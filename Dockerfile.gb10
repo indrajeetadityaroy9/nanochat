@@ -1,0 +1,29 @@
+FROM nvcr.io/nvidia/pytorch:26.08-py3
+
+WORKDIR /workspace
+
+# Use uv for nanochat dependencies, but retain the NGC-provided
+# PyTorch/CUDA stack through system-site-packages.
+RUN python -m pip install --no-cache-dir uv==0.12.13 \
+    && uv venv --system-site-packages /opt/nanochat-venv
+
+ENV VIRTUAL_ENV=/opt/nanochat-venv
+ENV PATH="/opt/nanochat-venv/bin:${PATH}"
+
+# nanochat dependencies except torch.
+# torch comes from the NVIDIA NGC image.
+RUN uv pip install --python /opt/nanochat-venv/bin/python \
+    "filelock>=3.19.0" \
+    "kernels>=0.11.7" \
+    "numpy>=1.26.0" \
+    "psutil>=7.1.0" \
+    "pyarrow>=21.0.0" \
+    "rustbpe>=0.1.0" \
+    "tiktoken>=0.11.0" \
+    "wandb>=0.21.3" \
+    "requests>=2"
+
+ENV OMP_NUM_THREADS=1
+ENV PYTHONUNBUFFERED=1
+
+CMD ["/bin/bash"]
