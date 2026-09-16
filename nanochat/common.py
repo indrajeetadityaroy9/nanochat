@@ -120,20 +120,6 @@ def print0(s="",**kwargs):
     if ddp_rank == 0:
         print(s, **kwargs)
 
-def print_banner():
-    # Cool DOS Rebel font ASCII banner made with https://manytools.org/hacker-tools/ascii-banner/
-    banner = """
-                                                       █████                █████
-                                                      ░░███                ░░███
-     ████████    ██████   ████████    ██████   ██████  ░███████    ██████  ███████
-    ░░███░░███  ░░░░░███ ░░███░░███  ███░░███ ███░░███ ░███░░███  ░░░░░███░░░███░
-     ░███ ░███   ███████  ░███ ░███ ░███ ░███░███ ░░░  ░███ ░███   ███████  ░███
-     ░███ ░███  ███░░███  ░███ ░███ ░███ ░███░███  ███ ░███ ░███  ███░░███  ░███ ███
-     ████ █████░░████████ ████ █████░░██████ ░░██████  ████ █████░░███████  ░░█████
-    ░░░░ ░░░░░  ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░   ░░░░░░  ░░░░ ░░░░░  ░░░░░░░░   ░░░░░
-    """
-    print0(banner)
-
 def is_ddp_requested() -> bool:
     """
     True if launched by torchrun (env present), even before init.

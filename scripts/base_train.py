@@ -27,14 +27,13 @@ import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
+from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
-from nanochat.flash_attention import HAS_FA3
+from nanochat.flash_attention import HAS_FA3, USE_FA3, HAS_FA2, USE_FA2
 from scripts.base_eval import evaluate_core
-print_banner()
 
 # -----------------------------------------------------------------------------
 # CLI arguments
@@ -100,17 +99,17 @@ use_dummy_wandb = args.run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
 
 # Flash Attention status
-from nanochat.flash_attention import USE_FA3
-using_fa3 = USE_FA3
-if using_fa3:
+if USE_FA3:
     print0("✓ Using Flash Attention 3: efficient, new and awesome.")
+elif USE_FA2:
+    print0("✓ Using Flash Attention 2 (FA3 not available)")
 else:
     print0("!" * 80)
-    if HAS_FA3 and COMPUTE_DTYPE != torch.bfloat16:
-        print0(f"WARNING: Flash Attention 3 only supports bf16, but COMPUTE_DTYPE={COMPUTE_DTYPE}. Using PyTorch SDPA fallback")
+    if HAS_FA3 or HAS_FA2:
+        print0(f"WARNING: available Flash Attention does not support COMPUTE_DTYPE={COMPUTE_DTYPE}. Using PyTorch SDPA fallback")
     else:
-        print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback")
-    print0("WARNING: Training will be less efficient without FA3")
+        print0("WARNING: Flash Attention (FA3/FA2) not available, using PyTorch SDPA fallback")
+    print0("WARNING: Training will be less efficient without Flash Attention")
     if args.window_pattern != "L":
         print0(f"WARNING: SDPA has no support for sliding window attention (window_pattern='{args.window_pattern}'). Your GPU utilization will be terrible.")
         print0("WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.")

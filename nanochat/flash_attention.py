@@ -1,8 +1,10 @@
 """
-Unified Flash Attention interface with automatic FA3/SDPA switching.
+Unified Flash Attention interface with automatic FA3 -> FA2 -> SDPA switching.
 
-Exports `flash_attn` module that matches the FA3 API exactly, but falls back
-to PyTorch SDPA on incompatible CUDA GPUs, MPS, and CPU.
+Exports `flash_attn` module that matches the FA3 API exactly. When FA3 is unavailable
+(e.g. Blackwell GPUs), it uses FA2 (the flash_attn package, which has the same
+flash_attn_func / flash_attn_with_kvcache interface), and falls back to PyTorch SDPA
+on incompatible CUDA GPUs, MPS, and CPU.
 
 Usage (drop-in replacement for FA3):
     from nanochat.flash_attention import flash_attn
@@ -27,7 +29,9 @@ def _load_flash_attention_3():
     try:
         major, _ = torch.cuda.get_device_capability()
         # FA3 kernels are currently compiled for Hopper (sm90), Ada (sm89) and Ampere (sm80/sm86)
-        # Blackwell (sm100) needs SDPA fallback until FA3 is recompiled or FA4 is released
+        # Blackwell (sm100, sm12x) is not supported by FA3, skip straight to the FA2 fallback
+        if major >= 10:
+            return None
         import os
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         from kernels import get_kernel, has_kernel
@@ -46,10 +50,26 @@ def _load_flash_attention_3():
         return None
 
 
+def _load_flash_attention_2():
+    """Try to load Flash Attention 2 (the flash_attn package, e.g. preinstalled in NGC PyTorch images)."""
+    if not torch.cuda.is_available():
+        return None
+    major, _ = torch.cuda.get_device_capability()
+    if major < 8:
+        return None # FA2 requires Ampere (sm80) or newer
+    try:
+        import flash_attn
+    except ImportError:
+        return None
+    return flash_attn
+
+
 _fa3 = _load_flash_attention_3()
 HAS_FA3 = _fa3 is not None
+_fa2 = _load_flash_attention_2()
+HAS_FA2 = _fa2 is not None
 
-# Override for testing: set to 'fa3', 'sdpa', or None (auto)
+# Override for testing: set to 'fa3', 'fa2', 'sdpa', or None (auto)
 _override_impl = None
 
 
@@ -58,7 +78,7 @@ def _resolve_use_fa3():
     if _override_impl == 'fa3':
         assert HAS_FA3, "Cannot override to FA3: not available on this hardware"
         return True
-    if _override_impl == 'sdpa':
+    if _override_impl in ('fa2', 'sdpa'):
         return False
     if HAS_FA3:
         # FA3 Hopper kernels only support bf16 and fp8; fp16/fp32 must use SDPA fallback
@@ -68,7 +88,31 @@ def _resolve_use_fa3():
         return False
     return False
 
+def _resolve_use_fa2():
+    """Decide once whether to use FA2 (when FA3 is not used), based on availability, override, and dtype."""
+    if _override_impl == 'fa2':
+        assert HAS_FA2, "Cannot override to FA2: not available on this hardware"
+        return True
+    if _override_impl in ('fa3', 'sdpa') or USE_FA3:
+        return False
+    if HAS_FA2:
+        # FA2 kernels support bf16 and fp16; fp32 must use SDPA fallback
+        from nanochat.common import COMPUTE_DTYPE
+        return COMPUTE_DTYPE in (torch.bfloat16, torch.float16)
+    return False
+
 USE_FA3 = _resolve_use_fa3()
+USE_FA2 = _resolve_use_fa2()
+
+
+def _flash_impl():
+    """The flash attention module to dispatch to (FA3 or FA2, same API), or None for SDPA."""
+    if USE_FA3:
+        return _fa3
+    # re-check the override here too, so forcing 'sdpa' works even if only USE_FA3 was re-resolved
+    if USE_FA2 and _override_impl != 'sdpa':
+        return _fa2
+    return None
 
 
 # =============================================================================
@@ -124,8 +168,9 @@ def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
     Returns:
         Output tensor of shape (B, T, H, D)
     """
-    if USE_FA3:
-        return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    impl = _flash_impl()
+    if impl is not None:
+        return impl.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
 
     # SDPA fallback: transpose (B, T, H, D) -> (B, H, T, D)
     q = q.transpose(1, 2)
@@ -141,7 +186,7 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
     """
     Flash Attention with KV cache for inference.
 
-    FA3 updates k_cache/v_cache in-place. Our SDPA fallback does the same.
+    FA3 and FA2 update k_cache/v_cache in-place. Our SDPA fallback does the same.
 
     Args:
         q: Queries, shape (B, T_new, H, D)
@@ -154,8 +199,9 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
     Returns:
         Output tensor of shape (B, T_new, H, D)
     """
-    if USE_FA3:
-        return _fa3.flash_attn_with_kvcache(
+    impl = _flash_impl()
+    if impl is not None:
+        return impl.flash_attn_with_kvcache(
             q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,
             causal=causal, window_size=window_size
         )
