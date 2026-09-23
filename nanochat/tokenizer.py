@@ -67,24 +67,11 @@ class RustBPETokenizer:
             enc = pickle.load(f)
         return cls(enc, "<|bos|>")
 
-    @classmethod
-    def from_pretrained(cls, tiktoken_name):
-        # https://github.com/openai/tiktoken/blob/eedc8563/tiktoken_ext/openai_public.py
-        enc = tiktoken.get_encoding(tiktoken_name)
-        # tiktoken calls the special document delimiter token "<|endoftext|>"
-        # yes this is confusing because this token is almost always PREPENDED to the beginning of the document
-        # it most often is used to signal the start of a new sequence to the LLM during inference etc.
-        # so in nanoChat we always use "<|bos|>" short for "beginning of sequence", but historically it is often called "<|endoftext|>".
-        return cls(enc, "<|endoftext|>")
-
     def get_vocab_size(self):
         return self.enc.n_vocab
 
     def get_special_tokens(self):
         return self.enc.special_tokens_set
-
-    def id_to_token(self, id):
-        return self.enc.decode([id])
 
     @lru_cache(maxsize=32)
     def encode_special(self, text):
@@ -222,21 +209,6 @@ class RustBPETokenizer:
         ids = ids[:max_tokens]
         mask = mask[:max_tokens]
         return ids, mask
-
-    def visualize_tokenization(self, ids, mask, with_token_id=False):
-        """Small helper function useful in debugging: visualize the tokenization of render_conversation"""
-        RED = '\033[91m'
-        GREEN = '\033[92m'
-        RESET = '\033[0m'
-        GRAY = '\033[90m'
-        tokens = []
-        for i, (token_id, mask_val) in enumerate(zip(ids, mask)):
-            token_str = self.decode([token_id])
-            color = GREEN if mask_val == 1 else RED
-            tokens.append(f"{color}{token_str}{RESET}")
-            if with_token_id:
-                tokens.append(f"{GRAY}({token_id}){RESET}")
-        return '|'.join(tokens)
 
     def render_for_completion(self, conversation):
         """

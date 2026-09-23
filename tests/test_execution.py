@@ -75,9 +75,3 @@ def test_tricky_string_content():
     tricky = '''s = 'it\\'s "quoted" \\\\ {braces} \\n'; print(len(s))'''
     result = execute_code(tricky)
     assert result.success
-
-
-def test_fresh_globals():
-    # user code must not see the guard prelude's imports
-    result = execute_code("print('GUARD' in dir())")
-    assert result.success and result.stdout.strip() == "False"

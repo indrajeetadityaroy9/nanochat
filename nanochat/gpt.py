@@ -348,45 +348,6 @@ class GPT(nn.Module):
         matmul_params = sum(m.weight.numel() for m in self.modules() if isinstance(m, Linear))
         return matmul_params
 
-    def estimate_decode_flops(self, context_len):
-        """
-        Forward FLOPs to decode one token at a given context length during inference:
-        2 FLOPs per matmul param, plus attention over min(context, window) per layer.
-        """
-        h = self.config.n_head
-        q = self.config.n_embd // self.config.n_head
-        attn_flops = sum(4 * h * q * min(context_len, window) for window, _ in self.window_sizes)
-        decode_flops = 2 * self.num_matmul_params() + attn_flops
-        return decode_flops
-
-    def estimate_prefill_flops(self, num_tokens):
-        """Forward FLOPs to prefill a prompt: causal, so token t attends to min(t, window)."""
-        h = self.config.n_head
-        q = self.config.n_embd // self.config.n_head
-        attn_flops = 0
-        for window, _ in self.window_sizes:
-            w = min(window, num_tokens)
-            attended_tokens = w * (w + 1) // 2 + (num_tokens - w) * w # ramp up to w, then flat
-            attn_flops += 4 * h * q * attended_tokens
-        prefill_flops = 2 * self.num_matmul_params() * num_tokens + attn_flops
-        return prefill_flops
-
-    def kv_bytes_per_token(self):
-        """Bytes to *store* one token of KV cache during inference, per row (all layers)."""
-        head_dim = self.config.n_embd // self.config.n_head
-        kv_dtype_bytes = COMPUTE_DTYPE.itemsize # the KV cache is kept in the compute dtype
-        return self.config.n_layer * 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes
-
-    def kv_read_bytes(self, context_len):
-        """Bytes of KV cache *read* by one decode step at a given context length, per row.
-        Sliding window layers only attend to (and read) the last `window` tokens."""
-        head_dim = self.config.n_embd // self.config.n_head
-        kv_dtype_bytes = COMPUTE_DTYPE.itemsize
-        total = 0
-        for window, _ in self.window_sizes:
-            total += 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes * min(context_len, window)
-        return total
-
     def num_scaling_params(self):
         """
         Return detailed parameter counts for scaling law analysis.
@@ -522,34 +483,3 @@ class GPT(nn.Module):
         else:
             # inference: just return the logits directly
             return logits
-
-    @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
-        """
-        Naive autoregressive streaming inference.
-        To make it super simple, let's assume:
-        - batch size is 1
-        - ids and the yielded tokens are simple Python lists and ints
-        """
-        assert isinstance(tokens, list)
-        device = self.get_device()
-        rng = None
-        if temperature > 0:
-            rng = torch.Generator(device=device)
-            rng.manual_seed(seed)
-        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
-        for _ in range(max_tokens):
-            logits = self.forward(ids) # (B, T, vocab_size)
-            logits = logits[:, -1, :] # (B, vocab_size)
-            if top_k is not None and top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            if temperature > 0:
-                logits = logits / temperature
-                probs = F.softmax(logits, dim=-1)
-                next_ids = torch.multinomial(probs, num_samples=1, generator=rng)
-            else:
-                next_ids = torch.argmax(logits, dim=-1, keepdim=True)
-            ids = torch.cat((ids, next_ids), dim=1)
-            token = next_ids.item()
-            yield token

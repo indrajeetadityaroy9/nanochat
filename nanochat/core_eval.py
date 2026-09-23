@@ -193,25 +193,6 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
 
-    # Some models can't forward sequences beyond a certain length (e.g. GPT-2)
-    # In these cases, we have to truncate sequences to max length and adjust the indices
-    if hasattr(model, 'max_seq_len') and model.max_seq_len is not None:
-        max_tokens = model.max_seq_len
-        new_tokens, new_start_idxs, new_end_idxs = [], [], []
-        for t, s, e in zip(tokens, start_idxs, end_idxs):
-            if len(t) > max_tokens:
-                num_to_crop = len(t) - max_tokens
-                new_tokens.append(t[-max_tokens:]) # take the last max_tokens tokens
-                new_start_idxs.append(s - num_to_crop) # shift the indices down
-                new_end_idxs.append(e - num_to_crop)
-                assert s - num_to_crop >= 0, "this should never happen right?"
-                assert e - num_to_crop >= 0, "this should never happen right?"
-            else:
-                new_tokens.append(t) # keep unchanged
-                new_start_idxs.append(s)
-                new_end_idxs.append(e)
-        tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
-
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
     input_ids = stack_sequences(tokens, pad_token_id)

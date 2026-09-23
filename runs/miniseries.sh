@@ -58,9 +58,7 @@ for d in "${DEPTHS[@]}"; do
     START_TIME=$(date +%s)
 
     # Reduce --device-batch-size to avoid OOM at larger depths
-    if [ $d -ge 28 ]; then
-        DEVICE_BATCH_SIZE_ARG="--device-batch-size=8"
-    elif [ $d -ge 20 ]; then
+    if [ $d -ge 20 ]; then
         DEVICE_BATCH_SIZE_ARG="--device-batch-size=16"
     else
         DEVICE_BATCH_SIZE_ARG="--device-batch-size=32"

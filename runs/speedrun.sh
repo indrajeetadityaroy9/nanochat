@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # This script is configured to train your own GPT-2 grade LLM (pretraining + finetuning)
-# It is designed to run on a blank 8XH100 GPU node and takes approximately 1.5 hours to complete.
+# It is designed to run on an 8XH100 GPU node and takes approximately 1.5 hours to complete.
+# Assumes an activated environment: `uv sync --extra gpu && source .venv/bin/activate`
 
 # 1) Example launch (simplest):
 # bash runs/speedrun.sh
@@ -14,18 +15,6 @@
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
-
-# -----------------------------------------------------------------------------
-# Python venv setup with uv
-
-# install uv (if not already installed)
-command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-# create a .venv local virtual environment (if it doesn't exist)
-[ -d ".venv" ] || uv venv
-# install the repo dependencies
-uv sync --extra gpu
-# activate venv so that `python` uses the project's venv instead of system python
-source .venv/bin/activate
 
 # -----------------------------------------------------------------------------
 # wandb setup
@@ -55,8 +44,6 @@ python -m nanochat.dataset -n 170 &
 DATASET_DOWNLOAD_PID=$!
 # train the tokenizer with vocab size 2**15 = 32768 on ~2B characters of data
 python -m scripts.tok_train
-# evaluate the tokenizer (report compression ratio etc.)
-python -m scripts.tok_eval
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
@@ -74,6 +61,3 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-
 # run SFT and eval the model
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --run=$WANDB_RUN
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
-
-# chat with the model over CLI! Leave out the -p to chat interactively
-# python -m scripts.chat_cli -p "Why is the sky blue?"
