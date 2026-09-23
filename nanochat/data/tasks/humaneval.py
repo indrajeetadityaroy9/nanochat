@@ -6,7 +6,10 @@ It is a coding benchmark.
 
 import re
 from nanochat.execution import execute_code
-from tasks.common import Task, load_hub_dataset
+from nanochat.data.tasks.common import Task, load_hub_dataset
+
+REPO = "openai/openai_humaneval"
+REVISION = "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544" # pinned commit, the only split is openai_humaneval/test-*.parquet
 
 def extract_imports(prompt):
     """Extract import statements from the beginning of a code block."""
@@ -47,8 +50,7 @@ class HumanEval(Task):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # note: this dataset has no named subsets, its parquet config on the hub is "openai_humaneval"
-        self.ds = load_hub_dataset("openai/openai_humaneval", subset="openai_humaneval", split="test").shuffle(seed=42)
+        self.ds = load_hub_dataset(REPO, REVISION, "openai_humaneval/test-*.parquet").shuffle(seed=42)
 
     @property
     def eval_type(self):

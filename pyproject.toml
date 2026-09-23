@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "filelock>=3.19.0",
+    "fsspec>=2025.3.0",
+    "huggingface-hub>=0.34.0",
     "kernels>=0.11.7",
     "numpy>=1.26.0",
     "psutil>=7.1.0",
@@ -57,6 +59,9 @@ cpu = [
 ]
 gpu = [
     "torch==2.9.1",
+]
+s3 = [
+    "s3fs>=2025.3.0",
 ]
 
 [tool.uv]

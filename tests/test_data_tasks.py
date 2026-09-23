@@ -1,13 +1,16 @@
 """
-Test the Task container machinery: slicing views, mixtures, and the
-HubDataset parquet wrapper (in-memory, no network).
+Test the Task container machinery: slicing views, mixtures, the HubDataset
+parquet wrapper and split selection in load_hub_dataset (in-memory, no network).
 
-python -m pytest tests/test_tasks.py -v
+python -m pytest tests/test_data_tasks.py -v
 """
 
 import numpy as np
 import pyarrow as pa
-from tasks.common import Task, TaskMixture, HubDataset, render_mc
+import pyarrow.parquet as pq
+import pytest
+from nanochat.data.tasks import common
+from nanochat.data.tasks.common import Task, TaskMixture, HubDataset, render_mc
 
 
 class ToyTask(Task):
@@ -79,6 +82,26 @@ def test_hub_dataset_shuffle_matches_numpy():
     assert [ds[i]["x"] for i in range(100)] == [int(p) for p in perm]
     # shuffling returns a view; the original order is untouched
     assert HubDataset(table)[0] == {"x": 0}
+
+
+def test_load_hub_dataset_reads_the_split_in_sorted_file_order(tmp_path, monkeypatch):
+    # row order must not depend on the order of the repo listing: seeded shuffles and
+    # start/stop views select rows by position
+    shards = {
+        "data/train-00001-of-00002.parquet": [2, 3],
+        "data/test-00000-of-00001.parquet": [9],
+        "data/train-00000-of-00002.parquet": [0, 1],
+    }
+    for filename, rows in shards.items():
+        (tmp_path / "data").mkdir(exist_ok=True)
+        pq.write_table(pa.table({"x": rows}), tmp_path / filename)
+    monkeypatch.setenv("NANOCHAT_DATA_DIR", str(tmp_path / "root"))
+    monkeypatch.setattr(common, "list_repo_files", lambda repo, revision, cache_dir: ["README.md", *shards])
+    monkeypatch.setattr(common, "fetch_repo_file", lambda repo, revision, filename, local_dir: str(tmp_path / filename))
+    ds = common.load_hub_dataset("org/repo", "0" * 40, "data/train-*.parquet")
+    assert [ds[i]["x"] for i in range(len(ds))] == [0, 1, 2, 3]
+    with pytest.raises(AssertionError, match="validation"):
+        common.load_hub_dataset("org/repo", "0" * 40, "data/validation-*.parquet")
 
 
 def test_render_mc_letter_binding():

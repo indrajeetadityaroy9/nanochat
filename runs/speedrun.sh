@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# This script is configured to train your own GPT-2 grade LLM (pretraining + finetuning)
-# It is designed to run on an 8XH100 GPU node and takes approximately 1.5 hours to complete.
-# Assumes an activated environment: `uv sync --extra gpu && source .venv/bin/activate`
+# This script is configured to train your own GPT-2 grade LLM (pretraining + finetuning).
+# The time-to-GPT-2 reference is an 8XH100 node (~1.5 hours), but it runs on any number of GPUs:
+# NPROC_PER_NODE defaults to every visible GPU and gradient accumulation makes up the difference.
+# Assumes an activated environment (`uv sync --extra gpu && source .venv/bin/activate`) or the docker/ image.
 
 # 1) Example launch (simplest):
 # bash runs/speedrun.sh
@@ -13,8 +14,11 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
+export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
 mkdir -p $NANOCHAT_BASE_DIR
+NPROC_PER_NODE="${NPROC_PER_NODE:-gpu}"
+# Optional object store root (e.g. s3://bucket/nanochat) to publish the compiled shards to and stream them from
+DATA_REMOTE="${DATA_REMOTE:-}"
 
 # -----------------------------------------------------------------------------
 # wandb setup
@@ -29,35 +33,32 @@ if [ -z "$WANDB_RUN" ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Tokenizer
+# Data: raw corpus -> tokenizer -> compiled token shards
 
-# Download the first ~2B characters of pretraining dataset
-# each data shard is ~250M chars
-# so we download 2e9 / 250e6 = 8 data shards at this point
-# each shard is ~100MB of text (compressed), so this is about ~800MB of data on disk
-# look at dev/repackage_data_reference.py for details on how this data was prepared
-python -m nanochat.dataset -n 8
-# Immediately also kick off downloading more shards in the background while tokenizer trains
-# Approximately 150 shards are needed for GPT-2 capability pretraining, add 20 for padding.
-# The maximum total number of shards available in the entire dataset is 6542.
-python -m nanochat.dataset -n 170 &
-DATASET_DOWNLOAD_PID=$!
+# Fetch the first ~2B characters of the raw corpus for the tokenizer
+# each raw file is ~250M chars (~100MB of compressed text), so this is 2e9 / 250e6 = 8 files
+python -m nanochat.data.sources -n 8
+# Meanwhile fetch the rest of what pretraining needs: ~150 files for GPT-2 capability, plus 20 of padding
+python -m nanochat.data.sources -n 170 &
+RAW_PID=$!
 # train the tokenizer with vocab size 2**15 = 32768 on ~2B characters of data
-python -m scripts.tok_train
+python -m nanochat.tokenizer
+echo "Waiting for the raw corpus download to complete..."
+wait $RAW_PID
+# tokenize and pack the corpus into token shards once, on all CPUs (and publish them to DATA_REMOTE, if set)
+python -m nanochat.data.compile --max-files=170 ${DATA_REMOTE:+--remote=$DATA_REMOTE}
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
-echo "Waiting for dataset download to complete..."
-wait $DATASET_DOWNLOAD_PID
 
 # d24 model (slightly undertrained to beat GPT-2 => decrease data:params ratio from compute optimal 10.5 (default) to 8)
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8 --run=$WANDB_RUN ${DATA_REMOTE:+--data-remote=$DATA_REMOTE}
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
-torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-size=16
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval -- --device-batch-size=16
 
 # -----------------------------------------------------------------------------
 # SFT (teach the model conversation special tokens, tool use, multiple choice)
 
 # run SFT and eval the model
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft

@@ -10,13 +10,14 @@ FLOPS_BUDGETS=(
 )
 DEPTHS=(10 12 14 16 18 20)
 
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-gpu}" # every visible GPU by default
 WANDB_RUN="${WANDB_RUN:-scaling_${LABEL}}"
 EVAL_TOKENS=$((100 * 524288))  # ~100M tokens for final eval (default is ~10M)
 
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
 source .venv/bin/activate
+# expects a trained tokenizer and compiled data (see speedrun.sh: nanochat.tokenizer, nanochat.data.compile)
 
 RESULTS_DIR="$NANOCHAT_BASE_DIR/scaling_laws_results_${LABEL}"
 mkdir -p "$RESULTS_DIR"

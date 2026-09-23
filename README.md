@@ -2,7 +2,7 @@
 
 ![scaling laws](dev/scaling_laws_jan26.png)
 
-nanochat is a minimal experimental harness for LLM training research on a single GPU node. It covers tokenization, pretraining, supervised finetuning, reinforcement learning, evaluation, and inference in one small, hackable codebase. Models are configured by a single complexity dial: `--depth`, the number of transformer layers. Width, head count, batch size, learning rates, weight decay, and training horizon are all derived from it, so sweeping depth yields a miniseries of compute-optimal models (GPT-2 capability is around d24–d26).
+nanochat is a minimal experimental harness for LLM training research on NVIDIA GPUs, from one GPU to multi-node clusters. It covers tokenization, pretraining, supervised finetuning, reinforcement learning, evaluation, and inference in one small, hackable codebase. Models are configured by a single complexity dial: `--depth`, the number of transformer layers. Width, head count, batch size, learning rates, weight decay, and training horizon are all derived from it, so sweeping depth yields a miniseries of compute-optimal models (GPT-2 capability is around d24–d26).
 
 ## Time-to-GPT-2 Leaderboard
 
@@ -32,33 +32,115 @@ source .venv/bin/activate
 
 `uv sync --extra gpu --group dev` adds pytest, matplotlib, ipykernel, and python-dotenv.
 
-Artifacts (data shards, tokenizer, checkpoints, eval bundle, task data) live under `$NANOCHAT_BASE_DIR`, default `~/.cache/nanochat`.
+Datasets (raw corpora, compiled token shards, task data, the CORE bundle) live under `$NANOCHAT_DATA_DIR`, default `$NANOCHAT_BASE_DIR/data`; put it on fast local NVMe. Outputs (tokenizer, checkpoints, eval results) live under `$NANOCHAT_BASE_DIR`, default `~/.cache/nanochat`. For NGC/Docker, see [Containers](#containers-ngc--docker).
 
 ## Reference pipeline
 
-[runs/speedrun.sh](runs/speedrun.sh) runs the full pipeline on an 8XH100 node (~1.5 hours):
+[runs/speedrun.sh](runs/speedrun.sh) runs the full pipeline; on an 8XH100 node it takes ~1.5 hours:
 
 ```bash
-python -m nanochat.dataset -n 170                    # ClimbMix shards (+ the val shard)
-python -m scripts.tok_train                          # BPE tokenizer, vocab 32768
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8
-torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-size=16   # CORE, bpb, samples
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft                  # ChatCORE
+python -m nanochat.data.sources -n 170            # raw ClimbMix parquet (+ the val file)
+python -m nanochat.tokenizer                      # BPE tokenizer, vocab 32768
+python -m nanochat.data.compile --max-files=170   # tokenize + pack once into Megatron .bin/.idx shards
+torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8
+torchrun --standalone --nproc_per_node=gpu -m scripts.base_eval -- --device-batch-size=16   # CORE, bpb, samples
+torchrun --standalone --nproc_per_node=gpu -m scripts.chat_sft
+torchrun --standalone --nproc_per_node=gpu -m scripts.chat_eval -- -i sft                  # ChatCORE
 ```
 
 Optional stage: `scripts.chat_rl` (GRPO-style RL on GSM8K, evaluate with `chat_eval -i rl`).
 
-- A100 nodes work, just slower.
-- On a single GPU, omit `torchrun`; the scripts switch to gradient accumulation automatically and produce ~identical results.
+- `--nproc_per_node=gpu` starts one rank per visible GPU; any number of GPUs works (the run scripts read `NPROC_PER_NODE`). The total batch size is fixed and gradient accumulation makes up the difference, so results are ~identical on 1 or 64 GPUs; an automatic batch size is rounded to a whole number of micro-batches across the ranks.
+- On a single GPU, `torchrun` can also be omitted. A100 nodes work, just slower.
 - With less than 80GB of VRAM, reduce `--device-batch-size` (32 → 16, 8, 4, ...).
+
+## Data
+
+All dataset and data-loading code lives in [nanochat/data](nanochat/data). Pretraining decouples storage from compute: corpora are tokenized and packed once into immutable binary shards, which training streams from any store through a node-local cache.
+
+```
+HF Hub parquet, pinned commits          sources.py    raw corpus registry, files fetched on demand
+  │  optional: NeMo Curator             curate.py     heuristic quality filters -> '<dataset>-curated'
+  ▼
+tokenize + BOS-aligned best-fit pack    compile.py    once, CPU-parallel, deterministic, resumable
+  ▼
+Megatron .bin/.idx shards + index.json  shards.py     local disk or any object store: s3://, gs://, hf://, shared fs
+  ▼
+node-local NVMe cache, mmap             stream.py     elastic deterministic order, DataLoader workers, pinned memory
+  ▼
+GPU
+```
+
+Post-training data sits alongside it: `tasks/` (SFT, RL and chat-eval task datasets, pinned HF parquet), `sft.py` (the SFT conversation packing loader) and `eval_bundle.py` (CORE data). Every download goes through `storage.py`: locked per file and published atomically, so all ranks and DataLoader workers on a node share one copy.
+
+### Corpora
+
+Pretraining corpora are registered in `DATASETS` in [nanochat/data/sources.py](nanochat/data/sources.py), each pinned to a commit. `--dataset` selects one for fetching, tokenizer training, compilation and pretraining; it is recorded in the checkpoint, so `base_eval` measures bpb on the same data:
+
+```bash
+python -m nanochat.data.sources --dataset=dclm_100b -n 20
+python -m nanochat.tokenizer --dataset=dclm_100b
+python -m nanochat.data.compile --dataset=dclm_100b --max-files=20
+torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --dataset=dclm_100b --depth=12
+```
+
+| `--dataset` | HuggingFace repo | Released | License | Files |
+|---|---|---|---|---|
+| `climbmix` (default) | karpathy/climbmix-400b-shuffle | 2025 | MIT card, CC-BY-NC-4.0 upstream | 6,543 × ~250M chars |
+| `smol_pdfedu_dclm_fwedu` | HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
+| `smol_pdf_dclm_fwedu` | HuggingFaceFW/finepdfs_50BT-dclm_30BT-fineweb_edu_20BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
+| `dclm_100b` | HuggingFaceFW/dclm_100BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
+| `fineweb_edu_100b` | HuggingFaceFW/fineweb_edu_100BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
+| `finepdfs_edu_100b` | HuggingFaceFW/finepdfs_edu_100BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
+| `txt360_v2_web` | IFM/TxT360-v2 (`web-high-medium`) | 2026 | CC-BY-4.0 | 828 × ~2GB |
+
+`-n` and `--max-files` count raw files, whose sizes differ between corpora, so size them by the tokens a run needs. The tokenizer lives in `$NANOCHAT_BASE_DIR/tokenizer` and is retrained per corpus; use a separate `NANOCHAT_BASE_DIR` per corpus to keep several side by side.
+
+To add a corpus, add a `DatasetSpec(repo, train_files, val_files, text_column, revision)` entry:
+
+- Parquet files with one document per row and raw text in `text_column` (only that column is read).
+- `val_files` selects the held-out file(s); they are excluded from train.
+- `revision` pinned to a commit sha. Gated repos need `HF_TOKEN` (or `hf auth login`) and accepted terms.
+
+A local-only corpus uses `repo=None`; place its parquet files in `$NANOCHAT_DATA_DIR/raw/<name>/`.
+
+### Curation (optional)
+
+The registered corpora are already filtered by their publishers. For corpora that are not, [nanochat/data/curate.py](nanochat/data/curate.py) runs NeMo Curator's heuristic quality filters (length, symbol and punctuation ratios, n-gram repetition) and writes the kept documents as the corpus `<dataset>-curated`, which the tokenizer, compiler and trainer accept like any other. NeMo Curator needs Python ≥3.11 and Ray, so it runs in its own container (`docker compose run --rm curate`, or `python -m nanochat.data.curate --dataset=climbmix --max-files=170` inside `nvcr.io/nvidia/nemo-curator`).
+
+### Compiled shards
+
+`python -m nanochat.data.compile` tokenizes each raw file once and packs documents into rows of `seq_len + 1` tokens that each start with a document's BOS: the longest buffered document that fits goes next, and when none fits the shortest is cropped to fill the row, so there is no padding. Files are compiled in parallel (`--workers`, default all CPUs), the output is identical for any number of workers, and an interrupted compile resumes where it stopped.
+
+Shards use Megatron-LM's indexed dataset format (`.bin`/`.idx`, one packed row per sequence), the format Megatron-LM and NeMo pretrain from: `megatron.core`'s `IndexedDataset` reads them back row for row (checked in [tests/test_data_megatron_compat.py](tests/test_data_megatron_compat.py)). nanochat reads them with its own small mmap reader rather than importing `megatron.core`, which pulls in the whole Megatron framework and triton. An `index.json` per split records the tokenizer fingerprint, sequence length, source and a blake2b digest per file. Compiled data is keyed by corpus, sequence length and tokenizer fingerprint (`$NANOCHAT_DATA_DIR/compiled/<dataset>-T<seq_len>-<fingerprint>/`), so changing any of them needs a recompile. NeMo Curator's `MegatronTokenizerWriter` is not used: it needs a Hugging Face `AutoTokenizer` and writes whole documents, while nanochat trains its own tokenizer and trains on BOS-aligned packed rows.
+
+### Streaming
+
+- `--remote s3://bucket/prefix` on compile uploads the shards (and `index.json`, last) to an object store. `--data-remote` on `base_train` streams them into the node-local cache; `--data-cache-gb` bounds that cache (it must hold 3 shuffle blocks), otherwise every shard is kept. The next block is prefetched in the background and every file's digest is checked after transfer.
+- Each epoch permutes the shard order and shuffles rows within blocks of 16 shards. The global row order depends only on the seed and the data, never on the number of GPUs, nodes or workers, and every optimizer step covers the same rows at any GPU count. The checkpoint stores only the rows consumed, so a run resumes exactly, even on a different number of GPUs.
+- `--data-workers` DataLoader processes per rank gather rows from the mmap'd shards into pinned memory, and batches are copied to the GPU asynchronously. There is no tokenization or packing on the training nodes.
+
+## Containers (NGC / Docker)
+
+[docker/Dockerfile](docker/Dockerfile) builds on an NGC PyTorch image by default and keeps NVIDIA's PyTorch, CUDA, NCCL and cuDNN as built. nanochat's other dependencies go on top ([docker/ngc_requirements.py](docker/ngc_requirements.py)): packages the image lacks at their `uv.lock` version, NVIDIA's own builds (every package with a local version label, such as `torch 2.9.0a0+145a3a7`) pinned as installed, and the image's other packages kept unless nanochat needs a newer one, which then moves to its `uv.lock` version. `nvcr.io/nvidia/pytorch:25.10-py3` ships PyTorch 2.9 (the release nanochat pins) with CUDA 13.0, so the host needs a CUDA 13-capable driver; `--build-arg BASE_IMAGE=ubuntu:24.04 --build-arg TORCH=lock` instead installs the exact locked environment with PyTorch 2.9.1 CUDA 12.8 wheels (`--build-arg EXTRA=cpu` for CPU-only data preparation nodes).
+
+```bash
+docker build -f docker/Dockerfile -t nanochat .
+docker compose -f docker/compose.yaml up -d storage     # MinIO, an S3-compatible store for compiled shards
+docker compose -f docker/compose.yaml run --rm prepare  # fetch raw corpus, train tokenizer, compile, upload
+docker compose -f docker/compose.yaml run --rm train    # stream shards into the local cache and train on every GPU
+```
+
+[docker/compose.yaml](docker/compose.yaml) wires this up; configure it with environment variables: `DATASET`, `NUM_FILES`, `SEQ_LEN`, `TRAIN_ARGS`, `DATA_REMOTE` and `AWS_*` (for S3 or another store instead of the bundled MinIO), `DATA_CACHE_GB`, `HF_TOKEN`, `WANDB_API_KEY`. Mount node-local NVMe as `DATA_HOST`; it holds raw corpora, compiled shards and the streaming cache. The GPU count is never fixed: `NPROC_PER_NODE` defaults to one rank per visible GPU. For multi-node runs, start `train` on every node against a store they all reach, with torchrun rendezvous flags in `TORCHRUN_ARGS` (e.g. `--nnodes=4 --node-rank=0 --rdzv-endpoint=head:29500`).
+
+Without compose, run the image with `--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864`, the data volume at `/data` and an output volume at `/runs`: DataLoader workers hand batches to the trainer through shared memory, which Docker otherwise limits to 64MB, and NCCL needs it too.
 
 ## Experiments
 
 For quick iteration (~5 min pretraining runs), train a 12-layer model:
 
 ```
-OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
+OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- \
     --depth=12 \
     --run="d12" \
     --model-tag="d12" \
@@ -94,99 +176,9 @@ Override the default with the `NANOCHAT_DTYPE` environment variable:
 
 ```bash
 NANOCHAT_DTYPE=float32 python -m scripts.base_eval --eval=sample           # force fp32
-NANOCHAT_DTYPE=bfloat16 torchrun --nproc_per_node=8 -m scripts.base_train  # force bf16
+NANOCHAT_DTYPE=bfloat16 torchrun --nproc_per_node=gpu -m scripts.base_train  # force bf16
 ```
 
 Model weights are stored in fp32 (for optimizer precision), and the custom `Linear` layer casts them to `COMPUTE_DTYPE` during the forward pass. Embeddings are stored directly in `COMPUTE_DTYPE` to save memory. This gives the mixed-precision benefit of autocast with explicit control over what runs in which precision.
 
 `float16` training automatically enables a `GradScaler` in `base_train.py` and `chat_sft.py`; RL does not support it yet. Inference in fp16 works everywhere. `--fp8` (CUDA only) converts eligible linear layers to FP8 matmuls with tensorwise scaling (`nanochat/fp8.py`).
-
-## File structure
-
-```
-.
-├── LICENSE
-├── README.md
-├── dev
-│   ├── LEADERBOARD.md              # Time-to-GPT-2 benchmark rules and runs
-│   ├── LOG.md                      # Experiment log
-│   ├── estimate_gpt3_core.ipynb    # GPT-3 CORE estimate
-│   ├── repackage_data_reference.py # Pretraining data shard generation
-│   ├── scaling_analysis.ipynb      # Scaling-law fits from runs/scaling_laws.sh
-│   └── scaling_laws_jan26.png
-├── nanochat
-│   ├── __init__.py                 # empty
-│   ├── checkpoint_manager.py       # Save/Load model checkpoints
-│   ├── common.py                   # Dtype, device, distributed, logging utilities
-│   ├── core_eval.py                # Evaluates base model CORE score (DCLM paper)
-│   ├── dataloader.py               # Tokenizing distributed data loader (BOS-aligned best-fit packing)
-│   ├── dataset.py                  # Download/read utils for pretraining data
-│   ├── engine.py                   # Efficient model inference with KV cache and calculator tool
-│   ├── execution.py                # Sandboxed Python execution (HumanEval)
-│   ├── flash_attention.py          # FA3 with PyTorch SDPA fallback
-│   ├── fp8.py                      # Minimal FP8 (tensorwise) training
-│   ├── gpt.py                      # The GPT nn.Module Transformer
-│   ├── loss_eval.py                # Evaluate bits per byte (instead of loss)
-│   ├── optim.py                    # AdamW + Muon optimizer, 1GPU and distributed
-│   └── tokenizer.py                # BPE tokenizer (rustbpe train, tiktoken inference)
-├── pyproject.toml
-├── runs
-│   ├── miniseries.sh               # Depth sweep
-│   ├── scaling_laws.sh             # Scaling laws experiments
-│   └── speedrun.sh                 # Reference GPT-2 speedrun (d24, fp8) + SFT
-├── scripts
-│   ├── base_eval.py                # Base model: CORE score, bits per byte, samples
-│   ├── base_train.py               # Base model: train
-│   ├── chat_eval.py                # Chat model: eval tasks, ChatCORE
-│   ├── chat_rl.py                  # Chat model: reinforcement learning
-│   ├── chat_sft.py                 # Chat model: train SFT
-│   └── tok_train.py                # Tokenizer: train it
-├── tasks
-│   ├── arc.py                      # Multiple choice science questions
-│   ├── common.py                   # Task base, TaskMixture, HubDataset
-│   ├── gsm8k.py                    # 8K Grade School Math questions
-│   ├── humaneval.py                # Misnomer; Simple Python coding task
-│   ├── mmlu.py                     # Multiple choice questions, broad topics
-│   └── smoltalk.py                 # Conglomerate dataset of SmolTalk from HF
-├── tests
-│   ├── test_attention_fallback.py  # FA3/SDPA attention fallback
-│   ├── test_engine.py              # Inference engine, KV cache
-│   ├── test_execution.py           # Sandboxed code execution
-│   ├── test_optim.py               # MuonAdamW optimizer (needs GPU)
-│   ├── test_tasks.py               # Task slicing, mixtures, HubDataset
-│   └── test_tokenizer.py           # BPE round-trips, chat rendering
-└── uv.lock
-```
-
-## Contributing
-
-The goal of nanochat is to improve the state of the art in micro models that are accessible to work with end to end on budgets of < $1000 dollars. Accessibility is about overall cost but also about cognitive complexity - nanochat is not an exhaustively configurable LLM "framework"; there are no giant configuration objects, model factories, or if-then-else monsters in the code base. It is a single, cohesive, minimal, readable, hackable, maximally-forkable "strong baseline" codebase designed to run start to end and produce a ChatGPT model you can talk to. Currently, the most interesting part personally is speeding up the latency to GPT-2 (i.e. getting a CORE score above 0.256525). Currently this takes ~1.5 hours (down from 3h), but by improving the pretraining stage we can improve this further.
-
-Current AI policy: disclosure. When submitting a PR, please declare any parts that had substantial LLM contribution and that you have not written or that you do not fully understand.
-
-## Acknowledgements
-
-- The name (nanochat) derives from my earlier project [nanoGPT](https://github.com/karpathy/nanoGPT), which only covered pretraining.
-- nanochat is also inspired by [modded-nanoGPT](https://github.com/KellerJordan/modded-nanogpt), which gamified the nanoGPT repo with clear metrics and a leaderboard, and borrows a lot of its ideas and some implementation for pretraining.
-- Thank you to [HuggingFace](https://huggingface.co/) for fineweb and smoltalk.
-- Thank you [Lambda](https://lambda.ai/service/gpu-cloud) for the compute used in developing this project.
-- Thank you to chief LLM whisperer 🧙‍♂️ Alec Radford for advice/guidance.
-- Thank you to the repo czar Sofie [@svlandeg](https://github.com/svlandeg) for help with managing issues, pull requests and discussions of nanochat.
-
-## Cite
-
-If you find nanochat helpful in your research cite simply as:
-
-```bibtex
-@misc{nanochat,
-  author = {Andrej Karpathy},
-  title = {nanochat: The best ChatGPT that \$100 can buy},
-  year = {2025},
-  publisher = {GitHub},
-  url = {https://github.com/karpathy/nanochat}
-}
-```
-
-## License
-
-MIT

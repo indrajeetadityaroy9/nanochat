@@ -6,16 +6,14 @@ Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
 """
 
 import os
-import json
 import random
-import urllib.request
+import fnmatch
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from filelock import FileLock
 
-from nanochat.common import get_base_dir
+from nanochat.data.storage import get_data_dir, list_repo_files, fetch_repo_file
 
 
 class HubDataset:
@@ -42,44 +40,18 @@ class HubDataset:
         return row
 
 
-def load_hub_dataset(repo_id, subset="default", split="train"):
+def load_hub_dataset(repo, revision, files):
     """
-    Minimal stand-in for HuggingFace datasets.load_dataset(repo_id, subset, split=split).
-    Every dataset on the hub has an auto-generated parquet export. We list the parquet
-    shards via the hub API, download them (once) into the local cache directory, and
-    read them with pyarrow. Under torchrun, only one rank downloads, the others wait.
+    Minimal stand-in for HuggingFace datasets.load_dataset: one split of a HF dataset repo at a
+    pinned commit. files is a glob over repo-relative paths selecting the split's parquet shards,
+    which are downloaded once into <data_dir>/tasks/<org>--<repo>/ and read in sorted order.
+    Under torchrun, each file is downloaded by one rank while the others wait.
     """
-    base_dir = get_base_dir()
-    slug = repo_id.replace("/", "--")
-    shards_dir = os.path.join(base_dir, "task_data", slug, subset, split)
-    # the manifest is written last, so its existence means the download completed
-    manifest_path = os.path.join(shards_dir, "manifest.json")
-    if not os.path.exists(manifest_path):
-        os.makedirs(shards_dir, exist_ok=True)
-        with FileLock(manifest_path + ".lock"):
-            # only a single rank acquires the lock and downloads, the others block
-            # here and then skip the download because they recheck the manifest
-            if not os.path.exists(manifest_path):
-                listing_url = f"https://huggingface.co/api/datasets/{repo_id}/parquet/{subset}/{split}"
-                with urllib.request.urlopen(listing_url) as response:
-                    shard_urls = json.loads(response.read())
-                filenames = []
-                for shard_index, shard_url in enumerate(shard_urls):
-                    filename = f"{shard_index:05d}.parquet"
-                    print(f"Downloading {shard_url} ...")
-                    with urllib.request.urlopen(shard_url) as response:
-                        content = response.read()
-                    with open(os.path.join(shards_dir, filename), "wb") as f:
-                        f.write(content)
-                    filenames.append(filename)
-                with open(manifest_path, "w") as f:
-                    json.dump(filenames, f)
-    with open(manifest_path, "r") as f:
-        filenames = json.load(f)
-    shard_paths = [os.path.join(shards_dir, filename) for filename in filenames]
-    tables = [pq.read_table(path) for path in shard_paths]
-    table = pa.concat_tables(tables)
-    return HubDataset(table)
+    local_dir = os.path.join(get_data_dir(), "tasks", repo.replace("/", "--"))
+    filenames = sorted(f for f in list_repo_files(repo, revision, local_dir) if fnmatch.fnmatchcase(f, files))
+    assert filenames, f"No files of {repo}@{revision} match {files!r}"
+    tables = [pq.read_table(fetch_repo_file(repo, revision, filename, local_dir)) for filename in filenames]
+    return HubDataset(pa.concat_tables(tables))
 
 
 class Task:
@@ -181,19 +153,3 @@ def render_mc(question, letters, choices):
     query += "".join([f"- {choice}={letter}\n" for letter, choice in zip(letters, choices)])
     query += "\nRespond only with the letter of the correct answer."
     return query
-
-
-if __name__ == "__main__":
-    # very lightweight test of slicing
-    from tasks.mmlu import MMLU
-
-    ds = MMLU(subset="all", split="auxiliary_train")
-    print("Length of MMLU: ", len(ds))
-    ex = ds[5]
-    print("5th example: ", ex)
-
-    ds = MMLU(subset="all", split="auxiliary_train", start=5, stop=10)
-    print("Length of sliced MMLU[5:10]: ", len(ds))
-    print("0th example of sliced MMLU: ", ds[0])
-
-    print("They match: ", ex == ds[0])

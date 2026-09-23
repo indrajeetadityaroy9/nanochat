@@ -15,7 +15,10 @@ Notice that GSM8K uses tool calls inside << >> tags.
 """
 
 import re
-from tasks.common import Task, load_hub_dataset
+from nanochat.data.tasks.common import Task, load_hub_dataset
+
+REPO = "openai/gsm8k"
+REVISION = "740312add88f781978c0658806c59bc2815b9866" # pinned commit, files are <subset>/<split>-*.parquet
 
 
 GSM_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
@@ -39,7 +42,7 @@ class GSM8K(Task):
         super().__init__(**kwargs)
         assert subset in ["main", "socratic"], "GSM8K subset must be main|socratic"
         assert split in ["train", "test"], "GSM8K split must be train|test"
-        self.ds = load_hub_dataset("openai/gsm8k", subset, split=split).shuffle(seed=42)
+        self.ds = load_hub_dataset(REPO, REVISION, f"{subset}/{split}-*.parquet").shuffle(seed=42)
 
     @property
     def eval_type(self):

@@ -6,7 +6,7 @@
 # Default series name is today's date (e.g., jan11)
 
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
+export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
 mkdir -p $NANOCHAT_BASE_DIR
 
 # Setup (skip with SKIP_SETUP=1)
@@ -17,10 +17,11 @@ if [ -z "$SKIP_SETUP" ]; then
     uv sync --extra gpu
     source .venv/bin/activate
 
-    # Tokenizer, download 1000 shards for pretraining
+    # Raw corpus (1000 files), tokenizer, and compiled token shards for pretraining
     # (probably this can be reduced but it's tricky to determine the exact right number, TODO).
-    python -m nanochat.dataset -n 1000
-    python -m scripts.tok_train --max-chars=2000000000 --vocab-size=32768
+    python -m nanochat.data.sources -n 1000
+    python -m nanochat.tokenizer --max-chars=2000000000 --vocab-size=32768
+    python -m nanochat.data.compile --max-files=1000
 else
     source .venv/bin/activate
 fi
@@ -29,8 +30,8 @@ fi
 SERIES_NAME="${1:-${SERIES_NAME:-$(date +%b%d | tr '[:upper:]' '[:lower:]')}}"
 # Depths to train (the "miniseries")
 DEPTHS=(12 14 16 18 20 22 24 26)
-# Hardware
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+# Hardware: every visible GPU by default
+NPROC_PER_NODE="${NPROC_PER_NODE:-gpu}"
 # Logging
 WANDB_RUN="${WANDB_RUN:-${SERIES_NAME}_miniseries}"
 

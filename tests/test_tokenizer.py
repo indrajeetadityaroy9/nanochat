@@ -58,6 +58,17 @@ def test_encode_batch(tokenizer):
     assert ids[0] == tokenizer.encode("hello")
 
 
+def test_token_bytes(tokenizer):
+    token_bytes = tokenizer.get_token_bytes()
+    assert token_bytes.shape == (tokenizer.get_vocab_size(),)
+    # special tokens carry no bytes, so they never count toward bits per byte
+    assert all(token_bytes[tokenizer.encode_special(t)] == 0 for t in SPECIAL_TOKENS)
+    # per-token bytes sum to the UTF-8 length, including tokens that split multi-byte chars
+    for text in ["hello world", "naïve café 你好 🙂", "unseen tokens: zqxjkv"]:
+        ids = tokenizer.encode(text)
+        assert token_bytes[ids].sum().item() == len(text.encode("utf-8"))
+
+
 def test_render_conversation_masks(tokenizer):
     conversation = {"messages": [
         {"role": "user", "content": "hi"},

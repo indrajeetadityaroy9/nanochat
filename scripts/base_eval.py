@@ -21,49 +21,27 @@ import csv
 import time
 import json
 import yaml
-import shutil
 import random
-import zipfile
-import tempfile
 import argparse
 import torch
 
-from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock
-from nanochat.tokenizer import get_token_bytes
+from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
-from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit
+from nanochat.data.eval_bundle import get_eval_bundle_dir
+from nanochat.data.stream import pretraining_batches
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 
 # -----------------------------------------------------------------------------
 # CORE evaluation
 
-EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
-
-
-def place_eval_bundle(file_path):
-    """Unzip eval_bundle.zip and place it in the base directory."""
-    base_dir = get_base_dir()
-    eval_bundle_dir = os.path.join(base_dir, "eval_bundle")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with zipfile.ZipFile(file_path, 'r') as zip_ref:
-            zip_ref.extractall(tmpdir)
-        extracted_bundle_dir = os.path.join(tmpdir, "eval_bundle")
-        shutil.move(extracted_bundle_dir, eval_bundle_dir)
-    print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
-
-
 def evaluate_core(model, tokenizer, device, max_per_task=-1):
     """
     Evaluate a base model on the CORE benchmark.
     Returns dict with results, centered_results, and core_metric.
     """
-    base_dir = get_base_dir()
-    eval_bundle_dir = os.path.join(base_dir, "eval_bundle")
-    # Download the eval bundle if needed
-    if not os.path.exists(eval_bundle_dir):
-        download_file_with_lock(EVAL_BUNDLE_URL, "eval_bundle.zip", postprocess_fn=place_eval_bundle)
+    eval_bundle_dir = get_eval_bundle_dir()
 
     config_path = os.path.join(eval_bundle_dir, "core.yaml")
     data_base_path = os.path.join(eval_bundle_dir, "eval_data")
@@ -133,6 +111,9 @@ def main():
     parser.add_argument('--max-per-task', type=int, default=-1, help='Max examples per CORE task (-1 = all)')
     parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation')
     parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
+    parser.add_argument('--dataset', type=str, default=None, help='Pretraining dataset for BPB (default: the dataset the checkpoint was trained on)')
+    parser.add_argument('--data-remote', type=str, default=None, help='Object store root to stream compiled data from (default: the one the checkpoint was trained with)')
+    parser.add_argument('--data-workers', type=int, default=2, help='DataLoader worker processes per rank for BPB evaluation')
     parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
     args = parser.parse_args()
 
@@ -149,7 +130,7 @@ def main():
     # Load model and tokenizer
     model, tokenizer, meta = load_model("base", device, phase="eval", model_tag=args.model_tag, step=args.step)
     sequence_len = meta["model_config"]["sequence_len"]
-    token_bytes = get_token_bytes(device=device)
+    token_bytes = tokenizer.get_token_bytes(device=device)
     model_name = f"base_model (step {meta['step']})"
     model_slug = f"base_model_{meta['step']:06d}"
 
@@ -180,7 +161,7 @@ def main():
             engine = Engine(model, tokenizer)
             print0("\nConditioned samples:")
             for prompt in prompts:
-                tokens = tokenizer(prompt, prepend="<|bos|>")
+                tokens = tokenizer.encode(prompt, prepend="<|bos|>")
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
                 sample_str = tokenizer.decode(sample[0])
                 print0("-" * 80)
@@ -188,7 +169,7 @@ def main():
                 samples.append(sample_str)
 
             print0("\nUnconditioned samples:")
-            tokens = tokenizer("", prepend="<|bos|>")
+            tokens = tokenizer.encode("", prepend="<|bos|>")
             uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
             for sample in uncond:
                 sample_str = tokenizer.decode(sample)
@@ -208,8 +189,14 @@ def main():
             print0(f"Adjusted split_tokens to {args.split_tokens} (must be divisible by {tokens_per_step})")
         steps = args.split_tokens // tokens_per_step
 
+        # the compiled data the checkpoint was trained on, read in order from the start of each split
+        dataset = args.dataset or meta["user_config"]["dataset"]
+        remote = args.data_remote or meta["user_config"]["data_remote"]
+        print0(f"Dataset: {dataset}" + (f" (streamed from {remote})" if remote else ""))
         for split_name in ["train", "val"]:
-            loader = tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, split_name, device=device)
+            loader, _ = pretraining_batches(dataset, split_name, tokenizer, seq_len=sequence_len, batch_rows=args.device_batch_size,
+                                            device=device, rank=ddp_rank, world_size=ddp_world_size, shuffle=False,
+                                            num_workers=args.data_workers, remote=remote)
             bpb = evaluate_bpb(model, loader, steps, token_bytes)
             bpb_results[split_name] = bpb
             print0(f"{split_name} bpb: {bpb:.6f}")

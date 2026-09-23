@@ -26,9 +26,11 @@ import torch
 import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
-from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanochat.data.sources import DEFAULT_DATASET, dataset_names
+from nanochat.data.shards import index_id
+from nanochat.data.stream import pretraining_batches
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
-from nanochat.tokenizer import get_tokenizer, get_token_bytes
+from nanochat.tokenizer import get_tokenizer
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
@@ -44,6 +46,12 @@ parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('d
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
+# Data
+parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, choices=dataset_names(), help=f"pretraining corpus (nanochat/data/sources.py, or its -curated copy), compiled with nanochat.data.compile (default: {DEFAULT_DATASET})")
+parser.add_argument("--data-remote", type=str, default=None, help="object store root to stream compiled shards from, e.g. s3://bucket/prefix (default: the local compiled directory)")
+parser.add_argument("--data-cache-gb", type=float, default=0, help="node-local cache limit per split when streaming from --data-remote, in GiB (0 = keep every shard)")
+parser.add_argument("--data-workers", type=int, default=2, help="DataLoader worker processes per rank")
+parser.add_argument("--data-seed", type=int, default=42, help="seed of the global data order")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
@@ -117,7 +125,7 @@ else:
 # -----------------------------------------------------------------------------
 # Tokenizer will be useful for evaluation and also we need the vocab size to init the model
 tokenizer = get_tokenizer()
-token_bytes = get_token_bytes(device=device)
+token_bytes = tokenizer.get_token_bytes(device=device)
 vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
 
@@ -280,6 +288,13 @@ if total_batch_size == -1:
     predicted_batch_size = B_REF * batch_size_ratio ** 0.383
     total_batch_size = 2 ** round(math.log2(predicted_batch_size)) # clamp to nearest power of 2 for efficiency
     print0(f"Auto-computed optimal batch size: {total_batch_size:,} tokens")
+    # any number of GPUs: round to a whole number of micro-batches across all ranks
+    world_tokens = args.device_batch_size * args.max_seq_len * ddp_world_size
+    rounded = max(1, round(total_batch_size / world_tokens)) * world_tokens
+    if rounded != total_batch_size:
+        assert 0.5 <= rounded / total_batch_size <= 2, f"A micro-batch across {ddp_world_size} ranks ({world_tokens:,} tokens) is too far from the optimal batch size ({total_batch_size:,}): adjust --device-batch-size or pass --total-batch-size"
+        print0(f"Rounded batch size to {rounded:,} tokens: a whole number of micro-batches on {ddp_world_size} ranks")
+        total_batch_size = rounded
 
 # 3) Knowing the batch size, we can now calculate a learning rate correction (bigger batch size allows higher learning rates)
 batch_lr_scale = 1.0
@@ -324,11 +339,21 @@ if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
 # -----------------------------------------------------------------------------
-# Initialize the DataLoaders for train/val
-dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
-train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
-build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device)
-x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
+# DataLoaders over the compiled token shards (python -m nanochat.data.compile), streamed from --data-remote if given.
+# The global row order does not depend on the number of GPUs, so the data state is just the number of rows consumed:
+# a resumed run continues exactly where it stopped, on any number of GPUs.
+rows_per_step = total_batch_size // args.max_seq_len
+data_kwargs = dict(seq_len=args.max_seq_len, batch_rows=args.device_batch_size, device=device, rank=ddp_rank, world_size=ddp_world_size,
+                   seed=args.data_seed, num_workers=args.data_workers, remote=args.data_remote, cache_gb=args.data_cache_gb)
+rows_consumed = meta_data["dataloader_state_dict"]["rows"] if resuming else 0
+train_batches, train_index = pretraining_batches(args.dataset, "train", tokenizer, start_row=rows_consumed, shuffle=True, **data_kwargs)
+if resuming:
+    data_state = meta_data["dataloader_state_dict"]
+    assert data_state["index"] == index_id(train_index) and data_state["seed"] == args.data_seed, "The checkpoint was trained on different data or a different data order"
+val_batches, _ = pretraining_batches(args.dataset, "val", tokenizer, shuffle=False, **data_kwargs)
+print0(f"Training data: {train_index['rows']:,} rows x {train_index['row_len']} tokens in {len(train_index['shards'])} shards, {args.data_workers} loader workers per rank")
+train_iter = iter(train_batches)
+x, y = next(train_iter) # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------
 # Calculate the number of iterations we will train for and set up the various schedulers
@@ -418,10 +443,9 @@ while True:
     # once in a while: evaluate the val bpb (all ranks participate)
     if args.eval_every > 0 and (last_step or step % args.eval_every == 0):
         model.eval()
-        val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
         with disable_fp8(model):
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_bpb = evaluate_bpb(model, val_batches, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -465,7 +489,7 @@ while True:
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
-            tokens = tokenizer(prompt, prepend="<|bos|>")
+            tokens = tokenizer.encode(prompt, prepend="<|bos|>")
             with disable_fp8(orig_model):
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
             print0(tokenizer.decode(sample[0]))
@@ -486,7 +510,7 @@ while True:
                 "device_batch_size": args.device_batch_size,
                 "max_seq_len": args.max_seq_len,
                 "total_batch_size": total_batch_size,
-                "dataloader_state_dict": dataloader_state_dict,
+                "dataloader_state_dict": {"rows": rows_consumed, "index": index_id(train_index), "seed": args.data_seed},
                 "loop_state": { # all loop state (other than step) so that we can resume training
                     "min_val_bpb": min_val_bpb,
                     "smooth_train_loss": smooth_train_loss,
@@ -513,7 +537,7 @@ while True:
             scaler.scale(loss).backward()
         else:
             loss.backward()
-        x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+        x, y = next(train_iter) # prefetch the next batch while the GPU is busy with forward/backward
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
@@ -536,6 +560,7 @@ while True:
     else:
         optimizer.step()
     model.zero_grad(set_to_none=True)
+    rows_consumed += rows_per_step
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
     t1 = time.time()
@@ -561,8 +586,8 @@ while True:
         eta_str = f" | eta: {eta_seconds/60:.1f}m"
     else:
         eta_str = ""
-    epoch = f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
+    epoch = rows_consumed / train_index["rows"]
+    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch:.4f} | total time: {total_training_time/60:.2f}m{eta_str}")
     if step % 100 == 0:
         log_data = {
             "step": step,

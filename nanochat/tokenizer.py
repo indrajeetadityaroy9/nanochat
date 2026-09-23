@@ -1,10 +1,22 @@
 """
 BPE Tokenizer in the style of GPT-4: train with rustbpe, inference with tiktoken.
+
+Train on the pretraining data (writes <base_dir>/tokenizer/tokenizer.pkl):
+python -m nanochat.tokenizer
 """
 
 import os
 import copy
-from functools import lru_cache
+import time
+import pickle
+import argparse
+import hashlib
+
+import torch
+import rustbpe
+import tiktoken
+
+from nanochat.common import get_base_dir
 
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
@@ -27,16 +39,14 @@ SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| 
 
 # -----------------------------------------------------------------------------
 # Tokenizer based on rustbpe + tiktoken combo
-import pickle
-import rustbpe
-import tiktoken
 
 class RustBPETokenizer:
     """Light wrapper around tiktoken (for efficient inference) but train with rustbpe"""
 
     def __init__(self, enc, bos_token):
         self.enc = enc
-        self.bos_token_id = self.encode_special(bos_token)
+        self.special_ids = {name: enc.encode_single_token(name) for name in enc.special_tokens_set}
+        self.bos_token_id = self.special_ids[bos_token]
 
     @classmethod
     def train_from_iterator(cls, text_iterator, vocab_size):
@@ -70,12 +80,8 @@ class RustBPETokenizer:
     def get_vocab_size(self):
         return self.enc.n_vocab
 
-    def get_special_tokens(self):
-        return self.enc.special_tokens_set
-
-    @lru_cache(maxsize=32)
     def encode_special(self, text):
-        return self.enc.encode_single_token(text)
+        return self.special_ids[text]
 
     def get_bos_token_id(self):
         return self.bos_token_id
@@ -107,14 +113,26 @@ class RustBPETokenizer:
 
         return ids
 
-    def __call__(self, *args, **kwargs):
-        return self.encode(*args, **kwargs)
-
     def decode(self, ids):
         return self.enc.decode(ids)
 
-    def decode_single_token_bytes(self, token_id):
-        return self.enc.decode_single_token_bytes(token_id)
+    def get_token_bytes(self, device="cpu"):
+        """
+        Byte length of every token id, as an int32 tensor of shape (vocab_size,), used for
+        vocab-size-invariant bits per byte. Special tokens count 0 bytes. Uses the raw token
+        bytes: decoding to str first corrupts tokens that are not valid standalone UTF-8.
+        """
+        token_bytes = self.enc.decode_tokens_bytes(list(range(self.get_vocab_size())))
+        lengths = torch.tensor([len(b) for b in token_bytes], dtype=torch.int32)
+        lengths[list(self.special_ids.values())] = 0
+        return lengths.to(device)
+
+    def fingerprint(self):
+        """Stable 16-hex identity of the vocabulary (split pattern, every token's bytes, special tokens), keying compiled data."""
+        digest = hashlib.sha256(self.enc._pat_str.encode())
+        for token in self.enc.decode_tokens_bytes(list(range(self.get_vocab_size()))):
+            digest.update(len(token).to_bytes(4, "little") + token)
+        return digest.hexdigest()[:16]
 
     def save(self, tokenizer_dir):
         # save the encoding object to disk
@@ -233,19 +251,47 @@ class RustBPETokenizer:
 # -----------------------------------------------------------------------------
 # nanochat-specific convenience functions
 
-def get_tokenizer():
-    from nanochat.common import get_base_dir
-    base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
-    return RustBPETokenizer.from_directory(tokenizer_dir)
+def get_tokenizer_dir():
+    return os.path.join(get_base_dir(), "tokenizer")
 
-def get_token_bytes(device="cpu"):
-    import torch
-    from nanochat.common import get_base_dir
-    base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
-    token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
-    assert os.path.exists(token_bytes_path), f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
-    with open(token_bytes_path, "rb") as f:
-        token_bytes = torch.load(f, map_location=device)
-    return token_bytes
+def get_tokenizer():
+    return RustBPETokenizer.from_directory(get_tokenizer_dir())
+
+# -----------------------------------------------------------------------------
+# Train the tokenizer on the pretraining data
+
+if __name__ == "__main__":
+    from nanochat.data.sources import DEFAULT_DATASET, dataset_names, iter_text_batches
+
+    parser = argparse.ArgumentParser(description="Train a BPE tokenizer on the pretraining data")
+    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, choices=dataset_names(), help=f"pretraining corpus to train on (default: {DEFAULT_DATASET})")
+    parser.add_argument("--max-chars", type=int, default=2_000_000_000, help="Maximum characters to train on (default: 2B)")
+    parser.add_argument("--doc-cap", type=int, default=10_000, help="Maximum characters per document (default: 10,000)")
+    parser.add_argument("--vocab-size", type=int, default=32768, help="Vocabulary size (default: 32768 = 2^15)")
+    args = parser.parse_args()
+    print(f"dataset: {args.dataset} | max_chars: {args.max_chars:,} | doc_cap: {args.doc_cap:,} | vocab_size: {args.vocab_size:,}")
+
+    def text_iterator():
+        """Train-split documents, each cropped to doc_cap characters, until max_chars have been seen."""
+        nchars = 0
+        for batch in iter_text_batches(args.dataset, "train"):
+            for doc in batch:
+                doc = doc[:args.doc_cap]
+                nchars += len(doc)
+                yield doc
+                if nchars > args.max_chars:
+                    return
+
+    t0 = time.time()
+    tokenizer = RustBPETokenizer.train_from_iterator(text_iterator(), args.vocab_size)
+    print(f"Training time: {time.time() - t0:.2f}s")
+    tokenizer.save(get_tokenizer_dir())
+
+    # sanity check: round-trip ASCII, numbers, contractions, punctuation and multi-byte unicode
+    test_text = """Hello world! This is a test.
+Numbers: 123, 4567, 89
+Contractions: I'm, you're, it's
+Special chars: @#$%^&*()
+Unicode: 你好世界 🌍"""
+    assert tokenizer.decode(tokenizer.encode(test_text)) == test_text
+    print(f"Tokenizer fingerprint: {tokenizer.fingerprint()} (keys compiled data: python -m nanochat.data.compile)")
