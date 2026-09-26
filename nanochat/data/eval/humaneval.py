@@ -6,7 +6,7 @@ It is a coding benchmark.
 
 import re
 from nanochat.execution import execute_code
-from nanochat.data.tasks.common import Task, load_hub_dataset
+from nanochat.data.task import Task, load_hub_dataset
 
 REPO = "openai/openai_humaneval"
 REVISION = "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544" # pinned commit, the only split is openai_humaneval/test-*.parquet

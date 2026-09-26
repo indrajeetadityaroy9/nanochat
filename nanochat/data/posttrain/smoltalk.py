@@ -4,7 +4,7 @@ https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk
 We use the "smol" version, which is more appropriate for smaller models.
 """
 
-from nanochat.data.tasks.common import Task, load_hub_dataset
+from nanochat.data.task import Task, load_hub_dataset
 
 REPO = "HuggingFaceTB/smol-smoltalk"
 REVISION = "f73fe857d519ff6ac5af2ea67c4d3834da7b8bcc" # pinned commit, files are data/<split>-*.parquet

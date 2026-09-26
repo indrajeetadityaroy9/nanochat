@@ -104,11 +104,11 @@ def _strings(obj):
 
 def eval_texts():
     """The text of every item of the CORE tasks and the chat-eval test sets, one string per item."""
-    from nanochat.data.eval_bundle import get_eval_bundle_dir
-    from nanochat.data.tasks.arc import ARC
-    from nanochat.data.tasks.mmlu import MMLU
-    from nanochat.data.tasks.gsm8k import GSM8K
-    from nanochat.data.tasks.humaneval import HumanEval
+    from nanochat.data.eval.core import get_eval_bundle_dir
+    from nanochat.data.eval.arc import ARC
+    from nanochat.data.eval.mmlu import MMLU
+    from nanochat.data.eval.gsm8k import GSM8K
+    from nanochat.data.eval.humaneval import HumanEval
 
     bundle = get_eval_bundle_dir()
     with open(os.path.join(bundle, "core.yaml"), encoding="utf-8") as f:

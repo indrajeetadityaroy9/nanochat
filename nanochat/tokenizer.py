@@ -261,7 +261,7 @@ def get_tokenizer():
 # Train the tokenizer on the pretraining data
 
 if __name__ == "__main__":
-    from nanochat.data.sources import DEFAULT_DATASET, iter_text_batches
+    from nanochat.data.pretrain.sources import DEFAULT_DATASET, iter_text_batches
 
     parser = argparse.ArgumentParser(description="Train a BPE tokenizer on the pretraining data")
     parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus to train on (default: {DEFAULT_DATASET})")
@@ -294,4 +294,4 @@ Contractions: I'm, you're, it's
 Special chars: @#$%^&*()
 Unicode: 你好世界 🌍"""
     assert tokenizer.decode(tokenizer.encode(test_text)) == test_text
-    print(f"Tokenizer fingerprint: {tokenizer.fingerprint()} (keys compiled data: python -m nanochat.data.compile)")
+    print(f"Tokenizer fingerprint: {tokenizer.fingerprint()} (keys compiled data: python -m nanochat.data.pretrain.compile)")

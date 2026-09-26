@@ -26,8 +26,8 @@ import torch
 import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
-from nanochat.data.sources import DEFAULT_DATASET
-from nanochat.data.stream import PretrainingBatches
+from nanochat.data.pretrain.sources import DEFAULT_DATASET
+from nanochat.data.pretrain.stream import PretrainingBatches
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
@@ -46,7 +46,7 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 # Data
-parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus (nanochat/data/sources.py), compiled with nanochat.data.compile (default: {DEFAULT_DATASET})")
+parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus (nanochat/data/pretrain/sources.py), compiled with nanochat.data.pretrain.compile (default: {DEFAULT_DATASET})")
 parser.add_argument("--data-seed", type=int, default=42, help="seed of the global data order")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
@@ -335,7 +335,7 @@ if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
 # -----------------------------------------------------------------------------
-# Batches of the compiled token rows (python -m nanochat.data.compile).
+# Batches of the compiled token rows (python -m nanochat.data.pretrain.compile).
 # The global row order does not depend on the number of GPUs, so the data state is just the number of rows consumed:
 # a resumed run continues exactly where it stopped, on any number of GPUs.
 rows_per_step = total_batch_size // args.max_seq_len

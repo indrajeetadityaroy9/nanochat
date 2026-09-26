@@ -8,8 +8,8 @@ python -m pytest tests/test_data_sft.py -v
 import pytest
 import torch
 from nanochat.tokenizer import RustBPETokenizer, SPECIAL_TOKENS
-from nanochat.data.tasks.common import Task
-from nanochat.data.sft import SFTLoader
+from nanochat.data.task import Task
+from nanochat.data.posttrain.sft import SFTLoader
 
 
 @pytest.fixture(scope="module")

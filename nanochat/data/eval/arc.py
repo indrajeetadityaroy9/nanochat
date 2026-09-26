@@ -3,7 +3,7 @@ The ARC dataset from Allen AI.
 https://huggingface.co/datasets/allenai/ai2_arc
 """
 
-from nanochat.data.tasks.common import Task, load_hub_dataset, render_mc
+from nanochat.data.task import Task, load_hub_dataset, render_mc
 
 REPO = "allenai/ai2_arc"
 REVISION = "210d026faf9955653af8916fad021475a3f00453" # pinned commit, files are <subset>/<split>-*.parquet

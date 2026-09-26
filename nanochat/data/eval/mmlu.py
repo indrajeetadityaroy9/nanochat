@@ -3,7 +3,7 @@ The MMLU dataset.
 https://huggingface.co/datasets/cais/mmlu
 """
 
-from nanochat.data.tasks.common import Task, load_hub_dataset, render_mc
+from nanochat.data.task import Task, load_hub_dataset, render_mc
 
 REPO = "cais/mmlu"
 REVISION = "c30699e8356da336a370243923dbaf21066bb9fe" # pinned commit, files are <subset>/<split>-*.parquet

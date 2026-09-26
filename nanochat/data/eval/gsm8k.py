@@ -15,7 +15,7 @@ Notice that GSM8K uses tool calls inside << >> tags.
 """
 
 import re
-from nanochat.data.tasks.common import Task, load_hub_dataset
+from nanochat.data.task import Task, load_hub_dataset
 
 REPO = "openai/gsm8k"
 REVISION = "740312add88f781978c0658806c59bc2815b9866" # pinned commit, files are <subset>/<split>-*.parquet

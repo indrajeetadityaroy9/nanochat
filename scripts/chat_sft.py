@@ -25,11 +25,10 @@ from nanochat.flash_attention import HAS_FA3
 from nanochat.engine import Engine
 from scripts.chat_eval import run_chat_eval
 
-from nanochat.data.tasks.common import TaskMixture
-from nanochat.data.tasks.gsm8k import GSM8K
-from nanochat.data.tasks.mmlu import MMLU
-from nanochat.data.tasks.smoltalk import SmolTalk
-from nanochat.data.sft import SFTLoader
+from nanochat.data.posttrain.sft import TaskMixture, SFTLoader
+from nanochat.data.posttrain.smoltalk import SmolTalk
+from nanochat.data.eval.gsm8k import GSM8K
+from nanochat.data.eval.mmlu import MMLU
 
 # -----------------------------------------------------------------------------
 # CLI arguments

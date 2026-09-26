@@ -25,7 +25,7 @@ import torch.distributed as dist
 from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb, autodetect_device_type
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
-from nanochat.data.tasks.gsm8k import GSM8K
+from nanochat.data.eval.gsm8k import GSM8K
 
 # -----------------------------------------------------------------------------
 # CLI arguments

@@ -1,10 +1,10 @@
 """
-Test eval decontamination (nanochat/data/decontam.py): which documents share an n-word sequence with an eval item.
+Test eval decontamination (nanochat/data/pretrain/decontam.py): which documents share an n-word sequence with an eval item.
 
 python -m pytest tests/test_data_decontam.py -v
 """
 
-from nanochat.data.decontam import EvalIndex, contaminated, ngram_hashes
+from nanochat.data.pretrain.decontam import EvalIndex, contaminated, ngram_hashes
 
 N = 13
 EVAL = "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May."

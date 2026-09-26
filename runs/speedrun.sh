@@ -37,7 +37,7 @@ fi
 python -m nanochat.tokenizer
 # download, tokenize and pack the first 170 raw files (~150 for GPT-2 capability, plus 20 of padding) into token
 # rows once, on all CPUs
-python -m nanochat.data.compile --max-files=170
+python -m nanochat.data.pretrain.compile --max-files=170
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)

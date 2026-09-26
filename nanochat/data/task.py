@@ -1,11 +1,9 @@
 """
-Base class for all Tasks.
-A Task is basically a dataset of conversations, together with some
-metadata and often also evaluation criteria.
-Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
+Chat tasks, shared by post-training (SFT and RL train on their train splits) and evaluation (their test splits):
+a Task is a sliceable dataset of conversations, often with a grader (evaluate). Tasks read one split of a pinned
+HF dataset repo (load_hub_dataset), and multiple-choice tasks share one prompt format (render_mc).
 """
 
-import random
 import fnmatch
 
 import numpy as np
@@ -94,41 +92,6 @@ class Task:
 
     def evaluate(self, problem, completion):
         raise NotImplementedError
-
-
-class TaskMixture(Task):
-    """
-    For SFT Training it becomes useful to train on a mixture of datasets.
-    Fun trick: if you wish to oversample any task, just pass it in multiple times in the list.
-    """
-
-    def __init__(self, tasks, **kwargs):
-        super().__init__(**kwargs)
-        # tasks is a list of Task objects
-        self.tasks = tasks
-        self.lengths = [len(task) for task in self.tasks]
-        self.num_conversations = sum(self.lengths)
-        # Build list of all (task_idx, local_idx) pairs
-        self.index_map = []
-        for task_idx, task_length in enumerate(self.lengths):
-            for local_idx in range(task_length):
-                self.index_map.append((task_idx, local_idx))
-        # Deterministically shuffle to mix tasks throughout training
-        rng = random.Random(42)
-        rng.shuffle(self.index_map)
-        # Note: this is not the most elegant or best solution, but it's ok for now
-
-    def num_examples(self):
-        return self.num_conversations
-
-    def get_example(self, index):
-        """
-        Access conversations according to a deterministic shuffle of all examples.
-        This ensures tasks are mixed throughout training, regardless of dataset size.
-        """
-        assert 0 <= index < self.num_conversations, f"Index {index} out of range for mixture with {self.num_conversations} conversations"
-        task_idx, local_idx = self.index_map[index]
-        return self.tasks[task_idx][local_idx]
 
 
 def render_mc(question, letters, choices):

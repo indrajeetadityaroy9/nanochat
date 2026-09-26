@@ -13,7 +13,7 @@ file order, so the output does not depend on the number of worker processes.
 
 The tokenizer must exist first (python -m nanochat.tokenizer): compiled data is keyed by its fingerprint.
 
-python -m nanochat.data.compile --dataset=climbmix --seq-len=2048 --max-files=170
+python -m nanochat.data.pretrain.compile --dataset=climbmix --seq-len=2048 --max-files=170
 """
 
 import os
@@ -29,10 +29,10 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from nanochat.tokenizer import get_tokenizer
-from nanochat.data.sources import DEFAULT_DATASET, DATASETS, list_raw_files, read_texts
 from nanochat.data.storage import fetch_repo_file
-from nanochat.data.stream import compiled_path, token_dtype
-from nanochat.data.decontam import build_eval_index, contaminated
+from nanochat.data.pretrain.sources import DEFAULT_DATASET, DATASETS, list_raw_files, read_texts
+from nanochat.data.pretrain.stream import compiled_path, token_dtype
+from nanochat.data.pretrain.decontam import build_eval_index, contaminated
 
 
 def pack(docs, row_len, buffer_docs):
@@ -113,7 +113,7 @@ def compile_split(dataset, split, tokenizer, eval_index, *, seq_len, max_files, 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compile a raw corpus into packed token rows")
-    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"registered corpus in nanochat/data/sources.py (default: {DEFAULT_DATASET})")
+    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"registered corpus in nanochat/data/pretrain/sources.py (default: {DEFAULT_DATASET})")
     parser.add_argument("--seq-len", type=int, default=2048, help="training sequence length; rows hold seq_len + 1 tokens (default: 2048)")
     parser.add_argument("--max-files", type=int, required=True, help="compile the first N raw files of each split")
     parser.add_argument("--buffer-docs", type=int, default=16000, help="documents buffered for best-fit packing (default: 16000)")

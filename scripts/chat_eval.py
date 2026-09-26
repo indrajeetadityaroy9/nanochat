@@ -17,10 +17,10 @@ from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 
-from nanochat.data.tasks.humaneval import HumanEval
-from nanochat.data.tasks.mmlu import MMLU
-from nanochat.data.tasks.arc import ARC
-from nanochat.data.tasks.gsm8k import GSM8K
+from nanochat.data.eval.humaneval import HumanEval
+from nanochat.data.eval.mmlu import MMLU
+from nanochat.data.eval.arc import ARC
+from nanochat.data.eval.gsm8k import GSM8K
 
 # -----------------------------------------------------------------------------
 # Generative evaluation loop (we go one problem at a time, sample, evaluate)

@@ -43,7 +43,7 @@ services:
     <<: *nanochat
     command: >-
       bash -c 'python -m nanochat.tokenizer --dataset="$$DATASET" &&
-      python -m nanochat.data.compile --dataset="$$DATASET" --seq-len="$$SEQ_LEN" --max-files="$$NUM_FILES"'
+      python -m nanochat.data.pretrain.compile --dataset="$$DATASET" --seq-len="$$SEQ_LEN" --max-files="$$NUM_FILES"'
 
   train:
     <<: *nanochat

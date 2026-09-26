@@ -4,6 +4,12 @@ A running summary documenting some experiments and findings. Started ~Jan 7 2026
 
 ---
 
+## 2026-09-26: nanochat/data split into pretrain/, posttrain/ and eval/
+
+`nanochat/data` mixed the three stages at one level, and `tasks/` mixed SFT data (SmolTalk), benchmarks (ARC, HumanEval), datasets used by both (GSM8K, MMLU) and SFT-only machinery (`TaskMixture`). Now each module lives in one stage: `pretrain/` (sources, decontam, compile, stream), `posttrain/` (SmolTalk, and `sft.py` with `TaskMixture` and `SFTLoader`) and `eval/` (the CORE bundle as `core.py`, ARC, MMLU, GSM8K, HumanEval). `storage.py` (downloads) and `task.py` (the Task base, `HubDataset`/`load_hub_dataset`, the multiple-choice prompt format) are shared. Benchmarks live in `eval/` because they are benchmarks with graders; SFT and RL train on their train splits (RL rewards with GSM8K's grader) and pretraining decontaminates against their test splits, so all of those import from `eval/`, and `eval/` imports from no stage. Commands move with the modules: `python -m nanochat.data.pretrain.compile`. No code changed besides imports and moving `TaskMixture`.
+
+---
+
 ## 2026-09-26: Compiled data as one numpy row file per split; loader without DataLoader workers
 
 `nanochat/data/shards.py` is gone, and `compile.py` and `stream.py` shrank to the experiment's mechanism: BOS-aligned best-fit packing with a 16000-document buffer, 13-gram decontamination, and a seeded, elastic, resumable row order.

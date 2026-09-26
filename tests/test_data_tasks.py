@@ -7,7 +7,8 @@ python -m pytest tests/test_data_tasks.py -v
 
 import numpy as np
 import pyarrow as pa
-from nanochat.data.tasks.common import Task, TaskMixture, HubDataset, render_mc
+from nanochat.data.task import Task, HubDataset, render_mc
+from nanochat.data.posttrain.sft import TaskMixture
 
 
 class ToyTask(Task):

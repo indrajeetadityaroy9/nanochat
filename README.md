@@ -39,8 +39,8 @@ Datasets (raw corpora, compiled token rows, task data, the CORE bundle) live und
 [runs/speedrun.sh](runs/speedrun.sh) runs the full pipeline; on an 8XH100 node it takes ~1.5 hours:
 
 ```bash
-python -m nanochat.tokenizer                      # BPE tokenizer, vocab 32768
-python -m nanochat.data.compile --max-files=170   # fetch, tokenize + pack once into a file of token rows per split
+python -m nanochat.tokenizer                              # BPE tokenizer, vocab 32768
+python -m nanochat.data.pretrain.compile --max-files=170   # fetch, tokenize + pack once into a file of token rows per split
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_eval -- --device-batch-size=16   # CORE, bpb, samples
 torchrun --standalone --nproc_per_node=gpu -m scripts.chat_sft
@@ -55,7 +55,7 @@ Optional stage: `scripts.chat_rl` (GRPO-style RL on GSM8K, evaluate with `chat_e
 
 ## Data
 
-All dataset and data-loading code lives in [nanochat/data](nanochat/data). Pretraining corpora are tokenized and packed once into one file of token rows per split on local disk, which training memory-maps in place.
+All dataset and data-loading code lives in [nanochat/data](nanochat/data), one package per stage: `pretrain/`, `posttrain/` (SFT and RL) and `eval/`. Pretraining corpora are tokenized and packed once into one file of token rows per split on local disk, which training memory-maps in place (modules of `pretrain/`):
 
 ```
 HF Hub parquet, pinned commits          sources.py    raw corpus registry, files fetched on demand
@@ -70,15 +70,15 @@ numpy.memmap                            stream.py     elastic deterministic orde
 GPU
 ```
 
-Post-training data sits alongside it: `tasks/` (SFT, RL and chat-eval task datasets, pinned HF parquet), `sft.py` (the SFT conversation packing loader) and `eval_bundle.py` (CORE data). Every file is downloaded on first use through `storage.py`, under a per-file lock, so the ranks on a node download it once.
+Post-training and evaluation share the chat tasks of [task.py](nanochat/data/task.py), each reading one split of a pinned HF dataset repo. `eval/` holds the benchmarks: the CORE bundle (`core.py`) and the chat evals ARC, MMLU, GSM8K and HumanEval with their graders. `posttrain/` holds SmolTalk and the SFT task mixture and packing loader (`sft.py`). SFT also trains on the MMLU and GSM8K train splits, RL on GSM8K's with its grader as the reward, and pretraining decontaminates against the eval sets, so those stages import from `eval/` and `eval/` imports from neither. Every file is downloaded on first use through `storage.py`, under a per-file lock, so the ranks on a node download it once.
 
 ### Corpora
 
-Pretraining corpora are registered in `DATASETS` in [nanochat/data/sources.py](nanochat/data/sources.py), each pinned to a commit. `--dataset` selects one for tokenizer training, compilation and pretraining; it is recorded in the checkpoint, so `base_eval` measures bpb on the same data:
+Pretraining corpora are registered in `DATASETS` in [nanochat/data/pretrain/sources.py](nanochat/data/pretrain/sources.py), each pinned to a commit. `--dataset` selects one for tokenizer training, compilation and pretraining; it is recorded in the checkpoint, so `base_eval` measures bpb on the same data:
 
 ```bash
 python -m nanochat.tokenizer --dataset=dclm_100b
-python -m nanochat.data.compile --dataset=dclm_100b --max-files=20
+python -m nanochat.data.pretrain.compile --dataset=dclm_100b --max-files=20
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --dataset=dclm_100b --depth=12
 ```
 
@@ -102,13 +102,13 @@ To add a corpus, add a `DatasetSpec(repo, train_files, val_files, revision)` ent
 
 ### Compiled rows
 
-`python -m nanochat.data.compile` tokenizes each raw file once and packs documents into rows of `seq_len + 1` tokens that each start with a document's BOS: the longest buffered document that fits goes next, and when none fits the shortest is cropped to fill the row, so there is no padding. The buffer holds `--buffer-docs` documents (default 16000): a fuller buffer finds more exact fits, which on ClimbMix halves the tokens lost to cropping (22% at 1000, 12% at 16000, against an 11% floor set by documents longer than a row, of which only the first row is kept). Raw files are packed in parallel, one per CPU, and their rows are written in raw file order, so the output does not depend on the number of CPUs.
+`python -m nanochat.data.pretrain.compile` tokenizes each raw file once and packs documents into rows of `seq_len + 1` tokens that each start with a document's BOS: the longest buffered document that fits goes next, and when none fits the shortest is cropped to fill the row, so there is no padding. The buffer holds `--buffer-docs` documents (default 16000): a fuller buffer finds more exact fits, which on ClimbMix halves the tokens lost to cropping (22% at 1000, 12% at 16000, against an 11% floor set by documents longer than a row, of which only the first row is kept). Raw files are packed in parallel, one per CPU, and their rows are written in raw file order, so the output does not depend on the number of CPUs.
 
 A compiled split is one flat file of token rows, `uint16` while the vocabulary fits, at `$NANOCHAT_BASE_DIR/data/compiled/<dataset>-T<seq_len>-<fingerprint>/{train,val}.bin`. It is keyed by corpus, sequence length and tokenizer fingerprint, so changing any of them needs a recompile, and it appears only once compile has finished. Training reads it in place with `numpy.memmap`.
 
 ### Decontamination
 
-Before tokenization, compile drops every document that shares a 13-word sequence (`--decontam-ngram`) with an item of the evaluation sets nanochat reports: every CORE task in the eval bundle's `core.yaml`, and the ARC-Easy, ARC-Challenge, MMLU and GSM8K test splits and HumanEval used by `chat_eval` ([nanochat/data/decontam.py](nanochat/data/decontam.py)). Words are lowercased alphanumeric runs, so formatting differences do not hide a match. The corpora are not decontaminated by their publishers (Nemotron-CC, the bulk of ClimbMix, explicitly is not), and without this step benchmark text seen in pretraining inflates CORE and ChatCORE. Compile prints how many documents it dropped.
+Before tokenization, compile drops every document that shares a 13-word sequence (`--decontam-ngram`) with an item of the evaluation sets nanochat reports: every CORE task in the eval bundle's `core.yaml`, and the ARC-Easy, ARC-Challenge, MMLU and GSM8K test splits and HumanEval used by `chat_eval` ([nanochat/data/pretrain/decontam.py](nanochat/data/pretrain/decontam.py)). Words are lowercased alphanumeric runs, so formatting differences do not hide a match. The corpora are not decontaminated by their publishers (Nemotron-CC, the bulk of ClimbMix, explicitly is not), and without this step benchmark text seen in pretraining inflates CORE and ChatCORE. Compile prints how many documents it dropped.
 
 ### Loading
 

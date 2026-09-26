@@ -28,8 +28,8 @@ import torch
 from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
-from nanochat.data.eval_bundle import get_eval_bundle_dir
-from nanochat.data.stream import PretrainingBatches
+from nanochat.data.eval.core import get_eval_bundle_dir
+from nanochat.data.pretrain.stream import PretrainingBatches
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 
