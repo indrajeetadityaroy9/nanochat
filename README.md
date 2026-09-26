@@ -32,16 +32,15 @@ source .venv/bin/activate
 
 `uv sync --extra gpu --group dev` adds pytest, matplotlib, ipykernel, and python-dotenv.
 
-Datasets (raw corpora, compiled token shards, task data, the CORE bundle) live under `$NANOCHAT_DATA_DIR`, default `$NANOCHAT_BASE_DIR/data`; put it on fast local NVMe. Outputs (tokenizer, checkpoints, eval results) live under `$NANOCHAT_BASE_DIR`, default `~/.cache/nanochat`. For NGC/Docker, see [Containers](#containers-ngc--docker).
+Datasets (raw corpora, compiled token shards, task data, the CORE bundle) live under `$NANOCHAT_BASE_DIR/data`; put it on fast local NVMe. Outputs (tokenizer, checkpoints, eval results) live under `$NANOCHAT_BASE_DIR`, default `~/.cache/nanochat`. For NGC/Docker, see [Containers](#containers-ngc--docker).
 
 ## Reference pipeline
 
 [runs/speedrun.sh](runs/speedrun.sh) runs the full pipeline; on an 8XH100 node it takes ~1.5 hours:
 
 ```bash
-python -m nanochat.data.sources -n 170            # raw ClimbMix parquet (+ the val file)
 python -m nanochat.tokenizer                      # BPE tokenizer, vocab 32768
-python -m nanochat.data.compile --max-files=170   # tokenize + pack once into Megatron .bin/.idx shards
+python -m nanochat.data.compile --max-files=170   # fetch, tokenize + pack once into Megatron .bin/.idx shards
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_eval -- --device-batch-size=16   # CORE, bpb, samples
 torchrun --standalone --nproc_per_node=gpu -m scripts.chat_sft
@@ -56,29 +55,28 @@ Optional stage: `scripts.chat_rl` (GRPO-style RL on GSM8K, evaluate with `chat_e
 
 ## Data
 
-All dataset and data-loading code lives in [nanochat/data](nanochat/data). Pretraining decouples storage from compute: corpora are tokenized and packed once into immutable binary shards, which training streams from any store through a node-local cache.
+All dataset and data-loading code lives in [nanochat/data](nanochat/data). Pretraining corpora are tokenized and packed once into immutable binary shards on local disk, which training memory-maps in place.
 
 ```
 HF Hub parquet, pinned commits          sources.py    raw corpus registry, files fetched on demand
-  │  optional: NeMo Curator             curate.py     heuristic quality filters -> '<dataset>-curated'
   ▼
-tokenize + BOS-aligned best-fit pack    compile.py    once, CPU-parallel, deterministic, resumable
+drop eval-contaminated docs, tokenize,  compile.py    once, CPU-parallel, deterministic, resumable
+BOS-aligned best-fit pack               decontam.py   13-gram overlap with CORE / chat-eval items
   ▼
-Megatron .bin/.idx shards + index.json  shards.py     local disk or any object store: s3://, gs://, hf://, shared fs
+Megatron .bin/.idx shards + index.json  shards.py     on local NVMe, under <base_dir>/data/compiled
   ▼
-node-local NVMe cache, mmap             stream.py     elastic deterministic order, DataLoader workers, pinned memory
+mmap'd in place                         stream.py     elastic deterministic order, DataLoader workers, pinned memory
   ▼
 GPU
 ```
 
-Post-training data sits alongside it: `tasks/` (SFT, RL and chat-eval task datasets, pinned HF parquet), `sft.py` (the SFT conversation packing loader) and `eval_bundle.py` (CORE data). Every download goes through `storage.py`: locked per file and published atomically, so all ranks and DataLoader workers on a node share one copy.
+Post-training data sits alongside it: `tasks/` (SFT, RL and chat-eval task datasets, pinned HF parquet), `sft.py` (the SFT conversation packing loader) and `eval_bundle.py` (CORE data). Every file is downloaded on first use through `storage.py`, under a per-file lock, so the ranks on a node download it once.
 
 ### Corpora
 
-Pretraining corpora are registered in `DATASETS` in [nanochat/data/sources.py](nanochat/data/sources.py), each pinned to a commit. `--dataset` selects one for fetching, tokenizer training, compilation and pretraining; it is recorded in the checkpoint, so `base_eval` measures bpb on the same data:
+Pretraining corpora are registered in `DATASETS` in [nanochat/data/sources.py](nanochat/data/sources.py), each pinned to a commit. `--dataset` selects one for tokenizer training, compilation and pretraining; it is recorded in the checkpoint, so `base_eval` measures bpb on the same data:
 
 ```bash
-python -m nanochat.data.sources --dataset=dclm_100b -n 20
 python -m nanochat.tokenizer --dataset=dclm_100b
 python -m nanochat.data.compile --dataset=dclm_100b --max-files=20
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --dataset=dclm_100b --depth=12
@@ -94,29 +92,26 @@ torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --dataset=dc
 | `finepdfs_edu_100b` | HuggingFaceFW/finepdfs_edu_100BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
 | `txt360_v2_web` | IFM/TxT360-v2 (`web-high-medium`) | 2026 | CC-BY-4.0 | 828 × ~2GB |
 
-`-n` and `--max-files` count raw files, whose sizes differ between corpora, so size them by the tokens a run needs. The tokenizer lives in `$NANOCHAT_BASE_DIR/tokenizer` and is retrained per corpus; use a separate `NANOCHAT_BASE_DIR` per corpus to keep several side by side.
+`--max-files` counts raw files, whose sizes differ between corpora, so size it by the tokens a run needs. The tokenizer lives in `$NANOCHAT_BASE_DIR/tokenizer` and is retrained per corpus; use a separate `NANOCHAT_BASE_DIR` per corpus to keep several side by side.
 
-To add a corpus, add a `DatasetSpec(repo, train_files, val_files, text_column, revision)` entry:
+To add a corpus, add a `DatasetSpec(repo, train_files, val_files, revision)` entry:
 
-- Parquet files with one document per row and raw text in `text_column` (only that column is read).
+- Parquet files with one document per row and raw text in a `text` column (only that column is read).
 - `val_files` selects the held-out file(s); they are excluded from train.
 - `revision` pinned to a commit sha. Gated repos need `HF_TOKEN` (or `hf auth login`) and accepted terms.
 
-A local-only corpus uses `repo=None`; place its parquet files in `$NANOCHAT_DATA_DIR/raw/<name>/`.
-
-### Curation (optional)
-
-The registered corpora are already filtered by their publishers. For corpora that are not, [nanochat/data/curate.py](nanochat/data/curate.py) runs NeMo Curator's heuristic quality filters (length, symbol and punctuation ratios, n-gram repetition) and writes the kept documents as the corpus `<dataset>-curated`, which the tokenizer, compiler and trainer accept like any other. NeMo Curator needs Python ≥3.11 and Ray, so it runs in its own container (`docker compose run --rm curate`, or `python -m nanochat.data.curate --dataset=climbmix --max-files=170` inside `nvcr.io/nvidia/nemo-curator`).
-
 ### Compiled shards
 
-`python -m nanochat.data.compile` tokenizes each raw file once and packs documents into rows of `seq_len + 1` tokens that each start with a document's BOS: the longest buffered document that fits goes next, and when none fits the shortest is cropped to fill the row, so there is no padding. Files are compiled in parallel (`--workers`, default all CPUs), the output is identical for any number of workers, and an interrupted compile resumes where it stopped.
+`python -m nanochat.data.compile` tokenizes each raw file once and packs documents into rows of `seq_len + 1` tokens that each start with a document's BOS: the longest buffered document that fits goes next, and when none fits the shortest is cropped to fill the row, so there is no padding. The buffer holds `--buffer-docs` documents (default 16000): a fuller buffer finds more exact fits, which on ClimbMix halves the tokens lost to cropping (22% at 1000, 12% at 16000, against an 11% floor set by documents longer than a row, of which only the first row is kept). Files are compiled in parallel (`--workers`, default all CPUs), the output is identical for any number of workers, and an interrupted compile resumes where it stopped.
 
-Shards use Megatron-LM's indexed dataset format (`.bin`/`.idx`, one packed row per sequence), the format Megatron-LM and NeMo pretrain from: `megatron.core`'s `IndexedDataset` reads them back row for row (checked in [tests/test_data_megatron_compat.py](tests/test_data_megatron_compat.py)). nanochat reads them with its own small mmap reader rather than importing `megatron.core`, which pulls in the whole Megatron framework and triton. An `index.json` per split records the tokenizer fingerprint, sequence length, source and a blake2b digest per file. Compiled data is keyed by corpus, sequence length and tokenizer fingerprint (`$NANOCHAT_DATA_DIR/compiled/<dataset>-T<seq_len>-<fingerprint>/`), so changing any of them needs a recompile. NeMo Curator's `MegatronTokenizerWriter` is not used: it needs a Hugging Face `AutoTokenizer` and writes whole documents, while nanochat trains its own tokenizer and trains on BOS-aligned packed rows.
+Shards use Megatron-LM's indexed dataset format (`.bin`/`.idx`, one packed row per sequence), the format Megatron-LM and NeMo pretrain from: `megatron.core`'s `IndexedDataset` reads them back row for row (checked in [tests/test_data_megatron_compat.py](tests/test_data_megatron_compat.py)). nanochat reads them with its own small mmap reader rather than importing `megatron.core`, which pulls in the whole Megatron framework and triton. An `index.json` per split records the tokenizer fingerprint, sequence length, source and a blake2b digest of each shard's rows, which a resumed run checks. Compiled data is keyed by corpus, sequence length and tokenizer fingerprint (`$NANOCHAT_BASE_DIR/data/compiled/<dataset>-T<seq_len>-<fingerprint>/`), so changing any of them needs a recompile. NeMo Curator's `MegatronTokenizerWriter` is not used: it needs a Hugging Face `AutoTokenizer` and writes whole documents, while nanochat trains its own tokenizer and trains on BOS-aligned packed rows.
 
-### Streaming
+### Decontamination
 
-- `--remote s3://bucket/prefix` on compile uploads the shards (and `index.json`, last) to an object store. `--data-remote` on `base_train` streams them into the node-local cache; `--data-cache-gb` bounds that cache (it must hold 3 shuffle blocks), otherwise every shard is kept. The next block is prefetched in the background and every file's digest is checked after transfer.
+Before tokenization, compile drops every document that shares a 13-word sequence (`--decontam-ngram`, 0 disables) with an item of the evaluation sets nanochat reports: every CORE task in the eval bundle's `core.yaml`, and the ARC-Easy, ARC-Challenge, MMLU and GSM8K test splits and HumanEval used by `chat_eval` ([nanochat/data/decontam.py](nanochat/data/decontam.py)). Words are lowercased alphanumeric runs, so formatting differences do not hide a match. The corpora are not decontaminated by their publishers (Nemotron-CC, the bulk of ClimbMix, explicitly is not), and without this step benchmark text seen in pretraining inflates CORE and ChatCORE. The eval-set digest is part of the compile settings, so changing the eval sets forces a recompile, and `index.json` records how many documents were dropped.
+
+### Loading
+
 - Each epoch permutes the shard order and shuffles rows within blocks of 16 shards. The global row order depends only on the seed and the data, never on the number of GPUs, nodes or workers, and every optimizer step covers the same rows at any GPU count. The checkpoint stores only the rows consumed, so a run resumes exactly, even on a different number of GPUs.
 - `--data-workers` DataLoader processes per rank gather rows from the mmap'd shards into pinned memory, and batches are copied to the GPU asynchronously. There is no tokenization or packing on the training nodes.
 
@@ -126,14 +121,13 @@ Shards use Megatron-LM's indexed dataset format (`.bin`/`.idx`, one packed row p
 
 ```bash
 docker build -f docker/Dockerfile -t nanochat .
-docker compose -f docker/compose.yaml up -d storage     # MinIO, an S3-compatible store for compiled shards
-docker compose -f docker/compose.yaml run --rm prepare  # fetch raw corpus, train tokenizer, compile, upload
-docker compose -f docker/compose.yaml run --rm train    # stream shards into the local cache and train on every GPU
+docker compose -f docker/compose.yaml run --rm prepare  # train tokenizer, fetch raw corpus, compile
+docker compose -f docker/compose.yaml run --rm train    # train on every GPU
 ```
 
-[docker/compose.yaml](docker/compose.yaml) wires this up; configure it with environment variables: `DATASET`, `NUM_FILES`, `SEQ_LEN`, `TRAIN_ARGS`, `DATA_REMOTE` and `AWS_*` (for S3 or another store instead of the bundled MinIO), `DATA_CACHE_GB`, `HF_TOKEN`, `WANDB_API_KEY`. Mount node-local NVMe as `DATA_HOST`; it holds raw corpora, compiled shards and the streaming cache. The GPU count is never fixed: `NPROC_PER_NODE` defaults to one rank per visible GPU. For multi-node runs, start `train` on every node against a store they all reach, with torchrun rendezvous flags in `TORCHRUN_ARGS` (e.g. `--nnodes=4 --node-rank=0 --rdzv-endpoint=head:29500`).
+[docker/compose.yaml](docker/compose.yaml) wires this up; configure it with environment variables: `DATASET`, `NUM_FILES`, `SEQ_LEN`, `TRAIN_ARGS`, `HF_TOKEN`, `WANDB_API_KEY`. Mount node-local NVMe as `DATA_HOST`; it holds raw corpora and compiled shards. The GPU count is never fixed: `NPROC_PER_NODE` defaults to one rank per visible GPU. For multi-node runs, every node reads the tokenizer and compiled shards locally: give each node the same `RUNS_HOST` and `DATA_HOST` contents (a shared filesystem, or a copy made after `prepare`), then start `train` on every node with torchrun rendezvous flags in `TORCHRUN_ARGS` (e.g. `--nnodes=4 --node-rank=0 --rdzv-endpoint=head:29500`).
 
-Without compose, run the image with `--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864`, the data volume at `/data` and an output volume at `/runs`: DataLoader workers hand batches to the trainer through shared memory, which Docker otherwise limits to 64MB, and NCCL needs it too.
+Without compose, run the image with `--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864`, an output volume at `/runs` and the data volume at `/runs/data`: DataLoader workers hand batches to the trainer through shared memory, which Docker otherwise limits to 64MB, and NCCL needs it too.
 
 ## Experiments
 

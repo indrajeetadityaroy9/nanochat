@@ -5,7 +5,6 @@ metadata and often also evaluation criteria.
 Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
 """
 
-import os
 import random
 import fnmatch
 
@@ -13,7 +12,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from nanochat.data.storage import get_data_dir, list_repo_files, fetch_repo_file
+from nanochat.data.storage import list_repo_files, fetch_repo_file
 
 
 class HubDataset:
@@ -44,13 +43,12 @@ def load_hub_dataset(repo, revision, files):
     """
     Minimal stand-in for HuggingFace datasets.load_dataset: one split of a HF dataset repo at a
     pinned commit. files is a glob over repo-relative paths selecting the split's parquet shards,
-    which are downloaded once into <data_dir>/tasks/<org>--<repo>/ and read in sorted order.
+    which are downloaded once (storage.fetch_repo_file) and read in sorted order.
     Under torchrun, each file is downloaded by one rank while the others wait.
     """
-    local_dir = os.path.join(get_data_dir(), "tasks", repo.replace("/", "--"))
-    filenames = sorted(f for f in list_repo_files(repo, revision, local_dir) if fnmatch.fnmatchcase(f, files))
+    filenames = sorted(f for f in list_repo_files(repo, revision) if fnmatch.fnmatchcase(f, files))
     assert filenames, f"No files of {repo}@{revision} match {files!r}"
-    tables = [pq.read_table(fetch_repo_file(repo, revision, filename, local_dir)) for filename in filenames]
+    tables = [pq.read_table(fetch_repo_file(repo, revision, filename)) for filename in filenames]
     return HubDataset(pa.concat_tables(tables))
 
 

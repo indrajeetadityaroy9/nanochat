@@ -299,20 +299,32 @@ while True:
 
     # -------------------------------------------------------------------------
     # single training step
-    # evaluate the gradient
+    # evaluate the gradient. Micro-batches hold different numbers of supervised tokens (prompts, tool outputs and
+    # padding are masked), so the loss is summed per micro-batch and the accumulated gradient is divided by the
+    # step's supervised-token count over all ranks: every token weighs the same, as if the step were one batch.
     synchronize()
     t0 = time.time()
+    step_loss = torch.zeros((), device=device)
+    step_tokens = torch.zeros((), dtype=torch.int64, device=device)
     for micro_step in range(grad_accum_steps):
         # the loader state as of (x, y), read before the prefetch below moves it one batch ahead
         progress, last_step, epoch = train_loader.progress, train_loader.last_step, train_loader.epoch
-        loss = model(x, y)
-        train_loss = loss.detach() # for logging
-        loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
+        loss = model(x, y, loss_reduction='sum')
+        step_loss += loss.detach()
+        step_tokens += (y != -1).sum()
+        loss = loss / tokens_per_fwdbwd # fixed scale, so gradient magnitudes match a per-micro-batch mean; the exact normalization is below
         if scaler is not None:
             scaler.scale(loss).backward()
         else:
             loss.backward()
         x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+    train_loss = step_loss / step_tokens.clamp(min=1) # this rank's per-token loss over the step, for logging
+    global_tokens = step_tokens.clone()
+    if is_ddp_initialized():
+        dist.all_reduce(global_tokens, op=dist.ReduceOp.SUM)
+    # the optimizer averages gradients over ranks: world * tokens_per_fwdbwd / N turns the sum into the mean over the N tokens
+    grad_scale = (ddp_world_size * tokens_per_fwdbwd) / global_tokens.clamp(min=1).to(torch.float32)
+    torch._foreach_mul_([p.grad for p in model.parameters() if p.grad is not None], grad_scale)
     # step the optimizer
     lrm = get_lr_multiplier(progress)
     muon_momentum = get_muon_momentum(step)

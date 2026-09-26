@@ -1,42 +1,30 @@
-# nanochat pretraining with storage decoupled from compute. One rank per visible GPU on the node
-# (torchrun --nproc-per-node=gpu), or set NPROC_PER_NODE.
+# nanochat pretraining on node-local data. One rank per visible GPU on the node (torchrun --nproc-per-node=gpu),
+# or set NPROC_PER_NODE.
 #
-#   docker compose -f docker/compose.yaml up -d storage        # S3-compatible object store for compiled shards
-#   docker compose -f docker/compose.yaml run --rm prepare     # raw corpus -> tokenizer -> Megatron .bin/.idx shards -> storage
-#   docker compose -f docker/compose.yaml run --rm train       # stream shards into the NVMe cache and train
+#   docker compose -f docker/compose.yaml run --rm prepare     # tokenizer, raw corpus -> Megatron .bin/.idx shards
+#   docker compose -f docker/compose.yaml run --rm train       # train on the compiled shards
 #
-# Optional, before `prepare`: quality-filter the corpus with NeMo Curator (its own container), then prepare
-# and train on the curated copy:
-#   docker compose -f docker/compose.yaml run --rm curate
-#   DATASET=climbmix-curated docker compose -f docker/compose.yaml run --rm prepare   # likewise for `train`
-#
-# Set DATA_HOST to node-local NVMe: it holds the raw corpora, compiled shards and the streaming cache.
-# For S3 or another store instead of the bundled MinIO, set DATA_REMOTE, AWS_ENDPOINT_URL and credentials.
-# Multi-node: run `train` on every node against a store they all reach, with TRAIN_ARGS unchanged and
-# torchrun rendezvous flags in TORCHRUN_ARGS (e.g. "--nnodes=4 --node-rank=0 --rdzv-endpoint=host:29500").
+# Set DATA_HOST to node-local NVMe: it holds the raw corpora and compiled shards.
+# Multi-node: every node reads the tokenizer and compiled shards locally, so give each node the same RUNS_HOST and
+# DATA_HOST contents (a shared filesystem, or a copy made after `prepare`), then run `train` on every node with
+# TRAIN_ARGS unchanged and torchrun rendezvous flags in TORCHRUN_ARGS (e.g. "--nnodes=4 --node-rank=0 --rdzv-endpoint=host:29500").
 name: nanochat
 
 x-env: &env
-  NANOCHAT_DATA_DIR: /data
   NANOCHAT_BASE_DIR: /runs
-  HF_HOME: /data/huggingface
+  HF_HOME: /runs/data/huggingface
   HF_TOKEN: ${HF_TOKEN:-}
   WANDB_API_KEY: ${WANDB_API_KEY:-}
-  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-nanochat}
-  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-nanochat-secret}
-  AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://storage:9000}
   DATASET: ${DATASET:-climbmix}
   NUM_FILES: ${NUM_FILES:-170}
   SEQ_LEN: ${SEQ_LEN:-2048}
-  DATA_REMOTE: ${DATA_REMOTE:-s3://nanochat}
-  DATA_CACHE_GB: ${DATA_CACHE_GB:-0}
   NPROC_PER_NODE: ${NPROC_PER_NODE:-gpu}
   TORCHRUN_ARGS: ${TORCHRUN_ARGS:---standalone}
   TRAIN_ARGS: ${TRAIN_ARGS:---depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8}
 
 x-volumes: &volumes
-  - ${DATA_HOST:-./data}:/data
   - ${RUNS_HOST:-./runs}:/runs
+  - ${DATA_HOST:-./data}:/runs/data
 
 x-nanochat: &nanochat
   image: ${NANOCHAT_IMAGE:-nanochat:latest}
@@ -51,35 +39,11 @@ x-nanochat: &nanochat
     stack: 67108864
 
 services:
-  storage:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: server /export --console-address :9001
-    environment:
-      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-nanochat}
-      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-nanochat-secret}
-    volumes:
-      - storage:/export
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-
-  curate:
-    image: nvcr.io/nvidia/nemo-curator:${CURATOR_VERSION:-26.07}
-    environment: *env
-    volumes:
-      - ${DATA_HOST:-./data}:/data
-      - ${RUNS_HOST:-./runs}:/runs
-      - ..:/workspace/nanochat:ro
-    working_dir: /workspace/nanochat
-    ipc: host
-    command: bash -c 'python -m nanochat.data.curate --dataset="$$DATASET" --max-files="$$NUM_FILES"' # the image's /opt/venv leads PATH
-
   prepare:
     <<: *nanochat
     command: >-
-      bash -c 'python -m nanochat.data.sources --dataset="$$DATASET" -n "$$NUM_FILES" &&
-      python -m nanochat.tokenizer --dataset="$$DATASET" &&
-      python -m nanochat.data.compile --dataset="$$DATASET" --seq-len="$$SEQ_LEN" --max-files="$$NUM_FILES" --remote="$$DATA_REMOTE"'
+      bash -c 'python -m nanochat.tokenizer --dataset="$$DATASET" &&
+      python -m nanochat.data.compile --dataset="$$DATASET" --seq-len="$$SEQ_LEN" --max-files="$$NUM_FILES"'
 
   train:
     <<: *nanochat
@@ -92,7 +56,4 @@ services:
               capabilities: [gpu]
     command: >-
       bash -c 'torchrun $$TORCHRUN_ARGS --nproc-per-node="$$NPROC_PER_NODE" -m scripts.base_train --
-      --dataset="$$DATASET" --max-seq-len="$$SEQ_LEN" --data-remote="$$DATA_REMOTE" --data-cache-gb="$$DATA_CACHE_GB" $$TRAIN_ARGS'
-
-volumes:
-  storage:
+      --dataset="$$DATASET" --max-seq-len="$$SEQ_LEN" $$TRAIN_ARGS'

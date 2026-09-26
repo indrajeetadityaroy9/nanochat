@@ -40,7 +40,7 @@ with open(pyproject, "rb") as f:
     project = tomllib.load(f)["project"]
 installed = {canonical(d.metadata["Name"]): d.version for d in distributions() if d.metadata["Name"]}
 
-direct = project["dependencies"] + project["optional-dependencies"]["s3"]
+direct = project["dependencies"]
 with open(requirements_path, "w") as f:
     f.writelines(r + "\n" for r in direct if requirement_name(r) != "torch")
 

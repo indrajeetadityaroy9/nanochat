@@ -11,12 +11,11 @@ Each Megatron sequence (and document) is one packed training row of row_len = se
 start with their own BOS. The pairs are the files Megatron-LM, NeMo and NeMo Curator produce and
 read (megatron.core.datasets.indexed_dataset.IndexedDataset), so the data interoperates with that
 tooling, while nanochat reads them with the small mmap reader below instead of importing all of
-megatron.core. Shards are immutable and carry blake2b digests in the index, so they can be copied
-between object stores and node caches and verified after every transfer.
+megatron.core. Shards are immutable; index.json records a blake2b digest of each shard's rows, so a
+resumed run can check that it continues on exactly the same data (index_id).
 
 Compiled data is keyed by corpus, sequence length and tokenizer fingerprint:
-    $NANOCHAT_DATA_DIR/compiled/<dataset>-T<seq_len>-<fingerprint>/{train,val}/
-and the same relative layout under any remote root (e.g. s3://bucket/prefix/<name>/{train,val}/).
+    <base_dir>/data/compiled/<dataset>-T<seq_len>-<fingerprint>/{train,val}/
 """
 
 import os
@@ -28,9 +27,8 @@ import numpy as np
 
 from nanochat.data.storage import get_data_dir
 
-FORMAT = "nanochat-megatron-rows-v1"
+FORMAT = "nanochat-megatron-rows-v2"
 INDEX_FILE = "index.json"
-SHARD_FILES = (".bin", ".idx")
 
 # Megatron .idx layout: header, version, dtype code, sequence count, document count, then int32 sequence
 # lengths, int64 sequence byte offsets and int64 document boundaries (sequence indices, starting at 0)
@@ -69,8 +67,7 @@ def write_shard(prefix, rows):
            + lengths.tobytes() + offsets.tobytes() + documents.tobytes())
     _write_atomic(prefix + ".bin", memoryview(rows).cast("B"))
     _write_atomic(prefix + ".idx", idx)
-    digests = {".bin": hashlib.blake2b(rows, digest_size=16).hexdigest(), ".idx": hashlib.blake2b(idx, digest_size=16).hexdigest()}
-    return {"name": os.path.basename(prefix), "rows": int(num_rows), "bytes": int(rows.nbytes + len(idx)), "digests": digests}
+    return {"name": os.path.basename(prefix), "rows": int(num_rows), "digest": hashlib.blake2b(rows, digest_size=16).hexdigest()}
 
 
 def open_shard(prefix):
@@ -103,4 +100,4 @@ def check_index(index):
 
 def index_id(index):
     """Identity of a split's exact contents and order (hash of the ordered shard digests)."""
-    return hashlib.blake2b("".join(s["digests"][".bin"] for s in index["shards"]).encode(), digest_size=8).hexdigest()
+    return hashlib.blake2b("".join(s["digest"] for s in index["shards"]).encode(), digest_size=8).hexdigest()

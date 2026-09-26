@@ -17,8 +17,6 @@ export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
 mkdir -p $NANOCHAT_BASE_DIR
 NPROC_PER_NODE="${NPROC_PER_NODE:-gpu}"
-# Optional object store root (e.g. s3://bucket/nanochat) to publish the compiled shards to and stream them from
-DATA_REMOTE="${DATA_REMOTE:-}"
 
 # -----------------------------------------------------------------------------
 # wandb setup
@@ -35,24 +33,17 @@ fi
 # -----------------------------------------------------------------------------
 # Data: raw corpus -> tokenizer -> compiled token shards
 
-# Fetch the first ~2B characters of the raw corpus for the tokenizer
-# each raw file is ~250M chars (~100MB of compressed text), so this is 2e9 / 250e6 = 8 files
-python -m nanochat.data.sources -n 8
-# Meanwhile fetch the rest of what pretraining needs: ~150 files for GPT-2 capability, plus 20 of padding
-python -m nanochat.data.sources -n 170 &
-RAW_PID=$!
-# train the tokenizer with vocab size 2**15 = 32768 on ~2B characters of data
+# train the tokenizer with vocab size 2**15 = 32768 on ~2B characters of data (it downloads the raw files it reads)
 python -m nanochat.tokenizer
-echo "Waiting for the raw corpus download to complete..."
-wait $RAW_PID
-# tokenize and pack the corpus into token shards once, on all CPUs (and publish them to DATA_REMOTE, if set)
-python -m nanochat.data.compile --max-files=170 ${DATA_REMOTE:+--remote=$DATA_REMOTE}
+# download, tokenize and pack the first 170 raw files (~150 for GPT-2 capability, plus 20 of padding) into token
+# shards once, on all CPUs
+python -m nanochat.data.compile --max-files=170
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
 
 # d24 model (slightly undertrained to beat GPT-2 => decrease data:params ratio from compute optimal 10.5 (default) to 8)
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8 --run=$WANDB_RUN ${DATA_REMOTE:+--data-remote=$DATA_REMOTE}
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8 --run=$WANDB_RUN
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval -- --device-batch-size=16
 

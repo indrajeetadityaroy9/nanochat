@@ -1,16 +1,16 @@
 """
 All dataset and data-loading components of nanochat, for pretraining and post-training.
 
-Pretraining follows a decoupled storage/compute streaming design:
+Pretraining:
 
     raw corpus (HF parquet, pinned)          sources.py
-        │  tokenize + BOS-aligned best-fit packing, once, CPU-parallel
+        │  drop eval-contaminated docs, tokenize, BOS-aligned best-fit packing, once, CPU-parallel
         ▼
-    immutable token shards + index.json      compile.py, shards.py
-        │  any fsspec store: s3:// (S3/MinIO), gs://, hf://, shared filesystem
+    immutable token shards + index.json      compile.py, decontam.py, shards.py
+        │  mmap'd in place from local NVMe
         ▼
-    node-local NVMe cache, mmap'd            stream.py (storage.py does locked, atomic fetches)
-        │  deterministic elastic order, DataLoader workers, pinned memory
+    deterministic elastic row order          stream.py
+        │  DataLoader workers, pinned memory
         ▼
     GPU
 
@@ -19,9 +19,8 @@ Post-training and evaluation data:
     sft.py          SFT conversation packing loader
     eval_bundle.py  CORE benchmark data
 
-Everything is stored under $NANOCHAT_DATA_DIR (default <base_dir>/data):
-    raw/<dataset>/                         raw parquet at repo-relative paths
-    compiled/<dataset>-T<seq_len>-<tok>/   {train,val}/index.json + shards (also the stream cache)
-    tasks/<org>--<repo>/                   task parquet at repo-relative paths
+Everything is stored under <base_dir>/data, each file downloaded once on first use (storage.py):
+    <org>/<repo>/                          HF dataset files (raw corpora, task data) at repo-relative paths
+    compiled/<dataset>-T<seq_len>-<tok>/   {train,val}/index.json + shards
     eval_bundle/                           CORE data
 """

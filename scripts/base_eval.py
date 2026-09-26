@@ -112,7 +112,6 @@ def main():
     parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation')
     parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
     parser.add_argument('--dataset', type=str, default=None, help='Pretraining dataset for BPB (default: the dataset the checkpoint was trained on)')
-    parser.add_argument('--data-remote', type=str, default=None, help='Object store root to stream compiled data from (default: the one the checkpoint was trained with)')
     parser.add_argument('--data-workers', type=int, default=2, help='DataLoader worker processes per rank for BPB evaluation')
     parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
     args = parser.parse_args()
@@ -191,12 +190,11 @@ def main():
 
         # the compiled data the checkpoint was trained on, read in order from the start of each split
         dataset = args.dataset or meta["user_config"]["dataset"]
-        remote = args.data_remote or meta["user_config"]["data_remote"]
-        print0(f"Dataset: {dataset}" + (f" (streamed from {remote})" if remote else ""))
+        print0(f"Dataset: {dataset}")
         for split_name in ["train", "val"]:
             loader, _ = pretraining_batches(dataset, split_name, tokenizer, seq_len=sequence_len, batch_rows=args.device_batch_size,
                                             device=device, rank=ddp_rank, world_size=ddp_world_size, shuffle=False,
-                                            num_workers=args.data_workers, remote=remote)
+                                            num_workers=args.data_workers)
             bpb = evaluate_bpb(model, loader, steps, token_bytes)
             bpb_results[split_name] = bpb
             print0(f"{split_name} bpb: {bpb:.6f}")

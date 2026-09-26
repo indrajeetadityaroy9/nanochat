@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
-# nanochat image for NVIDIA GPUs. Datasets are not baked in: mount fast node-local NVMe at /data
-# (NANOCHAT_DATA_DIR: raw corpora, compiled shards, the streaming cache) and a volume at /runs
-# (NANOCHAT_BASE_DIR: tokenizer, checkpoints, eval results). See docker/compose.yaml.
+# nanochat image for NVIDIA GPUs. Datasets are not baked in: mount a volume at /runs (NANOCHAT_BASE_DIR:
+# tokenizer, checkpoints, eval results) and fast node-local NVMe at /runs/data (raw corpora, compiled shards).
+# See docker/compose.yaml.
 #
 # TORCH=base (default): an NGC PyTorch image. NVIDIA's PyTorch/CUDA/NCCL/cuDNN stack is kept as built and
 #   nanochat's other dependencies are installed on top at their uv.lock versions (see ngc_requirements.py).
@@ -30,9 +30,9 @@ COPY docker/ngc_requirements.py docker/
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TORCH" = "lock" ]; then \
         apt-get update && apt-get install -y --no-install-recommends ca-certificates g++ && rm -rf /var/lib/apt/lists/* && \
-        uv sync --frozen --no-dev --no-install-project --extra "$EXTRA" --extra s3; \
+        uv sync --frozen --no-dev --no-install-project --extra "$EXTRA"; \
     else \
-        uv export --quiet --frozen --no-hashes --no-dev --no-emit-project --extra gpu --extra s3 -o /tmp/lock.txt && \
+        uv export --quiet --frozen --no-hashes --no-dev --no-emit-project --extra gpu -o /tmp/lock.txt && \
         python docker/ngc_requirements.py pyproject.toml /tmp/lock.txt /tmp/requirements.txt /tmp/constraints.txt && \
         uv pip install --system --break-system-packages -r /tmp/requirements.txt -c /tmp/constraints.txt; \
     fi
@@ -40,5 +40,5 @@ ENV PATH=/opt/nanochat-venv/bin:$PATH
 
 COPY . .
 # HF_XET_HIGH_PERFORMANCE: saturate network and CPUs when pulling raw corpora from the Hugging Face Hub
-ENV NANOCHAT_DATA_DIR=/data NANOCHAT_BASE_DIR=/runs HF_HOME=/data/huggingface \
+ENV NANOCHAT_BASE_DIR=/runs HF_HOME=/runs/data/huggingface \
     HF_XET_HIGH_PERFORMANCE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 OMP_NUM_THREADS=1 PYTHONUNBUFFERED=1

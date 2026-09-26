@@ -1,7 +1,7 @@
 """
 Loader for compiled token shards (shards.py): deterministic, elastic, and cheap on the CPU.
 
-Training reads the node's compiled directory in place (put $NANOCHAT_DATA_DIR on fast local NVMe):
+Training reads the node's compiled directory in place (put <base_dir>/data on fast local NVMe):
 shards are memory-mapped, so the OS page cache holds the hot data and nothing is decoded.
 
 Order. Each epoch permutes the shard order and shuffles rows within consecutive blocks of

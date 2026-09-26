@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
-from nanochat.data.sources import DEFAULT_DATASET, dataset_names
+from nanochat.data.sources import DEFAULT_DATASET
 from nanochat.data.shards import index_id
 from nanochat.data.stream import pretraining_batches
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
@@ -47,9 +47,7 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 # Data
-parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, choices=dataset_names(), help=f"pretraining corpus (nanochat/data/sources.py, or its -curated copy), compiled with nanochat.data.compile (default: {DEFAULT_DATASET})")
-parser.add_argument("--data-remote", type=str, default=None, help="object store root to stream compiled shards from, e.g. s3://bucket/prefix (default: the local compiled directory)")
-parser.add_argument("--data-cache-gb", type=float, default=0, help="node-local cache limit per split when streaming from --data-remote, in GiB (0 = keep every shard)")
+parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus (nanochat/data/sources.py), compiled with nanochat.data.compile (default: {DEFAULT_DATASET})")
 parser.add_argument("--data-workers", type=int, default=2, help="DataLoader worker processes per rank")
 parser.add_argument("--data-seed", type=int, default=42, help="seed of the global data order")
 # Model architecture
@@ -339,12 +337,12 @@ if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
 # -----------------------------------------------------------------------------
-# DataLoaders over the compiled token shards (python -m nanochat.data.compile), streamed from --data-remote if given.
+# DataLoaders over the compiled token shards (python -m nanochat.data.compile).
 # The global row order does not depend on the number of GPUs, so the data state is just the number of rows consumed:
 # a resumed run continues exactly where it stopped, on any number of GPUs.
 rows_per_step = total_batch_size // args.max_seq_len
 data_kwargs = dict(seq_len=args.max_seq_len, batch_rows=args.device_batch_size, device=device, rank=ddp_rank, world_size=ddp_world_size,
-                   seed=args.data_seed, num_workers=args.data_workers, remote=args.data_remote, cache_gb=args.data_cache_gb)
+                   seed=args.data_seed, num_workers=args.data_workers)
 rows_consumed = meta_data["dataloader_state_dict"]["rows"] if resuming else 0
 train_batches, train_index = pretraining_batches(args.dataset, "train", tokenizer, start_row=rows_consumed, shuffle=True, **data_kwargs)
 if resuming:

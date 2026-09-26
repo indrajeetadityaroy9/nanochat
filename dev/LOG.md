@@ -4,6 +4,35 @@ A running summary documenting some experiments and findings. Started ~Jan 7 2026
 
 ---
 
+## 2026-09-26: Remote-streaming leftovers removed
+
+Training reads compiled shards from local disk only; the object-store streaming path had already been removed from `stream.py`, but its callers and wiring were left behind. `base_train` and `base_eval` still passed `remote=`/`cache_gb=` to `pretraining_batches`, so pretraining failed at startup with a `TypeError`. Removed: `--data-remote`/`--data-cache-gb` and the checkpoint's `data_remote`, the MinIO service, `AWS_*`, `DATA_REMOTE` and `DATA_CACHE_GB` in compose, `DATA_REMOTE` in speedrun, the `s3` extra (s3fs and 14 transitive packages leave `uv.lock`) and the direct `fsspec` dependency. The shard index entries lose the `.idx` digest and byte size, which only served transfer checks and cache sizing; each entry keeps one `digest` of its rows for the resume identity check, and the format is now `nanochat-megatron-rows-v2`, so data compiled before is rejected with a request to recompile. Multi-node runs need the same tokenizer and compiled shards on every node (a shared filesystem or a copy).
+
+---
+
+## 2026-09-26: Data storage and sources reduced to one path
+
+`nanochat/data/storage.py` and `sources.py` now have one code path each, with identical data selection:
+
+- The data root is always `<base_dir>/data` (`NANOCHAT_DATA_DIR` is gone; Docker mounts the data volume at `/runs/data`). Every download goes through one `fetch(path, download)`: a lock on `path.lock`, download if missing. HF dataset files, corpora and task data alike, live at `<data_dir>/<org>/<repo>/`.
+- The lock is needed: in `hf_hub_download` (huggingface_hub 1.28), a second process fetching the same missing file deletes the first one's finished copy and downloads it again, and torchrun ranks load the same task files at once. With the lock, 4 processes fetching the same raw shard, task file and eval bundle at once download each exactly once.
+- No listing cache (an uncached listing of ClimbMix's 6,545 files at the pinned commit takes ~1 s), no `text_column` (every corpus uses `text`), no local-only or `-curated` corpora (`curate.py` and the compose `curate` service are deleted), no prefetch CLI. The tokenizer and compile workers download the files they read, so `python -m nanochat.data.sources -n N` is gone from the run scripts. The removed prefetch downloaded 8 files at a time (87 MiB/s here against 43 MiB/s for one file); compile keeps parallel downloads through its workers.
+- For all 7 corpora, the train and val file lists are identical to the previous implementation, and so are the documents of the first 90 ClimbMix row groups.
+
+---
+
+## 2026-09-25: Data pipeline: packing buffer, eval decontamination, SFT loss normalization
+
+Measured the data pipeline on a DGX Spark (GB10) with real data (4 ClimbMix shards + val, a tokenizer trained on 1B characters, the full SFT mixture) and compared it with 2025-2026 practice. Loading is not a bottleneck anywhere: the pretraining loader delivers ~26k rows/s to the GPU (cold NVMe ~7k rows/s) while d24 at 100% of the GB10's measured 95 TFLOP/s BF16 consumes at most ~10 rows/s, and the SFT loader packs a micro-batch in ~11 ms. So the changes are about data quality and correctness.
+
+- **Packing buffer 1000 → 16000 documents** (`--buffer-docs`). ClimbMix documents are short (median 527 tokens; the 3.1% longer than a row hold 21% of the tokens), and a 1000-document buffer rarely finds exact fits: 22% of tokens were cropped away against an 11.3% floor (a document longer than a row keeps only its first row). On one shard: buffer 1000 → 22.0% lost, 4000 → 13.5%, 16000 → 11.8%. Compiling 4 shards went from 22.3% to 12.4% cropped, +12.6% training rows from the same raw data. Buffered documents are now numpy token arrays instead of lists of Python ints (~36 → 2 bytes per token), so the larger buffer costs ~20 MB per worker. Long documents are still under-represented (documents of 2050-8191 tokens keep 42% of their tokens, 8192+ keep 15%). Chunking them first would bring the loss to ~3%, but adds rows that start mid-document; untested, left as an experiment.
+- **Eval decontamination at compile time** (`nanochat/data/decontam.py`, `--decontam-ngram=13`). Nemotron-CC, the bulk of ClimbMix, is explicitly not decontaminated. In 4 shards, 0.88% of CORE items share a 13-word sequence with the data (BoolQ 3.0%, SQuAD 2.4%, mostly Wikipedia passages) and 0.04% share at least half of their 13-grams. Compile now drops every document sharing a 13-word sequence with a CORE item or a chat-eval test item: 0.06% of documents (211 of 341k train, 55 of 85k val). A one-hash bit filter (32 MiB) in front of the sorted n-gram index rejects ~98% of lookups, keeping the cost at ~10 s per shard (compile ~19 s → ~30 s per shard). Validation bpb is not comparable to data compiled before this change (the val rows differ).
+- **SFT loss normalization.** `chat_sft` averaged the loss per micro-batch and divided by `grad_accum_steps`. SFT micro-batches hold 14k-26k supervised tokens (prompts, tool outputs and padding are masked), so a token's gradient weight varied up to 1.9x with the micro-batch it landed in. The loss is now summed and the accumulated gradient divided by the step's supervised-token count over all ranks (the same fix as HF's `num_items_in_batch`). On two micro-batches with 8 vs 48 supervised tokens per row, the old gradient was 103% off the single-batch token-mean gradient, the new one 2e-5 (fp32 rounding). The logged train loss is now the step's token mean rather than the last micro-batch's.
+
+No change, with reasons: document masking at 2k context has limited effect in Llama 3, SmolLM3 and OLMo 3 (consistent with the 2026-01-13 varlen result); block shuffling is fine for this pre-shuffled corpus; exact duplicates are 0.01%; SFT padding is 0.8% (offline best-fit-decreasing would be 0.04%); tokenizing runs at 23 MB/s per core and compiling 170 shards takes minutes, so faster tokenizers or loader libraries buy nothing. The most promising data experiment left is mixing high-quality data into the final LR decay (MiniCPM, OLMo 2), which requires the decontamination above.
+
+---
+
 ## 2026-05-05: DyT for d12 pretraining (negative)
 
 Tried replacing normalization with [DyT](https://arxiv.org/abs/2503.10622) for d12-scale pretraining following some [hype](https://x.com/LodestoneRock/status/2050367217087512953) on X.

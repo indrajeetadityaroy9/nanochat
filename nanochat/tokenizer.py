@@ -261,10 +261,10 @@ def get_tokenizer():
 # Train the tokenizer on the pretraining data
 
 if __name__ == "__main__":
-    from nanochat.data.sources import DEFAULT_DATASET, dataset_names, iter_text_batches
+    from nanochat.data.sources import DEFAULT_DATASET, iter_text_batches
 
     parser = argparse.ArgumentParser(description="Train a BPE tokenizer on the pretraining data")
-    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, choices=dataset_names(), help=f"pretraining corpus to train on (default: {DEFAULT_DATASET})")
+    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus to train on (default: {DEFAULT_DATASET})")
     parser.add_argument("--max-chars", type=int, default=2_000_000_000, help="Maximum characters to train on (default: 2B)")
     parser.add_argument("--doc-cap", type=int, default=10_000, help="Maximum characters per document (default: 10,000)")
     parser.add_argument("--vocab-size", type=int, default=32768, help="Vocabulary size (default: 32768 = 2^15)")
