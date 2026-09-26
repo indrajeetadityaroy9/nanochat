@@ -17,7 +17,7 @@ if [ -z "$SKIP_SETUP" ]; then
     uv sync --extra gpu
     source .venv/bin/activate
 
-    # Tokenizer and compiled token shards for pretraining from 1000 raw files, downloaded on first read
+    # Tokenizer and compiled token rows for pretraining from 1000 raw files, downloaded on first read
     # (probably this can be reduced but it's tricky to determine the exact right number, TODO).
     python -m nanochat.tokenizer --max-chars=2000000000 --vocab-size=32768
     python -m nanochat.data.compile --max-files=1000

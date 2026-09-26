@@ -1,11 +1,11 @@
 # nanochat pretraining on node-local data. One rank per visible GPU on the node (torchrun --nproc-per-node=gpu),
 # or set NPROC_PER_NODE.
 #
-#   docker compose -f docker/compose.yaml run --rm prepare     # tokenizer, raw corpus -> Megatron .bin/.idx shards
-#   docker compose -f docker/compose.yaml run --rm train       # train on the compiled shards
+#   docker compose -f docker/compose.yaml run --rm prepare     # tokenizer, raw corpus -> packed token rows
+#   docker compose -f docker/compose.yaml run --rm train       # train on the compiled rows
 #
-# Set DATA_HOST to node-local NVMe: it holds the raw corpora and compiled shards.
-# Multi-node: every node reads the tokenizer and compiled shards locally, so give each node the same RUNS_HOST and
+# Set DATA_HOST to node-local NVMe: it holds the raw corpora and compiled data.
+# Multi-node: every node reads the tokenizer and compiled data locally, so give each node the same RUNS_HOST and
 # DATA_HOST contents (a shared filesystem, or a copy made after `prepare`), then run `train` on every node with
 # TRAIN_ARGS unchanged and torchrun rendezvous flags in TORCHRUN_ARGS (e.g. "--nnodes=4 --node-rank=0 --rdzv-endpoint=host:29500").
 name: nanochat
@@ -33,7 +33,7 @@ x-nanochat: &nanochat
     dockerfile: docker/Dockerfile
   environment: *env
   volumes: *volumes
-  ipc: host # DataLoader workers hand batches over through shared memory; NCCL needs it too
+  ipc: host # NCCL uses shared memory, which Docker otherwise limits to 64MB
   ulimits:
     memlock: -1
     stack: 67108864

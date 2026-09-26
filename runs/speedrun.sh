@@ -31,12 +31,12 @@ if [ -z "$WANDB_RUN" ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Data: raw corpus -> tokenizer -> compiled token shards
+# Data: raw corpus -> tokenizer -> compiled token rows
 
 # train the tokenizer with vocab size 2**15 = 32768 on ~2B characters of data (it downloads the raw files it reads)
 python -m nanochat.tokenizer
 # download, tokenize and pack the first 170 raw files (~150 for GPT-2 capability, plus 20 of padding) into token
-# shards once, on all CPUs
+# rows once, on all CPUs
 python -m nanochat.data.compile --max-files=170
 
 # -----------------------------------------------------------------------------

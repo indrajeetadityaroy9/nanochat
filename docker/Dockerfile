@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # nanochat image for NVIDIA GPUs. Datasets are not baked in: mount a volume at /runs (NANOCHAT_BASE_DIR:
-# tokenizer, checkpoints, eval results) and fast node-local NVMe at /runs/data (raw corpora, compiled shards).
+# tokenizer, checkpoints, eval results) and fast node-local NVMe at /runs/data (raw corpora, compiled data).
 # See docker/compose.yaml.
 #
 # TORCH=base (default): an NGC PyTorch image. NVIDIA's PyTorch/CUDA/NCCL/cuDNN stack is kept as built and

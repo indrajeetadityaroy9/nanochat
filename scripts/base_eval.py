@@ -29,7 +29,7 @@ from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir,
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
 from nanochat.data.eval_bundle import get_eval_bundle_dir
-from nanochat.data.stream import pretraining_batches
+from nanochat.data.stream import PretrainingBatches
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 
@@ -112,7 +112,6 @@ def main():
     parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation')
     parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
     parser.add_argument('--dataset', type=str, default=None, help='Pretraining dataset for BPB (default: the dataset the checkpoint was trained on)')
-    parser.add_argument('--data-workers', type=int, default=2, help='DataLoader worker processes per rank for BPB evaluation')
     parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
     args = parser.parse_args()
 
@@ -192,9 +191,8 @@ def main():
         dataset = args.dataset or meta["user_config"]["dataset"]
         print0(f"Dataset: {dataset}")
         for split_name in ["train", "val"]:
-            loader, _ = pretraining_batches(dataset, split_name, tokenizer, seq_len=sequence_len, batch_rows=args.device_batch_size,
-                                            device=device, rank=ddp_rank, world_size=ddp_world_size, shuffle=False,
-                                            num_workers=args.data_workers)
+            loader = PretrainingBatches(dataset, split_name, tokenizer, seq_len=sequence_len, batch_rows=args.device_batch_size,
+                                        device=device, rank=ddp_rank, world_size=ddp_world_size)
             bpb = evaluate_bpb(model, loader, steps, token_bytes)
             bpb_results[split_name] = bpb
             print0(f"{split_name} bpb: {bpb:.6f}")
