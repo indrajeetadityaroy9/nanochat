@@ -3,7 +3,6 @@ CORE benchmark data (the DCLM eval bundle), fetched once into <data_dir>/eval_bu
 """
 
 import os
-import shutil
 import zipfile
 import tempfile
 import urllib.request
@@ -14,7 +13,8 @@ EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundl
 
 
 def get_eval_bundle_dir():
-    """Directory holding core.yaml, eval_meta_data.csv and eval_data/, downloaded and extracted once per node."""
+    """Directory holding core.yaml, eval_meta_data.csv and eval_data/, downloaded and extracted once per node into a
+    scratch directory beside it, then renamed into place complete."""
     def download(path):
         with tempfile.TemporaryDirectory(dir=get_data_dir()) as scratch:
             zip_path = os.path.join(scratch, "eval_bundle.zip")
@@ -22,5 +22,5 @@ def get_eval_bundle_dir():
             urllib.request.urlretrieve(EVAL_BUNDLE_URL, zip_path)
             with zipfile.ZipFile(zip_path) as z:
                 z.extractall(scratch)
-            shutil.move(os.path.join(scratch, "eval_bundle"), path)
+            os.rename(os.path.join(scratch, "eval_bundle"), path)
     return fetch(os.path.join(get_data_dir(), "eval_bundle"), download)

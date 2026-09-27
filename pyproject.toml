@@ -16,8 +16,6 @@ dependencies = [
     "obstore>=0.11.1",
     "pyarrow>=21.0.0",
     "pyyaml>=6.0.2",
-    # the test suite; also required by the NGC image's triton-kernels
-    "pytest>=8.0.0",
     "rustbpe>=0.1.0",
     "tiktoken>=0.14.0",
     # PyPI's Linux wheels are the CUDA 13 build
@@ -29,15 +27,6 @@ dependencies = [
 dev = [
     "python-dotenv>=1.2.1",
 ]
-
-[tool.pytest.ini_options]
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
 
 [tool.uv]
 default-groups = []

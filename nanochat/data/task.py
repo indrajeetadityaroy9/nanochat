@@ -4,14 +4,15 @@ a Task is a sliceable dataset of conversations, often with a grader (evaluate). 
 HF dataset repo (load_hub_dataset), and multiple-choice tasks share one prompt format (render_mc).
 """
 
+import os
 import fnmatch
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_download
 
-from nanochat.data.storage import fetch_repo_file
+from nanochat.data.storage import fetch, get_data_dir
 
 
 class HubDataset:
@@ -41,13 +42,15 @@ class HubDataset:
 def load_hub_dataset(repo, revision, files):
     """
     Minimal stand-in for HuggingFace datasets.load_dataset: one split of a HF dataset repo at a
-    pinned commit. files is a glob over repo-relative paths selecting the split's parquet shards,
-    which are downloaded once (storage.fetch_repo_file) and read in sorted order.
-    Under torchrun, each file is downloaded by one rank while the others wait.
+    pinned commit. files is a glob over repo-relative paths selecting the split's parquet shards, read in sorted order.
+    Each is downloaded once per node into <data_dir>/<org>/<repo>/ (storage.fetch): under torchrun one rank downloads
+    while the others wait, and a file already there is not requested again.
     """
     filenames = sorted(f for f in HfApi().list_repo_files(repo, repo_type="dataset", revision=revision) if fnmatch.fnmatchcase(f, files))
     assert filenames, f"No files of {repo}@{revision} match {files!r}"
-    tables = [pq.read_table(fetch_repo_file(repo, revision, filename)) for filename in filenames]
+    local_dir = os.path.join(get_data_dir(), repo)
+    tables = [pq.read_table(fetch(os.path.join(local_dir, f), lambda _: hf_hub_download(repo, f, repo_type="dataset", revision=revision, local_dir=local_dir)))
+              for f in filenames]
     return HubDataset(pa.concat_tables(tables))
 
 

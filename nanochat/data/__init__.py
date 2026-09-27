@@ -1,6 +1,7 @@
 """
 All dataset and data-loading components of nanochat: one package per stage, and two modules they share.
-    storage.py    the data root, <base_dir>/data; task and eval files are downloaded once, on first use, under a lock
+    storage.py    the data root, <base_dir>/data; task and eval files are downloaded once per node, under a lock; the
+                  atomic, durable JSON writer for manifests and statistics
     task.py       chat tasks: the Task base, one split of a pinned HF dataset repo, the multiple-choice prompt format
 
 pretrain/

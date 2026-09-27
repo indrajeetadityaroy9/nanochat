@@ -72,7 +72,7 @@ numpy.memmap, weighted mixture          stream.py     elastic deterministic orde
 GPU
 ```
 
-Post-training and evaluation share the chat tasks of [task.py](nanochat/data/task.py), each reading one split of a pinned HF dataset repo. `eval/` holds the benchmarks: the CORE bundle (`core.py`) and the chat evals ARC, MMLU, GSM8K and HumanEval with their graders. `posttrain/` holds SmolTalk and the SFT task mixture and packing loader (`sft.py`). SFT also trains on the MMLU and GSM8K train splits, RL on GSM8K's with its grader as the reward, and pretraining decontaminates against the eval sets, so those stages import from `eval/` and `eval/` imports from neither. These files are small and downloaded on first use through `storage.py`, under a per-file lock, so the ranks on a node download each once.
+Post-training and evaluation share the chat tasks of [task.py](nanochat/data/task.py), each reading one split of a pinned HF dataset repo. `eval/` holds the benchmarks: the CORE bundle (`core.py`) and the chat evals ARC, MMLU, GSM8K and HumanEval with their graders. `posttrain/` holds SmolTalk and the SFT task mixture and packing loader (`sft.py`). SFT also trains on the MMLU and GSM8K train splits, RL on GSM8K's with its grader as the reward, and pretraining decontaminates against the eval sets, so those stages import from `eval/` and `eval/` imports from neither. These files are small and downloaded on first use through `storage.fetch`, which checks for each file under a per-file lock, so the ranks on a node download each once. (huggingface_hub's own lock is not enough: in 2.0.0 every concurrent caller re-downloads the file and first deletes the copy another has just completed.)
 
 ### Corpora
 

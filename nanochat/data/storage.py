@@ -1,16 +1,12 @@
 """
-The data root, <base_dir>/data, and the one way files get into it: fetch(path, download) calls download(path)
-only if path is missing, holding a lock on path, so ranks that ask for the same file download it once.
-download must put path in place only when it is complete.
-
-HuggingFace dataset repos are read at pinned commits; their files live at <data_dir>/<org>/<repo>/<repo-relative path>.
+The data root, <base_dir>/data, the one-download-per-node fetch for files there, and the JSON writer for the manifests
+and statistics kept under it.
 """
 
 import os
 import json
 
 from filelock import FileLock
-from huggingface_hub import hf_hub_download
 
 from nanochat.common import get_base_dir
 
@@ -20,7 +16,9 @@ def get_data_dir():
 
 
 def fetch(path, download):
-    """path, after download(path) has created it if it was missing; concurrent callers wait for the first one."""
+    """path, after download(path) has created it if it was missing; concurrent callers wait for the first one. The check
+    runs under the lock: huggingface_hub's own lock (hf_hub_download with local_dir, 2.0.0) checks before locking, so every
+    concurrent caller downloads again and first deletes the file an earlier one just completed."""
     with FileLock(path + ".lock"):
         if not os.path.exists(path):
             download(path)
@@ -28,15 +26,11 @@ def fetch(path, download):
 
 
 def write_json(path, obj):
-    """Write JSON atomically: readers see the old file or the complete new one."""
+    """Write JSON atomically and durably: readers see the old file or the complete new one, also after a power loss
+    (the data reaches the disk before the rename, as torch.distributed.checkpoint's sync_files does)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path + ".tmp", "w") as f:
         json.dump(obj, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(path + ".tmp", path)
-
-
-def fetch_repo_file(repo, revision, filename):
-    """Local path of one file of a HuggingFace dataset repo at a commit, downloaded on first use."""
-    local_dir = os.path.join(get_data_dir(), repo)
-    return fetch(os.path.join(local_dir, filename),
-                 lambda path: hf_hub_download(repo, filename, repo_type="dataset", revision=revision, local_dir=local_dir))
