@@ -116,16 +116,15 @@ def require_raw_files(name, split, count=None):
     return files[:count]
 
 
-def read_training_documents(name, path, columns):
-    """Per row group of a raw file: (table of `columns` holding only the documents training reads, documents in the row
-    group). A corpus in SAMPLING keeps, per program_lang, the documents whose sha256(document_id) as an integer is below
+def read_training_documents(name, path, row_group, columns):
+    """(table of `columns` holding only the documents training reads, documents listed) of one row group of a raw file.
+    A corpus in SAMPLING keeps, per program_lang, the documents whose sha256(document_id) as an integer is below
     share * 2**256, independent of sharding and of how much is fetched (blob IDs themselves are not uniform: 0.4391 of
     RefineCode's 58.9M Java blobs fall below 0.4454 of their range)."""
     sampling = SAMPLING.get(name)
-    pf = pq.ParquetFile(path)
-    for i in range(pf.num_row_groups):
-        table = pf.read_row_group(i, columns=columns + (["document_id", "program_lang"] if sampling else []))
-        if sampling:
-            table = table.filter([int(hashlib.sha256(d.encode()).hexdigest(), 16) < sampling.get(lang, 1.0) * 2**256
-                                  for d, lang in zip(table["document_id"].to_pylist(), table["program_lang"].to_pylist())])
-        yield table.select(columns), pf.metadata.row_group(i).num_rows
+    table = pq.ParquetFile(path).read_row_group(row_group, columns=columns + (["document_id", "program_lang"] if sampling else []))
+    listed = table.num_rows
+    if sampling:
+        table = table.filter([int(hashlib.sha256(d.encode()).hexdigest(), 16) < sampling.get(lang, 1.0) * 2**256
+                              for d, lang in zip(table["document_id"].to_pylist(), table["program_lang"].to_pylist())])
+    return table.select(columns), listed

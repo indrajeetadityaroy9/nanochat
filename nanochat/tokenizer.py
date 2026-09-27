@@ -263,6 +263,7 @@ def get_tokenizer():
 
 if __name__ == "__main__":
     import json
+    import pyarrow.parquet as pq
     from nanochat.data.pretrain.sources import (DATASETS, DEFAULT_DATASET, CodeCorpus, list_raw_files, require_raw_files,
                                                 read_training_documents, fetch_command)
 
@@ -279,7 +280,8 @@ if __name__ == "__main__":
         """(texts, languages) per row group of the corpus's files, in order, of the documents training reads (as compile
         selects them); a code corpus also reads its language column."""
         for path in paths:
-            for table, _ in read_training_documents(args.dataset, path, ["text", "language"] if code else ["text"]):
+            for i in range(pq.ParquetFile(path).num_row_groups):
+                table, _ = read_training_documents(args.dataset, path, i, ["text", "language"] if code else ["text"])
                 texts = table.column("text").to_pylist()
                 yield texts, table.column("language").to_pylist() if code else [None] * len(texts)
 

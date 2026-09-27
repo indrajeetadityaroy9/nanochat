@@ -26,11 +26,13 @@ Design, layout and commands: README, sections Data > Corpora, Fetching, Code cor
 |---|---|
 | Hub download, 8 files in parallel | 87-89 MiB/s |
 | Software Heritage (obstore), one process | Python's default pool (24 threads) ~260-320 files/s, 64 threads 820, 128 threads 1,610: each request waits on latency, not bandwidth (~3 KB of text per file); while a 100 MB/s Hub download shares the 1 Gb/s link, a Stack-Edu shard takes 610-710 s |
-| Software Heritage (obstore), 20 processes | default pool ~5,000-5,300 files/s (Stack-Edu and RefineCode in full, 473M blobs: ~26 h); 64 threads per process 11,128 files/s (~12 h), 120,000 blobs each (Open 8) |
+| Software Heritage (obstore), 20 processes | default pool ~5,000-5,300 files/s (Stack-Edu and RefineCode in full, 473M blobs: ~26 h); 64 threads per process 11,128 files/s (~12 h), 120,000 blobs each: fetch runs 64 per process (`swh.table`) |
 | Stack v3, row groups by byte range | one row group (114 MB decoded) in 3.6 s; 20 in parallel in 9.2 s, as fast as downloading whole parts (38 parts, 430 row groups, in 175 s) |
 | Rewritten fetch vs the earlier code | 8 units re-fetched (3 Stack-Edu, 3 RefineCode, 2 Stack v3; 609k documents): identical values, statistics and column types |
-| Compile, 8 Stack-Edu shards (2 GB of code) | ~1 min on 20 CPUs |
-| Compile, Stack v3 38 parts (430 shards + val, 17.8B tokens, six-corpus vocab-32768 tokenizer) | 6.5 min on 20 CPUs |
+| Compile, 8 Stack-Edu shards (2 GB of code) | ~1 min on 20 CPUs (one worker per file, before row-group tasks) |
+| Compile, Stack v3 38 parts (430 shards + val, 17.8B tokens, six-corpus vocab-32768 tokenizer) | 6.5 min on 20 CPUs (one worker per file, before row-group tasks) |
+| Compile, one task per row group (20 CPUs, seq 2048, ClimbMix vocab-32768 tokenizer) | one file: ClimbMix val 2.4 s, Stack-Edu train shard 2.7 s, Stack v3 val 1.6 s, TxT360 train 57.6 s and val 37.7 s (one worker per file: 24.5, 25.6, 11.0 s; TxT360 train + val 901 s on two workers, six-corpus tokenizer); 20 ClimbMix files 34.7 s (38.4 s). Output byte-identical. Peak RSS on TxT360: worker 1.76 GiB, parent 2.99 GiB (one file's tokens, packed there) |
+| One compile worker, per stage (one thread) | decontamination 46-48% of a worker's time on ClimbMix and TxT360 (29% on Stack-Edu), tokenization 48-49% (64%), read, numpy conversion and segmentation the rest; packing a file in the parent 250-310M tokens/s, 4-8x the 39-61M tokens/s of 20 workers |
 
 ## Open
 
@@ -71,15 +73,3 @@ Design, layout and commands: README, sections Data > Corpora, Fetching, Code cor
    files has trained on at most N times that share of val (ClimbMix: 170 files ≤1.0%, all 6,542 ≤39%; Smol-Data: 20
    files ≤1.7%, all 99 ≤8.3%). TxT360 has none in 8 files. Compile could drop train documents whose exact text is in
    the corpus's val split; that changes the compiled train rows, so it is left as a decision.
-8. Software Heritage fetch concurrency. A process fetches with Python's default thread pool, and the rate is bound by
-   request latency, not the link: 20 processes x 64 threads fetch 11,128 files/s against 5,025 with the default pool,
-   which would take a full Stack-Edu plus RefineCode fetch from ~26 h to ~12 h. Raising it means choosing a number of
-   requests in flight (and staying under Software Heritage's throttling, which obstore retries), so it is left as a
-   decision.
-9. Compile memory on the ~1B-token general-domain files. A worker packs a whole raw file, so it holds the file's tokens
-   (Smol-Data 1.75 GiB, TxT360 2.11 GiB of uint16), and decontaminates one published row group at a time (~12k
-   documents there, against 1,024 in ClimbMix and the code files: up to 1.55 GiB). Its measured peak is 5.0 GiB,
-   against 1.0-1.5 GiB for ClimbMix and code files, so 20 workers on such files could reach ~100 GiB of the 121 GiB.
-   One train and one val file compile in 996 s (Smol-Data) and 901 s (TxT360): two workers, one document encoded at a
-   time each. Not yet hit, since no run has compiled more than 2 of these files; bounding it means a worker count or a
-   packing buffer, so it is left as a decision.

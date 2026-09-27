@@ -4,6 +4,14 @@ A running summary documenting some experiments and findings. Started ~Jan 7 2026
 
 ---
 
+## 2026-09-27: Compile parallel over row groups; Software Heritage fetch at 64 requests per process
+
+- **Where a compile worker's time goes** (ClimbMix, Stack-Edu and TxT360 val, one thread): decontamination 46-48% (Stack-Edu 29%), tiktoken 48-49% (64%), read, numpy conversion and segmentation the rest, packing ~1%. Tokenizing a file's documents on 20 threads (tiktoken's `encode_ordinary_batch`: a Python thread pool over documents, the GIL released in Rust) made one file only 1.3-1.6x faster, since decontamination stays serial, and 20 files 6.5% slower: on one thread the batch call is 1-16% slower than one call per document. Dropped.
+- **Row groups are the unit of work.** Each task reads, decontaminates, tokenizes (one tiktoken call per document) and segments one row group and returns its pieces; the parent packs each file once its row groups are done and writes rows in raw file order. `read_training_documents` reads one row group; the tokenizer loops over them. One file now compiles 6.5-10x faster (ClimbMix val 24.5 → 2.4 s, Stack-Edu shard 25.6 → 2.7 s, TxT360 train 57.6 s against 372.5 s on 20 tokenizer threads), 20 files 38.4 → 34.7 s. Compiled rows and statistics are byte-identical on 7 splits; the tokenizer trains to the same fingerprint. A worker holds one row group (TxT360 peak 1.76 GiB) instead of a file (5.0 GiB), and the parent one file (2.99 GiB), which closes the compile-memory item of DATA_ROADMAP. `Executor.map` submits every task at once: 550k tasks (ClimbMix in full) take 1.09 GiB in the parent and 48 us each, against ~0.3 s of work per ClimbMix row group, so there is no bounded scheduler. Results travel pickled: at 40-60M tokens/s of 20 workers that is 80-120 MB/s, so there is no intermediate file format.
+- **Software Heritage fetch** runs 64 requests in flight per process (`swh.table`): 20 processes fetched 11,128 files/s against 5,025 with Python's default 24 threads (entry below); one process fetched a Stack-Edu shard (78,804 documents) in 104 s. Closes DATA_ROADMAP's fetch-concurrency item.
+
+---
+
 ## 2026-09-27: nanochat/data/pretrain restructured around what code needs; one fetch path, no verify, no seed
 
 The code corpora have handling the general-domain ones do not (materialized from a source, overlap and downsampling at read time, segmentation at line ends), so it now lives in `pretrain/code/`: `__init__.py` (OVERLAPS, SAMPLING, `segment`), `swh.py` (Stack-Edu and RefineCode from Software Heritage) and `stack_v3.py`. Every stage stays shared, as in NeMo Curator (code filters inside the text stages), dolma (code taggers) and datatrove. `pretrain/` went from 966 to 735 lines. Every change was checked against a copy of the code before it, on the same inputs.

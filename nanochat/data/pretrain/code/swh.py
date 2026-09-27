@@ -101,6 +101,8 @@ def table(name, file):
     split, shard = os.path.dirname(file), int(os.path.basename(file).removeprefix("shard_").removesuffix(".parquet"))
     rows = pq.read_table(os.path.join(raw_dir(name), "manifest.parquet"), filters=[("split", "=", split), ("shard", "=", shard)])
     store = S3Store("softwareheritage", region="us-east-1", skip_signature=True)  # Software Heritage's public bucket
-    with ThreadPoolExecutor() as pool:
+    # requests in flight: the rate is bound by the bucket's latency, not the link; 20 processes of 64 threads fetch
+    # 11,128 files/s against 5,025 with Python's default pool of 24 (dev/LOG.md, 2026-09-27)
+    with ThreadPoolExecutor(64) as pool:
         texts = pa.array(list(pool.map(partial(fetch, store), rows["document_id"].to_pylist(), rows["src_encoding"].to_pylist())), pa.string())
     return rows.drop_columns(["split", "shard"]).append_column("text", texts).filter(pc.is_valid(texts))
