@@ -14,7 +14,7 @@ if [ -z "$SKIP_SETUP" ]; then
     # uv
     command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
     [ -d ".venv" ] || uv venv
-    uv sync --extra gpu
+    uv sync
     source .venv/bin/activate
 
     # Raw corpus (1000 files), tokenizer, and compiled token rows for pretraining

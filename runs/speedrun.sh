@@ -3,7 +3,7 @@
 # This script is configured to train your own GPT-2 grade LLM (pretraining + finetuning).
 # The time-to-GPT-2 reference is an 8XH100 node (~1.5 hours), but it runs on any number of GPUs:
 # NPROC_PER_NODE defaults to every visible GPU and gradient accumulation makes up the difference.
-# Assumes an activated environment (`uv sync --extra gpu && source .venv/bin/activate`) or the docker/ image.
+# Assumes an activated environment (`uv sync && source .venv/bin/activate`) or the docker/ image.
 
 # 1) Example launch (simplest):
 # bash runs/speedrun.sh

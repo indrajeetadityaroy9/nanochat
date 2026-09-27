@@ -9,7 +9,7 @@ Notable features:
 - no learnable params in rmsnorm
 - no bias in linear layers
 - Group-Query Attention (GQA) support for more efficient inference
-- Flash Attention 3 integration
+- FlashAttention-4 (Hopper and Blackwell)
 """
 
 from functools import partial
@@ -22,8 +22,7 @@ import torch.nn.functional as F
 from nanochat.common import get_dist_info, print0, COMPUTE_DTYPE
 from nanochat.optim import MuonAdamW
 
-# Our custom Flash Attention module that automatically uses FA3 when compatible and SDPA fallback otherwise
-from nanochat.flash_attention import flash_attn
+from flash_attn.cute import flash_attn_func
 
 @dataclass
 class GPTConfig:
@@ -85,7 +84,7 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
-        # Shape: (B, T, H, D) - FA3's native layout, no transpose needed!
+        # Shape: (B, T, H, D) - FlashAttention's native layout, no transpose needed!
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -103,24 +102,18 @@ class CausalSelfAttention(nn.Module):
         q = q * 1.2  # sharper attention (split scale between Q and K), TODO think through better
         k = k * 1.2
 
-        # Flash Attention (FA3 or SDPA fallback)
-        # window_size is (left, right) tuple: (N, 0) for causal, (-1, 0) for full context
-        if kv_cache is None:
-            # Training: causal attention with optional sliding window
-            y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        else:
-            # Inference: use flash_attn_with_kvcache which handles cache management
+        # FlashAttention-4, causal; window_size is (left, 0): each query sees itself and `left` keys before it
+        if kv_cache is not None:
+            # Inference: append the new keys/values to this layer's cache and attend over the filled prefix. The causal
+            # mask is aligned to the last query, so each new token sees the cache before it, within its window.
             k_cache, v_cache = kv_cache.get_layer_cache(self.layer_idx)
-            y = flash_attn.flash_attn_with_kvcache(
-                q, k_cache, v_cache,
-                k=k, v=v,
-                cache_seqlens=kv_cache.cache_seqlens,
-                causal=True,
-                window_size=window_size,
-            )
+            pos = kv_cache.get_pos()
+            k_cache[:, pos:pos + T], v_cache[:, pos:pos + T] = k, v
+            k, v = k_cache[:, :pos + T], v_cache[:, :pos + T]
             # Advance position after last layer processes
             if self.layer_idx == kv_cache.n_layers - 1:
                 kv_cache.advance(T)
+        y = flash_attn_func(q, k, v, causal=True, window_size=window_size)[0]
 
         # Re-assemble the heads and project back to residual stream
         y = y.contiguous().view(B, T, -1)
@@ -288,8 +281,8 @@ class GPT(nn.Module):
         """
         Compute per-layer window sizes for sliding window attention.
 
-        Returns list of (left, right) tuples for FA3's window_size parameter:
-        - left: how many tokens before current position to attend to (-1 = unlimited)
+        Returns list of (left, right) tuples for FlashAttention's window_size parameter:
+        - left: how many tokens before current position to attend to
         - right: how many tokens after current position to attend to (0 for causal)
 
         Pattern string is tiled across layers. Final layer always gets L (full context).
@@ -299,7 +292,7 @@ class GPT(nn.Module):
         assert all(c in "SL" for c in pattern), f"Invalid window_pattern: {pattern}. Use only S and L."
         # Map characters to window sizes
         long_window = config.sequence_len
-        short_window = -(-long_window // 4 // 128) * 128  # ceil to FA3 tile size (2048 -> 768)
+        short_window = -(-long_window // 4 // 128) * 128  # ceil to a multiple of the 128-key tile (2048 -> 512)
         char_to_window = {
             "L": (long_window, 0),
             "S": (short_window, 0),

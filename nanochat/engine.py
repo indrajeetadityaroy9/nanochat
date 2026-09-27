@@ -80,12 +80,8 @@ def use_calculator(expr):
 # -----------------------------------------------------------------------------
 class KVCache:
     """
-    KV Cache designed for Flash Attention 3's flash_attn_with_kvcache API.
-
-    Key differences from FA2-style cache:
-    - Tensors are (B, T, H, D) not (B, H, T, D)
-    - FA3 updates the cache in-place during flash_attn_with_kvcache
-    - Position tracked per batch element via cache_seqlens tensor
+    KV cache in FlashAttention's (B, T, H, D) layout, filled in place by the model's attention layers. All batch
+    elements share one position, a host-side int, so reading it never waits on the GPU.
     """
 
     def __init__(self, batch_size, num_heads, seq_len, head_dim, num_layers, device, dtype):
@@ -97,19 +93,19 @@ class KVCache:
         # Pre-allocate cache tensors: (n_layers, B, T, H, D)
         self.k_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
         self.v_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
-        # Current sequence length per batch element (FA3 needs int32)
-        self.cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        # Current sequence length, shared by all batch elements
+        self.pos = 0
         # Previous token's normalized embedding for smear (set by model forward pass)
         self.prev_embedding = None
 
     def reset(self):
         """Reset cache to empty state."""
-        self.cache_seqlens.zero_()
+        self.pos = 0
         self.prev_embedding = None
 
     def get_pos(self):
-        """Get current position (assumes all batch elements at same position)."""
-        return self.cache_seqlens[0].item()
+        """Get current position (all batch elements are at the same position)."""
+        return self.pos
 
     def get_layer_cache(self, layer_idx):
         """Return (k_cache, v_cache) views for a specific layer."""
@@ -117,7 +113,7 @@ class KVCache:
 
     def advance(self, num_tokens):
         """Advance the cache position by num_tokens."""
-        self.cache_seqlens += num_tokens
+        self.pos += num_tokens
 
     def prefill(self, other):
         """
@@ -130,7 +126,7 @@ class KVCache:
         other_pos = other.get_pos()
         self.k_cache[:, :, :other_pos, :, :] = other.k_cache[:, :, :other_pos, :, :]
         self.v_cache[:, :, :other_pos, :, :] = other.v_cache[:, :, :other_pos, :, :]
-        self.cache_seqlens.fill_(other_pos)
+        self.pos = other_pos
         # Copy smear state: expand batch=1 prev_embedding to num_samples
         if other.prev_embedding is not None:
             self.prev_embedding = other.prev_embedding.expand(self.batch_size, -1, -1).clone()

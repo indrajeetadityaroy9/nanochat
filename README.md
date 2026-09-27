@@ -25,12 +25,11 @@ See [dev/LEADERBOARD.md](dev/LEADERBOARD.md) for how time is measured and how to
 Dependencies are managed with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync --extra gpu    # CUDA (A100/H100/etc.)
-uv sync --extra cpu    # (or) CPU-only / MPS
+uv sync    # Linux, Python 3.12, NVIDIA Hopper or Blackwell: PyTorch's CUDA 13 wheels and FlashAttention-4
 source .venv/bin/activate
 ```
 
-`uv sync --extra gpu --group dev` adds pytest, matplotlib, ipykernel, and python-dotenv.
+`uv sync --group dev` adds python-dotenv.
 
 Datasets (raw corpora, compiled token rows, task data, the CORE bundle) live under `$NANOCHAT_BASE_DIR/data`; put it on fast local NVMe. Outputs (tokenizer, checkpoints, eval results) live under `$NANOCHAT_BASE_DIR`, default `~/.cache/nanochat`. For NGC/Docker, see [Containers](#containers-ngc--docker).
 
@@ -179,7 +178,7 @@ Before tokenization, compile drops every document that shares a 13-word sequence
 
 ## Containers (NGC / Docker)
 
-[docker/Dockerfile](docker/Dockerfile) builds on an NGC PyTorch image by default and keeps NVIDIA's PyTorch, CUDA, NCCL and cuDNN as built. nanochat's other dependencies go on top ([docker/ngc_requirements.py](docker/ngc_requirements.py)): packages the image lacks at their `uv.lock` version, NVIDIA's own builds (every package with a local version label, such as `torch 2.9.0a0+145a3a7`) pinned as installed, and the image's other packages kept unless nanochat needs a newer one, which then moves to its `uv.lock` version. `nvcr.io/nvidia/pytorch:25.10-py3` ships PyTorch 2.9 (the release nanochat pins) with CUDA 13.0, so the host needs a CUDA 13-capable driver; `--build-arg BASE_IMAGE=ubuntu:24.04 --build-arg TORCH=lock` instead installs the exact locked environment with PyTorch 2.9.1 CUDA 12.8 wheels (`--build-arg EXTRA=cpu` for CPU-only data preparation nodes).
+[docker/Dockerfile](docker/Dockerfile) builds on NVIDIA's NGC PyTorch image (`nvcr.io/nvidia/pytorch:26.08-py3`: Python 3.12, PyTorch 2.14, CUDA 13.4, cuDNN 9.25, NCCL 2.30) the way NVIDIA's own stacks (Megatron-LM, Megatron-Bridge, NeMo Automodel, NeMo-RL) do: the image's Python stays as NVIDIA built it, and `uv.lock` is installed into a virtual environment (`/opt/venv`, created with `--system-site-packages`) that sees the image's packages. The environment takes torch, everything only torch needs (Triton, the CUDA libraries) and numpy from the image (`uv export --prune`) and every other package, FlashAttention-4 among them, at its locked version; the image's `torchrun` is pointed at the environment's Python. The host needs a CUDA 13-capable driver.
 
 ```bash
 docker build -f docker/Dockerfile -t nanochat .
@@ -214,7 +213,7 @@ This logs to wandb (run name "d12"), runs the CORE metric only on the last step,
 Changes must be principled enough to hold across all depths, not just the one tested. Two sweep drivers check this:
 
 - [runs/miniseries.sh](runs/miniseries.sh): trains d12–d26 at the default data:param ratio and writes a results CSV.
-- [runs/scaling_laws.sh](runs/scaling_laws.sh): trains depths 10–20 at fixed FLOP budgets (1e18–1e19) and writes a resumable CSV, analyzed in [dev/scaling_analysis.ipynb](dev/scaling_analysis.ipynb).
+- [runs/scaling_laws.sh](runs/scaling_laws.sh): trains depths 10–20 at fixed FLOP budgets (1e18–1e19) and writes a resumable CSV.
 
 Experiment history, including negative results, is in [dev/LOG.md](dev/LOG.md).
 

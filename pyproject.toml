@@ -3,28 +3,30 @@ name = "nanochat"
 version = "0.1.0"
 description = "the minimal full-stack ChatGPT clone"
 readme = "README.md"
-requires-python = ">=3.10"
+# the Python of NVIDIA's NGC PyTorch images (26.08: 3.12), the environment nanochat runs in
+requires-python = ">=3.12"
 dependencies = [
     "duckdb>=1.5.5",
     "filelock>=3.19.0",
+    # FlashAttention-4 (CuTe DSL) for Hopper and Blackwell; cu13 matches PyTorch's CUDA 13 builds
+    "flash-attn-4[cu13]==4.0.0b32",
     "huggingface-hub>=0.34.0",
-    "kernels>=0.11.7",
+    "jinja2>=3.1.0",
     "numpy>=1.26.0",
     "obstore>=0.11.1",
-    "psutil>=7.1.0",
     "pyarrow>=21.0.0",
     "pyyaml>=6.0.2",
+    # the test suite; also required by the NGC image's triton-kernels
+    "pytest>=8.0.0",
     "rustbpe>=0.1.0",
     "tiktoken>=0.14.0",
-    "torch==2.9.1",
+    # PyPI's Linux wheels are the CUDA 13 build
+    "torch>=2.14.0",
     "wandb>=0.21.3",
 ]
 
 [dependency-groups]
 dev = [
-    "ipykernel>=7.1.0",
-    "matplotlib>=3.10.8",
-    "pytest>=8.0.0",
     "python-dotenv>=1.2.1",
 ]
 
@@ -37,37 +39,11 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-# target torch to cuda 12.8 or CPU
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cu128", extra = "gpu" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[project.optional-dependencies]
-cpu = [
-    "setuptools>=65.0.0",
-    "torch==2.9.1",
-]
-gpu = [
-    "torch==2.9.1",
-]
-
 [tool.uv]
 default-groups = []
-conflicts = [
-    [
-        { extra = "cpu" },
-        { extra = "gpu" },
-    ],
+# NVIDIA GPU hosts only: x86_64 (Hopper, Blackwell) and aarch64 (Grace Hopper, Grace Blackwell, DGX Spark)
+environments = ["sys_platform == 'linux'"]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]

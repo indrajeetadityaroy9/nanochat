@@ -1,42 +1,33 @@
 # syntax=docker/dockerfile:1
 #
-# nanochat image for NVIDIA GPUs. Datasets are not baked in: mount a volume at /runs (NANOCHAT_BASE_DIR:
-# tokenizer, checkpoints, eval results) and fast node-local NVMe at /runs/data (raw corpora, compiled data).
-# See docker/compose.yaml.
+# nanochat image for NVIDIA Hopper and Blackwell GPUs. Datasets are not baked in: mount a volume at /runs
+# (NANOCHAT_BASE_DIR: tokenizer, checkpoints, eval results) and fast node-local NVMe at /runs/data (raw corpora,
+# compiled data). See docker/compose.yaml.
 #
-# TORCH=base (default): an NGC PyTorch image. NVIDIA's PyTorch/CUDA/NCCL/cuDNN stack is kept as built and
-#   nanochat's other dependencies are installed on top at their uv.lock versions (see ngc_requirements.py).
-#   25.10 ships PyTorch 2.9 (CUDA 13.0), the release nanochat pins; newer NGC tags carry newer PyTorch.
-# TORCH=lock: any Debian/Ubuntu base. Installs the exact uv.lock environment, including the PyTorch 2.9.1
-#   CUDA 12.8 wheels (EXTRA=cpu for a CPU-only image, e.g. for data preparation nodes).
+# Built on NVIDIA's NGC PyTorch image the way NVIDIA's own stacks (Megatron-LM, Megatron-Bridge, NeMo Automodel,
+# NeMo-RL) build on it: the image's Python is left as NVIDIA built it, and uv.lock goes into a virtual environment that
+# sees the image's packages. The environment takes torch, everything only torch needs (Triton, the CUDA libraries) and
+# numpy (which the image's numba pins below 2.5) from the image, and every other package at its locked version.
 #
 #   docker build -f docker/Dockerfile -t nanochat .
-#   docker build -f docker/Dockerfile --build-arg BASE_IMAGE=ubuntu:24.04 --build-arg TORCH=lock -t nanochat:lock .
 
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.10-py3
-FROM ghcr.io/astral-sh/uv:0.12.15 AS uv
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.08-py3
+FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
 
 FROM ${BASE_IMAGE}
-ARG TORCH=base
-ARG EXTRA=gpu
 COPY --from=uv /uv /usr/local/bin/uv
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/nanochat-venv UV_PYTHON_INSTALL_DIR=/opt/uv-python
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH
 WORKDIR /workspace/nanochat
 
-# dependency layer, rebuilt only when pyproject.toml or uv.lock change. The plain base also needs g++ at runtime:
-# torch.compile's Inductor and Triton's kernel launchers compile C/C++ (NGC images already ship a toolchain).
-COPY pyproject.toml uv.lock .python-version ./
-COPY docker/ngc_requirements.py docker/
+# dependency layer, rebuilt only when pyproject.toml or uv.lock change. The image's torchrun starts the environment's
+# Python (as NeMo Automodel does), and the import confirms FlashAttention-4 loads against the image's torch.
+COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$TORCH" = "lock" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends ca-certificates g++ && rm -rf /var/lib/apt/lists/* && \
-        uv sync --frozen --no-dev --no-install-project --extra "$EXTRA"; \
-    else \
-        uv export --quiet --frozen --no-hashes --no-dev --no-emit-project --extra gpu -o /tmp/lock.txt && \
-        python docker/ngc_requirements.py pyproject.toml /tmp/lock.txt /tmp/requirements.txt /tmp/constraints.txt && \
-        uv pip install --system --break-system-packages -r /tmp/requirements.txt -c /tmp/constraints.txt; \
-    fi
-ENV PATH=/opt/nanochat-venv/bin:$PATH
+    uv venv --system-site-packages --python /usr/bin/python3 $VIRTUAL_ENV && \
+    uv export --frozen --no-dev --no-emit-project --no-hashes --prune torch --prune numpy -o /tmp/requirements.txt && \
+    uv pip install --no-deps -r /tmp/requirements.txt && \
+    sed -i "1s|.*|#!$VIRTUAL_ENV/bin/python|" /usr/local/bin/torchrun && \
+    python -c "import torch, flash_attn.cute"
 
 COPY . .
 # HF_XET_HIGH_PERFORMANCE: saturate network and CPUs when pulling raw corpora from the Hugging Face Hub
