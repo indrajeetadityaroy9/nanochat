@@ -26,8 +26,8 @@ import torch
 import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
-from nanochat.data.pretrain.sources import DEFAULT_DATASET, compiled_mixture
-from nanochat.data.pretrain.stream import PretrainingBatches, mixture_rows
+from nanochat.data.pretrain.sources import DEFAULT_DATASET
+from nanochat.data.pretrain.stream import PretrainingBatches
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
@@ -46,7 +46,7 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 # Data
-parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining mixture of corpora (nanochat/data/pretrain/sources.py), each compiled with nanochat.data.pretrain.compile: a corpus, or weighted corpora, e.g. 'stack_edu:0.3,refinecode_stackv2_reconstructed:0.2,smol_pdfedu_dclm_fwedu:0.5' (default: {DEFAULT_DATASET})")
+parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus (nanochat/data/pretrain/sources.py), compiled with nanochat.data.pretrain.compile (default: {DEFAULT_DATASET})")
 parser.add_argument("--data-seed", type=int, default=42, help="seed of the global data order")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
@@ -334,16 +334,14 @@ scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
-# Batches of the compiled token rows (python -m nanochat.data.pretrain.compile) of each corpus of the mixture.
+# Batches of the compiled token rows (python -m nanochat.data.pretrain.compile) of the corpus.
 # The global row order does not depend on the number of GPUs, so the data state is just the number of rows consumed:
 # a resumed run continues exactly where it stopped, on any number of GPUs.
-mixture = compiled_mixture(args.dataset) # [(the compiled data each corpus contributes, weight)]
 rows_per_step = total_batch_size // args.max_seq_len
 data_kwargs = dict(seq_len=args.max_seq_len, batch_rows=args.device_batch_size, device=device, rank=ddp_rank, world_size=ddp_world_size)
 rows_consumed = meta_data["dataloader_state_dict"]["rows"] if resuming else 0
-train_batches = PretrainingBatches(mixture, "train", tokenizer, start_row=rows_consumed, seed=args.data_seed, **data_kwargs)
-val_batches = PretrainingBatches(mixture, "val", tokenizer, **data_kwargs)
-component_rows_consumed = mixture_rows(train_batches.weights, 0, rows_consumed) # rows each component has given so far
+train_batches = PretrainingBatches(args.dataset, "train", tokenizer, start_row=rows_consumed, seed=args.data_seed, **data_kwargs)
+val_batches = PretrainingBatches(args.dataset, "val", tokenizer, **data_kwargs)
 train_iter = iter(train_batches)
 x, y = next(train_iter) # kick off load of the very first batch of data
 
@@ -370,10 +368,6 @@ total_tokens = total_batch_size * num_iterations # the actual number of tokens w
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
 print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
-# Rows have a fixed length, so each component's share of the planned rows is its share of the planned tokens
-planned_rows = mixture_rows(train_batches.weights, rows_consumed, num_iterations * rows_per_step)
-for (name, weight), rows, planned in zip(mixture, train_batches.rows, planned_rows):
-    print0(f"Training data {name}: {len(rows):,} rows x {args.max_seq_len + 1} tokens | weight: {weight:.4f} | share of planned rows: {planned / planned_rows.sum():.4f}")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):
@@ -556,7 +550,6 @@ while True:
     else:
         optimizer.step()
     model.zero_grad(set_to_none=True)
-    component_rows_consumed += mixture_rows(train_batches.weights, rows_consumed, rows_consumed + rows_per_step)
     rows_consumed += rows_per_step
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
@@ -583,7 +576,7 @@ while True:
         eta_str = f" | eta: {eta_seconds/60:.1f}m"
     else:
         eta_str = ""
-    epoch = max(consumed / len(rows) for consumed, rows in zip(component_rows_consumed, train_batches.rows)) # the component closest to repeating data
+    epoch = rows_consumed / len(train_batches.rows)
     print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch:.4f} | total time: {total_training_time/60:.2f}m{eta_str}")
     if step % 100 == 0:
         log_data = {

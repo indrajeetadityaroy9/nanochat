@@ -3,10 +3,9 @@ Compile a fetched corpus into packed token rows, once: per split, one file of ro
 memory-maps (stream.py), so training does no tokenization or packing.
 
 Each document of the raw files, in order:
-- is read only if training reads it (sources.read_training_documents); with --without=<corpus> the output is
-  <dataset>-without-<corpus>, the compiled data a mixture with that corpus reads;
+- is read only if training reads it (sources.read_training_documents);
 - is dropped if it shares a --decontam-ngram word sequence with a CORE or chat-eval item (decontam.py);
-- is tokenized and, if code, split losslessly into pieces of at most a row (segment);
+- is tokenized and, if code, split losslessly into pieces of at most a row (code.segment);
 - is packed into BOS-aligned rows by best fit over all documents of its raw file (pack), so only documents longer than
   a row force cropping.
 
@@ -15,7 +14,7 @@ number of workers. <split>.json beside <split>.bin records the settings and per-
 tokenizer must exist first: compiled data is keyed by its fingerprint.
 
 python -m nanochat.data.pretrain.compile --dataset=climbmix --seq-len=2048 --max-files=170
-python -m nanochat.data.pretrain.compile --dataset=refinecode_stackv2_reconstructed --without=stack_edu --max-files=100
+python -m nanochat.data.pretrain.compile --dataset=refinecode_stackv2_reconstructed --max-files=100
 """
 
 import os
@@ -31,8 +30,8 @@ import numpy as np
 
 from nanochat.tokenizer import get_tokenizer
 from nanochat.data.storage import write_json
-from nanochat.data.pretrain.sources import (DEFAULT_DATASET, DATASETS, SAMPLING, CodeCorpus, raw_dir, require_raw_files,
-                                            read_training_documents, compiled_name)
+from nanochat.data.pretrain.sources import DEFAULT_DATASET, DATASETS, CodeCorpus, raw_dir, require_raw_files, read_training_documents
+from nanochat.data.pretrain.code import SAMPLING, segment
 from nanochat.data.pretrain.stream import compiled_path, token_dtype
 from nanochat.data.pretrain.decontam import eval_ngrams, contaminated
 
@@ -57,22 +56,6 @@ def pack(docs, row_len):
         yield np.concatenate(row)
 
 
-def segment(doc, row_len, ends_line):
-    """Pieces of at most row_len tokens that cover a BOS-prefixed document exactly, each starting with its BOS: a piece
-    ends after the last token of its window that ends a line (ends_line, over the vocabulary), or with the window when
-    none does."""
-    if len(doc) <= row_len:
-        return [doc]
-    pieces, start = [], 1
-    while len(doc) - start > row_len - 1:
-        window = doc[start:start + row_len - 1]
-        breaks = np.flatnonzero(ends_line[window])
-        end = start + (breaks[-1] + 1 if breaks.size else len(window))
-        pieces.append(np.concatenate((doc[:1], doc[start:end])))
-        start = end
-    pieces.append(np.concatenate((doc[:1], doc[start:])))
-    return pieces
-
 # -----------------------------------------------------------------------------
 # Workers: one raw file per task; the split's configuration (tokenizer, eval n-grams) is set once per worker
 
@@ -90,7 +73,7 @@ def _compile_file(path):
     n = dict.fromkeys(["documents", "dropped_unselected", "dropped_contaminated", "segmented", "pieces", "tokens"], 0)
 
     def pieces():
-        for table, listed in read_training_documents(_config["dataset"], path, ["text"], _config["without"]):
+        for table, listed in read_training_documents(_config["dataset"], path, ["text"]):
             texts = table.column("text").to_pylist()
             dropped = contaminated(texts, _config["eval_ngrams"], _config["ngram"])
             n["documents"] += listed
@@ -112,16 +95,16 @@ def _compile_file(path):
     return f.name, n | {"rows": rows, "tokens_cropped": n["tokens"] - rows * row_len}
 
 
-def compile_split(dataset, split, tokenizer, eval_hashes, *, ngram, seq_len, max_files, without):
+def compile_split(dataset, split, tokenizer, eval_hashes, *, ngram, seq_len, max_files):
     """Pack the first max_files raw files of a split (all when None) into its compiled file, with <split>.json
     beside it."""
     files = require_raw_files(dataset, split, max_files)
-    path = compiled_path(compiled_name(dataset, without), split, seq_len, tokenizer)
+    path = compiled_path(dataset, split, seq_len, tokenizer)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     ends_line = None
     if isinstance(DATASETS[dataset], CodeCorpus):
         ends_line = np.array([t.endswith(b"\n") for t in tokenizer.enc.decode_tokens_bytes(list(range(tokenizer.get_vocab_size())))])
-    config = {"dataset": dataset, "without": without, "tokenizer": tokenizer, "dir": os.path.dirname(path), "dtype": token_dtype(tokenizer),
+    config = {"dataset": dataset, "tokenizer": tokenizer, "dir": os.path.dirname(path), "dtype": token_dtype(tokenizer),
               "row_len": seq_len + 1, "eval_ngrams": eval_hashes, "ngram": ngram, "ends_line": ends_line}
     print(f"Compiling {len(files)} {split} files of '{dataset}' into {path}")
     per_file = []
@@ -133,7 +116,7 @@ def compile_split(dataset, split, tokenizer, eval_hashes, *, ngram, seq_len, max
             per_file.append({"file": os.path.relpath(file, raw_dir(dataset)), **stats})
     os.replace(out.name, path)  # the compiled file appears only once it is complete
     t = {key: sum(entry[key] for entry in per_file) for key in per_file[0] if key != "file"}
-    settings = {"dataset": dataset, "without": without, "sampling": SAMPLING.get(dataset), "seq_len": seq_len,
+    settings = {"dataset": dataset, "sampling": SAMPLING.get(dataset), "seq_len": seq_len,
                 "tokenizer": tokenizer.fingerprint(), "decontam_ngram": ngram, "eval_ngrams": hashlib.sha256(eval_hashes.tobytes()).hexdigest()}
     write_json(os.path.splitext(path)[0] + ".json", {"settings": settings, "files": per_file, "total": t})
     print(f"{split}: {t['rows']:,} rows from {t['documents'] - t['dropped_unselected'] - t['dropped_contaminated']:,} docs "
@@ -147,10 +130,8 @@ if __name__ == "__main__":
     parser.add_argument("--seq-len", type=int, default=2048, help="training sequence length; rows hold seq_len + 1 tokens (default: 2048)")
     parser.add_argument("--max-files", type=int, required=True, help="compile the first N raw train files (and every val file)")
     parser.add_argument("--decontam-ngram", type=int, default=13, help="drop documents sharing an n-word sequence with a CORE or chat-eval item (default: 13)")
-    parser.add_argument("--without", type=str, default=None, help="drop the documents flagged in_<corpus>, compiling <dataset>-without-<corpus>, which a mixture with that corpus reads (e.g. --dataset=refinecode_stackv2_reconstructed --without=stack_edu)")
     args = parser.parse_args()
     tokenizer = get_tokenizer()
     eval_hashes = eval_ngrams(args.decontam_ngram)
     for split, max_files in [("train", args.max_files), ("val", None)]:
-        compile_split(args.dataset, split, tokenizer, eval_hashes, ngram=args.decontam_ngram, seq_len=args.seq_len,
-                      max_files=max_files, without=args.without)
+        compile_split(args.dataset, split, tokenizer, eval_hashes, ngram=args.decontam_ngram, seq_len=args.seq_len, max_files=max_files)
