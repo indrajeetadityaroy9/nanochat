@@ -1,6 +1,6 @@
 """
-The ARC dataset from Allen AI.
-https://huggingface.co/datasets/allenai/ai2_arc
+The ARC dataset from Allen AI (https://huggingface.co/datasets/allenai/ai2_arc), read by pretraining decontamination
+(decontam.py), which hashes every string of an item.
 """
 
 from nanochat.data.task import Task, load_hub_dataset, render_mc
@@ -15,10 +15,6 @@ class ARC(Task):
         assert subset in ["ARC-Easy", "ARC-Challenge"], "ARC subset must be ARC-Easy or ARC-Challenge"
         assert split in ["train", "validation", "test"], "ARC split must be train|validation|test"
         self.ds = load_hub_dataset(REPO, REVISION, f"{subset}/{split}-*.parquet").shuffle(seed=42)
-
-    @property
-    def eval_type(self):
-        return 'categorical'
 
     def num_examples(self):
         return len(self.ds)
@@ -38,13 +34,6 @@ class ARC(Task):
         ]
         conversation = {
             "messages": messages,
-            "letters": letters, # useful during evaluation, so we can narrow and clamp the assistant prediction to one of the letters
+            "letters": letters,
         }
         return conversation
-
-    def evaluate(self, conversation, assistant_response):
-        # the assert here is not strictly speaking needed, but currently the way we eval, we expect this to be true
-        # I'm going to leave the assert here to prevent footguns, but possibly in the future can remove it.
-        assert assistant_response in conversation['letters'], f"ARC answer {assistant_response} is expected to be one of {conversation['letters']}"
-        assistant_message = conversation['messages'][-1]['content'] # e.g. "A"
-        return assistant_response == assistant_message

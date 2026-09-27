@@ -1,7 +1,7 @@
 """
-Chat tasks, shared by post-training (SFT and RL train on their train splits) and evaluation (their test splits):
-a Task is a sliceable dataset of conversations, often with a grader (evaluate). Tasks read one split of a pinned
-HF dataset repo (load_hub_dataset), and multiple-choice tasks share one prompt format (render_mc).
+Benchmark tasks, read by pretraining decontamination (pretrain/decontam.py): a Task is a sliceable dataset of a
+benchmark's items as conversations. Tasks read one split of a pinned HF dataset repo (load_hub_dataset), and
+multiple-choice tasks share one prompt format (render_mc).
 """
 
 import os
@@ -68,11 +68,6 @@ class Task:
         self.stop = stop # could be None here
         self.step = step
 
-    @property
-    def eval_type(self):
-        # one of 'generative' | 'categorical'
-        raise NotImplementedError
-
     def num_examples(self):
         raise NotImplementedError
 
@@ -93,9 +88,6 @@ class Task:
         physical_index = self.start + index * self.step
         conversation = self.get_example(physical_index)
         return conversation
-
-    def evaluate(self, problem, completion):
-        raise NotImplementedError
 
 
 def render_mc(question, letters, choices):

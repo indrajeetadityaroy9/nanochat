@@ -1,8 +1,6 @@
 """
-GSM8K evaluation.
-https://huggingface.co/datasets/openai/gsm8k
-
-Example problem instance:
+GSM8K math word problems (https://huggingface.co/datasets/openai/gsm8k), read by pretraining decontamination
+(decontam.py), which hashes every string of an item. Example:
 
 Question:
 Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?
@@ -11,7 +9,7 @@ Weng earns 12/60 = $<<12/60=0.2>>0.2 per minute.
 Working 50 minutes, she earned 0.2 x 50 = $<<0.2*50=10>>10.
 #### 10
 
-Notice that GSM8K uses tool calls inside << >> tags.
+The calculator calls inside << >> become python and python_output parts of the item.
 """
 
 import re
@@ -21,21 +19,6 @@ REPO = "openai/gsm8k"
 REVISION = "740312add88f781978c0658806c59bc2815b9866" # pinned commit, files are <subset>/<split>-*.parquet
 
 
-GSM_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
-def extract_answer(completion):
-    """
-    Extract the numerical answer after #### marker.
-    Follows official code for normalization:
-    https://github.com/openai/grade-school-math/blob/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/dataset.py#L28
-    """
-    match = GSM_RE.search(completion)
-    if match:
-        match_str = match.group(1).strip()
-        match_str = match_str.replace(",", "")
-        return match_str
-    return None
-
-
 class GSM8K(Task):
 
     def __init__(self, subset, split, **kwargs):
@@ -43,10 +26,6 @@ class GSM8K(Task):
         assert subset in ["main", "socratic"], "GSM8K subset must be main|socratic"
         assert split in ["train", "test"], "GSM8K split must be train|test"
         self.ds = load_hub_dataset(REPO, REVISION, f"{subset}/{split}-*.parquet").shuffle(seed=42)
-
-    @property
-    def eval_type(self):
-        return 'generative'
 
     def num_examples(self):
         return len(self.ds)
@@ -85,35 +64,3 @@ class GSM8K(Task):
             "messages": messages,
         }
         return conversation
-
-    def evaluate(self, conversation, assistant_response):
-        """
-        Given (conversation, completion), return evaluation outcome (0 = wrong, 1 = correct)
-        Note that:
-        - the conversation has both user AND assistant message (containing the ground truth answer)
-        - the assistant_response is usually the alternative assistant message achieved via sampling
-
-        TODO: Technically, assistant_response should be a Message (either a string or a list of parts)
-              We can handle this later possibly. For now just assume string.
-        """
-        assert isinstance(assistant_response, str), "Assuming simple string response for now"
-        # First extract the ground truth answer
-        assistant_message = conversation['messages'][-1]
-        assert assistant_message['role'] == "assistant", "Last message must be from the Assistant"
-        assert isinstance(assistant_message['content'], list), "This is expected to be a list of parts"
-        last_text_part = assistant_message['content'][-1]['text'] # this contains the final answer in GSM8K
-        # Extract both the ground truth answer and the predicted answer
-        ref_num = extract_answer(last_text_part)
-        pred_num = extract_answer(assistant_response)
-        # Compare and return the success as int
-        is_correct = int(pred_num == ref_num)
-        return is_correct
-
-    def reward(self, conversation, assistant_response):
-        """
-        Used during RL. To keep things simple, just re-use the evaluation above.
-        Later this could be made more complex (e.g. format matching etc.)
-        """
-        is_correct = self.evaluate(conversation, assistant_response)
-        is_correct_float = float(is_correct)
-        return is_correct_float

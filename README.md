@@ -2,7 +2,7 @@
 
 ![scaling laws](dev/scaling_laws_jan26.png)
 
-nanochat is a minimal experimental harness for LLM training research on NVIDIA GPUs, from one GPU to multi-node clusters. It covers tokenization, pretraining, supervised finetuning, reinforcement learning, evaluation, and inference in one small, hackable codebase. Models are configured by a single complexity dial: `--depth`, the number of transformer layers. Width, head count, batch size, learning rates, weight decay, and training horizon are all derived from it, so sweeping depth yields a miniseries of compute-optimal models (GPT-2 capability is around d24–d26).
+nanochat is a minimal experimental harness for LLM training research on NVIDIA GPUs, from one GPU to multi-node clusters. It covers tokenization, pretraining, evaluation, and sampling of base models in one small, hackable codebase. Models are configured by a single complexity dial: `--depth`, the number of transformer layers. Width, head count, batch size, learning rates, weight decay, and training horizon are all derived from it, so sweeping depth yields a miniseries of compute-optimal models (GPT-2 capability is around d24–d26).
 
 ## Time-to-GPT-2 Leaderboard
 
@@ -43,11 +43,9 @@ python -m nanochat.tokenizer                              # BPE tokenizer, vocab
 python -m nanochat.data.pretrain.compile --max-files=170   # tokenize + pack once into a file of token rows per split
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_eval -- --device-batch-size=16   # CORE, bpb, samples
-torchrun --standalone --nproc_per_node=gpu -m scripts.chat_sft
-torchrun --standalone --nproc_per_node=gpu -m scripts.chat_eval -- -i sft                  # ChatCORE
 ```
 
-Optional stage: `scripts.chat_rl` (GRPO-style RL on GSM8K, evaluate with `chat_eval -i rl`).
+nanochat trains base models for next-token prediction: the tokenizer's only special token is `<|bos|>`, which begins every document.
 
 - `--nproc_per_node=gpu` starts one rank per visible GPU; any number of GPUs works (the run scripts read `NPROC_PER_NODE`). The total batch size is fixed and gradient accumulation makes up the difference, so results are ~identical on 1 or 64 GPUs; an automatic batch size is rounded to a whole number of micro-batches across the ranks.
 - On a single GPU, `torchrun` can also be omitted. A100 nodes work, just slower.
@@ -55,7 +53,7 @@ Optional stage: `scripts.chat_rl` (GRPO-style RL on GSM8K, evaluate with `chat_e
 
 ## Data
 
-All dataset and data-loading code lives in [nanochat/data](nanochat/data), one package per stage: `pretrain/`, `posttrain/` (SFT and RL) and `eval/`. Pretraining data is fetched once into local files, the only network step; the tokenizer, compile and training read only those files. Corpora are tokenized and packed once into one file of token rows per split, which training memory-maps in place (modules of `pretrain/`):
+All dataset and data-loading code lives in [nanochat/data](nanochat/data), one package per stage: `pretrain/` and `eval/`. Pretraining data is fetched once into local files, the only network step; the tokenizer, compile and training read only those files. Corpora are tokenized and packed once into one file of token rows per split, which training memory-maps in place (modules of `pretrain/`):
 
 ```
 HF Hub, Software Heritage, pinned       fetch.py      the only network step: resumable, deterministic, tmux-safe
@@ -63,7 +61,7 @@ HF Hub, Software Heritage, pinned       fetch.py      the only network step: res
 raw/<corpus>/: parquet + manifest.json  sources.py    general-domain corpora as published, code in one schema
   ▼
 drop eval-contaminated docs, tokenize,  compile.py    once, CPU-parallel, deterministic
-split long code files, best-fit pack    decontam.py   13-gram overlap with CORE / chat-eval items
+split long code files, best-fit pack    decontam.py   13-gram overlap with CORE / benchmark items
   ▼
 {train,val}.bin: packed token rows                    under <base_dir>/data/compiled, on local NVMe
   ▼
@@ -72,7 +70,7 @@ numpy.memmap, weighted mixture          stream.py     elastic deterministic orde
 GPU
 ```
 
-Post-training and evaluation share the chat tasks of [task.py](nanochat/data/task.py), each reading one split of a pinned HF dataset repo. `eval/` holds the benchmarks: the CORE bundle (`core.py`) and the chat evals ARC, MMLU, GSM8K and HumanEval with their graders. `posttrain/` holds SmolTalk and the SFT task mixture and packing loader (`sft.py`). SFT also trains on the MMLU and GSM8K train splits, RL on GSM8K's with its grader as the reward, and pretraining decontaminates against the eval sets, so those stages import from `eval/` and `eval/` imports from neither. These files are small and downloaded on first use through `storage.fetch`, which checks for each file under a per-file lock, so the ranks on a node download each once. (huggingface_hub's own lock is not enough: in 2.0.0 every concurrent caller re-downloads the file and first deletes the copy another has just completed.)
+Decontamination reads the benchmarks in `eval/`: the CORE bundle (`core.py`) and the ARC, MMLU, GSM8K and HumanEval test sets, as the tasks of [task.py](nanochat/data/task.py), each reading one split of a pinned HF dataset repo. These files are small and downloaded on first use through `storage.fetch`, which checks for each file under a per-file lock, so the ranks on a node download each once. (huggingface_hub's own lock is not enough: in 2.0.0 every concurrent caller re-downloads the file and first deletes the copy another has just completed.)
 
 ### Corpora
 
@@ -100,7 +98,7 @@ To add a general-domain corpus, add a `TextCorpus(repo, revision, train_files, v
 
 ### Fetching
 
-`python -m nanochat.data.pretrain.fetch --dataset=<corpus> --max-files=N` ([fetch.py](nanochat/data/pretrain/fetch.py)) is the only step that downloads pretraining data. It writes `raw/<corpus>/manifest.json` once, the files of each split in order, then writes every val file and the first N train files that are missing, in parallel: a general-domain file is downloaded as it is, a code file is materialized by its source ([code/](nanochat/data/pretrain/code)). A file appears only once it is complete, so an interrupted fetch is simply run again, and a larger N adds only the missing files. The tokenizer and compile read a split's files in manifest order up to the first missing one and fail with the fetch command when a corpus has not been fetched far enough.
+`python -m nanochat.data.pretrain.fetch --dataset=<corpus> --max-files=N` ([fetch.py](nanochat/data/pretrain/fetch.py)) is the only step that downloads pretraining data. It writes `raw/<corpus>/manifest.json` once, the files of each split in order, then writes every val file and the first N train files that are missing, in parallel: a text corpus's file is downloaded as it is, a code file is materialized by its source ([code/](nanochat/data/pretrain/code)). A file appears only once it is complete, so an interrupted fetch is simply run again, and a larger N adds only the missing files. The tokenizer and compile read a split's files in manifest order up to the first missing one and fail with the fetch command when a corpus has not been fetched far enough.
 
 Run long fetches in tmux so they survive a dropped session (from the repository root; data under `~/nanochat-runs/data`, logs under `~/nanochat-runs/logs`):
 
@@ -169,7 +167,7 @@ A compiled split is one flat file of token rows, `uint16` while the vocabulary f
 
 ### Decontamination
 
-Before tokenization, compile drops every document that shares a 13-word sequence (`--decontam-ngram`) with an item of the evaluation sets nanochat reports: every CORE task in the eval bundle's `core.yaml`, and the ARC-Easy, ARC-Challenge, MMLU and GSM8K test splits and HumanEval used by `chat_eval` ([nanochat/data/pretrain/decontam.py](nanochat/data/pretrain/decontam.py)). Words are lowercased alphanumeric runs, so formatting differences do not hide a match; a document's n-gram hashes are looked up exactly, in sorted order, in the sorted eval n-gram hashes. The corpora are not decontaminated by their publishers (Nemotron-CC, the bulk of ClimbMix, explicitly is not), and without this step benchmark text seen in pretraining inflates CORE and ChatCORE. Compile prints how many documents it dropped.
+Before tokenization, compile drops every document that shares a 13-word sequence (`--decontam-ngram`) with an item of the evaluation sets nanochat reports: every CORE task in the eval bundle's `core.yaml`, and the ARC-Easy, ARC-Challenge, MMLU and GSM8K test splits and HumanEval ([nanochat/data/pretrain/decontam.py](nanochat/data/pretrain/decontam.py)). Words are lowercased alphanumeric runs, so formatting differences do not hide a match; a document's n-gram hashes are looked up exactly, in sorted order, in the sorted eval n-gram hashes. The corpora are not decontaminated by their publishers (Nemotron-CC, the bulk of ClimbMix, explicitly is not), and without this step benchmark text seen in pretraining inflates CORE and ChatCORE. Compile prints how many documents it dropped.
 
 ### Loading
 
@@ -236,4 +234,4 @@ NANOCHAT_DTYPE=bfloat16 torchrun --nproc_per_node=gpu -m scripts.base_train  # f
 
 Model weights are stored in fp32 (for optimizer precision), and the custom `Linear` layer casts them to `COMPUTE_DTYPE` during the forward pass. Embeddings are stored directly in `COMPUTE_DTYPE` to save memory. This gives the mixed-precision benefit of autocast with explicit control over what runs in which precision.
 
-`float16` training automatically enables a `GradScaler` in `base_train.py` and `chat_sft.py`; RL does not support it yet. Inference in fp16 works everywhere. `--fp8` (CUDA only) converts eligible linear layers to FP8 matmuls with tensorwise scaling (`nanochat/fp8.py`).
+`float16` training automatically enables a `GradScaler` in `base_train.py`. Inference in fp16 works everywhere. `--fp8` (CUDA only) converts eligible linear layers to FP8 matmuls with tensorwise scaling (`nanochat/fp8.py`).

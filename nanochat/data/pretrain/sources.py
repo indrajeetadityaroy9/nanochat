@@ -1,28 +1,23 @@
 """
-Pretraining corpora: the registry, their local files, and which documents training reads.
+Pretraining corpora: the registry and their local files.
 
 A corpus's manifest.json lists the files of each split in order (fetch.py writes it): the pinned Hub parquet files of a
-general-domain corpus (TextCorpus), or the zstd parquet files fetch materializes for a code corpus (CodeCorpus, code/).
+text corpus (TextCorpus), or the zstd parquet files fetch materializes for a code corpus (CodeCorpus, code/).
 Everything here reads the local files under <data_dir>/raw/<name>/ in that order, up to the first missing one, and
-fails with the fetch command when a corpus, or enough of its files, has not been fetched. The tokenizer and compile read
-documents only through read_training_documents, so both see the same selection.
+fails with the fetch command when a corpus, or enough of its files, has not been fetched.
 """
 
 import os
 import json
-import hashlib
 import itertools
 from dataclasses import dataclass
 
-import pyarrow.parquet as pq
-
 from nanochat.data.storage import get_data_dir
-from nanochat.data.pretrain.code import SAMPLING
 
 
 @dataclass
 class CodeCorpus:
-    repo: str         # Hub dataset repo the corpus is built from (metadata only for Software Heritage corpora)
+    repo: str         # Hub dataset repo the corpus is built from (metadata only for Stack-Edu)
     revision: str     # pinned commit
 
 
@@ -35,18 +30,11 @@ class TextCorpus:
 
 
 DATASETS = {
-    # Code corpora (code/swh.py, code/stack_v3.py)
+    # Code corpora, materialized by fetch (code/swh.py, code/stack_v3.py)
     # Stack-Edu (2025): 167M educational files of The Stack v2 in 15 languages; text from Software Heritage by blob ID
     "stack_edu": CodeCorpus(
         repo="HuggingFaceTB/stack-edu",
         revision="eeec5caac5cc3758a18f1d3ba4416837a9ba814c",
-    ),
-    # RefineCode (OpenCoder, 2024), reconstructed: its metadata for the files it shares with The Stack v2 (about half
-    # its raw code, none of its code-related web data), joined with bigcode/the-stack-v2 for blob IDs; text from
-    # Software Heritage, without notebooks
-    "refinecode_stackv2_reconstructed": CodeCorpus(
-        repo="OpenCoder-LLM/RefineCode-code-corpus-meta",
-        revision="017558900665343ca563733212623e37606167ab",
     ),
     # The Stack v3 (2026) train split: 173M GitHub repositories (August 2025), near-deduplicated and filtered by its
     # publisher, one repository per row with its PII-redacted text inline; ODC-BY
@@ -54,7 +42,23 @@ DATASETS = {
         repo="HuggingFaceCode/stack-v3-train",
         revision="1f61b735bc0a5698345ce2196730f24bfa467f33",
     ),
-    # General-domain corpora, pre-shuffled, each holding out its last file for val
+    # Text corpora: the Hub parquet files as published, `text` column. Fetch lists train files sorted, directories taken
+    # in turn, so the first N take every source alike; val is held out by file
+    # OpenCoder (2024): code-related pages recalled from FineWeb by fastText; 510 files of ~198k documents, each mixing
+    # Common Crawl dumps; MIT
+    "opc_fineweb_code": TextCorpus(
+        repo="OpenCoder-LLM/opc-fineweb-code-corpus",
+        revision="9e8e48e666c226294d6f9e6c2e13f2c84c1c06f3",
+        train_files="data/train-*.parquet",
+        val_files="data/train-00509-of-00510.parquet",
+    ),
+    # OpenCoder (2024): math-related pages recalled from FineWeb by fastText; 37 files of ~142k documents; ODC-BY
+    "opc_fineweb_math": TextCorpus(
+        repo="OpenCoder-LLM/opc-fineweb-math-corpus",
+        revision="858b10c748e6c95e0cbc5ebd38543b1c4699857b",
+        train_files="data/train-*.parquet",
+        val_files="data/train-00036-of-00037.parquet",
+    ),
     # NVIDIA ClimbMix (2025), repackaged and shuffled: 6543 shards of ~250M chars in 1024-document row groups
     # (card: MIT; upstream nvidia/Nemotron-ClimbMix: CC-BY-NC-4.0)
     "climbmix": TextCorpus(
@@ -63,13 +67,13 @@ DATASETS = {
         train_files="shard_*.parquet",
         val_files="shard_06542.parquet",
     ),
-    # HuggingFace Smol-Data (2026), ODC-BY, the closest ClimbMix analog: 100 shuffled shards of ~1B tokens of 50BT
-    # FinePDFs-Edu, 30BT DCLM and 20BT FineWeb-Edu (0.47 / 0.32 / 0.21 of the characters; source in `dataset`)
+    # HuggingFace Smol-Data (2026), ODC-BY: ~100B tokens of FinePDFs-Edu (~50B), DCLM (~30B) and FineWeb-Edu (~20B),
+    # each source in its own directory of 100 files (source in `dataset`); val is the last file of each source
     "smol_pdfedu_dclm_fwedu": TextCorpus(
-        repo="HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT-shuffled",
-        revision="8904a95879538b9e7db6cf8636b2cd16b5e86a76",
-        train_files="data/train-*.parquet",
-        val_files="data/train-00099-of-00100.parquet",
+        repo="HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT",
+        revision="c6ff5c68259ca98f23ecffe245d5f0da4598e704",
+        train_files="*_100BT/*.parquet",
+        val_files="*_100BT/000_00099.parquet",
     ),
     # TxT360-v2 (2026) web-high-medium, CC-BY-4.0: its Medium-High quality bucket, 828 shards of ~0.93M documents from
     # two source files (chunk0, chunk1). English web (Common Crawl, ClueWeb, HPLT) is 93% of the characters, curated
@@ -114,17 +118,3 @@ def require_raw_files(name, split, count=None):
     if len(files) < (len(read_manifest(name)[split]) if count is None else count):
         raise FileNotFoundError(f"'{name}' {split}: {len(files)} files complete, not enough: run `{fetch_command(name, count or 1)}`")
     return files[:count]
-
-
-def read_training_documents(name, path, row_group, columns):
-    """(table of `columns` holding only the documents training reads, documents listed) of one row group of a raw file.
-    A corpus in SAMPLING keeps, per program_lang, the documents whose sha256(document_id) as an integer is below
-    share * 2**256, independent of sharding and of how much is fetched (blob IDs themselves are not uniform: 0.4391 of
-    RefineCode's 58.9M Java blobs fall below 0.4454 of their range)."""
-    sampling = SAMPLING.get(name)
-    table = pq.ParquetFile(path).read_row_group(row_group, columns=columns + (["document_id", "program_lang"] if sampling else []))
-    listed = table.num_rows
-    if sampling:
-        table = table.filter([int(hashlib.sha256(d.encode()).hexdigest(), 16) < sampling.get(lang, 1.0) * 2**256
-                              for d, lang in zip(table["document_id"].to_pylist(), table["program_lang"].to_pylist())])
-    return table.select(columns), listed

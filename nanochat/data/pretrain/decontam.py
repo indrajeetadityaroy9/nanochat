@@ -1,7 +1,7 @@
 """
 Benchmark decontamination: compile drops every document that shares an n-word sequence (default 13, the GPT-3
 criterion) with an item of the evaluation sets nanochat reports, so their scores are not inflated by pretraining:
-every CORE task (scripts/base_eval.py) and the ARC, MMLU, GSM8K and HumanEval test sets (scripts/chat_eval.py).
+every CORE task (scripts/base_eval.py) and the ARC, MMLU, GSM8K and HumanEval test sets (data/eval/).
 
 Words are lowercased alphanumeric runs, so case, punctuation and whitespace do not hide a match. Each word hashes to
 64 bits (blake2b) and an n-gram combines its words' hashes by a polynomial rolling hash, so the eval n-grams, hashed
@@ -68,7 +68,7 @@ def strings(obj):
 
 
 def eval_tasks():
-    """The items of each CORE task and chat-eval test set, one list of texts (one string per item) per task."""
+    """The items of each CORE task and benchmark test set, one list of texts (one string per item) per task."""
     bundle = get_eval_bundle_dir()
     with open(os.path.join(bundle, "core.yaml"), encoding="utf-8") as f:
         core_tasks = yaml.safe_load(f)["icl_tasks"]

@@ -126,7 +126,7 @@ def main():
     device_type = autodetect_device_type() if args.device_type == '' else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     # Load model and tokenizer
-    model, tokenizer, meta = load_model("base", device, phase="eval", model_tag=args.model_tag, step=args.step)
+    model, tokenizer, meta = load_model(device, phase="eval", model_tag=args.model_tag, step=args.step)
     sequence_len = meta["model_config"]["sequence_len"]
     token_bytes = tokenizer.get_token_bytes(device=device)
     model_name = f"base_model (step {meta['step']})"
@@ -158,16 +158,16 @@ def main():
             engine = Engine(model, tokenizer)
             print0("\nConditioned samples:")
             for prompt in prompts:
-                tokens = tokenizer.encode(prompt, prepend="<|bos|>")
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+                tokens = tokenizer.encode(prompt, prepend=tokenizer.get_bos_token_id())
+                sample = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
                 sample_str = tokenizer.decode(sample[0])
                 print0("-" * 80)
                 print0(sample_str)
                 samples.append(sample_str)
 
             print0("\nUnconditioned samples:")
-            tokens = tokenizer.encode("", prepend="<|bos|>")
-            uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
+            tokens = tokenizer.encode("", prepend=tokenizer.get_bos_token_id())
+            uncond = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
             for sample in uncond:
                 sample_str = tokenizer.decode(sample)
                 print0("-" * 80)

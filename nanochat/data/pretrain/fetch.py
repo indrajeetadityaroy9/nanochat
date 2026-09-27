@@ -2,11 +2,13 @@
 The fetch stage, the only step that downloads pretraining data. It is resumable and deterministic: run it in tmux, and
 rerun it after an interruption.
 
-Per corpus it writes <data_dir>/raw/<name>/manifest.json once, the files of each split in order: for a general-domain
-corpus its pinned Hub files, sorted; for a code corpus the files its source's manifest defines (code/swh.py,
-code/stack_v3.py). Then it writes, in parallel, every val file and the first --max-files train files that are missing:
-a general-domain file is downloaded as it is, a code file is materialized by its source as zstd parquet. A file appears
-only once complete, so a rerun with a larger --max-files adds only the missing files.
+Per corpus it writes <data_dir>/raw/<name>/manifest.json once, the files of each split in order: for a text corpus its
+pinned Hub files, sorted, the train files of its directories taken in turn, so the first --max-files take every
+directory alike (Smol-Data keeps each source in its own directory); for a code corpus the files its source's manifest
+defines (code/swh.py, code/stack_v3.py). Then it writes, in parallel, every val file and the first
+--max-files train files that are missing: a text file is downloaded as it is, a code file is materialized by its
+source as zstd parquet. A file appears only once complete, so a rerun with a larger --max-files adds only the missing
+files.
 
 python -m nanochat.data.pretrain.fetch --dataset=stack_edu --max-files=8
 """
@@ -14,7 +16,9 @@ python -m nanochat.data.pretrain.fetch --dataset=stack_edu --max-files=8
 import os
 import time
 import argparse
+import itertools
 from fnmatch import fnmatchcase
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
 import pyarrow.parquet as pq
@@ -25,7 +29,7 @@ from nanochat.data.pretrain.sources import DATASETS, raw_dir, read_manifest
 from nanochat.data.pretrain.code import swh, stack_v3
 
 ROW_GROUP = 1024  # documents per parquet row group, as in ClimbMix: compile's read batch
-CODE_SOURCES = {"stack_edu": swh, "refinecode_stackv2_reconstructed": swh, "stack_v3": stack_v3}
+CODE_SOURCES = {"stack_edu": swh, "stack_v3": stack_v3}
 
 
 def build_manifest(name):
@@ -34,8 +38,12 @@ def build_manifest(name):
     spec = DATASETS[name]
     files = sorted(HfApi().list_repo_files(spec.repo, repo_type="dataset", revision=spec.revision))
     val = [f for f in files if fnmatchcase(f, spec.val_files)]
-    write_json(os.path.join(raw_dir(name), "manifest.json"),
-               {"train": [f for f in files if fnmatchcase(f, spec.train_files) and f not in val], "val": val})
+    directories = defaultdict(list)
+    for f in files:
+        if fnmatchcase(f, spec.train_files) and f not in val:
+            directories[os.path.dirname(f)].append(f)
+    train = [f for turn in itertools.zip_longest(*directories.values()) for f in turn if f is not None]
+    write_json(os.path.join(raw_dir(name), "manifest.json"), {"train": train, "val": val})
 
 
 def materialize(name, file):

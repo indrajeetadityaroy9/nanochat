@@ -121,7 +121,9 @@ def find_last_step(checkpoint_dir):
 # -----------------------------------------------------------------------------
 # convenience functions that take into account nanochat's directory structure
 
-def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=None):
+def load_model(device, phase, model_tag=None, step=None):
+    """(model, tokenizer, metadata) of a base_train checkpoint; by default the largest model's last step."""
+    checkpoints_dir = os.path.join(get_base_dir(), "base_checkpoints")
     if model_tag is None:
         # guess the model tag by defaulting to the largest model
         model_tag = find_largest_model(checkpoints_dir)
@@ -131,39 +133,5 @@ def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=Non
         # guess the step by defaulting to the last step
         step = find_last_step(checkpoint_dir)
     assert step is not None, f"No checkpoints found in {checkpoint_dir}"
-    # build the model
     log0(f"Loading model from {checkpoint_dir} with step {step}")
-    model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
-    return model, tokenizer, meta_data
-
-def load_model(source, *args, **kwargs):
-    model_dir = {
-        "base": "base_checkpoints",
-        "sft": "chatsft_checkpoints",
-        "rl": "chatrl_checkpoints",
-    }[source]
-    base_dir = get_base_dir()
-    checkpoints_dir = os.path.join(base_dir, model_dir)
-    return load_model_from_dir(checkpoints_dir, *args, **kwargs)
-
-def load_optimizer_state(source, device, rank, model_tag=None, step=None):
-    """Load just the optimizer shard for a given rank, without re-loading the model."""
-    model_dir = {
-        "base": "base_checkpoints",
-        "sft": "chatsft_checkpoints",
-        "rl": "chatrl_checkpoints",
-    }[source]
-    base_dir = get_base_dir()
-    checkpoints_dir = os.path.join(base_dir, model_dir)
-    if model_tag is None:
-        model_tag = find_largest_model(checkpoints_dir)
-    checkpoint_dir = os.path.join(checkpoints_dir, model_tag)
-    if step is None:
-        step = find_last_step(checkpoint_dir)
-    optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
-    if not os.path.exists(optimizer_path):
-        log0(f"Optimizer checkpoint not found: {optimizer_path}")
-        return None
-    log0(f"Loading optimizer state from {optimizer_path}")
-    optimizer_data = torch.load(optimizer_path, map_location=device)
-    return optimizer_data
+    return build_model(checkpoint_dir, step, device, phase)

@@ -1,17 +1,12 @@
 """
-What sets the code corpora apart from the general-domain ones, whose Hub files are used as they are:
+What sets the code corpora apart from the text ones, whose Hub files are used as they are:
 - fetch materializes each code source into zstd parquet files of one row per source file (swh.py, stack_v3.py): the
   columns every code file has (text, language, document_id, repository, path, license_type, detected_licenses), then
   its source's own metadata;
-- training reads RefineCode through SAMPLING (sources.read_training_documents);
 - compile splits a file longer than a row losslessly at line ends (segment).
 """
 
 import numpy as np
-
-# Share of each RefineCode program_lang that OpenCoder trained on (arXiv 2411.04905, 2.1.1: Java 449 -> 200 GB, HTML
-# 474 -> 64 GB); other languages are kept whole
-SAMPLING = {"refinecode_stackv2_reconstructed": {"java": 200 / 449, "html": 64 / 474}}
 
 
 def segment(doc, row_len, ends_line):
