@@ -9,8 +9,9 @@ import fnmatch
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from huggingface_hub import HfApi
 
-from nanochat.data.storage import list_repo_files, fetch_repo_file
+from nanochat.data.storage import fetch_repo_file
 
 
 class HubDataset:
@@ -44,7 +45,7 @@ def load_hub_dataset(repo, revision, files):
     which are downloaded once (storage.fetch_repo_file) and read in sorted order.
     Under torchrun, each file is downloaded by one rank while the others wait.
     """
-    filenames = sorted(f for f in list_repo_files(repo, revision) if fnmatch.fnmatchcase(f, files))
+    filenames = sorted(f for f in HfApi().list_repo_files(repo, repo_type="dataset", revision=revision) if fnmatch.fnmatchcase(f, files))
     assert filenames, f"No files of {repo}@{revision} match {files!r}"
     tables = [pq.read_table(fetch_repo_file(repo, revision, filename)) for filename in filenames]
     return HubDataset(pa.concat_tables(tables))

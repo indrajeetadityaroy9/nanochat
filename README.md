@@ -39,8 +39,9 @@ Datasets (raw corpora, compiled token rows, task data, the CORE bundle) live und
 [runs/speedrun.sh](runs/speedrun.sh) runs the full pipeline; on an 8XH100 node it takes ~1.5 hours:
 
 ```bash
-python -m nanochat.tokenizer                              # BPE tokenizer, vocab 32768
-python -m nanochat.data.pretrain.compile --max-files=170   # fetch, tokenize + pack once into a file of token rows per split
+python -m nanochat.data.pretrain.fetch --dataset=climbmix --max-files=170   # the only download: 170 raw files + val
+python -m nanochat.tokenizer                              # BPE tokenizer, vocab 32768, on the fetched files
+python -m nanochat.data.pretrain.compile --max-files=170   # tokenize + pack once into a file of token rows per split
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8
 torchrun --standalone --nproc_per_node=gpu -m scripts.base_eval -- --device-batch-size=16   # CORE, bpb, samples
 torchrun --standalone --nproc_per_node=gpu -m scripts.chat_sft
@@ -55,64 +56,127 @@ Optional stage: `scripts.chat_rl` (GRPO-style RL on GSM8K, evaluate with `chat_e
 
 ## Data
 
-All dataset and data-loading code lives in [nanochat/data](nanochat/data), one package per stage: `pretrain/`, `posttrain/` (SFT and RL) and `eval/`. Pretraining corpora are tokenized and packed once into one file of token rows per split on local disk, which training memory-maps in place (modules of `pretrain/`):
+All dataset and data-loading code lives in [nanochat/data](nanochat/data), one package per stage: `pretrain/`, `posttrain/` (SFT and RL) and `eval/`. Pretraining data is fetched once into local files, the only network step; the tokenizer, compile and training read only those files. Corpora are tokenized and packed once into one file of token rows per split, which training memory-maps in place (modules of `pretrain/`):
 
 ```
-HF Hub parquet, pinned commits          sources.py    raw corpus registry, files fetched on demand
+HF Hub, Software Heritage, pinned       fetch.py      the only network step: resumable, deterministic, tmux-safe
+  ▼
+raw/<corpus>/: parquet + manifest.json  sources.py    general-domain corpora as published, code in one schema
   ▼
 drop eval-contaminated docs, tokenize,  compile.py    once, CPU-parallel, deterministic
-BOS-aligned best-fit pack               decontam.py   13-gram overlap with CORE / chat-eval items
+split long code files, best-fit pack    decontam.py   13-gram overlap with CORE / chat-eval items
   ▼
 {train,val}.bin: packed token rows                    under <base_dir>/data/compiled, on local NVMe
   ▼
-numpy.memmap                            stream.py     elastic deterministic order, pinned memory
+numpy.memmap, weighted mixture          stream.py     elastic deterministic order, pinned memory
   ▼
 GPU
 ```
 
-Post-training and evaluation share the chat tasks of [task.py](nanochat/data/task.py), each reading one split of a pinned HF dataset repo. `eval/` holds the benchmarks: the CORE bundle (`core.py`) and the chat evals ARC, MMLU, GSM8K and HumanEval with their graders. `posttrain/` holds SmolTalk and the SFT task mixture and packing loader (`sft.py`). SFT also trains on the MMLU and GSM8K train splits, RL on GSM8K's with its grader as the reward, and pretraining decontaminates against the eval sets, so those stages import from `eval/` and `eval/` imports from neither. Every file is downloaded on first use through `storage.py`, under a per-file lock, so the ranks on a node download it once.
+Post-training and evaluation share the chat tasks of [task.py](nanochat/data/task.py), each reading one split of a pinned HF dataset repo. `eval/` holds the benchmarks: the CORE bundle (`core.py`) and the chat evals ARC, MMLU, GSM8K and HumanEval with their graders. `posttrain/` holds SmolTalk and the SFT task mixture and packing loader (`sft.py`). SFT also trains on the MMLU and GSM8K train splits, RL on GSM8K's with its grader as the reward, and pretraining decontaminates against the eval sets, so those stages import from `eval/` and `eval/` imports from neither. These files are small and downloaded on first use through `storage.py`, under a per-file lock, so the ranks on a node download each once.
 
 ### Corpora
 
-Pretraining corpora are registered in `DATASETS` in [nanochat/data/pretrain/sources.py](nanochat/data/pretrain/sources.py), each pinned to a commit. `--dataset` selects one for tokenizer training, compilation and pretraining; it is recorded in the checkpoint, so `base_eval` measures bpb on the same data:
+Pretraining corpora are registered in `DATASETS` in [sources.py](nanochat/data/pretrain/sources.py), each pinned to a commit. `--dataset` takes a corpus or a weighted mixture of corpora (below) for tokenizer training and pretraining; it is recorded in the checkpoint, so `base_eval` measures bpb on the same data, per corpus:
 
 ```bash
-python -m nanochat.tokenizer --dataset=dclm_100b
-python -m nanochat.data.pretrain.compile --dataset=dclm_100b --max-files=20
-torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --dataset=dclm_100b --depth=12
+python -m nanochat.data.pretrain.fetch --dataset=smol_pdfedu_dclm_fwedu --max-files=20
+python -m nanochat.tokenizer --dataset=smol_pdfedu_dclm_fwedu
+python -m nanochat.data.pretrain.compile --dataset=smol_pdfedu_dclm_fwedu --max-files=20
+torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --dataset=smol_pdfedu_dclm_fwedu --depth=12
 ```
 
-| `--dataset` | HuggingFace repo | Released | License | Files |
-|---|---|---|---|---|
-| `climbmix` (default) | karpathy/climbmix-400b-shuffle | 2025 | MIT card, CC-BY-NC-4.0 upstream | 6,543 × ~250M chars |
-| `smol_pdfedu_dclm_fwedu` | HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
-| `smol_pdf_dclm_fwedu` | HuggingFaceFW/finepdfs_50BT-dclm_30BT-fineweb_edu_20BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
-| `dclm_100b` | HuggingFaceFW/dclm_100BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
-| `fineweb_edu_100b` | HuggingFaceFW/fineweb_edu_100BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
-| `finepdfs_edu_100b` | HuggingFaceFW/finepdfs_edu_100BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
-| `txt360_v2_web` | IFM/TxT360-v2 (`web-high-medium`) | 2026 | CC-BY-4.0 | 828 × ~2GB |
+| Domain | `--dataset` | Source | Released | License | On the Hub |
+|---|---|---|---|---|---|
+| Code | `stack_edu` | HuggingFaceTB/stack-edu metadata; text from Software Heritage | 2025 | per file (`license_type`) | 167M files, 15 languages |
+| Code | `refinecode_stackv2_reconstructed` | OpenCoder-LLM/RefineCode-code-corpus-meta, blob IDs from bigcode/the-stack-v2; text from Software Heritage | 2024 | per file | 306M files: its The Stack v2 part, without notebooks |
+| Code | `stack_v3` | HuggingFaceCode/stack-v3-train | 2026 | ODC-BY; per file | 8,192 parts, 173M repositories |
+| General | `climbmix` (default) | karpathy/climbmix-400b-shuffle | 2025 | MIT card, CC-BY-NC-4.0 upstream | 6,543 × ~250M chars |
+| General | `smol_pdfedu_dclm_fwedu` | HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT-shuffled | 2026 | ODC-BY | 100 × ~1B tokens |
+| General | `txt360_v2_web` | IFM/TxT360-v2 (`web-high-medium`) | 2026 | CC-BY-4.0 | 828 × ~2 GB, ~1.1B tokens each |
 
-`--max-files` counts raw files, whose sizes differ between corpora, so size it by the tokens a run needs. The tokenizer lives in `$NANOCHAT_BASE_DIR/tokenizer` and is retrained per corpus; use a separate `NANOCHAT_BASE_DIR` per corpus to keep several side by side.
+`--max-files` counts local files, whose sizes differ between corpora, so size it by the tokens a run needs: compile reports every file's tokens. The tokenizer lives in `$NANOCHAT_BASE_DIR/tokenizer`; train one on the intended distribution and keep it for every run being compared (see Mixtures).
 
-To add a corpus, add a `DatasetSpec(repo, train_files, val_files, revision)` entry:
+To add a general-domain corpus, add a `TextCorpus(repo, revision, train_files, val_files)` entry: parquet files with one document per row and its raw text in a `text` column (only that column is read); `val_files` selects the held-out file(s), which are excluded from train; `revision` is pinned to a commit sha. Gated repos need `HF_TOKEN` (or `hf auth login`) and accepted terms.
 
-- Parquet files with one document per row and raw text in a `text` column (only that column is read).
-- `val_files` selects the held-out file(s); they are excluded from train.
-- `revision` pinned to a commit sha. Gated repos need `HF_TOKEN` (or `hf auth login`) and accepted terms.
+### Fetching
+
+`python -m nanochat.data.pretrain.fetch --dataset=<corpus> --max-files=N` ([fetch.py](nanochat/data/pretrain/fetch.py)) is the only step that downloads pretraining data. It first writes `raw/<corpus>/manifest.json`, which fixes the order of every train unit and the val units, then completes the val units and the train units in that order until the first N train files are local, in parallel. Every shard is written under a temporary name and renamed once complete, and a code unit counts as complete only once its sidecar JSON (its files and statistics) exists, so an interrupted fetch is simply run again, and a larger N adds only the missing units. The tokenizer and compile read only complete units and fail with the fetch command when a corpus has not been fetched or too few of its units are complete.
+
+Run long fetches in tmux so they survive a dropped session (from the repository root; data under `~/nanochat-runs/data`, logs under `~/nanochat-runs/logs`):
+
+```bash
+docker build -f docker/Dockerfile --build-arg BASE_IMAGE=nvcr.io/nvidia/pytorch:26.08-py3 -t nanochat .
+mkdir -p ~/nanochat-runs/logs
+tmux new-session -d -s fetch-stack_edu -c "$PWD" "bash -o pipefail -c 'docker run --rm --ipc=host \
+  --user $(id -u):$(id -g) -e HOME=/tmp --name fetch-stack_edu -v $HOME/.cache/huggingface/token:/tmp/hftoken:ro \
+  -e HF_TOKEN_PATH=/tmp/hftoken -e NANOCHAT_BASE_DIR=/runs -v $HOME/nanochat-runs:/runs \
+  -v $PWD:/workspace/nanochat:ro -w /workspace/nanochat nanochat \
+  python -m nanochat.data.pretrain.fetch --dataset=stack_edu --max-files=8 2>&1 | tee -a $HOME/nanochat-runs/logs/fetch-stack_edu.log'"
+tmux attach -t fetch-stack_edu   # watch; detach with Ctrl-b d. `docker stop fetch-stack_edu` stops the fetch
+```
+
+`python -m nanochat.data.pretrain.verify --dataset=<corpus>` reports how many units of each split are complete, in manifest order, and checks a fetch: for code, in one DuckDB scan, every document is non-empty, its `content_hash` matches its text, its language and provenance are present, and a `stack_v3` text is `size_bytes` long; for stack_edu and refinecode_stackv2_reconstructed, their overlap (below): over both whole manifests, every `in_stack_edu` flag must equal whether the blob is a Stack-Edu blob, and no fetched RefineCode document with a Stack-Edu blob may be unflagged. For a general-domain corpus it checks that every local file has the sha256 that fetch recorded for the pinned Hub file, and reports documents, characters, empty documents, exact duplicates, val documents whose exact text is also in fetched train, and exact copies of the other general-domain corpora's fetched documents. It exits with status 1 when a check fails.
+
+### Code corpora
+
+The three code corpora are materialized into zstd parquet shards of one document schema (`DOCUMENT_COLUMNS` in sources.py: text, source_dataset, language, document_id, content_hash, repository, repository_id, path, in_stack_edu, in_refinecode, license_type, detected_licenses, then source-specific columns), with 1,024-document row groups.
+
+- `stack_edu` and `refinecode_stackv2_reconstructed` ([fetch_swh.py](nanochat/data/pretrain/fetch_swh.py)) publish metadata only. Each file's text comes from Software Heritage's public S3 bucket by blob ID, fetched anonymously with [obstore](https://developmentseed.org/obstore/) (whose client retries throttled and failed requests), a process per unit and a thread pool in each, and is verified: a blob ID is the sha1 of the file's bytes. A blob absent from the bucket, corrupt or not decodable is dropped; a request that still fails after the retries stops the fetch, which a rerun resumes, so an outage never leaves a shard short of blobs. Both metadata sets are grouped by language, so the DuckDB-built manifest holds out for val the whole repositories first in seeded hash order that fit in one shard of text, the one val shard, and orders the other files by a seeded hash before cutting ~250 MB shards: every shard mixes all languages.
+- Software Heritage holds each file's original bytes, so fetch normalizes them ([sanitize.py](nanochat/data/pretrain/sanitize.py)): a leading comment block that mentions a copyright is removed (Pygments lexes it by the file's path), and credentials become `<SECRET>` (private keys, JSON web tokens, passwords in URLs, and cloud and API keys found by detect-secrets' provider detectors), email addresses `<EMAIL>` and public IPv4 addresses `<IP>`. On the fetched Stack-Edu shards, 3.1% of documents gained `<EMAIL>`, 0.37% `<IP>` and 0.11% `<SECRET>`, and 0.7% of characters changed; files that were only a copyright header are dropped. Names are not detected.
+- `refinecode_stackv2_reconstructed` is RefineCode's released file selection, not the text OpenCoder trained on, and is named for what it is. The metadata covers RefineCode's files that are also in The Stack v2 (337M (repository, path) rows, about half its raw code, and none of its code-related web data); its manifest joins them with `bigcode/the-stack-v2` on the path for blob IDs (gated: accept its terms on the Hub; 398 GiB of metadata, downloaded for the join and deleted after): 91.75% resolve, to 306M unique blobs without Jupyter notebooks. Notebooks are excluded because RefineCode trained on them converted to StarCoder's Jupyter-structured format, which its release does not specify; as raw `.ipynb` JSON they were 48.4% of the fetched bytes against 1.8% of RefineCode's recorded bytes. RefineCode's copyright and PII removal was not released either, so the sanitizer above is an independent, documented equivalent rather than a byte-for-byte reconstruction (before it, 93.5% of fetched files already matched RefineCode's recorded size). Its training-time downsampling (Java 449 → 200 GB, HTML 474 → 64 GB) is applied when training reads the corpus (Mixtures), so the local corpus keeps every selected file.
+- `stack_v3` ([fetch_stack_v3.py](nanochat/data/pretrain/fetch_stack_v3.py)) carries the (PII-redacted) text inline, one repository per row, in 8,192 hash-partitioned parts. The manifest orders the parts by a seeded hash. The first part's first row group is val (whole repositories), and each train part gives one shard per row group, repositories kept whole and in order for later repository-aware work. It is used as published: its publisher near-deduplicated the whole corpus (MinHash, Jaccard ≥ 0.7) and applied StarCoder2's quality filters, so nanochat does not deduplicate it again ([dev/LOG.md](dev/LOG.md) has the measurement).
+- Identity: `document_id` is the source's own (the Software Heritage blob ID; Stack v3's `content_id`, the sha1 of the bytes before redaction), and `content_hash`, the sha1 of the stored (for Software Heritage, sanitized) text, is exact identity across all sources.
+
+A quarter of RefineCode's blobs (77M of 306M) are also Stack-Edu blobs. Each corpus is materialized whole, so either can be used alone, and RefineCode's documents record `in_stack_edu`. A mixture of both uses `refinecode_stackv2_reconstructed-without-stack_edu` (compile with `--without=stack_edu`), so no blob is trained on twice, and the tokenizer's sample skips them likewise.
+
+### General-domain corpora
+
+The three general-domain corpora are the pinned Hub parquet files, kept as they are; training reads their `text` column. Each manifest records every file's sha256 at the pinned revision, which `verify` checks. Measured on 8 train files and val of `climbmix` and `txt360_v2_web`, and 2 and val of `smol_pdfedu_dclm_fwedu` (tokens with a six-corpus vocab-32768 tokenizer):
+
+| | `climbmix` | `smol_pdfedu_dclm_fwedu` | `txt360_v2_web` |
+|---|---|---|---|
+| per train file | 85k documents, 252M chars, 56M tokens | 500k documents, 4.2B chars, 950M tokens | 930k documents, 4.7B chars, 1.14B tokens |
+| sources (share of characters) | ClimbMix | FinePDFs-Edu 0.47, DCLM 0.32, FineWeb-Edu 0.21 | web 0.93 (Common Crawl 0.66, ClueWeb 0.19, HPLT 0.08), curated text 0.07 (S2ORC, PubMed Central, MegaMath, arXiv, Wikipedia, ...) |
+| exact duplicates | 0.019% | 0.14% (DCLM and FineWeb-Edu) | 1 in 8.08M |
+| val documents with an exact copy in each train file | 0.006% | 0.084% | 0 |
+| dropped as eval-contaminated | 0.07% | 0.27% | 0.14% |
+| tokens cropped at seq 2048 | 13.0% | 59.8% | 48.7% |
+
+- TxT360's sources are in the same shares in every row group sampled across its two source files (chunk0, chunk1), so neither a short fetch, which reads only chunk0, nor its val file (the last of chunk1) is a biased sample.
+- Val is held out by file. ClimbMix and Smol-Data repeat some val documents exactly in their train files, mostly boilerplate pages (one Smol-Data page appears 140 times in 2 train files), so a run over N train files has trained on at most N times the share above: ClimbMix at 170 files ≤1.0%, Smol-Data at 20 files ≤1.7% (dev/DATA_ROADMAP.md, Open 7).
+- Across corpora, 97 documents are exact copies between ClimbMix and Smol-Data, 2 between Smol-Data and TxT360, none between ClimbMix and TxT360.
+- General-domain documents are packed whole, so one longer than a row keeps only its first row: Smol-Data and TxT360 lose about half their tokens (dev/DATA_ROADMAP.md, Open 1).
+
+### Mixtures
+
+`--dataset` takes weights, e.g. `stack_edu:0.3,refinecode_stackv2_reconstructed:0.3,stack_v3:0.15,smol_pdfedu_dclm_fwedu:0.25`. Each corpus is compiled on its own, and training interleaves their rows by a deterministic low-discrepancy schedule (global row k goes to the corpus whose cumulative-weight interval contains frac(k·φ)), so every prefix of a run matches the weights and new weights need no rebuild. base_train prints each corpus's weight next to its share of the planned rows, and base_eval reports bpb per corpus.
+
+Which documents of a corpus training reads is decided in one place, `read_training_documents` in [sources.py](nanochat/data/pretrain/sources.py), used by both the tokenizer's sample and compile: `refinecode_stackv2_reconstructed` keeps 200/449 of its Java and 64/474 of its HTML (`SAMPLING`), the documents whose sha256 of the blob ID, as an integer, falls below share × 2²⁵⁶, so the choice is deterministic and does not depend on shards (blob IDs themselves are not uniform enough: 58.9M Java IDs fall below 0.4454 at a share of 0.4391); and a corpus mixed with one it overlaps drops the documents it shares with it. Compile's `dropped_unselected` counts both.
+
+```bash
+MIX=stack_edu:0.3,refinecode_stackv2_reconstructed:0.3,stack_v3:0.15,smol_pdfedu_dclm_fwedu:0.25
+python -m nanochat.tokenizer --dataset=$MIX   # once, then kept for every run being compared
+for c in stack_edu stack_v3 smol_pdfedu_dclm_fwedu; do python -m nanochat.data.pretrain.compile --dataset=$c --max-files=8; done
+python -m nanochat.data.pretrain.compile --dataset=refinecode_stackv2_reconstructed --without=stack_edu --max-files=8
+torchrun --standalone --nproc_per_node=gpu -m scripts.base_train -- --dataset=$MIX --depth=12
+```
+
+The tokenizer samples each corpus by its weight and writes the sample's composition and the bytes per token of held-out prose and code, by language, to `tokenizer_stats.json`. Train it once on the intended distribution and keep it for all runs being compared, so a mixture ablation does not also change the tokenizer.
 
 ### Compiled rows
 
-`python -m nanochat.data.pretrain.compile` tokenizes each raw file once and packs documents into rows of `seq_len + 1` tokens that each start with a document's BOS: the longest buffered document that fits goes next, and when none fits the shortest is cropped to fill the row, so there is no padding. The buffer holds `--buffer-docs` documents (default 16000): a fuller buffer finds more exact fits, which on ClimbMix halves the tokens lost to cropping (22% at 1000, 12% at 16000, against an 11% floor set by documents longer than a row, of which only the first row is kept). Raw files are packed in parallel, one per CPU, and their rows are written in raw file order, so the output does not depend on the number of CPUs.
+`python -m nanochat.data.pretrain.compile` tokenizes each raw file once and packs its documents into rows of `seq_len + 1` tokens that each start with a document's BOS, by best fit over the whole file: the longest remaining document that fits goes next, and when none fits the shortest is cropped to fill the row, so there is no padding. With the whole file to choose from, cropping comes almost only from documents longer than a row, of which only the first row is kept: on a ClimbMix shard 11.39% of tokens against an 11.3% floor, on a TxT360 file 36.8% against 36.7% (a 16000-document buffer cropped 11.8% and 48.4%). Code is split losslessly first: a file longer than a row becomes consecutive pieces of at most a row, each with its own BOS and cut after the last line-ending token that fits (or at the row limit inside a line longer than a row), so length handling drops no token and packing sees pieces instead of cropping files. Raw files are packed in parallel, one per CPU (`ProcessPoolExecutor`, so a worker's error, including a Rust panic, stops compile with it), and their rows are written in raw file order, so the output does not depend on the number of CPUs. Per file and split, compile writes `<split>.json` next to the compiled file: documents, documents dropped as unselected or eval-contaminated, segmented documents and their pieces, tokens entering packing, rows, and tokens cropped.
 
-A compiled split is one flat file of token rows, `uint16` while the vocabulary fits, at `$NANOCHAT_BASE_DIR/data/compiled/<dataset>-T<seq_len>-<fingerprint>/{train,val}.bin`. It is keyed by corpus, sequence length and tokenizer fingerprint, so changing any of them needs a recompile, and it appears only once compile has finished. Training reads it in place with `numpy.memmap`.
+A compiled split is one flat file of token rows, `uint16` while the vocabulary fits, at `$NANOCHAT_BASE_DIR/data/compiled/<dataset>-T<seq_len>-<fingerprint>/{train,val}.bin`. It is keyed by corpus, sequence length and tokenizer fingerprint, so changing any of them needs a recompile, and it appears only once compile has finished. `{train,val}.json` beside it records the settings that produced it (corpus, `--without`, the sampling shares, sequence length, tokenizer fingerprint, decontamination n-gram size and the sha256 of the eval n-gram set) and per-file statistics. Training reads it in place with `numpy.memmap`.
 
 ### Decontamination
 
-Before tokenization, compile drops every document that shares a 13-word sequence (`--decontam-ngram`) with an item of the evaluation sets nanochat reports: every CORE task in the eval bundle's `core.yaml`, and the ARC-Easy, ARC-Challenge, MMLU and GSM8K test splits and HumanEval used by `chat_eval` ([nanochat/data/pretrain/decontam.py](nanochat/data/pretrain/decontam.py)). Words are lowercased alphanumeric runs, so formatting differences do not hide a match. The corpora are not decontaminated by their publishers (Nemotron-CC, the bulk of ClimbMix, explicitly is not), and without this step benchmark text seen in pretraining inflates CORE and ChatCORE. Compile prints how many documents it dropped.
+Before tokenization, compile drops every document that shares a 13-word sequence (`--decontam-ngram`) with an item of the evaluation sets nanochat reports: every CORE task in the eval bundle's `core.yaml`, and the ARC-Easy, ARC-Challenge, MMLU and GSM8K test splits and HumanEval used by `chat_eval` ([nanochat/data/pretrain/decontam.py](nanochat/data/pretrain/decontam.py)). Words are lowercased alphanumeric runs, so formatting differences do not hide a match; a document's n-gram hashes are looked up exactly, in sorted order, in the sorted eval n-gram hashes. The corpora are not decontaminated by their publishers (Nemotron-CC, the bulk of ClimbMix, explicitly is not), and without this step benchmark text seen in pretraining inflates CORE and ChatCORE. Compile prints how many documents it dropped.
 
 ### Loading
 
-- Each epoch visits every row once, in a permutation seeded by `--data-seed` and the epoch; validation and `base_eval` read the rows in stored order. The global row order depends only on the seed and the data, never on the number of GPUs or nodes, and every optimizer step covers the same rows at any GPU count. The checkpoint stores only the rows consumed, so a run resumes exactly, even on a different number of GPUs.
+- Each epoch of a corpus visits every row once, in a permutation seeded by `--data-seed` and the epoch; validation and `base_eval` read the rows in stored order. A mixture interleaves the corpora by their weights as above. The global row order depends only on the seed, the weights and the data, never on the number of GPUs or nodes, and every optimizer step covers the same rows at any GPU count. The checkpoint stores only the rows consumed, so a run resumes exactly, even on a different number of GPUs.
 - The training process gathers each micro-batch from the memory-mapped file into pinned memory and copies it to the GPU asynchronously: on a GB10, 0.09 ms per 16-row micro-batch with the file in the page cache and 0.2 ms from NVMe. There is no tokenization or packing during training.
 
 ## Containers (NGC / Docker)
@@ -121,7 +185,7 @@ Before tokenization, compile drops every document that shares a 13-word sequence
 
 ```bash
 docker build -f docker/Dockerfile -t nanochat .
-docker compose -f docker/compose.yaml run --rm prepare  # train tokenizer, fetch raw corpus, compile
+docker compose -f docker/compose.yaml run --rm prepare  # fetch the raw corpus, train the tokenizer, compile
 docker compose -f docker/compose.yaml run --rm train    # train on every GPU
 ```
 

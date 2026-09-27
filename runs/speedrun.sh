@@ -31,12 +31,13 @@ if [ -z "$WANDB_RUN" ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Data: raw corpus -> tokenizer -> compiled token rows
+# Data: fetch the raw corpus -> tokenizer -> compiled token rows
 
-# train the tokenizer with vocab size 2**15 = 32768 on ~2B characters of data (it downloads the raw files it reads)
+# fetch the first 170 raw files (~150 for GPT-2 capability, plus 20 of padding) and the val file: the only download
+python -m nanochat.data.pretrain.fetch --dataset=climbmix --max-files=170
+# train the tokenizer with vocab size 2**15 = 32768 on ~2B characters of the fetched files
 python -m nanochat.tokenizer
-# download, tokenize and pack the first 170 raw files (~150 for GPT-2 capability, plus 20 of padding) into token
-# rows once, on all CPUs
+# tokenize and pack the 170 raw files into token rows once, on all CPUs
 python -m nanochat.data.pretrain.compile --max-files=170
 
 # -----------------------------------------------------------------------------

@@ -7,9 +7,10 @@ HuggingFace dataset repos are read at pinned commits; their files live at <data_
 """
 
 import os
+import json
 
 from filelock import FileLock
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import hf_hub_download
 
 from nanochat.common import get_base_dir
 
@@ -26,8 +27,12 @@ def fetch(path, download):
     return path
 
 
-def list_repo_files(repo, revision):
-    return HfApi().list_repo_files(repo, repo_type="dataset", revision=revision)
+def write_json(path, obj):
+    """Write JSON atomically: readers see the old file or the complete new one."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(obj, f, indent=1)
+    os.replace(path + ".tmp", path)
 
 
 def fetch_repo_file(repo, revision, filename):

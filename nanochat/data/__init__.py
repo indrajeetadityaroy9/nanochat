@@ -1,16 +1,21 @@
 """
 All dataset and data-loading components of nanochat: one package per stage, and two modules they share.
-    storage.py    the data root, <base_dir>/data, and downloads: each file once, on first use, under a lock
+    storage.py    the data root, <base_dir>/data; task and eval files are downloaded once, on first use, under a lock
     task.py       chat tasks: the Task base, one split of a pinned HF dataset repo, the multiple-choice prompt format
 
 pretrain/
-    raw corpus (HF parquet, pinned)          sources.py
-        │  drop eval-contaminated docs, tokenize, BOS-aligned best-fit packing, once, CPU-parallel
+    HF Hub, Software Heritage (pinned)       fetch.py, fetch_swh.py, fetch_stack_v3.py: the only network step
+        │  resumable, deterministic; code into one document schema, Software Heritage text sanitized (sanitize.py:
+        │  copyright headers, PII, credentials); verify.py checks a fetch
+        ▼
+    local corpus files + manifest.json       sources.py: the registry, local reads, training selection, mixtures
+        │  select training documents (published downsampling, overlaps), drop eval-contaminated docs, tokenize,
+        │  split long code files, BOS-aligned best-fit packing, once
         ▼
     one file of packed token rows per split  compile.py, decontam.py
         │  mmap'd in place from local NVMe
         ▼
-    deterministic elastic row order          stream.py
+    weighted, elastic row order              stream.py
         │  pinned memory, asynchronous copy
         ▼
     GPU
@@ -22,7 +27,8 @@ SFT also trains on the MMLU and GSM8K train splits, RL on GSM8K's with its grade
 decontaminates against the eval sets, so those stages import from eval/; eval/ imports from neither.
 
 Everything is stored under <base_dir>/data:
-    <org>/<repo>/                          HF dataset files (raw corpora, task data) at repo-relative paths
-    compiled/<dataset>-T<seq_len>-<tok>/   {train,val}.bin: packed token rows
+    raw/<corpus>/                          fetched corpora: manifest.json, then files (code: shards and their sidecars)
+    compiled/<dataset>-T<seq_len>-<tok>/   {train,val}.bin: packed token rows; {train,val}.json: their statistics
+    <org>/<repo>/                          task data at repo-relative paths (and metadata while a manifest is built)
     eval_bundle/                           CORE data
 """

@@ -1,7 +1,7 @@
 # nanochat pretraining on node-local data. One rank per visible GPU on the node (torchrun --nproc-per-node=gpu),
 # or set NPROC_PER_NODE.
 #
-#   docker compose -f docker/compose.yaml run --rm prepare     # tokenizer, raw corpus -> packed token rows
+#   docker compose -f docker/compose.yaml run --rm prepare     # fetch the raw corpus -> tokenizer -> packed token rows
 #   docker compose -f docker/compose.yaml run --rm train       # train on the compiled rows
 #
 # Set DATA_HOST to node-local NVMe: it holds the raw corpora and compiled data.
@@ -42,7 +42,8 @@ services:
   prepare:
     <<: *nanochat
     command: >-
-      bash -c 'python -m nanochat.tokenizer --dataset="$$DATASET" &&
+      bash -c 'python -m nanochat.data.pretrain.fetch --dataset="$$DATASET" --max-files="$$NUM_FILES" &&
+      python -m nanochat.tokenizer --dataset="$$DATASET" &&
       python -m nanochat.data.pretrain.compile --dataset="$$DATASET" --seq-len="$$SEQ_LEN" --max-files="$$NUM_FILES"'
 
   train:
