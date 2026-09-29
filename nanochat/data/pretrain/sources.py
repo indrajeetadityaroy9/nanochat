@@ -1,16 +1,26 @@
 """
-Pretraining corpora: the registry and their local files.
+Pretraining corpora: the registry, their files on the Hub, and their local files.
+
+A corpus's Hub parquet files (hub_files) are its TextCorpus.train_files, which include val, or its CodeCorpus.files,
+listed at the pinned commit, sorted. open_hub_file resolves one once, a request on the Hub's resolver rate limit (not
+its API limit), and reads it from the storage URL it redirects to by HTTP range requests: the footer, then the row
+groups read.
 
 A corpus's manifest.json lists the files of each split in order (fetch.py writes it): the pinned Hub parquet files of a
-text corpus (TextCorpus), or the zstd parquet files fetch materializes for a code corpus (CodeCorpus, code/).
-Everything here reads the local files under <data_dir>/raw/<name>/ in that order, up to the first missing one, and
-fails with the fetch command when a corpus, or enough of its files, has not been fetched.
+text corpus, or the zstd parquet files fetch materializes for a code corpus (code/). The local reads here take the
+files under <data_dir>/raw/<name>/ in that order, up to the first missing one, and fail with the fetch command when a
+corpus, or enough of its files, has not been fetched.
 """
 
 import os
 import json
 import itertools
+from fnmatch import fnmatchcase
 from dataclasses import dataclass
+
+import fsspec
+import pyarrow.parquet as pq
+from huggingface_hub import HfApi, get_hf_file_metadata, hf_hub_url
 
 from nanochat.data.storage import get_data_dir
 
@@ -19,6 +29,7 @@ from nanochat.data.storage import get_data_dir
 class CodeCorpus:
     repo: str         # Hub dataset repo the corpus is built from (metadata only for Stack-Edu)
     revision: str     # pinned commit
+    files: str        # glob over repo paths of the parquet files it is built from (`*` also matches `/`)
 
 
 @dataclass
@@ -35,15 +46,17 @@ DATASETS = {
     "stack_edu": CodeCorpus(
         repo="HuggingFaceTB/stack-edu",
         revision="eeec5caac5cc3758a18f1d3ba4416837a9ba814c",
+        files="*/train-*.parquet",
     ),
     # The Stack v3 (2026) train split: 173M GitHub repositories (August 2025), near-deduplicated and filtered by its
-    # publisher, one repository per row with its PII-redacted text inline; ODC-BY
+    # publisher, one repository per row with its PII-redacted text inline; ODC-BY. Fetch keeps its source code only
+    # (code/stack_v3.py)
     "stack_v3": CodeCorpus(
         repo="HuggingFaceCode/stack-v3-train",
         revision="1f61b735bc0a5698345ce2196730f24bfa467f33",
+        files="data/*.parquet",
     ),
-    # Text corpora: the Hub parquet files as published, `text` column. Fetch lists train files sorted, directories taken
-    # in turn, so the first N take every source alike; val is held out by file
+    # Text corpora: the Hub parquet files as published, `text` column; val is held out by file
     # OpenCoder (2024): code-related pages recalled from FineWeb by fastText; 510 files of ~198k documents, each mixing
     # Common Crawl dumps; MIT
     "opc_fineweb_code": TextCorpus(
@@ -67,26 +80,22 @@ DATASETS = {
         train_files="shard_*.parquet",
         val_files="shard_06542.parquet",
     ),
-    # HuggingFace Smol-Data (2026), ODC-BY: ~100B tokens of FinePDFs-Edu (~50B), DCLM (~30B) and FineWeb-Edu (~20B),
-    # each source in its own directory of 100 files (source in `dataset`); val is the last file of each source
-    "smol_pdfedu_dclm_fwedu": TextCorpus(
-        repo="HuggingFaceFW/finepdfs_edu_50BT-dclm_30BT-fineweb_edu_20BT",
-        revision="c6ff5c68259ca98f23ecffe245d5f0da4598e704",
-        train_files="*_100BT/*.parquet",
-        val_files="*_100BT/000_00099.parquet",
-    ),
-    # TxT360-v2 (2026) web-high-medium, CC-BY-4.0: its Medium-High quality bucket, 828 shards of ~0.93M documents from
-    # two source files (chunk0, chunk1). English web (Common Crawl, ClueWeb, HPLT) is 93% of the characters, curated
-    # text (S2ORC, PubMed Central, arXiv, Wikipedia, ...) the rest, in the same shares in every sampled row group.
-    # Updating a source file replaces its shards, so the revision pins them.
-    "txt360_v2_web": TextCorpus(
-        repo="IFM/TxT360-v2",
-        revision="a86bdfb101ebaaf71b445f95fb0f9b9bc2a47511",
-        train_files="web-high-medium/*.parquet",
-        val_files="web-high-medium/Medium-High.chunk1-5d0785ab03-00413.parquet",
-    ),
 }
 DEFAULT_DATASET = "climbmix"
+
+
+def hub_files(name):
+    """The corpus's parquet files on the Hub at the pinned commit, sorted."""
+    spec = DATASETS[name]
+    pattern = spec.files if isinstance(spec, CodeCorpus) else spec.train_files
+    return sorted(f for f in HfApi().list_repo_files(spec.repo, repo_type="dataset", revision=spec.revision) if fnmatchcase(f, pattern))
+
+
+def open_hub_file(name, file):
+    """A parquet file of the corpus on the Hub, read by HTTP range requests at the storage URL it resolves to."""
+    spec = DATASETS[name]
+    meta = get_hf_file_metadata(hf_hub_url(spec.repo, file, repo_type="dataset", revision=spec.revision))
+    return pq.ParquetFile(fsspec.filesystem("https").open(meta.location, cache_type="none", size=meta.size))
 
 
 def raw_dir(name):

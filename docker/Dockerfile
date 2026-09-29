@@ -30,6 +30,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     python -c "import torch, flash_attn.cute"
 
 COPY . .
-# HF_XET_HIGH_PERFORMANCE: saturate network and CPUs when pulling raw corpora from the Hugging Face Hub
+# HF_XET_HIGH_PERFORMANCE: saturate network and CPUs when pulling raw corpora from the Hugging Face Hub. The compiler and
+# kernel caches (Inductor, Triton, quack, FlashAttention-4 CuTe) live under /runs so that every run after the first reuses
+# compiled kernels and autotuning results instead of redoing them in each fresh container.
 ENV NANOCHAT_BASE_DIR=/runs HF_HOME=/runs/data/huggingface \
-    HF_XET_HIGH_PERFORMANCE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 OMP_NUM_THREADS=1 PYTHONUNBUFFERED=1
+    HF_XET_HIGH_PERFORMANCE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 OMP_NUM_THREADS=1 PYTHONUNBUFFERED=1 \
+    TORCHINDUCTOR_CACHE_DIR=/runs/cache/inductor TRITON_CACHE_DIR=/runs/cache/triton QUACK_CACHE_DIR=/runs/cache/quack \
+    FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1 FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=/runs/cache/flash_attn_cute

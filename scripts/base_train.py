@@ -27,10 +27,10 @@ import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.data.pretrain.sources import DEFAULT_DATASET
-from nanochat.data.pretrain.stream import PretrainingBatches
+from nanochat.data.pretrain.stream import PretrainingBatches, parse_mixture
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer
-from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
+from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint, find_last_step
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from scripts.base_eval import evaluate_core
@@ -45,7 +45,7 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 # Data
-parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus (nanochat/data/pretrain/sources.py), compiled with nanochat.data.pretrain.compile (default: {DEFAULT_DATASET})")
+parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus, or weighted mixture 'name:weight,name:weight,...' (nanochat/data/pretrain/sources.py), compiled with nanochat.data.pretrain.compile (default: {DEFAULT_DATASET})")
 parser.add_argument("--data-seed", type=int, default=42, help="seed of the global data order")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
@@ -69,6 +69,7 @@ parser.add_argument("--warmup-steps", type=int, default=40, help="number of step
 parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR")
 parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable)")
+parser.add_argument("--init-from", type=str, default=None, help="model tag whose last checkpoint initializes the weights; each corpus's data continues where that run stopped")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on")
@@ -139,11 +140,21 @@ base_dir = get_base_dir()
 output_dirname = args.model_tag if args.model_tag else f"d{args.depth}" # e.g. d12
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
 resuming = args.resume_from_step != -1
+data_start = {} # rows of each corpus's global sequence consumed before this run
 if resuming:
     print0(f"Resuming optimization from step {args.resume_from_step}")
     model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, args.resume_from_step, device, load_optimizer=True, rank=ddp_rank)
     model.load_state_dict(model_data, strict=True, assign=True)
     del model_data # free up this memory after the copy
+    data_start = meta_data["dataloader_state_dict"]["start"]
+elif args.init_from:
+    init_dir = os.path.join(base_dir, "base_checkpoints", args.init_from)
+    init_step = find_last_step(init_dir)
+    print0(f"Initializing from {args.init_from} step {init_step}")
+    model_data, _, init_meta = load_checkpoint(init_dir, init_step, device, rank=ddp_rank)
+    model.load_state_dict(model_data, strict=True, assign=True)
+    del model_data
+    data_start = init_meta["dataloader_state_dict"]["rows"]
 
 # -----------------------------------------------------------------------------
 # FP8 training initialization and management (this has to be done before torch.compile)
@@ -227,7 +238,7 @@ def disable_fp8(model):
 # Compile the model
 
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+model = torch.compile(model, dynamic=False, fullgraph=True) # the inputs to model will never change shape so dynamic=False is safe; a graph break is an error, not a silent slowdown
 
 # -----------------------------------------------------------------------------
 # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.
@@ -316,14 +327,15 @@ scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
-# Batches of the compiled token rows (python -m nanochat.data.pretrain.compile) of the corpus.
-# The global row order does not depend on the number of GPUs, so the data state is just the number of rows consumed:
+# Batches of the compiled token rows (python -m nanochat.data.pretrain.compile) of the corpus or mixture.
+# Each corpus's global row order does not depend on the number of GPUs, so the data state is the rows the run consumed:
 # a resumed run continues exactly where it stopped, on any number of GPUs.
+mixture = parse_mixture(args.dataset)
 rows_per_step = total_batch_size // args.max_seq_len
 data_kwargs = dict(seq_len=args.max_seq_len, batch_rows=args.device_batch_size, device=device, rank=ddp_rank, world_size=ddp_world_size)
-rows_consumed = meta_data["dataloader_state_dict"]["rows"] if resuming else 0
-train_batches = PretrainingBatches(args.dataset, "train", tokenizer, start_row=rows_consumed, seed=args.data_seed, **data_kwargs)
-val_batches = PretrainingBatches(args.dataset, "val", tokenizer, **data_kwargs)
+run_rows = meta_data["dataloader_state_dict"]["run_rows"] if resuming else 0
+train_batches = PretrainingBatches(mixture, "train", tokenizer, start=data_start, run_start=run_rows, seed=args.data_seed, **data_kwargs)
+val_batches = PretrainingBatches(mixture, "val", tokenizer, **data_kwargs)
 train_iter = iter(train_batches)
 x, y = next(train_iter) # kick off load of the very first batch of data
 
@@ -350,6 +362,8 @@ total_tokens = total_batch_size * num_iterations # the actual number of tokens w
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
 print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
+train_batches.require(num_iterations * rows_per_step) # each corpus is read once: fail now if it holds fewer rows than the run reads
+val_batches.require(args.eval_tokens // args.max_seq_len)
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
 def get_lr_multiplier(it):
@@ -482,7 +496,7 @@ while True:
                 "device_batch_size": args.device_batch_size,
                 "max_seq_len": args.max_seq_len,
                 "total_batch_size": total_batch_size,
-                "dataloader_state_dict": {"rows": rows_consumed},
+                "dataloader_state_dict": {"start": data_start, "run_rows": run_rows, "rows": train_batches.rows_after(run_rows)},
                 "loop_state": { # all loop state (other than step) so that we can resume training
                     "min_val_bpb": min_val_bpb,
                     "smooth_train_loss": smooth_train_loss,
@@ -532,7 +546,7 @@ while True:
     else:
         optimizer.step()
     model.zero_grad(set_to_none=True)
-    rows_consumed += rows_per_step
+    run_rows += rows_per_step
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
     t1 = time.time()
@@ -558,7 +572,7 @@ while True:
         eta_str = f" | eta: {eta_seconds/60:.1f}m"
     else:
         eta_str = ""
-    epoch = rows_consumed / len(train_batches.rows)
+    epoch = max(rows / len(train_batches.rows[name]) for name, rows in train_batches.rows_after(run_rows).items()) # share read of the most-read corpus (one pass at most)
     print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch:.4f} | total time: {total_training_time/60:.2f}m{eta_str}")
     if step % 100 == 0:
         log_data = {
@@ -585,6 +599,11 @@ while True:
         gc.collect() # manually collect a lot of garbage from setup
         gc.freeze() # immediately freeze all currently surviving objects and exclude them from GC
         gc.disable() # nuclear intervention here: disable GC entirely except:
+        if device_type == "cuda":
+            # Inductor autotuning copied mutated kernel arguments larger than the free device memory (the logits-sized loss
+            # gradient) to pinned host memory, which the host cache keeps for the life of the process; the graphs are now
+            # compiled (evaluation runs before the first step)
+            torch.accelerator.empty_host_cache()
     elif step % 5000 == 0: # every 5000 steps...
         gc.collect() # manually collect, just to be safe for very, very long runs
 

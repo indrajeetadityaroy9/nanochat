@@ -34,6 +34,8 @@ x-nanochat: &nanochat
   environment: *env
   volumes: *volumes
   ipc: host # NCCL uses shared memory, which Docker otherwise limits to 64MB
+  init: true # the trainer is not PID 1, which ignores SIGTERM: a stop or an out-of-memory kill ends it cleanly
+  oom_score_adj: 1000 # its GPU memory is invisible to the kernel's badness score: make it the first OOM victim anyway
   ulimits:
     memlock: -1
     stack: 67108864
@@ -48,13 +50,8 @@ services:
 
   train:
     <<: *nanochat
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    devices:
+      - nvidia.com/gpu=all # CDI: unlike --gpus, GPU access survives a systemd daemon-reload
     command: >-
       bash -c 'torchrun $$TORCHRUN_ARGS --nproc-per-node="$$NPROC_PER_NODE" -m scripts.base_train --
       --dataset="$$DATASET" --max-seq-len="$$SEQ_LEN" $$TRAIN_ARGS'

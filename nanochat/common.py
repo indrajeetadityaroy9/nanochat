@@ -116,6 +116,20 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
     else:
         device = torch.device(device_type) # mps|cpu
 
+    if device_type == "cuda" and torch.cuda.get_device_properties(device).is_integrated:
+        # A unified-memory GPU (DGX Spark GB10) allocates from the host's RAM. Its R580 driver neither charges these pages
+        # to cgroups nor counts them in process memory, and an allocation past the free RAM makes it reclaim without end
+        # instead of failing. Capping the caching allocator at the RAM available now, less the tenth of RAM that earlyoom
+        # keeps free by default, makes a run that does not fit raise torch.OutOfMemoryError; memory outside the allocator
+        # (CUDA context, compile workers) is left to earlyoom, which then stops the run first.
+        with open("/proc/meminfo") as f:
+            meminfo = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in f}
+        cap = meminfo["MemAvailable"] - meminfo["MemTotal"] // 10
+        index = torch.cuda.current_device() # this rank's GPU: DDP set it above
+        torch.cuda.set_per_process_memory_fraction(cap / torch.cuda.get_device_properties(index).total_memory, index)
+        if ddp_rank == 0:
+            logger.info(f"Unified memory: caching allocator capped at {cap / 2**30:.1f} GiB (MemAvailable less a tenth of RAM)")
+
     if ddp_rank == 0:
         logger.info(f"Distributed world size: {ddp_world_size}")
 

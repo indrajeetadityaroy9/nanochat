@@ -22,7 +22,46 @@ import torch.nn.functional as F
 from nanochat.common import get_dist_info, print0, COMPUTE_DTYPE
 from nanochat.optim import MuonAdamW
 
-from flash_attn.cute import flash_attn_func
+from flash_attn.cute.interface import _flash_attn_fwd, _flash_attn_bwd
+
+
+# FlashAttention-4 as torch.library ops, causal with `window_left` keys before each query. Its autograd.Function launches
+# CuTe kernels that torch.compile cannot trace: that broke the compiled graph at every layer and left the loss unfused.
+@torch.library.custom_op("nanochat::flash_attn", mutates_args=())
+def flash_attn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, window_left: int) -> tuple[torch.Tensor, torch.Tensor]:
+    out, lse, _, _ = _flash_attn_fwd(q, k, v, causal=True, window_size_left=window_left, window_size_right=0, return_lse=True)
+    return out, lse
+
+
+@flash_attn.register_fake
+def _(q, k, v, window_left):
+    B, T, H, _ = q.shape
+    return torch.empty_like(q), q.new_empty((B, H, T), dtype=torch.float32)
+
+
+@torch.library.custom_op("nanochat::flash_attn_bwd", mutates_args=())
+def flash_attn_bwd(dout: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor,
+                   lse: torch.Tensor, window_left: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return tuple(_flash_attn_bwd(q, k, v, out, dout, lse, None, True, 0.0, window_size_left=window_left, window_size_right=0))
+
+
+@flash_attn_bwd.register_fake
+def _(dout, q, k, v, out, lse, window_left):
+    return torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
+
+
+def _flash_attn_setup_context(ctx, inputs, output):
+    q, k, v, ctx.window_left = inputs
+    ctx.save_for_backward(q, k, v, *output)
+
+
+def _flash_attn_backward(ctx, dout, dlse):
+    q, k, v, out, lse = ctx.saved_tensors
+    return *flash_attn_bwd(dout, q, k, v, out, lse, ctx.window_left), None
+
+
+flash_attn.register_autograd(_flash_attn_backward, setup_context=_flash_attn_setup_context)
+
 
 @dataclass
 class GPTConfig:
@@ -113,7 +152,7 @@ class CausalSelfAttention(nn.Module):
             # Advance position after last layer processes
             if self.layer_idx == kv_cache.n_layers - 1:
                 kv_cache.advance(T)
-        y = flash_attn_func(q, k, v, causal=True, window_size=window_size)[0]
+        y = flash_attn(q, k, v, window_size[0])[0]
 
         # Re-assemble the heads and project back to residual stream
         y = y.contiguous().view(B, T, -1)

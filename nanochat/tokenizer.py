@@ -1,9 +1,10 @@
 """
 BPE Tokenizer in the style of GPT-4: train with rustbpe, inference with tiktoken.
 
-Train on a pretraining corpus (writes <base_dir>/tokenizer/tokenizer.pkl and tokenizer_stats.json):
+Train on pretraining corpora, an equal share of --max-chars from each (writes <base_dir>/tokenizer/tokenizer.pkl and
+tokenizer_stats.json):
 python -m nanochat.tokenizer
-python -m nanochat.tokenizer --dataset=stack_edu
+python -m nanochat.tokenizer --dataset=stack_edu,climbmix
 """
 
 import os
@@ -117,16 +118,18 @@ if __name__ == "__main__":
     from nanochat.data.pretrain.sources import DATASETS, DEFAULT_DATASET, CodeCorpus, list_raw_files, require_raw_files, fetch_command
 
     parser = argparse.ArgumentParser(description="Train a BPE tokenizer on the pretraining data")
-    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus (nanochat/data/pretrain/sources.py) (default: {DEFAULT_DATASET})")
+    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET, help=f"pretraining corpus, or comma-separated corpora, each an equal share of --max-chars (nanochat/data/pretrain/sources.py) (default: {DEFAULT_DATASET})")
     parser.add_argument("--max-chars", type=int, default=2_000_000_000, help="Maximum characters to train on (default: 2B)")
     parser.add_argument("--doc-cap", type=int, default=10_000, help="Maximum characters per document (default: 10,000)")
     parser.add_argument("--vocab-size", type=int, default=32768, help="Vocabulary size (default: 32768 = 2^15)")
     args = parser.parse_args()
     print(f"dataset: {args.dataset} | max_chars: {args.max_chars:,} | doc_cap: {args.doc_cap:,} | vocab_size: {args.vocab_size:,}")
-    code = isinstance(DATASETS[args.dataset], CodeCorpus)
+    datasets = args.dataset.split(",")
+    share = args.max_chars // len(datasets)
 
-    def iter_batches(paths):
+    def iter_batches(name, paths):
         """(texts, languages) per row group of the corpus's files, in order; a code corpus also reads its language column."""
+        code = isinstance(DATASETS[name], CodeCorpus)
         for path in paths:
             pf = pq.ParquetFile(path)
             for i in range(pf.num_row_groups):
@@ -134,27 +137,29 @@ if __name__ == "__main__":
                 texts = table.column("text").to_pylist()
                 yield texts, table.column("language").to_pylist() if code else [None] * len(texts)
 
-    composition = {"chars": 0, "documents": 0} | ({"languages": {}} if code else {})  # the training sample (per language for code)
+    # the training sample of each corpus (per language for code)
+    composition = {name: {"chars": 0, "documents": 0} | ({"languages": {}} if isinstance(DATASETS[name], CodeCorpus) else {}) for name in datasets}
 
-    def text_iterator():
-        """Train documents in file order, each cropped to doc_cap characters, until max_chars characters have been seen."""
-        for texts, languages in iter_batches(list_raw_files(args.dataset, "train")):
+    def corpus_texts(name):
+        """Train documents of a corpus in file order, each cropped to doc_cap characters, until its share is seen."""
+        counts = composition[name]
+        for texts, languages in iter_batches(name, list_raw_files(name, "train")):
             for doc, language in zip(texts, languages):
                 doc = doc[:args.doc_cap]
-                composition["chars"] += len(doc)
-                composition["documents"] += 1
-                if code:
-                    per_language = composition["languages"].setdefault(language, {"chars": 0, "documents": 0})
+                counts["chars"] += len(doc)
+                counts["documents"] += 1
+                if language is not None:
+                    per_language = counts["languages"].setdefault(language, {"chars": 0, "documents": 0})
                     per_language["chars"] += len(doc)
                     per_language["documents"] += 1
                 yield doc
-                if composition["chars"] > args.max_chars:
+                if counts["chars"] > share:
                     return
-        raise FileNotFoundError(f"'{args.dataset}' train: the completed files hold {composition['chars']:,} characters, short of "
-                                f"{args.max_chars:,}: fetch more files, raising --max-files: `{fetch_command(args.dataset)}`")
+        raise FileNotFoundError(f"'{name}' train: the completed files hold {counts['chars']:,} characters, short of its share "
+                                f"{share:,}: fetch more files, raising --max-files: `{fetch_command(name)}`")
 
     t0 = time.time()
-    tokenizer = RustBPETokenizer.train_from_iterator(text_iterator(), args.vocab_size)
+    tokenizer = RustBPETokenizer.train_from_iterator((doc for name in datasets for doc in corpus_texts(name)), args.vocab_size)
     print(f"Training time: {time.time() - t0:.2f}s")
     tokenizer.save(get_tokenizer_dir())
 
@@ -167,24 +172,27 @@ Unicode: 你好世界 🌍"""
     assert tokenizer.decode(tokenizer.encode(test_text)) == test_text
 
     print("Training sample composition:")
-    print(f"  {args.dataset}: {composition['chars']:,} chars, {composition['documents']:,} documents")
-    for language, counts in sorted(composition.get("languages", {}).items(), key=lambda kv: -kv[1]["chars"]):
-        print(f"    {language:<24} {counts['chars']:>15,} chars {counts['documents']:>12,} documents")
+    for name, counts in composition.items():
+        print(f"  {name}: {counts['chars']:,} chars, {counts['documents']:,} documents")
+        for language, per_language in sorted(counts.get("languages", {}).items(), key=lambda kv: -kv[1]["chars"]):
+            print(f"    {language:<24} {per_language['chars']:>15,} chars {per_language['documents']:>12,} documents")
 
     # Held-out categories: prose for a text corpus, code by Linguist language family; unlisted languages are other code
     CODE_CATEGORIES = {"Python": "Python", "C": "C/C++", "C++": "C/C++", "Java": "Java", "JavaScript": "JavaScript/TypeScript",
                        "TypeScript": "JavaScript/TypeScript", "Go": "Go", "Rust": "Rust"}
     CATEGORIES = ["general prose", *dict.fromkeys(CODE_CATEGORIES.values()), "other code"]
-    totals = {}  # category -> chars, bytes, tokens over the corpus's first val file
-    for texts, languages in iter_batches(require_raw_files(args.dataset, "val")[:1]):
-        for text, language, ids in zip(texts, languages, tokenizer.encode(texts)):
-            total = totals.setdefault(CODE_CATEGORIES.get(language, "other code") if code else "general prose", {"chars": 0, "bytes": 0, "tokens": 0})
-            total["chars"] += len(text)
-            total["bytes"] += len(text.encode("utf-8"))
-            total["tokens"] += len(ids)
+    totals = {}  # category -> chars, bytes, tokens over each corpus's first val file
+    for name in datasets:
+        code = isinstance(DATASETS[name], CodeCorpus)
+        for texts, languages in iter_batches(name, require_raw_files(name, "val")[:1]):
+            for text, language, ids in zip(texts, languages, tokenizer.encode(texts)):
+                total = totals.setdefault(CODE_CATEGORIES.get(language, "other code") if code else "general prose", {"chars": 0, "bytes": 0, "tokens": 0})
+                total["chars"] += len(text)
+                total["bytes"] += len(text.encode("utf-8"))
+                total["tokens"] += len(ids)
     heldout = {c: totals[c] | {"bytes_per_token": totals[c]["bytes"] / totals[c]["tokens"], "chars_per_token": totals[c]["chars"] / totals[c]["tokens"]}
                for c in CATEGORIES if c in totals}
-    print("Held-out statistics (first val file):")
+    print("Held-out statistics (first val file of each corpus):")
     print(f"  {'category':<24} {'chars':>15} {'bytes':>15} {'tokens':>15} {'bytes/token':>12} {'chars/token':>12}")
     for category, s in heldout.items():
         print(f"  {category:<24} {s['chars']:>15,} {s['bytes']:>15,} {s['tokens']:>15,} {s['bytes_per_token']:>12.3f} {s['chars_per_token']:>12.3f}")

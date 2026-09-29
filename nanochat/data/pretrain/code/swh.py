@@ -40,11 +40,11 @@ def build_manifest(name):
     root = raw_dir(name)
     os.makedirs(root, exist_ok=True)
     meta = os.path.join(get_data_dir(), spec.repo)
-    snapshot_download(spec.repo, repo_type="dataset", revision=spec.revision, allow_patterns="*/train-*.parquet", local_dir=meta)
+    snapshot_download(spec.repo, repo_type="dataset", revision=spec.revision, allow_patterns=spec.files, local_dir=meta)
     with tempfile.TemporaryDirectory(dir=get_data_dir()) as spill, duckdb.connect(config={"temp_directory": spill}) as con:
         con.execute(f"""CREATE TABLE files AS SELECT blob_id AS document_id, language, repo_name AS repository,
             ltrim(path, '/') AS path, length_bytes, license_type, detected_licenses, src_encoding, score, int_score
-            FROM read_parquet('{meta}/*/train-*.parquet', union_by_name = true)""")
+            FROM read_parquet('{meta}/{spec.files}', union_by_name = true)""")
         con.execute(f"""CREATE TABLE val_repos AS SELECT repository FROM (
             SELECT repository, sum(bytes) OVER (ORDER BY md5(repository) ROWS UNBOUNDED PRECEDING) AS cumulative
             FROM (SELECT repository, sum(length_bytes) AS bytes FROM files GROUP BY repository))

@@ -9,9 +9,10 @@ pretrain/
         │  resumable, deterministic; text corpora's files as they are, code materialized as the sources' text
         ▼
     local corpus files + manifest.json       sources.py: the registry and local reads
-        │  drop eval-contaminated docs, tokenize, split long code files, BOS-aligned best-fit packing, once
+        │  drop train copies of val docs, tokenize, split long documents at line ends, BOS-aligned lossless best-fit
+        │  packing, once
         ▼
-    one file of packed token rows per split  compile.py, decontam.py
+    one file of packed token rows per split  compile.py
         │  mmap'd in place from local NVMe
         ▼
     weighted, elastic row order              stream.py
@@ -19,8 +20,7 @@ pretrain/
         ▼
     GPU
 
-eval/         the CORE bundle (core.py) and the ARC, MMLU, GSM8K and HumanEval test sets, which pretraining
-              decontaminates against
+eval/         the CORE bundle (core.py) and the ARC, MMLU, GSM8K, HumanEval and MBPP test sets
 
 Everything is stored under <base_dir>/data:
     raw/<corpus>/                          fetched corpora: manifest.json, then the files it lists

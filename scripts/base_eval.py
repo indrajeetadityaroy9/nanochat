@@ -29,7 +29,7 @@ from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir,
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
 from nanochat.data.eval.core import get_eval_bundle_dir
-from nanochat.data.pretrain.stream import PretrainingBatches
+from nanochat.data.pretrain.stream import PretrainingBatches, parse_mixture
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 
@@ -111,7 +111,7 @@ def main():
     parser.add_argument('--max-per-task', type=int, default=-1, help='Max examples per CORE task (-1 = all)')
     parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation')
     parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
-    parser.add_argument('--dataset', type=str, default=None, help='Pretraining corpus for BPB (default: the corpus the checkpoint was trained on)')
+    parser.add_argument('--dataset', type=str, default=None, help='Pretraining corpus or mixture for BPB, each corpus scored alone (default: what the checkpoint was trained on)')
     parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
     args = parser.parse_args()
 
@@ -186,12 +186,12 @@ def main():
             print0(f"Adjusted split_tokens to {args.split_tokens} (must be divisible by {tokens_per_step})")
         steps = args.split_tokens // tokens_per_step
 
-        # the compiled data of the corpus, read in order from the start of each split
-        dataset = args.dataset or meta["user_config"]["dataset"]
-        for split_name in ["train", "val"]:
-            loader = PretrainingBatches(dataset, split_name, tokenizer, seq_len=sequence_len, batch_rows=args.device_batch_size,
-                                        device=device, rank=ddp_rank, world_size=ddp_world_size)
-            print0(f"{dataset} {split_name} bpb: {evaluate_bpb(model, loader, steps, token_bytes):.6f}")
+        # the compiled data of each corpus, read in order from the start of each split
+        for dataset in parse_mixture(args.dataset or meta["user_config"]["dataset"]):
+            for split_name in ["train", "val"]:
+                loader = PretrainingBatches({dataset: 1.0}, split_name, tokenizer, seq_len=sequence_len, batch_rows=args.device_batch_size,
+                                            device=device, rank=ddp_rank, world_size=ddp_world_size)
+                print0(f"{dataset} {split_name} bpb: {evaluate_bpb(model, loader, steps, token_bytes):.6f}")
 
     # --- CORE evaluation ---
     if 'core' in eval_modes:
