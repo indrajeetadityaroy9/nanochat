@@ -1,6 +1,6 @@
-# nanochat: code pretraining on a DGX Spark
+# nanochat
 
-Work in progress: a fork of [karpathy/nanochat](https://github.com/karpathy/nanochat) for pretraining a code-generation LLM on one NVIDIA DGX Spark (GB10).
+Work in progress: a fork of [karpathy/nanochat](https://github.com/karpathy/nanochat)
 
 ## Setup
 
