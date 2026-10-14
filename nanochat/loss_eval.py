@@ -20,7 +20,7 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     2) No special tokens (e.g. <|bos|>) are included in the metric - they are masked out.
     3) No actively masked tokens (using ignore_index of e.g. -1) are included in the metric.
 
-    In addition to evaluate_loss, we need the token_bytes tensor:
+    Besides the model and batches, we need the token_bytes tensor:
     It is a 1D tensor of shape (vocab_size,), indicating the number of bytes for
     each token id, or 0 if the token is to not be counted (e.g. special tokens).
     """

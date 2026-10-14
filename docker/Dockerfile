@@ -11,7 +11,7 @@
 #
 #   docker build -f docker/Dockerfile -t nanochat .
 
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.08-py3
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.09-py3
 FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
 
 FROM ${BASE_IMAGE}

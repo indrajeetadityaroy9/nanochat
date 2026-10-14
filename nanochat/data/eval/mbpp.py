@@ -1,6 +1,6 @@
 """
 MBPP, Mostly Basic Python Problems (https://huggingface.co/datasets/google-research-datasets/mbpp, the full
-configuration): a task description, a reference solution and its assert tests per problem.
+configuration): a task description, a reference solution and its assert tests per problem. Read by scripts/demix.py.
 """
 
 from nanochat.data.task import Task, load_hub_dataset

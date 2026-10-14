@@ -3,7 +3,7 @@ Unified evaluation script for base models.
 
 Supports three evaluation modes (comma-separated):
   --eval core    : CORE metric (accuracy on ICL tasks)
-  --eval bpb     : Bits per byte on the train/val splits of the pretraining corpus
+  --eval bpb     : Bits per byte on the train/val splits of each pretraining corpus
   --eval sample  : Generate samples from the model
 
 Default is all three: --eval core,bpb,sample

@@ -1,7 +1,6 @@
 """
-Benchmark tasks, read by pretraining decontamination (pretrain/decontam.py): a Task is a sliceable dataset of a
-benchmark's items as conversations. Tasks read one split of a pinned HF dataset repo (load_hub_dataset), and
-multiple-choice tasks share one prompt format (render_mc).
+Benchmark tasks, the base of the eval/ datasets: a Task is a sliceable dataset of a benchmark's items. Tasks read one
+split of a pinned HF dataset repo (load_hub_dataset), and multiple-choice tasks share one prompt format (render_mc).
 """
 
 import os

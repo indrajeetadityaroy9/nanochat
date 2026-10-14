@@ -2,7 +2,7 @@
 The Stack v3 train split (HuggingFaceCode/stack-v3-train): one GitHub repository per row, its files' text inline, in
 parts of whole repositories.
 
-The manifest orders the parts by md5 of their path: the first part's first row group is val, and every row group of the
+The manifest orders the parts by md5 of their path: the first part's row groups are val, and every row group of the
 others is a train file, read from the Hub by its byte range. A file is its row group's repositories flattened to one row
 per source file, in repository order (documents): the file's fields (content as text, content_id, the sha1 of its
 original bytes, as document_id, file_path as path), then its repository's (repo_path as repository).
@@ -31,17 +31,17 @@ LINGUIST = "https://raw.githubusercontent.com/github-linguist/linguist/v9.2.0/li
 def build_manifest(name):
     parts = sorted(hub_files(name), key=lambda p: hashlib.md5(p.encode()).hexdigest())
     with ThreadPoolExecutor() as pool:
-        groups = list(pool.map(lambda p: open_hub_file(name, p).num_row_groups, parts[1:]))
+        groups = list(pool.map(lambda p: open_hub_file(name, p).num_row_groups, parts))
     linguist = yaml.safe_load(urllib.request.urlopen(LINGUIST).read())
     languages = sorted({language for language, spec in linguist.items() if spec["type"] == "programming"} | {"SQL"})
     stems = [os.path.basename(p).removesuffix(".parquet") for p in parts]
     write_json(os.path.join(raw_dir(name), "manifest.json"), {
-        "train": [f"train/{s}-{g}.parquet" for s, n in zip(stems[1:], groups) for g in range(n)],
-        "val": [f"val/{stems[0]}-0.parquet"],
+        "train": [f"train/{s}-{g}.parquet" for s, n in zip(stems[1:], groups[1:]) for g in range(n)],
+        "val": [f"val/{stems[0]}-{g}.parquet" for g in range(groups[0])],
         "languages": languages,
     })
-    print(f"{name}: manifest of {sum(groups)} train row groups of {len(parts) - 1} parts, 1 val row group, "
-          f"{len(languages)} languages kept", flush=True)
+    print(f"{name}: manifest of {sum(groups[1:])} train row groups of {len(parts) - 1} parts, {groups[0]} val row groups "
+          f"(the first part), {len(languages)} languages kept", flush=True)
 
 
 def documents(repos):

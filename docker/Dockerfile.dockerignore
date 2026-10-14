@@ -2,8 +2,8 @@
 **/*.pyc
 .git
 .venv
+.env
 wandb
 docker/data
 docker/runs
-dev/*.ipynb
-dev/*.png
+dev

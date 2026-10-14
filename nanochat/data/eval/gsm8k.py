@@ -1,6 +1,5 @@
 """
-GSM8K math word problems (https://huggingface.co/datasets/openai/gsm8k), read by pretraining decontamination
-(decontam.py), which hashes every string of an item. Example:
+GSM8K math word problems (https://huggingface.co/datasets/openai/gsm8k). Example:
 
 Question:
 Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?

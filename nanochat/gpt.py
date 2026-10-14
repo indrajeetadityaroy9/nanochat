@@ -195,7 +195,7 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         # Compute per-layer window sizes for sliding window attention
-        # window_size is (left, right) tuple: (-1, 0) for full context, (N, 0) for sliding window
+        # window_size is a (left, 0) tuple: left = sequence_len for full context, a quarter of it for a short window
         self.window_sizes = self._compute_window_sizes(config)
         # Pad vocab for efficiency (DDP, tensor cores). This is just an optimization - outputs are cropped in forward().
         # https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.resize_token_embeddings
@@ -208,8 +208,8 @@ class GPT(nn.Module):
         })
         self.lm_head = Linear(config.n_embd, padded_vocab_size, bias=False)
         # Per-layer learnable scalars (inspired by modded-nanogpt)
-        # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
-        # x0_lambdas: blends initial embedding back in at each layer (init 0.0 = disabled)
+        # resid_lambdas: scales the residual stream at each layer
+        # x0_lambdas: blends initial embedding back in at each layer
         # Separate parameters so they can have different optimizer treatment
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))   # fake init, real init in init_weights()
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))     # fake init, real init in init_weights()
@@ -237,14 +237,14 @@ class GPT(nn.Module):
         """
         Initialize the full model in this one function for maximum clarity.
 
-        wte (embedding):     normal, std=1.0
+        wte (embedding):     normal, std=0.8
         lm_head:             normal, std=0.001
         for each block:
             attn.c_q:        uniform, std=1/sqrt(n_embd)
             attn.c_k:        uniform, std=1/sqrt(n_embd)
             attn.c_v:        uniform, std=1/sqrt(n_embd)
             attn.c_proj:     zeros
-            mlp.c_fc:        uniform, std=1/sqrt(n_embd)
+            mlp.c_fc:        uniform, std=0.4/sqrt(n_embd)
             mlp.c_proj:      zeros
         """
 
@@ -300,7 +300,6 @@ class GPT(nn.Module):
                 ve.to(dtype=COMPUTE_DTYPE)
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=100000, device=None):
-        # TODO: bump base theta more? e.g. 100K is more common more recently
         # autodetect the device from model embeddings
         if device is None:
             device = self.transformer.wte.weight.device
@@ -392,7 +391,7 @@ class GPT(nn.Module):
         Returns a dict with counts for each parameter group, so downstream analysis
         can experiment with which combination gives the cleanest scaling laws.
         """
-        # Count each group separately (mirrors the grouping in setup_optimizers)
+        # Count each group separately (mirrors the grouping in setup_optimizer)
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())

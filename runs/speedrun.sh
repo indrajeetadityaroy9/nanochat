@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script is configured to train your own GPT-2 grade LLM (pretraining + finetuning).
+# This script is configured to pretrain your own GPT-2 grade base model.
 # The time-to-GPT-2 reference is an 8XH100 node (~1.5 hours), but it runs on any number of GPUs:
 # NPROC_PER_NODE defaults to every visible GPU and gradient accumulation makes up the difference.
 # Assumes an activated environment (`uv sync && source .venv/bin/activate`) or the docker/ image.
@@ -43,7 +43,7 @@ python -m nanochat.data.pretrain.compile --max-files=170
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
 
-# d24 model (slightly undertrained to beat GPT-2 => decrease data:params ratio from compute optimal 10.5 (default) to 8)
+# d24 model (slightly undertrained to beat GPT-2 => decrease data:params ratio from the default 12 to 8)
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8 --run=$WANDB_RUN
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval -- --device-batch-size=16

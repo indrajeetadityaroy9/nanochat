@@ -1,6 +1,6 @@
 """
-HumanEval coding problems (https://huggingface.co/datasets/openai/openai_humaneval), read by pretraining
-decontamination (decontam.py), which hashes every string of an item: prompt, canonical solution and tests.
+HumanEval coding problems (https://huggingface.co/datasets/openai/openai_humaneval): a function prompt, its canonical
+solution and tests per problem. Read by scripts/demix.py (prompts and canonical solutions).
 """
 
 from nanochat.data.task import Task, load_hub_dataset

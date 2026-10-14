@@ -2,7 +2,8 @@
 Micro-batches of compiled token rows (compile.py) of one corpus or a weighted mixture of corpora, in a deterministic
 order that does not depend on the number of GPUs.
 
-A compiled split is one file of packed rows of seq_len + 1 tokens (inputs row[:-1], targets row[1:]), memory-mapped in
+A compiled split is one file of packed rows of seq_len + 1 tokens (inputs row[:-1], targets row[1:]) that may end in
+padding (pad_id), which enters as BOS and is never a target (-1, ignored by the loss and by bpb), memory-mapped in
 place. Each corpus's row sequence is one pass over its rows, permuted by the seed, or in stored order (row_order): no row
 is read twice, so a run needs as many compiled rows of each corpus as it reads, and require() fails before training,
 with the files to compile, when a corpus holds fewer. A run interleaves the corpora by their weights (mixture_rows) and
@@ -31,8 +32,13 @@ def compiled_path(dataset, split, seq_len, tokenizer):
 
 
 def token_dtype(tokenizer):
-    """The smallest unsigned integer type that holds every token id."""
-    return np.min_scalar_type(tokenizer.get_vocab_size() - 1)
+    """The smallest unsigned integer type that holds every token id and the pad id."""
+    return np.min_scalar_type(pad_id(tokenizer))
+
+
+def pad_id(tokenizer):
+    """The id that marks padding in compiled rows: the first past the vocabulary."""
+    return tokenizer.get_vocab_size()
 
 
 def parse_mixture(spec):
@@ -71,6 +77,7 @@ class PretrainingBatches:
         self.rows = {name: np.memmap(path, dtype=token_dtype(tokenizer), mode="r").reshape(-1, seq_len + 1)
                      for name, path in self.paths.items()}
         self.batch_rows, self.device, self.rank, self.world_size = batch_rows, device, rank, world_size
+        self.pad, self.bos = pad_id(tokenizer), tokenizer.get_bos_token_id()
         self.start, self.run_start, self.seed = start or {}, run_start, seed
 
     def rows_after(self, run_rows):
@@ -111,4 +118,5 @@ class PretrainingBatches:
             rows = [self.rows[self.names[c]][i] for c, i in zip(corpora, ids)][first:first + self.batch_rows]
             batch = torch.from_numpy(np.stack(rows).astype(np.int32))
             batch = batch.pin_memory().to(self.device, non_blocking=True)  # page-locked, so the copy is asynchronous
-            yield batch[:, :-1].contiguous(), batch[:, 1:].to(torch.int64)
+            pad = batch == self.pad
+            yield batch[:, :-1].masked_fill(pad[:, :-1], self.bos), batch[:, 1:].to(torch.int64).masked_fill(pad[:, 1:], -1)

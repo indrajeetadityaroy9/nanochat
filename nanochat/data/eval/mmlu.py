@@ -1,6 +1,5 @@
 """
-The MMLU dataset (https://huggingface.co/datasets/cais/mmlu), read by pretraining decontamination (decontam.py), which
-hashes every string of an item.
+The MMLU dataset (https://huggingface.co/datasets/cais/mmlu): four-choice questions across 57 subjects.
 """
 
 from nanochat.data.task import Task, load_hub_dataset, render_mc

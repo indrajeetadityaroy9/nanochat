@@ -1,6 +1,6 @@
 """
-The ARC dataset from Allen AI (https://huggingface.co/datasets/allenai/ai2_arc), read by pretraining decontamination
-(decontam.py), which hashes every string of an item.
+The ARC dataset from Allen AI (https://huggingface.co/datasets/allenai/ai2_arc): grade-school science multiple-choice
+questions, ARC-Easy and ARC-Challenge subsets.
 """
 
 from nanochat.data.task import Task, load_hub_dataset, render_mc

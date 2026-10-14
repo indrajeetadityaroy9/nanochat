@@ -1,9 +1,9 @@
 [project]
 name = "nanochat"
 version = "0.1.0"
-description = "the minimal full-stack ChatGPT clone"
+description = "nanochat fork: pretraining a code-generation LLM on an NVIDIA DGX Spark (GB10)"
 readme = "README.md"
-# the Python of NVIDIA's NGC PyTorch images (26.08: 3.12), the environment nanochat runs in
+# the Python of NVIDIA's NGC PyTorch images (26.09: 3.12), the environment nanochat runs in
 requires-python = ">=3.12"
 dependencies = [
     "duckdb>=1.5.5",

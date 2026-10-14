@@ -21,8 +21,7 @@ def _detect_compute_dtype():
         capability = torch.cuda.get_device_capability()
         if capability >= (8, 0):
             return torch.bfloat16, f"auto-detected: CUDA SM {capability[0]}{capability[1]} (bf16 supported)"
-        # fp16 training requires GradScaler (not yet implemented), so fall back to fp32.
-        # Users can still force fp16 via NANOCHAT_DTYPE=float16 if they know what they're doing.
+        # Pre-Ampere GPUs fall back to fp32; fp16 (trained with base_train's GradScaler) is opt-in via NANOCHAT_DTYPE=float16.
         return torch.float32, f"auto-detected: CUDA SM {capability[0]}{capability[1]} (pre-Ampere, bf16 not supported, using fp32)"
     # Note: MPS on recent macOS also handles bf16 fine, opt in via NANOCHAT_DTYPE=bfloat16
     return torch.float32, "auto-detected: no CUDA (CPU/MPS)"

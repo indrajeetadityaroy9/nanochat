@@ -7,8 +7,8 @@ Each document of the raw files, in order, is
   and can repeat a val document elsewhere, so val measures held-out text only once train drops its copies;
 - tokenized after a BOS and split losslessly into pieces of at most a row, each led by the BOS, cut after the last
   token of the window that ends a line (segment);
-- packed by best fit over all pieces of its raw file (pack), with no padding and no discarded token but those of the
-  file's unfinished last row.
+- packed by Best-Fit-Decreasing over all pieces of its raw file (pack, Ding et al. 2024): no piece is cut and no token
+  discarded; the end of a row that no piece fits is padding (stream.pad_id), neither context nor target in training.
 
 Val compiles first. Row groups, not files, are the unit of parallel work, so every CPU is busy however many files a
 split has. The parent packs each file once its row groups are done and writes the rows in raw file order, so the output
@@ -24,8 +24,8 @@ import hashlib
 import argparse
 import itertools
 import tempfile
-from bisect import bisect_right, insort
-from collections import Counter, defaultdict, deque
+from bisect import bisect_left, insort
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
@@ -34,7 +34,7 @@ import pyarrow.parquet as pq
 from nanochat.tokenizer import get_tokenizer
 from nanochat.data.storage import write_json
 from nanochat.data.pretrain.sources import DEFAULT_DATASET, raw_dir, require_raw_files
-from nanochat.data.pretrain.stream import compiled_path, token_dtype
+from nanochat.data.pretrain.stream import compiled_path, token_dtype, pad_id
 
 
 def text_hashes(texts):
@@ -60,41 +60,28 @@ def segment(doc, row_len, ends_line):
     return pieces
 
 
-def pack(pieces, row_len):
-    """Rows of exactly row_len tokens from pieces of at most row_len tokens, by best fit: the longest remaining piece that
-    fits goes next, the earliest among equal lengths; when none fits, the shortest fills the row and its rest, led by its
-    BOS, returns to the pieces. Only the unfinished last row is dropped. Pieces wait in one queue per length, so taking
-    one moves no other."""
-    fitting = defaultdict(deque)
-    for piece in pieces:
-        fitting[len(piece)].append(piece)
-    lengths = sorted(fitting)  # those with a piece left
-
-    def take(i):
-        """The earliest piece of lengths[i]."""
-        queue = fitting[lengths[i]]
-        if len(queue) == 1:
-            del lengths[i]
-        return queue.popleft()
-
-    while True:
-        row, remaining = [], row_len
-        while remaining:
-            if fits := bisect_right(lengths, remaining):
-                piece = take(fits - 1)
-                row.append(piece)
-                remaining -= len(piece)
-            elif lengths:  # none fits: the shortest fills the row
-                piece = take(0)
-                row.append(piece[:remaining])
-                rest = np.concatenate((piece[:1], piece[remaining:]))
-                if not fitting[len(rest)]:
-                    insort(lengths, len(rest))
-                fitting[len(rest)].append(rest)
-                break
-            else:
-                return
-        yield np.concatenate(row)
+def pack(pieces, row_len, pad):
+    """Rows of row_len tokens from pieces of at most row_len tokens by Best-Fit-Decreasing ("Fewer Truncations Improve
+    Language Modeling", Ding et al. 2024): longest first, the earliest among equal lengths, each piece goes into the row
+    with the least room that holds it, else starts a row, so no piece is cut; what a row's pieces leave is filled with
+    pad. Rows wait in one list per room, so placing a piece moves no other row."""
+    rows, waiting, rooms = [], defaultdict(list), []  # rooms: the sorted room sizes some unfilled row has
+    for piece in sorted(pieces, key=len, reverse=True):  # a stable sort: equal lengths keep document order
+        if (i := bisect_left(rooms, len(piece))) < len(rooms):
+            room = rooms[i]
+            row = waiting[room].pop()
+            if not waiting[room]:
+                del rooms[i]
+        else:
+            room, row = row_len, len(rows)
+            rows.append([])
+        rows[row].append(piece)
+        if room := room - len(piece):
+            if not waiting[room]:
+                insort(rooms, room)
+            waiting[room].append(row)
+    for row in rows:
+        yield np.concatenate(row + [np.full(row_len - sum(map(len, row)), pad, dtype=row[0].dtype)])
 
 
 _config = {}  # the split's settings, sent once per worker: the tokenizer is too large to send per task
@@ -142,17 +129,17 @@ def compile_split(dataset, split, tokenizer, val_hashes, *, seq_len, max_files):
                 pieces += part
                 stats.update(part_stats)
             rows = 0
-            for row in pack(pieces, row_len):
+            for row in pack(pieces, row_len, pad_id(tokenizer)):
                 out.write(row)
                 rows += 1
-            stats.update(rows=rows)
+            stats.update(rows=rows, padding=rows * row_len - stats["tokens"])
             total.update(stats)
             per_file.append({"file": os.path.relpath(file, raw_dir(dataset)), **stats})
         out.close()
         os.replace(out.name, path)  # the compiled file appears only once complete
     settings = dict(dataset=dataset, seq_len=seq_len, tokenizer=tokenizer.fingerprint(), val_documents=len(val_hashes))
     write_json(os.path.splitext(path)[0] + ".json", {"settings": settings, "files": per_file, "total": total})
-    print(f"{split}: {total['rows']:,} rows ({total['rows'] * row_len / total['tokens']:.2%} of the pieces' tokens) from "
+    print(f"{split}: {total['rows']:,} rows ({total['padding'] / (total['rows'] * row_len):.3%} padding) from "
           f"{total['documents'] - total['dropped_val_copies']:,} docs ({total['dropped_val_copies']:,} dropped as copies of "
           f"val documents; {total['segmented']:,} segmented into {total['pieces']:,} pieces)")
 
