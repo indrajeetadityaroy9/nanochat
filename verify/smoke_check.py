@@ -1,6 +1,7 @@
 """The smoke's metrics record (<base_dir>/metrics/<tag>.jsonl), split into launches at each "run" record: the stage
-switches, the losses of the steps both launches took (the relaunch resumes at the switch checkpoint), and per launch
-and stage the median tok/s. Usage: python -m verify.smoke_check TAG"""
+switches, per launch and context the median tok/s, and the losses of the steps both launches took (the relaunch
+resumes at the switch checkpoint). Training is bitwise deterministic (model/gpt.py), so those losses must be equal:
+exits 1 otherwise. Usage: python -m verify.smoke_check TAG"""
 import json
 import os
 import statistics
@@ -21,16 +22,21 @@ for i, launch in enumerate(launches):
     steps = sorted(launch["train"])
     print(f"launch {i}: from step {launch['start']} at seq_len {launch['stage']}, steps {steps[0]}..{steps[-1]}, "
           f"switches {launch['switch']}")
-    switch = launch["switch"][0][0] if launch["switch"] else None
-    for name, sel in (("file", [s for s in steps if switch is None or s < switch]),
-                      ("repo", [s for s in steps if switch is not None and s >= switch])):
-        sel = sel[1:]  # the launch's first step of a stage includes its compilation
+    # the launch's contexts: its starting one, then each switch's from the switch's step on
+    bounds = [(launch["start"], launch["stage"])] + [(s, seq_len) for s, seq_len, _ in launch["switch"]]
+    for (first, seq_len), (end, _) in zip(bounds, bounds[1:] + [(steps[-1] + 1, None)], strict=True):
+        sel = [s for s in steps if first <= s < end][1:]  # the launch's first step at a context includes compilation
         if sel:
-            print(f"  {name}: median tok/s {statistics.median(launch['train'][s]['tok_per_s'] for s in sel):,.0f}")
+            tok_per_s = statistics.median(launch["train"][s]["tok_per_s"] for s in sel)
+            print(f"  seq_len {seq_len}: median tok/s {tok_per_s:,.0f}")
 common = sorted(set(launches[0]["train"]) & set(launches[1]["train"]))
 print("steps in both launches (loss first, relaunch, rel diff):")
+differ = 0
 for s in common:
     a, b = launches[0]["train"][s]["loss"], launches[1]["train"][s]["loss"]
+    differ += a != b
     print(f"  {s}: {a:.6f} {b:.6f} {abs(a - b) / a:.1e}")
 last = launches[-1]["train"][max(launches[-1]["train"])]
-print(f"final step {last['step']}: loss {last['loss']:.4f}")
+print(f"final step {last['step']}: loss {last['loss']:.4f}; steps of both launches with different losses "
+      f"{differ}/{len(common)}")
+sys.exit(1 if differ or not common else 0)

@@ -123,7 +123,7 @@ class Block(nn.Module):
             gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))  # (B, T, H)
             v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
         # per head RMS norm, the q / k gain, RoPE (ops/qk_prologue.cu, one pass over memory per direction: its forward
-        # and backward take 228 ms of a d24 step where Inductor's fusion of the same ops takes 336 ms, bench/h100.txt)
+        # and backward take 168 ms of a d24 step where Inductor's fusion of the same ops takes 336 ms, bench/h100.txt)
         q, k = qk_norm_rope(q, k, self.q_gain, self.k_gain, *cos_sin)
         if kv_cache is not None:
             kv_cache.k_cache[self.layer_idx, :, :T], kv_cache.v_cache[self.layer_idx, :, :T] = k, v

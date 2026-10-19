@@ -11,8 +11,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 TREE=$HOME/nanochat-runs/trees/h100 LOGS=$HOME/nanochat-runs/logs/h100
 if [[ $(pwd -P) != "$(realpath -m "$TREE")" ]]; then
-  [[ -e $TREE ]] || rsync -a --mkpath --exclude /dev-ignore --exclude /.git --exclude /.worktrees --exclude /runs/logs \
-    --exclude __pycache__ --exclude .ruff_cache "$(pwd)/" "$TREE/"
+  [[ -e $TREE ]] || rsync -a --mkpath --exclude /dev-ignore --exclude /.git --exclude /runs/logs --exclude __pycache__ \
+    --exclude .ruff_cache "$(pwd)/" "$TREE/"
   exec "$TREE/runs/h100.sh"
 fi
 DEPTH=24 SEED=42

@@ -48,7 +48,7 @@ d24 production step, real data, 12 x 12 rows (profile_step.py 24 30 12), 2026-10
   GEMM TABLE re-swept at M = 98,304 (gemmsweep_sm90.jsonl), cuBLAS roles as torch.mm: 3,785 ms, 311.7K tok/s;
     qk prologue backward 168.4 ms, VE-gate fp32 GEMMs on CUDA cores (sm80_xmma f32 + simt sgemm) 80.6 ms.
   VE gate as an fp32 broadcast-sum, qk prologue backward persistent and atomic-free: 3,724 ms, 316.8K tok/s;
-    qk prologue backward 92.7 ms.
+    qk prologue forward 75.2 ms, backward 92.7 ms.
   Bitwise-deterministic gradients (FA4 deterministic backward, ops/embedding.cu): 3,821 ms, 308.7K tok/s (embedding
     backward run starts by a cummax scan, 48.3 ms).
 VE gate alone, fwd+bwd of gate and mix per layer at M = 98,304 (torch.utils.benchmark median), rel err vs fp64 of

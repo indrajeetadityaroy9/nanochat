@@ -1,7 +1,8 @@
 #!/bin/bash
 # Two-stage smoke on the H100: d8 at 20 tokens per scaling parameter, a checkpoint every repo_start steps (one at the
 # switch to the repo-level stage). The first launch is killed 8 steps after the switch; the relaunch resumes from the
-# switch checkpoint in the repo-level stage and finishes. Only the smoke's own container is stopped: runs/container.sh
+# switch checkpoint in the repo-level stage and finishes; then smoke_check (the steps both launches took must have
+# equal losses) and decoder_check on the trained model. Only the smoke's own container is stopped: runs/container.sh
 # execs `docker run` (sig-proxy on by default), so the signal to its pid reaches that container alone.
 set -euo pipefail
 cd "$(dirname "$0")/.."
