@@ -8,7 +8,7 @@ Evaluation of a base_train run's final checkpoint (its raw weights, train/checkp
   (eval/fim_eval.py).
 Written to <base_dir>/base_eval/<tag>.json.
 
-    python -m scripts.base_eval --model-tag=d24-r490.805-s42-g1
+    python -m scripts.base_eval --model-tag=d24-r490.805-s42
 """
 import argparse
 import os

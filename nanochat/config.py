@@ -53,7 +53,6 @@ REPO_STAGE = Stage(seq_len=32_768, rope_base=1_000_000,
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
 
 
-def run_tag(depth, ratio, seed, grad_clip):
-    """A run's tag (its checkpoint directory and metrics file); grad_clip distinguishes the clipping ablation's arms
-    (runs/ablation_clip.sh)."""
-    return f"d{depth}-r{ratio:g}-s{seed}-g{grad_clip:g}"
+def run_tag(depth, ratio, seed):
+    """A run's tag (its checkpoint directory and metrics file)."""
+    return f"d{depth}-r{ratio:g}-s{seed}"

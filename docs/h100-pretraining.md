@@ -53,8 +53,9 @@ compiled documents and the packed 8K and 32K rows.
 | Gradient clipping | global L2 norm 1.0, `torch.nn.utils.clip_grad_norm_` | DeepSeek LLM §2.3, inherited by DeepSeek-Coder §3.4 |
 
 **Why clip.** A paired A/B at d8, 20 tokens per parameter, compared clipping at 1.0 with no clipping
-(`runs/ablation_clip.sh` → `results/ablation_clip.md`; `benchmarks/h100.txt`). Both arms used the same seed and data
-order, and training is deterministic, so the clipping is the only difference between them. With clipping:
+(`benchmarks/h100.txt`; repeated at 100 tokens per parameter as the `noclip` arm of `experiments/design.py`'s regime
+phase). Both arms used the same seed and data order, and training is deterministic, so the clipping is the only
+difference between them. With clipping:
 
 - Mean validation bits per byte over all 11 corpora fell from 0.88119 to 0.87806.
 - Every corpus scored lower: Python 0.74504 → 0.74209, C++ 0.68317 → 0.67994.
@@ -113,7 +114,7 @@ tmux new -d -s h100 'cd ~/projects/nanochat && runs/h100.sh'
 
 What `runs/h100.sh` does:
 
-1. Derives the ratio and the tag `d24-r490.805-s42-g1` (`config.run_tag`: depth, ratio, seed, gradient clip).
+1. Derives the ratio and the tag `d24-r490.805-s42` (`python -m nanochat.train.schedule`: depth, ratio, seed).
 2. Trains both stages, saving a checkpoint every 812 steps (1%).
 3. Relaunches after a failure, as long as the failed attempt saved a newer checkpoint.
 4. Runs `scripts/base_eval.py` on the final checkpoint: per-corpus validation bits per byte, reference-solution bits
@@ -172,7 +173,8 @@ Each entry has its measurement in `benchmarks/h100.txt`:
 - `nanochat/data/`: the data pipeline, including the Rust tokenizer, repository and packing crate in `bpe/`.
 - `scripts/`: `base_train.py`, `base_eval.py`, `report.py` (results tables).
 - `runs/`: `setup.sh` (fresh host), `container.sh` (run a command in the image), `h100.sh` (the production run),
-  `ablation_clip.sh` (the clipping ablation), `release.sh` (publish a run).
+  `release.sh` (publish a run).
+- `experiments/`: the ablation study (`design.py`: the arms and the analysis; `arm.py`: one arm; `run.sh`).
 - `results/`: the tables the paper reports.
 - `tests/`: the checks above; `all.sh` runs them.
 - `benchmarks/`: the benchmarks, the GEMM sweep record and `h100.txt`, the measurement record the code cites.

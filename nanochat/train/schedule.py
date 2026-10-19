@@ -3,8 +3,12 @@ The run plan of a training: batch, steps, the first step of the repo-level stage
 and the tokens per scaling parameter by DeepSeek LLM's compute-optimal hyperparameter laws; the lr multiplier of each
 step, one schedule over both stages (the repo-level stage continues the run's learning rate, as DeepSeek-Coder's
 long-context training keeps its final pre-training rate, arXiv 2401.14196 §3.6).
+
+python -m nanochat.train.schedule <depth> <ratio> <seed> prints the run's tag, steps and repo_start (the run scripts'
+one source of them).
 """
 
+import sys
 from dataclasses import dataclass
 from typing import Literal
 
@@ -75,3 +79,12 @@ def lr_multiplier(it: int, n: int, shape: Literal["wsd", "d2z"], repo_start: int
     if it < n - cooldown:
         return 1.0
     return 1 - ((it - n + cooldown) / cooldown) ** 0.5
+
+
+if __name__ == "__main__":
+    from nanochat.config import run_tag
+    from nanochat.data.tokenizer import get_tokenizer
+
+    depth, ratio, seed = int(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
+    run = plan(depth, ratio, get_tokenizer().vocab_size)
+    print(run_tag(depth, ratio, seed), run.num_iterations, run.repo_start)

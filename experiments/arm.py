@@ -19,7 +19,6 @@ from nanochat.data.loader import mixture_corpora
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.eval.loss_eval import val_bpb
 from nanochat.paths import base_dir, write_json
-from nanochat.train.optim import GRAD_CLIP
 from nanochat.train.schedule import plan
 from scripts.base_train import Variant, train
 
@@ -27,8 +26,7 @@ tag, depth, ratio = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 seed, data_seed, variant = int(sys.argv[4]), int(sys.argv[5]), Variant(**json.loads(sys.argv[6]))
 tokenizer = get_tokenizer()
 steps = plan(depth, ratio, tokenizer.vocab_size, variant.batch_scale).num_iterations
-model = train(depth=depth, ratio=ratio, seed=seed, data_seed=data_seed, save_every=steps, grad_clip=GRAD_CLIP, tag=tag,
-              variant=variant)
+model = train(depth=depth, ratio=ratio, seed=seed, data_seed=data_seed, save_every=steps, tag=tag, variant=variant)
 losses = torch.compile(model.losses, dynamic=False, fullgraph=True)
 device = torch.device("cuda")
 bpb = val_bpb(losses, tokenizer, mixture_corpora(MIXTURE), stage=FILE_STAGE, device=device)
@@ -40,4 +38,4 @@ write_json(os.path.join(base_dir(), "ablation", f"{tag}.json"), {
     "tag": tag, "depth": depth, "ratio": ratio, "seed": seed, "data_seed": data_seed, "variant": json.loads(sys.argv[6]),
     "steps": steps, "bpb": bpb, "bpb32": bpb32, "final_loss": records[-1]["loss"],
     "tok_per_s": statistics.median(r["tok_per_s"] for r in records[1:]),
-    "clipped": sum(r["grad_norm"] > GRAD_CLIP for r in records) / len(records)})
+    "clipped": sum(r["grad_norm"] > variant.grad_clip for r in records) / len(records)})

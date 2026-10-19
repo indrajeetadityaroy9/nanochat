@@ -13,9 +13,9 @@ byte of d8 proxies at DEPTH and RATIO, each arm one run of experiments/arm.py.
 
 - regime: one-at-a-time departures of the canonical model at seeds 0, 0: the peak lr on a half-octave log grid (lr
   sensitivity, Wortsman et al., arXiv 2309.14322 §2), the batch at 2x and 4x the law's (at d8 the law's batch is one
-  micro-batch, the floor), the repo-level stage's own re-warmed schedule, the single RoPE base, and both; with a
-  repeat of the canonical arm under its own tag (equal to the screen's bit for bit: the harness leaves the canonical
-  run unchanged).
+  micro-batch, the floor), no gradient clipping, the repo-level stage's own re-warmed schedule, the single RoPE base,
+  and both; with a repeat of the canonical arm under its own tag (equal to the screen's bit for bit: the harness leaves
+  the canonical run unchanged).
 
 The metric is the mean bits per byte over the code corpora (config.MIXTURE "code"); effects are bpb(alternative) -
 bpb(current), positive when the current component helps, with standard error sigma / 2 (16 runs, sigma from the noise
@@ -69,8 +69,8 @@ def tag(seed, data_seed, point):
 
 REGIME = {"canonical": {}, "lr0.5": {"lr_scale": 0.5}, "lr0.71": {"lr_scale": 2 ** -0.5},
           "lr1.41": {"lr_scale": 2 ** 0.5}, "lr2": {"lr_scale": 2.0}, "batch2": {"batch_scale": 2.0},
-          "batch4": {"batch_scale": 4.0}, "rewarm": {"repo_schedule": "rewarm"}, "rope1e6": {"rope": "single"},
-          "rewarm-rope1e6": {"repo_schedule": "rewarm", "rope": "single"}}
+          "batch4": {"batch_scale": 4.0}, "noclip": {"grad_clip": math.inf}, "rewarm": {"repo_schedule": "rewarm"},
+          "rope1e6": {"rope": "single"}, "rewarm-rope1e6": {"repo_schedule": "rewarm", "rope": "single"}}
 
 
 def runs(phase):

@@ -26,11 +26,7 @@ mkdir -p "$LOGS"
 } >>"$LOGS/runner.log"
 [[ -s $LOGS/ratio ]] || runs/container.sh python -m nanochat.train.stages "$DEPTH" | tail -n 1 >"$LOGS/ratio"
 RATIO=$(cat "$LOGS/ratio")
-read -r TAG STEPS CLIP < <(runs/container.sh python -c "from nanochat.config import run_tag; \
-from nanochat.data.tokenizer import get_tokenizer; from nanochat.train.optim import GRAD_CLIP; \
-from nanochat.train.schedule import plan; \
-print(run_tag($DEPTH, $RATIO, $SEED, GRAD_CLIP), plan($DEPTH, $RATIO, get_tokenizer().vocab_size).num_iterations, \
-GRAD_CLIP)" | tail -n 1)
+read -r TAG STEPS _ < <(runs/container.sh python -m nanochat.train.schedule "$DEPTH" "$RATIO" "$SEED" | tail -n 1)
 # a checkpoint every 1% of the plan's steps: a failure loses at most 1% of the run
 SAVE_EVERY=$(( (STEPS + 99) / 100 ))
 echo "$(date -Is) $TAG ratio $RATIO steps $STEPS save_every $SAVE_EVERY" >>"$LOGS/runner.log"
@@ -40,7 +36,7 @@ saved() { stat -c %Y "$CKPT" 2>/dev/null || echo 0; }
 until
   start=$(saved)
   runs/container.sh python -m scripts.base_train --depth "$DEPTH" --target-param-data-ratio "$RATIO" --seed "$SEED" \
-    --grad-clip "$CLIP" --save-every "$SAVE_EVERY" >>"$LOGS/train.log" 2>&1
+    --save-every "$SAVE_EVERY" >>"$LOGS/train.log" 2>&1
 do
   end=$(saved)
   echo "$(date -Is) base_train failed: checkpoint saved at $start -> $end" >>"$LOGS/runner.log"
