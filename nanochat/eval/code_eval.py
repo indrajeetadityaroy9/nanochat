@@ -20,12 +20,11 @@ Benchmarks:
 - humaneval_x_cpp (164; HumanEval-X, Zheng et al., arXiv 2303.17568): C++ reference solutions, which MultiPL-E lacks.
 
 Scores:
-- solution bits: the bits and bytes (loss_eval.evaluate) of each reference solution given its prompt (BOS, prompt,
-  solution; scored from the first token that begins at or after the prompt's end), on humaneval_plus, mbpp_plus
-  (EvalPlus canonical solutions after the generation prompt) and humaneval_x_cpp. Xing et al. (arXiv 2604.07769): their
-  bits per byte track pass@1 across checkpoints where corpus loss does not.
+- solution bits: bits and bytes (loss_eval.evaluate) of each reference solution given its prompt (BOS, prompt, solution;
+  scored from the first token starting at or after the prompt's end) on humaneval_plus, mbpp_plus and humaneval_x_cpp;
+  their bits per byte track pass@1 across checkpoints where corpus loss does not (Xing et al., arXiv 2604.07769).
 - pass@1 of one greedy completion per problem.
-Every evaluator runs as a fresh process (exec), never as a fork of this torch/CUDA process.
+Every evaluator runs as a fresh process (exec), never a fork of this torch/CUDA process.
 """
 
 import bisect
@@ -50,14 +49,12 @@ from nanochat.data.loader import PretrainingBatches
 from nanochat.eval.loss_eval import evaluate
 from nanochat.inference.decoder import NativeDecoder
 
-MULTIPL_E = ("nuprl/MultiPL-E", "28441b6024e71d4a1c1c0f6bf171c935cd5a43f2")  # HF dataset revision
-HUMANEVAL_X = ("zai-org/humaneval-x", "62c78627f3072a1454fa0cb0184737cafe5e4198")
+# HF dataset revisions
+MULTIPL_E = {"repo_id": "nuprl/MultiPL-E", "revision": "28441b6024e71d4a1c1c0f6bf171c935cd5a43f2"}
+HUMANEVAL_X = {"repo_id": "zai-org/humaneval-x", "revision": "62c78627f3072a1454fa0cb0184737cafe5e4198"}
 EVALPLUS = {"humaneval_plus": ("humaneval", get_human_eval_plus), "mbpp_plus": ("mbpp", get_mbpp_plus)}
 MULTIPL_E_BENCHMARKS = ("humaneval_cpp", "mbpp_cpp")
 SOLUTION_BENCHMARKS = ("humaneval_plus", "mbpp_plus", "humaneval_x_cpp")
-# The generation budgets (module docstring): EvalPlus at most 768 new tokens (evalplus/provider/base.py:13); MultiPL-E
-# at most 1024 tokens of prompt and completion (automodel.py:56, 67)
-EVALPLUS_NEW_TOKENS, MULTIPL_E_LENGTH = 768, 1024
 
 
 class Task(NamedTuple):
@@ -68,11 +65,6 @@ class Task(NamedTuple):
     entry: str      # EvalPlus: the entry point; MultiPL-E: its tests
 
 
-def hub_file(dataset, file):
-    repo, revision = dataset
-    return hf_hub_download(repo, file, repo_type="dataset", revision=revision)
-
-
 def tasks():
     """{benchmark: [Task]} (module docstring); humaneval_x_cpp holds reference solutions only."""
     out = {}
@@ -81,20 +73,20 @@ def tasks():
         out[name] = [Task(task_id, t["prompt"].strip() + "\n", t["canonical_solution"], stops, t["entry_point"])
                      for task_id, t in load().items()]
     for name in MULTIPL_E_BENCHMARKS:
-        rows = pq.read_table(hub_file(MULTIPL_E, f"{name.replace('_', '-')}/test-00000-of-00001.parquet")).to_pylist()
+        file = f"{name.replace('_', '-')}/test-00000-of-00001.parquet"
+        rows = pq.read_table(hf_hub_download(filename=file, repo_type="dataset", **MULTIPL_E)).to_pylist()
         out[name] = [Task(r["name"], r["prompt"], None, r["stop_tokens"], r["tests"]) for r in rows]
-    with open(hub_file(HUMANEVAL_X, "data/cpp/data/humaneval.jsonl"), encoding="utf-8") as f:
+    with open(hf_hub_download(filename="data/cpp/data/humaneval.jsonl", repo_type="dataset", **HUMANEVAL_X),
+              encoding="utf-8") as f:
         rows = [json.loads(line) for line in f]
     out["humaneval_x_cpp"] = [Task(r["task_id"], r["prompt"], r["canonical_solution"], None, None) for r in rows]
     return out
 
 
-def solution_batches(tokenizer, examples, batch_rows, seq_len, device):
-    """Micro-batches (inputs, targets, cu_seqlens) of (prompt, solution) examples, each batch_rows x seq_len (one shape:
-    one compiled graph), one example per row and one attention segment per row: BOS then prompt + solution tokenized
-    together (as in training text), targets the loader's padding but from the first token that begins at or after the
-    prompt's end (tiktoken's decode_with_offsets: each token's first character), so the scored targets' bytes are the
-    solution's but for a token that straddles the prompt's end, scored in neither."""
+def solution_batches(tokenizer, examples, *, batch_rows, seq_len, device):
+    """Micro-batches (inputs, targets, cu_seqlens) of (prompt, solution) examples, batch_rows x seq_len (one compiled
+    shape), one example and one attention segment per row: BOS + the tokens of prompt + solution, targets padding before
+    the first token starting at or after the prompt's end (decode_with_offsets); a token straddling it is not scored."""
     bos = tokenizer.bos_token_id
     seqs = []
     for prompt, solution in examples:
@@ -114,21 +106,20 @@ def solution_batches(tokenizer, examples, batch_rows, seq_len, device):
 
 
 @torch.no_grad()
-def solution_bits(losses, tokenizer, device, batch_rows, seq_len, benchmarks):
-    """{benchmark: the bits and bytes (loss_eval.evaluate) of all its reference solutions} of SOLUTION_BENCHMARKS under
-    losses (GPT.losses)."""
+def solution_bits(losses, tokenizer, benchmarks, *, batch_rows, seq_len, device):
+    """{benchmark: bits and bytes (loss_eval.evaluate) of its reference solutions} for SOLUTION_BENCHMARKS."""
     token_bytes = tokenizer.get_token_bytes(device=device)
     results = {}
     for name in SOLUTION_BENCHMARKS:
-        batches = solution_batches(tokenizer, [(t.prompt, t.solution) for t in benchmarks[name]], batch_rows, seq_len,
-                                   device)
-        results[name] = evaluate(losses, batches, len(batches), token_bytes, batch_rows)
+        batches = solution_batches(tokenizer, [(t.prompt, t.solution) for t in benchmarks[name]],
+                                   batch_rows=batch_rows, seq_len=seq_len, device=device)
+        results[name] = evaluate(losses, batches, token_bytes, steps=len(batches), num_segments=batch_rows)
     return results
 
 
 class StopAt:
-    """NativeDecoder.run's stop rule: true once the generated text holds a stop sequence (each call decodes only the
-    new ids, UTF-8 incrementally, and searches only from where a sequence could still begin)."""
+    """NativeDecoder.run's stop rule: true once the generated text holds a stop sequence (incremental UTF-8 decoding;
+    search starts where a stop sequence could still begin)."""
 
     def __init__(self, tokenizer, stops):
         self.token_bytes, self.stops, self.longest = tokenizer.token_bytes, stops, max(map(len, stops))
@@ -141,10 +132,9 @@ class StopAt:
 
 
 def complete(decoder, tokenizer, items, prompts, budgets, *, special):
-    """Greedy completions of the tasks from `prompts` (one per task) within `budgets` (new tokens), each cut before its
-    task's first stop sequence (MultiPL-E's stop_at_stop_token; vLLM's stop strings in EvalPlus); a special token the
-    model writes is "skip"ped in decoding (EvalPlus's skip_special_tokens) or "stop"s the completion (MultiPL-E's
-    automodel.py). The special tokens are the ids from BOS on (data/tokenizer.py)."""
+    """Greedy completions of `prompts` within `budgets` new tokens, each cut before its task's first stop sequence
+    (MultiPL-E stop_at_stop_token; EvalPlus vLLM stop strings). Special tokens (ids >= BOS, data/tokenizer.py) are
+    "skip"ped (EvalPlus skip_special_tokens) or "stop" the completion (MultiPL-E automodel.py:99-101)."""
     bos = tokenizer.bos_token_id
     requests = (([bos, *tokenizer.enc.encode_ordinary(p)], m, StopAt(tokenizer, t.stops))
                 for t, p, m in zip(items, prompts, budgets, strict=True))
@@ -157,8 +147,8 @@ def complete(decoder, tokenizer, items, prompts, budgets, *, special):
 
 
 def evalplus(name, items, completions):
-    """EvalPlus's evaluation of the sanitized solutions (module docstring): {"base pass@1", "plus pass@1" (EvalPlus's
-    pass_at_k), "ids", "completions", "base_status", "plus_status"}."""
+    """EvalPlus's evaluation of the sanitized solutions: {"base pass@1", "plus pass@1", "ids", "completions",
+    "base_status", "plus_status"}."""
     dataset = EVALPLUS[name][0]
     with tempfile.TemporaryDirectory() as tmp:
         samples, scored = os.path.join(tmp, "samples.jsonl"), os.path.join(tmp, "results.json")
@@ -177,12 +167,9 @@ def evalplus(name, items, completions):
 
 
 def multipl_e(items, completions):
-    """MultiPL-E's evaluation (module docstring) of one completion per problem: {"pass@1" (pass_k.py), "ids",
-    "completions", "status" (eval_cpp.py's)}. Each problem a completions file as multipl_e/completions.py writes it
-    (the dataset row's fields main.py reads, "completions"), judged and scored by the repository's scripts, which import
-    their siblings from the script's directory (so not isolated: no -I). main.py's --max-workers runs one problem's
-    completions in parallel and its --dir walks the problems one at a time, so with one completion per problem each
-    problem is its own main.py --file process, os.cpu_count() of them at once."""
+    """MultiPL-E's evaluation of one completion per problem: {"pass@1" (pass_k.py), "ids", "completions", "status"}.
+    Each problem is a completions file as multipl_e/completions.py writes it, judged by its own main.py --file process
+    (--dir runs problems serially), os.cpu_count() at once; the scripts import siblings, so no -I."""
     root = os.environ["MULTIPL_E"]
     main = os.path.join(root, "evaluation", "src", "main.py")
     with tempfile.TemporaryDirectory() as tmp:
@@ -205,18 +192,19 @@ def multipl_e(items, completions):
 
 
 def generation(model, tokenizer, benchmarks):
-    """{benchmark: its official evaluation} of greedy completions of the EvalPlus and MultiPL-E benchmarks, each as its
-    evaluator's generator writes them (module docstring)."""
+    """{benchmark: official evaluation} of greedy completions of the EvalPlus and MultiPL-E benchmarks."""
     decoder, results = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id), {}
     for name in EVALPLUS:
         items = benchmarks[name]
-        completions = complete(decoder, tokenizer, items, [t.prompt for t in items],
-                               [EVALPLUS_NEW_TOKENS] * len(items), special="skip")
+        # EvalPlus: at most 768 new tokens (evalplus/provider/base.py:13 max_new_tokens)
+        completions = complete(decoder, tokenizer, items, [t.prompt for t in items], [768] * len(items), special="skip")
         results[name] = evalplus(name, items, completions)
     for name in MULTIPL_E_BENCHMARKS:
         items = benchmarks[name]
         prompts = [t.prompt.strip() for t in items]
-        budgets = [MULTIPL_E_LENGTH - 1 - len(tokenizer.enc.encode_ordinary(p)) for p in prompts]  # 1: the BOS
+        # MultiPL-E: at most 1024 tokens of prompt and completion (multipl_e/completions.py --max-tokens,
+        # automodel.py:67 generate(max_length=...)), the BOS among them
+        budgets = [1024 - 1 - len(tokenizer.enc.encode_ordinary(p)) for p in prompts]
         completions = complete(decoder, tokenizer, items, prompts, budgets, special="stop")
         results[name] = multipl_e(items, completions)
     return results

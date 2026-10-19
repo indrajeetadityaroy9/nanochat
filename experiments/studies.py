@@ -1,542 +1,258 @@
 """
-The paper's appendix studies (docs/h100-pretraining.md, "Appendix studies"): each a set of arms (training runs, one
-experiments/arm.py run each, identified by their configuration so a run shared by studies trains once), a
-pre-registered decision rule, and an analysis into Markdown and tidy tables under results/studies/ (the figures' data).
-The metric of every study: METRIC, the code group's mixture bits per byte of the 8K val rows (eval/loss_eval.py).
+The appendix ablations: each study is a set of runs (identified by configuration and code, config.run_tag), a decision
+rule fixed in advance, and a report in results/studies/. Metric: validation bits per byte of the code
+mixture at 8K (VAL_METRIC); for the repository-stage schedule also of the repository mixture at 32K (LONG_VAL_METRIC).
 
-- noise (d8, 100 tokens per scaling parameter): the canonical model at 4 init seeds x 2 data seeds: the run-to-run SD
-  of the metric (the yardstick of every d8 effect) and its two-way ANOVA variance components (method of moments).
-- screen (d8, 100 TPP): a 2^(7-3) resolution-IV fractional factorial (pydoe.fracfact DESIGN; Box & Hunter 1961) over
-  four parameterized components, the attention windows and two regime choices (FACTORS), every arm at init and data
-  seed 0 (common random numbers: model/gpt.py init_weights seeds each tensor by its name; the all-current point is the
-  noise study's (0, 0) arm). Main effects by OLS on the +-1 design, each tested against the noise SD (t, the noise
-  arms' df, one-sided in its rule's direction, Holm across the factors) and against Lenth's margin of error over the
-  design's 15 contrasts (Technometrics 31(4), 1989). The noise SD is between seeds; a contrast at shared seeds carries
-  the trajectory divergence of a changed component, bounded by it (Summers & Dinneen, arXiv 2103.04514). Rule
-  (verdict): a component that costs parameters stays only if it significantly helps; the windows, which save compute,
-  go only if they significantly hurt; a regime alternative is adopted only if significantly better.
-- long_context (d8, 100 TPP): 2 x 2 over the repo-level stage's lr schedule (continue / re-warmed) and the RoPE base
-  (switched at the stage / the repo-level stage's from the start): bits per byte at 32K per context bucket and at 8K.
-- confirm (d24, the file-level stage, two seed pairs): the base, the screen's verdict, at HORIZONS[0] and HORIZONS[1]
-  (its metric's slope in ln tokens); the canonical architecture on the verdict's regime (when the verdict prunes); each
-  candidate addition (CANDIDATES) on the base at HORIZONS[0]. Rules (final): the architecture verdict stands unless
-  the base loses to the canonical on both pairs; a candidate is adopted if on both pairs it beats the base at equal
-  H100 time (the base's metric interpolated in ln tokens to the tokens it trains in the candidate's time, from the
-  arms' median tok/s: the user's criterion, loss per wall-clock).
-- lr_horizon (d24, the file-level stage): peak lr LR_SCALES x the law's production lr (schedule.plan at the production
-  ratio) over HORIZONS, on the final variant: the lr minimizing a quadratic in ln lr per horizon, and the WLS line of
-  ln eta* on ln D extrapolated to the production run's file-level tokens.
-- optimizer (d24, OPTIMIZER_TOKENS): AdamW on every parameter at LR_SCALES against lr_horizon's Muon arms there,
-  each at its own fitted optimum.
-- batch (d24): the gradient noise scale (experiments/noise_scale.py) of lr_horizon's runs at the law's lr, its
-  log-log trend in the tokens trained, extrapolated to the production run, against its batch.
-A study's runs of one variant at several horizons form a chain (chain): with the wsd schedule and fixed weight decay
-the horizons share one constant-lr phase (schedule.lr_multiplier), so a horizon continues the shorter one's checkpoint
-kept at its cooldown start (Hagele et al., arXiv 2405.18392 §3.2): the same run. The d24 timings (confirm's tok/s) need
-the GPU alone: experiments/run.sh runs one arm at a time.
+Adopted without a study, on published evidence: linear decay to zero (Bergsma et al., arXiv 2502.15938: the gain over
+WSD grows with tokens per parameter), one RoPE base 10^6 for both stages (Men et al., arXiv 2405.14591 lower bound;
+Llama 3 trains at a large base from the start), SSSL windows (Gemma 3, arXiv 2503.19786 §5.2), learned QK-norm gains
+(Qwen3, arXiv 2505.09388 §2), the x0 and residual scalars (karpathy/nanochat dev/LOG.md 2026-01-11), the peak lr of
+DeepSeek LLM's law (a d24 lr-horizon fit at affordable horizons extrapolates 38x with an interval too wide to override
+it).
 
-    python -m experiments.studies arms <study>        # "arm NAME TAG" per line (experiments/run.sh)
-    python -m experiments.studies analyze <study>     # results/studies/<study>.md and .csv
-    python -m experiments.studies collect             # results/studies/{arms.csv, eval.csv, curves.parquet}
+- regime (small scale: d8, 100 tokens per scaling parameter): 2^3 full factorial over weight decay (tau law / 0.1),
+  clipping (none / 1.0) and the repository stage's schedule (continue / rewarm), at two seed pairs; effects by OLS with
+  the seed pair as a block, their SEs from the replicates. Rules (regime_decision), Holm across the three: a hand-set
+  value (weight decay 0.1, clip 1.0) replaces the baseline's only if significantly better at 8K; rewarm is adopted only
+  if significantly better at 32K and not significantly worse at 8K.
+- scale_up (full scale: d24, file-level stage, two seed pairs): the regime decision ("selected") at SCALE_UP_TOKENS and
+  each architecture candidate on it: value embeddings removed (~5% of the step, 302M table parameters), Block Attention
+  Residuals added, the partial key offset added. The first pair's selected run also at twice the tokens: its slope per
+  doubling. Rule (scale_up_decision): a candidate is adopted if on both pairs it beats the selected run at equal H100
+  time (the selected run's metric moved along that slope to the candidate's wall-clock).
+Runs train one at a time (experiments/run.sh): scale_up's throughput needs the GPU alone.
+
+    python -m experiments.studies runs <study>
+    python -m experiments.studies report <study>|final
 """
 import argparse
-import dataclasses
 import json
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
 from functools import cache
+from typing import Literal, get_args, get_origin
 
-import numpy as np
 import pandas as pd
 import pydoe
 import scipy.stats
-import statsmodels.api as sm
 import statsmodels.formula.api as smf
 from statsmodels.stats.multitest import multipletests
 
-from nanochat.config import REPO_STAGE, run_tag
-from nanochat.data.loader import mixture_weights
+from nanochat.config import run_tag
 from nanochat.data.tokenizer import get_tokenizer
-from nanochat.eval.loss_eval import CONTEXTS, mixture_bpb
 from nanochat.paths import base_dir
-from nanochat.train.optim import GRAD_CLIP
-from nanochat.train.schedule import cooldown_start, plan
 from nanochat.train.stages import max_ratio
 from scripts.base_train import Variant
 
 RESULTS = "results/studies"
-METRIC = ("8k", "code")
+VAL_METRIC = ("8k", "code")
+LONG_VAL_METRIC = ("32k", "all")
 ALPHA = 0.05
-# The d8 proxy: the smallest model of the family at 100 tokens per scaling parameter (5x Chinchilla's 20, arXiv
-# 2203.15556; the production ratio is ~490)
-D8, RATIO8 = 8, 100
-NOISE_SEEDS, NOISE_DATA_SEEDS = (0, 1, 2, 3), (0, 1)
-# {factor: (current, alternative)}: each choice under test against its simplest alternative (Variant fields), in the
-# order of DESIGN's columns: schedule = VE x0 resid, weight_decay = VE x0 qk_gain, windows = VE resid qk_gain, which put
-# the suspected interactions (VE x x0, x0 x resid, schedule x weight decay, qk_gain x windows) in four alias chains
-FACTORS = {"value_embeds": (True, False), "x0": (True, False), "resid": (True, False), "qk_gain": (True, False),
-           "schedule": ("wsd", "d2z"), "weight_decay": ("fixed", "tau"), "windows": (True, False)}
-DESIGN = "a b c d abc abd acd"
-COMPONENTS, COMPUTE, REGIME = ("value_embeds", "x0", "resid", "qk_gain"), ("windows",), ("schedule", "weight_decay")
-LONG_CONTEXT = {"canonical": {}, "rewarm": {"repo_schedule": "rewarm"}, "rope": {"rope": "single"},
-                "rewarm-rope": {"repo_schedule": "rewarm", "rope": "single"}}
-D24 = 24
-CONFIRM_SEEDS = ((0, 0), (1, 1))
-# The candidate additions (Variant fields): Block Attention Residuals (Chen et al., arXiv 2603.15031 Table 2: at 194M
-# activated parameters val loss 1.931 -> 1.909, a 1.25x compute equivalent), which replace the resid and x0 scalars;
-# p-RoPE with the partial key offset on the full-context layers (modded-nanogpt record #49)
-CANDIDATES = {"attn_res": {"attn_res": True, "resid": False, "x0": False}, "key_offset": {"key_offset": True}}
-# Octaves of the law's production lr, bracketing the short horizons' optimum, which lies above it (eta* falls with the
-# horizon: Bjorck et al., arXiv 2409.19913); horizons doubling from 0.5B tokens (2.6 tokens per scaling parameter)
-LR_SCALES = (0.5, 1.0, 2.0, 4.0)
-HORIZONS = (5e8, 1e9, 2e9)
-OPTIMIZER_TOKENS = HORIZONS[0]
+# Small scale: d8 at 100 tokens per scaling parameter (5x Chinchilla's 20, arXiv 2203.15556), the studies' budget
+SMALL_DEPTH, SMALL_RATIO = 8, 100
+# Each Literal field's (baseline, alternative): its first and second choice
+LEVELS = {f.name: get_args(f.type) for f in fields(Variant) if get_origin(f.type) is Literal}
+FACTORS = ("weight_decay", "clip", "repo_schedule")
+SEED_PAIRS = ((0, 0), (1, 1))
+FULL_DEPTH = 24
+# 0.5B tokens (2.6 per scaling parameter at d24)
+SCALE_UP_TOKENS = 5e8
+# Value embeddings removed; Block Attention Residuals (arXiv 2603.15031 Table 2: 194M activated params, val loss
+# 1.931 -> 1.909), which replaces the resid and x0 scalars; p-RoPE with the partial key offset (modded-nanogpt #49)
+CANDIDATES = {"no_value_embeds": {"value_embeds": "none"},
+              "attn_res": {"attn_res": "block", "resid": "one", "x0": "none"},
+              "key_offset": {"key_offset": "partial"}}
 
 
 @dataclass(frozen=True, kw_only=True)
-class Arm:
-    """A study's arm: a training run's configuration (Variant fields departing from the canonical model), the parent
-    run whose kept checkpoint (tag, step) it continues, and the steps whose checkpoints it keeps."""
+class Run:
     study: str
     name: str
     depth: int
     ratio: float
     seed: int
     data_seed: int
-    variant: dict = field(default_factory=dict)
-    parent: tuple[str, int] | None = None
-    keep: tuple[int, ...] = ()
+    config: dict  # the Variant fields that differ from the baseline
 
     @property
     def tag(self) -> str:
-        """The run's identity: config.run_tag, the data seed and every departing field."""
-        fields = "".join(f"-{k}={v:g}" if isinstance(v, float) else f"-{k}={v}" for k, v in sorted(self.variant.items()))
-        return f"{run_tag(self.depth, self.ratio, self.seed)}-d{self.data_seed}{fields}"
+        return run_tag(depth=self.depth, ratio=self.ratio, seed=self.seed, data_seed=self.data_seed,
+                       changes=self.config)
 
 
-def departures(**fields) -> dict:
-    """The fields that depart from the canonical Variant (its defaults)."""
-    canonical = Variant()
-    return {k: v for k, v in fields.items() if getattr(canonical, k) != v}
+def changes(values: dict) -> dict:
+    """The fields that differ from the baseline Variant."""
+    baseline = Variant()
+    return {k: v for k, v in values.items() if getattr(baseline, k) != v}
 
 
-def record(tag: str) -> dict:
-    """An arm's evaluation record (experiments/arm.py)."""
+def val_bpb(tag: str, *, which: tuple[str, str]) -> float:
     with open(os.path.join(base_dir(), "evals", f"{tag}.json"), encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f)["eval"][which[0]]["bpb"][which[1]]
 
 
-def metric(tag: str) -> float:
-    return record(tag)["eval"][METRIC[0]]["bpb"][METRIC[1]]
+def throughput(tag: str) -> float:
+    """Median training tok/s (train/metrics.py), each process's first (compiling) step excluded."""
+    log = pd.read_json(os.path.join(base_dir(), "metrics", f"{tag}.jsonl"), lines=True)
+    steps = log[log.kind == "train"]
+    return float(steps.tok_per_s[~steps.step.isin(log[log.kind == "run"].step)].median())
 
 
 @cache
 def production_ratio() -> float:
-    """The production run's tokens per scaling parameter (runs/h100.sh: train/stages.py max_ratio at d24)."""
-    return max_ratio(D24, get_tokenizer())
+    return max_ratio(get_tokenizer(), depth=FULL_DEPTH)
 
 
-# The studies' arms
+# Runs
 
 
-def noise() -> list[Arm]:
-    return [Arm(study="noise", name=f"s{s}-d{d}", depth=D8, ratio=RATIO8, seed=s, data_seed=d)
-            for s in NOISE_SEEDS for d in NOISE_DATA_SEEDS]
+def design_points() -> list[dict[str, int]]:
+    """{factor: +1 baseline / -1 alternative} per point of the full factorial."""
+    return [dict(zip(FACTORS, map(int, row), strict=True)) for row in pydoe.ff2n(len(FACTORS))]
 
 
-def screen_points() -> list[dict[str, int]]:
-    """The design's 16 points: {factor: +1 current / -1 alternative} (pydoe's Yates order)."""
-    return [dict(zip(FACTORS, map(int, row), strict=True)) for row in pydoe.fracfact(DESIGN)]
+def regime() -> list[Run]:
+    return [Run(study="regime", name="".join("1" if p[f] > 0 else "0" for f in FACTORS) + f"-s{s}-d{d}",
+                depth=SMALL_DEPTH, ratio=SMALL_RATIO, seed=s, data_seed=d,
+                config=changes({f: LEVELS[f][p[f] < 0] for f in FACTORS}))
+            for s, d in SEED_PAIRS for p in design_points()]
 
 
-def screen() -> list[Arm]:
-    return [Arm(study="screen", name="".join("1" if p[f] > 0 else "0" for f in FACTORS), depth=D8, ratio=RATIO8,
-                seed=0, data_seed=0, variant=departures(**{f: FACTORS[f][p[f] < 0] for f in FACTORS}))
-            for p in screen_points()]
+def full_scale_run(*, name: str, config: dict, seed: int, data_seed: int, tokens: float) -> Run:
+    """A d24 run at the production run's batch and lr, cut to `tokens`."""
+    return Run(study="scale_up", name=name, depth=FULL_DEPTH, ratio=production_ratio(), seed=seed, data_seed=data_seed,
+               config=changes(config | {"tokens": tokens}))
 
 
-def long_context() -> list[Arm]:
-    return [Arm(study="long_context", name=name, depth=D8, ratio=RATIO8, seed=0, data_seed=0, variant=v)
-            for name, v in LONG_CONTEXT.items()]
+def scale_up() -> list[Run]:
+    selected = regime_decision()
+    runs = []
+    for s, d in SEED_PAIRS:
+        configs = {f"selected-s{s}-d{d}": (selected, SCALE_UP_TOKENS)}
+        configs |= {f"selected-s{s}-d{d}-2x": (selected, 2 * SCALE_UP_TOKENS)} if (s, d) == SEED_PAIRS[0] else {}
+        configs |= {f"{c}-s{s}-d{d}": (selected | extra, SCALE_UP_TOKENS) for c, extra in CANDIDATES.items()}
+        runs += [full_scale_run(name=n, config=c, seed=s, data_seed=d, tokens=t) for n, (c, t) in configs.items()]
+    return runs
 
 
-def chain(study: str, name: str, variant: dict, seed: int, data_seed: int, horizons: tuple[float, ...]) -> list[Arm]:
-    """Runs of a d24 variant at the production ratio's batch and lr over doubling horizons (module docstring), each
-    keeping its cooldown start's checkpoint when a longer horizon can continue it."""
-    ratio, run = production_ratio(), Variant(**variant)
-    branch = run.schedule == "wsd" and run.weight_decay == "fixed"
-    arms, parent = [], None
-    for tokens in horizons:
-        keep = (cooldown_start(plan(D24, ratio, tokens).num_iterations),) if branch else ()
-        arm = Arm(study=study, name=f"{name}-t{tokens:g}", depth=D24, ratio=ratio, seed=seed, data_seed=data_seed,
-                  variant=departures(**variant, tokens=tokens), parent=parent, keep=keep)
-        arms.append(arm)
-        parent = (arm.tag, keep[0]) if branch else None
-    return arms
-
-
-def confirm() -> list[Arm]:
-    """Per seed pair: the base (the screen's verdict) at HORIZONS[0] and [1], the canonical architecture on its regime
-    when the verdict prunes, each candidate on the base at HORIZONS[0]."""
-    adopted = verdict()
-    regime = {k: v for k, v in adopted.items() if k in REGIME}
-    arms = []
-    for s, d in CONFIRM_SEEDS:
-        arms += chain("confirm", f"base-s{s}-d{d}", adopted, s, d, HORIZONS[:2])
-        single = {"canonical": regime} if adopted != regime else {}
-        single |= {c: adopted | fields for c, fields in CANDIDATES.items()}
-        arms += [Arm(study="confirm", name=f"{c}-s{s}-d{d}", depth=D24, ratio=production_ratio(), seed=s, data_seed=d,
-                     variant=departures(**v, tokens=HORIZONS[0])) for c, v in single.items()]
-    return arms
-
-
-def lr_horizon() -> list[Arm]:
-    return [a for scale in LR_SCALES for a in chain("lr_horizon", f"lr{scale:g}", final() | {"lr_scale": scale}, 0, 0,
-                                                    HORIZONS)]
-
-
-def optimizer() -> list[Arm]:
-    variant, ratio = final(), production_ratio()
-    return [Arm(study="optimizer", name=f"adamw-lr{scale:g}", depth=D24, ratio=ratio, seed=0, data_seed=0,
-                variant=departures(**variant, optimizer="adamw", lr_scale=scale, tokens=OPTIMIZER_TOKENS))
-            for scale in LR_SCALES]
-
-
-def batch() -> list[Arm]:
-    """The noise-scale measurements' runs: lr_horizon's at the law's lr, one per horizon (their final models)."""
-    return [a for a in lr_horizon() if "lr_scale" not in a.variant]
-
-
-STUDIES = {"noise": noise, "screen": screen, "long_context": long_context, "confirm": confirm,
-           "lr_horizon": lr_horizon, "optimizer": optimizer}
+STUDIES = {"regime": regime, "scale_up": scale_up}
 
 
 # Decisions
 
 
-def noise_sd() -> tuple[float, int]:
-    """The noise study's SD of the metric and its degrees of freedom."""
-    values = [metric(a.tag) for a in noise()]
-    return float(np.std(values, ddof=1)), len(values) - 1
+def regime_results() -> pd.DataFrame:
+    """The factorial's runs on +-1 coding (+1 baseline) with their seed pair and both metrics."""
+    return pd.DataFrame([{"run": r.name, "pair": f"s{r.seed}-d{r.data_seed}",
+                          **{f: 1 if f not in r.config else -1 for f in FACTORS},
+                          "bpb_8k": val_bpb(r.tag, which=VAL_METRIC), "bpb_32k": val_bpb(r.tag, which=LONG_VAL_METRIC)}
+                         for r in regime()]).set_index("run")
 
 
-def screen_effects() -> pd.DataFrame:
-    """Per factor: effect = metric(alternative) - metric(current) (OLS on the +-1 design: -2 x its coefficient; the
-    residual holds the aliased interaction chains, so the coefficients' own SEs are not used), its noise SE and t,
-    p one-sided in the rule's direction (components: the current choice helps; windows and regime: the alternative
-    is better), Holm-adjusted across the factors, Lenth's PSE / ME / SME over the 15 contrasts, the effect on tok/s
-    (relative), and the decision `adopt` (the alternative replaces the current choice)."""
-    points = screen_points()
-    frame = pd.DataFrame([{**p, "bpb": metric(a.tag), "tok_per_s": summary(a)["tok_per_s"]}
-                          for a, p in zip(screen(), points, strict=True)])
-    factors = list(FACTORS)
-    effect = -2 * smf.ols("bpb ~ " + " + ".join(factors), data=frame).fit().params[factors]
-    speed = -2 * smf.ols("tok_per_s ~ " + " + ".join(factors), data=frame).fit().params[factors] / frame.tok_per_s.mean()
-    sigma, df = noise_sd()
-    se = 2 * sigma / math.sqrt(len(points))
-    contrasts = 2 * smf.ols("bpb ~ " + " * ".join(factors[:4]), data=frame).fit().params.drop("Intercept").abs()
-    s0 = 1.5 * contrasts.median()
-    pse = 1.5 * contrasts[contrasts < 2.5 * s0].median()
-    m = len(contrasts)
-    me, sme = scipy.stats.t.ppf([0.975, (1 + 0.95 ** (1 / m)) / 2], m / 3) * pse
-    direction = pd.Series({f: 1 if f in COMPONENTS else -1 for f in factors})
-    p = scipy.stats.t.sf(direction * effect / se, df)
-    holm = multipletests(p, alpha=ALPHA, method="holm")[1]
-    significant = (holm < ALPHA) & (direction * effect > me)
-    adopt = np.where(direction > 0, ~significant, significant)
-    return pd.DataFrame({"alternative": [FACTORS[f][1] for f in factors], "effect": effect, "se": se,
-                         "t": effect / se, "df": df, "p": p, "p_holm": holm, "lenth_pse": pse, "lenth_me": me,
-                         "lenth_sme": sme, "tok_per_s_effect": speed, "adopt": adopt}, index=factors)
+def regime_effects() -> pd.DataFrame:
+    """Per factor and metric: effect = alternative - baseline (OLS on the full factorial with a seed-pair block, -2 x
+    the coefficient), its SE and one-sided p from the replicates' residual; the rule's p-values Holm-adjusted together,
+    and `adopt`."""
+    results = regime_results()
+    rows = {}
+    for metric in ("bpb_8k", "bpb_32k"):
+        fit = smf.ols(f"{metric} ~ {' * '.join(FACTORS)} + C(pair)", data=results).fit()
+        for f in FACTORS:
+            effect, se = -2 * fit.params[f], 2 * fit.bse[f]
+            rows[(f, metric)] = {"effect": effect, "se": se, "df": fit.df_resid,
+                                 "p_better": scipy.stats.t.cdf(effect / se, fit.df_resid),
+                                 "p_worse": scipy.stats.t.sf(effect / se, fit.df_resid)}
+    effects = pd.DataFrame(rows).T.rename_axis(["factor", "metric"])
+    tests = [("weight_decay", "bpb_8k"), ("clip", "bpb_8k"), ("repo_schedule", "bpb_32k")]
+    holm = multipletests([effects.loc[t, "p_better"] for t in tests], alpha=ALPHA, method="holm")[1]
+    effects["p_better_holm"] = pd.Series(dict(zip(tests, holm, strict=True)))
+    adopt = {f: p < ALPHA for (f, _), p in zip(tests, holm, strict=True)}
+    adopt["repo_schedule"] &= effects.loc[("repo_schedule", "bpb_8k"), "p_worse"] >= ALPHA
+    effects["adopt"] = [adopt[f] if (f, m) in tests else None for f, m in effects.index]
+    return effects
 
 
-def verdict() -> dict:
-    """The screen's decision: the Variant fields of the alternatives it adopts."""
-    effects = screen_effects()
-    return departures(**{f: FACTORS[f][1] for f in effects.index[effects.adopt]})
+def regime_decision() -> dict:
+    effects = regime_effects()
+    return changes({f: LEVELS[f][1] for (f, _), a in effects.adopt.dropna().items() if a})
 
 
-def confirm_decisions() -> tuple[pd.DataFrame, bool, list[str]]:
-    """Per seed pair the confirm arms' metric; each candidate's time ratio r (the base's median tok/s over the
-    candidate's) and the base's metric at r x HORIZONS[0] tokens (linear in log2 tokens between its two horizons).
-    Returns (that frame, whether the architecture verdict stands, the candidates adopted): module docstring."""
-    arms = {a.name: a for a in confirm()}
+def scale_up_decision() -> tuple[pd.DataFrame, list[str]]:
+    """Per seed pair the metrics, each candidate's time ratio r (selected / candidate throughput) and the selected
+    run's metric at r x SCALE_UP_TOKENS (the first pair's slope per doubling); the candidates adopted."""
+    runs = {r.name: r for r in scale_up()}
+    s0, d0 = SEED_PAIRS[0]
+    slope = (val_bpb(runs[f"selected-s{s0}-d{d0}-2x"].tag, which=VAL_METRIC)
+             - val_bpb(runs[f"selected-s{s0}-d{d0}"].tag, which=VAL_METRIC))
     rows = []
-    for s, d in CONFIRM_SEEDS:
+    for s, d in SEED_PAIRS:
         pair = f"s{s}-d{d}"
-        short, long = (arms[f"base-{pair}-t{t:g}"] for t in HORIZONS[:2])
-        row = {"seeds": pair, "base": metric(short.tag), "base, 2x tokens": metric(long.tag)}
-        if f"canonical-{pair}" in arms:
-            row["canonical"] = metric(arms[f"canonical-{pair}"].tag)
+        selected = runs[f"selected-{pair}"]
+        row = {"seeds": pair, "selected": val_bpb(selected.tag, which=VAL_METRIC), "slope per doubling": slope}
         for c in CANDIDATES:
-            arm = arms[f"{c}-{pair}"]
-            ratio = summary(short)["tok_per_s"] / summary(arm)["tok_per_s"]
-            row |= {c: metric(arm.tag), f"{c}: time ratio": ratio,
-                    f"{c}: base at equal time": row["base"] + (row["base, 2x tokens"] - row["base"]) * math.log2(ratio)}
+            run = runs[f"{c}-{pair}"]
+            ratio = throughput(selected.tag) / throughput(run.tag)
+            row |= {c: val_bpb(run.tag, which=VAL_METRIC), f"{c}: time ratio": ratio,
+                    f"{c}: selected at equal time": row["selected"] + slope * math.log2(ratio)}
         rows.append(row)
     frame = pd.DataFrame(rows).set_index("seeds")
-    stands = "canonical" not in frame or not (frame["base"] > frame["canonical"]).all()
-    return frame, stands, [c for c in CANDIDATES if (frame[c] < frame[f"{c}: base at equal time"]).all()]
+    return frame, [c for c in CANDIDATES if (frame[c] < frame[f"{c}: selected at equal time"]).all()]
 
 
-def final() -> dict:
-    """The variant of the d24 regime studies: the screen's regime verdict, its architecture verdict unless confirm
-    reverts it, and the candidates confirm adopts."""
-    adopted = verdict()
-    _, stands, added = confirm_decisions()
-    variant = adopted if stands else {k: v for k, v in adopted.items() if k in REGIME}
-    for c in added:
-        variant |= CANDIDATES[c]
-    return departures(**variant)
+def final_config() -> dict:
+    """The production run's changes from the baseline: the regime decision plus the adopted candidates."""
+    config = regime_decision()
+    for c in scale_up_decision()[1]:
+        config |= CANDIDATES[c]
+    return changes(config)
 
 
-# Tidy tables
+# Reports: results/studies/<study>.md and <study>.csv
 
 
-def summary(arm: Arm) -> dict:
-    """The run's train summary from its metrics (curves): median tok/s (each process's first step, which compiles,
-    excluded) and the fraction of steps whose gradient norm exceeded the clip (optim.GRAD_CLIP)."""
-    frame = curves(arm.tag, {})
-    return {"tok_per_s": frame.tok_per_s[~frame.first_of_process].median(),
-            "clipped": float((frame.grad_norm > GRAD_CLIP).mean())}
-
-
-def metrics(tag: str) -> pd.DataFrame:
-    return pd.read_json(os.path.join(base_dir(), "metrics", f"{tag}.jsonl"), lines=True)
-
-
-def runs(tag: str) -> pd.DataFrame:
-    frame = metrics(tag)
-    return frame[frame.kind == "run"]
-
-
-def curves(tag: str, parents: dict) -> pd.DataFrame:
-    """The run's train records, one per step (a relaunch's repeat of a step replaces it), each process's first step
-    marked; a branch's ({tag: (parent tag, branch step)}) preceded by its ancestry's steps before the branch point."""
-    frame = metrics(tag)
-    starts = set(frame[frame.kind == "run"].step)
-    train = frame[frame.kind == "train"].drop_duplicates("step", keep="last").sort_values("step")
-    train = train.assign(first_of_process=train.step.isin(starts))[
-        ["step", "tokens", "loss", "lr", "grad_norm", "tok_per_s", "first_of_process"]]
-    if parents.get(tag):
-        parent, step = parents[tag]
-        ancestry = curves(parent, parents)
-        train = pd.concat([ancestry[ancestry.step < step], train], ignore_index=True)
-    return train.reset_index(drop=True)
-
-
-def registered() -> list[Arm]:
-    return [a for arms in STUDIES.values() for a in arms()]
-
-
-def evaluated(arms: list[Arm]) -> list[Arm]:
-    """The arms with an evaluation record."""
-    return [a for a in arms if os.path.exists(os.path.join(base_dir(), "evals", f"{a.tag}.json"))]
-
-
-def collect() -> None:
-    """results/studies/arms.csv (one row per study arm: its configuration, every Variant field, the plan and the
-    optimizer hyperparameters of its first process, its train summary, its group bits per byte), eval.csv (one row per
-    arm, evaluation, corpus or benchmark and context bucket: bits, bytes, rows) and curves.parquet (one row per arm and
-    step)."""
-    arms, evals, steps = [], [], []
-    everything = registered()
-    parents = {a.tag: a.parent for a in everything}
-    for arm in evaluated(everything):
-        r, first = record(arm.tag), runs(arm.tag).iloc[0]
-        row = {"study": arm.study, "arm": arm.name, "tag": arm.tag, "commit": r["commit"], "depth": arm.depth,
-               "ratio": arm.ratio, "seed": arm.seed, "data_seed": arm.data_seed,
-               **dataclasses.asdict(Variant(**arm.variant)), "parent": arm.parent and arm.parent[0],
-               "branch_step": arm.parent and arm.parent[1], **{f"plan_{k}": v for k, v in first["plan"].items()},
-               "lr": first.get("lr"), "weight_decay": first.get("weight_decay"), "eval_step": r["step"],
-               **summary(arm)}
-        for name, result in r["eval"].items():
-            if name == "solution":
-                evals += [{"tag": arm.tag, "eval": name, "corpus": b, "bucket": i, **bucket(s, i)}
-                          for b, s in result.items() for i in range(len(s["bits"]))]
-                continue
-            row |= {f"bpb_{name}_{g}": v for g, v in result["bpb"].items()}
-            evals += [{"tag": arm.tag, "eval": name, "corpus": c, "bucket": i, "rows": s["rows"], **bucket(s, i)}
-                      for c, s in result["corpora"].items() for i in range(len(s["bits"]))]
-        arms.append(row)
-        steps.append(curves(arm.tag, parents).assign(tag=arm.tag))
-    os.makedirs(RESULTS, exist_ok=True)
-    pd.DataFrame(arms).to_csv(os.path.join(RESULTS, "arms.csv"), index=False)
-    pd.DataFrame(evals).drop_duplicates().to_csv(os.path.join(RESULTS, "eval.csv"), index=False)
-    pd.concat(steps).drop_duplicates(["tag", "step"]).to_parquet(os.path.join(RESULTS, "curves.parquet"), index=False)
-
-
-def bucket(sums: dict, i: int) -> dict:
-    """Context bucket i of evaluated sums: its context range (loss_eval.CONTEXTS) and its bits and bytes."""
-    edges = (0, *CONTEXTS, math.inf)
-    return {"context_min": edges[i] + 1, "context_max": edges[i + 1], "bits": sums["bits"][i],
-            "bytes": sums["bytes"][i]}
-
-
-# Analyses: each writes results/studies/<study>.md (the appendix table) and <study>.csv (its numbers)
-
-
-def lr_optimum(frame: pd.DataFrame) -> dict:
-    """The lr minimizing a quadratic in x = ln lr fitted by OLS to the metric: ln eta* = -b1 / (2 b2) with its
-    delta-method SE (gradient (-1 / (2 b2), b1 / (2 b2^2)) through the coefficients' covariance), the fitted minimum,
-    the curvature b2 (> 0 for a minimum) and whether eta* lies inside the grid."""
-    fit = smf.ols("bpb ~ x + I(x ** 2)", data=frame.assign(x=np.log(frame.lr))).fit()
-    b1, b2 = fit.params["x"], fit.params["I(x ** 2)"]
-    x = -b1 / (2 * b2)
-    gradient = np.array([-1 / (2 * b2), b1 / (2 * b2 ** 2)])
-    cov = fit.cov_params().loc[["x", "I(x ** 2)"], ["x", "I(x ** 2)"]].to_numpy()
-    return {"ln_lr": x, "ln_lr_se": float(np.sqrt(gradient @ cov @ gradient)), "lr": math.exp(x), "curvature": b2,
-            "bpb_min": float(fit.predict(pd.DataFrame({"x": [x]}))[0]), "df_resid": fit.df_resid,
-            "inside": bool(np.log(frame.lr).min() <= x <= np.log(frame.lr).max())}
-
-
-def table(frame: pd.DataFrame, title: str) -> str:
-    """A titled Markdown table of a DataFrame (pandas to_markdown, tabulate's pipe format)."""
+def markdown(frame: pd.DataFrame, *, title: str) -> str:
     return f"### {title}\n\n{frame.to_markdown(floatfmt='.5g')}\n"
 
 
-def per_arm(arms: list[Arm]) -> pd.DataFrame:
-    rows = {a.name: {"tag": a.tag, "bpb": metric(a.tag), **summary(a)} for a in arms}
-    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("arm")
+def report_regime() -> tuple[list[str], pd.DataFrame]:
+    effects = regime_effects()
+    return [markdown(regime_results(), title="Regime: runs"),
+            markdown(effects, title="Regime: effects, alternative - baseline, and decisions"),
+            f"Adopted: `{json.dumps(regime_decision())}`\n"], effects
 
 
-def analyze_noise() -> tuple[list[str], pd.DataFrame]:
-    frame = pd.DataFrame([{"seed": a.seed, "data_seed": a.data_seed, "bpb": metric(a.tag)} for a in noise()])
-    anova = sm.stats.anova_lm(smf.ols("bpb ~ C(seed) + C(data_seed)", data=frame).fit(), typ=1)
-    ms = anova["mean_sq"]
-    components = pd.DataFrame({"variance": [
-        max(0.0, (ms["C(seed)"] - ms["Residual"]) / len(NOISE_DATA_SEEDS)),
-        max(0.0, (ms["C(data_seed)"] - ms["Residual"]) / len(NOISE_SEEDS)), ms["Residual"]]},
-        index=pd.Index(["init seed", "data seed", "residual"], name="component"))
-    sigma, df = noise_sd()
-    return [table(frame.set_index("seed"), "Noise: the metric per init x data seed"),
-            table(anova, "Two-way ANOVA (type 1)"), table(components, "Variance components (method of moments)"),
-            f"SD of all {df + 1} runs {sigma:.5f} ({df} df)\n"], frame
+def report_scale_up() -> tuple[list[str], pd.DataFrame]:
+    frame, added = scale_up_decision()
+    return [markdown(frame, title=f"Scale-up to d24 on {json.dumps(regime_decision())} (bits per byte at "
+                                  f"{SCALE_UP_TOKENS:g} tokens; the selected run at equal H100 time along its "
+                                  f"log2-token slope)"),
+            f"Candidates adopted: {added}\n"], frame
 
 
-def analyze_screen() -> tuple[list[str], pd.DataFrame]:
-    effects = screen_effects()
-    aliases = pydoe.fracfact_aliasing(pydoe.fracfact(DESIGN))[0]
-    letters = dict(zip("abcdefg", FACTORS, strict=True))
-    chains = ["- " + " = ".join("*".join(letters[c] for c in word) for word in chain.split(" = ")) for chain in aliases]
-    return [table(per_arm(screen()), "Screen: arms"), table(effects.rename_axis("factor"), "Screen: main effects"),
-            "### Alias chains\n\n" + "\n".join(chains) + "\n"], effects
+def report_final() -> tuple[list[str], pd.DataFrame]:
+    config = final_config()
+    frame = pd.DataFrame({"value": {k: str(v) for k, v in config.items()}}).rename_axis("Variant field")
+    return [markdown(frame, title="The production run's changes from the baseline"), f"`{json.dumps(config)}`\n"], frame
 
 
-def analyze_long_context() -> tuple[list[str], pd.DataFrame]:
-    weights = mixture_weights(REPO_STAGE.mixture, get_tokenizer(), REPO_STAGE.seq_len)
-    rows = []
-    for arm in long_context():
-        result = record(arm.tag)["eval"]
-        corpora = result["32k"]["corpora"]
-        # each context bucket's mixture bits per byte (eval/loss_eval.py mixture_bpb, the corpora's bucket alone)
-        buckets = {f"bpb_32k_context_le_{edge:g}": mixture_bpb(
-            {c: {"bits": [s["bits"][i]], "bytes": [s["bytes"][i]], "rows": s["rows"]} for c, s in corpora.items()},
-            weights) for i, edge in enumerate((*CONTEXTS, math.inf))}
-        rows.append({"arm": arm.name, "rewarm": -1 if "repo_schedule" in arm.variant else 1,
-                     "rope": -1 if "rope" in arm.variant else 1, "bpb_8k": result["8k"]["bpb"]["code"],
-                     "bpb_32k": result["32k"]["bpb"]["all"], **buckets})
-    frame = pd.DataFrame(rows).set_index("arm")
-    sigma, _ = noise_sd()
-    outcomes = [c for c in frame.columns if c.startswith("bpb")]
-    # one replicate per cell: each effect's SE is the noise SD (2 sigma / sqrt(4)); the interaction as -2 x its
-    # coefficient, the alternatives' joint departure from additivity
-    effects = pd.DataFrame({y: -2 * smf.ols(f"{y} ~ rewarm * rope", data=frame).fit().params[
-        ["rewarm", "rope", "rewarm:rope"]] for y in outcomes}).rename_axis("effect")
-    return [table(frame, "Long-context stage: arms"),
-            table(effects, f"Long-context stage: effects, alternative - current (SE: the noise SD {sigma:.5f})")], \
-        effects
-
-
-def analyze_confirm() -> tuple[list[str], pd.DataFrame]:
-    frame, stands, added = confirm_decisions()
-    return [table(frame, f"Confirmation at d24 of the verdict {json.dumps(verdict())} and the candidates "
-                         f"(bits per byte at {HORIZONS[0]:g} tokens; the base at equal H100 time interpolated in log2 "
-                         f"tokens)"),
-            f"Architecture verdict {'stands' if stands else 'reverts'}; candidates adopted: {added}; final variant of "
-            f"the d24 studies: `{json.dumps(final())}`\n"], frame
-
-
-def horizon_frame(arms: list[Arm]) -> pd.DataFrame:
-    rows = []
-    for a in arms:
-        run = runs(a.tag).iloc[0]
-        rows.append({"arm": a.name, "tokens": Variant(**a.variant).tokens, "lr": run["lr"], "bpb": metric(a.tag)})
-    return pd.DataFrame(rows)
-
-
-def analyze_lr_horizon() -> tuple[list[str], pd.DataFrame]:
-    """The optimum per horizon, then (from the horizons whose fit has an interior minimum: positive curvature, eta*
-    inside the grid) the WLS line of ln eta* on ln D with the optima's delta-method variances as known variances,
-    extrapolated to the production run's file-level tokens (decision: its lr replaces the law's only if the 95%
-    interval excludes the law's)."""
-    frame = horizon_frame(lr_horizon())
-    optima = pd.DataFrame({t: lr_optimum(g) for t, g in frame.groupby("tokens")}).T.rename_axis("tokens")
-    sections = [table(frame.set_index("arm"), "lr x horizon: arms"), table(optima, "Optimal lr per horizon")]
-    valid = optima[(optima.curvature.astype(float) > 0) & optima.inside.astype(bool)]
-    if len(valid) < 2:
-        return [*sections, f"{len(valid)} horizon(s) with an interior optimum: no horizon law.\n"], optima
-    fit = sm.WLS(valid.ln_lr.astype(float), sm.add_constant(np.log(valid.index.to_numpy(dtype=float))),
-                 weights=1 / valid.ln_lr_se.astype(float) ** 2).fit(cov_type="fixed scale")
-    production = plan(D24, production_ratio())
-    file_tokens = production.repo_start * production.total_batch_size
-    prediction = fit.get_prediction(np.array([[1.0, math.log(file_tokens)]])).summary_frame(alpha=ALPHA)
-    lower, upper = (math.exp(prediction[k].iloc[0]) for k in ("mean_ci_lower", "mean_ci_upper"))
-    law = pd.DataFrame({"law lr": [production.lr], "extrapolated lr": [math.exp(prediction["mean"].iloc[0])],
-                        "lower": [lower], "upper": [upper], "beta": [-fit.params.iloc[1]], "beta se": [fit.bse.iloc[1]],
-                        "replace the law": [not lower <= production.lr <= upper]},
-                       index=pd.Index([f"{file_tokens:.4g} tokens"], name="horizon"))
-    return [*sections, table(law, "eta*(D) = a D^-beta at the production run's file-level tokens")], optima
-
-
-def analyze_optimizer() -> tuple[list[str], pd.DataFrame]:
-    muon = horizon_frame([a for a in lr_horizon() if Variant(**a.variant).tokens == OPTIMIZER_TOKENS])
-    adamw = horizon_frame(optimizer())
-    optima = pd.DataFrame({"muon": lr_optimum(muon), "adamw": lr_optimum(adamw)}).T.rename_axis("optimizer")
-    return [table(pd.concat([muon.assign(optimizer="muon"), adamw.assign(optimizer="adamw")]).set_index("arm"),
-                  f"Optimizers at {OPTIMIZER_TOKENS:g} tokens: arms"),
-            table(optima, "Optimizers: fitted optimum each")], optima
-
-
-def analyze_batch() -> tuple[list[str], pd.DataFrame]:
-    production = plan(D24, production_ratio())
-    rows = []
-    for arm in batch():
-        with open(os.path.join(base_dir(), "noise_scale", f"{arm.tag}.json"), encoding="utf-8") as f:
-            rows.append(json.load(f))
-    frame = pd.DataFrame(rows).set_index("tokens")
-    fit = sm.OLS(np.log(frame.b_simple), sm.add_constant(np.log(frame.index.to_numpy(dtype=float)))).fit()
-    file_tokens = production.repo_start * production.total_batch_size
-    prediction = fit.get_prediction(np.array([[1.0, math.log(file_tokens)]])).summary_frame(alpha=ALPHA)
-    trend = pd.DataFrame({"batch": [production.total_batch_size], "B_simple": [math.exp(prediction["mean"].iloc[0])],
-                          "lower": [math.exp(prediction["mean_ci_lower"].iloc[0])],
-                          "upper": [math.exp(prediction["mean_ci_upper"].iloc[0])], "slope": [fit.params.iloc[1]]},
-                         index=pd.Index([f"{file_tokens:.4g} tokens"], name="horizon"))
-    return [table(frame, "Gradient noise scale at the law's lr"),
-            table(trend, "ln B_simple ~ ln D (OLS), at the production run's file-level tokens")], frame
-
-
-ANALYSES = {"noise": analyze_noise, "screen": analyze_screen, "long_context": analyze_long_context,
-            "confirm": analyze_confirm, "lr_horizon": analyze_lr_horizon, "optimizer": analyze_optimizer,
-            "batch": analyze_batch}
+REPORTS = {"regime": report_regime, "scale_up": report_scale_up, "final": report_final}
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("arms", "analyze", "collect"))
-    parser.add_argument("study", nargs="?", choices=(*STUDIES, "batch"))
+    parser.add_argument("command", choices=("runs", "report"))
+    parser.add_argument("study", choices=REPORTS)
     args = parser.parse_args()
-    if args.command == "arms":
-        for arm in (batch() if args.study == "batch" else STUDIES[args.study]()):
-            print("arm", arm.name, arm.tag)
-    elif args.command == "analyze":
-        sections, numbers = ANALYSES[args.study]()
-        os.makedirs(RESULTS, exist_ok=True)
-        with open(os.path.join(RESULTS, f"{args.study}.md"), "w", encoding="utf-8") as f:
-            f.write(f"## {args.study}\n\n" + "\n".join(sections))
-        numbers.to_csv(os.path.join(RESULTS, f"{args.study}.csv"))
-    else:
-        collect()
+    if args.command == "runs":
+        for run in STUDIES[args.study]():
+            print("run", run.name, run.tag)
+        return
+    sections, numbers = REPORTS[args.study]()
+    os.makedirs(RESULTS, exist_ok=True)
+    with open(os.path.join(RESULTS, f"{args.study}.md"), "w", encoding="utf-8") as f:
+        f.write(f"## {args.study}\n\n" + "\n".join(sections))
+    numbers.to_csv(os.path.join(RESULTS, f"{args.study}.csv"))
 
 
 if __name__ == "__main__":

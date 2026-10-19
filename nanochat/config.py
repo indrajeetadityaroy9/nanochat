@@ -1,56 +1,74 @@
-"""
-The run settings every training and evaluation shares: context, vocabulary, mixture, micro-batch, training stages.
-"""
+"""Run settings shared by training and evaluation: vocabulary, mixture, micro-batch, stages, run identity."""
+import hashlib
+import json
+import os
+import subprocess
 from dataclasses import dataclass
+from functools import cache
 
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
 
-# The vocabulary, special tokens included: nanochat's 2^15 ids (karpathy/nanochat 92d63d4 scripts/tok_train.py:19
-# --vocab-size default 32768; DeepSeek-Coder's BPE vocabulary has 32,000, arXiv 2401.14196 §3.2)
+# The code a run's result depends on: model, ops, trainer, evaluation and data pipeline, the training and evaluation
+# scripts, and the image's definition
+CODE = ("nanochat", "scripts", "docker", "pyproject.toml", "uv.lock")
+
+# Ids including special tokens: nanochat's 2^15 (karpathy/nanochat 92d63d4 scripts/tok_train.py:19)
 VOCAB_SIZE = 2**15
-# {group: (share, corpora)}: DeepSeek-Coder's 87% code, 10% + 3% natural language (arXiv 2401.14196 §2: source code,
-# English code-related text, Chinese general text), the 3% here math web text as StarCoder2's OpenWebMath (14.42B of the
-# 7B model's 658.58B unique tokens, arXiv 2402.19173 Table 4); code = the Python and C++ corpora, each corpus at its
-# group's natural row share (data.loader.mixture_weights). On coding benchmarks more code scores higher (Qwen2.5-Coder
-# ablation, arXiv 2409.12186 Table 3: code:text:math 100:0:0 49.8 / 40.3 Common / BigCodeBench vs 70:20:10 48.3 / 38.3)
+# {group: (share, corpora)}, each corpus at its group's natural row share (data.loader.mixture_weights). Code 87% as
+# DeepSeek-Coder (arXiv 2401.14196 §2); math 3% as StarCoder2's OpenWebMath share (arXiv 2402.19173 Table 4); text the
+# rest. More code scores higher on coding benchmarks (Qwen2.5-Coder, arXiv 2409.12186 Table 3).
 MIXTURE = {
     "code": (0.87, ["stack_edu_python", "ultradata_code_l2_python", "ultradata_stack_v3_l2_python", "kaggle_notebooks",
                     "codeforces_cots", "stack_edu_cpp", "ultradata_code_l2_cpp", "ultradata_stack_v3_l2_cpp"]),
     "text": (0.10, ["climbmix"]),
     "math": (0.03, ["opc_fineweb_math", "ultradata_math_l2"]),
 }
-# Micro-batches of 98,304 tokens, 12 rows of the file-level stage's 8,192 and 3 of the repo-level stage's 32,768: the
-# most whole rows of both contexts whose d24 training step fits the H100's 80 GB, measured on the packed train rows
-# (profile_step.py: peak 69.6 GiB with the optimizer state, 48.9 GiB at 65,536 tokens, so +20.7 GiB per 32,768 and over
-# 80 GB at 131,072), 1% faster per token than 65,536 (benchmarks/h100.txt)
+# The most whole rows of both contexts (12 x 8K, 3 x 32K) whose d24 step fits 80 GB: peak 69.6 GiB; 131,072 tokens
+# exceeds 80 GB (benchmarks/h100.txt)
 MICRO_BATCH_TOKENS = 98_304
 
 
 @dataclass(frozen=True, kw_only=True)
 class Stage:
-    """A training stage: its context (rows of seq_len tokens), RoPE base and mixture {group: (share, corpora)}."""
+    """A training stage: context and mixture {group: (share, corpora)}."""
     seq_len: int
-    rope_base: float
     mixture: dict
 
     @property
     def batch_rows(self):
-        """Rows per micro-batch: MICRO_BATCH_TOKENS // seq_len."""
         return MICRO_BATCH_TOKENS // self.seq_len
 
 
-# Qwen2.5-Coder's two pretraining stages (arXiv 2409.12186 §3.2): file-level at its pretraining sequence length of
-# 8,192 tokens (§3.2.1), then repo-level, the context extended to 32,768 tokens and "RoPE's base frequency is adjusted
-# from 10,000 to 1,000,000" (§3.2.2), on long-context code: here the code corpora whose documents are repository samples
-# (data/schema.py REPOSITORY_FILE), at their natural row shares.
-FILE_STAGE = Stage(seq_len=8192, rope_base=10_000, mixture=MIXTURE)
-REPO_STAGE = Stage(seq_len=32_768, rope_base=1_000_000,
+# Qwen2.5-Coder's stages (arXiv 2409.12186 §3.2): file-level at 8,192 tokens, then repo-level at 32,768 on the
+# repository corpora (data/schema.py REPOSITORY_FILE)
+FILE_STAGE = Stage(seq_len=8192, mixture=MIXTURE)
+REPO_STAGE = Stage(seq_len=32_768,
                    mixture={"code": (1.0, [c for c in MIXTURE["code"][1] if SOURCES[c].schema is REPOSITORY_FILE])})
-# The repo-level stage's share of a run's tokens: Qwen2.5-Coder's ~300B of its 5.2T file-level + 300B tokens (§3.2.1-2)
+# The repo-level stage's share of tokens: Qwen2.5-Coder's 300B of 5.2T + 300B (§3.2.1-2)
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
+# One RoPE base for both stages: Qwen2.5-Coder's repo-level 10^6 (§3.2.2), above Men et al.'s lower bound for a 32K
+# context (arXiv 2405.14591); Llama 3 trains at a large base (5 x 10^5) from the start (arXiv 2407.21783 §3.2)
+ROPE_BASE = 1_000_000
 
 
-def run_tag(depth, ratio, seed):
-    """A run's tag (its checkpoint directory and metrics file)."""
-    return f"d{depth}-r{ratio:g}-s{seed}"
+@cache
+def code_version() -> tuple[str, ...]:
+    """Git object ids of CODE at HEAD. Uncommitted changes there fail: a result names the code that produced it."""
+    git = ["git", "-C", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+    dirty = subprocess.run([*git, "status", "--porcelain", "--", *CODE], capture_output=True, text=True,
+                           check=True).stdout
+    if dirty:
+        raise RuntimeError(f"commit the code a run depends on first; uncommitted:\n{dirty}")
+    return tuple(subprocess.run([*git, "rev-parse", *(f"HEAD:{p}" for p in CODE)], capture_output=True, text=True,
+                                check=True).stdout.split())
+
+
+def run_tag(*, depth: int, ratio: float, seed: int, data_seed: int, changes: dict) -> str:
+    """A run's checkpoint directory, metrics and evaluation file name: its depth, ratio and seeds, then a hash of all
+    its result depends on (those, the Variant changes from the baseline, code_version), so a run never resumes,
+    appends to or counts the artifacts of other code or another configuration."""
+    identity = {"depth": depth, "ratio": ratio, "seed": seed, "data_seed": data_seed, "changes": changes,
+                "code": code_version()}
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return f"d{depth}-r{ratio:g}-s{seed}-d{data_seed}-{digest[:12]}"

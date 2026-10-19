@@ -1,11 +1,9 @@
 /*
- * Device code shared by csrc/qk_prologue.cu (training) and csrc/decode.cu (decoding), so that given equal inputs
- * the decoder's q and k equal the training forward's bit for bit: the 16-byte load/store helpers and the forward row
- * math of gpt.py's qk_norm_rope on one head row x of HEAD_DIM bf16, n = x / sqrt(mean(x^2) + eps) with F.rms_norm's
- * fp32 epsilon, m = n * g with the fp32 per-dim gain g, y = m rotated by -theta over the full head (half split: m1 =
- * dims 0..63, m2 = dims 64..127, y1 = m1 cos + m2 sin, y2 = -m1 sin + m2 cos; karpathy/nanochat 92d63d4
- * gpt.py:57-65). A row is QK_LANES consecutive threads, each owning a rotation pair of VEC-dim vectors (offsets o =
- * lane * VEC and o + HALF); the row's sums are reduced by shuffles within its lanes.
+ * Device code shared by csrc/qk_prologue.cu (training) and csrc/decode.cu (decoding), so the decoder's q and k equal the
+ * training forward's bitwise. Row math on one head row x: n = x / sqrt(mean(x^2) + eps) (F.rms_norm's fp32 epsilon),
+ * m = n * g, y = m rotated by -theta over the full head (m1, m2 the halves; y1 = m1 cos + m2 sin, y2 = -m1 sin + m2 cos;
+ * karpathy/nanochat 92d63d4 gpt.py:57-65). A row is QK_LANES threads, each holding dims o..o+VEC-1 and their rotation
+ * partners o+HALF..; row sums reduce by shuffles within those lanes.
  */
 #pragma once
 
@@ -16,8 +14,8 @@
 
 typedef __nv_bfloat16 bf16;
 
-constexpr int WARP = 32;                           /* threads per warp */
-constexpr int HEAD_DIM = 128;                      /* model/gpt.py gpt_config head_dim */
+constexpr int WARP = 32;                           /* threads per warp (CUDA C++ Programming Guide, warpSize) */
+constexpr int HEAD_DIM = 128;                      /* model/gpt.py gpt_config head_dim; compile time: register arrays */
 constexpr int HALF = HEAD_DIM / 2;                 /* rotation pairs per head: dims i and i + HALF */
 constexpr int VEC = sizeof(uint4) / sizeof(bf16);  /* bf16 per 16-byte access */
 constexpr int QK_LANES = HALF / VEC;               /* threads per head row, one rotation pair of vectors each */
@@ -32,9 +30,10 @@ static __device__ __forceinline__ void load(const bf16 *p, float *v) {
     }
 }
 
-/* VEC fp32 entries (offsets are multiples of VEC, so each float4 is aligned). */
+/* VEC fp32; offsets are multiples of VEC, so each float4 is aligned. */
 static __device__ __forceinline__ void load(const float *p, float *v) {
-    for (int i = 0; i < VEC; i += 4) *reinterpret_cast<float4 *>(v + i) = *reinterpret_cast<const float4 *>(p + i);
+    for (int i = 0; i < VEC; i += sizeof(float4) / sizeof(float))
+        *reinterpret_cast<float4 *>(v + i) = *reinterpret_cast<const float4 *>(p + i);
 }
 
 /* VEC fp32 rounded to bf16, one 16-byte store. */
@@ -45,8 +44,7 @@ static __device__ __forceinline__ void store(bf16 *p, const float *v) {
     *reinterpret_cast<uint4 *>(p) = u;
 }
 
-/* Lanes of this thread's row, the shuffle mask: rows are whole groups of QK_LANES threads, so a group is live
- * together. */
+/* Shuffle mask of this thread's row; rows are whole QK_LANES-thread groups, so a group is live together. */
 static __device__ __forceinline__ unsigned qk_row_mask() {
     return ((1u << QK_LANES) - 1) << ((threadIdx.x & (WARP - 1)) & ~(QK_LANES - 1));
 }
@@ -57,15 +55,14 @@ static __device__ __forceinline__ float qk_row_sum(float v) {
     return v;
 }
 
-/* 1 / sqrt(mean(x^2) + FLT_EPSILON) of the row whose pair of vectors x1, x2 this lane holds. */
+/* 1 / sqrt(mean(x^2) + FLT_EPSILON) of this lane's row. */
 static __device__ __forceinline__ float qk_rstd(const float *x1, const float *x2) {
     float ss = 0.f;
     for (int i = 0; i < VEC; i++) ss += x1[i] * x1[i] + x2[i] * x2[i];
     return rsqrtf(qk_row_sum(ss) / HEAD_DIM + FLT_EPSILON);
 }
 
-/* The forward of this lane's pair of vectors: x, g, c, s point at its first vector of the head row, the gain and the
- * position's cos/sin table row (the pair's second vector of x and g is HALF further); y1, y2 the fp32 outputs. */
+/* Forward of this lane's vector pair: x, g at its first vector (partners HALF further), c, s at its cos/sin entries. */
 static __device__ __forceinline__ void qk_row(const bf16 *x, const float *g, const float *c, const float *s, float *y1,
                                               float *y2) {
     float x1[VEC], x2[VEC], g1[VEC], g2[VEC], cs[VEC], sn[VEC];

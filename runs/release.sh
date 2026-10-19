@@ -1,9 +1,8 @@
 #!/bin/bash
-# Publish a run on the Hugging Face Hub as a model repository laid out like the experiment directory: its final
-# checkpoint (base_checkpoints/<tag>/checkpoint.pt: weights, optimizer state and model config, train/checkpoint.py), its
-# metrics record and its base_eval results. `hf download <repo> --local-dir ~/nanochat-runs` puts them back where
-# train/checkpoint.load_model, scripts/base_eval.py and a resumed scripts/base_train.py read them. Needs a write token
-# (runs/container.sh hf auth login).
+# Publish a run as a Hugging Face model repository in the experiment directory's layout: final checkpoint
+# (base_checkpoints/<tag>/checkpoint.pt), metrics record, base_eval results. `hf download <repo> --local-dir
+# ~/nanochat-runs` restores them for train/checkpoint.load_model, scripts/base_eval.py and a resumed base_train. Needs a
+# write token (runs/container.sh hf auth login).
 #
 #   runs/release.sh <tag> <repo>
 set -euo pipefail

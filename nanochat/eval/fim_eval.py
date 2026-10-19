@@ -1,11 +1,10 @@
 """
-Fill-in-the-middle evaluation of a base model trained with FIM sentinels (data/pack.py): openai/human-eval-infilling
-(Bavarian et al., arXiv 2207.14255; the package and its data installed in the image, docker/Dockerfile): single-line,
-multi-line and random-span infilling of the 164 HumanEval solutions. Each problem's prompt (prefix) and suffix form a
-PSM or SPM prompt (inference.decoder.fim_prompt); the model writes the middle greedily until it writes BOS (its
-end-of-middle target in training), bounded by the benchmark's longest reference middle in tokens. Scored by the
-package's own entry point (`python -m human_eval_infilling.evaluate_functional_correctness`, its 3 s timeout and 4
-workers) in its own process; pass@1 by its estimate_pass_at_k over the per-problem verdicts.
+Fill-in-the-middle evaluation on openai/human-eval-infilling (Bavarian et al., arXiv 2207.14255; installed in the
+image, docker/Dockerfile): single-line, multi-line and random-span infilling of the 164 HumanEval solutions. Each
+problem's prefix and suffix form a PSM or SPM prompt (inference.decoder.fim_prompt); the model writes the middle
+greedily until BOS (its end-of-middle target in training), at most the benchmark's longest reference middle in tokens.
+Scored by the package's entry point (`python -m human_eval_infilling.evaluate_functional_correctness`: 3 s timeout,
+4 workers) in its own process; pass@1 by its estimate_pass_at_k.
 """
 
 import json
@@ -24,8 +23,8 @@ FIM_MODES = ("psm", "spm")  # the two orders the packer trains (Bavarian et al. 
 
 
 def infilling(name, problems, middles):
-    """The official evaluation of one middle per problem of benchmark `name`: {"pass@1", "ids", "completions",
-    "result"} ("passed", "failed: <exception>" or "timed out" per problem, human_eval_infilling/execution.py)."""
+    """Official evaluation of one middle per problem: {"pass@1", "ids", "completions", "result"} (per problem "passed",
+    "failed: <exception>" or "timed out", human_eval_infilling/execution.py)."""
     with tempfile.TemporaryDirectory() as tmp:
         samples = os.path.join(tmp, "samples.jsonl")
         with open(samples, "w", encoding="utf-8") as f:
@@ -47,7 +46,8 @@ def fim_generation(model, tokenizer):
         max_tokens = max(len(tokenizer.enc.encode_ordinary(p["canonical_solution"])) for p in problems)
         for mode in FIM_MODES:
             middles = [None] * len(problems)
-            requests = ((fim_prompt(tokenizer, p["prompt"], p["suffix"], mode), max_tokens, None) for p in problems)
+            requests = ((fim_prompt(tokenizer, p["prompt"], p["suffix"], mode=mode), max_tokens, None)
+                        for p in problems)
             for i, ids in decoder.run(requests):
                 middles[i] = tokenizer.enc.decode(ids)
             results[f"{name}/{mode}"] = infilling(name, problems, middles)

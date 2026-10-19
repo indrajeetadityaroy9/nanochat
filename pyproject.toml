@@ -22,18 +22,18 @@ dependencies = [
     "nvidia-cutlass-dsl[cu13]",
     "numpy",
     "obstore",
-    # the studies' and the report's tables: tidy results as DataFrames, CSV, Parquet and Markdown (experiments/studies.py,
+    # the studies' and the report's tables: results as DataFrames, CSV and Markdown (experiments/studies.py,
     # scripts/report.py)
     "pandas",
     # 25.0.1: ParquetFile pre-buffers (coalesces) reads by default; 25.0.0 returns wrong doubles on Arm CPUs with SVE
     "pyarrow>=25.0.1",
-    # the ablation studies' designs: fractional factorials and their alias structure (experiments/studies.py)
+    # the regime study's full factorial (experiments/studies.py)
     "pydoe",
     # QuACK's CuTe DSL kernels, from github.com/Dao-AILab/quack (tool.uv.sources)
     "quack-kernels",
     # the LSH band count's integrals (nanochat/data/dedup.py rows)
     "scipy",
-    # the studies' estimates: factorial effects by OLS, ANOVA, WLS fits with their prediction intervals
+    # the studies' estimates: factorial effects by OLS, Holm adjustment, WLS fits with their prediction intervals
     # (experiments/studies.py)
     "statsmodels",
     # pandas' DataFrame.to_markdown

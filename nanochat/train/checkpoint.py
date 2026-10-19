@@ -1,24 +1,21 @@
 """
-A base_train run's checkpoints under <base_dir>/base_checkpoints/<tag>/: checkpoint.pt, the newest, the one a run resumes
-from, one torch.save of {"step", "model" (the raw weights), "optimizers" (their state dicts), "model_config",
-"stage_rows"} written to a temporary file and moved over the previous one (os.replace, atomic on POSIX), so that the
-path always holds one complete checkpoint; and step_<step, 6 digits>.pt, the same at each step the run keeps
-(train --keep: production milestones, the lr-horizon study's branch points), hard links of the newest at that step.
+Checkpoints under <base_dir>/base_checkpoints/<tag>/: checkpoint.pt, the newest ({"step", "model", "optimizers",
+"model_config", "stage_rows"}), written to a temporary file and renamed (os.replace is atomic), so a run killed
+mid-save resumes from a complete file; step_<step:06d>.pt, hard links of the newest at the steps the run keeps.
 """
 
 import os
 
 import torch
 
-from nanochat.data.tokenizer import Tokenizer, get_tokenizer
 from nanochat.model.gpt import GPT, GPTConfig
 from nanochat.paths import base_dir
 
 
-def checkpoint_path(model_tag: str, step: int | None = None) -> str:
-    """The run's newest checkpoint, or (step) the one it kept at that step."""
+def checkpoint_path(tag: str, *, step: int | None) -> str:
+    """The newest checkpoint (step None) or the one kept at `step`."""
     name = "checkpoint.pt" if step is None else f"step_{step:06d}.pt"
-    return os.path.join(base_dir(), "base_checkpoints", model_tag, name)
+    return os.path.join(base_dir(), "base_checkpoints", tag, name)
 
 
 def save_checkpoint(path: str, checkpoint: dict) -> None:
@@ -27,12 +24,11 @@ def save_checkpoint(path: str, checkpoint: dict) -> None:
     os.replace(path + ".tmp", path)
 
 
-def load_model(device: torch.device, model_tag: str, step: int | None = None) -> tuple[GPT, Tokenizer, int]:
-    """(model, tokenizer, step) of a run's checkpoint (checkpoint_path): its raw weights, at the stage (context and
-    rotary base) the run was in (model_config)."""
-    checkpoint = torch.load(checkpoint_path(model_tag, step), map_location=device)
+def load_model(tag: str, *, step: int | None, device: torch.device) -> tuple[GPT, int]:
+    """(model, step) of a checkpoint, at the stage (context, RoPE base) its weights trained in."""
+    checkpoint = torch.load(checkpoint_path(tag, step=step), map_location=device)
     with torch.device("meta"):
         model = GPT(GPTConfig(**checkpoint["model_config"]))
-    model.load_state_dict(checkpoint["model"], assign=True)  # every parameter, so the meta model needs no storage
+    model.load_state_dict(checkpoint["model"], assign=True)
     model.init_buffers()
-    return model, get_tokenizer(), checkpoint["step"]
+    return model, checkpoint["step"]

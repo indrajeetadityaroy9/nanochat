@@ -1,19 +1,13 @@
 """
-The metrics record of a training run: JSON lines in <base_dir>/metrics/<tag>.jsonl, each with "kind", "time" (Unix
-seconds, added by append) and the fields of its kind.
+A run's metrics: JSON lines in <base_dir>/metrics/<tag>.jsonl, each with "kind", "time" (Unix seconds) and its fields.
 
-kind "run" (one per process start): step (the step the process starts from), plan (train/schedule.py RunPlan: batch,
-    steps, the repo-level stage's first step, tokens per parameter, the law's peak lr), seed, data_seed, variant
-    (scripts/base_train.Variant), lr and weight_decay (the peak lr and weight decay the optimizers run with: a resumed
-    process's are its checkpoint's), stage (the stage of that step as the model runs it, config.Stage: seq_len,
-    rope_base, mixture as {corpus: row weight}).
-kind "stage" (at the switch to the repo-level stage): step, stage (as in "run").
-kind "train" (every optimizer step): step (0-based), tokens (row positions after it, padding included), loss (the step's
-    training loss: the mean next-token loss over the step's valid targets, summed over its micro-batches in fp64), lr
-    (the lr of every group at the step: the plan's lr x train/schedule.py lr_multiplier, by LambdaLR), grad_norm (L2
-    norm of the gradient of every parameter before clipping, torch.nn.utils.clip_grad_norm_),
-    tok_per_s (row positions per second, padding included, as tokens, over the step's time between two CUDA
-    synchronizations: its loader reads, forward/backward passes and optimizer step).
+run (each process start): step, plan (schedule.RunPlan), seed, data_seed, variant (base_train.Variant), lr and
+    weight_decay (as the optimizers hold them: a resumed process's are its checkpoint's), stage (config.Stage as the
+    model runs it, mixture as {corpus: row weight}).
+stage (switch to the repo-level stage): step, stage.
+train (each optimizer step, 0-based): step; tokens (row positions after it, padding included); loss (mean next-token
+    loss over the step's valid targets, fp64); lr (LambdaLR's at the step); grad_norm (before clipping); tok_per_s (row
+    positions per second between the step's two CUDA synchronizations).
 """
 
 import json
@@ -24,7 +18,6 @@ from nanochat.paths import base_dir
 
 
 def append(tag, record):
-    """Append the record (a JSON-serializable dict with "kind") as one line to the run's metrics file."""
     path = os.path.join(base_dir(), "metrics", f"{tag}.jsonl")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:

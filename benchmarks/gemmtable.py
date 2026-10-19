@@ -1,18 +1,15 @@
-"""Pick a device's GEMM configs from gemmsweep.py's records: forward and dX roles the lowest median time; weight-gradient
-roles (proj_dw, mlp_dw_proj, mlp_dw_fc, lm_dw) among the configs within 1% of the fastest median the lowest error vs
-fp64, then the fastest. Prints each pick against the fastest, then the TABLE entries of ops/quack_gemm.py.
+"""ops/quack_gemm.py TABLE entries from gemmsweep.py records. Forward and dX roles: lowest median time. Weight-gradient
+roles: among configs whose median is within the fastest's median absolute deviation over rounds of the fastest median,
+lowest error vs fp64, then fastest. Prints each pick against the fastest, then the TABLE entries.
 Usage: python -m benchmarks.gemmtable gemmsweep.jsonl"""
 import collections
 import json
 import statistics
 import sys
 
-ORDER = ("proj_fwd", "proj_dx", "proj_dw", "mlp_up", "mlp_down", "mlp_dact", "mlp_dw_proj", "mlp_dx", "mlp_dw_fc",
-         "lm_dx", "lm_dw")
-
 
 def entry(cfg):
-    """A record's config as ops/quack_gemm.py's TABLE writes it."""
+    """A record's config in TABLE syntax (split_k omitted at 1)."""
     if cfg == "cublas":
         return '"cublas"'
     split = f", split_k={cfg['split_k']}" if cfg["split_k"] != 1 else ""
@@ -20,17 +17,24 @@ def entry(cfg):
             f"cluster_m={cfg['cluster_m']}, cluster_n={cfg['cluster_n']}{split})")
 
 
-rows = collections.defaultdict(dict)  # (C, role) -> entry -> (median ms, err)
-with open(sys.argv[1]) as f:
-    for line in f:
-        r = json.loads(line)
-        rows[(r["C"], r["role"])][entry(r["config"])] = (statistics.median(r["ms"]), r.get("err"))
-table = collections.defaultdict(dict)
-for (C, role), cs in sorted(rows.items()):
-    fastest = min(cs, key=lambda c: cs[c][0])
-    near = [c for c in cs if cs[c][0] <= 1.01 * cs[fastest][0]]
-    pick = fastest if cs[fastest][1] is None else min(near, key=lambda c: (cs[c][1], cs[c][0]))
-    table[C][role] = pick
-    print(f"C {C} {role} {pick}: {cs[pick][0]:.4f} ms (+{100 * (cs[pick][0] / cs[fastest][0] - 1):.2f}% vs fastest)")
-for C, roles in table.items():
-    print(f"    {C}: dict(\n" + ",\n".join(f"        {r}={roles[r]}" for r in ORDER) + "),")
+def main():
+    rows = collections.defaultdict(dict)  # (C, role) -> entry -> (ms per round, err)
+    with open(sys.argv[1], encoding="utf-8") as f:
+        for r in map(json.loads, f):
+            rows[(r["C"], r["role"])][entry(r["config"])] = (r["ms"], r.get("err"))
+    table = collections.defaultdict(dict)
+    for (C, role), cs in rows.items():
+        median = {c: statistics.median(ms) for c, (ms, _) in cs.items()}
+        fastest = min(median, key=median.get)
+        pick = fastest
+        if cs[fastest][1] is not None:
+            noise = statistics.median(abs(t - median[fastest]) for t in cs[fastest][0])
+            pick = min((c for c in cs if median[c] <= median[fastest] + noise), key=lambda c: (cs[c][1], median[c]))
+        table[C][role] = pick
+        print(f"C {C} {role} {pick}: {median[pick]:.4f} ms (+{median[pick] / median[fastest] - 1:.2%} vs fastest)")
+    for C, picks in table.items():
+        print(f"    {C}: dict(\n" + ",\n".join(f"        {r}={p}" for r, p in picks.items()) + "),")
+
+
+if __name__ == "__main__":
+    main()

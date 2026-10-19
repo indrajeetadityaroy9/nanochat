@@ -1,50 +1,41 @@
 /*
- * Greedy decoding of a nanochat GPT (nanochat/model/gpt.py) in CUDA C for a batch of B independent sequences, one
- * decoding step of all of them captured as a CUDA graph (nanochat/inference/decoder.py).
+ * Greedy decoding of a nanochat GPT (nanochat/model/gpt.py) for B independent sequences (slots); one step of all slots
+ * is captured as a CUDA graph (nanochat/inference/decoder.py).
  *
- * At small batch a step reads every weight once and does little else, so it is bound by memory bandwidth and, in an
- * eager framework, by kernel launches. Here one step advances each of the B sequences (slots) by one token: every
- * weight is read once for all of them, and the step is 5 kernels per layer plus 3, captured once as a CUDA graph and
- * replayed. Every value a step depends on (each slot's position, input token and KV cache; which slots are active)
- * lives in device memory. A sequence starts in a slot from the model's batch-1 prefill of all its prompt tokens but
- * the last, whose KV cache is copied in (dec_set_prefilled); the steps continue it greedily. Inactive slots (a bit
- * mask) are skipped by every kernel.
+ * A small-batch step is bound by weight reads and kernel launches: each weight is read once for all slots, and the
+ * step's 5 kernels per layer plus 3 replay as one graph. Positions, input tokens, KV caches and the active-slot mask
+ * live in device memory. A slot starts from the model's batch-1 prefill of its prompt but the last token
+ * (dec_set_prefilled); inactive slots are skipped by every kernel.
  *
  * Each step (gpt.py's forward at one position; C width, H heads of HEAD_DIM, x0 the normed embedding):
  *   k_embed   x0 = norm(wte[token])
  *   per layer i:
  *     k_gemv  xm = resid_lambdas[i] x + x0_lambdas[i] x0 (x = x0 before layer 0), h = norm(xm),
- *             [q k v] = h [Wq Wk Wv]^T                                                  (the prologue mixes and norms)
- *     k_attn  VE layers: v += 2 sigmoid(W_g[head] . h) value_embeds[i][token]  (per head, fp32);
- *             q, k = rope(norm_D(q) q_gain), rope(norm_D(k) k_gain) per head (qk_row.cuh, as qk_prologue.cu);
- *             the cache takes k, v at the position; y = softmax(q K^T / sqrt(HEAD_DIM)) V over the keys of the
- *             layer's window (FlashAttention's window_size left) and the current key
+ *             [q k v] = h [Wq Wk Wv]^T
+ *     k_attn  VE layers: v += 2 sigmoid(W_g[head] . h) value_embeds[i][token] (per head, fp32);
+ *             q, k = rope(norm_D(q) q_gain), rope(norm_D(k) k_gain) (qk_row.cuh, as qk_prologue.cu);
+ *             y = softmax(q K^T / sqrt(HEAD_DIM)) V over the layer's window (FlashAttention's window_size left)
  *     k_gemv  xo = xm + y Wo^T
  *     k_gemv  u = relu(norm(xo) Wfc^T)^2
  *     k_gemv  x = xo + u Wproj^T
- *   k_gemv    logits = norm(x) W_lm^T, their argmax (atomicMax on a packed key)
- *   k_commit  each active slot's argmax becomes its next input token and its position advances.
+ *   k_gemv    argmax of norm(x) W_lm^T (atomicMax on a packed key)
+ *   k_commit  the argmax becomes each active slot's next token
  *
- * Numerics follow the PyTorch model's eager forward op by op: the matrices and tables are bf16 copies of the fp32
- * parameters (rounded once, as the forward rounds them at use); the fp32 rotary table and q/k gains; the value-embedding
- * gate in fp32 on its fp32 weights (one operation per PyTorch op, no contraction), its mix rounded once to bf16; the
- * resid/x0 lambdas applied as bf16 values to bf16 tensors (PyTorch's promotion of a 0-dim fp32 tensor with a bf16
- * tensor), each product and sum rounded; ReLU^2 from the fp32 accumulators as QuACK's gemm_act epilogue computes it
- * (relu_sq: relu(s) * s, quack/activation.py), one bf16 rounding; fp32 accumulation; values rounded to bf16 wherever
- * PyTorch stores a bf16 tensor; F.rms_norm's fp32 epsilon; the greedy argmax over the fp32 logits (bf16 rounding first
- * would create ties).
+ * Numerics follow the eager forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary table, q/k
+ * gains and value-embedding gate (no contraction), the gate's mix rounded once to bf16; resid/x0 lambdas as bf16 values
+ * on bf16 tensors (PyTorch's 0-dim fp32 x bf16 promotion), each product and sum rounded; ReLU^2 from the fp32
+ * accumulators as QuACK's gemm_act relu_sq (quack/activation.py), one bf16 rounding; F.rms_norm's fp32 epsilon; argmax
+ * over fp32 logits.
  *
- * Every slot is computed alone: no sum mixes slots, and every sum of a slot is taken in an order fixed by the model's
- * shapes and the slot's own position (each GEMV output by the tensor cores' MMAs over K in a fixed order, the slot one
- * column of them, whichever warp or block computes the row; attention's split count from the position, attn_run). So a
- * sequence's tokens and logits do not depend on the batch size, on the other sequences in the batch or on timing.
+ * No sum mixes slots and every sum's order is fixed by the shapes and the slot's position (GEMV: MMAs over K in fixed
+ * order; attention: split count from the position), so a sequence's tokens do not depend on the batch or on timing.
  *
- * Launch shapes follow from the kernels' limits and the problem size: a GEMV runs a warp per 16-row tile (the MMA's
- * m16), looping over tiles, in blocks of the size that maximizes its occupancy (cudaOccupancyMaxPotentialBlockSize) or
- * of fewer warps when that grid would leave SMs without a block, at most as many blocks as are resident at once;
- * attention runs a thread per head dim in each of (head, split, slot) blocks, at most a wave of splits per head and
- * slot (see k_attn).
+ * Launch shapes: a GEMV runs a warp per MMA_M-row tile in blocks sized by cudaOccupancyMaxPotentialBlockSize, fewer
+ * warps when that would leave SMs idle, at most one resident wave; attention runs a thread per head dim in (head,
+ * split, slot) blocks, at most a wave of splits per head and slot (k_attn).
  */
+#include <initializer_list>
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 
@@ -52,9 +43,13 @@
 
 constexpr int LANE_DIMS = HEAD_DIM / WARP;         /* a lane's dims of a query, key or value */
 constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thread per head dim */
-constexpr int MAX_BATCH = 8 * sizeof(unsigned long long);  /* slots: the bits of the active mask */
-constexpr int MMA_M = 16, MMA_N = 8;               /* mma.sync m16n8k16: rows of W and slots per MMA */
-constexpr int K_BLOCK = 4 * VEC;                   /* k per lane group step: lanes t = 0..3 hold VEC k each (two k16) */
+constexpr int MAX_BATCH = CHAR_BIT * sizeof(unsigned long long);  /* slots: the bits of the active mask */
+/* mma.sync m16n8k16 (PTX ISA "Matrix Fragments for mma.m16n8k16"): lanes form MMA_N groups (groupID = lane / GROUP) of
+ * GROUP threads (threadID_in_group = lane % GROUP), each holding ACC fp32 accumulators */
+constexpr int MMA_M = 16, MMA_N = 8, MMA_K = 16;
+constexpr int GROUP = WARP / MMA_N, ACC = MMA_M * MMA_N / WARP;
+constexpr int K_BLOCK = GROUP * VEC;               /* k per group step: VEC per lane */
+static_assert(K_BLOCK == 2 * MMA_K, "a K_BLOCK block is two k16 MMAs (k_gemv)");
 constexpr int NTILES = MAX_BATCH / MMA_N;          /* the MMA's n tiles of the slots */
 
 enum { PRO_COPY, PRO_RESID_NORM, PRO_NORM };
@@ -79,18 +74,13 @@ static __device__ __forceinline__ float warp_max(float v) {
 
 /* ---------------------------------------------------------------------------------------------------------------- */
 /* GEMV of B slots on the tensor cores: out[b][r] = W[r] . x[b] by mma.sync m16n8k16 (bf16 operands, fp32 accumulators),
- * a warp per MMA_M-row tile of W (tiles strided over the grid), every weight read once for all slots. A slot is a column
- * of the MMA's MMA_N-wide n tiles; the MMA computes every output element from its own row and column only, and each
- * element's sum runs over K in the same order (K_BLOCK blocks in order, two k16 MMAs each) whatever the batch, so a
- * slot's outputs do not depend on B or on the other slots. Within a K_BLOCK block lane (g, t) = (lane / 4, lane % 4)
- * (the m16n8k16 fragments' groupID and threadID_in_group, PTX ISA "Matrix Fragments for mma.m16n8k16")
- * loads the VEC consecutive k t*VEC.. of rows g and g + 8 and of its column's input (one 16-byte load each): A and B map
- * the MMA's k index to these physical k the same way, so the product is W . x.
- * The slots' inputs are made by the prologue (each value a bf16 value) a K chunk at a time into shared memory, [n tiles
- * of slots][chunk + VEC] (the VEC pad staggers the slot rows over the banks; inactive and padding slots zero), so any
- * batch fits: the chunk follows from the shared memory (gemv_chunk). (RESID_)NORM: each slot's norm factor first, a warp
- * per slot summing the squares lane-strided in fp32. RELU2: out[b][r] = bf16(relu(s) s) of the fp32 dot product s, as
- * QuACK's gemm_act relu_sq epilogue on its accumulators. */
+ * a warp per MMA_M-row tile of W (tiles strided over the grid), each weight read once. A slot is one column of an n
+ * tile, and each output's sum runs over K in a fixed order (K_BLOCK blocks, two k16 MMAs each), so a slot's outputs do
+ * not depend on B. In a K_BLOCK block lane (g, t) = (groupID, threadID_in_group) loads k t*VEC.. of rows g, g + 8 and
+ * of its column's input (one 16-byte load each); A and B map MMA k to physical k alike, so the product is W . x.
+ * The prologue writes the slots' bf16 inputs a K chunk at a time to shared memory, [n tiles of slots][chunk + VEC] (the
+ * VEC pad staggers banks; inactive and padding slots zero; chunk: gemv_chunk). (RESID_)NORM first computes each slot's
+ * norm factor, a warp per slot. RELU2: out = bf16(relu(s) s) of the fp32 dot product s (QuACK gemm_act relu_sq). */
 
 typedef struct {
     const bf16 *w;               /* [rows][cols] */
@@ -126,7 +116,7 @@ static __device__ __forceinline__ float pro_value(const Gemv &a, size_t at, floa
 __global__ void k_gemv(Gemv a) {
     extern __shared__ __align__(16) unsigned char gemv_buf[];
     const int K = a.cols, kc = a.chunk, ks = kc + VEC, tid = threadIdx.x, nthreads = blockDim.x, warp = tid / WARP,
-              lane = tid % WARP, warps = nthreads / WARP, g = lane / 4, t = lane % 4;
+              lane = tid % WARP, warps = nthreads / WARP, g = lane / GROUP, t = lane % GROUP;
     const int tiles = (a.B + MMA_N - 1) / MMA_N, slots = tiles * MMA_N;
     bf16 *xs = reinterpret_cast<bf16 *>(gemv_buf);                    /* [slots][ks] */
     float *rs = reinterpret_cast<float *>(xs + (size_t)slots * ks);    /* [slots]: each slot's norm factor */
@@ -152,10 +142,10 @@ __global__ void k_gemv(Gemv a) {
         const int r0 = min(row0 + g, a.rows - 1), r1 = min(row0 + g + MMA_M / 2, a.rows - 1);  /* past the end: loads only */
         const uint4 *w0 = reinterpret_cast<const uint4 *>(a.w + (size_t)r0 * K);
         const uint4 *w1 = reinterpret_cast<const uint4 *>(a.w + (size_t)r1 * K);
-        float acc[NTILES][4];
+        float acc[NTILES][ACC];
 #pragma unroll
         for (int n = 0; n < NTILES; n++)
-            for (int i = 0; i < 4; i++) acc[n][i] = 0.f;
+            for (int i = 0; i < ACC; i++) acc[n][i] = 0.f;
         for (int k0 = 0; k0 < K; k0 += kc) {
             const int kn = min(kc, K - k0), vecs = kn / VEC;
             __syncthreads();  /* the previous chunk is consumed */
@@ -190,8 +180,8 @@ __global__ void k_gemv(Gemv a) {
 #pragma unroll
         for (int n = 0; n < NTILES; n++) {
             if (n >= tiles) break;
-            for (int i = 0; i < 4; i++) {  /* the m16n8 accumulator fragment: rows g, g + 8; columns 2t, 2t + 1 */
-                const int row = row0 + g + (i >> 1) * (MMA_M / 2), b = n * MMA_N + t * 2 + (i & 1);
+            for (int i = 0; i < ACC; i++) {  /* the m16n8 accumulator fragment: rows g, g + 8; columns 2t, 2t + 1 */
+                const int row = row0 + g + i / 2 * (MMA_M / 2), b = n * MMA_N + t * 2 + i % 2;
                 if (row >= a.rows || b >= a.B || !live(mask, b)) continue;
                 const float s = acc[n][i];
                 const size_t at = (size_t)b * a.rows + row;
@@ -208,23 +198,21 @@ __global__ void k_gemv(Gemv a) {
                            * unsigned order (negatives inverted, positives above them) */
                     const uint32_t bits = __float_as_uint(s);
                     const uint32_t ordered = (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-                    atomicMax(a.argmax + b, ((unsigned long long)ordered << 32) | (0xffffffffu - (uint32_t)row));
+                    atomicMax(a.argmax + b, ((unsigned long long)ordered << 32) | (UINT32_MAX - (uint32_t)row));
                 }
             }
         }
     }
 }
 
-/* Shared memory of k_gemv at B slots and chunk kc: the inputs [n tiles of slots][kc + VEC] bf16, then a norm factor per
- * slot. */
+/* k_gemv's shared memory: the inputs [n tiles of slots][kc + VEC] bf16, then a norm factor per slot. */
 static size_t gemv_smem(int B, int kc) {
     const size_t slots = (size_t)(B + MMA_N - 1) / MMA_N * MMA_N;
     return slots * (kc + VEC) * sizeof(bf16) + slots * sizeof(float);
 }
 
-/* The chunk of a GEMV of K columns: the largest whole number of K_BLOCK blocks, at most K, whose inputs fit half the
- * device's opt-in shared memory per block, so that two blocks share an SM, the fewest that overlap one block's chunk
- * fill with the other's MMAs. */
+/* The largest chunk of whole K_BLOCK blocks, at most K, whose inputs fit half the opt-in shared memory per block: two
+ * co-resident blocks, the fewest that overlap one block's chunk fill with the other's MMAs. */
 static int gemv_chunk(int B, int K, int optin) {
     int kc = K / K_BLOCK * K_BLOCK;
     while (kc > K_BLOCK && gemv_smem(B, kc) > (size_t)optin / 2) kc -= K_BLOCK;
@@ -250,22 +238,14 @@ __global__ void k_embed(const int32_t *tokens, const unsigned long long *active,
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
-/* Attention, split over the KV cache (flash decoding): a grid of (head, split, slot) blocks of HEAD_DIM threads.
+/* Attention split over the KV cache (flash decoding): (head, split, slot) blocks of HEAD_DIM threads.
  *
- * Each block runs its head's prologue (attn_prologue; split 0 writes the position's key and value to the cache), then
- * an online softmax over its split of the cached keys: the keys before this position within the window, lo..p-1, cut
- * into runs of attn_run keys (the last shorter), one split per run, so the split count follows from the position alone.
- * The block's warps take the run's keys in turn (each warp's first key requested before the prologue); a warp holds a
- * running maximum score m, exponential sum l and weighted value sum acc (a lane's LANE_DIMS dims), each new maximum
- * rescaling l and acc by exp(m_old - m_new). The warps' states are merged in warp order into the split's partial
- * (acc; m, l) in global memory. The head's last block to finish (a counter orders the blocks, it carries no values)
- * weighs each split by exp(m - max m), adds the partials (warp w the splits w, w + ATTN_WARPS, ... in turn, then the
- * warps in order) and the current key and value (from its own prologue: the cache write may not be visible yet), and
- * writes the head's output acc / l (one bf16 rounding, FlashAttention's bf16 output). Blocks whose split lies past the
- * position's runs return at once. Every sum's order is fixed by the window and the position.
- *
- * Shared memory: three head-dim vectors, the warps' states and a weight per split; the context only lengthens the runs.
- * Each step reads the cache once, so its loads stream (__ldcs). */
+ * Each block runs its head's prologue (split 0 writes the position's k, v to the cache), then an online softmax over
+ * its run of attn_run cached keys from the window lo..p-1, so the split count depends on the position alone. Warps take
+ * the run's keys in turn, each keeping (m, l, acc); the warps merge in order into the split's partial in global memory.
+ * The head's last block to finish (an atomic counter) weighs each split by exp(m - max m), sums the partials in split
+ * order, adds the current key and value from its own prologue, and writes acc / l rounded to bf16 (FlashAttention's
+ * output). Every sum's order is fixed by the window and the position. Cache loads stream (__ldcs). */
 
 typedef struct {
     const bf16 *qkv, *h, *ve;  /* [B][3C], [B][C] (the normed input), the layer's value-embedding table or NULL */
@@ -278,17 +258,15 @@ typedef struct {
     const int32_t *tokens, *pos;  /* [B]: each slot's input token and its position */
     const unsigned long long *active;
     float *part;               /* slot b, head h, split s: [(b H + h) part_slot + s][HEAD_DIM], each split's value sum */
-    float *stat;               /* same index [2]: each split's maximum score m and exponential sum l */
+    float2 *stat;              /* same index: each split's maximum score m (x) and exponential sum l (y) */
     unsigned *done;            /* [B][H]: the head's splits finished in this launch; its last resets it */
     int part_slot;             /* splits per head and slot the partial buffers hold */
     int C, H, window, run;
 } Attn;
 
-/* Slot b's query, key and value of the head at position p into q, k, v (fp32 holding bf16 values), as gpt.py: on VE
- * layers v += 2 sigmoid(ve_gate[head] . h) * value_embedding[token] in fp32 (2 sigmoid(0) = 1: unit weight at init), the
- * gate's dot product over C lane-strided and reduced by every warp in the same order, one bf16 rounding (a thread per
- * dim); q and k by qk_row.cuh's qk_row, the forward of qk_prologue.cu (threads 0.. QK_LANES - 1 the query row, the
- * next QK_LANES the key row), each output rounded once to bf16. Ends with the block synchronized. */
+/* Slot b's q, k, v of the head at position p (fp32 holding bf16 values), as gpt.py: VE layers
+ * v += 2 sigmoid(ve_gate[head] . h) value_embedding[token] in fp32, one bf16 rounding; q and k by qk_row (qk_row.cuh;
+ * threads 0..QK_LANES-1 the query row, the next QK_LANES the key row). Ends with the block synchronized. */
 static __device__ void attn_prologue(const Attn &a, int b, int head, int p, float *q, float *k, float *v) {
     const int tid = threadIdx.x, lane = tid % WARP;
     const bf16 *qkv = a.qkv + (size_t)b * 3 * a.C + head * HEAD_DIM;
@@ -320,19 +298,19 @@ static __device__ void attn_prologue(const Attn &a, int b, int head, int p, floa
 static_assert(LANE_DIMS == 4, "a lane reads its dims of a cached row as one uint2, of a partial as one float4");
 static __device__ __forceinline__ void load_dims(const bf16 *row, float *x) {
     const uint2 u = __ldcs((const uint2 *)row);
-    x[0] = __uint_as_float(u.x << 16); x[1] = __uint_as_float(u.x & 0xffff0000u);
-    x[2] = __uint_as_float(u.y << 16); x[3] = __uint_as_float(u.y & 0xffff0000u);
+    const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(&u.x));
+    const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(&u.y));
+    x[0] = lo.x; x[1] = lo.y; x[2] = hi.x; x[3] = hi.y;
 }
 
-/* A key's score q . k / sqrt(HEAD_DIM) (FlashAttention's default softmax scale), to every lane: each lane's LANE_DIMS
- * products in order, then warp_sum. */
+/* q . k / sqrt(HEAD_DIM) (FlashAttention's default softmax scale) to every lane: lane products in order, warp_sum. */
 static __device__ __forceinline__ float key_score(const float *q, const float *k) {
     float d = __fmul_rn(q[0], k[0]);
     for (int e = 1; e < LANE_DIMS; e++) d = __fmaf_rn(q[e], k[e], d);
     return __fmul_rn(warp_sum(d), rsqrtf((float)HEAD_DIM));
 }
 
-/* exp(m - top), 0 for an empty state (m = -inf, which top = -inf would turn into NaN) */
+/* exp(m - top); 0 for an empty state (m = top = -inf would give NaN) */
 static __device__ __forceinline__ float rescale(float m, float top) { return m == -INFINITY ? 0.f : expf(m - top); }
 
 __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
@@ -344,8 +322,7 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
               lane = tid % WARP;
     if (!live(*a.active, b)) return;
     const int p = a.pos[b];
-    /* this split's run of cached keys, its warps taking them in turn; each warp's first key is requested before the
-     * prologue, so the cache streams while the prologue runs */
+    /* each warp's first key is requested before the prologue, so the cache streams while the prologue runs */
     const int lo = p > a.window ? p - a.window : 0, splits = p > lo ? (p - lo + a.run - 1) / a.run : 1;
     if (split >= splits) return;
     const int begin = lo + split * a.run, end = begin + a.run < p ? begin + a.run : p;
@@ -390,9 +367,10 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
         bacc = __fmaf_rn(c, wacc[w][tid], bacc);
     }
     const size_t base = ((size_t)b * a.H + head) * a.part_slot;
-    float *part = a.part + base * HEAD_DIM, *stat = a.stat + base * 2;
+    float *part = a.part + base * HEAD_DIM;
+    float2 *stat = a.stat + base;
     part[(size_t)split * HEAD_DIM + tid] = bacc;
-    if (tid == 0) stat[2 * split] = bm, stat[2 * split + 1] = bl;
+    if (tid == 0) stat[split] = make_float2(bm, bl);
     __threadfence();  /* the partial is visible to every block before this block counts as done */
     __syncthreads();
     unsigned *done = a.done + (size_t)b * a.H + head;
@@ -400,18 +378,19 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
     __syncthreads();
     if (!last) return;
 
-    /* the head's last block: the partials (read from L2, written by other SMs) in split order, then the current key */
+    /* the head's last block: the partials (from L2, written by other SMs) in split order, then the current key */
     if (tid == 0) *done = 0;
     if (warp == 0) {
         const float cur = key_score(q + lane * LANE_DIMS, k + lane * LANE_DIMS);
         float top = cur;
-        for (int s = lane; s < splits; s += WARP) top = fmaxf(top, __ldcg(stat + 2 * s));
+        for (int s = lane; s < splits; s += WARP) top = fmaxf(top, __ldcg(stat + s).x);
         top = warp_max(top);
         float sum = 0.f;
         for (int s = lane; s < splits; s += WARP) {
-            const float c = rescale(__ldcg(stat + 2 * s), top);
+            const float2 ml = __ldcg(stat + s);
+            const float c = rescale(ml.x, top);
             weight[s] = c;
-            sum = __fmaf_rn(c, __ldcg(stat + 2 * s + 1), sum);
+            sum = __fmaf_rn(c, ml.y, sum);
         }
         sum = warp_sum(sum);
         if (lane == 0) current = expf(cur - top), total = __fadd_rn(sum, expf(cur - top));
@@ -434,19 +413,18 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
-/* Each active slot's argmax becomes its next input token (reported to the host from tokens) and its position advances.
- * A thread per slot. */
+/* Each active slot's argmax becomes its next token and its position advances; a thread per slot. */
 __global__ void k_commit(int32_t *tokens, int32_t *pos, const unsigned long long *active, unsigned long long *argmax,
                          int B) {
     const int b = threadIdx.x;
     if (b >= B || !live(*active, b)) return;
-    tokens[b] = (int32_t)(0xffffffffu - (uint32_t)(argmax[b] & 0xffffffffu));
+    tokens[b] = (int32_t)(UINT32_MAX - (uint32_t)argmax[b]);
     pos[b] += 1;
     argmax[b] = 0ull;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
-/* Host side: one decoder per model and batch size, its step captured as a CUDA graph. */
+/* Host side: one decoder per model, its step captured as a CUDA graph. */
 
 typedef struct {
     const bf16 *qkv, *o, *fc, *proj, *ve;  /* fc: [F][C]; ve: NULL in a layer without value embeddings */
@@ -461,18 +439,35 @@ typedef struct {
     const bf16 *wte, *lm_head;
     const float *cos, *sin;   /* the fp32 rotary table [max_len][HALF] */
     Layer *layer;
-    int32_t *tokens, *pos;    /* [B]: each slot's input token (k_commit replaces it by the step's argmax), its position */
+    int32_t *tokens, *pos;    /* [B]: each slot's input token and position */
     unsigned long long *active;  /* device: the active slots' bit mask */
     int32_t *host_tokens;     /* pinned host [B]: the last step's tokens */
     unsigned long long *argmax;  /* [B] */
     bf16 *x, *x0, *xm, *h, *qkv_out, *att, *xo, *u;  /* [B][...] */
     bf16 *kc, *vc;            /* [B][L][max_len][C] */
-    float *attn_part;         /* k_attn's partials, reused by every layer: [B][H][attn_wave][HEAD_DIM] sums, then [..][2] */
+    float *attn_part;         /* k_attn's partials, reused by every layer: [B][H][attn_wave][HEAD_DIM] value sums */
+    float2 *attn_stat;        /* [B][H][attn_wave]: their (m, l) */
     unsigned *attn_done;      /* [B][H]: k_attn's counters, zero between launches */
     cudaStream_t stream;      /* the caller's */
     cudaGraph_t graph;
     cudaGraphExec_t exec;
 } Decoder;
+
+/* f(buffer, bytes per slot) for each per-slot device buffer. */
+template <class F> static void slot_buffers(Decoder *d, F f) {
+    const size_t C = d->C, kv = (size_t)d->L * d->max_len * C * sizeof(bf16), part = (size_t)d->H * d->attn_wave;
+    f((void **)&d->tokens, sizeof(int32_t));
+    f((void **)&d->pos, sizeof(int32_t));
+    f((void **)&d->argmax, sizeof(unsigned long long));
+    for (bf16 **b : {&d->x, &d->x0, &d->xm, &d->h, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
+    f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
+    f((void **)&d->u, d->F * sizeof(bf16));
+    f((void **)&d->kc, kv);
+    f((void **)&d->vc, kv);
+    f((void **)&d->attn_part, part * HEAD_DIM * sizeof(float));
+    f((void **)&d->attn_stat, part * sizeof(float2));
+    f((void **)&d->attn_done, d->H * sizeof(unsigned));
+}
 
 static Gemv gemv(const Decoder *d, const bf16 *w, int rows, int cols, int pro, const bf16 *in, int epi, bf16 *out) {
     Gemv g = {};
@@ -481,8 +476,8 @@ static Gemv gemv(const Decoder *d, const bf16 *w, int rows, int cols, int pro, c
     return g;
 }
 
-/* A warp per MMA_M-row tile, in blocks of the size that maximizes k_gemv's occupancy, or of fewer warps when that grid
- * would leave SMs without a block; at most as many blocks as the SMs hold at once (the warps loop over the tiles). */
+/* Block size from cudaOccupancyMaxPotentialBlockSize, fewer warps when that would leave SMs without a block; grid at
+ * most one resident wave (warps loop over the tiles). */
 static void launch_gemv(Decoder *d, Gemv g) {
     g.chunk = gemv_chunk(g.B, g.cols, d->optin);
     const size_t smem = gemv_smem(g.B, g.chunk);
@@ -495,7 +490,7 @@ static void launch_gemv(Decoder *d, Gemv g) {
     k_gemv<<<needed < wave ? needed : wave, WARP * warps, smem, d->stream>>>(g);
 }
 
-/* One decoding step of every active slot, enqueued on d->stream (captured once into the graph). */
+/* One step of every active slot on d->stream (captured once into the graph). */
 static void enqueue_step(Decoder *d) {
     const int C = d->C, F = d->F, L = d->L, B = d->B;
     cudaFuncAttributes fa;
@@ -504,17 +499,17 @@ static void enqueue_step(Decoder *d) {
                                                                                        d->x0, C);
     for (int l = 0; l < L; l++) {
         const Layer *ly = &d->layer[l];
-        /* the layer's input: x0 before the first block, else the previous block's output */
+        /* input: x0 at layer 0, else the previous layer's output */
         Gemv g = gemv(d, ly->qkv, 3 * C, C, PRO_RESID_NORM, l == 0 ? d->x0 : d->x, EPI_STORE, d->qkv_out);
         g.in2 = d->x0; g.l1 = ly->resid_lambda; g.l2 = ly->x0_lambda; g.pro_out = d->xm; g.pro_out2 = d->h;
         launch_gemv(d, g);
-        /* attention splits per head and slot: the position's runs of attn_run keys, at most the window's */
+        /* splits per head and slot: runs of attn_run keys over at most the window */
         const int keys = ly->window < d->max_len - 1 ? ly->window : d->max_len - 1;
         const int splits = (keys + d->attn_run - 1) / d->attn_run;
         const Attn a = {d->qkv_out, d->h, ly->ve, ly->ve_gate, ly->q_gain, ly->k_gain, d->cos, d->sin,
                         d->kc + (size_t)l * d->max_len * C, d->vc + (size_t)l * d->max_len * C,
-                        (size_t)L * d->max_len * C, d->att, d->tokens, d->pos, d->active, d->attn_part,
-                        d->attn_part + (size_t)B * d->H * d->attn_wave * HEAD_DIM, d->attn_done, d->attn_wave, C, d->H,
+                        (size_t)L * d->max_len * C, d->att, d->tokens, d->pos, d->active, d->attn_part, d->attn_stat,
+                        d->attn_done, d->attn_wave, C, d->H,
                         ly->window, d->attn_run};
         k_attn<<<dim3(d->H, splits, B), HEAD_DIM, splits * sizeof(float), d->stream>>>(a);
         g = gemv(d, ly->o, C, C, PRO_COPY, d->att, EPI_RESID, d->xo);
@@ -537,36 +532,34 @@ extern "C" void dec_destroy(void *handle) {
     Decoder *d = (Decoder *)handle;
     cudaGraphExecDestroy(d->exec);
     cudaGraphDestroy(d->graph);
-    void *bufs[] = {d->tokens, d->pos, d->active, d->argmax, d->x, d->x0, d->xm, d->h, d->qkv_out, d->att, d->xo, d->u,
-                    d->kc, d->vc, d->attn_part, d->attn_done};
-    for (void *b : bufs) cudaFree(b);
+    slot_buffers(d, [](void **p, size_t) { cudaFree(*p); });
+    cudaFree(d->active);
     cudaFreeHost(d->host_tokens);
     free(d->layer);
     free(d);
 }
 
-/* The most slots a decoder can run (MAX_BATCH). */
-extern "C" int dec_max_batch() { return MAX_BATCH; }
+/* The slots of a decoder (dec_create). */
+extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
 
 /*
- * cfg: L, C, MLP hidden width F (fc: [F][C]; proj: [C][F]), vocab (lm_head's rows), max_len, B (slots).
+ * cfg: L, C, MLP hidden width F (fc: [F][C]; proj: [C][F]), vocab (lm_head's rows), max_len.
  * ptrs: GLOBAL_PTRS pointers wte, cos, sin (the fp32 rotary table [max_len][HALF] of every layer), lm_head; then
  *       LAYER_PTRS per layer: qkv, o, fc, proj, value-embedding table (0 if none), value-embedding gate (0 if none),
  *       q gain, k gain.
  * scal: per layer: resid lambda, x0 lambda (bf16 values).
  * window: per layer, the keys before each query that it attends (FlashAttention's window_size left).
- * stream: the caller's CUDA stream (not the legacy default stream: captured), on which every call here enqueues its
- *         work; the caller owns it and keeps it alive past dec_destroy.
+ * stream: the caller's stream (not the legacy default stream: it is captured), alive past dec_destroy.
  */
 constexpr int GLOBAL_PTRS = 4, LAYER_PTRS = 8;
 
 extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *scal, const int *window, void *stream) {
     Decoder *d = (Decoder *)calloc(1, sizeof(Decoder));
-    d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->B = cfg[5];
+    d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4];
     d->H = d->C / HEAD_DIM;
     d->wte = (const bf16 *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
     d->lm_head = (const bf16 *)ptrs[3]; d->stream = (cudaStream_t)stream;
-    const int L = d->L, C = d->C, B = d->B;
+    const int L = d->L;
     d->layer = (Layer *)calloc(L, sizeof(Layer));
     for (int l = 0; l < L; l++) {
         const uint64_t *p = ptrs + GLOBAL_PTRS + LAYER_PTRS * l;
@@ -579,32 +572,27 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     cudaDeviceGetAttribute(&d->sms, cudaDevAttrMultiProcessorCount, device);
     cudaDeviceGetAttribute(&d->optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
     cudaFuncSetAttribute(k_gemv, cudaFuncAttributeMaxDynamicSharedMemorySize, d->optin);
-    /* attention's wave: as many (head, split) blocks as the SMs hold at once, split evenly over the heads. Its shared
-     * memory grows by a float per split, so the residency is taken again at the wave found without that array (fewer
-     * splits, less memory: the second wave fits). attn_run: the keys of a split, so that the longest attended range
-     * (max_len - 1 keys) takes one wave per head and slot; shorter ranges take fewer splits */
+    /* attn_wave: (head, split) blocks the SMs hold at once, per head; residency is retaken with the per-split shared
+     * memory of that wave (fewer splits fit). attn_run: keys per split, so max_len - 1 keys take one wave */
     int resident;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, 0);
     d->attn_wave = d->sms * resident / d->H;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, d->attn_wave * sizeof(float));
     d->attn_wave = d->sms * resident / d->H;
     d->attn_run = (d->max_len - 1 + d->attn_wave - 1) / d->attn_wave;
-    int32_t **ints[] = {&d->tokens, &d->pos};
-    for (int32_t **p : ints) cudaMalloc((void **)p, (size_t)B * sizeof(int32_t));
+    /* B: the most slots (at most MAX_BATCH) that fit free memory, leaving one slot's bytes for the batch-1 prefill
+     * (its KV cache of at most max_len tokens) */
+    size_t slot = 0, free_bytes, total_bytes;
+    slot_buffers(d, [&](void **, size_t bytes) { slot += bytes; });
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+    d->B = (int)(free_bytes / slot - 1 < (size_t)MAX_BATCH ? free_bytes / slot - 1 : MAX_BATCH);
+    slot_buffers(d, [&](void **p, size_t bytes) {
+        cudaMalloc(p, d->B * bytes);
+        cudaMemset(*p, 0, d->B * bytes);
+    });
     cudaMalloc((void **)&d->active, sizeof(unsigned long long));
     cudaMemset(d->active, 0, sizeof(unsigned long long));
-    cudaHostAlloc((void **)&d->host_tokens, (size_t)B * sizeof(int32_t), cudaHostAllocDefault);
-    cudaMalloc((void **)&d->argmax, (size_t)B * sizeof(unsigned long long));
-    cudaMemset(d->argmax, 0, (size_t)B * sizeof(unsigned long long));
-    bf16 **bufs[] = {&d->x, &d->x0, &d->xm, &d->h, &d->att, &d->xo};
-    for (bf16 **b : bufs) cudaMalloc((void **)b, (size_t)B * C * sizeof(bf16));
-    cudaMalloc((void **)&d->qkv_out, (size_t)B * 3 * C * sizeof(bf16));
-    cudaMalloc((void **)&d->u, (size_t)B * d->F * sizeof(bf16));
-    cudaMalloc((void **)&d->kc, (size_t)B * L * d->max_len * C * sizeof(bf16));
-    cudaMalloc((void **)&d->vc, (size_t)B * L * d->max_len * C * sizeof(bf16));
-    cudaMalloc((void **)&d->attn_part, (size_t)B * d->H * d->attn_wave * (HEAD_DIM + 2) * sizeof(float));
-    cudaMalloc((void **)&d->attn_done, (size_t)B * d->H * sizeof(unsigned));
-    cudaMemset(d->attn_done, 0, (size_t)B * d->H * sizeof(unsigned));
+    cudaHostAlloc((void **)&d->host_tokens, d->B * sizeof(int32_t), cudaHostAllocDefault);
     cudaStreamBeginCapture(d->stream, cudaStreamCaptureModeThreadLocal);
     enqueue_step(d);
     cudaStreamEndCapture(d->stream, &d->graph);
@@ -612,9 +600,8 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     return d;
 }
 
-/* Start a sequence in slot b from PyTorch's batch-1 KVCache of its first pos tokens, laid out (layer, position, head,
- * dim) with a layer stride of layer_stride elements: its steps continue from token, its last, at position pos once the
- * slot is active (dec_set_active). Enqueued after the steps launched so far. */
+/* Start slot b from PyTorch's batch-1 KVCache of its first pos tokens ((layer, position, head, dim), layer stride
+ * layer_stride elements); its steps continue from token at position pos once active. Stream-ordered. */
 extern "C" void dec_set_prefilled(void *handle, int b, int32_t token, int32_t pos, const bf16 *k, const bf16 *v,
                                   long long layer_stride) {
     Decoder *d = (Decoder *)handle;
@@ -628,14 +615,13 @@ extern "C" void dec_set_prefilled(void *handle, int b, int32_t token, int32_t po
                       d->stream);
 }
 
-/* The active slots (bit b: slot b) of the next steps. Enqueued after the steps launched so far. */
+/* The active slots (bit b: slot b) of the next steps. Stream-ordered. */
 extern "C" void dec_set_active(void *handle, unsigned long long mask) {
     Decoder *d = (Decoder *)handle;
     cudaMemcpyAsync(d->active, &mask, sizeof(mask), cudaMemcpyHostToDevice, d->stream);
 }
 
-/* Start one step of the active slots (asynchronous): each takes its argmax as its next token, which dec_tokens
- * returns. */
+/* Launch one step (asynchronous); dec_tokens returns its tokens. */
 extern "C" void dec_launch(void *handle) {
     Decoder *d = (Decoder *)handle;
     cudaGraphLaunch(d->exec, d->stream);

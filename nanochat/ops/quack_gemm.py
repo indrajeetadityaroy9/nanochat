@@ -1,37 +1,28 @@
 """
-The model's QuACK GEMMs (Tri Dao, CuTe DSL; Dao-AILab/quack quack.gemm_interface) at one kernel config per (GEMM, model
-width) on the H100, fixed in TABLE. QuACK's own selection does not subsume it: its autotuner (quack/autotuner.py) times
-each candidate once (triton do_bench) at the first call of every new shape in the training process, so the pick varies
-with GPU load between runs, and it offers neither cuBLAS nor an accuracy criterion for weight gradients; its analytic
-default (nvMatmulHeuristics, quack/nvmmh_heuristic.py) is not installed and is not a measurement. QuACK compiles kernels
-for symbolic shapes and caches them under QUACK_CACHE_DIR, so one width's kernels serve every M.
+The model's QuACK GEMMs (Dao-AILab/quack quack.gemm_interface) at one config per (role, width), fixed in TABLE. QuACK's
+autotuner (quack/autotuner.py) times each candidate once per new shape, so its pick varies with GPU load, and offers
+neither cuBLAS nor an accuracy criterion for weight gradients. Kernels compile for symbolic M (QUACK_CACHE_DIR).
 
-GEMMs (C the width, h = 4C the MLP hidden size, V the vocabulary, M tokens; ops/linear.py, ops/cross_entropy.py):
-  proj_fwd    x W^T                    (M, C) x (C, C)     attention projections c_q, c_k, c_v, c_o
+Roles (C width, h = 4C, V vocabulary, M tokens; ops/linear.py, ops/cross_entropy.py):
+  proj_fwd    x W^T                    (M, C) x (C, C)     c_q, c_k, c_v, c_o
   proj_dx     dY W                     (M, C) x (C, C)
   proj_dw     dY^T X -> fp32           (C, M) x (M, C)
-  mlp_up      x W_fc^T                 (M, C) x (C, h)     relu^2 epilogue (quack gemm_act)
+  mlp_up      x W_fc^T                 (M, C) x (C, h)     relu^2 epilogue (gemm_act)
   mlp_down    u W_proj^T               (M, h) x (h, C)
-  mlp_dact    dY W_proj                (M, C) x (C, h)     relu^2-derivative epilogue (quack gemm_dact)
+  mlp_dact    dY W_proj                (M, C) x (C, h)     relu^2-derivative epilogue (gemm_dact)
   mlp_dw_proj dY^T u -> fp32           (C, M) x (M, h)
   mlp_dx      dpre W_fc                (M, h) x (h, C)
   mlp_dw_fc   dpre^T x -> fp32         (h, M) x (M, C)
   lm_dx       dz W_lm                  (M, V) x (V, C)
   lm_dw       dz^T x -> fp32           (V, M) x (M, C)
 
-TABLE holds the widths of the d8 smoke model (256) and the d24 production model (768). It is a measurement record on the
-H100 80 GB SXM5 (sm_90, at its 700 W power cap): median times of interleaved CUDA-graph rounds at
-M = config.MICRO_BATCH_TOKENS (98,304) of QuACK's SM90 candidates (all 44: tiles x pingpong x cluster 1x2 / 2x1 x
-swap_ab), the weight-gradient roles also at serial split-K 1..16 and cuBLAS (torch.mm, fp32 out; "cublas"; the forward
-and dX roles against cuBLAS at 256 in profile_step: benchmarks/h100.txt):
-benchmarks/gemmsweep.py (gemmsweep_sm90.jsonl; benchmarks/gemmtable.py -> gemmtable_sm90.txt).
-Forward and dX roles: the fastest. Weight-gradient roles: among the configs within 1% of the fastest, the most accurate
-(rel. error vs fp64 depends only on the split-K factor s: 1.14e-4 / 5.67e-5 / 2.82e-5 / 1.38e-5 / 6.76e-6 at
-s = 1 / 2 / 4 / 8 / 16; cuBLAS 1.38e-5 to 5.68e-5), then the fastest.
-
-Each config: the tile (tile_m x tile_n), pingpong or cooperative, swap_ab, the thread-block cluster, serial split-K
-(deterministic; 1 when not given); not dynamic-persistent, as QuACK's SM90 candidates (quack.gemm_config
-._get_sm90_configs). One GemmConfig object per entry: QuACK's launch cache keys on the config object.
+TABLE: widths of d8 (256) and d24 (768), measured on the H100 SXM5 (sm_90, 700 W cap) at M = config.MICRO_BATCH_TOKENS
+over QuACK's 44 SM90 candidates, weight-gradient roles also at serial split-K 1..16 and cuBLAS ("cublas"; torch.mm,
+fp32 out): benchmarks/gemmsweep.py -> gemmsweep_sm90.jsonl -> benchmarks/gemmtable.py -> gemmtable_sm90.txt. Forward
+and dX roles: the fastest. Weight-gradient roles: within the fastest's median absolute deviation, the most accurate
+(rel. error vs fp64 1.14e-4 / 5.67e-5 / 2.82e-5 / 1.38e-5 / 6.76e-6 at split-K 1 / 2 / 4 / 8 / 16; cuBLAS 1.38e-5 to
+5.68e-5), then the fastest. Not dynamic-persistent, as quack.gemm_config._get_sm90_configs; one GemmConfig object per
+entry because QuACK's launch cache keys on the object.
 """
 from functools import partial
 
@@ -69,11 +60,10 @@ TABLE = {
 }
 
 
-def gemm(A: Tensor, B: Tensor, role: str, C: int, out_dtype: torch.dtype, alpha: float | Tensor) -> Tensor:
-    """alpha A (M, K) @ B (K, N) in out_dtype with role's config at width C: QuACK's gemm_tuned.fn with the config given
-    (the function its autotuner wraps), split-K from the config; "cublas": torch.mm, alpha unused, as gemmsweep.py
-    offers cuBLAS only to roles called with alpha 1."""
-    cfg = TABLE[C][role]
+def gemm(A: Tensor, B: Tensor, *, role: str, width: int, out_dtype: torch.dtype, alpha: float | Tensor) -> Tensor:
+    """alpha A (M, K) @ B (K, N) in out_dtype via gemm_tuned.fn at TABLE[width][role]; "cublas" roles are only called
+    with alpha 1 (benchmarks/gemmsweep.py)."""
+    cfg = TABLE[width][role]
     if cfg == "cublas":
         return torch.mm(A, B, out_dtype=out_dtype)
     out = torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
