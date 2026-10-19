@@ -27,3 +27,5 @@ wait "$pid" || true
 echo "killed; checkpoints: $(ls "$RUNS/base_checkpoints/$TAG")"
 "${train[@]}" >"$HOME/smoke-2.log" 2>&1
 echo "done"
+runs/container.sh python -m verify.smoke_check "$TAG"
+runs/container.sh python -m verify.decoder_check "$TAG" 32 64
