@@ -6,6 +6,7 @@ long-context training keeps its final pre-training rate, arXiv 2401.14196 §3.6)
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
@@ -51,13 +52,17 @@ def plan(depth: int, ratio: float, vocab_size: int) -> RunPlan:
     )
 
 
-def lr_multiplier(it: int, n: int) -> float:
-    """The lr multiplier at step it of an n-step run: linear warmup over WARMUP steps, constant, then the (1 - sqrt)
-    cooldown to 0 over the last 20% of the steps (Hagele et al., arXiv 2405.18392 §3.2: constant lr with a 20% cooldown
-    matches cosine, the gains of a longer cooldown plateau at ~20% (Fig. 5), and (1 - sqrt),
-    f = 1 - sqrt((it - (n - n_decay)) / n_decay), outperforms the linear cooldown (Eq. (1-sqrt)))."""
+def lr_multiplier(it: int, n: int, shape: Literal["wsd", "d2z"]) -> float:
+    """The lr multiplier at step it of an n-step run: linear warmup over WARMUP steps, then
+    wsd: constant, then the (1 - sqrt) cooldown to 0 over the last 20% of the steps (Hagele et al., arXiv 2405.18392
+        §3.2: constant lr with a 20% cooldown matches cosine, the gains of a longer cooldown plateau at ~20% (Fig. 5),
+        and (1 - sqrt), f = 1 - sqrt((it - (n - n_decay)) / n_decay), outperforms the linear cooldown (Eq. (1-sqrt)));
+    d2z: linear decay to 0 at step n (Bergsma et al., arXiv 2502.15938: beats WSD and cosine, more so at more tokens
+        per parameter)."""
     if it < WARMUP:
         return (it + 1) / WARMUP
+    if shape == "d2z":
+        return (n - it) / (n - WARMUP)
     cooldown = round(0.2 * n)
     if it < n - cooldown:
         return 1.0

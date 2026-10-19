@@ -3,12 +3,14 @@
 This document describes the production configuration of this fork and how to reproduce it: a Python and C++
 code-generation base model, pretrained once on every unique token of its data on a single NVIDIA H100 80 GB SXM5
 (sm_90). The code is the specification. Each section names the file that defines a setting, and every number below is
-read from that file or measured in `bench/h100.txt`.
+read from that file or measured in `benchmarks/h100.txt`.
 
 ## Model
 
 `nanochat/model/gpt.py` is nanochat (karpathy/nanochat 92d63d4) plus the measured wins of its experiment log, with
-Qwen3's QK norm with learnable gains.
+Qwen3's QK norm with learnable gains. As in DeepSeek-V3's `model.py` and Qwen3's Hugging Face implementation, each
+layer is a `Block` of an `Attention` and an `MLP` module, each applied to the RMS-normed stream and added back to it;
+`GPT` stacks the blocks between the embeddings and `lm_head`.
 
 | | d24 (production) |
 |---|---|
@@ -50,21 +52,21 @@ compiled documents and the packed 8K and 32K rows.
 | AdamW | β = (0.9, 0.95), weight decay 0.1 (tables, `lm_head`, Muon matrices), 0 on vectors | DeepSeek LLM §2.3 |
 | Gradient clipping | global L2 norm 1.0, `torch.nn.utils.clip_grad_norm_` | DeepSeek LLM §2.3, inherited by DeepSeek-Coder §3.4 |
 
-**Why clip.** A paired A/B at d8, 20 tokens per parameter, compared clipping at 1.0 with no clipping (`bench/h100.txt`).
-Both arms used the same seed and data order, and training is deterministic, so the clipping is the only difference
-between them. With clipping:
+**Why clip.** A paired A/B at d8, 20 tokens per parameter, compared clipping at 1.0 with no clipping
+(`runs/ablation_clip.sh` → `results/ablation_clip.md`; `benchmarks/h100.txt`). Both arms used the same seed and data
+order, and training is deterministic, so the clipping is the only difference between them. With clipping:
 
 - Mean validation bits per byte over all 11 corpora fell from 0.88119 to 0.87806.
 - Every corpus scored lower: Python 0.74504 → 0.74209, C++ 0.68317 → 0.67994.
 
 ## H100 implementation
 
-The model's ops live in `nanochat/ops/`. Each is a `torch.library` op, so `torch.compile(fullgraph=True)` traces one
-graph per stage.
+The model's ops live in `nanochat/ops/` and their CUDA sources in `nanochat/csrc/` (built on first use by
+`native.cuda_library`). Each op is a `torch.library` op, so `torch.compile(fullgraph=True)` traces one graph per stage.
 
 | Op | Implementation |
 |---|---|
-| Projections, MLP, LM-head GEMMs | QuACK SM90 GEMMs with a per-role tile table measured at M = 98,304 (`quack_gemm.TABLE`, `bench/gemmsweep.py` → `gemmtable.py`); weight gradients use cuBLAS `torch.mm` or serial split-K, whichever is most accurate within 1% of the fastest |
+| Projections, MLP, LM-head GEMMs | QuACK SM90 GEMMs with a per-role tile table measured at M = 98,304 (`quack_gemm.TABLE`, `benchmarks/gemmsweep.py` → `gemmtable.py`); weight gradients use cuBLAS `torch.mm` or serial split-K, whichever is most accurate within 1% of the fastest |
 | ReLU² MLP | QuACK fused `gemm_act` / `gemm_dact` |
 | Cross entropy | QuACK, from bf16 logits read once; the loss and the logit gradient in one pass, the gradient written over the logits |
 | Attention | FlashAttention-4 varlen, deterministic backward |
@@ -72,7 +74,7 @@ graph per stage.
 | Embeddings | `csrc/embedding.cu`: bf16 lookup; the gradient sums each token's rows in a fixed order (stable sort, partials of 32 rows, ordered sums) |
 | Decoding | `csrc/decode.cu` (wrapper `inference/decoder.py`): batched native decoder for the code benchmarks |
 
-Measured on the d24 step with real data (`bench/profile_step.py 24 30 12`):
+Measured on the d24 step with real data (`benchmarks/profile_step.py 24 30 12`):
 
 - 3,764 ms per step, 313.4K tok/s.
 - 99% of the step's time is GPU kernels.
@@ -83,10 +85,10 @@ Measured on the d24 step with real data (`bench/profile_step.py 24 30 12`):
 
 - **Bitwise-deterministic training.** Every gradient reduction runs in a fixed order: FA4's deterministic backward, and
   the q/k prologue and embedding kernels, which use no atomics.
-  - `verify/determinism.py` repeats a d24 step 6 times. 0 of 220 parameter gradients differ between repeats; with
+  - `tests/determinism.py` repeats a d24 step 6 times. 0 of 220 parameter gradients differ between repeats; with
     PyTorch's default kernels, 212 differ.
   - A run killed and resumed from its checkpoint reproduces the uninterrupted run's losses bit for bit
-    (`verify/smoke.sh`).
+    (`tests/smoke.sh`).
   - Cost: +1.5% per micro-batch, against +8% for `torch.use_deterministic_algorithms`.
 - **Pinned environment.**
   - `docker/Dockerfile` pins every base image by digest (NGC PyTorch 26.09, uv, Go) and every git dependency by commit;
@@ -105,17 +107,18 @@ On a fresh Lambda `gpu_1x_h100_sxm5` (Ubuntu with Docker and the NVIDIA driver):
 git clone https://github.com/indrajeetadityaroy9/nanochat ~/projects/nanochat && cd ~/projects/nanochat
 HF_TOKEN=<read token> runs/setup.sh iaroy/nanochat-data   # CDI spec, docker group, image, tokenizer + packed data
 # log in again (docker group), then:
-verify/all.sh                                             # every check below
+tests/all.sh                                              # every check below
 tmux new -d -s h100 'cd ~/projects/nanochat && runs/h100.sh'
 ```
 
 What `runs/h100.sh` does:
 
-1. Derives the ratio and the tag `d24-r490.805-s42`.
+1. Derives the ratio and the tag `d24-r490.805-s42-g1` (`config.run_tag`: depth, ratio, seed, gradient clip).
 2. Trains both stages, saving a checkpoint every 812 steps (1%).
 3. Relaunches after a failure, as long as the failed attempt saved a newer checkpoint.
 4. Runs `scripts/base_eval.py` on the final checkpoint: per-corpus validation bits per byte, reference-solution bits
    per byte, EvalPlus HumanEval+/MBPP+, MultiPL-E C++ and HumanEval infilling, each scored by its official evaluator.
+5. Writes its tables to `~/nanochat-runs/results/<tag>.md` (`scripts/report.py`).
 
 **Expected cost:** about 85 h at the measured 313.4K tok/s, about $365 at $4.29/h. This is an estimate: the
 repository stage is 5.5% of the steps and was not re-profiled with the final code.
@@ -123,9 +126,13 @@ repository stage is 5.5% of the steps and was not re-profiled with the final cod
 Training metrics go to `~/nanochat-runs/metrics/<tag>.jsonl` (`train/metrics.py`); runner logs to
 `~/nanochat-runs/logs/h100/`. Every command runs in the image through `runs/container.sh`.
 
+**Publishing the model:** `runs/release.sh <tag> <repo>` uploads the run's checkpoint, metrics and evaluation to a
+Hugging Face model repository in the experiment-directory layout; `hf download <repo> --local-dir ~/nanochat-runs`
+puts them back where `load_model`, `base_eval` and a resumed `base_train` read them.
+
 ## Verification
 
-`verify/all.sh` runs these checks on the H100. Figures are from the run on the released code.
+`tests/all.sh` runs these checks on the H100. Figures are from the run on the released code.
 
 | Check | Result |
 |---|---|
@@ -136,12 +143,12 @@ Training metrics go to `~/nanochat-runs/metrics/<tag>.jsonl` (`train/metrics.py`
 | `decoder_check`: native decoder vs eager greedy decoding | trained d8: 32/32 identical; random d24: tokens differ only where eager's top two logits are within 0.013 |
 | `smoke.sh`: d8 both stages, killed after the switch and resumed | losses on the overlapping steps bitwise equal |
 
-The fp64 reference (`verify/reference.py`) restates the window and value-embedding rules itself rather than importing
+The fp64 reference (`tests/reference.py`) restates the window and value-embedding rules itself rather than importing
 them, so a bug in the model's rules shows up as a mismatch.
 
 ## Measured design decisions
 
-Each entry has its measurement in `bench/h100.txt`:
+Each entry has its measurement in `benchmarks/h100.txt`:
 
 - **Micro-batch 98,304** rather than 65,536: 1% faster per token, peak 69.5 GiB of the 80 GB.
 - **FlashAttention-4** rather than cuDNN attention (Transformer Engine): faster forward and backward in all four
@@ -156,15 +163,17 @@ Each entry has its measurement in `bench/h100.txt`:
 ## Layout
 
 - `nanochat/config.py`: context, vocabulary, mixture, micro-batch, stages, run tag.
-- `nanochat/model/gpt.py`: the model, its scaling parameters and FLOPs per token.
-- `nanochat/ops/`: the ops above, CUDA sources included.
+- `nanochat/model/gpt.py`: the model (`Attention`, `MLP`, `Block`, `GPT`), its scaling parameters and FLOPs per token.
+- `nanochat/ops/`: the ops above; `nanochat/csrc/`: their CUDA sources and the decoder's.
 - `nanochat/train/`: `optim.py`, `schedule.py` (plan and lr multiplier), `stages.py` (token budget, rows per stage),
   `checkpoint.py`, `metrics.py`.
 - `nanochat/eval/`: bits per byte and the code benchmarks.
 - `nanochat/inference/`: the native decoder.
 - `nanochat/data/`: the data pipeline, including the Rust tokenizer, repository and packing crate in `bpe/`.
-- `scripts/`: `base_train.py`, `base_eval.py`.
-- `verify/`: the checks above; `all.sh` runs them.
-- `bench/`: the benchmarks, the GEMM sweep record and `h100.txt`, the measurement record the code cites.
-- `runs/`: `setup.sh` (fresh host), `container.sh` (run a command in the image), `h100.sh` (the production run).
+- `scripts/`: `base_train.py`, `base_eval.py`, `report.py` (results tables).
+- `runs/`: `setup.sh` (fresh host), `container.sh` (run a command in the image), `h100.sh` (the production run),
+  `ablation_clip.sh` (the clipping ablation), `release.sh` (publish a run).
+- `results/`: the tables the paper reports.
+- `tests/`: the checks above; `all.sh` runs them.
+- `benchmarks/`: the benchmarks, the GEMM sweep record and `h100.txt`, the measurement record the code cites.
 - `docker/Dockerfile`: the image.

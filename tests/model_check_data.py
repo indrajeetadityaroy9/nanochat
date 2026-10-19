@@ -34,7 +34,7 @@ else:
     with torch.device("meta"):
         model = GPT(gpt_config(depth, tokenizer.vocab_size, stage, aspect_ratio=ASPECT_RATIO))
     model.to_empty(device=device)
-    model.init_weights()
+    model.init_weights(0)
     perturb(model)
 mixture = mixture_weights(stage.mixture, tokenizer, T)
 orders = {c: np.random.RandomState(42).permutation(packed_rows(c, "train", tokenizer, T)) for c in mixture}

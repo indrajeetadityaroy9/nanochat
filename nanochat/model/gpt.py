@@ -15,6 +15,7 @@ embedding and q/k prologue kernels without atomics, FA4's deterministic backward
 reproducible. The optimizer's parameter groups are train/optim.py's.
 """
 
+import zlib
 from dataclasses import dataclass
 
 import torch
@@ -40,6 +41,14 @@ class GPTConfig:
     n_layer: int
     n_head: int      # query heads = key/value heads (MHA)
     n_embd: int
+    # The ablation study's switches (experiments/): each component of the mechanism under test, on in the canonical
+    # model. Off: value_embeds no value embeddings or gates; x0 no x0 path; resid no residual scalars (1); qk_gain gains
+    # fixed at 1; windows every layer full context.
+    value_embeds: bool = True
+    x0: bool = True
+    resid: bool = True
+    qk_gain: bool = True
+    windows: bool = True
 
 
 def gpt_config(depth, vocab_size, stage, *, aspect_ratio):
@@ -61,8 +70,8 @@ def has_ve(layer_idx, n_layer):
 def layer_windows(config):
     """The left window (keys before each query) per layer: the pattern SSSL tiled across layers, the last layer L (LOG
     2026-01-11; 92d63d4 gpt.py:287-314); L the context, S = 512 keys at most the context (Gemma 3 arXiv 2503.19786
-    §5.2 Fig. 4: local windows of 512..4096 change perplexity minimally)."""
-    pattern = "SSSL"
+    §5.2 Fig. 4: local windows of 512..4096 change perplexity minimally). Every layer L without config.windows."""
+    pattern = "SSSL" if config.windows else "L"
     window = {"S": min(512, config.sequence_len), "L": config.sequence_len}
     sizes = [window[pattern[i % len(pattern)]] for i in range(config.n_layer)]
     sizes[-1] = config.sequence_len
@@ -103,9 +112,14 @@ class Attention(nn.Module):
         self.c_k = nn.Linear(C, C, bias=False)
         self.c_v = nn.Linear(C, C, bias=False)
         self.c_o = nn.Linear(C, C, bias=False)
-        self.q_gain = nn.Parameter(torch.empty(C // H))
-        self.k_gain = nn.Parameter(torch.empty(C // H))
-        self.ve_gate = nn.Linear(C, H, bias=False) if has_ve(layer_idx, config.n_layer) else None
+        if config.qk_gain:
+            self.q_gain = nn.Parameter(torch.empty(C // H))
+            self.k_gain = nn.Parameter(torch.empty(C // H))
+        else:  # fixed at 1 (init_weights), not trained
+            self.register_buffer("q_gain", torch.empty(C // H), persistent=False)
+            self.register_buffer("k_gain", torch.empty(C // H), persistent=False)
+        self.ve_gate = (nn.Linear(C, H, bias=False) if config.value_embeds and has_ve(layer_idx, config.n_layer)
+                        else None)
 
     def forward(self, n, ve, cos_sin, window_size, kv_cache, cu_seqlens):
         """n: the normed residual stream; ve: this layer's value embeddings (bf16) or None. kv_cache (decoder prefill
@@ -169,37 +183,35 @@ class GPT(nn.Module):
         self.wte = nn.Embedding(V, C)
         self.blocks = nn.ModuleList([Block(config, i) for i in range(config.n_layer)])
         self.lm_head = nn.Linear(C, V, bias=False)
-        self.resid_lambdas = nn.Parameter(torch.empty(config.n_layer))
-        self.x0_lambdas = nn.Parameter(torch.empty(config.n_layer))
+        self.resid_lambdas = nn.Parameter(torch.empty(config.n_layer)) if config.resid else None
+        self.x0_lambdas = nn.Parameter(torch.empty(config.n_layer)) if config.x0 else None
         self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(V, C) for i in range(config.n_layer)
-                                           if has_ve(i, config.n_layer)})
+                                           if config.value_embeds and has_ve(i, config.n_layer)})
         # the rotary tables of the context (rotary_tables), computed by init_weights, set_stage and checkpoint.load_model
         self.register_buffer("cos", None, persistent=False)
         self.register_buffer("sin", None, persistent=False)
 
     @torch.no_grad()
-    def init_weights(self):
+    def init_weights(self, seed):
         """Every matrix and table that reads the stream uniform with std C^-0.5 (variance preserving, LeCun et al.
         "Efficient BackProp" §4.6; bound sqrt(3) std, the std of U(-a, a) being a / sqrt(3)): attn.c_q, attn.c_k,
         attn.c_v, mlp.c_fc, wte, value_embeds. Zero: attn.c_o, mlp.c_proj, lm_head (each block the identity at init,
         modded-nanogpt record #5) and attn.ve_gate (gate 1). resid_lambdas 1, x0_lambdas 0 (LOG 2026-01-11), q_gain =
-        k_gain = 1."""
+        k_gain = 1. Each random tensor draws from its own generator, seeded by `seed` and the tensor's name, so a model
+        without some component starts every other tensor exactly as the full model does (common random numbers across
+        an ablation's arms)."""
         bound = (3 / self.config.n_embd) ** 0.5
-        for block in self.blocks:
-            attn, mlp = block.attn, block.mlp
-            for w in (attn.c_q.weight, attn.c_k.weight, attn.c_v.weight, mlp.c_fc.weight):
-                nn.init.uniform_(w, -bound, bound)
-            nn.init.zeros_(attn.c_o.weight)
-            nn.init.zeros_(mlp.c_proj.weight)
-            nn.init.ones_(attn.q_gain)
-            nn.init.ones_(attn.k_gain)
-            if attn.ve_gate is not None:
-                nn.init.zeros_(attn.ve_gate.weight)
-        for table in (self.wte, *self.value_embeds.values()):
-            nn.init.uniform_(table.weight, -bound, bound)
-        nn.init.zeros_(self.lm_head.weight)
-        nn.init.ones_(self.resid_lambdas)
-        nn.init.zeros_(self.x0_lambdas)
+        zero = ("attn.c_o.weight", "mlp.c_proj.weight", "lm_head.weight", "attn.ve_gate.weight", "x0_lambdas")
+        one = ("q_gain", "k_gain", "resid_lambdas")
+        tensors = [*self.named_parameters(), *((n, b) for n, b in self.named_buffers() if n.endswith(one))]
+        for name, t in tensors:
+            if name.endswith(zero):
+                t.zero_()
+            elif name.endswith(one):
+                t.fill_(1)
+            else:
+                t.uniform_(-bound, bound,
+                           generator=torch.Generator(t.device).manual_seed(seed * 2**32 + zlib.crc32(name.encode())))
         self.cos, self.sin = rotary_tables(self.config, self.wte.weight.device)
 
     def set_stage(self, stage):
@@ -218,7 +230,10 @@ class GPT(nn.Module):
         for i, block in enumerate(self.blocks):
             # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 (no fp32 copies of the mix saved for
             # the backward, as an explicit fp32 mix would)
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            if self.config.resid:
+                x = self.resid_lambdas[i] * x
+            if self.config.x0:
+                x = x + self.x0_lambdas[i] * x0
             ve = embedding(self.value_embeds[str(i)].weight, idx) if str(i) in self.value_embeds else None
             x = block(x, ve, (self.cos, self.sin), self.window_sizes[i], kv_cache, cu_seqlens)
         return norm(x).flatten(0, 1)

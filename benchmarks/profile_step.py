@@ -16,7 +16,7 @@ from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.loader import PretrainingBatches, mixture_weights, packed_rows
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
-from nanochat.train.optim import optimizers
+from nanochat.train.optim import WEIGHT_DECAY, optimizers
 from nanochat.train.schedule import plan
 
 depth, aspect, micro = (int(a) for a in sys.argv[1:4])
@@ -29,9 +29,9 @@ run = plan(depth, 20, tokenizer.vocab_size)  # fixture: only run.lr is used; 20 
 with torch.device("meta"):
     orig = GPT(gpt_config(depth, tokenizer.vocab_size, stage, aspect_ratio=aspect))
 orig.to_empty(device=device)
-orig.init_weights()
+orig.init_weights(0)
 model = torch.compile(orig, dynamic=False, fullgraph=True)
-adamw, muon = optimizers(orig, run.lr)
+adamw, muon = optimizers(orig, run.lr, WEIGHT_DECAY)
 mixture = mixture_weights(stage.mixture, tokenizer, SEQ_LEN)
 orders = {c: np.random.RandomState(0).permutation(packed_rows(c, "train", tokenizer, SEQ_LEN)) for c in mixture}
 batches_iter = iter(PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=SEQ_LEN, batch_rows=rows,

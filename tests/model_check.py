@@ -18,7 +18,7 @@ torch.manual_seed(0)
 dev = "cuda"
 T, V = 1024, VOCAB_SIZE
 model = GPT(dataclasses.replace(gpt_config(8, V, FILE_STAGE, aspect_ratio=ASPECT_RATIO), sequence_len=T)).to(dev)
-model.init_weights()
+model.init_weights(0)
 perturb(model)
 print(f"width {model.config.n_embd} windows {model.window_sizes}")
 idx = torch.randint(0, V, (2, T), device=dev, dtype=torch.int32)

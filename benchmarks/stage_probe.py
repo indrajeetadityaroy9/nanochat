@@ -15,7 +15,7 @@ micro = int(sys.argv[3]) if len(sys.argv) > 3 else MICRO_BATCH_TOKENS
 with torch.device("meta"):
     orig = GPT(gpt_config(depth, VOCAB_SIZE, FILE_STAGE, aspect_ratio=aspect))
 orig.to_empty(device="cuda")
-orig.init_weights()
+orig.init_weights(0)
 for stage, segments in ((FILE_STAGE, 4), (REPO_STAGE, 1)):
     orig.set_stage(stage)
     model = torch.compile(orig, dynamic=False, fullgraph=True)

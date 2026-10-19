@@ -23,7 +23,7 @@ stage = FILE_STAGE
 with torch.device("meta"):
     model = GPT(gpt_config(24, tokenizer.vocab_size, stage, aspect_ratio=ASPECT_RATIO))
 model.to_empty(device=device)
-model.init_weights()
+model.init_weights(0)
 perturb(model)
 mixture = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
 orders = {c: np.random.RandomState(42).permutation(packed_rows(c, "train", tokenizer, stage.seq_len)) for c in mixture}

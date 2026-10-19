@@ -31,7 +31,7 @@ if source.isdigit():
         model = GPT(gpt_config(int(source), tokenizer.vocab_size, {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[4]],
                                aspect_ratio=ASPECT_RATIO))
     model.to_empty(device=device)
-    model.init_weights()
+    model.init_weights(0)
     bound = (3 / model.config.n_embd) ** 0.5
     with torch.no_grad():
         for p in model.parameters():
