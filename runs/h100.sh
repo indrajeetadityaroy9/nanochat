@@ -1,10 +1,11 @@
 #!/bin/bash
 # The production run on one H100 80 GB SXM5: d24 (nanochat/model/gpt.py ASPECT_RATIO: 24 x 768) at the most tokens per
 # scaling parameter the data holds without reading a document twice (nanochat/train/stages.py max_ratio), seed 42, both
-# stages (file-level 8K, then repo-level 32K), then base_eval on its final checkpoint. The first launch copies the
-# repository to ~/nanochat-runs/trees/h100 and records the ratio; every launch runs that copy at that ratio. base_train
-# resumes from the run's newest checkpoint; after a failure the runner relaunches it as long as the failed attempt saved
-# a newer checkpoint than the one it started from (a failure without progress stops the runner).
+# stages (file-level 8K, then repo-level 32K), then base_eval on its final checkpoint and its tables
+# (~/nanochat-runs/results/<tag>.md, scripts/report.py). The first launch copies the repository to
+# ~/nanochat-runs/trees/h100 and records the ratio; every launch runs that copy at that ratio. base_train resumes from
+# the run's newest checkpoint; after a failure the runner relaunches it as long as the failed attempt saved a newer
+# checkpoint than the one it started from (a failure without progress stops the runner).
 #
 #   tmux new -d -s h100 'cd ~/projects/nanochat && runs/h100.sh'
 set -euo pipefail
@@ -25,9 +26,11 @@ mkdir -p "$LOGS"
 } >>"$LOGS/runner.log"
 [[ -s $LOGS/ratio ]] || runs/container.sh python -m nanochat.train.stages "$DEPTH" | tail -n 1 >"$LOGS/ratio"
 RATIO=$(cat "$LOGS/ratio")
-read -r TAG STEPS < <(runs/container.sh python -c "from nanochat.config import run_tag; \
-from nanochat.data.tokenizer import get_tokenizer; from nanochat.train.schedule import plan; \
-print(run_tag($DEPTH, $RATIO, $SEED), plan($DEPTH, $RATIO, get_tokenizer().vocab_size).num_iterations)" | tail -n 1)
+read -r TAG STEPS CLIP < <(runs/container.sh python -c "from nanochat.config import run_tag; \
+from nanochat.data.tokenizer import get_tokenizer; from nanochat.train.optim import GRAD_CLIP; \
+from nanochat.train.schedule import plan; \
+print(run_tag($DEPTH, $RATIO, $SEED, GRAD_CLIP), plan($DEPTH, $RATIO, get_tokenizer().vocab_size).num_iterations, \
+GRAD_CLIP)" | tail -n 1)
 # a checkpoint every 1% of the plan's steps: a failure loses at most 1% of the run
 SAVE_EVERY=$(( (STEPS + 99) / 100 ))
 echo "$(date -Is) $TAG ratio $RATIO steps $STEPS save_every $SAVE_EVERY" >>"$LOGS/runner.log"
@@ -37,11 +40,12 @@ saved() { stat -c %Y "$CKPT" 2>/dev/null || echo 0; }
 until
   start=$(saved)
   runs/container.sh python -m scripts.base_train --depth "$DEPTH" --target-param-data-ratio "$RATIO" --seed "$SEED" \
-    --save-every "$SAVE_EVERY" >>"$LOGS/train.log" 2>&1
+    --grad-clip "$CLIP" --save-every "$SAVE_EVERY" >>"$LOGS/train.log" 2>&1
 do
   end=$(saved)
   echo "$(date -Is) base_train failed: checkpoint saved at $start -> $end" >>"$LOGS/runner.log"
   [[ $end != "$start" ]] || exit 1
 done
 runs/container.sh python -m scripts.base_eval --model-tag "$TAG" >>"$LOGS/eval.log" 2>&1
+runs/container.sh python -m scripts.report --out "/runs/results/$TAG.md" "$TAG" >>"$LOGS/eval.log" 2>&1
 echo "$(date -Is) done" >>"$LOGS/runner.log"

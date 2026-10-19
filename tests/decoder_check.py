@@ -8,7 +8,7 @@ MODEL: a base_train model tag (at its checkpoint's stage), or a depth: a fresh m
 repo: config.FILE_STAGE, REPO_STAGE) with every matrix and table uniform with std C^-0.5 and every vector (lambdas, q/k
 gains) uniform in [0.5, 1.5] (init_weights zeroes the output projections, lm_head and gates and fixes the vectors, under
 which greedy decoding is trivial).
-Usage: python -m verify.decoder_check MODEL N_PROMPTS NEW_TOKENS [STAGE]"""
+Usage: python -m tests.decoder_check MODEL N_PROMPTS NEW_TOKENS [STAGE]"""
 import statistics
 import sys
 

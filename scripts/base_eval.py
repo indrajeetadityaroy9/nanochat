@@ -8,7 +8,7 @@ Evaluation of a base_train run's final checkpoint (its raw weights, train/checkp
   (eval/fim_eval.py).
 Written to <base_dir>/base_eval/<tag>.json.
 
-    python -m scripts.base_eval --model-tag=d24-r490.964-s42
+    python -m scripts.base_eval --model-tag=d24-r490.805-s42-g1
 """
 import argparse
 import os
@@ -25,8 +25,8 @@ from nanochat.train.checkpoint import load_model
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Base model evaluation: the whole suite on a run's final checkpoint")
-    parser.add_argument("--model-tag", required=True, help="base_train run tag (base_checkpoints/<tag>)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-tag", required=True)
     tag = parser.parse_args().model_tag
     device = torch.device("cuda")
     benchmarks = tasks()

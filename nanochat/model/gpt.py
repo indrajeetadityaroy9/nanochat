@@ -44,7 +44,7 @@ class GPTConfig:
 
 def gpt_config(depth, vocab_size, stage, *, aspect_ratio):
     """The architecture at a depth: nanochat's shape rule (92d63d4 scripts/base_train.py:51-52, 131-134: width =
-    aspect_ratio x depth rounded up to whole heads of head_dim 128, LOG 2026-01-17; inference/decode.cu HEAD_DIM); the
+    aspect_ratio x depth rounded up to whole heads of head_dim 128, LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM); the
     context and rotary base of a training stage (config.Stage)."""
     head_dim = 128
     n_embd = -(-depth * aspect_ratio // head_dim) * head_dim
@@ -83,15 +83,16 @@ def rotary_tables(config, device):
 
 def norm(x):
     """RMS norm over the last dim: F.rms_norm on bf16 computes its statistics in fp32 and rounds the output once. The
-    one epsilon convention of every RMS norm (here, ops/qk_prologue.cu and inference/decode.cu): F.rms_norm's default,
+    one epsilon convention of every RMS norm (here, csrc/qk_prologue.cu and csrc/decode.cu): F.rms_norm's default,
     the fp32 machine epsilon FLT_EPSILON = 2^-23 also for bf16 inputs (torch.finfo of the fp32 opmath type;
     modded-nanogpt track_1_short perf/kernels/qkv_rope.py:8)."""
     return F.rms_norm(x, (x.size(-1),))
 
 
-class Block(nn.Module):
-    """One transformer layer: attention (the projections, the value-embedding mix, the q/k prologue and FlashAttention-4,
-    which computes only softmax(q k^T / sqrt(D)) v) and the MLP, each pre-normed and added to the residual stream."""
+class Attention(nn.Module):
+    """Causal self-attention, MHA with heads of 128: the q, k, v projections of the normed stream; on value-embedding
+    layers the value residual; per head RMS norm, the q / k gain and RoPE; FlashAttention-4 over each query's window
+    within its document; the output projection c_o."""
 
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -105,33 +106,56 @@ class Block(nn.Module):
         self.q_gain = nn.Parameter(torch.empty(C // H))
         self.k_gain = nn.Parameter(torch.empty(C // H))
         self.ve_gate = nn.Linear(C, H, bias=False) if has_ve(layer_idx, config.n_layer) else None
-        self.c_fc = nn.Linear(C, 4 * C, bias=False)
-        self.c_proj = nn.Linear(4 * C, C, bias=False)
 
-    def forward(self, x, ve, cos_sin, window_size, kv_cache, cu_seqlens):
-        """x: the residual stream; ve: this layer's value embeddings (bf16) or None. kv_cache (decoder prefill from
-        position 0): receives this layer's keys (after the prologue) and values (after the value-embedding mix)."""
-        B, T, C = x.size()
-        n = norm(x)
+    def forward(self, n, ve, cos_sin, window_size, kv_cache, cu_seqlens):
+        """n: the normed residual stream; ve: this layer's value embeddings (bf16) or None. kv_cache (decoder prefill
+        from position 0): receives this layer's keys (after the prologue) and values (after the value-embedding mix)."""
+        B, T, C = n.size()
         q, k, v = (linear(n, w).view(B, T, self.n_head, -1) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
         # Value residual: the value embedding mixed in with an input-dependent gate per head, 2 sigmoid(.) in (0, 2),
         # 1 at the zero-init gate weight (unit weight at init); in fp32, rounded once to bf16. The gate's H dot products
         # as a broadcast-sum, which Inductor fuses into reductions over n (fp32 throughout, the weight gradient
-        # included) where F.linear ran fp32 GEMMs on CUDA cores: 0.88 vs 1.20 ms per layer and d24 micro-batch, fwd+bwd
-        # of gate and mix (bench/h100.txt)
+        # included) where F.linear ran fp32 GEMMs on CUDA cores: 0.88 vs 1.20 ms per layer and d24 micro-batch,
+        # fwd+bwd of gate and mix (benchmarks/h100.txt)
         if ve is not None:
             gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))  # (B, T, H)
             v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
-        # per head RMS norm, the q / k gain, RoPE (ops/qk_prologue.cu, one pass over memory per direction: its forward
-        # and backward take 168 ms of a d24 step where Inductor's fusion of the same ops takes 336 ms, bench/h100.txt)
+        # per head RMS norm, the q / k gain, RoPE (csrc/qk_prologue.cu, one pass over memory per direction: its forward
+        # and backward take 168 ms of a d24 step where Inductor's fusion of the same ops takes 336 ms,
+        # benchmarks/h100.txt)
         q, k = qk_norm_rope(q, k, self.q_gain, self.k_gain, *cos_sin)
         if kv_cache is not None:
             kv_cache.k_cache[self.layer_idx, :, :T], kv_cache.v_cache[self.layer_idx, :, :T] = k, v
         # FlashAttention-4, causal: each query sees itself and `window_size` keys before it
-        x = x + linear(flash_attn(q, k, v, window_size, cu_seqlens)[0].view(B, T, C), self.c_o.weight)
-        # the MLP c_proj(relu(c_fc(norm(x)))^2) on QuACK's GEMMs (ops/linear.py relu2_mlp: the activation in the
-        # up-projection GEMM's epilogue, its derivative in the backward GEMM's)
-        return x + relu2_mlp(norm(x), self.c_fc.weight, self.c_proj.weight)[0]
+        return linear(flash_attn(q, k, v, window_size, cu_seqlens)[0].view(B, T, C), self.c_o.weight)
+
+
+class MLP(nn.Module):
+    """The ReLU^2 MLP with hidden width 4C, c_proj(relu(c_fc(x))^2), on QuACK's GEMMs (ops/linear.py relu2_mlp: the
+    activation in the up-projection GEMM's epilogue, its derivative in the backward GEMM's)."""
+
+    def __init__(self, config):
+        super().__init__()
+        C = config.n_embd
+        self.c_fc = nn.Linear(C, 4 * C, bias=False)
+        self.c_proj = nn.Linear(4 * C, C, bias=False)
+
+    def forward(self, x):
+        return relu2_mlp(x, self.c_fc.weight, self.c_proj.weight)[0]
+
+
+class Block(nn.Module):
+    """One transformer layer: attention and the MLP, each on the RMS-normed stream and added to it."""
+
+    def __init__(self, config, layer_idx):
+        super().__init__()
+        self.attn = Attention(config, layer_idx)
+        self.mlp = MLP(config)
+
+    def forward(self, x, ve, cos_sin, window_size, kv_cache, cu_seqlens):
+        """x: the residual stream; the rest as Attention.forward."""
+        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache, cu_seqlens)
+        return x + self.mlp(norm(x))
 
 
 class GPT(nn.Module):
@@ -156,19 +180,21 @@ class GPT(nn.Module):
     @torch.no_grad()
     def init_weights(self):
         """Every matrix and table that reads the stream uniform with std C^-0.5 (variance preserving, LeCun et al.
-        "Efficient BackProp" §4.6; bound sqrt(3) std, the std of U(-a, a) being a / sqrt(3)): c_q, c_k, c_v, c_fc,
-        wte, value_embeds. Zero: c_o, c_proj, lm_head (each block the identity at init, modded-nanogpt record #5) and
-        ve_gate (gate 1). resid_lambdas 1, x0_lambdas 0 (LOG 2026-01-11), q_gain = k_gain = 1."""
+        "Efficient BackProp" §4.6; bound sqrt(3) std, the std of U(-a, a) being a / sqrt(3)): attn.c_q, attn.c_k,
+        attn.c_v, mlp.c_fc, wte, value_embeds. Zero: attn.c_o, mlp.c_proj, lm_head (each block the identity at init,
+        modded-nanogpt record #5) and attn.ve_gate (gate 1). resid_lambdas 1, x0_lambdas 0 (LOG 2026-01-11), q_gain =
+        k_gain = 1."""
         bound = (3 / self.config.n_embd) ** 0.5
         for block in self.blocks:
-            for w in (block.c_q.weight, block.c_k.weight, block.c_v.weight, block.c_fc.weight):
+            attn, mlp = block.attn, block.mlp
+            for w in (attn.c_q.weight, attn.c_k.weight, attn.c_v.weight, mlp.c_fc.weight):
                 nn.init.uniform_(w, -bound, bound)
-            nn.init.zeros_(block.c_o.weight)
-            nn.init.zeros_(block.c_proj.weight)
-            nn.init.ones_(block.q_gain)
-            nn.init.ones_(block.k_gain)
-            if block.ve_gate is not None:
-                nn.init.zeros_(block.ve_gate.weight)
+            nn.init.zeros_(attn.c_o.weight)
+            nn.init.zeros_(mlp.c_proj.weight)
+            nn.init.ones_(attn.q_gain)
+            nn.init.ones_(attn.k_gain)
+            if attn.ve_gate is not None:
+                nn.init.zeros_(attn.ve_gate.weight)
         for table in (self.wte, *self.value_embeds.values()):
             nn.init.uniform_(table.weight, -bound, bound)
         nn.init.zeros_(self.lm_head.weight)

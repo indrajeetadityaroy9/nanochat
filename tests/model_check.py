@@ -12,7 +12,7 @@ from nanochat.config import FILE_STAGE, VOCAB_SIZE
 from nanochat.data.loader import PretrainingBatches
 from nanochat.model.gpt import ASPECT_RATIO, GPT, gpt_config
 
-from verify.reference import perturb, reference_losses, rel
+from tests.reference import perturb, reference_losses, rel
 
 torch.manual_seed(0)
 dev = "cuda"

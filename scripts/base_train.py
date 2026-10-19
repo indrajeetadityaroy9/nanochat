@@ -2,17 +2,17 @@
 Pretrain a base model on the GPU. From the root directory of the project:
 
 python -m scripts.base_train --depth=<depth> --target-param-data-ratio=<tokens per scaling parameter> --seed=<seed>
-    --save-every=<steps>
+    --grad-clip=<max gradient norm> --save-every=<steps>
 
 Every other setting is derived: nanochat/config.py (the stages' contexts, RoPE bases and mixtures, micro-batch),
 nanochat/train/schedule.py (batch, horizon, the repo-level stage's first step, peak lr, lr schedule) and
-nanochat/train/optim.py (the optimizer groups, gradient clipping). The run trains the file-level stage, then from the
-plan's repo_start on the repo-level stage (config.REPO_STAGE: the model continues at its context and RoPE base), on the
-next token with the packs' fill-in-the-middle pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
-data/pack.py). The run's tag is config.run_tag. --save-every writes full checkpoints (only the newest is kept); every
-start resumes from the tag's newest checkpoint, and continues bitwise as the uninterrupted run would (the gradients are
-deterministic, model/gpt.py; the data order is the seed's). Metrics: <base_dir>/metrics/<tag>.jsonl
-(nanochat/train/metrics.py).
+nanochat/train/optim.py (the optimizer groups; GRAD_CLIP, the regime's --grad-clip). The run trains the file-level
+stage, then from the plan's repo_start on the repo-level stage (config.REPO_STAGE: the model continues at its context
+and RoPE base), on the next token with the packs' fill-in-the-middle pieces read as FIM examples (DeepSeek-Coder, arXiv
+2401.14196 §3.1; data/pack.py). The run's tag is config.run_tag. --save-every writes full checkpoints (only the newest
+is kept); every start resumes from the tag's newest checkpoint, and continues bitwise as the uninterrupted run would
+(the gradients are deterministic, model/gpt.py; the data order is the seed's). Metrics:
+<base_dir>/metrics/<tag>.jsonl (nanochat/train/metrics.py).
 """
 
 import argparse
@@ -32,18 +32,19 @@ from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import ASPECT_RATIO, GPT, gpt_config
 from nanochat.train import metrics, stages
 from nanochat.train.checkpoint import checkpoint_path, save_checkpoint
-from nanochat.train.optim import GRAD_CLIP, optimizers
+from nanochat.train.optim import optimizers
 from nanochat.train.schedule import lr_multiplier, plan
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Pretrain base model")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--depth", type=int, required=True)
-    parser.add_argument("--target-param-data-ratio", type=float, required=True, help="training tokens per scaling parameter")
-    parser.add_argument("--seed", type=int, required=True, help="seed of the model initialization and of the data order")
-    parser.add_argument("--save-every", type=int, required=True, help="full checkpoint every N steps besides the final one")
+    parser.add_argument("--target-param-data-ratio", type=float, required=True)
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--save-every", type=int, required=True)
+    parser.add_argument("--grad-clip", type=float, required=True)
     args = parser.parse_args()
-    model_tag = run_tag(args.depth, args.target_param_data_ratio, args.seed)
+    model_tag = run_tag(args.depth, args.target_param_data_ratio, args.seed, args.grad_clip)
     device = torch.device("cuda")
     torch.manual_seed(args.seed)
     tokenizer = get_tokenizer()
@@ -126,7 +127,7 @@ def main():
             loss.backward()
             if step + 1 < run.num_iterations:
                 upcoming.append(next(train_iter))
-        grad_norm = torch.nn.utils.clip_grad_norm_(params, GRAD_CLIP)  # the norm before clipping
+        grad_norm = torch.nn.utils.clip_grad_norm_(params, args.grad_clip)  # the norm before clipping
         lr = schedulers[0].get_last_lr()[0]
         for opt, scheduler in zip((adamw, muon), schedulers, strict=True):
             opt.step()

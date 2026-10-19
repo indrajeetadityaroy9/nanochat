@@ -1,22 +1,20 @@
 """
-The token and value embeddings of model/gpt.py as one torch.library op, nanochat::embedding (embedding.cu): fp32 table
-rows looked up as bf16, and the table's fp32 gradient summed without atomics in a fixed order, so a training step's
-gradients are bitwise reproducible (Inductor's own embedding backward adds rows with atomics). The run of each token's
-positions comes from a stable sort; its partials, slots and first partial per row are computed on the device (no host
-synchronization). The library is compiled from embedding.cu once per source revision and GPU architecture
+The token and value embeddings of model/gpt.py as one torch.library op, nanochat::embedding (csrc/embedding.cu): fp32
+table rows looked up as bf16, and the table's fp32 gradient summed without atomics in a fixed order, so a training
+step's gradients are bitwise reproducible (Inductor's own embedding backward adds rows with atomics). The run of each
+token's positions comes from a stable sort; its partials, slots and first partial per row are computed on the device
+(no host synchronization). The library is compiled from csrc/embedding.cu once per source revision and GPU architecture
 (native.cuda_library) on first use.
 """
 
 import ctypes
 import functools
-import os
 
 import torch
 from torch import Tensor
 
 from nanochat.native import cuda_library
 
-SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "embedding.cu")
 # Positions per partial sum: a frequent token's run is summed as ceil(run / PARTIAL_ROWS) partials in parallel, then in
 # order, so no block's serial sum exceeds PARTIAL_ROWS rows or one run's partials. A fixture (any fixed value is
 # reproducible; it sets the summation order), 32.
@@ -25,7 +23,7 @@ PARTIAL_ROWS = 32
 
 @functools.cache
 def _lib():
-    lib = cuda_library("embedding", SOURCE)
+    lib = cuda_library("embedding")
     lib.emb_forward.argtypes = [ctypes.c_void_p] * 3 + [ctypes.c_longlong, ctypes.c_int, ctypes.c_void_p]
     lib.emb_backward.argtypes = [ctypes.c_void_p] * 8 + [ctypes.c_longlong] + [ctypes.c_int] * 3 + [ctypes.c_void_p]
     return lib

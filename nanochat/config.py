@@ -25,7 +25,7 @@ MIXTURE = {
 # Micro-batches of 98,304 tokens, 12 rows of the file-level stage's 8,192 and 3 of the repo-level stage's 32,768: the
 # most whole rows of both contexts whose d24 training step fits the H100's 80 GB, measured on the packed train rows
 # (profile_step.py: peak 69.6 GiB with the optimizer state, 48.9 GiB at 65,536 tokens, so +20.7 GiB per 32,768 and over
-# 80 GB at 131,072), 1% faster per token than 65,536 (bench/h100.txt)
+# 80 GB at 131,072), 1% faster per token than 65,536 (benchmarks/h100.txt)
 MICRO_BATCH_TOKENS = 98_304
 
 
@@ -53,6 +53,7 @@ REPO_STAGE = Stage(seq_len=32_768, rope_base=1_000_000,
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
 
 
-def run_tag(depth, ratio, seed):
-    """A run's tag (its checkpoint directory and metrics file)."""
-    return f"d{depth}-r{ratio:g}-s{seed}"
+def run_tag(depth, ratio, seed, grad_clip):
+    """A run's tag (its checkpoint directory and metrics file); grad_clip distinguishes the clipping ablation's arms
+    (runs/ablation_clip.sh)."""
+    return f"d{depth}-r{ratio:g}-s{seed}-g{grad_clip:g}"

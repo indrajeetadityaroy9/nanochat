@@ -42,7 +42,7 @@ def flash_attn_bwd(dout: Tensor, q: Tensor, k: Tensor, v: Tensor, out: Tensor, l
                    cu_seqlens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     """(dq, dk, dv) like q, k, v given dout and the forward's out and lse. FA4's deterministic backward (dq summed in a
     fixed order, not by atomics): with ops/embedding and ops/qk_prologue a step's gradients are bitwise reproducible,
-    at +1.5% fwd+bwd time per d24 micro-batch (bench/h100.txt)."""
+    at +1.5% fwd+bwd time per d24 micro-batch (benchmarks/h100.txt)."""
     T = q.size(1)
     grads = _flash_attn_bwd(_varlen(q), _varlen(k), _varlen(v), _varlen(out), _varlen(dout), lse, causal=True,
                             window_size_left=window_left, cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,

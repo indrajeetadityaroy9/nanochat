@@ -16,7 +16,7 @@
  *     k_gemv  xm = resid_lambdas[i] x + x0_lambdas[i] x0 (x = x0 before layer 0), h = norm(xm),
  *             [q k v] = h [Wq Wk Wv]^T                                                  (the prologue mixes and norms)
  *     k_attn  VE layers: v += 2 sigmoid(W_g[head] . h) value_embeds[i][token]  (per head, fp32);
- *             q, k = rope(norm_D(q) q_gain), rope(norm_D(k) k_gain) per head (ops/qk_row.cuh, as qk_prologue.cu);
+ *             q, k = rope(norm_D(q) q_gain), rope(norm_D(k) k_gain) per head (qk_row.cuh, as qk_prologue.cu);
  *             the cache takes k, v at the position; y = softmax(q K^T / sqrt(HEAD_DIM)) V over the keys of the
  *             layer's window (FlashAttention's window_size left) and the current key
  *     k_gemv  xo = xm + y Wo^T
@@ -48,7 +48,7 @@
 #include <math.h>
 #include <stdlib.h>
 
-#include "../ops/qk_row.cuh"
+#include "qk_row.cuh"
 
 constexpr int LANE_DIMS = HEAD_DIM / WARP;         /* a lane's dims of a query, key or value */
 constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thread per head dim */

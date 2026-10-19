@@ -11,7 +11,7 @@ import torch
 
 # DeepSeek LLM's AdamW (arXiv 2401.02954 §2.3): "beta1 = 0.9, beta2 = 0.95, and weight_decay = 0.1"; and its clipping,
 # "The gradient clipping during the training phase is set to 1.0" (DeepSeek-Coder §3.4 follows DeepSeek LLM): the step's
-# gradient scaled to L2 norm GRAD_CLIP when above it, torch.nn.utils.clip_grad_norm_ in the trainer
+# gradient scaled to L2 norm GRAD_CLIP when above it (base_train --grad-clip, torch.nn.utils.clip_grad_norm_)
 BETAS, WEIGHT_DECAY, GRAD_CLIP = (0.9, 0.95), 0.1, 1.0
 
 

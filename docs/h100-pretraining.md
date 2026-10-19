@@ -68,9 +68,9 @@ graph per stage.
 | ReLU² MLP | QuACK fused `gemm_act` / `gemm_dact` |
 | Cross entropy | QuACK, from bf16 logits read once; the loss and the logit gradient in one pass, the gradient written over the logits |
 | Attention | FlashAttention-4 varlen, deterministic backward |
-| q/k norm + gain + RoPE | `qk_prologue.cu`: one pass per direction; the backward is persistent and reduces the gain gradient in a fixed order (row math shared with the decoder through `qk_row.cuh`) |
-| Embeddings | `embedding.cu`: bf16 lookup; the gradient sums each token's rows in a fixed order (stable sort, partials of 32 rows, ordered sums) |
-| Decoding | `inference/decode.cu`: batched native decoder for the code benchmarks |
+| q/k norm + gain + RoPE | `csrc/qk_prologue.cu`: one pass per direction; the backward is persistent and reduces the gain gradient in a fixed order (row math shared with the decoder through `csrc/qk_row.cuh`) |
+| Embeddings | `csrc/embedding.cu`: bf16 lookup; the gradient sums each token's rows in a fixed order (stable sort, partials of 32 rows, ordered sums) |
+| Decoding | `csrc/decode.cu` (wrapper `inference/decoder.py`): batched native decoder for the code benchmarks |
 
 Measured on the d24 step with real data (`bench/profile_step.py 24 30 12`):
 

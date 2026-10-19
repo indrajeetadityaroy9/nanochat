@@ -5,8 +5,8 @@ dropped); the weight-gradient roles (proj_dw, mlp_dw_proj, mlp_dw_fc, lm_dw) at 
 serial split-K 1/2/4/8/16, plus cuBLAS (torch.mm(out_dtype), the production path) for those without alpha, each with its
 rel L2 error vs fp64 (same bf16 inputs, fp64 sum chunked over M). Timing: median of ROUNDS interleaved rounds, a CUDA
 graph of >= TARGET_MS of calls per replay, config order rotated each round; kernels compiled first in QuACK's pool.
-Usage: python -m bench.gemmsweep OUT.jsonl M C [C ...]; each line {"M", "C", "role", "config" (GemmConfig's fields, or
-"cublas"), "ms": [per round], "err" (dW)}."""
+Usage: python -m benchmarks.gemmsweep OUT.jsonl M C [C ...]; each line {"M", "C", "role", "config" (GemmConfig's
+fields, or "cublas"), "ms": [per round], "err" (dW)}."""
 import dataclasses
 import json
 import math

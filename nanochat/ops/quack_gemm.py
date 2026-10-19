@@ -21,7 +21,7 @@ TABLE holds the widths of the d8 smoke model (256) and the d24 production model 
 H100 80 GB SXM5 (sm_90, at its 700 W power cap): median times of interleaved CUDA-graph rounds at
 M = config.MICRO_BATCH_TOKENS (98,304) of QuACK's SM90 candidates (all 44: tiles x pingpong x cluster 1x2 / 2x1 x
 swap_ab), the weight-gradient roles also at serial split-K 1..16 and cuBLAS (torch.mm, fp32 out; "cublas"):
-bench/gemmsweep.py (gemmsweep_sm90.jsonl; bench/gemmtable.py -> gemmtable_sm90.txt).
+benchmarks/gemmsweep.py (gemmsweep_sm90.jsonl; benchmarks/gemmtable.py -> gemmtable_sm90.txt).
 Forward and dX roles: the fastest. Weight-gradient roles: among the configs within 1% of the fastest, the most accurate
 (rel. error vs fp64 depends only on the split-K factor s: 1.14e-4 / 5.67e-5 / 2.82e-5 / 1.38e-5 / 6.76e-6 at
 s = 1 / 2 / 4 / 8 / 16; cuBLAS 1.38e-5 to 5.68e-5), then the fastest.

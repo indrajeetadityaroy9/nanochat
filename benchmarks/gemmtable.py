@@ -1,7 +1,7 @@
 """Pick a device's GEMM configs from gemmsweep.py's records: forward and dX roles the lowest median time; weight-gradient
 roles (proj_dw, mlp_dw_proj, mlp_dw_fc, lm_dw) among the configs within 1% of the fastest median the lowest error vs
 fp64, then the fastest. Prints each pick against the fastest, then the TABLE entries of ops/quack_gemm.py.
-Usage: python -m bench.gemmtable gemmsweep.jsonl"""
+Usage: python -m benchmarks.gemmtable gemmsweep.jsonl"""
 import collections
 import json
 import statistics

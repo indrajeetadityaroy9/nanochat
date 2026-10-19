@@ -3,7 +3,7 @@
 torch.profiler: GPU kernel time by category and the top kernels; GPU busy fraction of the step. Relative to
 scripts/base_train.py's step it omits the loss weighting by valid-target share, reading the next step's batches during
 backward (here the loader is timed apart), the LR schedulers, checkpoints and metrics.
-Usage: python -m bench.profile_step DEPTH ASPECT_RATIO MICRO_STEPS [ROWS per micro-batch [file|repo stage]]"""
+Usage: python -m benchmarks.profile_step DEPTH ASPECT_RATIO MICRO_STEPS [ROWS per micro-batch [file|repo stage]]"""
 import collections
 import statistics
 import sys

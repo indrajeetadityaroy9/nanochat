@@ -1,7 +1,7 @@
 """Time and peak memory of one micro-batch (forward + backward, compiled as base_train) of each training stage at DEPTH
 and ASPECT_RATIO on this GPU: MICRO_TOKENS // seq_len rows of random token ids (timing does not depend on them), each
 row 4 equal segments at the file-level stage and 1 segment (one long repository sample) at the repo-level stage.
-Usage: python -m bench.stage_probe DEPTH ASPECT_RATIO [MICRO_TOKENS (default MICRO_BATCH_TOKENS)]"""
+Usage: python -m benchmarks.stage_probe DEPTH ASPECT_RATIO [MICRO_TOKENS (default MICRO_BATCH_TOKENS)]"""
 import sys
 import time
 

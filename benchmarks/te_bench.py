@@ -2,8 +2,8 @@
 aspect_ratio=ASPECT_RATIO)) and M = MICRO_BATCH_TOKENS tokens on this GPU: ours (bf16: nanochat::linear for q, k, v, o
 and nanochat::relu2_mlp after the RMS norm) vs Transformer Engine (te.Linear for qkv (C -> 3C) and o, and
 te.LayerNormMLP with RMSNorm and squared ReLU) in bf16 and under FP8 recipes (DelayedScaling, Float8CurrentScaling,
-Float8BlockScaling; all three run on H100, bench/h100.txt). Median ms of torch.utils.benchmark.Timer.blocked_autorange's
-measurements. Usage: python -m bench.te_bench"""
+Float8BlockScaling; all three run on H100, benchmarks/h100.txt). Median ms of torch.utils.benchmark.Timer's
+blocked_autorange measurements. Usage: python -m benchmarks.te_bench"""
 import torch
 import torch.nn.functional as F
 import transformer_engine.pytorch as te

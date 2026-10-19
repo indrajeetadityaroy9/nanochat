@@ -1,5 +1,5 @@
 """Bitwise run-to-run determinism of base_train's compiled forward + backward at d24 (the production model, perturbed
-init: verify/reference.perturb) on the first file-level micro-batch of the packed train rows: the step repeated 6 times
+init: tests/reference.perturb) on the first file-level micro-batch of the packed train rows: the step repeated 6 times
 from the same weights and batch, each parameter's gradient compared bit for bit with the first repeat's. Prints the
 median fwd+bwd time and the parameters whose gradients differ; exits 1 if any does."""
 import statistics
@@ -14,7 +14,7 @@ from nanochat.data.loader import PretrainingBatches, mixture_weights, packed_row
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import ASPECT_RATIO, GPT, gpt_config
 
-from verify.reference import perturb
+from tests.reference import perturb
 
 torch.manual_seed(0)
 device = torch.device("cuda")

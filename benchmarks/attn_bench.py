@@ -5,7 +5,7 @@ batch_rows rows of seq_len tokens, each row SEGMENTS equal documents (cu_seqlens
 the loader pads, data/loader.py PretrainingBatches.num_segments); the model's windows (gpt.layer_windows). Median ms of
 torch.utils.benchmark.Timer.blocked_autorange's measurements; outputs and gradients compared to FA4's
 (max |diff| / max |FA4|).
-Usage: python -m bench.attn_bench SEGMENTS"""
+Usage: python -m benchmarks.attn_bench SEGMENTS"""
 import os
 import sys
 

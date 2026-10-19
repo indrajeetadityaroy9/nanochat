@@ -1,5 +1,5 @@
 /*
- * Device code shared by ops/qk_prologue.cu (training) and inference/decode.cu (decoding), so that given equal inputs
+ * Device code shared by csrc/qk_prologue.cu (training) and csrc/decode.cu (decoding), so that given equal inputs
  * the decoder's q and k equal the training forward's bit for bit: the 16-byte load/store helpers and the forward row
  * math of gpt.py's qk_norm_rope on one head row x of HEAD_DIM bf16, n = x / sqrt(mean(x^2) + eps) with F.rms_norm's
  * fp32 epsilon, m = n * g with the fp32 per-dim gain g, y = m rotated by -theta over the full head (half split: m1 =

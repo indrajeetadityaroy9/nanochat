@@ -15,7 +15,7 @@ from nanochat.ops.linear import relu2_mlp
 from nanochat.ops.qk_prologue import qk_norm_rope
 from nanochat.ops.quack_gemm import TABLE
 
-from verify.reference import rel, rope
+from tests.reference import rel, rope
 
 torch.manual_seed(0)
 dev = "cuda"

@@ -1,7 +1,7 @@
 """The smoke's metrics record (<base_dir>/metrics/<tag>.jsonl), split into launches at each "run" record: the stage
 switches, per launch and context the median tok/s, and the losses of the steps both launches took (the relaunch
 resumes at the switch checkpoint). Training is bitwise deterministic (model/gpt.py), so those losses must be equal:
-exits 1 otherwise. Usage: python -m verify.smoke_check TAG"""
+exits 1 otherwise. Usage: python -m tests.smoke_check TAG"""
 import json
 import os
 import statistics

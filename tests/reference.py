@@ -30,12 +30,12 @@ def perturb(model):
     gains. The ranges are fixtures: s is the uniform bound of std C^-0.5, the rest of order one around the init."""
     s = 3 ** 0.5 * model.config.n_embd ** -0.5
     for b in model.blocks:
-        b.c_o.weight.uniform_(-s, s)
-        b.c_proj.weight.uniform_(-s / 2, s / 2)
-        b.q_gain.uniform_(0.5, 1.5)
-        b.k_gain.uniform_(0.5, 1.5)
-        if b.ve_gate is not None:
-            b.ve_gate.weight.uniform_(-s, s)
+        b.attn.c_o.weight.uniform_(-s, s)
+        b.mlp.c_proj.weight.uniform_(-s / 2, s / 2)
+        b.attn.q_gain.uniform_(0.5, 1.5)
+        b.attn.k_gain.uniform_(0.5, 1.5)
+        if b.attn.ve_gate is not None:
+            b.attn.ve_gate.weight.uniform_(-s, s)
     model.lm_head.weight.normal_(0, 0.05)
     model.resid_lambdas.uniform_(0.8, 1.2)
     model.x0_lambdas.uniform_(0.1, 0.3)
@@ -81,22 +81,22 @@ def reference_losses(model, idx, targets, cu_seqlens, params=None, dtype=torch.f
     x = norm(P["wte.weight"][idx])
     x0 = x
     for i in range(L):
-        b = f"blocks.{i}."
+        a, m = f"blocks.{i}.attn.", f"blocks.{i}.mlp."
         x = P["resid_lambdas"][i] * x + P["x0_lambdas"][i] * x0
         xn = norm(x)
-        q = (xn @ P[b + "c_q.weight"].t()).view(B, T, H, D)
-        k = (xn @ P[b + "c_k.weight"].t()).view(B, T, H, D)
-        v = (xn @ P[b + "c_v.weight"].t()).view(B, T, H, D)
+        q = (xn @ P[a + "c_q.weight"].t()).view(B, T, H, D)
+        k = (xn @ P[a + "c_k.weight"].t()).view(B, T, H, D)
+        v = (xn @ P[a + "c_v.weight"].t()).view(B, T, H, D)
         if i % 2 == (L - 1) % 2:  # value embeddings on alternating layers, the last one included
             ve = P[f"value_embeds.{i}.weight"][idx].view(B, T, H, D)
-            g = 2 * torch.sigmoid(xn @ P[b + "ve_gate.weight"].t())
+            g = 2 * torch.sigmoid(xn @ P[a + "ve_gate.weight"].t())
             v = v + g[..., None] * ve
-        q = rope(norm(q) * P[b + "q_gain"], cos, sin)
-        k = rope(norm(k) * P[b + "k_gain"], cos, sin)
+        q = rope(norm(q) * P[a + "q_gain"], cos, sin)
+        k = rope(norm(k) * P[a + "k_gain"], cos, sin)
         y = attention(q, k, v, seg, windows[i], dtype).reshape(B, T, C)
-        x = x + y @ P[b + "c_o.weight"].t()
-        h = F.relu(norm(x) @ P[b + "c_fc.weight"].t()).square()
-        x = x + h @ P[b + "c_proj.weight"].t()
+        x = x + y @ P[a + "c_o.weight"].t()
+        h = F.relu(norm(x) @ P[m + "c_fc.weight"].t()).square()
+        x = x + h @ P[m + "c_proj.weight"].t()
     logits = (norm(x) @ P["lm_head.weight"].t()).to(wide)
     losses = F.cross_entropy(logits.reshape(-1, cfg.vocab_size), targets.reshape(-1), ignore_index=-1, reduction="none")
     return losses, P

@@ -7,13 +7,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DEPTH=8 RATIO=20 SEED=42 RUNS=$HOME/nanochat-runs
-read -r TAG SWITCH < <(runs/container.sh python -c "from nanochat.config import run_tag; \
-from nanochat.data.tokenizer import get_tokenizer; from nanochat.train.schedule import plan; \
-print(run_tag($DEPTH, $RATIO, $SEED), plan($DEPTH, $RATIO, get_tokenizer().vocab_size).repo_start)" | tail -n 1)
+read -r TAG SWITCH CLIP < <(runs/container.sh python -c "from nanochat.config import run_tag; \
+from nanochat.data.tokenizer import get_tokenizer; from nanochat.train.optim import GRAD_CLIP; \
+from nanochat.train.schedule import plan; \
+print(run_tag($DEPTH, $RATIO, $SEED, GRAD_CLIP), plan($DEPTH, $RATIO, get_tokenizer().vocab_size).repo_start, \
+GRAD_CLIP)" | tail -n 1)
 rm -rf "$RUNS/base_checkpoints/$TAG" "$RUNS/metrics/$TAG.jsonl"
 echo "$TAG: switch at step $SWITCH"
 train=(runs/container.sh python -m scripts.base_train --depth "$DEPTH" --target-param-data-ratio "$RATIO" --seed "$SEED"
-  --save-every "$SWITCH")
+  --grad-clip "$CLIP" --save-every "$SWITCH")
 "${train[@]}" >"$HOME/smoke-1.log" 2>&1 &
 pid=$!
 until [[ -s $RUNS/metrics/$TAG.jsonl ]] && python3 -c "
@@ -28,5 +30,5 @@ wait "$pid" || true
 echo "killed; checkpoints: $(ls "$RUNS/base_checkpoints/$TAG")"
 "${train[@]}" >"$HOME/smoke-2.log" 2>&1
 echo "done"
-runs/container.sh python -m verify.smoke_check "$TAG"
-runs/container.sh python -m verify.decoder_check "$TAG" 32 64
+runs/container.sh python -m tests.smoke_check "$TAG"
+runs/container.sh python -m tests.decoder_check "$TAG" 32 64

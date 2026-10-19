@@ -5,7 +5,7 @@ targets -1. A freshly initialized model at DEPTH perturbed by reference.perturb 
 micro-batch through the compiled model (torch.compile dynamic=False fullgraph, as base_train): loss, gradient norm,
 step time, peak memory. Then ROWS rows alone (B = 1, T = the stage's context) as trained vs the fp64 reference, next
 to the bf16 eager formulation; negative controls on the reference.
-Usage: python -m verify.model_check_data DEPTH file|repo ROWS [CHECKPOINT_TAG (trained weights instead of the random
+Usage: python -m tests.model_check_data DEPTH file|repo ROWS [CHECKPOINT_TAG (trained weights instead of the random
 init)]"""
 import statistics
 import sys
@@ -20,7 +20,7 @@ from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import ASPECT_RATIO, GPT, gpt_config
 from nanochat.train.checkpoint import load_model
 
-from verify.reference import perturb, reference_losses, rel
+from tests.reference import perturb, reference_losses, rel
 
 depth, stage, n_rows = int(sys.argv[1]), {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[2]], int(sys.argv[3])
 torch.manual_seed(0)

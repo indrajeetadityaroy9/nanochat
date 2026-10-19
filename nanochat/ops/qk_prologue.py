@@ -1,26 +1,23 @@
 """
-The attention's q/k prologue (model/gpt.py) as one fused op per direction (qk_prologue.cu): per head RMS norm
+The attention's q/k prologue (model/gpt.py) as one fused op per direction (csrc/qk_prologue.cu): per head RMS norm
 (F.rms_norm's fp32 epsilon), a learnable fp32 per-dim gain (Qwen3, arXiv 2505.09388 §2), then rotary by -theta over the
 full head (karpathy/nanochat 92d63d4 gpt.py:57-65), on q and k in one launch, fp32 inside and one bf16 rounding per
-output. The library is compiled from qk_prologue.cu (and its header qk_row.cuh, shared with inference/decode.cu) once
-per source revision and GPU architecture (native.cuda_library) on first use.
+output. The library is compiled from csrc/qk_prologue.cu (and its header csrc/qk_row.cuh, shared with csrc/decode.cu)
+once per source revision and GPU architecture (native.cuda_library) on first use.
 """
 
 import ctypes
 import functools
-import os
 
 import torch
 from torch import Tensor
 
 from nanochat.native import cuda_library
 
-SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qk_prologue.cu")
-
 
 @functools.cache
 def _lib():
-    lib = cuda_library("qk_prologue", SOURCE)
+    lib = cuda_library("qk_prologue")
     shape = [ctypes.c_longlong, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
     lib.qkp_forward.argtypes = [ctypes.c_void_p] * 8 + shape
     lib.qkp_backward.argtypes = [ctypes.c_void_p] * 13 + shape

@@ -1,15 +1,14 @@
 """
 Greedy decoding of a GPT (nanochat/model/gpt.py) on CUDA for a batch of independent sequences: the model's forward
-pass prefills a sequence's prompt but its last token, then decode.cu advances every sequence of the batch by one token
-per step, one captured CUDA graph (see its header), each until the model writes BOS, its token budget ends or the
+pass prefills a sequence's prompt but its last token, then csrc/decode.cu advances every sequence of the batch by one
+token per step, one captured CUDA graph (see its header), each until the model writes BOS, its token budget ends or the
 caller's stop rule fires; a finished sequence's slot takes the next request (continuous batching). fim_prompt
 assembles fill-in-the-middle prompts. The decoder reads the model's weights as they are when it is made (bf16 copies of
 the matrices and tables) and the model's context, windows and rotary tables (a stage change needs a new decoder). Its
-library is compiled from decode.cu once per source revision and GPU architecture (native.cuda_library).
+library is compiled from csrc/decode.cu once per source revision and GPU architecture (native.cuda_library).
 """
 
 import ctypes
-import os
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,8 +20,6 @@ import torch
 from nanochat.data.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX
 from nanochat.model.gpt import has_ve
 from nanochat.native import cuda_library
-
-SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decode.cu")
 
 
 def fim_prompt(tokenizer, prefix, suffix, mode: Literal["psm", "spm"]):
@@ -69,7 +66,7 @@ class NativeDecoder:
 
     @torch.no_grad()
     def __init__(self, model, *, bos_token_id):
-        lib = cuda_library("decode", SOURCE)
+        lib = cuda_library("decode")
         lib.dec_create.argtypes = [ctypes.c_void_p] * 5
         lib.dec_create.restype = ctypes.c_void_p
         lib.dec_set_prefilled.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
@@ -93,18 +90,18 @@ class NativeDecoder:
 
         weights = [bf16("wte.weight"), model.cos, model.sin, bf16("lm_head.weight")]
         for i in range(L):
-            b = f"blocks.{i}."
-            qkv = torch.cat([p[b + "c_q.weight"], p[b + "c_k.weight"], p[b + "c_v.weight"]]).to(torch.bfloat16)
+            a, m = f"blocks.{i}.attn.", f"blocks.{i}.mlp."
+            qkv = torch.cat([p[a + "c_q.weight"], p[a + "c_k.weight"], p[a + "c_v.weight"]]).to(torch.bfloat16)
             ve = has_ve(i, L)
-            weights += [qkv, bf16(b + "c_o.weight"), bf16(b + "c_fc.weight"), bf16(b + "c_proj.weight"),
-                        bf16(f"value_embeds.{i}.weight") if ve else None, fp32(b + "ve_gate.weight") if ve else None,
-                        fp32(b + "q_gain"), fp32(b + "k_gain")]
+            weights += [qkv, bf16(a + "c_o.weight"), bf16(m + "c_fc.weight"), bf16(m + "c_proj.weight"),
+                        bf16(f"value_embeds.{i}.weight") if ve else None, fp32(a + "ve_gate.weight") if ve else None,
+                        fp32(a + "q_gain"), fp32(a + "k_gain")]
         self._weights = weights  # referenced while the decoder reads them through pointers
         # the resid/x0 lambdas meet bf16 tensors as bf16 values (a 0-dim fp32 tensor times a bf16 tensor computes in
         # bf16), per layer (resid, x0)
         scal = torch.stack([p["resid_lambdas"], p["x0_lambdas"]], 1).to(torch.bfloat16).float().cpu().numpy()
         # MLP hidden width F: c_fc is (F, C), c_proj (C, F)
-        hidden = p["blocks.0.c_fc.weight"].size(0)
+        hidden = p["blocks.0.mlp.c_fc.weight"].size(0)
         # a slot's device memory (bf16 unless noted): KV caches 2 L T C, the per-vector buffers (x, x0, xm, h, att, xo
         # 6 C, qkv 3 C, MLP F), fp32 attention partials H splits (D + 2) with splits at most T (one key each)
         slot_bytes = 2 * (2 * L * T * C + 9 * C + hidden) + 4 * cfg.n_head * T * (C // cfg.n_head + 2)
