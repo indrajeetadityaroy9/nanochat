@@ -1,284 +1,225 @@
 """
-GPT model (nanochat, karpathy/nanochat 92d63d4 nanochat/gpt.py, adapted to dev/D20_SPEC.md)
-Notable features:
-- rotary embeddings on the first half of each head (and no positional embeddings), the key offset on the full-context
-  layers
-- QK norm
-- untied weights for token embedding and lm_head
-- SwiGLU MLP
-- norm after token embedding
-- no learnable params in rmsnorm
-- no bias in linear layers
-- one key/value head per query head (XSA pairs them)
-- FlashAttention-4 (sm_12x patched) with document masking, XSA at strength 1, a head-wise attention-output gate, MUDD
-  dense connections (model/mudd.py), Engram (model/engram.py; dev/D20_SPEC.md "Model")
-The optimizer's parameter groups are train/optim.py's.
+The GPT: karpathy/nanochat 92d63d4 nanochat/gpt.py with the measured wins of its experiment log (dev/LOG.md, "LOG" below)
+and Qwen3's QK norm with learnable gains (arXiv 2505.09388 §2).
+- Token embedding normed, no positional embedding; rotary embeddings over the full head (92d63d4 gpt.py:57-65).
+- Per layer x = resid_lambdas[i] x + x0_lambdas[i] x0, x0 the normed embedding (LOG 2026-01-11).
+- Attention: MHA, head_dim 128 (LOG 2026-01-17); per head RMS norm, a per-dim gain shared across heads, then RoPE
+  (Qwen3; transformers modeling_qwen3.py Qwen3Attention.forward: q_norm/k_norm, then apply_rotary_pos_emb); windows
+  SSSL (layer_windows); value embeddings on alternating layers with a gate (ResFormer arXiv 2410.17897; LOG
+  2026-01-17); FlashAttention-4 with document masking (ops/flash_attn.py).
+- MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
+- RMS norm without gains, linear layers without bias, untied lm_head (modded-nanogpt record #8), plain cross entropy.
+Parameters are fp32 masters; activations bf16: the tables are looked up and rounded once, every matmul runs through the
+nanochat ops, which round the weights inside. The optimizer's parameter groups are train/optim.py's.
 """
+
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nanochat.model.attention import (
-    CausalSelfAttention,
-    layer_windows,
-    rotary_tables,
-    segment_starts,
-)
-from nanochat.model.config import SOFTCAP, has_ve, padded_vocab
-from nanochat.model.engram import Engram
-from nanochat.model.layers import Embedding, Linear, norm
-from nanochat.model.mlp import MLP
-from nanochat.model.mudd import MuddSite, mix, site_sources
-from nanochat.ops.softcap_ce import softcap_ce_losses, softcap_lce
+from nanochat.ops.cross_entropy import lm_loss, lm_losses
+from nanochat.ops.flash_attn import flash_attn
+from nanochat.ops.linear import linear, relu2_mlp
+from nanochat.ops.qk_prologue import qk_norm_rope
+
+# Width per layer of depth: MobileLLM-350M's deep-and-thin shape, 32 layers x 960 (Liu et al. arXiv 2402.14905 §2.2.2
+# Fig. 4: below 1B, deeper and thinner beats wider and shallower at comparable size)
+ASPECT_RATIO = 960 // 32
 
 
-def scaling_params(model):
-    """The parameters the token budget scales with (nanochat's choice, the cleanest scaling laws): the blocks' matrices
-    (the attention-output gates excluded, as MUDD and Engram are) + lm_head."""
-    blocks = model.transformer.h
-    attn_gates = sum(b.attn.attn_gate.weight.numel() for b in blocks)
-    return sum(p.numel() for p in blocks.parameters()) - attn_gates + model.lm_head.weight.numel()
+@dataclass(kw_only=True)
+class GPTConfig:
+    sequence_len: int
+    vocab_size: int  # the tokenizer's ids, specials included: the rows of wte, value_embeds and lm_head
+    rope_base: int   # the rotary frequencies rope_base^(-i/64), i = 0..63, over the full head
+    n_layer: int
+    n_head: int      # query heads = key/value heads (MHA)
+    n_embd: int
+
+
+def gpt_config(depth, vocab_size, stage, *, aspect_ratio):
+    """The architecture at a depth: nanochat's shape rule (92d63d4 scripts/base_train.py:51-52, 131-134: width =
+    aspect_ratio x depth rounded up to whole heads of head_dim 128, LOG 2026-01-17; inference/decode.cu HEAD_DIM); the
+    context and rotary base of a training stage (config.Stage)."""
+    head_dim = 128
+    n_embd = -(-depth * aspect_ratio // head_dim) * head_dim
+    return GPTConfig(sequence_len=stage.seq_len, vocab_size=vocab_size, rope_base=stage.rope_base, n_layer=depth,
+                     n_head=n_embd // head_dim, n_embd=n_embd)
+
+
+def has_ve(layer_idx, n_layer):
+    """Whether layer layer_idx has a value embedding: alternating layers, the last one included (92d63d4 gpt.py:53-55;
+    LOG 2026-01-17: alternating layers worked best)."""
+    return layer_idx % 2 == (n_layer - 1) % 2
+
+
+def layer_windows(config):
+    """The left window (keys before each query) per layer: the pattern SSSL tiled across layers, the last layer L (LOG
+    2026-01-11; 92d63d4 gpt.py:287-314); L the context, S = 512 keys at most the context (Gemma 3 arXiv 2503.19786
+    §5.2 Fig. 4: local windows of 512..4096 change perplexity minimally)."""
+    pattern = "SSSL"
+    window = {"S": min(512, config.sequence_len), "L": config.sequence_len}
+    sizes = [window[pattern[i % len(pattern)]] for i in range(config.n_layer)]
+    sizes[-1] = config.sequence_len
+    return sizes
+
+
+def rotary_tables(config, device):
+    """cos/sin (fp32, contiguous, shape (sequence_len, head_dim/2)) of the rotary embeddings over the full head, one table
+    for every layer: angle(t, i) = t * rope_base^(-i / (head_dim/2)), i = 0 .. head_dim/2 - 1 (92d63d4 gpt.py:270-285:
+    inv_freq = base^(-(2i)/head_dim)). Angles and their cos/sin in fp64, rounded once to fp32 (an fp32 angle t * f would
+    carry an absolute error up to t * 2^-24)."""
+    head_dim = config.n_embd // config.n_head
+    exponent = torch.arange(0, head_dim, 2, dtype=torch.float64, device=device) / head_dim
+    t = torch.arange(config.sequence_len, dtype=torch.float64, device=device)
+    freqs = torch.outer(t, config.rope_base ** -exponent)
+    return freqs.cos().float(), freqs.sin().float()
+
+
+def norm(x):
+    """RMS norm over the last dim: F.rms_norm on bf16 computes its statistics in fp32 and rounds the output once. The
+    one epsilon convention of every RMS norm (here, ops/qk_prologue.cu and inference/decode.cu): F.rms_norm's default,
+    the fp32 machine epsilon FLT_EPSILON = 2^-23 also for bf16 inputs (torch.finfo of the fp32 opmath type;
+    modded-nanogpt track_1_short perf/kernels/qkv_rope.py:8)."""
+    return F.rms_norm(x, (x.size(-1),))
 
 
 class Block(nn.Module):
+    """One transformer layer: attention (the projections, the value-embedding mix, the q/k prologue and FlashAttention-4,
+    which computes only softmax(q k^T / sqrt(D)) v) and the MLP, each pre-normed and added to the residual stream."""
+
     def __init__(self, config, layer_idx):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
-        self.mlp = MLP(config)
+        C, H = config.n_embd, config.n_head
+        self.layer_idx = layer_idx
+        self.n_head = H
+        self.c_q = nn.Linear(C, C, bias=False)
+        self.c_k = nn.Linear(C, C, bias=False)
+        self.c_v = nn.Linear(C, C, bias=False)
+        self.c_o = nn.Linear(C, C, bias=False)
+        self.q_gain = nn.Parameter(torch.empty(C // H))
+        self.k_gain = nn.Parameter(torch.empty(C // H))
+        self.ve_gate = nn.Linear(C, H, bias=False) if has_ve(layer_idx, config.n_layer) else None
+        self.c_fc = nn.Linear(C, 4 * C, bias=False)
+        self.c_proj = nn.Linear(4 * C, C, bias=False)
 
-    def forward(self, x, ve, cos_sin, window_size, kv_cache, key_offset, starts, cu_seqlens, v_mix=None):
-        x = x + self.attn(x, ve, cos_sin, window_size, kv_cache, key_offset, starts, cu_seqlens, v_mix)
-        return x + self.mlp(x)
+    def forward(self, x, ve, cos_sin, window_size, kv_cache, cu_seqlens):
+        """x: the residual stream; ve: this layer's value embeddings (bf16) or None. kv_cache (decoder prefill from
+        position 0): receives this layer's keys (after the prologue) and values (after the value-embedding mix)."""
+        B, T, C = x.size()
+        n = norm(x)
+        q, k, v = (linear(n, w).view(B, T, self.n_head, -1) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
+        # Value residual: the value embedding mixed in with an input-dependent gate per head, 2 sigmoid(.) in (0, 2),
+        # 1 at the zero-init gate weight (unit weight at init); in fp32 (the gate's weight gradient reduced in fp32
+        # straight to its fp32 .grad), rounded once to bf16
+        if ve is not None:
+            gate = 2 * torch.sigmoid(F.linear(n.float(), self.ve_gate.weight))  # (B, T, H)
+            v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
+        # per head RMS norm, the q / k gain, RoPE (ops/qk_prologue.cu, one pass over memory per direction: its forward
+        # and backward take 228 ms of a d24 step where Inductor's fusion of the same ops takes 336 ms, bench/h100.txt)
+        q, k = qk_norm_rope(q, k, self.q_gain, self.k_gain, *cos_sin)
+        if kv_cache is not None:
+            kv_cache.k_cache[self.layer_idx, :, :T], kv_cache.v_cache[self.layer_idx, :, :T] = k, v
+        # FlashAttention-4, causal: each query sees itself and `window_size` keys before it
+        x = x + linear(flash_attn(q, k, v, window_size, cu_seqlens)[0].view(B, T, C), self.c_o.weight)
+        # the MLP c_proj(relu(c_fc(norm(x)))^2) on QuACK's GEMMs (ops/linear.py relu2_mlp: the activation in the
+        # up-projection GEMM's epilogue, its derivative in the backward GEMM's)
+        return x + relu2_mlp(norm(x), self.c_fc.weight, self.c_proj.weight)[0]
 
 
 class GPT(nn.Module):
     def __init__(self, config):
-        """
-        NOTE a major footgun: this __init__ function runs in meta device context (!!)
-        Therefore, any calculations inside here are shapes and dtypes only, no actual data.
-        => We actually initialize all data (parameters, buffers, etc.) in init_weights() instead.
-        """
+        """Shapes only (the trainer and the checkpoint loader build it on the meta device); init_weights sets the
+        values."""
         super().__init__()
         self.config = config
-        self.window_sizes, self.key_offsets = layer_windows(config)
-        head_dim = config.n_embd // config.n_head
-        # Token-indexed tables have padded_vocab rows; ids >= config.vocab_size never occur as inputs or targets
-        V = padded_vocab(config.vocab_size)
-        self.transformer = nn.ModuleDict({
-            "wte": Embedding(V, config.n_embd),
-            "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
-        })
-        self.lm_head = Linear(config.n_embd, V, bias=False)
-        # Per-layer learnable scalars (nanochat, 92d63d4 gpt.py:236-241, 500; from modded-nanogpt)
-        # resid_lambdas: scales the residual stream at each layer
-        # x0_lambdas: blends initial embedding back in at each layer
-        # Separate parameters so they can have different optimizer treatment
+        self.window_sizes = layer_windows(config)
+        C, V = config.n_embd, config.vocab_size
+        self.wte = nn.Embedding(V, C)
+        self.blocks = nn.ModuleList([Block(config, i) for i in range(config.n_layer)])
+        self.lm_head = nn.Linear(C, V, bias=False)
         self.resid_lambdas = nn.Parameter(torch.empty(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.empty(config.n_layer))
-        # Smear: mix previous token's embedding into current token (cheap bigram-like info); gate on the first 24 channels
-        # (92d63d4 gpt.py:185, 479)
-        self.smear_gate = Linear(24, 1, bias=False)
-        self.smear_lambda = nn.Parameter(torch.empty(1))
-        # MUDD site 2's prior on block backout_layer's output holds nanochat's backout
-        self.backout_layer = config.n_layer // 2
-        # Value embeddings (ResFormer-style): alternating layers, last layer always included
-        kv_dim = config.n_kv_head * head_dim
-        self.value_embeds = nn.ModuleDict({str(i): Embedding(V, kv_dim) for i in range(config.n_layer) if has_ve(i, config.n_layer)})
-        # XSA (Zhai, arXiv 2603.09078 Eq. 2; modded-nanogpt track_1_short attention.py:224-228) in every layer: each
-        # head's output loses its component along the head's value; y and v pair up head by head
-        # Engram layers, before each block of engram.layers, each with its own table and hash of idx's n-grams
-        self.engram = nn.ModuleDict({str(i): Engram(config.engram, config.n_embd, i) for i in config.engram.layers})
-        # MUDD (model/mudd.py): the coefficient MLPs of site 1 (the last block's input: value and residual streams)
-        # and site 2 (before the final norm: residual stream)
-        self.mudd_sources = site_sources(config.n_layer, [int(i) for i in self.value_embeds])
-        self.mudd_in = MuddSite(len(self.mudd_sources[0]), 2, config.n_embd)
-        self.mudd_out = MuddSite(len(self.mudd_sources[1]), 1, config.n_embd)
-        # rotary embeddings of every position of the context, computed by init_rotary
+        self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(V, C) for i in range(config.n_layer)
+                                           if has_ve(i, config.n_layer)})
+        # the rotary tables of the context (rotary_tables), computed by init_weights and set_stage
         self.register_buffer("cos", None, persistent=False)
         self.register_buffer("sin", None, persistent=False)
 
     @torch.no_grad()
     def init_weights(self):
-        """
-        Initialize the full model in this one function for maximum clarity: the ANVIL matrices as modded-nanogpt
-        track_1_short (the optimizer's recipe; model/gpt.py:254-261 attention banks, :291-295 MLP bank), the rest as
-        nanochat (karpathy/nanochat 92d63d4 gpt.py:205-255; their AdamW recipe), plus the Engram layers (their own init).
+        """Every matrix and table that reads the stream uniform with std C^-0.5 (variance preserving, LeCun et al.
+        "Efficient BackProp" §4.6; bound sqrt(3) std, the std of U(-a, a) being a / sqrt(3)): c_q, c_k, c_v, c_fc,
+        wte, value_embeds. Zero: c_o, c_proj, lm_head (each block the identity at init, modded-nanogpt record #5) and
+        ve_gate (gate 1). resid_lambdas 1, x0_lambdas 0 (LOG 2026-01-11), q_gain = k_gain = 1."""
+        bound = (3 / self.config.n_embd) ** 0.5
+        for block in self.blocks:
+            for w in (block.c_q.weight, block.c_k.weight, block.c_v.weight, block.c_fc.weight):
+                nn.init.uniform_(w, -bound, bound)
+            nn.init.zeros_(block.c_o.weight)
+            nn.init.zeros_(block.c_proj.weight)
+            nn.init.ones_(block.q_gain)
+            nn.init.ones_(block.k_gain)
+            if block.ve_gate is not None:
+                nn.init.zeros_(block.ve_gate.weight)
+        for table in (self.wte, *self.value_embeds.values()):
+            nn.init.uniform_(table.weight, -bound, bound)
+        nn.init.zeros_(self.lm_head.weight)
+        nn.init.ones_(self.resid_lambdas)
+        nn.init.zeros_(self.x0_lambdas)
+        self.cos, self.sin = rotary_tables(self.config, self.wte.weight.device)
 
-        wte (embedding):     normal, std=0.8
-        lm_head:             normal, std=0.001
-        for each block (uniform, std=0.5/sqrt(n_embd)):
-            attn.c_q, c_k, c_v, c_proj (modded's vo_bank draws O as V)
-            mlp.c_fc (gate and up rows)
-            mlp.c_proj:      zeros
-        """
+    def set_stage(self, stage):
+        """Continue at a training stage's context and rotary base (config.Stage; the weights are unchanged): the layers'
+        windows and the rotary tables of the new context, on the parameters' device."""
+        self.config.sequence_len, self.config.rope_base = stage.seq_len, stage.rope_base
+        self.window_sizes = layer_windows(self.config)
+        self.cos, self.sin = rotary_tables(self.config, self.wte.weight.device)
 
-        # Embedding and unembedding (92d63d4 gpt.py:220-221)
-        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.8)
-        torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
-        torch.nn.init.zeros_(self.lm_head.weight[self.config.vocab_size:])  # padded rows: never a logit (softcap_ce)
-
-        # Block matrices: modded's uniform with bound sqrt(3) * std, std = 0.5 / sqrt(n_embd) (model/gpt.py:255-256, 291-292)
-        n_embd = self.config.n_embd
-        s = 3**0.5 * 0.5 * n_embd**-0.5
-        for block in self.transformer.h:
-            torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
-            torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
-            torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
-            torch.nn.init.uniform_(block.attn.c_proj.weight, -s, s)
-            torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
-            torch.nn.init.zeros_(block.mlp.c_proj.weight)  # model/gpt.py:295
-
-        # Per-layer scalars (92d63d4 gpt.py:236-241): resid init stronger at early layers, weaker at deep layers; x0 init
-        # decaying, earlier layers get more input embedding blending
-        n_layer = self.config.n_layer
-        for i in range(n_layer):
-            self.resid_lambdas.data[i] = 1.15 - (0.10 * i / (n_layer - 1))
-            self.x0_lambdas.data[i] = 0.20 - (0.15 * i / (n_layer - 1))
-
-        # Smear scalar and gate (92d63d4 gpt.py:243-246)
-        torch.nn.init.zeros_(self.smear_lambda)
-        torch.nn.init.uniform_(self.smear_gate.weight, 0.0, 0.02)
-
-        # Value embeddings (92d63d4 gpt.py:248-250: uniform like nanochat's c_v, std = 1/sqrt(n_embd))
-        for ve in self.value_embeds.values():
-            torch.nn.init.uniform_(ve.weight, -3**0.5 * n_embd**-0.5, 3**0.5 * n_embd**-0.5)
-
-        # Value-embedding gates zero (R82:1179, torch.zeros): 2 * sigmoid(0) = 1 at step 0; attention-output gates zero
-        for block in self.transformer.h:
-            if block.attn.ve_gate is not None:
-                torch.nn.init.zeros_(block.attn.ve_gate.weight)
-            torch.nn.init.zeros_(block.attn.attn_gate.weight)
-
-        # Engram projections and tables last, so the dense weights are those of the model without them (same seed)
-        for m in self.engram.values():
-            m.init_weights()
-        # MUDD after them (its W1 draws from the generator): site 1 priors 0, site 2 the backout's -0.2 on block
-        # backout_layer's output
-        self.mudd_in.init_weights(torch.zeros_like(self.mudd_in.b))
-        prior = torch.zeros_like(self.mudd_out.b)
-        # nanochat's backout at its init (karpathy/nanochat 92d63d4 gpt.py:188, 243-246, 497: x - 0.2 h_{L/2} before the
-        # final norm)
-        prior[self.mudd_sources[1].index(("h", self.backout_layer))] = -0.2
-        self.mudd_out.init_weights(prior)
-        self.init_rotary()
-
-    def init_rotary(self):
-        """The rotary tables (attention.rotary_tables) on the model's device: non-persistent buffers, so a model built
-        from a checkpoint computes them here."""
-        self.cos, self.sin = rotary_tables(self.config, self.get_device())
-
-    def get_device(self):
-        return self.transformer.wte.weight.device
-
-    def set_loss_targets(self, mtp_depth, bos_token_id, prefix_table):
-        """The training loss's target columns (base_train, before training: modded-nanogpt's multi-token prediction and
-        prefix-token loss): the next mtp_depth tokens (multi-token prediction), then, if prefix_table
-        ((padded_vocab,) of data/tokenizer.py prefix_targets, on the model's device) is given, the next token's prefix
-        token. bos_token_id: the first special token; the tokenizer's special tokens are it and every id after it (BOS,
-        then the FIM sentinels: data/tokenizer.py)."""
-        self.mtp_depth, self.bos_token_id, self.prefix_table = mtp_depth, bos_token_id, prefix_table
-
-    def loss_targets(self, targets):
-        """(B*T, K) target columns of the (B, T) next-token targets: column j < mtp_depth the token j positions after the
-        next one, -1 past the row's end or after a boundary among the j tokens before it: a special token (BOS or a FIM
-        sentinel) or a -1 target (padding, or the loader's masked BOS of the next piece): a target in the next,
-        unrelated document or across a FIM section boundary; a special target itself is kept, as column 0 keeps it.
-        Then the next token's prefix token, -1 where it has none and for padding (target -1 indexes the table's last
-        entry, a special or padding id's -1)."""
-        columns = [targets]
-        special = (targets >= self.bos_token_id) | (targets < 0)
-        crossed = special  # a special token among the j tokens before column j's target
-        for j in range(1, self.mtp_depth):
-            if j > 1:
-                crossed = crossed | F.pad(special[:, j - 1:], (0, j - 1), value=False)
-            ahead = F.pad(targets[:, j:], (0, j), value=-1)
-            columns.append(ahead.masked_fill(crossed, -1))
-        if self.prefix_table is not None:
-            columns.append(self.prefix_table[targets])
-        return torch.stack(columns, dim=-1).view(-1, len(columns))
-
-    def forward(self, idx, targets=None, loss_weights=None, cu_seqlens=None, kv_cache=None, loss_reduction='mean'):
-        """cu_seqlens: the attention segments of the flattened idx (document masking; data/loader.py PretrainingBatches);
-        None, every row one segment (a single document, e.g. a prompt: the same attention as plain causal rows); the
-        Engram convolutions restart at every segment's first token, as attention (their n-gram rows stop at BOS:
-        engram.engram_ids). kv_cache (inference prefill): receives every layer's keys/values and each Engram layer's
-        convolution inputs (kv_cache.engram_taps[j], layer j of engram.layers); the head is skipped (returns None: the
-        decoder continues from the caches).
-        Training (targets, loss_reduction 'mean') returns (loss, column_losses, engram_gate), column_losses (K,) fp32
-        detached: each target column's mean loss over its own valid targets (unweighted); engram_gate
-        (len(config.engram.layers),) fp32 detached: each Engram layer's mean gate alpha (Eq. 4) over the micro-batch's
-        tokens. Evaluation (targets, loss_reduction 'none'): each position's next-token loss (B*T,) fp32."""
-        x, starts = self._embed(idx, kv_cache, cu_seqlens)
-        x, states = self._trunk(idx, x, kv_cache, starts, cu_seqlens)
-        if kv_cache is not None:
-            return None
-        # MUDD site 2 (its prior: the backout's -0.2 on block backout_layer's output)
-        x = mix(self.mudd_out(x), [states[key] for key in self.mudd_sources[1]], x).to(x.dtype)
-        x = norm(x)
-        # the loss straight from the hidden states, the softcap inside the cross-entropy pass (ops/softcap_ce.py; the
-        # fp32 master weight is rounded to bf16 inside, its gradient fp32; the softmax over the first config.vocab_size
-        # columns, the padded ones excluded); targets -1 (the loader's padding) are ignored
-        x = x.reshape(-1, x.size(-1))
-        if loss_reduction == 'mean':
-            return *self._training_loss(x, targets, loss_weights), torch.stack(states["engram_gate"])
-        return softcap_ce_losses(x, self.lm_head.weight, targets.reshape(-1, 1), SOFTCAP, -1, self.config.vocab_size)[:, 0]
-
-    def _embed(self, idx, kv_cache, cu_seqlens):
-        """(x, starts): the normed token embeddings of idx (B, T) with the smear, and the attention segments' first tokens
-        ((B, T) bool; None without cu_seqlens), where the smear stops."""
-        x = self.transformer.wte(idx)
-        x = norm(x)
-        # Smear: mix previous token's embedding into current position (cheap bigram info); none for the first token, and
-        # with attention segments none for each segment's first token (its predecessor is another document's)
-        if kv_cache is not None:
-            kv_cache.prev_embedding = x[:, -1:, :]  # the decoder smears its first token with this
-        # The smear lambda and gate weight meet the bf16 activations in fp32 (their gradients' rel err vs fp64 5e-7 /
-        # 4e-7; as bf16 operands 3e-3 / 5e-3, measured on GB10); the mix rounds once to bf16
-        gate = self.smear_lambda * torch.sigmoid(F.linear(x[:, 1:, :self.smear_gate.in_features].float(), self.smear_gate.weight))
-        starts = None
-        if cu_seqlens is not None:
-            starts = segment_starts(cu_seqlens, *idx.shape)
-            gate = gate.masked_fill(starts[:, 1:, None], 0)
-        x = torch.cat([x[:, :1], (x[:, 1:].float() + gate * x[:, :-1].float()).to(x.dtype)], dim=1)
-        return x, starts
-
-    def _trunk(self, idx, x, kv_cache, starts, cu_seqlens):
-        """The blocks over the embedded x: (x, states). states: MUDD's sources by mudd.site_sources key (x0, the blocks'
-        outputs, the value embeddings) and "engram_gate", the Engram layers' mean gates (0-dim fp32 each)."""
-        x0 = x  # the initial normalized embedding for the x0 residual
-        states = {"x0": x0, "engram_gate": []}
-        last = self.config.n_layer - 1
-        for i, block in enumerate(self.transformer.h):
-            # 0-dim fp32 lambdas x bf16: Inductor already reduces their gradients in fp32 (rel err vs fp64 5e-8 / 9e-8,
-            # as with an explicit fp32 mix, which costs fp32 copies saved for the backward: +880 MiB at d12)
+    def hidden(self, idx, cu_seqlens, kv_cache):
+        """The final normed hidden states (B*T, C) of idx (B, T) token ids; cu_seqlens: the int32 attention segments of
+        the flattened idx (document masking; data/loader.py PretrainingBatches). kv_cache (decoder prefill) receives
+        every layer's keys and values."""
+        x = norm(self.wte(idx).to(torch.bfloat16))
+        x0 = x
+        for i, block in enumerate(self.blocks):
+            # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 (no fp32 copies of the mix saved for
+            # the backward, as an explicit fp32 mix would)
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            if str(i) in self.engram:
-                if kv_cache is not None:
-                    kv_cache.engram_taps[self.config.engram.layers.index(i)] = self.engram[str(i)].taps(x, idx)
-                x, alpha = self.engram[str(i)](x, idx, starts)
-                states["engram_gate"].append(alpha.mean())
-            ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            if ve is not None:
-                states[("ve", i)] = ve
-            v_mix = None
-            if i == last:
-                # MUDD site 1: the value stream joins this block's values, the residual stream replaces its input
-                sources = [states[key] for key in self.mudd_sources[0]]
-                coefs = self.mudd_in(x)
-                S = len(sources)
-                v_mix = mix(coefs[..., :S], sources)
-                x = mix(coefs[..., S:], sources, x).to(x.dtype)
-            key_offset = self.key_offsets[i]
-            x = block(x, ve, (self.cos[i], self.sin[i]), self.window_sizes[i], kv_cache, key_offset,
-                      starts if key_offset else None, cu_seqlens, v_mix)
-            states[("h", i)] = x
-        return x, states
+            ve = self.value_embeds[str(i)](idx).to(torch.bfloat16) if str(i) in self.value_embeds else None
+            x = block(x, ve, (self.cos, self.sin), self.window_sizes[i], kv_cache, cu_seqlens)
+        return norm(x).flatten(0, 1)
 
-    def _training_loss(self, x, targets, loss_weights):
-        """(loss, column_losses) of the normed hidden states x (B*T, C): the target columns of loss_targets weighted by
-        loss_weights ((K,) fp32 on the device, a tensor so that a per-step schedule does not recompile)."""
-        columns = self.loss_targets(targets)
-        loss, _, _, column_losses = softcap_lce(x, self.lm_head.weight, columns, loss_weights, SOFTCAP, -1,
-                                                self.config.vocab_size)
-        return loss, column_losses
+    def forward(self, idx, targets, cu_seqlens):
+        """The training loss: the mean next-token loss over the targets (B, T) that are not the loader's padding,
+        scalar fp32."""
+        return lm_loss(self.hidden(idx, cu_seqlens, None), self.lm_head.weight, targets.flatten())[0]
+
+    def losses(self, idx, targets, cu_seqlens):
+        """Each position's next-token loss (B*T,) fp32, 0 at padding targets (evaluation)."""
+        return lm_losses(self.hidden(idx, cu_seqlens, None), self.lm_head.weight, targets.flatten())
+
+    def prefill(self, idx, kv_cache):
+        """Fill kv_cache with the keys and values of one prompt idx (1, T) read from position 0 (one segment)."""
+        self.hidden(idx, torch.tensor([0, idx.size(1)], dtype=torch.int32, device=idx.device), kv_cache)
+
+
+def scaling_params(model):
+    """The parameters the token budget scales with: the blocks' parameters + lm_head (nanochat's transformer_matrices +
+    lm_head, the cleanest scaling laws: 92d63d4 scripts/base_train.py:263-267, gpt.py:403-406)."""
+    return sum(p.numel() for p in model.blocks.parameters()) + model.lm_head.weight.numel()
+
+
+def non_embedding_flops_per_token(model):
+    """DeepSeek LLM's non-embedding FLOPs per token M (arXiv 2401.02954 §3.1 Eq. 2): 6 per weight of the blocks'
+    matrices (forward 2, backward 4) plus the attention's 12 C l_seq per layer, l_seq the layer's window (at most the
+    context; 92d63d4 gpt.py:319-339)."""
+    matrices = sum(p.numel() for p in model.blocks.parameters() if p.ndim == 2)
+    return 6 * matrices + sum(12 * model.config.n_embd * w for w in model.window_sizes)
+
+
+def flops_per_token(model):
+    """Training FLOPs per token: non_embedding_flops_per_token plus lm_head's 6 V C."""
+    return non_embedding_flops_per_token(model) + 6 * model.lm_head.weight.numel()

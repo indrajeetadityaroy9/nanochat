@@ -1,5 +1,6 @@
 """
-Pack a compiled split (compile.py) into training rows of SEQ_LEN + 1 tokens (loader.py): an index over its tokens,
+Pack a compiled split (compile.py) into training rows of seq_len + 1 tokens (loader.py), seq_len a training stage's
+(config.Stage): an index over its tokens,
 which are not copied, and the tokens of its fill-in-the-middle examples; the loader builds each row on the fly (Ding
 et al. 2024, "Fewer Truncations Improve Language Modeling", arXiv 2404.10830, App. C.1: chunk indices offline,
 sequences online).
@@ -17,7 +18,7 @@ Each document of the split is
   inference.decoder.fim_prompt encodes a prompt). Each piece draws from a generator keyed by its document and its
   index, so the packs are one deterministic function of the compiled data. Val splits stay left to right;
 - packed by Best-Fit-Decreasing with the other pieces of its curated shard: no piece is cut and no token discarded.
-  A piece takes the slots of the longer of its two readings, as a FIM example (--objective spec) and left to right
+  A piece takes the slots of the longer of its two readings, as a FIM example (--objective fim) and left to right
   (ntp), so every row fits both. A piece that ends its document or is a FIM example has the BOS after it as its
   target; a row of only such pieces keeps one slot for the BOS after its last piece. Within a row those pieces come
   first and the pieces cut from their document left to right last, so a cut piece is followed by the row's end, its
@@ -33,39 +34,49 @@ pieces (int64); <split>-T<seq_len>.fim the FIM examples' tokens (uint16; empty u
 loader.fim_packed). Shards are packed and written in file order, so the output does not depend on the number of
 threads.
 
-python -m nanochat.data.pack
+python -m nanochat.data.pack --stage file   # every corpus's val and train splits at the file-level stage's rows
+python -m nanochat.data.pack --stage repo   # the repo-level stage's train splits at its rows
 """
 
+import argparse
 import itertools
 import json
 
 import numpy as np
 
-from nanochat.config import SEQ_LEN
-from nanochat.data.loader import TOKEN_DTYPE, fim_packed, packed_path, split_path
+from nanochat.config import FILE_STAGE, REPO_STAGE
+from nanochat.data.loader import (
+    TOKEN_DTYPE,
+    fim_packed,
+    mixture_corpora,
+    packed_path,
+    split_path,
+)
 from nanochat.data.sources import SOURCES
 from nanochat.data.tokenizer import FIM_TOKENS, bpe, get_tokenizer
 
-# AST-FIM's training mixture, arXiv 2506.00204v1 §5.1 "FIM": 70% FIM and 30% left to right; of FIM, 90% AST-FIM and
-# 10% random character spans; 50% PSM and 50% SPM; §3.3: "an equal mix" of Single-Node and Aligned-Span masking
-FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, SPM_SHARE = 0.7, 0.1, 0.5, 0.5
+# The FIM rate of DeepSeek-Coder (arXiv 2401.14196 §3.1.2: "an FIM rate of 0.5"; its Fig. 3 ablation: a higher rate
+# costs left-to-right completion) and Bavarian et al. (arXiv 2207.14255, 50% FIM "for free"); AST-FIM's middles,
+# arXiv 2506.00204v1 §5.1: of FIM, 90% AST-FIM and 10% random character spans, 50% PSM and 50% SPM; §3.3: "an equal mix"
+# of Single-Node and Aligned-Span masking
+FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5, 0.5
 
 
-def pack_split(source, split, tokenizer):
-    """Pack a compiled split into <split>-T<SEQ_LEN>.pieces, .rows and .fim."""
+def pack_split(source, split, tokenizer, seq_len):
+    """Pack a compiled split into <split>-T<seq_len>.pieces, .rows and .fim."""
     compiled = split_path(source, split, tokenizer)
     with open(compiled + ".json") as f:
         files = json.load(f)["files"]
     bounds = np.cumsum([0] + [file["documents"] for file in files]).tolist()
-    path = packed_path(source, split, tokenizer)
+    path = packed_path(source, split, tokenizer, seq_len)
     fim = (dict(rate=FIM_RATE, random=RANDOM_SHARE, single=SINGLE_NODE_SHARE, spm=SPM_SHARE,
                 sentinels=[tokenizer.special_tokens[name] for name in FIM_TOKENS]) if fim_packed(source, split) else None)
-    print(f"Packing {len(files)} {split} files of '{source}' into rows of {SEQ_LEN + 1} tokens{' with FIM' if fim else ''}: {path}")
+    print(f"Packing {len(files)} {split} files of '{source}' into rows of {seq_len + 1} tokens{' with FIM' if fim else ''}: {path}")
     mergeable = tokenizer.token_bytes[:tokenizer.bos_token_id]
     placed, fim_tokens = 0, 0
     with open(path + ".pieces", "wb") as pieces_file, open(path + ".rows", "wb") as rows_file, open(path + ".fim", "wb") as fim_file:
         for shard in itertools.pairwise(bounds):
-            pieces, counts, tokens = bpe().pack(compiled + ".bin", compiled + ".idx", shard, row_len=SEQ_LEN + 1,
+            pieces, counts, tokens = bpe().pack(compiled + ".bin", compiled + ".idx", shard, row_len=seq_len + 1,
                                                 token_bytes=mergeable, pattern=tokenizer.pattern,
                                                 grammar=SOURCES[source].grammar, fim=fim, fim_base=fim_tokens)
             counts = np.frombuffer(counts, dtype=np.int64)
@@ -78,7 +89,14 @@ def pack_split(source, split, tokenizer):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Pack the compiled splits into training rows of a stage")
+    parser.add_argument("--stage", type=str, required=True, choices=("file", "repo"))
+    args = parser.parse_args()
     tokenizer = get_tokenizer()
-    for source in SOURCES:
-        for split in ("val", "train"):
-            pack_split(source, split, tokenizer)
+    if args.stage == "file":
+        for source in SOURCES:
+            for split in ("val", "train"):
+                pack_split(source, split, tokenizer, FILE_STAGE.seq_len)
+    else:
+        for source in mixture_corpora(REPO_STAGE.mixture):
+            pack_split(source, "train", tokenizer, REPO_STAGE.seq_len)

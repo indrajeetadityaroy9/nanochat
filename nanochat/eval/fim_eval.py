@@ -1,5 +1,5 @@
 """
-Fill-in-the-middle evaluation of a base model trained with FIM sentinels (--objective spec): openai/human-eval-infilling
+Fill-in-the-middle evaluation of a base model trained with FIM sentinels (data/pack.py): openai/human-eval-infilling
 (Bavarian et al., arXiv 2207.14255; the package and its data installed in the image, docker/Dockerfile): single-line,
 multi-line and random-span infilling of the 164 HumanEval solutions. Each problem's prompt (prefix) and suffix form a
 PSM or SPM prompt (inference.decoder.fim_prompt); the model writes the middle greedily until it writes BOS (its

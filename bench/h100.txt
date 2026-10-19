@@ -1,0 +1,45 @@
+H100 80GB HBM3 SXM5 (700 W cap), image nanochat (NGC 26.09), bf16, compiled as base_train, one micro-batch forward +
+backward, random token ids (bench/stage_probe.py DEPTH ASPECT [TOKENS]); 2026-10-19.
+
+d32 x 1024 stage seq_len 8192 rope 100000, 65536 tokens: 353.2 ms / micro-batch (185,536 tok/s), peak 70.4 GiB
+d32 x 1024 stage seq_len 32768 rope 1e+06, 65536 tokens: 517.7 ms / micro-batch (126,593 tok/s), peak 70.4 GiB
+d20 x 1280 stage seq_len 8192 rope 100000, 65536 tokens: 323.6 ms / micro-batch (202,500 tok/s), peak 57.1 GiB
+d20 x 1280 stage seq_len 32768 rope 1e+06, 65536 tokens: 453.9 ms / micro-batch (144,394 tok/s), peak 57.1 GiB
+d32 x 1024 stage seq_len 8192 rope 100000, 32768 tokens: 183.1 ms / micro-batch (178,958 tok/s), peak 39.1 GiB
+d32 x 1024 stage seq_len 32768 rope 1e+06, 32768 tokens: 266.2 ms / micro-batch (123,080 tok/s), peak 39.1 GiB
+
+Peak excludes the optimizer state and base_train's update-RMS copy of the fp32 parameters (d32: Muon momentum 1.6 GB,
+AdamW moments of wte/value embeddings/lm_head 4.8 GB, parameter copy 4.0 GB).
+
+Locked SM clocks, d32 x 1024 at 65536 tokens, kernel time per micro-batch (profile_kernels.py): default boost 346.8 ms,
+1980 MHz 344.0, 1830 346.5, 1680 351.0, 1530 358.3 (software power cap active at 700 W in every case).
+
+Real data (FIM-0.5 8K packs, fim reading), d32 x 1024, one base_train step of 78 micro-batches of 32,768 tokens with
+MuonAdamW and the update-RMS norms (profile_step.py 32 30 78): loader 647 ms (serial, before the step's compute),
+fwd+bwd 16,308 ms, optimizer + norms 49 ms, total 17,004 ms -> 150,310 tok/s (fwd+bwd alone 156,728 tok/s), peak
+48.9 GiB. Kernel time 16,226 ms: GEMM 58.2%, FA4 21.5%, Inductor 11.3%, other 6.3% (qk prologue backward 359 ms,
+fp32 gradient accumulation adds 334 ms, qk prologue forward 251 ms), softcap CE 1.5%, copies 1.2%.
+
+Real data, d24 x 768 (the production shape), steps of 2,752,512 tokens, the M = 65,536 SM90 table (profile_step.py
+24 30 MICRO_STEPS ROWS [stage]):
+  file-level, 42 x 8 rows of 8192: fwd+bwd 8,756 ms -> 314,346 tok/s; peak 46.6 GiB; GPU 98% busy
+  file-level, 84 x 4 rows of 8192: fwd+bwd 9,148 ms -> 300,892 tok/s; peak 28.0 GiB
+  repo-level, 42 x 2 rows of 32768: fwd+bwd 9,161 ms -> 300,453 tok/s; peak 46.6 GiB
+Kernel time (file-level, 8 rows): GEMM 53.3%, FA4 24.7%, Inductor 12.4%, other 5.9%, softcap CE 3.0%, copies 0.7%.
+
+Composite d24 (Block with QK gains, VE gate 2 sigmoid, torch AdamW + Muon), real data, one step of 1,179,648 tokens
+(profile_step.py 24 30 MICRO_STEPS ROWS): q/k prologue as Inductor-fused PyTorch ops (18 x 8 rows): fwd+bwd 3,890 ms,
+298.2K tok/s, Inductor 789 ms; as ops/qk_prologue.cu (18 x 8 rows): 3,792 ms, 305.8K tok/s, Inductor 453 ms + the
+kernel's 228 ms in "other"; 12 x 12 rows (98,304-token micro-batches): 3,756 ms, 308.8K tok/s, peak 69.6 GiB (8 rows:
+48.9 GiB). GPU 99% busy in each: GEMM 54%, FA4 24%, Inductor 12%.
+
+Attention, causal varlen fwd + bwd, H 8 x D 128, 4 rows x 8192 (attn_bench.py SEGMENTS): FA4 (flash_attn.cute SM90)
+vs cuDNN 9.26 (Transformer Engine 2.19 DotProductAttention, thd, fused backend), ms:
+  4 segments/row, window 512:  FA4 fwd 0.287, fwd+bwd 1.109;  cuDNN fwd 0.410, fwd+bwd 1.376
+  4 segments/row, full 8192:   FA4 fwd 0.371, fwd+bwd 1.415;  cuDNN fwd 0.505, fwd+bwd 1.796
+  1 segment/row,  window 512:  FA4 fwd 0.301, fwd+bwd 1.135;  cuDNN fwd 0.429, fwd+bwd 1.418
+  1 segment/row,  full 8192:   FA4 fwd 0.894, fwd+bwd 3.746;  cuDNN fwd 1.185, fwd+bwd 4.375
+
+Transformer Engine FP8 vs ours (bf16 QuACK), the block's GEMM work fwd + bwd at M = 65,536 (te_bench.py C), ms:
+  C 1024: ours 8.69; TE bf16 9.89; TE fp8 DelayedScaling 7.97, Float8CurrentScaling 9.44, Float8BlockScaling 9.68
+  C 1280: ours 13.17; TE bf16 15.21; TE fp8 DelayedScaling 11.30, Float8CurrentScaling 13.02, Float8BlockScaling 14.09

@@ -1,43 +1,50 @@
 [project]
 name = "nanochat"
 version = "0.1.0"
-description = "nanochat fork: pretraining a code-generation LLM on an NVIDIA DGX Spark (GB10)"
+description = "nanochat fork: pretraining a Python and C++ code-generation base model on one NVIDIA H100"
 readme = "README.md"
 # the Python of NVIDIA's NGC PyTorch images (26.09: 3.12), the environment nanochat runs in
 requires-python = ">=3.12"
+# PyTorch and what it needs (Triton, the CUDA libraries, numpy) come from the NGC PyTorch image as NVIDIA built them for
+# Blackwell: docker/Dockerfile prunes torch and numpy from the lock. Every other package is at its latest
+# release in uv.lock (uv lock --upgrade), FlashAttention-4 and QuACK at the latest commit of their repositories.
 dependencies = [
-    "duckdb>=1.5.5",
-    "filelock>=3.19.0",
-    # FlashAttention-4 (CuTe DSL) for Hopper and Blackwell; cu13 matches PyTorch's CUDA 13 builds
-    "flash-attn-4[cu13]==4.0.0b32",
-    # HTTP range reads of Hub files at their resolved storage URLs (nanochat/data/pretrain/sources.py)
-    "fsspec[http]>=2026.9.0",
-    "huggingface-hub>=0.34.0",
-    "jinja2>=3.1.0",
-    # DeMix's mixture predictor (scripts/demix.py)
-    "lightgbm>=4.6",
-    "numpy>=1.26.0",
-    "obstore>=0.11.1",
+    "duckdb",
+    # FlashAttention-4 (CuTe DSL), from github.com/Dao-AILab/flash-attention (tool.uv.sources). It brings cuda-bindings,
+    # TVM FFI and QuACK; not its cu13 extra, whose PyTorch index conflicts with QuACK's while torch comes from the image.
+    "flash-attn-4",
+    # EvalPlus's official evaluation of HumanEval+ / MBPP+ (nanochat/eval/code_eval.py runs its entry point), pinned
+    # (tool.uv.sources); docker/Dockerfile prunes its model-provider clients (openai, anthropic, google-generativeai,
+    # boto3, ollama, transformers), which only its code generation imports
+    "evalplus",
+    "huggingface-hub",
+    # CuTe DSL with its CUDA 13 libraries, matching the image's CUDA 13
+    "nvidia-cutlass-dsl[cu13]",
+    "numpy",
+    "obstore",
     # 25.0.1: ParquetFile pre-buffers (coalesces) reads by default; 25.0.0 returns wrong doubles on Arm CPUs with SVE
     "pyarrow>=25.0.1",
-    "pyyaml>=6.0.2",
-    "rustbpe>=0.1.0",
-    "tiktoken>=0.14.0",
-    # PyPI's Linux wheels are the CUDA 13 build
-    "torch>=2.14.0",
-    "wandb>=0.21.3",
+    # QuACK's CuTe DSL kernels, from github.com/Dao-AILab/quack (tool.uv.sources)
+    "quack-kernels",
+    # the LSH band count's integrals (nanochat/data/dedup.py rows)
+    "scipy",
+    # OpenAI's encoder of the trained vocabulary (nanochat/data/tokenizer.py); the SA-BPE trainer is the crate nanochat/data/bpe
+    "tiktoken",
+    "torch",
 ]
 
 [dependency-groups]
-dev = [
-    "python-dotenv>=1.2.1",
+# what building FlashAttention-4 from source needs beyond the image's setuptools (its build-system requirement):
+# docker/Dockerfile builds the git sources without build isolation, against the image's packages
+build = [
+    "setuptools-scm>=8",
 ]
 
 [tool.uv]
-default-groups = []
-# NVIDIA GPU hosts only: x86_64 (Hopper, Blackwell) and aarch64 (Grace Hopper, Grace Blackwell, DGX Spark)
+# NVIDIA GPU hosts only
 environments = ["sys_platform == 'linux'"]
-required-environments = [
-    "sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "sys_platform == 'linux' and platform_machine == 'aarch64'",
-]
+
+[tool.uv.sources]
+flash-attn-4 = { git = "https://github.com/Dao-AILab/flash-attention", subdirectory = "flash_attn/cute" }
+quack-kernels = { git = "https://github.com/Dao-AILab/quack" }
+evalplus = { git = "https://github.com/evalplus/evalplus", rev = "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e" }

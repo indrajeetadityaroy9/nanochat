@@ -1,0 +1,101 @@
+"""Profile base_train's step on this GPU (the data pipeline's packed rows of the file-level stage, fim reading):
+wall time per phase (loader, forward+backward, optimizer and record norms) over 3 steps after 3 warmup steps, then one
+step under torch.profiler: GPU kernel time by category and the top kernels; GPU busy fraction of the step.
+Usage: python -m bench.profile_step DEPTH ASPECT_RATIO MICRO_STEPS [ROWS per micro-batch [file|repo stage]]"""
+import collections
+import sys
+import time
+
+import numpy as np
+import torch
+
+from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE
+from nanochat.data.loader import PretrainingBatches, mixture_weights, packed_rows
+from nanochat.data.tokenizer import get_tokenizer
+from nanochat.model.gpt import GPT, gpt_config
+from nanochat.train.optim import optimizers
+from nanochat.train.schedule import plan
+
+depth, aspect, micro = (int(a) for a in sys.argv[1:4])
+stage = {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[5] if len(sys.argv) > 5 else "file"]
+SEQ_LEN = stage.seq_len
+rows = int(sys.argv[4]) if len(sys.argv) > 4 else MICRO_BATCH_TOKENS // SEQ_LEN
+device = torch.device("cuda")
+tokenizer = get_tokenizer()
+run = plan(depth, 20, tokenizer.vocab_size)
+with torch.device("meta"):
+    orig = GPT(gpt_config(depth, tokenizer.vocab_size, stage, aspect_ratio=aspect))
+orig.to_empty(device=device)
+orig.init_weights()
+model = torch.compile(orig, dynamic=False, fullgraph=True)
+adamw, muon = optimizers(orig, run.lr)
+mixture = mixture_weights(stage.mixture, tokenizer, SEQ_LEN)
+orders = {c: np.random.RandomState(0).permutation(packed_rows(c, "train", tokenizer, SEQ_LEN)) for c in mixture}
+batches_iter = iter(PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=SEQ_LEN, batch_rows=rows,
+                                       device=device, reading="fim", start=0))
+params = list(orig.parameters())
+
+
+def step(times):
+    torch.cuda.synchronize(); t0 = time.time()
+    batches = [next(batches_iter) for _ in range(micro)]
+    torch.cuda.synchronize(); t1 = time.time()
+    for x, y, cu in batches:
+        model(x, y, cu_seqlens=cu).backward()
+    torch.cuda.synchronize(); t2 = time.time()
+    torch.nn.utils.get_total_norm([p.grad for p in params])
+    adamw.step()
+    muon.step()
+    orig.zero_grad()
+    torch.cuda.synchronize(); t3 = time.time()
+    times.append((t1 - t0, t2 - t1, t3 - t2))
+
+
+warm = []
+for _ in range(3):
+    step(warm)
+times = []
+for _ in range(3):
+    step(times)
+loader, fb, opt = (float(np.median([t[i] for t in times])) for i in range(3))
+tokens = micro * rows * SEQ_LEN
+total = loader + fb + opt
+print(f"d{depth}: {micro} micro-batches ({tokens:,} tokens): loader {loader*1e3:.0f} ms, fwd+bwd {fb*1e3:.0f} ms, "
+      f"optimizer+norms {opt*1e3:.0f} ms, total {total*1e3:.0f} ms -> {tokens/total:,.0f} tok/s "
+      f"(fwd+bwd only {tokens/fb:,.0f} tok/s); peak {torch.cuda.max_memory_allocated()/2**30:.1f} GiB")
+
+with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+    step([])
+events = [e for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA]
+by_name = collections.Counter()
+for e in events:
+    by_name[e.name] += e.device_time_total if hasattr(e, "device_time_total") else e.cuda_time_total
+
+
+def category(n):
+    low = n.lower()
+    if "flash" in low or "fmha" in low or "attn" in low:
+        return "attention (FA4)"
+    if "qkp" in low:
+        return "q/k prologue"
+    if "crossentropy" in low or "softcap" in low:
+        return "softcap CE"
+    if "gemm" in low or "cutlass" in low or "sm90" in low or "sm120" in low or "kernel_cutlass" in low or "xmma" in low or "nvjet" in low:
+        return "GEMM"
+    if "triton" in low:
+        return "triton (inductor fused)"
+    if "memcpy" in low or "memset" in low or "copy" in low:
+        return "copy/memset"
+    return "other"
+
+
+cats = collections.Counter()
+for n, t in by_name.items():
+    cats[category(n)] += t
+busy = sum(cats.values()) / 1e3
+print(f"profiled step: GPU kernel time {busy:.0f} ms of wall {total*1e3:.0f} ms ({100*busy/(total*1e3):.0f}% busy)")
+for c, t in cats.most_common():
+    print(f"  {c:26s} {t/1e3:9.1f} ms  {100*t/1e3/busy:5.1f}%")
+print("top kernels:")
+for n, t in by_name.most_common(25):
+    print(f"  {t/1e3:9.1f} ms  {category(n):22s} {n[:110]}")

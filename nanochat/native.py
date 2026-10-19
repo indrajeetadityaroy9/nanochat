@@ -1,6 +1,6 @@
 """
-Native libraries (CUDA kernels, the C Engram store, the Rust tokenizer crate) built on first use and cached per source
-revision under <base_dir>/cache/native.
+Native libraries (CUDA kernels, the Rust tokenizer crate) built on first use and cached per source revision under
+<base_dir>/cache/native.
 """
 
 import ctypes

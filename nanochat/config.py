@@ -1,23 +1,54 @@
 """
-The run settings every training and evaluation shares (dev/D20_SPEC.md "Run settings").
+The run settings every training and evaluation shares: context, vocabulary, mixture, micro-batch, training stages.
 """
+from typing import NamedTuple
 
+from nanochat.data.schema import REPOSITORY_FILE
+from nanochat.data.sources import SOURCES
+
+# The context: Qwen2.5-Coder's file-level pretraining sequence length, 8,192 tokens (arXiv 2409.12186 §3.2.1)
 SEQ_LEN = 8192
-# The vocabulary, special tokens included: DeepSeek-Coder's 32K BPE vocabulary (arXiv 2401.14196 §3.2) as 2^15 ids
+# The vocabulary, special tokens included: nanochat's 2^15 ids (karpathy/nanochat 92d63d4 scripts/tok_train.py:19
+# --vocab-size default 32768; DeepSeek-Coder's BPE vocabulary has 32,000, arXiv 2401.14196 §3.2)
 VOCAB_SIZE = 2**15
-# {group: (share, corpora)}: Qwen2.5-Coder's code:text:math = 7:2:1 (arXiv 2409.12186 §3.1.2, Table 3), code = the
-# Python and C++ corpora, each corpus at its group's natural row share (data.loader.mixture_weights)
+# {group: (share, corpora)}: DeepSeek-Coder's 87% code, 10% + 3% natural language (arXiv 2401.14196 §2: source code,
+# English code-related text, Chinese general text), the 3% here math web text as StarCoder2's OpenWebMath (14.42B of the
+# 7B model's 658.58B unique tokens, arXiv 2402.19173 Table 4); code = the Python and C++ corpora, each corpus at its
+# group's natural row share (data.loader.mixture_weights). On coding benchmarks more code scores higher (Qwen2.5-Coder
+# ablation, arXiv 2409.12186 Table 3: code:text:math 100:0:0 49.8 / 40.3 Common / BigCodeBench vs 70:20:10 48.3 / 38.3)
 MIXTURE = {
-    "code": (0.7, ["stack_edu_python", "ultradata_code_l2_python", "ultradata_stack_v3_l2_python", "kaggle_notebooks", "codeforces_cots",
-                   "stack_edu_cpp", "ultradata_code_l2_cpp", "ultradata_stack_v3_l2_cpp"]),
-    "text": (0.2, ["climbmix"]),
-    "math": (0.1, ["opc_fineweb_math", "ultradata_math_l2"]),
+    "code": (0.87, ["stack_edu_python", "ultradata_code_l2_python", "ultradata_stack_v3_l2_python", "kaggle_notebooks",
+                    "codeforces_cots", "stack_edu_cpp", "ultradata_code_l2_cpp", "ultradata_stack_v3_l2_cpp"]),
+    "text": (0.10, ["climbmix"]),
+    "math": (0.03, ["opc_fineweb_math", "ultradata_math_l2"]),
 }
-# Micro-batches of CALIBRATION_M tokens: the M at which the pinned QuACK GEMM table (ops/quack_gemm.py) was measured
-CALIBRATION_M = 65_536
-MICRO_BATCH_ROWS = CALIBRATION_M // SEQ_LEN
+# Micro-batches of 98,304 tokens, 12 rows of the file-level stage's 8,192 and 3 of the repo-level stage's 32,768: the
+# most whole rows of both contexts whose d24 training step fits the H100's 80 GB, measured on the packed train rows
+# (profile_step.py: peak 69.6 GiB with the optimizer state, 48.9 GiB at 65,536 tokens, so +20.7 GiB per 32,768 and over
+# 80 GB at 131,072), 1% faster per token than 65,536 (bench/h100.txt)
+MICRO_BATCH_TOKENS = 98_304
+MICRO_BATCH_ROWS = MICRO_BATCH_TOKENS // SEQ_LEN
 
 
-def run_tag(depth, ratio, objective, seed):
+class Stage(NamedTuple):
+    """A training stage: its context (rows of seq_len tokens, MICRO_BATCH_TOKENS // seq_len per micro-batch), RoPE base
+    and mixture {group: (share, corpora)}."""
+    seq_len: int
+    rope_base: int
+    mixture: dict
+
+
+# Qwen2.5-Coder's two pretraining stages (arXiv 2409.12186 §3.2): file-level at 8,192 tokens, then repo-level, the
+# context extended to 32,768 tokens and "RoPE's base frequency is adjusted from 10,000 to 1,000,000" (§3.2.2), on
+# long-context code: here the code corpora whose documents are repository samples (data/sources.py REPOSITORY_FILE), at
+# their natural row shares.
+FILE_STAGE = Stage(SEQ_LEN, 10_000, MIXTURE)
+REPO_STAGE = Stage(32_768, 1_000_000, {"code": (1.0, [c for c in MIXTURE["code"][1]
+                                                      if SOURCES[c].schema is REPOSITORY_FILE])})
+# The repo-level stage's share of a run's tokens: Qwen2.5-Coder's ~300B of its 5.2T file-level + 300B tokens (§3.2.1-2)
+REPO_SHARE = 300e9 / (5.2e12 + 300e9)
+
+
+def run_tag(depth, ratio, seed):
     """A run's tag (its checkpoint directory and metrics file)."""
-    return f"d{depth}-r{ratio:g}-{objective}-s{seed}"
+    return f"d{depth}-r{ratio:g}-s{seed}"

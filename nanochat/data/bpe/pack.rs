@@ -331,7 +331,7 @@ fn best_fit_decreasing(lengths: &[usize], targeted: &[bool], row_len: usize) -> 
 /// One curated shard's documents first..last packed: the pack index entry of every piece in row order (token range
 /// [start, end) of the split, then the range of its FIM example in the split's FIM tokens, empty for a piece read left
 /// to right; data/loader.py PIECE_COLUMNS), the pieces per row, and the FIM examples' tokens in row order (from
-/// fim_base on in the split's). A piece's BOS is followed by its tokens: a FIM example's under --objective spec, else
+/// fim_base on in the split's). A piece's BOS is followed by its tokens: a FIM example's under --objective fim, else
 /// (ntp, and every piece read left to right) its range; it takes the longer of the two in its row. A piece has the
 /// BOS after it as its target when it ends its document or is a FIM example (the end of its middle); such pieces come
 /// first in their row and the pieces cut from their document left to right last, so the BOS after a piece is its

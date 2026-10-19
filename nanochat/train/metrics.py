@@ -3,19 +3,14 @@ The metrics record of a training run: JSON lines in <base_dir>/metrics/<tag>.jso
 seconds, added by append) and the fields of its kind.
 
 kind "run" (one per process start): step (the step the process starts from), args (the command line), plan
-    (train/schedule.py RunPlan), optimizer (every optimizer group's hyperparameters, train/optim.py param_groups; lr and
-    initial_lr the peak), mixture ({corpus: row weight}).
-kind "train" (every optimizer step): step (0-based), tokens (row positions after it, padding included), lrm (the lr
-    multiplier), loss (the step's training loss: sum over the columns of weight x the column's summed loss over the
-    step's valid targets / the step's valid next-token targets, ops/softcap_ce.py), smooth_loss (loss's debiased EMA,
-    beta 0.9, nanochat 92d63d4 scripts/base_train.py:548-550), loss_columns ({column: its mean loss over its own valid
-    targets of the step}), grad_norm (L2 norm of the gradient of every parameter, the Engram tables included,
-    torch.nn.utils.get_total_norm), engram_gate ({Engram layer: the mean of its gate alpha (Eq. 4) over the step's
-    tokens}), weight_rms and update_rms ({optimizer group: RMS over the group's elements of its weights after the step,
-    of the step's change of them}), step_ms and tok_per_s (the step's compute and its loader reads), tflops (achieved
-    TFLOP/s: tok_per_s x the model's training FLOPs per token, train/schedule.py flops_per_token), peak_gib (the caching
-    allocator's peak allocated memory in the step). Sums are fp64 (torchmetrics SumMetric). lrm is the lr schedule's
-    shape; the groups with a warmup (train/optim.py param_groups) ramp on top of it.
+    (train/schedule.py RunPlan: batch, steps, the repo-level stage's first step, tokens per parameter, peak lr), stage
+    (the stage of that step, config.Stage: seq_len, rope_base, mixture as {corpus: row weight}).
+kind "stage" (at the switch to the repo-level stage): step, stage (as in "run").
+kind "train" (every optimizer step): step (0-based), tokens (row positions after it, padding included), loss (the step's
+    training loss: the mean next-token loss over the step's valid targets, summed over its micro-batches in fp64), lrm
+    (the lr multiplier of every group, train/schedule.py lr_multiplier), grad_norm (L2 norm of the gradient of every
+    parameter, torch.nn.utils.get_total_norm), tok_per_s (row positions per second, padding included, as tokens, over
+    the step's time between two CUDA synchronizations: its loader reads, forward/backward passes and optimizer step).
 """
 
 import json

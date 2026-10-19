@@ -1,7 +1,8 @@
 """
 Micro-batches of packed token rows (compile.py, pack.py) of one corpus or a mixture of corpora, in given row orders.
 
-A packed split is an index of rows of config.SEQ_LEN + 1 tokens (inputs row[:-1], targets row[1:]) over a corpus's
+A packed split is an index of rows of seq_len + 1 tokens (inputs row[:-1], targets row[1:]; seq_len a training stage's,
+config.Stage) over a corpus's
 compiled tokens, both memory-mapped in place: each row is its pieces, every piece after a BOS, then padding to the
 row's end, which enters as BOS and is never a target (-1, ignored by the loss and by bpb). A piece is a document or a
 document's cut part, read left to right or, in the train packs of the repository corpora, possibly a fill-in-the-middle
@@ -12,6 +13,7 @@ is config.MIXTURE, {group: (share, corpora)}: each group's share is split among 
 """
 
 import itertools
+import json
 import math
 import os
 from typing import Literal, NamedTuple
@@ -19,7 +21,6 @@ from typing import Literal, NamedTuple
 import numpy as np
 import torch
 
-from nanochat.config import SEQ_LEN
 from nanochat.data.sources import SOURCES
 from nanochat.paths import data_dir
 
@@ -37,9 +38,9 @@ def split_path(dataset, split, tokenizer):
     return os.path.join(data_dir(), "compiled", f"{dataset}-{tokenizer.data_key}", split)
 
 
-def packed_path(dataset, split, tokenizer):
+def packed_path(dataset, split, tokenizer, seq_len):
     """The stem of a packed split's files (pack.py: .pieces, .rows, .fim), the compiled split's at the row length."""
-    return f"{split_path(dataset, split, tokenizer)}-T{SEQ_LEN}"
+    return f"{split_path(dataset, split, tokenizer)}-T{seq_len}"
 
 
 def fim_packed(dataset, split):
@@ -59,9 +60,9 @@ class PackedSplit(NamedTuple):
     fim: np.memmap | None
 
 
-def packed(dataset, split, tokenizer):
-    """The packed split of a corpus (pack.py), memory-mapped in place."""
-    path, packing = split_path(dataset, split, tokenizer), packed_path(dataset, split, tokenizer)
+def packed(dataset, split, tokenizer, seq_len):
+    """The packed split of a corpus at rows of seq_len + 1 tokens (pack.py), memory-mapped in place."""
+    path, packing = split_path(dataset, split, tokenizer), packed_path(dataset, split, tokenizer, seq_len)
     return PackedSplit(np.memmap(path + ".bin", dtype=TOKEN_DTYPE, mode="r"),
                        np.memmap(path + ".idx", dtype=np.int64, mode="r"),
                        np.memmap(packing + ".pieces", dtype=np.int64, mode="r").reshape(-1, PIECE_COLUMNS),
@@ -69,9 +70,18 @@ def packed(dataset, split, tokenizer):
                        np.memmap(packing + ".fim", dtype=TOKEN_DTYPE, mode="r") if fim_packed(dataset, split) else None)
 
 
-def packed_rows(dataset, split, tokenizer):
+def packed_rows(dataset, split, tokenizer, seq_len):
     """The number of rows of a packed split."""
-    return len(packed(dataset, split, tokenizer).rows) - 1
+    return len(packed(dataset, split, tokenizer, seq_len).rows) - 1
+
+
+def row_shards(dataset, split, tokenizer, seq_len):
+    """Each row's curated shard of a packed split: the packer packs one shard at a time (pack.py), so a row's pieces
+    share the shard of its first piece's first token (compiled <split>.json: each file's documents, in order)."""
+    _, offsets, pieces, rows, _ = packed(dataset, split, tokenizer, seq_len)
+    with open(split_path(dataset, split, tokenizer) + ".json") as f:
+        documents = np.cumsum([0] + [file["documents"] for file in json.load(f)["files"]])
+    return np.searchsorted(offsets[documents[:-1]], pieces[rows[:-1], 0], side="right") - 1
 
 
 def mixture_corpora(groups):
@@ -79,13 +89,13 @@ def mixture_corpora(groups):
     return [corpus for _, corpora in groups.values() for corpus in corpora]
 
 
-def mixture_weights(groups, tokenizer):
+def mixture_weights(groups, tokenizer, seq_len):
     """{corpus: weight} of a mixture {group: (share, corpora)}: each group's share split among its corpora in proportion
-    to their packed train rows, so every row of a group is equally likely (its natural composition: no weight within a
-    group is chosen)."""
+    to their packed train rows (at rows of seq_len + 1 tokens), so every row of a group is equally likely (its natural
+    composition: no weight within a group is chosen)."""
     weights = {}
     for share, corpora in groups.values():
-        rows = {corpus: packed_rows(corpus, "train", tokenizer) for corpus in corpora}
+        rows = {corpus: packed_rows(corpus, "train", tokenizer, seq_len) for corpus in corpora}
         weights.update({corpus: share * count / sum(rows.values()) for corpus, count in rows.items()})
     return weights
 
@@ -109,19 +119,19 @@ class PretrainingBatches:
     piece left to right (assemble).
     - inputs (int32), targets (int64): on the device
     - cu_seqlens: the attention segments of the micro-batch (document masking), int32 offsets into its flattened
-      batch_rows x SEQ_LEN inputs (FA4's varlen layout) on the device: each piece (its BOS and its tokens: a document,
+      batch_rows x seq_len inputs (FA4's varlen layout) on the device: each piece (its BOS and its tokens: a document,
       a document's cut part, or a fill-in-the-middle example) and each row's padding is a segment. Their number is
       fixed per loader, so a compiled model sees one shape: num_segments, the unused entries repeating the last offset
       (empty segments)."""
 
     PAD = -1  # an assembled row's padding: the loss's ignore index as a target, BOS as an input
 
-    def __init__(self, mixture, split, tokenizer, orders, *, batch_rows, device,
+    def __init__(self, mixture, split, tokenizer, orders, *, seq_len, batch_rows, device,
                  reading: Literal["fim", "left_to_right"], start):
         self.names, self.weights = list(mixture), np.array(list(mixture.values()))
-        self.packed = {name: packed(name, split, tokenizer) for name in self.names}
+        self.packed = {name: packed(name, split, tokenizer, seq_len) for name in self.names}
         self.orders = [orders[name] for name in self.names]
-        self.batch_rows, self.device = batch_rows, device
+        self.seq_len, self.batch_rows, self.device = seq_len, batch_rows, device
         self.bos = tokenizer.bos_token_id
         self.fim = reading == "fim"
         self.start = start
@@ -158,7 +168,7 @@ class PretrainingBatches:
         orders = [iter(order[skip:]) for order, skip in zip(self.orders, consumed)]
         for position in itertools.count(self.start, self.batch_rows):
             corpora = mixture_rows(self.weights, start=position, count=self.batch_rows)
-            batch = np.full((self.batch_rows, SEQ_LEN + 1), self.PAD, dtype=np.int32)
+            batch = np.full((self.batch_rows, self.seq_len + 1), self.PAD, dtype=np.int32)
             bounds = []
             for r, c in enumerate(corpora):
                 row = next(orders[c], None)
@@ -166,9 +176,9 @@ class PretrainingBatches:
                     return
                 starts = self.assemble(batch[r], self.names[c], row)
                 # the pieces, then the padding if the inputs hold any
-                bounds += [r * SEQ_LEN + start for start in starts if start < SEQ_LEN]
+                bounds += [r * self.seq_len + start for start in starts if start < self.seq_len]
             batch = torch.from_numpy(batch).pin_memory().to(self.device, non_blocking=True)  # page-locked, so the copy is asynchronous
-            cu = np.full(self.num_segments + 1, self.batch_rows * SEQ_LEN, dtype=np.int32)
+            cu = np.full(self.num_segments + 1, self.batch_rows * self.seq_len, dtype=np.int32)
             cu[:len(bounds)] = bounds
             cu_seqlens = torch.from_numpy(cu).pin_memory().to(self.device, non_blocking=True)
             yield batch[:, :-1].masked_fill(batch[:, :-1] == self.PAD, self.bos), batch[:, 1:].to(torch.int64), cu_seqlens

@@ -1,9 +1,3 @@
-**/__pycache__
-**/*.pyc
-.git
-.venv
-.env
-wandb
-docker/data
-docker/runs
-dev
+*
+!pyproject.toml
+!uv.lock

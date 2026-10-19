@@ -1,7 +1,7 @@
 """
 BPE tokenizer in the style of GPT-4: merges trained by source-attributed BPE (SA-BPE, F·ln R; Chizhov et al. 2026, arXiv
 2604.14053) within the chunks of SPLIT_PATTERN in the Rust crate nanochat/data/bpe, encoding by OpenAI's tiktoken, whose
-regex engine (fancy-regex) the trainer shares; and the prefix-token targets of the vocabulary (prefix_targets).
+regex engine (fancy-regex) the trainer shares.
 
 Trained on every curated source's train split in about equal byte shares (main), writing
 <base_dir>/tokenizer/tokenizer.tiktoken and tokenizer.pattern. Equal byte shares minimize the expected compute per byte
@@ -123,21 +123,6 @@ class Tokenizer:
 def get_tokenizer():
     """The trained tokenizer of <base_dir>/tokenizer, loaded once per process."""
     return Tokenizer.from_directory(os.path.join(base_dir(), "tokenizer"))
-
-
-def prefix_targets(tokenizer, *, rows):
-    """Prefix-token targets (modded-nanogpt's prefix-token loss; ops/softcap_ce.py's weighted target columns): (rows,)
-    int64, rows >= the vocabulary (the lm head's padded size); for each mergeable token, the id of the token whose
-    bytes are the longest proper prefix of its bytes. -1 (ignored) for single bytes, for tokens whose bytes are all
-    whitespace (bytes.isspace: on code an indentation or line structure, whose prefix is a one-shorter indentation), for
-    the special tokens and for the padding ids; the last entry is one of these, so an ignored target (-1) indexes it and
-    stays -1."""
-    mergeable = tokenizer.token_bytes[:tokenizer.bos_token_id]
-    ids = {b: i for i, b in enumerate(mergeable)}
-    table = torch.full((rows,), -1, dtype=torch.long)
-    table[:len(mergeable)] = torch.tensor([-1 if b.isspace() else next((ids[b[:n]] for n in range(len(b) - 1, 0, -1) if b[:n] in ids), -1)
-                                           for b in mergeable])
-    return table
 
 
 # ---- training sample

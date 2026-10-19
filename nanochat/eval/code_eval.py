@@ -4,10 +4,10 @@ Code generation and reference-solution loss of a base model, scored by the bench
 Benchmarks:
 - humaneval_plus (164) and mbpp_plus (378): EvalPlus (Liu et al., arXiv 2305.01210; the evalplus package pinned in
   pyproject.toml, data releases HumanEvalPlus v0.1.10 / MbppPlus v0.2.0). Prompt, stop sequences and post-processing
-  as EvalPlus's codegen for a base (direct-completion) model: prompt.strip() + "\\n" (evalplus/codegen.py:73), stops
+  as EvalPlus's codegen for a base (direct-completion) model: prompt.strip() + "\\n" (evalplus/codegen.py:71), stops
   EOS + extra_eos_for_direct_completion(dataset) (evalplus/provider/vllm.py:41-42), the completion cut at its first
   stop and its tabs replaced by four spaces (evalplus/provider/hf.py:104-105, vllm.py:76), solution sanitize(prompt +
-  completion, entry point) (codegen.py:84-87); scored by `python -m evalplus.evaluate` (base and plus pass@1, its
+  completion, entry point) (codegen.py:79-82); scored by `python -m evalplus.evaluate` (base and plus pass@1, its
   estimate_pass_at_k).
 - humaneval_cpp (161) and mbpp_cpp (397): MultiPL-E (Cassano et al., arXiv 2208.08227), each row's prompt, tests and
   stop_tokens; a completion ends at its first stop token (multipl_e/completions.py:216 stop_at_stop_token); judged by
@@ -43,8 +43,8 @@ from evalplus.data import get_human_eval_plus, get_mbpp_plus
 from evalplus.provider.utility import EOS, extra_eos_for_direct_completion
 from evalplus.sanitize import sanitize
 from huggingface_hub import hf_hub_download
-from torchmetrics.aggregation import SumMetric
 
+from nanochat.data.loader import PretrainingBatches
 from nanochat.inference.decoder import NativeDecoder
 
 MULTIPL_E = ("nuprl/MultiPL-E", "28441b6024e71d4a1c1c0f6bf171c935cd5a43f2")  # HF dataset revision
@@ -87,10 +87,11 @@ GENERATION_BUDGETS = {"humaneval_plus": 768, "mbpp_plus": 768, "humaneval_cpp": 
 
 
 def solution_batches(tokenizer, examples, batch_rows, seq_len, device):
-    """(micro-batches (inputs, targets), solution bytes) of (prompt, solution) examples, each
-    batch_rows x seq_len (one shape: one compiled graph): BOS then prompt + solution tokenized together (as in training
-    text), targets -1 but from the first token that begins at or after the prompt's end; solution bytes: the scored
-    tokens' bytes, the denominator of bits per byte."""
+    """(micro-batches (inputs, targets, cu_seqlens), solution bytes) of (prompt, solution) examples, each
+    batch_rows x seq_len (one shape: one compiled graph), one example per row and one attention segment per row: BOS
+    then prompt + solution tokenized together (as in training text), targets the loader's padding but from the first
+    token that begins at or after the prompt's end; solution bytes: the scored tokens' bytes, the denominator of bits per
+    byte."""
     bos = tokenizer.bos_token_id
     seqs, nbytes = [], 0
     for prompt, solution in examples:
@@ -99,30 +100,28 @@ def solution_batches(tokenizer, examples, batch_rows, seq_len, device):
         first = int(np.searchsorted(ends, len(prompt.encode()), side="left")) + 1  # the first token starting at/after the prompt end
         seqs.append((ids, first))
         nbytes += int(ends[-1] - ends[first - 1])
+    cu_seqlens = torch.arange(0, batch_rows * seq_len + 1, seq_len, dtype=torch.int32, device=device)
     batches = []
     for g in range(0, len(seqs), batch_rows):
         x = torch.full((batch_rows, seq_len), bos, dtype=torch.int32)
-        y = torch.full((batch_rows, seq_len), -1, dtype=torch.int64)
+        y = torch.full((batch_rows, seq_len), PretrainingBatches.PAD, dtype=torch.int64)
         for r, (ids, first) in enumerate(seqs[g:g + batch_rows]):
             x[r, :len(ids) - 1] = torch.tensor(ids[:-1])
             y[r, first - 1:len(ids) - 1] = torch.tensor(ids[first:])
-        batches.append((x.to(device), y.to(device)))
+        batches.append((x.to(device), y.to(device), cu_seqlens))
     return batches, nbytes
 
 
 @torch.no_grad()
-def solution_bpb(model, tokenizer, device, batch_rows, seq_len, benchmarks):
-    """{benchmark: bits per byte of all its reference solutions pooled} of SOLUTION_BENCHMARKS: summed nats (fp64,
-    torchmetrics SumMetric; NaN propagates) / (ln 2 x summed bytes). Each row holds one document, so plain causal
-    attention (no segments) is the document-masked attention of training."""
+def solution_bpb(losses, tokenizer, device, batch_rows, seq_len, benchmarks):
+    """{benchmark: bits per byte of all its reference solutions pooled} of SOLUTION_BENCHMARKS under losses (GPT.losses):
+    summed nats (fp64 on the device; NaN propagates) / (ln 2 x summed bytes)."""
     results = {}
     for name in SOLUTION_BENCHMARKS:
         batches, nbytes = solution_batches(tokenizer, [(t.prompt, t.solution) for t in benchmarks[name]], batch_rows,
                                            seq_len, device)
-        nats = SumMetric(nan_strategy="disable").set_dtype(torch.float64).to(device)
-        for x, y in batches:
-            nats.update(model(x, y, loss_reduction="none"))
-        results[name] = nats.compute().item() / (math.log(2) * nbytes)
+        nats = sum(losses(x, y, cu_seqlens).double().sum() for x, y, cu_seqlens in batches)
+        results[name] = nats.item() / (math.log(2) * nbytes)
     return results
 
 

@@ -10,10 +10,12 @@ files are metadata: its raw file adds each blob's text, fetched from Software He
 (obstore) and decoded with its src_encoding (The Stack v2 dataset card, download_contents); a blob the bucket does not
 hold or that does not decode has no text.
 
-The extent of each source follows from the mixture (config.MIXTURE): the first group, code, is taken whole, and its
-tokens over its share are the horizon, the longest run its rows feed; every later group takes its sources in order, and
-each source's Hub files in order, until it holds its share of the horizon (ClimbMix, the text group, is a shuffled
-crawl). A file's tokens are its content column's uncompressed Parquet bytes over the o200k_base (tiktoken) bytes per
+The extent of each source follows from EXTENT, the groups of config.MIXTURE at Qwen2.5-Coder's code:text:math = 7:2:1
+(arXiv 2409.12186 §3.1.2): the first group, code, is taken whole, and its tokens over its share are the horizon; every
+later group takes its sources in order, and each source's Hub files in order, until it holds its share of the horizon
+(ClimbMix, the text group, is a shuffled crawl). A mixture whose code share is at least 0.7 (config.MIXTURE: 0.87)
+reads at most that much text and math per code token.
+A file's tokens are its content column's uncompressed Parquet bytes over the o200k_base (tiktoken) bytes per
 token of its source's first normalized row group, before deduplication (the pipeline's tokenizer is trained on the
 curated store). A file already normalized is kept (stage writes each file whole), so a source is fetched and normalized
 once.
@@ -245,6 +247,8 @@ def residue(group):
 # Half the machine's memory: the lower end of DuckDB's 50-60% of system memory, as some operations bypass the buffer
 # manager's limit (duckdb.org/docs/lts/guides/troubleshooting/oom_errors) and other jobs share the unified memory.
 MEMORY = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2
+# The groups' shares of the store (module docstring)
+EXTENT = {"code": 0.7, "text": 0.2, "math": 0.1}
 
 
 def shuffle_dir(source):
@@ -349,9 +353,10 @@ def curate(normalized):
 
 def prepare():
     """Fetch, normalize and curate every source: config.MIXTURE's first group whole (its files normalized in parallel),
-    every later group in Hub order until it holds its share of the horizon (module docstring)."""
+    every later group in Hub order until it holds its EXTENT share of the horizon (module docstring)."""
     normalized, horizon = {}, None
-    for share, sources in MIXTURE.values():
+    for group, (_, sources) in MIXTURE.items():
+        share = EXTENT[group]
         held = 0
         for source in sources:
             spec = SOURCES[source]
