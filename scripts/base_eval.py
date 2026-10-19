@@ -36,8 +36,7 @@ def main():
     # bpb (a segment per row)
     losses = torch.compile(model.losses, dynamic=False, fullgraph=True)
     results = {"run": tag, "step": step,
-               "bpb": val_bpb(losses, tokenizer, mixture_corpora(MIXTURE), batch_rows=FILE_STAGE.batch_rows,
-                              device=device),
+               "bpb": val_bpb(losses, tokenizer, mixture_corpora(MIXTURE), stage=FILE_STAGE, device=device),
                "solution_bpb": solution_bpb(losses, tokenizer, device, FILE_STAGE.batch_rows, FILE_STAGE.seq_len,
                                             benchmarks),
                "codegen": generation(model, tokenizer, benchmarks),

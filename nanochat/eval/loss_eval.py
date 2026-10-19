@@ -9,7 +9,6 @@ from itertools import islice
 import numpy as np
 import torch
 
-from nanochat.config import SEQ_LEN
 from nanochat.data.loader import PretrainingBatches, packed_rows
 
 # The val sample per corpus: nanochat's evaluation budget, --eval-tokens 80 x 2^19 tokens (karpathy/nanochat 92d63d4
@@ -34,25 +33,26 @@ def evaluate_bpb(losses, batches, steps, token_bytes, num_segments):
     return (nats / (math.log(2) * nbytes)).item()
 
 
-def sample_rows(num_rows, *, batch_rows):
-    """Row ids of a split's systematic sample: n = ceil(VAL_TOKENS / (batch_rows x SEQ_LEN)) x batch_rows rows (all
+def sample_rows(num_rows, *, batch_rows, seq_len):
+    """Row ids of a split's systematic sample: n = ceil(VAL_TOKENS / (batch_rows x seq_len)) x batch_rows rows (all
     full micro-batches of a smaller split) (j x num_rows) // n for j < n, spread evenly over the whole split. The packer
     orders each shard's rows longest pieces first (Best-Fit-Decreasing), so a prefix of the split over-represents long
     documents; an even stride samples every position of every shard."""
-    n = min(num_rows // batch_rows, -(-VAL_TOKENS // (batch_rows * SEQ_LEN))) * batch_rows
+    n = min(num_rows // batch_rows, -(-VAL_TOKENS // (batch_rows * seq_len))) * batch_rows
     return np.arange(n, dtype=np.int64) * num_rows // n
 
 
-def val_bpb(losses, tokenizer, datasets, *, batch_rows, device):
-    """{dataset: bits per byte} of each corpus's packed val split (rows of the file-level stage's SEQ_LEN), read left to
-    right over a fixed systematic sample of its rows (sample_rows), by losses (GPT.losses, the training forward's
-    per-position losses). Every corpus's batches share one shape (cu_seqlens padded to the corpora's most segments): one
-    compiled graph scores all."""
+def val_bpb(losses, tokenizer, datasets, *, stage, device):
+    """{dataset: bits per byte} of each corpus's packed val split in rows of a training stage's context (config.Stage:
+    seq_len, batch_rows per batch), read left to right over a fixed systematic sample of its rows (sample_rows), by
+    losses (GPT.losses, the training forward's per-position losses). Every corpus's batches share one shape (cu_seqlens
+    padded to the corpora's most segments): one compiled graph scores all."""
     token_bytes = tokenizer.get_token_bytes(device=device)
-    samples = {name: sample_rows(packed_rows(name, "val", tokenizer, SEQ_LEN), batch_rows=batch_rows) for name in datasets}
-    loaders = {name: PretrainingBatches({name: 1.0}, "val", tokenizer, {name: rows}, seq_len=SEQ_LEN, batch_rows=batch_rows,
-                                        device=device, reading="left_to_right", start=0)
+    samples = {name: sample_rows(packed_rows(name, "val", tokenizer, stage.seq_len), batch_rows=stage.batch_rows,
+                                 seq_len=stage.seq_len) for name in datasets}
+    loaders = {name: PretrainingBatches({name: 1.0}, "val", tokenizer, {name: rows}, seq_len=stage.seq_len,
+                                        batch_rows=stage.batch_rows, device=device, reading="left_to_right", start=0)
                for name, rows in samples.items()}
     num_segments = max(loader.num_segments for loader in loaders.values())
-    return {name: evaluate_bpb(losses, loader, len(samples[name]) // batch_rows, token_bytes, num_segments)
+    return {name: evaluate_bpb(losses, loader, len(samples[name]) // stage.batch_rows, token_bytes, num_segments)
             for name, loader in loaders.items()}

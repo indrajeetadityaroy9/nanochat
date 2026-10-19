@@ -40,8 +40,11 @@ from nanochat.train.schedule import lr_multiplier, plan
 @dataclass(frozen=True, kw_only=True)
 class Variant:
     """The ablation study's departures from the canonical mechanism (experiments/), canonical by default: the model's
-    switches (model/gpt.py GPTConfig), the lr schedule shape (schedule.lr_multiplier), the weight decay (optim.py
-    WEIGHT_DECAY, or the EMA-timescale rule tau_weight_decay) and a factor on the plan's peak lr."""
+    switches (model/gpt.py GPTConfig), the lr schedule shape and the repo-level stage's schedule
+    (schedule.lr_multiplier), the weight decay (optim.py WEIGHT_DECAY, or the EMA-timescale rule tau_weight_decay), a
+    factor on the plan's peak lr and on its batch (schedule.plan), and the RoPE base: "switch" the stages' own
+    (config.Stage), "single" the repo-level stage's for both (Men et al., arXiv 2405.14591: the base's lower bound at
+    the final context)."""
     value_embeds: bool = True
     x0: bool = True
     resid: bool = True
@@ -50,6 +53,9 @@ class Variant:
     schedule: Literal["wsd", "d2z"] = "wsd"
     weight_decay: Literal["fixed", "tau"] = "fixed"
     lr_scale: float = 1.0
+    batch_scale: float = 1.0
+    repo_schedule: Literal["continue", "rewarm"] = "continue"
+    rope: Literal["switch", "single"] = "switch"
 
 
 def main():
@@ -67,10 +73,11 @@ def main():
 
 def train(*, depth, ratio, seed, data_seed, save_every, grad_clip, tag, variant):
     """Train (or resume) the run `tag` and return its model: initialization by `seed`, data order by `data_seed`, the
-    plan of the canonical model at this depth and ratio (so every variant of an ablation reads the same tokens)."""
+    plan of the canonical model at this depth and ratio (so every variant of an ablation but a batch-scaled one reads
+    the same tokens in the same steps)."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
-    run = plan(depth, ratio, tokenizer.vocab_size)
+    run = plan(depth, ratio, tokenizer.vocab_size, variant.batch_scale)
     lr = run.lr * variant.lr_scale
     weight_decay = (WEIGHT_DECAY if variant.weight_decay == "fixed"
                     else tau_weight_decay(lr, run.num_iterations, run.tokens_per_param))
@@ -93,11 +100,17 @@ def train(*, depth, ratio, seed, data_seed, save_every, grad_clip, tag, variant)
         del checkpoint
     # every group's lr: its initial lr x lr_multiplier(step); a resumed scheduler starts at start_step from the
     # initial lr the loaded optimizer state holds
-    schedulers = [LambdaLR(opt, partial(lr_multiplier, n=run.num_iterations, shape=variant.schedule),
+    schedulers = [LambdaLR(opt, partial(lr_multiplier, n=run.num_iterations, shape=variant.schedule,
+                                        repo_start=run.repo_start, repo=variant.repo_schedule),
                            last_epoch=start_step - 1) for opt in (adamw, muon)]
     step = start_step
     stage = REPO_STAGE if start_step >= run.repo_start else FILE_STAGE
-    orig_model.set_stage(stage)
+
+    def rotary(stage):
+        """The stage as the model runs it: its own RoPE base, or the repo-level stage's (variant.rope "single")."""
+        return replace(stage, rope_base=REPO_STAGE.rope_base) if variant.rope == "single" else stage
+
+    orig_model.set_stage(rotary(stage))
     model = torch.compile(orig_model, dynamic=False, fullgraph=True)
 
     # A stage's mixture of packed rows (train/stages.py: the rows each stage may read, no document read twice), each
@@ -125,7 +138,7 @@ def train(*, depth, ratio, seed, data_seed, save_every, grad_clip, tag, variant)
             # the repo-level stage: the model continues at its context and RoPE base (a new compiled graph for its
             # shapes); its batches were read during the step before
             stage, stage_rows = REPO_STAGE, 0
-            orig_model.set_stage(stage)
+            orig_model.set_stage(rotary(stage))
             model = torch.compile(orig_model, dynamic=False, fullgraph=True)
             metrics.append(tag, {"kind": "stage", "step": step, "stage": asdict(stage) | {"mixture": mixture}})
         # the state after `step` steps, with the stage of the step after it: a full checkpoint
