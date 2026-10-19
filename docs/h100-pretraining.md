@@ -53,7 +53,7 @@ compiled documents and the packed 8K and 32K rows.
 | Gradient clipping | global L2 norm 1.0, `torch.nn.utils.clip_grad_norm_` | DeepSeek LLM §2.3, inherited by DeepSeek-Coder §3.4 |
 
 **Why clip.** A paired A/B at d8, 20 tokens per parameter, compared clipping at 1.0 with no clipping
-(`benchmarks/h100.txt`, `results/ablation_clip.md`). Both arms used the same seed and data order, and the training of
+(`benchmarks/h100.txt`). Both arms used the same seed and data order, and the training of
 that comparison was deterministic, so the clipping is the only difference between them. With clipping:
 
 - Mean validation bits per byte over all 11 corpora fell from 0.88119 to 0.87806.
