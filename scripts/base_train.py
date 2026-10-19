@@ -129,7 +129,7 @@ def train(*, depth, ratio, seed, data_seed, save_every, grad_clip, tag, variant)
     batches = [next(train_iter) for _ in range(run.grad_accum_steps)] if start_step < run.num_iterations else []
     metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "data_seed": data_seed,
                          "grad_clip": grad_clip, "variant": asdict(variant), "weight_decay": weight_decay,
-                         "stage": asdict(stage) | {"mixture": mixture}})
+                         "stage": asdict(rotary(stage)) | {"mixture": mixture}})
     params = list(orig_model.parameters())
 
     while True:
@@ -140,7 +140,7 @@ def train(*, depth, ratio, seed, data_seed, save_every, grad_clip, tag, variant)
             stage, stage_rows = REPO_STAGE, 0
             orig_model.set_stage(rotary(stage))
             model = torch.compile(orig_model, dynamic=False, fullgraph=True)
-            metrics.append(tag, {"kind": "stage", "step": step, "stage": asdict(stage) | {"mixture": mixture}})
+            metrics.append(tag, {"kind": "stage", "step": step, "stage": asdict(rotary(stage)) | {"mixture": mixture}})
         # the state after `step` steps, with the stage of the step after it: a full checkpoint
         if step != start_step and (last_step or step % save_every == 0):
             save_checkpoint(path, {"step": step, "model": orig_model.state_dict(),
