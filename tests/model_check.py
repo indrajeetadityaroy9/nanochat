@@ -12,7 +12,8 @@ DEPTH perturbed by reference.perturb (every path non-zero).
   v; x0_lambdas 0; resid_lambdas 1; q / k gains 1) compute bitwise-equal per-position losses and training loss, and
   shared-parameter gradients equal within REORDER_BOUND. Eager (op by op, each op rounded as written): Inductor fuses
   the two graphs differently and keeps different fp32 intermediates.
-Exits 1 if a compare fails or a deletion is not equivalent.
+- The confirm study's candidate additions (experiments/studies.py CANDIDATES), each on the canonical model, perturbed,
+  on the first row through reference.compare.
 Usage: python -m tests.model_check DEPTH file|repo ROWS"""
 import dataclasses
 import sys
@@ -20,6 +21,7 @@ import time
 
 import torch
 
+from experiments.studies import CANDIDATES
 from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.loader import PretrainingBatches
 from nanochat.data.tokenizer import get_tokenizer
@@ -47,6 +49,13 @@ def build(config: GPTConfig) -> GPT:
     model.to_empty(device=device)
     model.init_weights(0)
     return model
+
+
+def compile_alone(model: GPT):
+    """The model compiled as base_train does, after clearing Dynamo's caches: each model variant is its own graph, and
+    the variants together exceed Dynamo's recompile limit on GPT.forward's code object."""
+    torch._dynamo.reset()
+    return torch.compile(model, dynamic=False, fullgraph=True)
 
 
 def step(model: GPT, idx: torch.Tensor, targets: torch.Tensor, cu: torch.Tensor):
@@ -105,8 +114,7 @@ for switch, identity in IDENTITY.items():
         for n, p in off.named_parameters():
             p.copy_(weights[n])
     print(f"{switch} off, row 0: windows {off.window_sizes}")
-    failures[f"{switch} off"] = compare(off, torch.compile(off, dynamic=False, fullgraph=True), idx, targets, row_cu,
-                                        indent="  ")
+    failures[f"{switch} off"] = compare(off, compile_alone(off), idx, targets, row_cu, indent="  ")
     if identity is None:
         continue
     part, value = identity
@@ -126,6 +134,14 @@ for switch, identity in IDENTITY.items():
           f"({loss_off.item():.9f} vs pinned canonical {loss_full.item():.9f}); shared-parameter gradients bitwise "
           f"{len(grads_off) - len(reordered)}/{len(grads_off)}, the others rel diff "
           f"{ {n: f'{e:.1e}' for n, e in reordered.items()} } (bound {REORDER_BOUND:.1e})")
+    torch.cuda.empty_cache()
+# the confirm study's candidate additions (experiments/studies.py CANDIDATES) on the canonical model, perturbed, on the
+# first row
+for name, fields in CANDIDATES.items():
+    added = build(dataclasses.replace(config, **fields))
+    perturb(added)
+    print(f"{name} added, row 0: windows {added.window_sizes}")
+    failures[f"{name} added"] = compare(added, compile_alone(added), idx, targets, row_cu, indent="  ")
     torch.cuda.empty_cache()
 failures = {k: v for k, v in failures.items() if v}
 print(f"compare failures (ours above bf16 eager): {failures}; deletions not equivalent: {not_equivalent}")

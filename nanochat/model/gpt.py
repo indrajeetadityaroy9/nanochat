@@ -18,6 +18,7 @@ train/optim.py's.
 
 import zlib
 from dataclasses import dataclass
+from functools import partial as bind
 
 import torch
 import torch.nn as nn
@@ -50,6 +51,11 @@ class GPTConfig:
     resid: bool = True
     qk_gain: bool = True
     windows: bool = True
+    # The candidate additions the confirm study tests (experiments/studies.py), off in the canonical model: attn_res the
+    # residual stream as Block Attention Residuals (GPT.hidden, depth_attention; it replaces the resid and x0 scalars,
+    # off with it); key_offset p-RoPE and the partial key offset on the full-context layers (Attention.forward).
+    attn_res: bool = False
+    key_offset: bool = False
 
 
 def gpt_config(depth, stage):
@@ -67,6 +73,20 @@ def has_ve(layer_idx, n_layer):
     """Whether layer layer_idx has a value embedding: alternating layers, the last one included (92d63d4 gpt.py:53-55;
     LOG 2026-01-17: alternating layers worked best)."""
     return layer_idx % 2 == (n_layer - 1) % 2
+
+
+# Block Attention Residuals' blocks: N ~ 8 recovers most of Full AttnRes's gain across model scales (Chen et al., arXiv
+# 2603.15031 §3.2)
+ATTN_RES_BLOCKS = 8
+
+
+def depth_attention(sources, query):
+    """Block Attention Residuals' input to a sublayer (Chen et al., arXiv 2603.15031 §3.1-3.2, Eqs. 2-6): the sources
+    (B, T, C) weighted by the softmax over them of query . RMSNorm(source) (the norm keeps a large-magnitude source from
+    dominating), in fp32, rounded once to the sources' dtype. query (C,): the sublayer's learned pseudo-query."""
+    logits = torch.stack([(norm(s.float()) * query).sum(-1) for s in sources])
+    weights = torch.softmax(logits, 0)
+    return sum(w[..., None] * s.float() for w, s in zip(weights, sources, strict=True)).to(sources[0].dtype)
 
 
 def layer_windows(config):
@@ -122,10 +142,12 @@ class Attention(nn.Module):
             self.register_buffer("k_gain", None, persistent=False)
         self.ve_gate = (nn.Linear(C, H, bias=False) if config.value_embeds and has_ve(layer_idx, config.n_layer)
                         else None)
+        self.depth_query = nn.Parameter(torch.empty(C)) if config.attn_res else None  # depth_attention's, before it
 
-    def forward(self, n, ve, cos_sin, window_size, kv_cache, cu_seqlens):
-        """n: the normed residual stream; ve: this layer's value embeddings (bf16) or None. kv_cache (decoder prefill
-        from position 0): receives this layer's keys (after the prologue) and values (after the value-embedding mix)."""
+    def forward(self, n, ve, cos_sin, window_size, kv_cache, cu_seqlens, starts):
+        """n: the normed residual stream; ve: this layer's value embeddings (bf16) or None. starts (B, T) bool: the
+        segments' first tokens on a key-offset layer, else None. kv_cache (decoder prefill from position 0): receives this
+        layer's keys (after the prologue and the key offset) and values (after the value-embedding mix)."""
         B, T, C = n.size()
         q, k, v = (linear(n, w).view(B, T, self.n_head, -1) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
         # Value residual: the value embedding mixed in with an input-dependent gate per head, 2 sigmoid(.) in (0, 2),
@@ -140,6 +162,15 @@ class Attention(nn.Module):
         # and backward take 168 ms of a d24 step where Inductor's fusion of the same ops takes 336 ms,
         # benchmarks/h100.txt)
         q, k = qk_norm_rope(q, k, self.q_gain, self.k_gain, *cos_sin)
+        if starts is not None:
+            # The partial key offset (modded-nanogpt record #49; track_1_short perf/kernels/qkv_rope.py KEY_OFFSET): the
+            # stationary dims of a key (its unrotated pairs, GPT.init_buffers: dims D/4..D/2-1 and 3D/4..D-1) are the
+            # previous token's, so one layer can match a token and read what followed it (an induction step); a
+            # segment's first token has no previous one and keeps its own
+            D = k.size(-1)
+            stationary = torch.arange(D, device=k.device) % (D // 2) >= D // 4
+            previous = torch.roll(k.flatten(0, 1), 1, 0).view_as(k)
+            k = torch.where(stationary & ~starts[..., None, None], previous, k)
         if kv_cache is not None:
             kv_cache.k_cache[self.layer_idx, :, :T], kv_cache.v_cache[self.layer_idx, :, :T] = k, v
         # FlashAttention-4, causal: each query sees itself and `window_size` keys before it
@@ -155,23 +186,19 @@ class MLP(nn.Module):
         C = config.n_embd
         self.c_fc = nn.Linear(C, 4 * C, bias=False)
         self.c_proj = nn.Linear(4 * C, C, bias=False)
+        self.depth_query = nn.Parameter(torch.empty(C)) if config.attn_res else None  # depth_attention's, before it
 
     def forward(self, x):
         return relu2_mlp(x, self.c_fc.weight, self.c_proj.weight)[0]
 
 
 class Block(nn.Module):
-    """One transformer layer: attention and the MLP, each on the RMS-normed stream and added to it."""
+    """One transformer layer: its attention and its MLP, each applied to the RMS-normed stream (GPT.hidden)."""
 
     def __init__(self, config, layer_idx):
         super().__init__()
         self.attn = Attention(config, layer_idx)
         self.mlp = MLP(config)
-
-    def forward(self, x, ve, cos_sin, window_size, kv_cache, cu_seqlens):
-        """x: the residual stream; the rest as Attention.forward."""
-        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache, cu_seqlens)
-        return x + self.mlp(norm(x))
 
 
 class GPT(nn.Module):
@@ -189,21 +216,26 @@ class GPT(nn.Module):
         self.x0_lambdas = nn.Parameter(torch.empty(config.n_layer)) if config.x0 else None
         self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(V, C) for i in range(config.n_layer)
                                            if config.value_embeds and has_ve(i, config.n_layer)})
-        # not in checkpoints (init_buffers): the rotary tables of the context (rotary_tables)
-        self.register_buffer("cos", None, persistent=False)
-        self.register_buffer("sin", None, persistent=False)
+        self.depth_query = nn.Parameter(torch.empty(C)) if config.attn_res else None  # the output's depth_attention
+        # not in checkpoints (init_buffers): the rotary tables of the context (rotary_tables), and with key_offset the
+        # p-RoPE tables of its full-context layers
+        for name in ("cos", "sin", "cos_p", "sin_p"):
+            self.register_buffer(name, None, persistent=False)
 
     @torch.no_grad()
     def init_weights(self, seed):
         """Every matrix and table that reads the stream uniform with std C^-0.5 (variance preserving, LeCun et al.
         "Efficient BackProp" §4.6; bound sqrt(3) std, the std of U(-a, a) being a / sqrt(3)): attn.c_q, attn.c_k,
         attn.c_v, mlp.c_fc, wte, value_embeds. Zero: attn.c_o, mlp.c_proj, lm_head (each block the identity at init,
-        modded-nanogpt record #5) and attn.ve_gate (gate 1). resid_lambdas 1, x0_lambdas 0 (LOG 2026-01-11), q_gain =
-        k_gain = 1. Each random tensor draws from its own generator, seeded by `seed` and the tensor's name, so a model
-        without some component starts every other tensor exactly as the full model does (common random numbers across
-        an ablation's arms). The non-persistent buffers: init_buffers."""
+        modded-nanogpt record #5), attn.ve_gate (gate 1) and the depth queries (attn_res: uniform weights over the
+        sources at init, Chen et al., arXiv 2603.15031 §5: "all pseudo-query vectors must be initialized to zero").
+        resid_lambdas 1, x0_lambdas 0 (LOG 2026-01-11), q_gain = k_gain = 1. Each random tensor draws from its own
+        generator, seeded by `seed` and the tensor's name, so a model without some component starts every other tensor
+        exactly as the full model does (common random numbers across an ablation's arms). The non-persistent buffers:
+        init_buffers."""
         bound = (3 / self.config.n_embd) ** 0.5
-        zero = ("attn.c_o.weight", "mlp.c_proj.weight", "lm_head.weight", "attn.ve_gate.weight", "x0_lambdas")
+        zero = ("attn.c_o.weight", "mlp.c_proj.weight", "lm_head.weight", "attn.ve_gate.weight", "x0_lambdas",
+                "depth_query")
         one = ("q_gain", "k_gain", "resid_lambdas")
         for name, t in self.named_parameters():
             if name.endswith(zero):
@@ -216,10 +248,17 @@ class GPT(nn.Module):
         self.init_buffers()
 
     def init_buffers(self):
-        """The buffers no checkpoint holds, on the parameters' device: the rotary tables of the context and, without
-        config.qk_gain, the q / k gains fixed at 1 (init_weights, set_stage, checkpoint.load_model)."""
+        """The buffers no checkpoint holds, on the parameters' device: the rotary tables of the context; with
+        config.key_offset the full-context layers' p-RoPE tables (Barbero et al., arXiv 2410.06205 §6: the
+        lowest-frequency rotation pairs truncated; half of them, modded-nanogpt's half-truncate RoPE: pairs D/4..D/2-1
+        stay unrotated, the key offset's stationary dims); without config.qk_gain the q / k gains fixed at 1
+        (init_weights, set_stage, checkpoint.load_model)."""
         device = self.wte.weight.device
         self.cos, self.sin = rotary_tables(self.config, device)
+        if self.config.key_offset:
+            half = self.cos.size(-1)
+            stationary = torch.arange(half, device=device) >= half // 2
+            self.cos_p, self.sin_p = self.cos.masked_fill(stationary, 1), self.sin.masked_fill(stationary, 0)
         if not self.config.qk_gain:
             for block in self.blocks:
                 block.attn.q_gain = torch.ones(self.config.n_embd // self.config.n_head, device=device)
@@ -235,19 +274,46 @@ class GPT(nn.Module):
     def hidden(self, idx, cu_seqlens, kv_cache):
         """The final normed hidden states (B*T, C) of idx (B, T) token ids; cu_seqlens: the int32 attention segments of
         the flattened idx (document masking; data/loader.py PretrainingBatches). kv_cache (decoder prefill) receives
-        every layer's keys and values."""
+        every layer's keys and values. Each layer's attention and MLP (its sublayers) read the RMS-normed stream:
+        - the residual stream x: x = resid_lambda x + x0_lambda x0 per layer (LOG 2026-01-11), then x += sublayer(norm(x));
+        - attn_res, Block Attention Residuals (Chen et al., arXiv 2603.15031 §3.2, Eq. 6): the sources are the
+          embedding b_0, the completed blocks b_1.. (each the sum of the outputs of 2 n_layer / ATTN_RES_BLOCKS
+          consecutive sublayers) and the current block's partial sum; a sublayer reads depth_attention over them (a
+          block's first sublayer over the completed blocks alone), the output over every block."""
+        cfg = self.config
+        B, T = idx.shape
         x = norm(F.embedding(idx, self.wte.weight).to(torch.bfloat16))
         x0 = x
+        # the key offset's segment starts: the positions in cu_seqlens (its trailing repeated offsets B*T are none)
+        starts = (torch.isin(torch.arange(B * T, dtype=cu_seqlens.dtype, device=idx.device), cu_seqlens).view(B, T)
+                  if cfg.key_offset else None)
+        blocks, partial = [x0], None
+        per_block = 2 * cfg.n_layer // ATTN_RES_BLOCKS
         for i, block in enumerate(self.blocks):
             # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 (no fp32 copies of the mix saved for
             # the backward, as an explicit fp32 mix would)
-            if self.config.resid:
+            if cfg.resid:
                 x = self.resid_lambdas[i] * x
-            if self.config.x0:
+            if cfg.x0:
                 x = x + self.x0_lambdas[i] * x0
             ve = (F.embedding(idx, self.value_embeds[str(i)].weight).to(torch.bfloat16) if str(i) in self.value_embeds
                   else None)
-            x = block(x, ve, (self.cos, self.sin), self.window_sizes[i], kv_cache, cu_seqlens)
+            offset = cfg.key_offset and self.window_sizes[i] == cfg.sequence_len
+            tables = (self.cos_p, self.sin_p) if offset else (self.cos, self.sin)
+            sublayers = ((block.attn, bind(block.attn, ve=ve, cos_sin=tables, window_size=self.window_sizes[i],
+                                           kv_cache=kv_cache, cu_seqlens=cu_seqlens, starts=starts if offset else None)),
+                         (block.mlp, block.mlp))
+            for j, (module, sublayer) in enumerate(sublayers):
+                if cfg.attn_res:
+                    out = sublayer(norm(depth_attention([*blocks, partial] if partial is not None else blocks,
+                                                        module.depth_query)))
+                    partial = out if partial is None else partial + out
+                    if (2 * i + j + 1) % per_block == 0:
+                        blocks, partial = [*blocks, partial], None
+                else:
+                    x = x + sublayer(norm(x))
+        if cfg.attn_res:
+            x = depth_attention(blocks, self.depth_query)
         return norm(x).flatten(0, 1)
 
     def forward(self, idx, targets, cu_seqlens):

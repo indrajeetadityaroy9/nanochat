@@ -74,7 +74,7 @@ The model's ops live in `nanochat/ops/` and their CUDA sources in `nanochat/csrc
 | Embeddings | `F.embedding` with the bf16 cast fused by Inductor; its backward adds rows with atomics |
 | Decoding | `csrc/decode.cu` (wrapper `inference/decoder.py`): batched native decoder for the code benchmarks |
 
-Measured on the d24 step with real data (`benchmarks/profile_step.py 24 12`), before the switch to the fastest
+Measured on the d24 step with real data (`benchmarks/profile_step.py 24 12 12 file`), before the switch to the fastest
 (atomic) gradient reductions, which take the step from 3,764 to 3,724 ms in `benchmarks/h100.txt`:
 
 - 3,764 ms per step, 313.4K tok/s.
@@ -161,7 +161,7 @@ the study's tables. The metric of every study is the code group's mixture bits p
 | `noise` | d8, 100 TPP | canonical model, 4 init × 2 data seeds | run-to-run SD; ANOVA variance components |
 | `screen` | d8, 100 TPP | 2^(7−3) resolution-IV fraction (`pydoe.fracfact`), common random numbers | which components earn their place: value embeddings, x0, resid, QK gains, windows; WSD vs D2Z; fixed vs τ-law weight decay |
 | `long_context` | d8, 100 TPP | 2 × 2 | the repo stage's schedule (continue / re-warm) × RoPE base (switch / one base), at 32K per context bucket and at 8K |
-| `confirm` | d24, 0.5B tokens | screen verdict vs canonical, 2 seed pairs | the pruned architecture at the target scale |
+| `confirm` | d24, 0.5B tokens (the base also 1B) | screen verdict vs canonical; two candidate additions on the verdict; 2 seed pairs | the pruned architecture at the target scale; Block Attention Residuals and p-RoPE + partial key offset at equal H100 time |
 | `lr_horizon` | d24, 0.5/1/2B tokens | peak lr × {0.5, 1, 2, 4} of the law's | the optimal lr per horizon, extrapolated to the production run |
 | `optimizer` | d24, 0.5B tokens | AdamW at the same lr grid | Muon+AdamW vs AdamW, each at its fitted optimum |
 | `batch` | d24 | gradient noise scale at the kept checkpoints | the critical batch's trend against the production batch |
@@ -173,7 +173,17 @@ Decision rules:
   - a component that costs parameters stays only if it significantly helps;
   - the windows, which save compute, go only if they significantly hurt;
   - a regime alternative replaces the current choice only if it is significantly better.
-- **Confirm:** the architecture verdict stands unless the pruned model loses on both seed pairs.
+- **Confirm:** the architecture verdict stands unless the pruned model loses on both seed pairs. A candidate addition is
+  adopted if on both seed pairs it beats the base at equal H100 time: the base's metric at the tokens it trains in the
+  candidate's wall-clock (the arms' median tok/s), interpolated in log tokens between its 0.5B and 1B runs.
+  - Block Attention Residuals (Chen et al., arXiv 2603.15031): the residual stream as softmax attention over depth,
+    8 blocks of sublayer outputs plus the embedding, a zero-initialized query per sublayer; at 194M activated
+    parameters val loss 1.931 → 1.909. It replaces the resid and x0 scalars.
+  - p-RoPE with the partial key offset on the full-context layers (modded-nanogpt record #49): RoPE on the
+    higher-frequency half of the rotation pairs, and the other half of each key's dims taken from the previous token
+    of its document, so one layer can match a token and read what followed it.
+  - The native decoder (`csrc/decode.cu`) runs the canonical mechanism; an adopted candidate needs it there before
+    production's code-generation evaluation.
 - **lr horizon:** the extrapolated lr replaces the law's only if its 95% interval excludes it. Each horizon's optimum is
   the vertex of a quadratic in ln lr with its delta-method SE; the line of ln η* on ln D is fitted by WLS over the
   horizons with an interior optimum.

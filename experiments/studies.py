@@ -17,17 +17,23 @@ The metric of every study: METRIC, the code group's mixture bits per byte of the
   go only if they significantly hurt; a regime alternative is adopted only if significantly better.
 - long_context (d8, 100 TPP): 2 x 2 over the repo-level stage's lr schedule (continue / re-warmed) and the RoPE base
   (switched at the stage / the repo-level stage's from the start): bits per byte at 32K per context bucket and at 8K.
-- confirm (d24, CONFIRM_TOKENS, the file-level stage): the screen's architecture verdict against the canonical model
-  at two seed pairs, on the screen's regime verdict. Rule (final): the verdict stands unless it loses on both.
+- confirm (d24, the file-level stage, two seed pairs): the base, the screen's verdict, at HORIZONS[0] and HORIZONS[1]
+  (its metric's slope in ln tokens); the canonical architecture on the verdict's regime (when the verdict prunes); each
+  candidate addition (CANDIDATES) on the base at HORIZONS[0]. Rules (final): the architecture verdict stands unless
+  the base loses to the canonical on both pairs; a candidate is adopted if on both pairs it beats the base at equal
+  H100 time (the base's metric interpolated in ln tokens to the tokens it trains in the candidate's time, from the
+  arms' median tok/s: the user's criterion, loss per wall-clock).
 - lr_horizon (d24, the file-level stage): peak lr LR_SCALES x the law's production lr (schedule.plan at the production
   ratio) over HORIZONS, on the final variant: the lr minimizing a quadratic in ln lr per horizon, and the WLS line of
-  ln eta* on ln D extrapolated to the production run's file-level tokens. With the wsd schedule and fixed weight decay
-  each lr's horizons share one constant-lr phase (schedule.lr_multiplier), so a horizon continues the shorter one's
-  kept checkpoint at its cooldown start (Hagele et al., arXiv 2405.18392 §3.2): the same run.
+  ln eta* on ln D extrapolated to the production run's file-level tokens.
 - optimizer (d24, OPTIMIZER_TOKENS): AdamW on every parameter at LR_SCALES against lr_horizon's Muon arms there,
   each at its own fitted optimum.
-- batch (d24): the gradient noise scale (experiments/noise_scale.py) at lr_horizon's kept checkpoints of the law's lr,
-  its log-log trend in the tokens trained, extrapolated to the production run, against its batch.
+- batch (d24): the gradient noise scale (experiments/noise_scale.py) of lr_horizon's runs at the law's lr, its
+  log-log trend in the tokens trained, extrapolated to the production run, against its batch.
+A study's runs of one variant at several horizons form a chain (chain): with the wsd schedule and fixed weight decay
+the horizons share one constant-lr phase (schedule.lr_multiplier), so a horizon continues the shorter one's checkpoint
+kept at its cooldown start (Hagele et al., arXiv 2405.18392 §3.2): the same run. The d24 timings (confirm's tok/s) need
+the GPU alone: experiments/run.sh runs one arm at a time.
 
     python -m experiments.studies arms <study>        # "arm NAME TAG" per line (experiments/run.sh)
     python -m experiments.studies analyze <study>     # results/studies/<study>.md and .csv
@@ -77,11 +83,15 @@ LONG_CONTEXT = {"canonical": {}, "rewarm": {"repo_schedule": "rewarm"}, "rope": 
                 "rewarm-rope": {"repo_schedule": "rewarm", "rope": "single"}}
 D24 = 24
 CONFIRM_SEEDS = ((0, 0), (1, 1))
+# The candidate additions (Variant fields): Block Attention Residuals (Chen et al., arXiv 2603.15031 Table 2: at 194M
+# activated parameters val loss 1.931 -> 1.909, a 1.25x compute equivalent), which replace the resid and x0 scalars;
+# p-RoPE with the partial key offset on the full-context layers (modded-nanogpt record #49)
+CANDIDATES = {"attn_res": {"attn_res": True, "resid": False, "x0": False}, "key_offset": {"key_offset": True}}
 # Octaves of the law's production lr, bracketing the short horizons' optimum, which lies above it (eta* falls with the
 # horizon: Bjorck et al., arXiv 2409.19913); horizons doubling from 0.5B tokens (2.6 tokens per scaling parameter)
 LR_SCALES = (0.5, 1.0, 2.0, 4.0)
 HORIZONS = (5e8, 1e9, 2e9)
-CONFIRM_TOKENS = OPTIMIZER_TOKENS = HORIZONS[0]
+OPTIMIZER_TOKENS = HORIZONS[0]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -151,34 +161,39 @@ def long_context() -> list[Arm]:
             for name, v in LONG_CONTEXT.items()]
 
 
+def chain(study: str, name: str, variant: dict, seed: int, data_seed: int, horizons: tuple[float, ...]) -> list[Arm]:
+    """Runs of a d24 variant at the production ratio's batch and lr over doubling horizons (module docstring), each
+    keeping its cooldown start's checkpoint when a longer horizon can continue it."""
+    ratio, run = production_ratio(), Variant(**variant)
+    branch = run.schedule == "wsd" and run.weight_decay == "fixed"
+    arms, parent = [], None
+    for tokens in horizons:
+        keep = (cooldown_start(plan(D24, ratio, tokens).num_iterations),) if branch else ()
+        arm = Arm(study=study, name=f"{name}-t{tokens:g}", depth=D24, ratio=ratio, seed=seed, data_seed=data_seed,
+                  variant=departures(**variant, tokens=tokens), parent=parent, keep=keep)
+        arms.append(arm)
+        parent = (arm.tag, keep[0]) if branch else None
+    return arms
+
+
 def confirm() -> list[Arm]:
-    """The d24 pairs (canonical, pruned) per seed pair; none when the screen keeps the canonical architecture."""
+    """Per seed pair: the base (the screen's verdict) at HORIZONS[0] and [1], the canonical architecture on its regime
+    when the verdict prunes, each candidate on the base at HORIZONS[0]."""
     adopted = verdict()
-    architecture = {k: v for k, v in adopted.items() if k not in REGIME}
     regime = {k: v for k, v in adopted.items() if k in REGIME}
-    if not architecture:
-        return []
-    return [Arm(study="confirm", name=f"{name}-s{s}-d{d}", depth=D24, ratio=production_ratio(), seed=s, data_seed=d,
-                variant=departures(**regime, **(architecture if name == "pruned" else {}), tokens=CONFIRM_TOKENS))
-            for s, d in CONFIRM_SEEDS for name in ("canonical", "pruned")]
+    arms = []
+    for s, d in CONFIRM_SEEDS:
+        arms += chain("confirm", f"base-s{s}-d{d}", adopted, s, d, HORIZONS[:2])
+        single = {"canonical": regime} if adopted != regime else {}
+        single |= {c: adopted | fields for c, fields in CANDIDATES.items()}
+        arms += [Arm(study="confirm", name=f"{c}-s{s}-d{d}", depth=D24, ratio=production_ratio(), seed=s, data_seed=d,
+                     variant=departures(**v, tokens=HORIZONS[0])) for c, v in single.items()]
+    return arms
 
 
 def lr_horizon() -> list[Arm]:
-    variant, ratio = final(), production_ratio()
-    run = Variant(**variant)
-    branch = run.schedule == "wsd" and run.weight_decay == "fixed"
-    arms = []
-    for scale in LR_SCALES:
-        parent = None
-        for i, tokens in enumerate(HORIZONS):
-            child = branch and i + 1 < len(HORIZONS)
-            keep = (cooldown_start(plan(D24, ratio, tokens).num_iterations),) if child else ()
-            arm = Arm(study="lr_horizon", name=f"lr{scale:g}-t{tokens:g}", depth=D24, ratio=ratio, seed=0,
-                      data_seed=0, variant=departures(**variant, lr_scale=scale, tokens=tokens), parent=parent,
-                      keep=keep)
-            arms.append(arm)
-            parent = (arm.tag, keep[0]) if child else None
-    return arms
+    return [a for scale in LR_SCALES for a in chain("lr_horizon", f"lr{scale:g}", final() | {"lr_scale": scale}, 0, 0,
+                                                    HORIZONS)]
 
 
 def optimizer() -> list[Arm]:
@@ -241,15 +256,38 @@ def verdict() -> dict:
     return departures(**{f: FACTORS[f][1] for f in effects.index[effects.adopt]})
 
 
+def confirm_decisions() -> tuple[pd.DataFrame, bool, list[str]]:
+    """Per seed pair the confirm arms' metric; each candidate's time ratio r (the base's median tok/s over the
+    candidate's) and the base's metric at r x HORIZONS[0] tokens (linear in log2 tokens between its two horizons).
+    Returns (that frame, whether the architecture verdict stands, the candidates adopted): module docstring."""
+    arms = {a.name: a for a in confirm()}
+    rows = []
+    for s, d in CONFIRM_SEEDS:
+        pair = f"s{s}-d{d}"
+        short, long = (arms[f"base-{pair}-t{t:g}"] for t in HORIZONS[:2])
+        row = {"seeds": pair, "base": metric(short.tag), "base, 2x tokens": metric(long.tag)}
+        if f"canonical-{pair}" in arms:
+            row["canonical"] = metric(arms[f"canonical-{pair}"].tag)
+        for c in CANDIDATES:
+            arm = arms[f"{c}-{pair}"]
+            ratio = summary(short)["tok_per_s"] / summary(arm)["tok_per_s"]
+            row |= {c: metric(arm.tag), f"{c}: time ratio": ratio,
+                    f"{c}: base at equal time": row["base"] + (row["base, 2x tokens"] - row["base"]) * math.log2(ratio)}
+        rows.append(row)
+    frame = pd.DataFrame(rows).set_index("seeds")
+    stands = "canonical" not in frame or not (frame["base"] > frame["canonical"]).all()
+    return frame, stands, [c for c in CANDIDATES if (frame[c] < frame[f"{c}: base at equal time"]).all()]
+
+
 def final() -> dict:
-    """The variant of the d24 regime studies: the screen's regime verdict, and its architecture verdict unless the
-    pruned model loses on both of confirm's seed pairs."""
+    """The variant of the d24 regime studies: the screen's regime verdict, its architecture verdict unless confirm
+    reverts it, and the candidates confirm adopts."""
     adopted = verdict()
-    pairs = confirm()
-    if pairs and all(metric(pruned.tag) > metric(canonical.tag) for canonical, pruned in zip(pairs[::2], pairs[1::2],
-                                                                                              strict=True)):
-        return {k: v for k, v in adopted.items() if k in REGIME}
-    return adopted
+    _, stands, added = confirm_decisions()
+    variant = adopted if stands else {k: v for k, v in adopted.items() if k in REGIME}
+    for c in added:
+        variant |= CANDIDATES[c]
+    return departures(**variant)
 
 
 # Tidy tables
@@ -411,14 +449,12 @@ def analyze_long_context() -> tuple[list[str], pd.DataFrame]:
 
 
 def analyze_confirm() -> tuple[list[str], pd.DataFrame]:
-    arms = confirm()
-    if not arms:
-        return ["The screen kept the canonical architecture: nothing to confirm.\n"], pd.DataFrame()
-    frame = pd.DataFrame([{"seeds": c.name.split("-", 1)[1], "canonical": metric(c.tag), "pruned": metric(p.tag)}
-                          for c, p in zip(arms[::2], arms[1::2], strict=True)]).set_index("seeds")
-    frame["pruned - canonical"] = frame.pruned - frame.canonical
-    return [table(frame, f"Confirmation at d24 of {json.dumps(verdict())}"),
-            f"Final variant of the d24 studies: `{json.dumps(final())}`\n"], frame
+    frame, stands, added = confirm_decisions()
+    return [table(frame, f"Confirmation at d24 of the verdict {json.dumps(verdict())} and the candidates "
+                         f"(bits per byte at {HORIZONS[0]:g} tokens; the base at equal H100 time interpolated in log2 "
+                         f"tokens)"),
+            f"Architecture verdict {'stands' if stands else 'reverts'}; candidates adopted: {added}; final variant of "
+            f"the d24 studies: `{json.dumps(final())}`\n"], frame
 
 
 def horizon_frame(arms: list[Arm]) -> pd.DataFrame:

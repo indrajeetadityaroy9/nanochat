@@ -41,16 +41,18 @@ from nanochat.train.schedule import lr_multiplier, plan
 @dataclass(frozen=True, kw_only=True)
 class Variant:
     """The ablation studies' departures from the canonical mechanism (experiments/studies.py), canonical by default:
-    the model's switches (model/gpt.py GPTConfig); the optimizers (optim.optimizers kind); the lr schedule shape and the
-    repo-level stage's schedule (schedule.lr_multiplier); the weight decay (optim.py WEIGHT_DECAY, or the EMA-timescale
-    rule tau_weight_decay); a factor on the plan's peak lr, and the horizon in tokens (schedule.plan: the file-level
-    stage alone); and the RoPE base ("switch" the stages' own, config.Stage; "single" the repo-level stage's for both,
-    Men et al., arXiv 2405.14591: the base's lower bound at the final context)."""
+    the model's switches and candidate additions (model/gpt.py GPTConfig); the optimizers (optim.optimizers kind); the
+    lr schedule shape and the repo-level stage's schedule (schedule.lr_multiplier); the weight decay (optim.py
+    WEIGHT_DECAY, or the EMA-timescale rule tau_weight_decay); a factor on the plan's peak lr, and the horizon in tokens
+    (schedule.plan: the file-level stage alone); and the RoPE base ("switch" the stages' own, config.Stage; "single"
+    the repo-level stage's for both, Men et al., arXiv 2405.14591: the base's lower bound at the final context)."""
     value_embeds: bool = True
     x0: bool = True
     resid: bool = True
     qk_gain: bool = True
     windows: bool = True
+    attn_res: bool = False
+    key_offset: bool = False
     optimizer: Literal["muon", "adamw"] = "muon"
     schedule: Literal["wsd", "d2z"] = "wsd"
     weight_decay: Literal["fixed", "tau"] = "fixed"
@@ -109,7 +111,8 @@ def train(*, depth: int, ratio: float, seed: int, data_seed: int, save_every: in
     lr = run.lr * variant.lr_scale
     weight_decay = (WEIGHT_DECAY if variant.weight_decay == "fixed"
                     else tau_weight_decay(lr, run.num_iterations, run.tokens_per_param))
-    switches = {k: getattr(variant, k) for k in ("value_embeds", "x0", "resid", "qk_gain", "windows")}
+    switches = {k: getattr(variant, k)
+                for k in ("value_embeds", "x0", "resid", "qk_gain", "windows", "attn_res", "key_offset")}
 
     with torch.device("meta"):
         orig_model = GPT(replace(gpt_config(depth, FILE_STAGE), **switches))

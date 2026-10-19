@@ -13,7 +13,7 @@ vs cuDNN 9.26 (Transformer Engine 2.19 DotProductAttention, thd, fused backend),
   1 segment/row,  window 512:  FA4 fwd 0.301, fwd+bwd 1.135;  cuDNN fwd 0.429, fwd+bwd 1.418
   1 segment/row,  full 8192:   FA4 fwd 0.894, fwd+bwd 3.746;  cuDNN fwd 1.185, fwd+bwd 4.375
 
-d24 production step, real data, 12 x 12 rows (profile_step.py 24 12), 2026-10-19, in order of the changes:
+d24 production step, real data, 12 x 12 rows (profile_step.py 24 12 12 file), 2026-10-19, in order of the changes:
   GEMM TABLE re-swept at M = 98,304 (gemmsweep_sm90.jsonl), cuBLAS roles as torch.mm: 3,785 ms, 311.7K tok/s;
     qk prologue backward 168.4 ms, VE-gate fp32 GEMMs on CUDA cores (sm80_xmma f32 + simt sgemm) 80.6 ms.
   VE gate as an fp32 broadcast-sum, qk prologue backward persistent and atomic-free: 3,724 ms, 316.8K tok/s;

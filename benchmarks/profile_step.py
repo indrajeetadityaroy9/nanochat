@@ -1,9 +1,12 @@
 """Profile base_train's optimizer step (scripts/base_train.optimizer_step: the one step every run takes, its next step's
 micro-batches read during its backward) on this GPU, on the data pipeline's packed rows of a stage (fim reading): wall
 time per step over 3 steps after 3 warmup steps, then one step under torch.profiler: GPU kernel time by category and
-the top kernels; GPU busy fraction of the step. The lr is the plan's peak (the schedule only scales it).
-Usage: python -m benchmarks.profile_step DEPTH MICRO_STEPS [ROWS per micro-batch [file|repo stage]]"""
+the top kernels; GPU busy fraction of the step. The lr is the plan's peak (the schedule only scales it). SWITCHES: the
+model's GPTConfig switches and additions as JSON (the canonical model without).
+Usage: python -m benchmarks.profile_step DEPTH MICRO_STEPS ROWS file|repo [SWITCHES]"""
 import collections
+import dataclasses
+import json
 import statistics
 import sys
 import time
@@ -19,15 +22,14 @@ from nanochat.train.optim import WEIGHT_DECAY, optimizers
 from nanochat.train.schedule import plan
 from scripts.base_train import optimizer_step
 
-depth, micro = (int(a) for a in sys.argv[1:3])
-stage = {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[4] if len(sys.argv) > 4 else "file"]
+depth, micro, rows = (int(a) for a in sys.argv[1:4])
+stage = {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[4]]
 SEQ_LEN = stage.seq_len
-rows = int(sys.argv[3]) if len(sys.argv) > 3 else stage.batch_rows
 device = torch.device("cuda")
 tokenizer = get_tokenizer()
 run = plan(depth, 20)  # fixture: only run.lr is used; 20 tokens per parameter (Chinchilla, arXiv 2203.15556 §3)
 with torch.device("meta"):
-    orig = GPT(gpt_config(depth, stage))
+    orig = GPT(dataclasses.replace(gpt_config(depth, stage), **json.loads(sys.argv[5] if len(sys.argv) > 5 else "{}")))
 orig.to_empty(device=device)
 orig.init_weights(0)
 model = torch.compile(orig, dynamic=False, fullgraph=True)

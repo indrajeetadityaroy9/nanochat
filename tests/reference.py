@@ -1,9 +1,13 @@
 """fp64 reference of the model (nanochat/model/gpt.py's forward written out in plain PyTorch, document masking by
 segments), from a GPT's parameters by name, and the helpers the verify scripts share. Positions are row positions.
-Window w: query i sees keys j of its segment with 0 <= i - j <= w. The windows, the value-embedding layers and the
-GPTConfig switches' off states are restated here from their specification (gpt.py GPTConfig, layer_windows, has_ve),
-not imported, so a bug there shows: without value_embeds no value embedding or gate; without x0 no x0 term; without
-resid the residual scalar 1; without qk_gain the gains 1; without windows every layer the full context."""
+Window w: query i sees keys j of its segment with 0 <= i - j <= w. The windows, the value-embedding layers, the
+GPTConfig switches' off states and the candidate additions are restated here from their specification (gpt.py
+GPTConfig, layer_windows, has_ve, depth_attention, Attention.forward), not imported, so a bug there shows: without
+value_embeds no value embedding or gate; without x0 no x0 term; without resid the residual scalar 1; without qk_gain
+the gains 1; without windows every layer the full context; attn_res Block Attention Residuals over 8 blocks of
+sublayers (Chen et al., arXiv 2603.15031 Eq. 6); key_offset on the full-context layers RoPE over the higher-frequency
+half of the rotation pairs and the other half of each key's dims from the previous token of its segment."""
+import math
 import statistics
 from collections.abc import Callable
 
@@ -50,11 +54,16 @@ def perturb(model: nn.Module) -> None:
             b.attn.k_gain.uniform_(0.5, 1.5)
         if b.attn.ve_gate is not None:
             b.attn.ve_gate.weight.uniform_(-s, s)
+        if cfg.attn_res:
+            b.attn.depth_query.uniform_(-s, s)
+            b.mlp.depth_query.uniform_(-s, s)
     model.lm_head.weight.normal_(0, 0.05)
     if cfg.resid:
         model.resid_lambdas.uniform_(0.8, 1.2)
     if cfg.x0:
         model.x0_lambdas.uniform_(0.1, 0.3)
+    if cfg.attn_res:
+        model.depth_query.uniform_(-s, s)
 
 
 def first_micro_batch(stage: Stage, tokenizer: Tokenizer,
@@ -110,16 +119,15 @@ def reference_losses(model: nn.Module, idx: torch.Tensor, targets: torch.Tensor,
     ang = torch.outer(t, cfg.rope_base ** (-torch.arange(D // 2, dtype=torch.float64, device=dev) / (D // 2)))
     cos, sin = ang.cos()[None, :, None, :].to(dtype), ang.sin()[None, :, None, :].to(dtype)
     wide = torch.promote_types(dtype, torch.float32)
+    # key_offset: the full-context layers rotate the higher-frequency half of the pairs (angle 0 for pairs >= D/4), and
+    # the unrotated dims of a key are the previous token's in its segment
+    low = torch.arange(D // 2, device=dev) >= D // 4
+    cos_p, sin_p = cos.masked_fill(low, 1), sin.masked_fill(low, 0)
+    previous = torch.cat([torch.zeros_like(seg[:, :1], dtype=torch.bool), seg[:, 1:] == seg[:, :-1]], 1)
+    unrotated = torch.cat([low, low])
 
-    x = norm(P["wte.weight"][idx])
-    x0 = x
-    for i in range(L):
-        a, m = f"blocks.{i}.attn.", f"blocks.{i}.mlp."
-        if cfg.resid:
-            x = P["resid_lambdas"][i] * x
-        if cfg.x0:
-            x = x + P["x0_lambdas"][i] * x0
-        xn = norm(x)
+    def attn(i, xn):
+        a = f"blocks.{i}.attn."
         q = (xn @ P[a + "c_q.weight"].t()).view(B, T, H, D)
         k = (xn @ P[a + "c_k.weight"].t()).view(B, T, H, D)
         v = (xn @ P[a + "c_v.weight"].t()).view(B, T, H, D)
@@ -130,11 +138,42 @@ def reference_losses(model: nn.Module, idx: torch.Tensor, targets: torch.Tensor,
         q, k = norm(q), norm(k)
         if cfg.qk_gain:
             q, k = q * P[a + "q_gain"], k * P[a + "k_gain"]
-        q, k = rope(q, cos, sin), rope(k, cos, sin)
-        y = attention(q, k, v, seg, windows[i], dtype).reshape(B, T, C)
-        x = x + y @ P[a + "c_o.weight"].t()
-        h = F.relu(norm(x) @ P[m + "c_fc.weight"].t()).square()
-        x = x + h @ P[m + "c_proj.weight"].t()
+        offset = cfg.key_offset and windows[i] == ctx
+        c, s = (cos_p, sin_p) if offset else (cos, sin)
+        q, k = rope(q, c, s), rope(k, c, s)
+        if offset:
+            shifted = torch.cat([k[:, :1], k[:, :-1]], 1)
+            k = torch.where(previous[:, :, None, None] & unrotated, shifted, k)
+        return attention(q, k, v, seg, windows[i], dtype).reshape(B, T, C) @ P[a + "c_o.weight"].t()
+
+    def mlp(i, xn):
+        m = f"blocks.{i}.mlp."
+        return F.relu(xn @ P[m + "c_fc.weight"].t()).square() @ P[m + "c_proj.weight"].t()
+
+    def depth(sources, query):
+        """Softmax over the sources of query . RMSNorm(source), the sources weighted by it."""
+        weights = torch.stack([(norm(src.to(wide)) * query.to(wide)).sum(-1) for src in sources]).softmax(0)
+        return sum(w[..., None].to(dtype) * src for w, src in zip(weights, sources, strict=True))
+
+    x = norm(P["wte.weight"][idx])
+    x0 = x
+    blocks, partial = [x0], None  # attn_res: b_0 the embedding, the completed blocks; the current block's partial sum
+    for i in range(L):
+        if cfg.resid:
+            x = P["resid_lambdas"][i] * x
+        if cfg.x0:
+            x = x + P["x0_lambdas"][i] * x0
+        for j, (name, f) in enumerate((("attn", attn), ("mlp", mlp))):
+            if cfg.attn_res:  # 8 blocks of 2 L / 8 sublayers each
+                out = f(i, norm(depth(blocks + ([partial] if partial is not None else []),
+                                      P[f"blocks.{i}.{name}.depth_query"])))
+                partial = out if partial is None else partial + out
+                if (2 * i + j + 1) % (2 * L // 8) == 0:
+                    blocks, partial = [*blocks, partial], None
+            else:
+                x = x + f(i, norm(x))
+    if cfg.attn_res:
+        x = depth(blocks, P["depth_query"])
     logits = (norm(x) @ P["lm_head.weight"].t()).to(wide)
     losses = F.cross_entropy(logits.reshape(-1, cfg.vocab_size), targets.reshape(-1),
                              ignore_index=PretrainingBatches.PAD, reduction="none")
@@ -148,7 +187,10 @@ def compare(model: nn.Module, compiled: Callable[..., torch.Tensor], idx: torch.
     parameter's gradient, as rel L2 errors vs fp64. Negative controls on the reference, for the components the model
     has: x0_lambdas x1.01 and the VE gate weights zeroed (gate 1), the size of a real model change. Prints them;
     returns the failures: the per-position losses or a matrix's gradient (the many-element errors; the mean loss and
-    the vectors' are single sums that sit on either side of bf16 eager's) with a larger error than bf16 eager's."""
+    the vectors' are single sums that sit on either side of bf16 eager's) whose error reaches bf16 eager's combined
+    with the smallest change a control makes (in quadrature: an implementation error that size, independent of the
+    rounding, added to the bf16 floor). The errors at the floor itself fall on either side of bf16 eager's (the gradient
+    reductions are not in a fixed order); a real error the size of a model change does not."""
     model.zero_grad(set_to_none=True)
     loss = compiled(idx, targets, cu_seqlens=cu_seqlens)
     loss.backward()
@@ -171,6 +213,7 @@ def compare(model: nn.Module, compiled: Callable[..., torch.Tensor], idx: torch.
           f"{errors['per-position losses'][1]:.2e}")
     print(f"{indent}worst grad rel {worst} ours {grads[worst][0]:.2e} bf16 eager {grads[worst][1]:.2e}; ours above "
           f"bf16 eager: {[f'{n} {e:.2e} vs {e16:.2e}' for n, (e, e16) in grads.items() if e > e16]}")
+    changes = []  # every control's matrix-gradient changes
     for name, part, factor in (("x0_lambdas x1.01", "x0_lambdas", 1.01), ("ve_gate zeroed", "ve_gate", 0.0)):
         edited = [n for n in P if part in n]
         if not edited:
@@ -183,7 +226,9 @@ def compare(model: nn.Module, compiled: Callable[..., torch.Tensor], idx: torch.
         lc = reference_losses(model, idx.long(), targets, cu_seqlens, params=Q)[0][valid].mean()
         lc.backward()
         diffs = [rel(Q[n].grad, P[n].grad) for n in P if Q[n].ndim == 2]
+        changes += diffs
         print(f"{indent}control {name}: loss rel diff {abs(lc.item() - ref) / ref:.2e}, matrix-grad rel diff median "
               f"{statistics.median_high(diffs):.2e} min {min(diffs):.2e}")
     errors |= {n: e for n, e in grads.items() if P[n].ndim == 2}
-    return [n for n, (e, e16) in errors.items() if e > e16]
+    detectable = min(changes, default=0.0)  # without a control: bf16 eager's error alone
+    return [n for n, (e, e16) in errors.items() if e >= math.hypot(e16, detectable)]
