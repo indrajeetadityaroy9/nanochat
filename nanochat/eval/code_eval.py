@@ -28,7 +28,6 @@ Every evaluator runs as a fresh process (exec), never as a fork of this torch/CU
 
 import codecs
 import json
-import math
 import os
 import subprocess
 import sys
@@ -45,6 +44,7 @@ from evalplus.sanitize import sanitize
 from huggingface_hub import hf_hub_download
 
 from nanochat.data.loader import PretrainingBatches
+from nanochat.eval.loss_eval import evaluate_bpb
 from nanochat.inference.decoder import NativeDecoder
 
 MULTIPL_E = ("nuprl/MultiPL-E", "28441b6024e71d4a1c1c0f6bf171c935cd5a43f2")  # HF dataset revision
@@ -87,19 +87,17 @@ GENERATION_BUDGETS = {"humaneval_plus": 768, "mbpp_plus": 768, "humaneval_cpp": 
 
 
 def solution_batches(tokenizer, examples, batch_rows, seq_len, device):
-    """(micro-batches (inputs, targets, cu_seqlens), solution bytes) of (prompt, solution) examples, each
-    batch_rows x seq_len (one shape: one compiled graph), one example per row and one attention segment per row: BOS
-    then prompt + solution tokenized together (as in training text), targets the loader's padding but from the first
-    token that begins at or after the prompt's end; solution bytes: the scored tokens' bytes, the denominator of bits per
-    byte."""
+    """Micro-batches (inputs, targets, cu_seqlens) of (prompt, solution) examples, each batch_rows x seq_len (one shape:
+    one compiled graph), one example per row and one attention segment per row: BOS then prompt + solution tokenized
+    together (as in training text), targets the loader's padding but from the first token that begins at or after the
+    prompt's end, so the scored targets' bytes are the solution's."""
     bos = tokenizer.bos_token_id
-    seqs, nbytes = [], 0
+    seqs = []
     for prompt, solution in examples:
         ids = [bos, *tokenizer.enc.encode_ordinary(prompt + solution)]
         ends = np.cumsum([0] + [len(tokenizer.token_bytes[t]) for t in ids[1:]])  # byte offset after each token
         first = int(np.searchsorted(ends, len(prompt.encode()), side="left")) + 1  # the first token starting at/after the prompt end
         seqs.append((ids, first))
-        nbytes += int(ends[-1] - ends[first - 1])
     cu_seqlens = torch.arange(0, batch_rows * seq_len + 1, seq_len, dtype=torch.int32, device=device)
     batches = []
     for g in range(0, len(seqs), batch_rows):
@@ -109,19 +107,19 @@ def solution_batches(tokenizer, examples, batch_rows, seq_len, device):
             x[r, :len(ids) - 1] = torch.tensor(ids[:-1])
             y[r, first - 1:len(ids) - 1] = torch.tensor(ids[first:])
         batches.append((x.to(device), y.to(device), cu_seqlens))
-    return batches, nbytes
+    return batches
 
 
 @torch.no_grad()
 def solution_bpb(losses, tokenizer, device, batch_rows, seq_len, benchmarks):
-    """{benchmark: bits per byte of all its reference solutions pooled} of SOLUTION_BENCHMARKS under losses (GPT.losses):
-    summed nats (fp64 on the device; NaN propagates) / (ln 2 x summed bytes)."""
+    """{benchmark: bits per byte of all its reference solutions pooled} of SOLUTION_BENCHMARKS under losses (GPT.losses),
+    by loss_eval.evaluate_bpb."""
+    token_bytes = tokenizer.get_token_bytes(device=device)
     results = {}
     for name in SOLUTION_BENCHMARKS:
-        batches, nbytes = solution_batches(tokenizer, [(t.prompt, t.solution) for t in benchmarks[name]], batch_rows,
-                                           seq_len, device)
-        nats = sum(losses(x, y, cu_seqlens).double().sum() for x, y, cu_seqlens in batches)
-        results[name] = nats.item() / (math.log(2) * nbytes)
+        batches = solution_batches(tokenizer, [(t.prompt, t.solution) for t in benchmarks[name]], batch_rows, seq_len,
+                                   device)
+        results[name] = evaluate_bpb(losses, batches, len(batches), token_bytes, batch_rows)
     return results
 
 
@@ -158,11 +156,11 @@ def evalplus(name, items, completions):
     with tempfile.TemporaryDirectory() as tmp:
         samples, scored = os.path.join(tmp, "samples.jsonl"), os.path.join(tmp, "results.json")
         with open(samples, "w", encoding="utf-8") as f:
-            for t, c in zip(items, completions, strict=False):
+            for t, c in zip(items, completions, strict=True):
                 solution = sanitize(t.prompt + c.replace("\t", "    "), entrypoint=t.entry)
                 f.write(json.dumps({"task_id": t.id, "solution": solution}) + "\n")
         subprocess.run([sys.executable, "-I", "-m", "evalplus.evaluate", "--dataset", dataset, "--samples", samples,
-                        "--output_file", scored], cwd=tmp)
+                        "--output_file", scored], cwd=tmp, check=True)
         with open(scored, encoding="utf-8") as f:
             result = json.load(f)
     verdicts = [result["eval"][t.id][0] for t in items]
@@ -182,16 +180,16 @@ def multipl_e(items, completions):
     main = os.path.join(root, "evaluation", "src", "main.py")
     with tempfile.TemporaryDirectory() as tmp:
         files = []
-        for t, c in zip(items, completions, strict=False):
+        for t, c in zip(items, completions, strict=True):
             files.append(os.path.join(tmp, f"{t.id}.json"))
             with open(files[-1], "w", encoding="utf-8") as f:
                 json.dump({"name": t.id, "language": "cpp", "prompt": t.prompt, "tests": t.entry, "completions": [c]}, f)
         with ThreadPoolExecutor(os.cpu_count()) as pool:
             list(pool.map(lambda file: subprocess.run([sys.executable, main, "--file", file, "--output-dir", tmp],
-                                                      cwd=tmp), files))
+                                                      cwd=tmp, check=True), files))
         # pass_k.py's one CSV line: Dataset,Pass@k,Estimate,NumProblems,MinCompletions,MaxCompletions
         pass_at_1 = float(subprocess.run([sys.executable, os.path.join(root, "pass_k.py"), "--suppress-header", tmp],
-                                         cwd=tmp, capture_output=True, text=True).stdout.split(",")[2])
+                                         cwd=tmp, capture_output=True, text=True, check=True).stdout.split(",")[2])
         status = []
         for t in items:
             with open(os.path.join(tmp, f"{t.id}.results.json"), encoding="utf-8") as f:
@@ -201,7 +199,7 @@ def multipl_e(items, completions):
 
 def generation(model, tokenizer, benchmarks):
     """{benchmark: its official evaluation} of greedy completions of GENERATION_BUDGETS's benchmarks."""
-    decoder, results = NativeDecoder(model), {}
+    decoder, results = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id), {}
     for name, max_tokens in GENERATION_BUDGETS.items():
         items = benchmarks[name]
         completions = complete(decoder, tokenizer, items, max_tokens)

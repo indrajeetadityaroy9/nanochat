@@ -43,3 +43,29 @@ vs cuDNN 9.26 (Transformer Engine 2.19 DotProductAttention, thd, fused backend),
 Transformer Engine FP8 vs ours (bf16 QuACK), the block's GEMM work fwd + bwd at M = 65,536 (te_bench.py C), ms:
   C 1024: ours 8.69; TE bf16 9.89; TE fp8 DelayedScaling 7.97, Float8CurrentScaling 9.44, Float8BlockScaling 9.68
   C 1280: ours 13.17; TE bf16 15.21; TE fp8 DelayedScaling 11.30, Float8CurrentScaling 13.02, Float8BlockScaling 14.09
+
+d24 production step, real data, 12 x 12 rows (profile_step.py 24 30 12), 2026-10-19, in order of the changes:
+  GEMM TABLE re-swept at M = 98,304 (gemmsweep_sm90.jsonl), cuBLAS roles as torch.mm: 3,785 ms, 311.7K tok/s;
+    qk prologue backward 168.4 ms, VE-gate fp32 GEMMs on CUDA cores (sm80_xmma f32 + simt sgemm) 80.6 ms.
+  VE gate as an fp32 broadcast-sum, qk prologue backward persistent and atomic-free: 3,724 ms, 316.8K tok/s;
+    qk prologue backward 92.7 ms.
+  Bitwise-deterministic gradients (FA4 deterministic backward, ops/embedding.cu): 3,821 ms, 308.7K tok/s (embedding
+    backward run starts by a cummax scan, 48.3 ms).
+VE gate alone, fwd+bwd of gate and mix per layer at M = 98,304 (torch.utils.benchmark median), rel err vs fp64 of
+gate / dW: fp32 F.linear 1.195 ms, 1.3e-7 / 5.6e-7; bf16 F.linear 0.575 ms, 8.1e-4 / 3.0e-3; TF32 1.008 ms,
+8.0e-5 / 2.2e-4; fp32 broadcast-sum 0.881 ms, 5.3e-8 / 4.1e-7.
+Run-to-run determinism, d24 one real micro-batch, compiled fwd+bwd repeated 6 times (median ms; parameters whose
+gradients differ between repeats, of 220): default 295.6-298.3 ms, 212; FA4 deterministic=True 299.9-303.9 ms, 13
+(the embedding tables: Inductor's atomic embedding backward); + torch.use_deterministic_algorithms 362.6 ms, 0 (319.3 ms
+without fill_uninitialized_memory); FA4 deterministic + ops/embedding.cu 305.8 ms, 0. Smoke kill/resume (d8 r20):
+losses of the steps both launches take equal bitwise (rel diff 0.0; 1e-4 before).
+  Embedding backward run starts by searchsorted (no scan): 3,764 ms, 313.4K tok/s, peak 69.5 GiB; d24 fwd+bwd
+    303.8 ms per micro-batch, 0 of 220 gradients differing across repeats (verify/determinism.py).
+Gradient clipping at 1.0 (train/optim.py GRAD_CLIP), paired A/B: d8 at 20 tokens per scaling parameter, seed 42, both
+arms bitwise deterministic on the same data order (so they differ by the clipping alone), 2,987 steps each; val bpb of
+the final checkpoint on each corpus's val split (eval/loss_eval.val_bpb), train loss mean over the last 10% of steps:
+  clip 1.0: val bpb mean 0.87806 (stack_edu_python 0.74209, stack_edu_cpp 0.67994, climbmix 1.34683), train 1.89735;
+    grad norm > 1 on 165 steps, max 10.40.
+  no clip:  val bpb mean 0.88119 (stack_edu_python 0.74504, stack_edu_cpp 0.68317, climbmix 1.35029), train 1.89841;
+    grad norm > 1 on 179 steps, max 9.83.
+  Clipping is lower on all 11 corpora.

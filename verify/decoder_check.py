@@ -9,6 +9,7 @@ repo: config.FILE_STAGE, REPO_STAGE) with every matrix and table uniform with st
 gains) uniform in [0.5, 1.5] (init_weights zeroes the output projections, lm_head and gates and fixes the vectors, under
 which greedy decoding is trivial).
 Usage: python -m verify.decoder_check MODEL N_PROMPTS NEW_TOKENS [STAGE]"""
+import statistics
 import sys
 
 import numpy as np
@@ -38,7 +39,6 @@ if source.isdigit():
                 p.uniform_(-bound, bound)
             else:
                 p.uniform_(0.5, 1.5)
-    model.eval()
 else:
     model, tokenizer, _ = load_model(device, source)
 print(f"model {source}: {model.config}")
@@ -72,7 +72,7 @@ def eager(ids):
 
 
 ref = [eager(p) for p in prompts]
-decoder = NativeDecoder(model)
+decoder = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id)
 print(f"decoder batch {decoder.batch}")
 together = dict(decoder.run((p, new, None) for p in prompts))
 alone = [next(iter(decoder.run([(p, new, None)])))[1] for p in prompts]
@@ -84,7 +84,7 @@ for i, (r, gaps) in enumerate(ref):
     if n != r:
         j = next((k for k, (a, b) in enumerate(zip(r, n)) if a != b), min(len(r), len(n)))
         print(f"  prompt {i} ({len(prompts[i])} tokens): diverge at {j} of {len(r)}/{len(n)}; eager top-2 gap there "
-              f"{gaps[j] if j < len(gaps) else float('nan'):.3e}; median gap {sorted(gaps)[len(gaps) // 2]:.3e}")
+              f"{gaps[j] if j < len(gaps) else float('nan'):.3e}; median gap {statistics.median_high(gaps):.3e}")
 deficits = []
 for i, p in enumerate(prompts):
     out = together[i]

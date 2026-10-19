@@ -1,7 +1,7 @@
 """
 The run settings every training and evaluation shares: context, vocabulary, mixture, micro-batch, training stages.
 """
-from typing import NamedTuple
+from dataclasses import dataclass
 
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
@@ -27,24 +27,28 @@ MIXTURE = {
 # (profile_step.py: peak 69.6 GiB with the optimizer state, 48.9 GiB at 65,536 tokens, so +20.7 GiB per 32,768 and over
 # 80 GB at 131,072), 1% faster per token than 65,536 (bench/h100.txt)
 MICRO_BATCH_TOKENS = 98_304
-MICRO_BATCH_ROWS = MICRO_BATCH_TOKENS // SEQ_LEN
 
 
-class Stage(NamedTuple):
-    """A training stage: its context (rows of seq_len tokens, MICRO_BATCH_TOKENS // seq_len per micro-batch), RoPE base
-    and mixture {group: (share, corpora)}."""
+@dataclass(frozen=True, kw_only=True)
+class Stage:
+    """A training stage: its context (rows of seq_len tokens), RoPE base and mixture {group: (share, corpora)}."""
     seq_len: int
-    rope_base: int
+    rope_base: float
     mixture: dict
+
+    @property
+    def batch_rows(self):
+        """Rows per micro-batch: MICRO_BATCH_TOKENS // seq_len."""
+        return MICRO_BATCH_TOKENS // self.seq_len
 
 
 # Qwen2.5-Coder's two pretraining stages (arXiv 2409.12186 §3.2): file-level at 8,192 tokens, then repo-level, the
 # context extended to 32,768 tokens and "RoPE's base frequency is adjusted from 10,000 to 1,000,000" (§3.2.2), on
-# long-context code: here the code corpora whose documents are repository samples (data/sources.py REPOSITORY_FILE), at
+# long-context code: here the code corpora whose documents are repository samples (data/schema.py REPOSITORY_FILE), at
 # their natural row shares.
-FILE_STAGE = Stage(SEQ_LEN, 10_000, MIXTURE)
-REPO_STAGE = Stage(32_768, 1_000_000, {"code": (1.0, [c for c in MIXTURE["code"][1]
-                                                      if SOURCES[c].schema is REPOSITORY_FILE])})
+FILE_STAGE = Stage(seq_len=SEQ_LEN, rope_base=10_000, mixture=MIXTURE)
+REPO_STAGE = Stage(seq_len=32_768, rope_base=1_000_000,
+                   mixture={"code": (1.0, [c for c in MIXTURE["code"][1] if SOURCES[c].schema is REPOSITORY_FILE])})
 # The repo-level stage's share of a run's tokens: Qwen2.5-Coder's ~300B of its 5.2T file-level + 300B tokens (§3.2.1-2)
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
 

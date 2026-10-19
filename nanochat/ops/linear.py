@@ -3,7 +3,7 @@ dtype straight from the GEMM's fp32 accumulators (nn.Linear and QuACK's linear/m
 relative error up to 2^-9 per element). Ops, not autograd.Functions, so a fullgraph torch.compile
 traces through them.
 
-nanochat::linear (attention projections c_q, c_k, c_v, c_proj): y = x W^T, backward nanochat::linear_bwd (dX = dY W,
+nanochat::linear (attention projections c_q, c_k, c_v, c_o): y = x W^T, backward nanochat::linear_bwd (dX = dY W,
 dW = dY^T X). QuACK (Tri Dao, CuTe DSL) for y and dX; every dW GEMM (here and in the MLP) QuACK or cuBLAS per width
 (ops/quack_gemm.py's table). quack.linear.linear_func is not used: it rounds dW to the weight's dtype.
 
@@ -81,8 +81,7 @@ def relu2_mlp_bwd(dy: Tensor, x: Tensor, preact: Tensor, w_fc: Tensor, w_proj: T
     pre-activation; the post-activation is recomputed in the dact GEMM's epilogue."""
     C = x.shape[-1]
     dy2, x2 = dy.reshape(-1, C).contiguous(), x.reshape(-1, C)
-    dpreact, postact = gemm_dact(dy2, w_proj.to(x.dtype), preact, activation="relu_sq", dynamic_scheduler=True,
-                                 config=TABLE[C]["mlp_dact"])
+    dpreact, postact = gemm_dact(dy2, w_proj.to(x.dtype), preact, activation="relu_sq", config=TABLE[C]["mlp_dact"])
     dw_proj = gemm(dy2.t(), postact, "mlp_dw_proj", C, w_proj.dtype, 1)
     del postact
     dx = gemm(dpreact, w_fc.to(x.dtype), "mlp_dx", C, x.dtype, 1).view(x.shape)

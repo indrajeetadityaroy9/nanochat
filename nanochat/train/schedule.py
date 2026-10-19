@@ -18,7 +18,7 @@ from nanochat.train.optim import BETAS
 WARMUP = round(2 / (1 - BETAS[1]))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RunPlan:
     """The derived settings of one run (plan); the run record holds them, all that reproduces its hyperparameters with
     train/optim.py's fixed constants."""

@@ -1,40 +1,32 @@
-"""The block's GEMM work, forward + backward, at width C and M = 65,536 tokens on this GPU: ours (bf16: nanochat::linear
-for q, k, v, o and nanochat::relu2_mlp after the RMS norm) vs Transformer Engine (te.Linear for qkv (C -> 3C) and o, and
+"""The block's GEMM work, forward + backward, at the d24 width C (gpt_config(24, VOCAB_SIZE, FILE_STAGE,
+aspect_ratio=ASPECT_RATIO)) and M = MICRO_BATCH_TOKENS tokens on this GPU: ours (bf16: nanochat::linear for q, k, v, o
+and nanochat::relu2_mlp after the RMS norm) vs Transformer Engine (te.Linear for qkv (C -> 3C) and o, and
 te.LayerNormMLP with RMSNorm and squared ReLU) in bf16 and under FP8 recipes (DelayedScaling, Float8CurrentScaling,
-Float8BlockScaling). Median ms of 20 timed iterations after 5 warmup. Usage: python -m bench.te_bench C"""
-import statistics
-import sys
-
+Float8BlockScaling; all three run on H100, bench/h100.txt). Median ms of torch.utils.benchmark.Timer.blocked_autorange's
+measurements. Usage: python -m bench.te_bench"""
 import torch
 import torch.nn.functional as F
 import transformer_engine.pytorch as te
+from torch.utils import benchmark
 from transformer_engine.common import recipe
 
+from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, VOCAB_SIZE
+from nanochat.model.gpt import ASPECT_RATIO, gpt_config
 from nanochat.ops.linear import linear, relu2_mlp
 
-C, M = int(sys.argv[1]), 65536
+C, M = gpt_config(24, VOCAB_SIZE, FILE_STAGE, aspect_ratio=ASPECT_RATIO).n_embd, MICRO_BATCH_TOKENS
 dev = "cuda"
 torch.manual_seed(0)
-
-
-def timed(f):
-    for _ in range(5):
-        f()
-    torch.cuda.synchronize()
-    out = []
-    for _ in range(20):
-        s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        s.record(); f(); e.record(); torch.cuda.synchronize()
-        out.append(s.elapsed_time(e))
-    return statistics.median(out)
-
-
 x = torch.randn(M, C, device=dev, dtype=torch.bfloat16, requires_grad=True)
 dy = torch.randn(M, C, device=dev, dtype=torch.bfloat16)
 s = 3 ** 0.5 * C ** -0.5
 wq, wk, wv, wo = (torch.empty(C, C, device=dev).uniform_(-s, s).requires_grad_() for _ in range(4))
 wfc = torch.empty(4 * C, C, device=dev).uniform_(-s, s).requires_grad_()
 wproj = torch.empty(C, 4 * C, device=dev).uniform_(-s / 2, s / 2).requires_grad_()
+
+
+def ms(f):
+    return benchmark.Timer("f()", globals={"f": f}).blocked_autorange().median * 1e3
 
 
 def ours():
@@ -64,12 +56,9 @@ def te_block(fp8_recipe):
 
 
 print(f"C {C}, M {M}, {torch.cuda.get_device_name()}")
-print(f"ours bf16 (QuACK)          {timed(ours):8.2f} ms")
+print(f"ours bf16 (QuACK)          {ms(ours):8.2f} ms")
 with torch.autocast("cuda", dtype=torch.bfloat16):
-    print(f"TE bf16                    {timed(te_block(None)):8.2f} ms")
+    print(f"TE bf16                    {ms(te_block(None)):8.2f} ms")
     for name, r in (("DelayedScaling", recipe.DelayedScaling()), ("Float8CurrentScaling", recipe.Float8CurrentScaling()),
                     ("Float8BlockScaling", recipe.Float8BlockScaling())):
-        try:
-            print(f"TE fp8 {name:20s}{timed(te_block(r)):8.2f} ms")
-        except Exception as err:  # a recipe this GPU or build does not support
-            print(f"TE fp8 {name:20s} unsupported: {type(err).__name__}: {str(err)[:120]}")
+        print(f"TE fp8 {name:20s}{ms(te_block(r)):8.2f} ms")

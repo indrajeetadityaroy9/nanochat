@@ -6,11 +6,13 @@ python -m scripts.base_train --depth=<depth> --target-param-data-ratio=<tokens p
 
 Every other setting is derived: nanochat/config.py (the stages' contexts, RoPE bases and mixtures, micro-batch),
 nanochat/train/schedule.py (batch, horizon, the repo-level stage's first step, peak lr, lr schedule) and
-nanochat/train/optim.py (the optimizer groups). The run trains the file-level stage, then from the plan's repo_start on
-the repo-level stage (config.REPO_STAGE: the model continues at its context and RoPE base), on the next token with the
-packs' fill-in-the-middle pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1; data/pack.py). The run's
-tag is config.run_tag. --save-every writes full checkpoints (only the newest is kept); every start resumes from the tag's
-newest checkpoint. Metrics: <base_dir>/metrics/<tag>.jsonl (nanochat/train/metrics.py).
+nanochat/train/optim.py (the optimizer groups, gradient clipping). The run trains the file-level stage, then from the
+plan's repo_start on the repo-level stage (config.REPO_STAGE: the model continues at its context and RoPE base), on the
+next token with the packs' fill-in-the-middle pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
+data/pack.py). The run's tag is config.run_tag. --save-every writes full checkpoints (only the newest is kept); every
+start resumes from the tag's newest checkpoint, and continues bitwise as the uninterrupted run would (the gradients are
+deterministic, model/gpt.py; the data order is the seed's). Metrics: <base_dir>/metrics/<tag>.jsonl
+(nanochat/train/metrics.py).
 """
 
 import argparse
@@ -18,17 +20,19 @@ import gc
 import os
 import time
 from dataclasses import asdict
+from functools import partial
 
 import numpy as np
 import torch
+from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE, run_tag
+from nanochat.config import FILE_STAGE, REPO_STAGE, run_tag
 from nanochat.data.loader import PretrainingBatches
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import ASPECT_RATIO, GPT, gpt_config
 from nanochat.train import metrics, stages
 from nanochat.train.checkpoint import checkpoint_path, save_checkpoint
-from nanochat.train.optim import optimizers
+from nanochat.train.optim import GRAD_CLIP, optimizers
 from nanochat.train.schedule import lr_multiplier, plan
 
 
@@ -59,6 +63,10 @@ def main():
             opt.load_state_dict(state)
         start_step, stage_rows = checkpoint["step"], checkpoint["stage_rows"]
         del checkpoint
+    # every group's lr: its initial lr (run.lr) x lr_multiplier(step); a resumed scheduler starts at start_step from the
+    # initial lr the loaded optimizer state holds
+    schedulers = [LambdaLR(opt, partial(lr_multiplier, n=run.num_iterations), last_epoch=start_step - 1)
+                  for opt in (adamw, muon)]
     step = start_step
     stage = REPO_STAGE if start_step >= run.repo_start else FILE_STAGE
     orig_model.set_stage(stage)
@@ -72,14 +80,14 @@ def main():
         readable = stages.readable_rows(stage, run, tokenizer)
         orders = {corpus: np.random.RandomState(args.seed).permutation(readable[corpus]) for corpus in mixture}
         batches = PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=stage.seq_len,
-                                     batch_rows=MICRO_BATCH_TOKENS // stage.seq_len, device=device, reading="fim",
+                                     batch_rows=stage.batch_rows, device=device, reading="fim",
                                      start=start)
         return mixture, iter(batches)
 
     mixture, train_iter = stage_batches(stage, stage_rows)
     batches = [next(train_iter) for _ in range(run.grad_accum_steps)] if start_step < run.num_iterations else []
     metrics.append(model_tag, {"kind": "run", "step": start_step, "args": vars(args), "plan": asdict(run),
-                               "stage": stage._asdict() | {"mixture": mixture}})
+                               "stage": asdict(stage) | {"mixture": mixture}})
     params = list(orig_model.parameters())
 
     while True:
@@ -90,7 +98,7 @@ def main():
             stage, stage_rows = REPO_STAGE, 0
             orig_model.set_stage(stage)
             model = torch.compile(orig_model, dynamic=False, fullgraph=True)
-            metrics.append(model_tag, {"kind": "stage", "step": step, "stage": stage._asdict() | {"mixture": mixture}})
+            metrics.append(model_tag, {"kind": "stage", "step": step, "stage": asdict(stage) | {"mixture": mixture}})
         # the state after `step` steps, with the stage of the step after it: a full checkpoint
         if step != start_step and (last_step or step % args.save_every == 0):
             save_checkpoint(path, {"step": step, "model": orig_model.state_dict(),
@@ -118,14 +126,13 @@ def main():
             loss.backward()
             if step + 1 < run.num_iterations:
                 upcoming.append(next(train_iter))
-        grad_norm = torch.nn.utils.get_total_norm([p.grad for p in params])
-        lrm = lr_multiplier(step, run.num_iterations)
-        for opt in (adamw, muon):
-            for group in opt.param_groups:
-                group["lr"] = run.lr * lrm
+        grad_norm = torch.nn.utils.clip_grad_norm_(params, GRAD_CLIP)  # the norm before clipping
+        lr = schedulers[0].get_last_lr()[0]
+        for opt, scheduler in zip((adamw, muon), schedulers, strict=True):
             opt.step()
+            scheduler.step()
         model.zero_grad()
-        stage_rows += len(batches) * MICRO_BATCH_TOKENS // stage.seq_len
+        stage_rows += len(batches) * stage.batch_rows
         batches = upcoming
         torch.cuda.synchronize()
         dt = time.time() - t0
@@ -133,7 +140,7 @@ def main():
         # the step loss summed in fp64 on the device, read with the grad norm in one host synchronization
         loss_value, grad_norm_value = torch.stack([torch.stack(losses).double().sum(), grad_norm.double()]).tolist()
         metrics.append(model_tag, {"kind": "train", "step": step, "tokens": (step + 1) * run.total_batch_size,
-                                   "loss": loss_value, "lrm": lrm, "grad_norm": grad_norm_value,
+                                   "loss": loss_value, "lr": lr, "grad_norm": grad_norm_value,
                                    "tok_per_s": run.total_batch_size / dt})
         if step == start_step:
             # A training step leaves no cyclic garbage: after the setup's is collected, the collector stays off (its

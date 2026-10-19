@@ -78,7 +78,7 @@ COPY --from=enry /go-enry/python /tmp/enry
 RUN uv pip install --no-deps --no-build-isolation /tmp/enry && rm -rf /tmp/enry
 
 # TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0: the NGC base image sets it to 1, which runs every fp32 cuBLAS matmul in TF32
-# (rel err vs fp64 ~1e-4 at the fp32 VE-gate GEMM); the precision policy keeps fp32 as fp32.
+# (10-bit mantissa); the precision policy keeps fp32 as fp32.
 # HF_XET_HIGH_PERFORMANCE: saturate network and CPUs when pulling raw corpora from the Hugging Face Hub. The compiler and
 # kernel caches (Inductor, Triton, quack, FlashAttention-4 CuTe, cargo's crates) and the user cache directory (evalplus's
 # data releases and ground truth: appdirs' XDG_CACHE_HOME) live under /runs so that every run after the first reuses

@@ -7,13 +7,13 @@ import time
 
 import torch
 
-from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE
+from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE, VOCAB_SIZE
 from nanochat.model.gpt import GPT, gpt_config
 
 depth, aspect = int(sys.argv[1]), int(sys.argv[2])
 micro = int(sys.argv[3]) if len(sys.argv) > 3 else MICRO_BATCH_TOKENS
 with torch.device("meta"):
-    orig = GPT(gpt_config(depth, 32768, FILE_STAGE, aspect_ratio=aspect))
+    orig = GPT(gpt_config(depth, VOCAB_SIZE, FILE_STAGE, aspect_ratio=aspect))
 orig.to_empty(device="cuda")
 orig.init_weights()
 for stage, segments in ((FILE_STAGE, 4), (REPO_STAGE, 1)):
@@ -21,8 +21,8 @@ for stage, segments in ((FILE_STAGE, 4), (REPO_STAGE, 1)):
     model = torch.compile(orig, dynamic=False, fullgraph=True)
     rows, T = micro // stage.seq_len, stage.seq_len
     g = torch.Generator(device="cuda").manual_seed(0)
-    x = torch.randint(0, 32768, (rows, T), device="cuda", generator=g, dtype=torch.int32)
-    y = torch.randint(0, 32768, (rows, T), device="cuda", generator=g)
+    x = torch.randint(0, VOCAB_SIZE, (rows, T), device="cuda", generator=g, dtype=torch.int32)
+    y = torch.randint(0, VOCAB_SIZE, (rows, T), device="cuda", generator=g)
     cu = torch.arange(0, rows * T + 1, T // segments, device="cuda", dtype=torch.int32)
     for _ in range(3):
         model(x, y, cu_seqlens=cu).backward()

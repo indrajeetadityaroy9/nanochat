@@ -29,10 +29,10 @@ def infilling(name, problems, middles):
     with tempfile.TemporaryDirectory() as tmp:
         samples = os.path.join(tmp, "samples.jsonl")
         with open(samples, "w", encoding="utf-8") as f:
-            for p, middle in zip(problems, middles, strict=False):
+            for p, middle in zip(problems, middles, strict=True):
                 f.write(json.dumps({"task_id": p["task_id"], "completion": middle}) + "\n")
         subprocess.run([sys.executable, "-I", "-m", "human_eval_infilling.evaluate_functional_correctness", name,
-                        samples], cwd=tmp)
+                        samples], cwd=tmp, check=True)
         with open(samples + "_results.jsonl", encoding="utf-8") as f:
             scored = [json.loads(line) for line in f]
     return {"pass@1": float(estimate_pass_at_k(1, [s["passed"] for s in scored], 1).mean()),
@@ -41,7 +41,7 @@ def infilling(name, problems, middles):
 
 def fim_generation(model, tokenizer):
     """{"<benchmark>/<mode>": infilling(...)} of greedy middles in each FIM_MODES order."""
-    decoder, results = NativeDecoder(model), {}
+    decoder, results = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id), {}
     for name in BENCHMARKS:
         problems = list(read_problems(name).values())
         max_tokens = max(len(tokenizer.enc.encode_ordinary(p["canonical_solution"])) for p in problems)

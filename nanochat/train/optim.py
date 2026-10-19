@@ -9,12 +9,14 @@ momentum 0.95, Newton-Schulz coefficients and 5 steps are torch.optim.Muon's def
 
 import torch
 
-# DeepSeek LLM's AdamW (arXiv 2401.02954 §2.3): "beta1 = 0.9, beta2 = 0.95, and weight_decay = 0.1"
-BETAS, WEIGHT_DECAY = (0.9, 0.95), 0.1
+# DeepSeek LLM's AdamW (arXiv 2401.02954 §2.3): "beta1 = 0.9, beta2 = 0.95, and weight_decay = 0.1"; and its clipping,
+# "The gradient clipping during the training phase is set to 1.0" (DeepSeek-Coder §3.4 follows DeepSeek LLM): the step's
+# gradient scaled to L2 norm GRAD_CLIP when above it, torch.nn.utils.clip_grad_norm_ in the trainer
+BETAS, WEIGHT_DECAY, GRAD_CLIP = (0.9, 0.95), 0.1, 1.0
 
 
 def optimizers(model, lr):
-    """(AdamW, Muon) of a GPT at peak lr (the trainer scales every group's lr by schedule.lr_multiplier each step):
+    """(AdamW, Muon) of a GPT at peak lr (the trainer's LambdaLR scales every group's lr by schedule.lr_multiplier):
     AdamW with weight decay on the token tables and lm_head and without on the 1-D parameters (nanoGPT model.py
     configure_optimizers: "all weight tensors in matmuls + embeddings decay, all biases and layernorms don't"); Muon on
     every other matrix."""

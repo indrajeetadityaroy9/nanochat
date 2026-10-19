@@ -7,10 +7,11 @@ kind "run" (one per process start): step (the step the process starts from), arg
     (the stage of that step, config.Stage: seq_len, rope_base, mixture as {corpus: row weight}).
 kind "stage" (at the switch to the repo-level stage): step, stage (as in "run").
 kind "train" (every optimizer step): step (0-based), tokens (row positions after it, padding included), loss (the step's
-    training loss: the mean next-token loss over the step's valid targets, summed over its micro-batches in fp64), lrm
-    (the lr multiplier of every group, train/schedule.py lr_multiplier), grad_norm (L2 norm of the gradient of every
-    parameter, torch.nn.utils.get_total_norm), tok_per_s (row positions per second, padding included, as tokens, over
-    the step's time between two CUDA synchronizations: its loader reads, forward/backward passes and optimizer step).
+    training loss: the mean next-token loss over the step's valid targets, summed over its micro-batches in fp64), lr
+    (the lr of every group at the step: the plan's lr x train/schedule.py lr_multiplier, by LambdaLR), grad_norm (L2
+    norm of the gradient of every parameter before clipping to optim.GRAD_CLIP, torch.nn.utils.clip_grad_norm_),
+    tok_per_s (row positions per second, padding included, as tokens, over the step's time between two CUDA
+    synchronizations: its loader reads, forward/backward passes and optimizer step).
 """
 
 import json

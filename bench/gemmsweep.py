@@ -2,14 +2,15 @@
 C and M tokens on the current GPU, exactly as nanochat calls them: QuACK's candidates for this device's compute
 capability (quack.gemm_config.get_all_configs() filtered to it: the autotuner's list; configs a call rejects are
 dropped); the weight-gradient roles (proj_dw, mlp_dw_proj, mlp_dw_fc, lm_dw) at every tile config the call accepts x
-serial split-K 1/2/4/8/16, plus cuBLAS (torch.mm, fp32 out) for those without alpha, each with its rel L2 error vs fp64
-(same bf16 inputs, fp64 sum chunked over M). Timing as autotune/sweep.py: median of ROUNDS interleaved rounds, a CUDA
+serial split-K 1/2/4/8/16, plus cuBLAS (torch.mm(out_dtype), the production path) for those without alpha, each with its
+rel L2 error vs fp64 (same bf16 inputs, fp64 sum chunked over M). Timing: median of ROUNDS interleaved rounds, a CUDA
 graph of >= TARGET_MS of calls per replay, config order rotated each round; kernels compiled first in QuACK's pool.
 Usage: python -m bench.gemmsweep OUT.jsonl M C [C ...]; each line {"M", "C", "role", "config" (GemmConfig's fields, or
 "cublas"), "ms": [per round], "err" (dW)}."""
 import dataclasses
 import json
 import math
+import statistics
 import sys
 import time
 
@@ -18,7 +19,9 @@ from quack.cache.async_compile import CompilePending, pool_scope
 from quack.gemm_config import get_all_configs
 from quack.gemm_interface import gemm_act, gemm_dact, gemm_tuned, prune_invalid_gemm_configs
 
-ROUNDS, TARGET_MS, SPLITS, CHUNK, V = 5, 30.0, (1, 2, 4, 8, 16), 4096, 32768
+from nanochat.config import VOCAB_SIZE
+
+ROUNDS, TARGET_MS, SPLITS, CHUNK, V = 5, 30.0, (1, 2, 4, 8, 16), 4096, VOCAB_SIZE
 CAPACITY = torch.cuda.get_device_capability()[0]
 DEVICE_CONFIGS = [c for c in get_all_configs() if c.device_capacity == CAPACITY]
 out_path, M, widths = sys.argv[1], int(sys.argv[2]), [int(c) for c in sys.argv[3:]]
@@ -146,7 +149,7 @@ with open(out_path, "a") as fh:
                 fh.write(json.dumps({"M": M, "C": C, "role": role, "config": fields[c], "ms": ms}
                                     | ({"err": err[c]} if err else {})) + "\n")
             fh.flush()
-            best = min(times, key=lambda c: sorted(times[c])[ROUNDS // 2])
-            print(f"C {C} M {M} {role}: {len(ok)} configs, {time.time() - t0:.1f} s, best {sorted(times[best])[ROUNDS // 2]:.4f} ms {best}", flush=True)
+            best = min(times, key=lambda c: statistics.median(times[c]))
+            print(f"C {C} M {M} {role}: {len(ok)} configs, {time.time() - t0:.1f} s, best {statistics.median(times[best]):.4f} ms {best}", flush=True)
         del rs
         torch.cuda.empty_cache()

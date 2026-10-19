@@ -9,8 +9,10 @@ and Qwen3's QK norm with learnable gains (arXiv 2505.09388 §2).
   2026-01-17); FlashAttention-4 with document masking (ops/flash_attn.py).
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
 - RMS norm without gains, linear layers without bias, untied lm_head (modded-nanogpt record #8), plain cross entropy.
-Parameters are fp32 masters; activations bf16: the tables are looked up and rounded once, every matmul runs through the
-nanochat ops, which round the weights inside. The optimizer's parameter groups are train/optim.py's.
+Parameters are fp32 masters; activations bf16: the tables are looked up and rounded once (ops/embedding.py), every
+matmul runs through the nanochat ops, which round the weights inside. Every gradient is summed in a fixed order (the
+embedding and q/k prologue kernels without atomics, FA4's deterministic backward), so a training step is bitwise
+reproducible. The optimizer's parameter groups are train/optim.py's.
 """
 
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from nanochat.ops.cross_entropy import lm_loss, lm_losses
+from nanochat.ops.embedding import embedding
 from nanochat.ops.flash_attn import flash_attn
 from nanochat.ops.linear import linear, relu2_mlp
 from nanochat.ops.qk_prologue import qk_norm_rope
@@ -112,10 +115,12 @@ class Block(nn.Module):
         n = norm(x)
         q, k, v = (linear(n, w).view(B, T, self.n_head, -1) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
         # Value residual: the value embedding mixed in with an input-dependent gate per head, 2 sigmoid(.) in (0, 2),
-        # 1 at the zero-init gate weight (unit weight at init); in fp32 (the gate's weight gradient reduced in fp32
-        # straight to its fp32 .grad), rounded once to bf16
+        # 1 at the zero-init gate weight (unit weight at init); in fp32, rounded once to bf16. The gate's H dot products
+        # as a broadcast-sum, which Inductor fuses into reductions over n (fp32 throughout, the weight gradient
+        # included) where F.linear ran fp32 GEMMs on CUDA cores: 0.88 vs 1.20 ms per layer and d24 micro-batch, fwd+bwd
+        # of gate and mix (bench/h100.txt)
         if ve is not None:
-            gate = 2 * torch.sigmoid(F.linear(n.float(), self.ve_gate.weight))  # (B, T, H)
+            gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))  # (B, T, H)
             v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
         # per head RMS norm, the q / k gain, RoPE (ops/qk_prologue.cu, one pass over memory per direction: its forward
         # and backward take 228 ms of a d24 step where Inductor's fusion of the same ops takes 336 ms, bench/h100.txt)
@@ -144,7 +149,7 @@ class GPT(nn.Module):
         self.x0_lambdas = nn.Parameter(torch.empty(config.n_layer))
         self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(V, C) for i in range(config.n_layer)
                                            if has_ve(i, config.n_layer)})
-        # the rotary tables of the context (rotary_tables), computed by init_weights and set_stage
+        # the rotary tables of the context (rotary_tables), computed by init_weights, set_stage and checkpoint.load_model
         self.register_buffer("cos", None, persistent=False)
         self.register_buffer("sin", None, persistent=False)
 
@@ -182,13 +187,13 @@ class GPT(nn.Module):
         """The final normed hidden states (B*T, C) of idx (B, T) token ids; cu_seqlens: the int32 attention segments of
         the flattened idx (document masking; data/loader.py PretrainingBatches). kv_cache (decoder prefill) receives
         every layer's keys and values."""
-        x = norm(self.wte(idx).to(torch.bfloat16))
+        x = norm(embedding(self.wte.weight, idx))
         x0 = x
         for i, block in enumerate(self.blocks):
             # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 (no fp32 copies of the mix saved for
             # the backward, as an explicit fp32 mix would)
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](idx).to(torch.bfloat16) if str(i) in self.value_embeds else None
+            ve = embedding(self.value_embeds[str(i)].weight, idx) if str(i) in self.value_embeds else None
             x = block(x, ve, (self.cos, self.sin), self.window_sizes[i], kv_cache, cu_seqlens)
         return norm(x).flatten(0, 1)
 

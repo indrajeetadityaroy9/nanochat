@@ -11,20 +11,21 @@ library is compiled from decode.cu once per source revision and GPU architecture
 import ctypes
 import os
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Literal
 
 import numpy as np
 import torch
 
-from nanochat.data.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX, SPECIAL_TOKENS
+from nanochat.data.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX
 from nanochat.model.gpt import has_ve
 from nanochat.native import cuda_library
 
 SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decode.cu")
 
 
-def fim_prompt(tokenizer, prefix, suffix, mode):
+def fim_prompt(tokenizer, prefix, suffix, mode: Literal["psm", "spm"]):
     """The token ids of a fill-in-the-middle prompt for the text between prefix and suffix (strings, each encoded on its
     own), in the layout the packer trains (nanochat/data/pack.py, loader.py; Bavarian et al. arXiv 2207.14255 §3, App. D):
         psm: BOS <fim_prefix> prefix <fim_suffix> suffix <fim_middle>
@@ -33,9 +34,11 @@ def fim_prompt(tokenizer, prefix, suffix, mode):
     special = tokenizer.special_tokens
     pre, suf, mid = special[FIM_PREFIX], special[FIM_SUFFIX], special[FIM_MIDDLE]
     p, s = tokenizer.enc.encode_ordinary(prefix), tokenizer.enc.encode_ordinary(suffix)
-    if mode == "psm":
-        return [tokenizer.bos_token_id, pre, *p, suf, *s, mid]
-    return [tokenizer.bos_token_id, pre, suf, *s, mid, *p]
+    match mode:
+        case "psm":
+            return [tokenizer.bos_token_id, pre, *p, suf, *s, mid]
+        case "spm":
+            return [tokenizer.bos_token_id, pre, suf, *s, mid, *p]
 
 
 class KVCache:
@@ -52,7 +55,7 @@ class _Slot:
     """A sequence in a decoder slot: its request's index, its budget and stop rule, the generated tokens."""
     index: int
     budget: int
-    stop: Optional[Callable]
+    stop: Callable | None
     out: list = field(default_factory=list)
 
 
@@ -65,7 +68,7 @@ class NativeDecoder:
     until the KV caches' bytes dominate the step."""
 
     @torch.no_grad()
-    def __init__(self, model):
+    def __init__(self, model, *, bos_token_id):
         lib = cuda_library("decode", SOURCE)
         lib.dec_create.argtypes = [ctypes.c_void_p] * 5
         lib.dec_create.restype = ctypes.c_void_p
@@ -82,8 +85,12 @@ class NativeDecoder:
         # decode.cu reads bf16 copies of the matrices and tables (the rounding the forward applies to the fp32
         # parameters at use) and fp32 copies of the q/k gains and value-embedding gate weights, which gpt.py uses in
         # fp32, as it does the rotary table
-        bf16 = lambda name: p[name].to(torch.bfloat16)
-        fp32 = lambda name: p[name].clone()
+        def bf16(name):
+            return p[name].to(torch.bfloat16)
+
+        def fp32(name):
+            return p[name].clone()
+
         weights = [bf16("wte.weight"), model.cos, model.sin, bf16("lm_head.weight")]
         for i in range(L):
             b = f"blocks.{i}."
@@ -103,8 +110,7 @@ class NativeDecoder:
         slot_bytes = 2 * (2 * L * T * C + 9 * C + hidden) + 4 * cfg.n_head * T * (C // cfg.n_head + 2)
         self.batch = min(lib.dec_max_batch(), torch.cuda.mem_get_info()[0] // slot_bytes)
         config = np.array([L, C, hidden, cfg.vocab_size, T, self.batch], dtype=np.int32)
-        # BOS: the first special token (data/tokenizer.py SPECIAL_TOKENS: the vocabulary's last ids, BOS first)
-        self.bos = cfg.vocab_size - len(SPECIAL_TOKENS)
+        self.bos = bos_token_id
         # Every buffer decode.cu reads or writes is a tensor of this object or its own, and the stream is torch's (its
         # pool streams live as long as the process), so dec_destroy (the finalizer, before these tensors are freed) is
         # the decoder's only release of native resources.

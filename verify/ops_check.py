@@ -1,28 +1,24 @@
 """The ops against fp64, next to the plain bf16 PyTorch formulation as the noise baseline: qk_norm_rope (per-head RMS
-norm, fp32 gains, full-head rotary; q and k column slices of a fused qkv, so at a non-dense token stride), relu2_mlp
-(QuACK relu_sq act/dact) at the table's widths, lm_loss / lm_losses (QuACK cross entropy). Prints rel L2 errors."""
+norm, fp32 gains, full-head rotary; contiguous (B, T, H, 128) q and k, the layout model/gpt.py passes), relu2_mlp
+(QuACK relu_sq act/dact) at the table's widths, lm_loss / lm_losses (QuACK cross entropy), embedding (lookup exact;
+gradient vs fp64 and bitwise equal across two calls). Prints rel L2 errors. Sizes T 2048 and M 8192 are fixtures;
+the embedding's ids are Zipf-distributed (fixture), so frequent tokens span many partials as real text's do."""
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 from nanochat.config import FILE_STAGE, VOCAB_SIZE
 from nanochat.model.gpt import ASPECT_RATIO, gpt_config, rotary_tables
 from nanochat.ops.cross_entropy import lm_loss, lm_losses
+from nanochat.ops.embedding import embedding
 from nanochat.ops.linear import relu2_mlp
 from nanochat.ops.qk_prologue import qk_norm_rope
 from nanochat.ops.quack_gemm import TABLE
 
+from verify.reference import rel, rope
+
 torch.manual_seed(0)
 dev = "cuda"
-
-
-def rel(a, b):
-    return ((a.double() - b.double()).norm() / b.double().norm()).item()
-
-
-def rope(x, cos, sin):
-    d = x.size(-1) // 2
-    x1, x2 = x[..., :d], x[..., d:]
-    return torch.cat([x1 * cos + x2 * sin, -x1 * sin + x2 * cos], -1)
 
 
 def show(names, ours, base, ref):
@@ -34,20 +30,20 @@ def show(names, ours, base, ref):
 cfg = gpt_config(24, VOCAB_SIZE, FILE_STAGE, aspect_ratio=ASPECT_RATIO)
 cos, sin = rotary_tables(cfg, dev)
 B, T, H, D = 2, 2048, cfg.n_head, 128
-qkv = torch.randn(B, T, 3 * H, D, device=dev, dtype=torch.bfloat16, requires_grad=True)
+q = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16, requires_grad=True)
+k = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16, requires_grad=True)
 gq = torch.empty(D, device=dev).uniform_(0.5, 1.5).requires_grad_()
 gk = torch.empty(D, device=dev).uniform_(0.5, 1.5).requires_grad_()
-q, k = qkv[:, :, :H], qkv[:, :, H:2 * H]
 dq, dk = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16), torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16)
 qo, ko = qk_norm_rope(q, k, gq, gk, cos, sin)
 torch.autograd.backward([qo, ko], [dq, dk])
-ours = [qo, ko, qkv.grad[:, :, :H], qkv.grad[:, :, H:2 * H], gq.grad, gk.grad]
-qkv.grad = gq.grad = gk.grad = None
+ours = [qo, ko, q.grad, k.grad, gq.grad, gk.grad]
+q.grad = k.grad = gq.grad = gk.grad = None
 c, s = cos[None, :T, None].to(torch.bfloat16), sin[None, :T, None].to(torch.bfloat16)
 qb = rope(F.rms_norm(q, (D,)) * gq.to(torch.bfloat16), c, s)
 kb = rope(F.rms_norm(k, (D,)) * gk.to(torch.bfloat16), c, s)
 torch.autograd.backward([qb, kb], [dq, dk])
-base = [qb, kb, qkv.grad[:, :, :H], qkv.grad[:, :, H:2 * H], gq.grad, gk.grad]
+base = [qb, kb, q.grad, k.grad, gq.grad, gk.grad]
 q64, k64 = q.detach().double().requires_grad_(), k.detach().double().requires_grad_()
 gq64, gk64 = gq.detach().double().requires_grad_(), gk.detach().double().requires_grad_()
 c, s = cos[None, :T, None].double(), sin[None, :T, None].double()
@@ -55,7 +51,7 @@ eps = torch.finfo(torch.float32).eps
 q6 = rope(F.rms_norm(q64, (D,), eps=eps) * gq64, c, s)
 k6 = rope(F.rms_norm(k64, (D,), eps=eps) * gk64, c, s)
 torch.autograd.backward([q6, k6], [dq.double(), dk.double()])
-print(f"qk_norm_rope B {B} T {T} H {H} (token stride {q.stride(1)})")
+print(f"qk_norm_rope B {B} T {T} H {H}")
 show(["q", "k", "dq", "dk", "dq_gain", "dk_gain"], ours, base, [q6, k6, q64.grad, k64.grad, gq64.grad, gk64.grad])
 
 # relu2_mlp at the table's widths, M 8192
@@ -102,3 +98,19 @@ for C in TABLE:
     print(f"lm_loss C {C}")
     show(["loss", "dx", "dw"], ours, base, [l6, x6.grad, w6.grad])
     print(f"  lm_losses ours {rel(losses, ls6):.3e}; ignored rows max |loss| {losses[t == -1].abs().max().item():.1e}")
+
+# embedding at d24's width, the micro-batch's tokens, vocabulary 2^15
+C, V = cfg.n_embd, VOCAB_SIZE
+rng = np.random.default_rng(0)
+idx = torch.tensor(np.minimum(rng.zipf(1.1, (FILE_STAGE.batch_rows, FILE_STAGE.seq_len)), V) - 1, dtype=torch.int32,
+                   device=dev)
+table = (torch.randn(V, C, device=dev) * C ** -0.5).requires_grad_()
+dy = torch.randn(*idx.shape, C, device=dev, dtype=torch.bfloat16)
+out = embedding(table, idx)
+grads = [torch.autograd.grad(embedding(table, idx), table, dy)[0] for _ in range(2)]
+dw6 = torch.zeros(V, C, dtype=torch.float64, device=dev).index_add_(0, idx.flatten().long(), dy.reshape(-1, C).double())
+wb = F.embedding(idx, table).to(torch.bfloat16)
+print(f"embedding C {C}, {idx.numel()} ids, {idx.unique().numel()} distinct, most frequent "
+      f"x{idx.flatten().bincount().max().item()}")
+print(f"  lookup exact: {torch.equal(out, wb)}; dw ours {rel(grads[0], dw6):.3e}; bitwise equal across calls: "
+      f"{torch.equal(grads[0], grads[1])}")

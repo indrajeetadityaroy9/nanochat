@@ -5,9 +5,10 @@ own autograd.Function launches CuTe kernels that torch.compile cannot trace: tha
 layer and left the loss unfused.
 
 Document masking (ProLong, Gao et al. 2410.02660; modded-nanogpt track_1_short trains on varlen batches of whole
-documents): cu_seqlens, the int32 segment offsets of the flattened (B*T) tokens (data/loader.py; one segment per row
-where a row is one document), makes each segment attend within itself only, causal and windowed from its own start,
-through FA4's varlen kernels; T bounds every segment (the kernels size their grids from each segment's own length).
+documents): cu_seqlens, the int32 segment offsets of the flattened (B*T) tokens (data/loader.py PretrainingBatches:
+each piece of a row, a document, a document's cut part or a fill-in-the-middle example, and each row's padding is a
+segment), makes each segment attend within itself only, causal and windowed from its own start, through FA4's varlen
+kernels; T bounds every segment (the kernels size their grids from each segment's own length).
 """
 
 import torch
@@ -20,7 +21,7 @@ def _varlen(t):
     return t.reshape(-1, *t.shape[2:])
 
 
-@torch.library.custom_op("nanochat::flash_attn", mutates_args=())
+@torch.library.custom_op("nanochat::flash_attn", mutates_args=(), device_types="cuda")
 def flash_attn(q: Tensor, k: Tensor, v: Tensor, window_left: int, cu_seqlens: Tensor) -> tuple[Tensor, Tensor]:
     """(out (B, T, H, D) like q, lse fp32 (H, B*T): FA4's varlen layouts) of q, k, v (B, T, H, D) bf16."""
     T = q.size(1)
@@ -36,14 +37,16 @@ def _(q, k, v, window_left, cu_seqlens):
     return torch.empty_like(q), q.new_empty((H, B * T), dtype=torch.float32)
 
 
-@torch.library.custom_op("nanochat::flash_attn_bwd", mutates_args=())
+@torch.library.custom_op("nanochat::flash_attn_bwd", mutates_args=(), device_types="cuda")
 def flash_attn_bwd(dout: Tensor, q: Tensor, k: Tensor, v: Tensor, out: Tensor, lse: Tensor, window_left: int,
                    cu_seqlens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """(dq, dk, dv) like q, k, v given dout and the forward's out and lse."""
+    """(dq, dk, dv) like q, k, v given dout and the forward's out and lse. FA4's deterministic backward (dq summed in a
+    fixed order, not by atomics): with ops/embedding and ops/qk_prologue a step's gradients are bitwise reproducible,
+    at +1.5% fwd+bwd time per d24 micro-batch (bench/h100.txt)."""
     T = q.size(1)
     grads = _flash_attn_bwd(_varlen(q), _varlen(k), _varlen(v), _varlen(out), _varlen(dout), lse, causal=True,
                             window_size_left=window_left, cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-                            max_seqlen_q=T, max_seqlen_k=T)
+                            max_seqlen_q=T, max_seqlen_k=T, deterministic=True)
     return tuple(g.view(q.shape) for g in grads)  # q, k, v share one shape (MHA)
 
 

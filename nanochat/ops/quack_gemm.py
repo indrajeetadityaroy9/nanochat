@@ -5,7 +5,7 @@ shape). QuACK compiles kernels for symbolic shapes and caches them under QUACK_C
 every M.
 
 GEMMs (C the width, h = 4C the MLP hidden size, V the vocabulary, M tokens; ops/linear.py, ops/cross_entropy.py):
-  proj_fwd    x W^T                    (M, C) x (C, C)     attention projections c_q, c_k, c_v, c_proj
+  proj_fwd    x W^T                    (M, C) x (C, C)     attention projections c_q, c_k, c_v, c_o
   proj_dx     dY W                     (M, C) x (C, C)
   proj_dw     dY^T X -> fp32           (C, M) x (M, C)
   mlp_up      x W_fc^T                 (M, C) x (C, h)     relu^2 epilogue (quack gemm_act)
@@ -18,14 +18,13 @@ GEMMs (C the width, h = 4C the MLP hidden size, V the vocabulary, M tokens; ops/
   lm_dw       dz^T x -> fp32           (V, M) x (M, C)
 
 TABLE holds the widths of the d8 smoke model (256) and the d24 production model (768). It is a measurement record on the
-H100 80 GB SXM5 (sm_90, at its 700 W power cap): median times of interleaved CUDA-graph rounds at M = 65,536 (the
-micro-batch then; config.MICRO_BATCH_TOKENS' 98,304 runs 1% faster per token with them, bench/h100.txt) of QuACK's SM90
-candidates (all 44: tiles x pingpong x cluster 1x2 / 2x1 x swap_ab), the weight-gradient roles also at serial split-K
-1..16 and cuBLAS (torch.mm, fp32 out; "cublas"):
+H100 80 GB SXM5 (sm_90, at its 700 W power cap): median times of interleaved CUDA-graph rounds at
+M = config.MICRO_BATCH_TOKENS (98,304) of QuACK's SM90 candidates (all 44: tiles x pingpong x cluster 1x2 / 2x1 x
+swap_ab), the weight-gradient roles also at serial split-K 1..16 and cuBLAS (torch.mm, fp32 out; "cublas"):
 bench/gemmsweep.py (gemmsweep_sm90.jsonl; bench/gemmtable.py -> gemmtable_sm90.txt).
 Forward and dX roles: the fastest. Weight-gradient roles: among the configs within 1% of the fastest, the most accurate
-(rel. error vs fp64 depends only on the split-K factor s: 7.59e-5 / 3.77e-5 / 1.86e-5 / 9.11e-6 / 4.40e-6 at
-s = 1 / 2 / 4 / 8 / 16; cuBLAS 7.59e-5), then the fastest.
+(rel. error vs fp64 depends only on the split-K factor s: 1.14e-4 / 5.67e-5 / 2.82e-5 / 1.38e-5 / 6.76e-6 at
+s = 1 / 2 / 4 / 8 / 16; cuBLAS 1.38e-5 to 5.68e-5), then the fastest.
 
 Each config: the tile (tile_m x tile_n), pingpong or cooperative, swap_ab, the thread-block cluster, serial split-K
 (deterministic; 1 when not given); not dynamic-persistent, as QuACK's SM90 candidates (quack.gemm_config
@@ -42,37 +41,38 @@ SM90 = partial(GemmConfig, is_dynamic_persistent=False, device_capacity=9)
 TABLE = {
     256: dict(
         proj_fwd=SM90(tile_m=128, tile_n=128, pingpong=True, swap_ab=False, cluster_m=1, cluster_n=2),
-        proj_dx=SM90(tile_m=128, tile_n=128, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
+        proj_dx=SM90(tile_m=192, tile_n=128, pingpong=True, swap_ab=False, cluster_m=1, cluster_n=2),
         proj_dw="cublas",
-        mlp_up=SM90(tile_m=128, tile_n=224, pingpong=False, swap_ab=True, cluster_m=2, cluster_n=1),
-        mlp_down=SM90(tile_m=128, tile_n=128, pingpong=True, swap_ab=False, cluster_m=1, cluster_n=2),
+        mlp_up=SM90(tile_m=128, tile_n=256, pingpong=False, swap_ab=True, cluster_m=1, cluster_n=2),
+        mlp_down=SM90(tile_m=128, tile_n=192, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
         mlp_dact=SM90(tile_m=128, tile_n=256, pingpong=False, swap_ab=True, cluster_m=1, cluster_n=2),
         mlp_dw_proj="cublas",
-        mlp_dx=SM90(tile_m=128, tile_n=128, pingpong=True, swap_ab=False, cluster_m=1, cluster_n=2),
+        mlp_dx=SM90(tile_m=192, tile_n=128, pingpong=True, swap_ab=False, cluster_m=1, cluster_n=2),
         mlp_dw_fc="cublas",
-        lm_dx=SM90(tile_m=128, tile_n=208, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
-        lm_dw=SM90(tile_m=128, tile_n=256, pingpong=False, swap_ab=False, cluster_m=2, cluster_n=1)),
+        lm_dx=SM90(tile_m=128, tile_n=192, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
+        lm_dw=SM90(tile_m=256, tile_n=128, pingpong=False, swap_ab=False, cluster_m=1, cluster_n=2)),
     768: dict(
-        proj_fwd=SM90(tile_m=128, tile_n=192, pingpong=True, swap_ab=False, cluster_m=2, cluster_n=1),
-        proj_dx=SM90(tile_m=128, tile_n=160, pingpong=True, swap_ab=True, cluster_m=1, cluster_n=2),
+        proj_fwd=SM90(tile_m=128, tile_n=208, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
+        proj_dx=SM90(tile_m=128, tile_n=208, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
         proj_dw="cublas",
         mlp_up=SM90(tile_m=192, tile_n=128, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
-        mlp_down=SM90(tile_m=256, tile_n=192, pingpong=False, swap_ab=False, cluster_m=2, cluster_n=1),
+        mlp_down=SM90(tile_m=256, tile_n=160, pingpong=False, swap_ab=True, cluster_m=1, cluster_n=2),
         mlp_dact=SM90(tile_m=192, tile_n=128, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
         mlp_dw_proj="cublas",
         mlp_dx=SM90(tile_m=128, tile_n=208, pingpong=True, swap_ab=True, cluster_m=1, cluster_n=2),
         mlp_dw_fc="cublas",
-        lm_dx=SM90(tile_m=128, tile_n=160, pingpong=True, swap_ab=True, cluster_m=2, cluster_n=1),
+        lm_dx=SM90(tile_m=256, tile_n=160, pingpong=False, swap_ab=True, cluster_m=1, cluster_n=2),
         lm_dw=SM90(tile_m=256, tile_n=192, pingpong=False, swap_ab=False, cluster_m=1, cluster_n=2, split_k=2)),
 }
 
 
 def gemm(A: Tensor, B: Tensor, role: str, C: int, out_dtype: torch.dtype, alpha) -> Tensor:
     """alpha A (M, K) @ B (K, N) in out_dtype with role's config at width C: QuACK's gemm_tuned.fn with the config given
-    (the function its autotuner wraps), split-K from the config; "cublas": torch.addmm with beta 0 (its input unread)."""
+    (the function its autotuner wraps), split-K from the config; "cublas": torch.mm, alpha unused, as every role
+    mapped to it is a weight gradient of ops/linear.py called with alpha 1 (proj_dw, mlp_dw_proj, mlp_dw_fc)."""
     cfg = TABLE[C][role]
-    out = torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
     if cfg == "cublas":
-        return torch.addmm(out, A, B, beta=0, alpha=alpha, out_dtype=out_dtype)
+        return torch.mm(A, B, out_dtype=out_dtype)
+    out = torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
     gemm_tuned.fn(A, B, out, alpha=alpha, config=cfg, split_k=cfg.split_k)
     return out

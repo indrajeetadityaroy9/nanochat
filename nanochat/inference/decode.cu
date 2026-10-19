@@ -16,7 +16,7 @@
  *     k_gemv  xm = resid_lambdas[i] x + x0_lambdas[i] x0 (x = x0 before layer 0), h = norm(xm),
  *             [q k v] = h [Wq Wk Wv]^T                                                  (the prologue mixes and norms)
  *     k_attn  VE layers: v += 2 sigmoid(W_g[head] . h) value_embeds[i][token]  (per head, fp32);
- *             q, k = rope(norm_D(q) q_gain), rope(norm_D(k) k_gain) per head (qk_prologue.cu);
+ *             q, k = rope(norm_D(q) q_gain), rope(norm_D(k) k_gain) per head (ops/qk_row.cuh, as qk_prologue.cu);
  *             the cache takes k, v at the position; y = softmax(q K^T / sqrt(HEAD_DIM)) V over the keys of the
  *             layer's window (FlashAttention's window_size left) and the current key
  *     k_gemv  xo = xm + y Wo^T
@@ -45,22 +45,14 @@
  * attention runs a thread per head dim in each of (head, split, slot) blocks, at most a wave of splits per head and
  * slot (see k_attn).
  */
-#include <float.h>
 #include <math.h>
-#include <stdint.h>
 #include <stdlib.h>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
 
-typedef __nv_bfloat16 bf16;
+#include "../ops/qk_row.cuh"
 
-constexpr int WARP = 32;                           /* threads per warp */
-constexpr int HEAD_DIM = 128;                      /* gpt_config's head dim */
-constexpr int HALF = HEAD_DIM / 2;                 /* rotation pairs per head: dims i and i + HALF */
 constexpr int LANE_DIMS = HEAD_DIM / WARP;         /* a lane's dims of a query, key or value */
 constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thread per head dim */
 constexpr int MAX_BATCH = 8 * sizeof(unsigned long long);  /* slots: the bits of the active mask */
-constexpr int VEC = sizeof(uint4) / sizeof(bf16);  /* bf16 per 16-byte access */
 constexpr int MMA_M = 16, MMA_N = 8;               /* mma.sync m16n8k16: rows of W and slots per MMA */
 constexpr int K_BLOCK = 4 * VEC;                   /* k per lane group step: lanes t = 0..3 hold VEC k each (two k16) */
 constexpr int NTILES = MAX_BATCH / MMA_N;          /* the MMA's n tiles of the slots */
@@ -83,28 +75,6 @@ static __device__ __forceinline__ float warp_sum(float v) {
 static __device__ __forceinline__ float warp_max(float v) {
     for (int o = WARP / 2; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
     return v;
-}
-
-/* VEC bf16 (a 16-byte vector) as floats. */
-static __device__ __forceinline__ void load8(const bf16 *p, float *v) {
-    const uint4 u = *reinterpret_cast<const uint4 *>(p);
-    v[0] = __uint_as_float(u.x << 16); v[1] = __uint_as_float(u.x & 0xffff0000u);
-    v[2] = __uint_as_float(u.y << 16); v[3] = __uint_as_float(u.y & 0xffff0000u);
-    v[4] = __uint_as_float(u.z << 16); v[5] = __uint_as_float(u.z & 0xffff0000u);
-    v[6] = __uint_as_float(u.w << 16); v[7] = __uint_as_float(u.w & 0xffff0000u);
-}
-
-/* VEC fp32 values: two 16-byte loads. */
-static __device__ __forceinline__ void load8(const float *p, float *v) {
-    const float4 a = *reinterpret_cast<const float4 *>(p), b = *reinterpret_cast<const float4 *>(p + 4);
-    v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w; v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w;
-}
-
-static __device__ __forceinline__ void store8(bf16 *p, const float *v) {
-    uint4 u;
-    __nv_bfloat162 *h = reinterpret_cast<__nv_bfloat162 *>(&u);
-    for (int i = 0; i < VEC / 2; i++) h[i] = __floats2bfloat162_rn(v[2 * i], v[2 * i + 1]);
-    *reinterpret_cast<uint4 *>(p) = u;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -195,11 +165,11 @@ __global__ void k_gemv(Gemv a) {
                     const size_t at = (size_t)b * K + k0 + c * VEC;
                     for (int e = 0; e < VEC; e++) v[e] = pro_value(a, at + e, a.pro == PRO_COPY ? 1.f : rs[b], m + e);
                     if (a.pro == PRO_RESID_NORM && blockIdx.x == 0 && first) {
-                        store8(a.pro_out + at, m);
-                        store8(a.pro_out2 + at, v);
+                        store(a.pro_out + at, m);
+                        store(a.pro_out2 + at, v);
                     }
                 }
-                store8(xs + (size_t)b * ks + c * VEC, v);
+                store(xs + (size_t)b * ks + c * VEC, v);
             }
             __syncthreads();
             if (tile >= row_tiles) continue;
@@ -315,45 +285,11 @@ typedef struct {
     int C, H, window, run;
 } Attn;
 
-/* qk_prologue.cu's forward arithmetic (gpt.py's qk_norm_rope), kept expression for expression so that given equal
- * inputs the decoder's q and k equal the PyTorch prefill's bit for bit: a head row is QKP_LANES threads, each with the
- * two vectors of VEC dims o and o + HALF (o = lane VEC); the row's sum of squares is reduced by shuffles among its
- * lanes; each dim is normed, times its gain, then rotated by -theta with the fp32 table entries at o; fp32 inside, one
- * bf16 rounding per output. */
-constexpr int QKP_LANES = HALF / VEC;  /* threads per head row, two vectors each */
-
-static __device__ __forceinline__ unsigned qkp_row_mask() {
-    return ((1u << QKP_LANES) - 1) << ((threadIdx.x % WARP) & ~(QKP_LANES - 1));
-}
-
-static __device__ __forceinline__ float qkp_row_sum(float v, unsigned mask) {
-    for (int o = QKP_LANES / 2; o > 0; o >>= 1) v += __shfl_xor_sync(mask, v, o);
-    return v;
-}
-
-/* This lane's dims o.. and o + HALF.. of the head row at x, normed, times the gains g, rotated by the table vectors at
- * c, s, into y. */
-static __device__ __forceinline__ void qkp_row(const bf16 *x, const float *g, const float *c, const float *s, float *y,
-                                               int o) {
-    float x1[VEC], x2[VEC], g1[VEC], g2[VEC], cs[VEC], sn[VEC];
-    load8(x + o, x1); load8(x + o + HALF, x2);
-    float ss = 0.f;
-    for (int i = 0; i < VEC; i++) ss += x1[i] * x1[i] + x2[i] * x2[i];
-    const float m = rsqrtf(qkp_row_sum(ss, qkp_row_mask()) / HEAD_DIM + FLT_EPSILON);
-    load8(g + o, g1); load8(g + o + HALF, g2);
-    load8(c, cs); load8(s, sn);
-    for (int i = 0; i < VEC; i++) {
-        const float n1 = x1[i] * m * g1[i], n2 = x2[i] * m * g2[i];
-        y[o + i] = bfr(n1 * cs[i] + n2 * sn[i]);
-        y[o + HALF + i] = bfr(n2 * cs[i] - n1 * sn[i]);
-    }
-}
-
 /* Slot b's query, key and value of the head at position p into q, k, v (fp32 holding bf16 values), as gpt.py: on VE
  * layers v += 2 sigmoid(ve_gate[head] . h) * value_embedding[token] in fp32 (2 sigmoid(0) = 1: unit weight at init), the
  * gate's dot product over C lane-strided and reduced by every warp in the same order, one bf16 rounding (a thread per
- * dim); q and k by qk_prologue.cu's forward (threads 0.. QKP_LANES - 1 the query row, the next QKP_LANES the key row).
- * Ends with the block synchronized. */
+ * dim); q and k by qk_row.cuh's qk_row, the forward of qk_prologue.cu (threads 0.. QK_LANES - 1 the query row, the
+ * next QK_LANES the key row), each output rounded once to bf16. Ends with the block synchronized. */
 static __device__ void attn_prologue(const Attn &a, int b, int head, int p, float *q, float *k, float *v) {
     const int tid = threadIdx.x, lane = tid % WARP;
     const bf16 *qkv = a.qkv + (size_t)b * 3 * a.C + head * HEAD_DIM;
@@ -367,11 +303,16 @@ static __device__ void attn_prologue(const Attn &a, int b, int head, int p, floa
         t = __fadd_rn(t, __fmul_rn(g, __bfloat162float(ve[head * HEAD_DIM + tid])));
     }
     v[tid] = bfr(t);
-    if (tid < 2 * QKP_LANES) {
-        const bool isq = tid < QKP_LANES;
-        const size_t tab = (size_t)p * HALF + tid % QKP_LANES * VEC;
-        qkp_row(qkv + (isq ? 0 : a.C), isq ? a.q_gain : a.k_gain, a.cos + tab, a.sin + tab, isq ? q : k,
-                tid % QKP_LANES * VEC);
+    if (tid < 2 * QK_LANES) {
+        const bool isq = tid < QK_LANES;
+        const int o = tid % QK_LANES * VEC;
+        const size_t tab = (size_t)p * HALF + o;
+        float y1[VEC], y2[VEC], *y = isq ? q : k;
+        qk_row(qkv + (isq ? 0 : a.C) + o, (isq ? a.q_gain : a.k_gain) + o, a.cos + tab, a.sin + tab, y1, y2);
+        for (int i = 0; i < VEC; i++) {
+            y[o + i] = bfr(y1[i]);
+            y[o + HALF + i] = bfr(y2[i]);
+        }
     }
     __syncthreads();
 }

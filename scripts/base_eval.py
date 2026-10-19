@@ -15,7 +15,7 @@ import os
 
 import torch
 
-from nanochat.config import MICRO_BATCH_ROWS, MIXTURE, SEQ_LEN
+from nanochat.config import FILE_STAGE, MIXTURE
 from nanochat.data.loader import mixture_corpora
 from nanochat.eval.code_eval import generation, solution_bpb, tasks
 from nanochat.eval.fim_eval import fim_generation
@@ -26,17 +26,20 @@ from nanochat.train.checkpoint import load_model
 
 def main():
     parser = argparse.ArgumentParser(description="Base model evaluation: the whole suite on a run's final checkpoint")
-    parser.add_argument('--model-tag', type=str, required=True, help='base_train run tag (base_checkpoints/<tag>)')
+    parser.add_argument("--model-tag", required=True, help="base_train run tag (base_checkpoints/<tag>)")
     tag = parser.parse_args().model_tag
     device = torch.device("cuda")
     benchmarks = tasks()
     model, tokenizer, step = load_model(device, tag)
-    # per-position losses from the compiled training forward (GPT.losses), every batch MICRO_BATCH_ROWS x SEQ_LEN: one
-    # graph scores every corpus's bpb (cu_seqlens padded to one length), one more the solution bpb (a segment per row)
+    # per-position losses from the compiled training forward (GPT.losses), every batch FILE_STAGE.batch_rows x
+    # FILE_STAGE.seq_len: one graph scores every corpus's bpb (cu_seqlens padded to one length), one more the solution
+    # bpb (a segment per row)
     losses = torch.compile(model.losses, dynamic=False, fullgraph=True)
     results = {"run": tag, "step": step,
-               "bpb": val_bpb(losses, tokenizer, mixture_corpora(MIXTURE), batch_rows=MICRO_BATCH_ROWS, device=device),
-               "solution_bpb": solution_bpb(losses, tokenizer, device, MICRO_BATCH_ROWS, SEQ_LEN, benchmarks),
+               "bpb": val_bpb(losses, tokenizer, mixture_corpora(MIXTURE), batch_rows=FILE_STAGE.batch_rows,
+                              device=device),
+               "solution_bpb": solution_bpb(losses, tokenizer, device, FILE_STAGE.batch_rows, FILE_STAGE.seq_len,
+                                            benchmarks),
                "codegen": generation(model, tokenizer, benchmarks),
                "fim": fim_generation(model, tokenizer)}
     os.makedirs(os.path.join(base_dir(), "base_eval"), exist_ok=True)

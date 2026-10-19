@@ -28,7 +28,7 @@ def drawn_rows(stage, run, tokenizer):
     """{corpus: rows a stage of the run draws}: its steps x micro-batches x rows per micro-batch, by mixture_rows."""
     steps = run.repo_start if stage is FILE_STAGE else run.num_iterations - run.repo_start
     mixture = stage_mixture(stage, tokenizer)
-    count = steps * run.grad_accum_steps * (MICRO_BATCH_TOKENS // stage.seq_len)
+    count = steps * run.grad_accum_steps * stage.batch_rows
     drawn = np.bincount(mixture_rows(np.array(list(mixture.values())), start=0, count=count), minlength=len(mixture))
     return dict(zip(mixture, drawn.tolist(), strict=True))
 
@@ -68,7 +68,9 @@ def fits(run, tokenizer):
 def max_ratio(depth, tokenizer):
     """The most tokens per scaling parameter a run of this depth fits, in whole micro-batches of tokens (finer than a
     step, the unit a run's trained tokens move in): bisect.bisect_left over the micro-batch counts up to every train row
-    of the file-level stage's corpora, on the predicate "does not fit" (monotone in the count)."""
+    of the file-level stage's corpora, on the predicate "does not fit". The predicate is not monotone in the count (a
+    run trains floor(n / g) x g micro-batches with g = grad_accum_steps rising with n, so the trained tokens dip where g
+    steps up): the ratio returned fits, but a larger count that also fits may exist."""
     params = plan(depth, 1.0, tokenizer.vocab_size).scaling_params
     rows = sum(packed_rows(c, "train", tokenizer, FILE_STAGE.seq_len) for c in stage_mixture(FILE_STAGE, tokenizer))
 

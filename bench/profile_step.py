@@ -1,15 +1,18 @@
-"""Profile base_train's step on this GPU (the data pipeline's packed rows of the file-level stage, fim reading):
-wall time per phase (loader, forward+backward, optimizer and record norms) over 3 steps after 3 warmup steps, then one
-step under torch.profiler: GPU kernel time by category and the top kernels; GPU busy fraction of the step.
+"""Profile a training step on this GPU (the data pipeline's packed rows of a stage, fim reading): wall time per phase
+(loader, forward+backward, optimizer and grad norm) over 3 steps after 3 warmup steps, then one step under
+torch.profiler: GPU kernel time by category and the top kernels; GPU busy fraction of the step. Relative to
+scripts/base_train.py's step it omits the loss weighting by valid-target share, reading the next step's batches during
+backward (here the loader is timed apart), the LR schedulers, checkpoints and metrics.
 Usage: python -m bench.profile_step DEPTH ASPECT_RATIO MICRO_STEPS [ROWS per micro-batch [file|repo stage]]"""
 import collections
+import statistics
 import sys
 import time
 
 import numpy as np
 import torch
 
-from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE
+from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.loader import PretrainingBatches, mixture_weights, packed_rows
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
@@ -19,10 +22,10 @@ from nanochat.train.schedule import plan
 depth, aspect, micro = (int(a) for a in sys.argv[1:4])
 stage = {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[5] if len(sys.argv) > 5 else "file"]
 SEQ_LEN = stage.seq_len
-rows = int(sys.argv[4]) if len(sys.argv) > 4 else MICRO_BATCH_TOKENS // SEQ_LEN
+rows = int(sys.argv[4]) if len(sys.argv) > 4 else stage.batch_rows
 device = torch.device("cuda")
 tokenizer = get_tokenizer()
-run = plan(depth, 20, tokenizer.vocab_size)
+run = plan(depth, 20, tokenizer.vocab_size)  # fixture: only run.lr is used; 20 tokens per parameter (Chinchilla, arXiv 2203.15556 §3)
 with torch.device("meta"):
     orig = GPT(gpt_config(depth, tokenizer.vocab_size, stage, aspect_ratio=aspect))
 orig.to_empty(device=device)
@@ -57,7 +60,7 @@ for _ in range(3):
 times = []
 for _ in range(3):
     step(times)
-loader, fb, opt = (float(np.median([t[i] for t in times])) for i in range(3))
+loader, fb, opt = (statistics.median(t[i] for t in times) for i in range(3))
 tokens = micro * rows * SEQ_LEN
 total = loader + fb + opt
 print(f"d{depth}: {micro} micro-batches ({tokens:,} tokens): loader {loader*1e3:.0f} ms, fwd+bwd {fb*1e3:.0f} ms, "
@@ -69,7 +72,7 @@ with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) a
 events = [e for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA]
 by_name = collections.Counter()
 for e in events:
-    by_name[e.name] += e.device_time_total if hasattr(e, "device_time_total") else e.cuda_time_total
+    by_name[e.name] += e.device_time_total
 
 
 def category(n):
@@ -78,9 +81,9 @@ def category(n):
         return "attention (FA4)"
     if "qkp" in low:
         return "q/k prologue"
-    if "crossentropy" in low or "softcap" in low:
-        return "softcap CE"
-    if "gemm" in low or "cutlass" in low or "sm90" in low or "sm120" in low or "kernel_cutlass" in low or "xmma" in low or "nvjet" in low:
+    if "crossentropy" in low:
+        return "cross entropy"
+    if "gemm" in low or "cutlass" in low or "sm90" in low or "xmma" in low or "nvjet" in low:
         return "GEMM"
     if "triton" in low:
         return "triton (inductor fused)"

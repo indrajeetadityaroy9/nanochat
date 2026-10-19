@@ -8,9 +8,8 @@ import os
 
 import torch
 
-from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.tokenizer import get_tokenizer
-from nanochat.model.gpt import GPT, GPTConfig
+from nanochat.model.gpt import GPT, GPTConfig, rotary_tables
 from nanochat.paths import base_dir
 
 
@@ -25,12 +24,11 @@ def save_checkpoint(path, checkpoint):
 
 
 def load_model(device, model_tag):
-    """(model in eval mode, tokenizer, step) of a run's checkpoint: its raw weights, at the stage (context and rotary
-    base) the run was in."""
+    """(model, tokenizer, step) of a run's checkpoint: its raw weights, at the stage (context and rotary base) the run was
+    in (model_config)."""
     checkpoint = torch.load(checkpoint_path(model_tag), map_location=device)
     with torch.device("meta"):
         model = GPT(GPTConfig(**checkpoint["model_config"]))
     model.load_state_dict(checkpoint["model"], assign=True)  # every parameter, so the meta model needs no storage
-    model.set_stage(REPO_STAGE if model.config.sequence_len == REPO_STAGE.seq_len else FILE_STAGE)
-    model.eval()
+    model.cos, model.sin = rotary_tables(model.config, device)
     return model, get_tokenizer(), checkpoint["step"]

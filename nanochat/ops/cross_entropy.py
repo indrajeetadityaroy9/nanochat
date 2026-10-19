@@ -5,16 +5,15 @@ z = x W^T:
     loss = (sum over the rows whose target t is not the loader's padding of (logsumexp(z) - z[t])) / n,
 
 n the valid count; the padding target PretrainingBatches.PAD (data/loader.py) is the ignore index. One GEMM writes
-the bf16 logits z; one pass of QuACK's CrossEntropy kernel (Tri Dao, CuTe DSL; quack/cross_entropy.py, launched as its
-cross_entropy_fwd launches it with return_dx and inplace_backward) reads each row once, writes the row's loss and, in
-place of z, the logit gradient relative to the scale 1 / n, softmax(z) - onehot(t) (0 in ignored rows); two GEMMs take
-dx and dW from it with alpha = 1 / n, dW in fp32 straight from the accumulators. The logits are bf16 and read once.
+the bf16 logits z; one pass of QuACK's CrossEntropy kernel (Tri Dao, CuTe DSL; quack/cross_entropy.py
+cross_entropy_fwd_out, given dx = z as its cross_entropy_fwd does with inplace_backward) reads each row once, writes the
+row's loss and, in place of z, the logit gradient relative to the scale 1 / n, softmax(z) - onehot(t) (0 in ignored
+rows); two GEMMs take dx and dW from it with alpha = 1 / n, dW in fp32 straight from the accumulators. The logits are
+bf16 and read once.
 """
 
 import torch
-from cutlass import Int32
-from quack.cross_entropy import CrossEntropy
-from quack.cute_dsl_utils import torch2cute_dtype_map
+from quack.cross_entropy import cross_entropy_fwd_out
 from torch import Tensor
 
 from nanochat.data.loader import PretrainingBatches
@@ -23,14 +22,10 @@ from nanochat.ops.quack_gemm import gemm
 
 def _losses(logits, target, dlogits):
     """Each row's loss (fp32, 0 for an ignored target) of the logits (M, V) against the targets (M,), and, if dlogits is
-    given (it may be the logits), the logit gradient into it: QuACK's kernel without the per-row log-sum-exp output,
-    class weights or precomputed target logits."""
+    given (it may be the logits), the logit gradient into it: QuACK's cross_entropy_fwd_out without the per-row
+    log-sum-exp output, class weights or precomputed target logits."""
     loss = torch.empty(target.shape, device=logits.device, dtype=torch.float32)
-    kernel = CrossEntropy.compile(
-        dtype=torch2cute_dtype_map[logits.dtype], target_dtype=torch2cute_dtype_map[target.dtype],
-        target_logit_dtype=None, N=logits.size(1), has_lse=False, has_dx=dlogits is not None, weight_dtype=None,
-        target_logit_ndim=None)
-    kernel(logits, target, None, loss, None, dlogits, None, Int32(PretrainingBatches.PAD))
+    cross_entropy_fwd_out(logits, target, None, loss, None, dlogits, None, PretrainingBatches.PAD)
     return loss
 
 
