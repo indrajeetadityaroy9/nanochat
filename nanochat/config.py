@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
 
-# The context: Qwen2.5-Coder's file-level pretraining sequence length, 8,192 tokens (arXiv 2409.12186 §3.2.1)
-SEQ_LEN = 8192
 # The vocabulary, special tokens included: nanochat's 2^15 ids (karpathy/nanochat 92d63d4 scripts/tok_train.py:19
 # --vocab-size default 32768; DeepSeek-Coder's BPE vocabulary has 32,000, arXiv 2401.14196 §3.2)
 VOCAB_SIZE = 2**15
@@ -42,11 +40,11 @@ class Stage:
         return MICRO_BATCH_TOKENS // self.seq_len
 
 
-# Qwen2.5-Coder's two pretraining stages (arXiv 2409.12186 §3.2): file-level at 8,192 tokens, then repo-level, the
-# context extended to 32,768 tokens and "RoPE's base frequency is adjusted from 10,000 to 1,000,000" (§3.2.2), on
-# long-context code: here the code corpora whose documents are repository samples (data/schema.py REPOSITORY_FILE), at
-# their natural row shares.
-FILE_STAGE = Stage(seq_len=SEQ_LEN, rope_base=10_000, mixture=MIXTURE)
+# Qwen2.5-Coder's two pretraining stages (arXiv 2409.12186 §3.2): file-level at its pretraining sequence length of
+# 8,192 tokens (§3.2.1), then repo-level, the context extended to 32,768 tokens and "RoPE's base frequency is adjusted
+# from 10,000 to 1,000,000" (§3.2.2), on long-context code: here the code corpora whose documents are repository samples
+# (data/schema.py REPOSITORY_FILE), at their natural row shares.
+FILE_STAGE = Stage(seq_len=8192, rope_base=10_000, mixture=MIXTURE)
 REPO_STAGE = Stage(seq_len=32_768, rope_base=1_000_000,
                    mixture={"code": (1.0, [c for c in MIXTURE["code"][1] if SOURCES[c].schema is REPOSITORY_FILE])})
 # The repo-level stage's share of a run's tokens: Qwen2.5-Coder's ~300B of its 5.2T file-level + 300B tokens (§3.2.1-2)

@@ -21,12 +21,20 @@ def _varlen(t):
     return t.reshape(-1, *t.shape[2:])
 
 
+def _window(window_left, T):
+    """FA4's window_size_left: None (its causal kernel) when the window spans the whole context, the local kernel
+    otherwise; FA4 runs causal with any window as local (interface.py _resolve_causal_local_window). At d8 on real
+    segments the causal kernel gives bitwise-equal outputs and gradients and is 1-2% faster fwd+bwd
+    (benchmarks/h100.txt)."""
+    return None if window_left >= T else window_left
+
+
 @torch.library.custom_op("nanochat::flash_attn", mutates_args=(), device_types="cuda")
 def flash_attn(q: Tensor, k: Tensor, v: Tensor, window_left: int, cu_seqlens: Tensor) -> tuple[Tensor, Tensor]:
     """(out (B, T, H, D) like q, lse fp32 (H, B*T): FA4's varlen layouts) of q, k, v (B, T, H, D) bf16."""
     T = q.size(1)
     out, lse = _flash_attn_fwd(_varlen(q), _varlen(k), _varlen(v), cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-                               max_seqlen_q=T, max_seqlen_k=T, causal=True, window_size_left=window_left,
+                               max_seqlen_q=T, max_seqlen_k=T, causal=True, window_size_left=_window(window_left, T),
                                return_lse=True)[:2]
     return out.view(q.shape), lse
 
@@ -40,13 +48,12 @@ def _(q, k, v, window_left, cu_seqlens):
 @torch.library.custom_op("nanochat::flash_attn_bwd", mutates_args=(), device_types="cuda")
 def flash_attn_bwd(dout: Tensor, q: Tensor, k: Tensor, v: Tensor, out: Tensor, lse: Tensor, window_left: int,
                    cu_seqlens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """(dq, dk, dv) like q, k, v given dout and the forward's out and lse. FA4's deterministic backward (dq summed in a
-    fixed order, not by atomics): with ops/embedding and ops/qk_prologue a step's gradients are bitwise reproducible,
-    at +1.5% fwd+bwd time per d24 micro-batch (benchmarks/h100.txt)."""
+    """(dq, dk, dv) like q, k, v given dout and the forward's out and lse: FA4's backward (dq accumulated with atomics,
+    its fastest: benchmarks/h100.txt)."""
     T = q.size(1)
     grads = _flash_attn_bwd(_varlen(q), _varlen(k), _varlen(v), _varlen(out), _varlen(dout), lse, causal=True,
-                            window_size_left=window_left, cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-                            max_seqlen_q=T, max_seqlen_k=T, deterministic=True)
+                            window_size_left=_window(window_left, T), cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
+                            max_seqlen_q=T, max_seqlen_k=T)
     return tuple(g.view(q.shape) for g in grads)  # q, k, v share one shape (MHA)
 
 

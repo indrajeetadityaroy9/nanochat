@@ -1,66 +1,28 @@
-H100 80GB HBM3 SXM5 (700 W cap), image nanochat (NGC 26.09), bf16, compiled as base_train, one micro-batch forward +
-backward, random token ids (benchmarks/stage_probe.py DEPTH ASPECT [TOKENS]); 2026-10-19.
-
-d32 x 1024 stage seq_len 8192 rope 100000, 65536 tokens: 353.2 ms / micro-batch (185,536 tok/s), peak 70.4 GiB
-d32 x 1024 stage seq_len 32768 rope 1e+06, 65536 tokens: 517.7 ms / micro-batch (126,593 tok/s), peak 70.4 GiB
-d20 x 1280 stage seq_len 8192 rope 100000, 65536 tokens: 323.6 ms / micro-batch (202,500 tok/s), peak 57.1 GiB
-d20 x 1280 stage seq_len 32768 rope 1e+06, 65536 tokens: 453.9 ms / micro-batch (144,394 tok/s), peak 57.1 GiB
-d32 x 1024 stage seq_len 8192 rope 100000, 32768 tokens: 183.1 ms / micro-batch (178,958 tok/s), peak 39.1 GiB
-d32 x 1024 stage seq_len 32768 rope 1e+06, 32768 tokens: 266.2 ms / micro-batch (123,080 tok/s), peak 39.1 GiB
-
-Peak excludes the optimizer state and base_train's update-RMS copy of the fp32 parameters (d32: Muon momentum 1.6 GB,
-AdamW moments of wte/value embeddings/lm_head 4.8 GB, parameter copy 4.0 GB).
-
-Locked SM clocks, d32 x 1024 at 65536 tokens, kernel time per micro-batch (profile_kernels.py): default boost 346.8 ms,
-1980 MHz 344.0, 1830 346.5, 1680 351.0, 1530 358.3 (software power cap active at 700 W in every case).
-
-Real data (FIM-0.5 8K packs, fim reading), d32 x 1024, one base_train step of 78 micro-batches of 32,768 tokens with
-MuonAdamW and the update-RMS norms (profile_step.py 32 30 78): loader 647 ms (serial, before the step's compute),
-fwd+bwd 16,308 ms, optimizer + norms 49 ms, total 17,004 ms -> 150,310 tok/s (fwd+bwd alone 156,728 tok/s), peak
-48.9 GiB. Kernel time 16,226 ms: GEMM 58.2%, FA4 21.5%, Inductor 11.3%, other 6.3% (qk prologue backward 359 ms,
-fp32 gradient accumulation adds 334 ms, qk prologue forward 251 ms), softcap CE 1.5%, copies 1.2%.
-
-Real data, d24 x 768 (the production shape), steps of 2,752,512 tokens, the M = 65,536 SM90 table (profile_step.py
-24 30 MICRO_STEPS ROWS [stage]):
-  file-level, 42 x 8 rows of 8192: fwd+bwd 8,756 ms -> 314,346 tok/s; peak 46.6 GiB; GPU 98% busy
-  file-level, 84 x 4 rows of 8192: fwd+bwd 9,148 ms -> 300,892 tok/s; peak 28.0 GiB
-  repo-level, 42 x 2 rows of 32768: fwd+bwd 9,161 ms -> 300,453 tok/s; peak 46.6 GiB
-Kernel time (file-level, 8 rows): GEMM 53.3%, FA4 24.7%, Inductor 12.4%, other 5.9%, softcap CE 3.0%, copies 0.7%.
+H100 80GB HBM3 SXM5 (700 W cap), image nanochat (NGC 26.09), bf16, compiled as base_train; 2026-10-19.
 
 Composite d24 (Block with QK gains, VE gate 2 sigmoid, torch AdamW + Muon), real data, one step of 1,179,648 tokens
-(profile_step.py 24 30 MICRO_STEPS ROWS): q/k prologue as Inductor-fused PyTorch ops (18 x 8 rows): fwd+bwd 3,890 ms,
+(profile_step.py 24 MICRO_STEPS ROWS): q/k prologue as Inductor-fused PyTorch ops (18 x 8 rows): fwd+bwd 3,890 ms,
 298.2K tok/s, Inductor 789 ms; as csrc/qk_prologue.cu (18 x 8 rows): 3,792 ms, 305.8K tok/s, Inductor 453 ms + the
 kernel's 228 ms in "other"; 12 x 12 rows (98,304-token micro-batches): 3,756 ms, 308.8K tok/s, peak 69.6 GiB (8 rows:
 48.9 GiB). GPU 99% busy in each: GEMM 54%, FA4 24%, Inductor 12%.
 
-Attention, causal varlen fwd + bwd, H 8 x D 128, 4 rows x 8192 (attn_bench.py SEGMENTS): FA4 (flash_attn.cute SM90)
+Attention, causal varlen fwd + bwd, H 8 x D 128, 4 rows x 8192 of equal-length segments: FA4 (flash_attn.cute SM90)
 vs cuDNN 9.26 (Transformer Engine 2.19 DotProductAttention, thd, fused backend), ms:
   4 segments/row, window 512:  FA4 fwd 0.287, fwd+bwd 1.109;  cuDNN fwd 0.410, fwd+bwd 1.376
   4 segments/row, full 8192:   FA4 fwd 0.371, fwd+bwd 1.415;  cuDNN fwd 0.505, fwd+bwd 1.796
   1 segment/row,  window 512:  FA4 fwd 0.301, fwd+bwd 1.135;  cuDNN fwd 0.429, fwd+bwd 1.418
   1 segment/row,  full 8192:   FA4 fwd 0.894, fwd+bwd 3.746;  cuDNN fwd 1.185, fwd+bwd 4.375
 
-Transformer Engine FP8 vs ours (bf16 QuACK), the block's GEMM work fwd + bwd at M = 65,536 (te_bench.py C), ms:
-  C 1024: ours 8.69; TE bf16 9.89; TE fp8 DelayedScaling 7.97, Float8CurrentScaling 9.44, Float8BlockScaling 9.68
-  C 1280: ours 13.17; TE bf16 15.21; TE fp8 DelayedScaling 11.30, Float8CurrentScaling 13.02, Float8BlockScaling 14.09
-
-d24 production step, real data, 12 x 12 rows (profile_step.py 24 30 12), 2026-10-19, in order of the changes:
+d24 production step, real data, 12 x 12 rows (profile_step.py 24 12), 2026-10-19, in order of the changes:
   GEMM TABLE re-swept at M = 98,304 (gemmsweep_sm90.jsonl), cuBLAS roles as torch.mm: 3,785 ms, 311.7K tok/s;
     qk prologue backward 168.4 ms, VE-gate fp32 GEMMs on CUDA cores (sm80_xmma f32 + simt sgemm) 80.6 ms.
   VE gate as an fp32 broadcast-sum, qk prologue backward persistent and atomic-free: 3,724 ms, 316.8K tok/s;
     qk prologue forward 75.2 ms, backward 92.7 ms.
-  Bitwise-deterministic gradients (FA4 deterministic backward, csrc/embedding.cu): 3,821 ms, 308.7K tok/s (embedding
-    backward run starts by a cummax scan, 48.3 ms).
 VE gate alone, fwd+bwd of gate and mix per layer at M = 98,304 (torch.utils.benchmark median), rel err vs fp64 of
 gate / dW: fp32 F.linear 1.195 ms, 1.3e-7 / 5.6e-7; bf16 F.linear 0.575 ms, 8.1e-4 / 3.0e-3; TF32 1.008 ms,
 8.0e-5 / 2.2e-4; fp32 broadcast-sum 0.881 ms, 5.3e-8 / 4.1e-7.
-Run-to-run determinism, d24 one real micro-batch, compiled fwd+bwd repeated 6 times (median ms; parameters whose
-gradients differ between repeats, of 220): default 295.6-298.3 ms, 212; FA4 deterministic=True 299.9-303.9 ms, 13
-(the embedding tables: Inductor's atomic embedding backward); + torch.use_deterministic_algorithms 362.6 ms, 0 (319.3 ms
-without fill_uninitialized_memory); FA4 deterministic + csrc/embedding.cu 305.8 ms, 0. Smoke kill/resume (d8 r20):
-losses of the steps both launches take equal bitwise (rel diff 0.0; 1e-4 before).
-  Embedding backward run starts by searchsorted (no scan): 3,764 ms, 313.4K tok/s, peak 69.5 GiB; d24 fwd+bwd
-    303.8 ms per micro-batch, 0 of 220 gradients differing across repeats (tests/determinism.py).
+FA4 backward, d24 one real micro-batch, compiled fwd+bwd repeated 6 times (median ms): dq accumulated with atomics
+(FA4's default) 295.6-298.3 ms; deterministic=True 299.9-303.9 ms.
 Gradient clipping at 1.0 (train/optim.py GRAD_CLIP), paired A/B: d8 at 20 tokens per scaling parameter, seed 42, both
 arms bitwise deterministic on the same data order (so they differ by the clipping alone), 2,987 steps each; val bpb of
 the final checkpoint on each corpus's val split (eval/loss_eval.val_bpb), train loss mean over the last 10% of steps:
@@ -69,3 +31,19 @@ the final checkpoint on each corpus's val split (eval/loss_eval.val_bpb), train 
   no clip:  val bpb mean 0.88119 (stack_edu_python 0.74504, stack_edu_cpp 0.68317, climbmix 1.35029), train 1.89841;
     grad norm > 1 on 179 steps, max 9.83.
   Clipping is lower on all 11 corpora.
+
+d8 on real rows (the file-level stage's first fim micro-batch, 12 x 8192, 3,300 cu_seqlens entries; H 2 x D 128),
+2026-10-19, GPU shared with a running d8 study (absolute times vary by tens of percent between runs; pairs below are
+interleaved in one process):
+  FA4 full-context layers (window = T), causal=True with window_size_left = T (FA4 resolves it to its local kernel) vs
+    None (its causal kernel): outputs and dq/dk/dv bitwise equal (file stage; repo stage 3 x 32768: o, dk, dv equal,
+    dq max |diff| 2.4e-4, atomic order); fwd+bwd 3.358-3.412 ms vs 3.301-3.386 ms (file), 12.38-12.49 vs
+    12.17-12.34 ms (repo, 2 of 3 rounds; the third disturbed) -> ops/flash_attn.py passes None.
+  LM head loss, M 98,304 x V 32,768, C 256: ours (bf16 logits GEMM, QuACK CrossEntropy, dx/dW GEMMs) 29.2 ms;
+    QuACK scaled_exp_linear_cross_entropy_fwd at chunk 4,096 / 8,192 / 16,384 / 32,768: 45.0 / 34.4 / 31.4 / 31.7 ms,
+    dx and dW rel diff to ours 2.6e-3 / 2.1e-3 -> kept ours. lm_dx GEMM out fp32 vs bf16: 7.84-7.99 ms both; kept
+    bf16 (an output dtype change of the op collides with graphs in the shared Inductor cache). Per-position eval
+    losses: bf16 logits + CrossEntropy 16.2-16.3 ms, rel err vs fp64
+    8e-4 (tests/model_check); QuACK lse_target_epi (no logits) 14.9-15.0 ms, rel err vs fp64 5.0e-8 -> lse_target_epi.
+  cuBLAS (torch.mm) for proj_fwd, proj_dx, mlp_down, mlp_dx vs TABLE[256]'s QuACK configs, profile_step.py 8 1,
+    alternating: GEMM kernel time 55.6 / 72.3 ms vs 53.9 / 47.0 ms, step 141 ms each -> TABLE kept.

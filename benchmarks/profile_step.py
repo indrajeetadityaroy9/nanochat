@@ -2,7 +2,7 @@
 micro-batches read during its backward) on this GPU, on the data pipeline's packed rows of a stage (fim reading): wall
 time per step over 3 steps after 3 warmup steps, then one step under torch.profiler: GPU kernel time by category and
 the top kernels; GPU busy fraction of the step. The lr is the plan's peak (the schedule only scales it).
-Usage: python -m benchmarks.profile_step DEPTH ASPECT_RATIO MICRO_STEPS [ROWS per micro-batch [file|repo stage]]"""
+Usage: python -m benchmarks.profile_step DEPTH MICRO_STEPS [ROWS per micro-batch [file|repo stage]]"""
 import collections
 import statistics
 import sys
@@ -15,23 +15,23 @@ from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.loader import PretrainingBatches, mixture_weights, packed_rows
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
-from nanochat.train.optim import GRAD_CLIP, WEIGHT_DECAY, optimizers
+from nanochat.train.optim import WEIGHT_DECAY, optimizers
 from nanochat.train.schedule import plan
 from scripts.base_train import optimizer_step
 
-depth, aspect, micro = (int(a) for a in sys.argv[1:4])
-stage = {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[5] if len(sys.argv) > 5 else "file"]
+depth, micro = (int(a) for a in sys.argv[1:3])
+stage = {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[4] if len(sys.argv) > 4 else "file"]
 SEQ_LEN = stage.seq_len
-rows = int(sys.argv[4]) if len(sys.argv) > 4 else stage.batch_rows
+rows = int(sys.argv[3]) if len(sys.argv) > 3 else stage.batch_rows
 device = torch.device("cuda")
 tokenizer = get_tokenizer()
-run = plan(depth, 20, tokenizer.vocab_size)  # fixture: only run.lr is used; 20 tokens per parameter (Chinchilla, arXiv 2203.15556 §3)
+run = plan(depth, 20)  # fixture: only run.lr is used; 20 tokens per parameter (Chinchilla, arXiv 2203.15556 §3)
 with torch.device("meta"):
-    orig = GPT(gpt_config(depth, tokenizer.vocab_size, stage, aspect_ratio=aspect))
+    orig = GPT(gpt_config(depth, stage))
 orig.to_empty(device=device)
 orig.init_weights(0)
 model = torch.compile(orig, dynamic=False, fullgraph=True)
-adamw, muon = optimizers(orig, run.lr, WEIGHT_DECAY)
+opts = optimizers(orig, run.lr, WEIGHT_DECAY, "muon")
 mixture = mixture_weights(stage.mixture, tokenizer, SEQ_LEN)
 orders = {c: np.random.RandomState(0).permutation(packed_rows(c, "train", tokenizer, SEQ_LEN)) for c in mixture}
 reads = iter(PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=SEQ_LEN, batch_rows=rows, device=device,
@@ -44,10 +44,10 @@ def step():
     """One canonical optimizer step; its wall time."""
     global batches
     torch.cuda.synchronize()
-    t0 = time.time()
-    _, _, batches = optimizer_step(model, batches, params, GRAD_CLIP, (adamw, muon), reads)
+    t0 = time.perf_counter()
+    _, _, batches = optimizer_step(model, batches, params, opts, reads)
     torch.cuda.synchronize()
-    return time.time() - t0
+    return time.perf_counter() - t0
 
 
 for _ in range(3):

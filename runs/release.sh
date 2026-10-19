@@ -9,5 +9,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG=$1 REPO=$2
-runs/container.sh hf upload "$REPO" /runs . --repo-type model \
-  --include "base_checkpoints/$TAG/checkpoint.pt" "metrics/$TAG.jsonl" "base_eval/$TAG.json"
+runs/container.sh hf upload "$REPO" /runs . --repo-type model --include "base_checkpoints/$TAG/checkpoint.pt" \
+  --include "metrics/$TAG.jsonl" --include "base_eval/$TAG.json"

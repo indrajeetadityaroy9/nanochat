@@ -1,8 +1,9 @@
 """Every GEMM role of the model (ops/quack_gemm.py: attention projections, relu^2 MLP with h = 4C, lm head) at width
 C and M tokens on the current GPU, exactly as nanochat calls them: QuACK's candidates for this device's compute
 capability (quack.gemm_config.get_all_configs() filtered to it: the autotuner's list; configs a call rejects are
-dropped); the weight-gradient roles (proj_dw, mlp_dw_proj, mlp_dw_fc, lm_dw) at every tile config the call accepts x
-serial split-K 1/2/4/8/16, plus cuBLAS (torch.mm(out_dtype), the production path) for those without alpha, each with its
+dropped), plus cuBLAS (torch.mm(out_dtype)) for every role called without a tensor alpha (cuBLAS takes none); the
+weight-gradient roles (proj_dw, mlp_dw_proj, mlp_dw_fc, lm_dw) at every tile config the call accepts x serial split-K
+1/2/4/8/16 (QuACK's split-K candidates, quack.gemm_interface._expand_split_k_configs, and 1), each with its
 rel L2 error vs fp64 (same bf16 inputs, fp64 sum chunked over M). Timing: median of ROUNDS interleaved rounds, a CUDA
 graph of >= TARGET_MS of calls per replay, config order rotated each round; kernels compiled first in QuACK's pool.
 Usage: python -m benchmarks.gemmsweep OUT.jsonl M C [C ...]; each line {"M", "C", "role", "config" (GemmConfig's
@@ -21,6 +22,8 @@ from quack.gemm_interface import gemm_act, gemm_dact, gemm_tuned, prune_invalid_
 
 from nanochat.config import VOCAB_SIZE
 
+# the protocol of gemmsweep_sm90.jsonl, the record behind ops/quack_gemm.py's TABLE; CHUNK bounds the fp64 reference's
+# temporaries
 ROUNDS, TARGET_MS, SPLITS, CHUNK, V = 5, 30.0, (1, 2, 4, 8, 16), 4096, VOCAB_SIZE
 CAPACITY = torch.cuda.get_device_capability()[0]
 DEVICE_CONFIGS = [c for c in get_all_configs() if c.device_capacity == CAPACITY]
@@ -28,10 +31,12 @@ out_path, M, widths = sys.argv[1], int(sys.argv[2]), [int(c) for c in sys.argv[3
 
 
 def plain(A, B, out_dtype=None, alpha=1.0):
-    """(callable(config), candidates) for quack_gemm.gemm(A, B): gemm_tuned.fn with the config's split-K."""
+    """(callable(config), candidates) for quack_gemm.gemm(A, B): gemm_tuned.fn with the config's split-K, and cuBLAS
+    unless alpha is a tensor."""
     out = torch.empty(A.shape[0], B.shape[1], dtype=out_dtype or A.dtype, device=A.device)
     cands = [c.kwargs["config"] for c in prune_invalid_gemm_configs(gemm_tuned.configs, dict(A=A, B=B, out=out),
                                                                     alpha=alpha, split_k=1)]
+    cands += [] if isinstance(alpha, torch.Tensor) else ["cublas"]
 
     def run(cfg):
         if cfg == "cublas":
@@ -43,7 +48,7 @@ def plain(A, B, out_dtype=None, alpha=1.0):
 
 def weight_grad(A, B, alpha=None):
     run, tiles = plain(A, B, torch.float32, 1.0 if alpha is None else alpha)
-    cands = sorted({dataclasses.replace(c, split_k=s) for c in tiles for s in SPLITS}, key=str)
+    cands = sorted({dataclasses.replace(c, split_k=s) for c in tiles if c != "cublas" for s in SPLITS}, key=str)
     cands += ["cublas"] if alpha is None else []
     scale = 1.0 if alpha is None else alpha.item()
 
@@ -62,7 +67,7 @@ def roles(C):
     x, dy, W, w_fc, w_proj = r(M, C), r(M, C), r(C, C), r(h, C), r(C, h)
     preact, postact, dpreact = r(M, h), r(M, h), r(M, h)
     logits, w_lm = r(M, V), r(V, C)
-    a = torch.full((1,), 1e-3, device="cuda")
+    a = torch.full((1,), 1 / M, device="cuda")  # ops/cross_entropy.py's alpha 1 / n with every target valid
     pre, post = torch.empty(M, h, device="cuda", dtype=torch.bfloat16), torch.empty(M, h, device="cuda", dtype=torch.bfloat16)
     dx, post2 = torch.empty(M, h, device="cuda", dtype=torch.bfloat16), torch.empty(M, h, device="cuda", dtype=torch.bfloat16)
     w_fc_t = w_fc.t()

@@ -9,10 +9,11 @@ and Qwen3's QK norm with learnable gains (arXiv 2505.09388 §2).
   2026-01-17); FlashAttention-4 with document masking (ops/flash_attn.py).
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
 - RMS norm without gains, linear layers without bias, untied lm_head (modded-nanogpt record #8), plain cross entropy.
-Parameters are fp32 masters; activations bf16: the tables are looked up and rounded once (ops/embedding.py), every
-matmul runs through the nanochat ops, which round the weights inside. Every gradient is summed in a fixed order (the
-embedding and q/k prologue kernels without atomics, FA4's deterministic backward), so a training step is bitwise
-reproducible. The optimizer's parameter groups are train/optim.py's.
+Parameters are fp32 masters; activations bf16: the tables are looked up and rounded once (F.embedding, the cast fused
+by Inductor), every matmul runs through the nanochat ops, which round the weights inside. The gradients are reduced by
+the fastest kernels, not in a fixed order (FA4's and Inductor's embedding backward add with atomics:
+benchmarks/h100.txt, ~1% faster per step than fixed-order reductions). The optimizer's parameter groups are
+train/optim.py's.
 """
 
 import zlib
@@ -22,8 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from nanochat.config import VOCAB_SIZE
 from nanochat.ops.cross_entropy import lm_loss, lm_losses
-from nanochat.ops.embedding import embedding
 from nanochat.ops.flash_attn import flash_attn
 from nanochat.ops.linear import linear, relu2_mlp
 from nanochat.ops.qk_prologue import qk_norm_rope
@@ -51,13 +52,14 @@ class GPTConfig:
     windows: bool = True
 
 
-def gpt_config(depth, vocab_size, stage, *, aspect_ratio):
+def gpt_config(depth, stage):
     """The architecture at a depth: nanochat's shape rule (92d63d4 scripts/base_train.py:51-52, 131-134: width =
-    aspect_ratio x depth rounded up to whole heads of head_dim 128, LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM); the
-    context and rotary base of a training stage (config.Stage)."""
+    ASPECT_RATIO x depth rounded up to whole heads of head_dim 128, LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM), the
+    vocabulary config.VOCAB_SIZE (the tokenizer is trained to it); the context and rotary base of a training stage
+    (config.Stage)."""
     head_dim = 128
-    n_embd = -(-depth * aspect_ratio // head_dim) * head_dim
-    return GPTConfig(sequence_len=stage.seq_len, vocab_size=vocab_size, rope_base=stage.rope_base, n_layer=depth,
+    n_embd = -(-depth * ASPECT_RATIO // head_dim) * head_dim
+    return GPTConfig(sequence_len=stage.seq_len, vocab_size=VOCAB_SIZE, rope_base=stage.rope_base, n_layer=depth,
                      n_head=n_embd // head_dim, n_embd=n_embd)
 
 
@@ -92,10 +94,10 @@ def rotary_tables(config, device):
 
 def norm(x):
     """RMS norm over the last dim: F.rms_norm on bf16 computes its statistics in fp32 and rounds the output once. The
-    one epsilon convention of every RMS norm (here, csrc/qk_prologue.cu and csrc/decode.cu): F.rms_norm's default,
-    the fp32 machine epsilon FLT_EPSILON = 2^-23 also for bf16 inputs (torch.finfo of the fp32 opmath type;
-    modded-nanogpt track_1_short perf/kernels/qkv_rope.py:8)."""
-    return F.rms_norm(x, (x.size(-1),))
+    one epsilon convention of every RMS norm (here, csrc/qk_prologue.cu and csrc/decode.cu): the fp32 machine epsilon
+    FLT_EPSILON = 2^-23 also for bf16 inputs, passed explicitly (F.rms_norm's default is the epsilon of its fp32 opmath
+    type; modded-nanogpt track_1_short perf/kernels/qkv_rope.py:8)."""
+    return F.rms_norm(x, (x.size(-1),), eps=torch.finfo(torch.float32).eps)
 
 
 class Attention(nn.Module):
@@ -115,9 +117,9 @@ class Attention(nn.Module):
         if config.qk_gain:
             self.q_gain = nn.Parameter(torch.empty(C // H))
             self.k_gain = nn.Parameter(torch.empty(C // H))
-        else:  # fixed at 1 (init_weights), not trained
-            self.register_buffer("q_gain", torch.empty(C // H), persistent=False)
-            self.register_buffer("k_gain", torch.empty(C // H), persistent=False)
+        else:  # fixed at 1, not trained, not in checkpoints (GPT.init_buffers)
+            self.register_buffer("q_gain", None, persistent=False)
+            self.register_buffer("k_gain", None, persistent=False)
         self.ve_gate = (nn.Linear(C, H, bias=False) if config.value_embeds and has_ve(layer_idx, config.n_layer)
                         else None)
 
@@ -187,7 +189,7 @@ class GPT(nn.Module):
         self.x0_lambdas = nn.Parameter(torch.empty(config.n_layer)) if config.x0 else None
         self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(V, C) for i in range(config.n_layer)
                                            if config.value_embeds and has_ve(i, config.n_layer)})
-        # the rotary tables of the context (rotary_tables), computed by init_weights, set_stage and checkpoint.load_model
+        # not in checkpoints (init_buffers): the rotary tables of the context (rotary_tables)
         self.register_buffer("cos", None, persistent=False)
         self.register_buffer("sin", None, persistent=False)
 
@@ -199,12 +201,11 @@ class GPT(nn.Module):
         modded-nanogpt record #5) and attn.ve_gate (gate 1). resid_lambdas 1, x0_lambdas 0 (LOG 2026-01-11), q_gain =
         k_gain = 1. Each random tensor draws from its own generator, seeded by `seed` and the tensor's name, so a model
         without some component starts every other tensor exactly as the full model does (common random numbers across
-        an ablation's arms)."""
+        an ablation's arms). The non-persistent buffers: init_buffers."""
         bound = (3 / self.config.n_embd) ** 0.5
         zero = ("attn.c_o.weight", "mlp.c_proj.weight", "lm_head.weight", "attn.ve_gate.weight", "x0_lambdas")
         one = ("q_gain", "k_gain", "resid_lambdas")
-        tensors = [*self.named_parameters(), *((n, b) for n, b in self.named_buffers() if n.endswith(one))]
-        for name, t in tensors:
+        for name, t in self.named_parameters():
             if name.endswith(zero):
                 t.zero_()
             elif name.endswith(one):
@@ -212,20 +213,30 @@ class GPT(nn.Module):
             else:
                 t.uniform_(-bound, bound,
                            generator=torch.Generator(t.device).manual_seed(seed * 2**32 + zlib.crc32(name.encode())))
-        self.cos, self.sin = rotary_tables(self.config, self.wte.weight.device)
+        self.init_buffers()
+
+    def init_buffers(self):
+        """The buffers no checkpoint holds, on the parameters' device: the rotary tables of the context and, without
+        config.qk_gain, the q / k gains fixed at 1 (init_weights, set_stage, checkpoint.load_model)."""
+        device = self.wte.weight.device
+        self.cos, self.sin = rotary_tables(self.config, device)
+        if not self.config.qk_gain:
+            for block in self.blocks:
+                block.attn.q_gain = torch.ones(self.config.n_embd // self.config.n_head, device=device)
+                block.attn.k_gain = torch.ones(self.config.n_embd // self.config.n_head, device=device)
 
     def set_stage(self, stage):
         """Continue at a training stage's context and rotary base (config.Stage; the weights are unchanged): the layers'
         windows and the rotary tables of the new context, on the parameters' device."""
         self.config.sequence_len, self.config.rope_base = stage.seq_len, stage.rope_base
         self.window_sizes = layer_windows(self.config)
-        self.cos, self.sin = rotary_tables(self.config, self.wte.weight.device)
+        self.init_buffers()
 
     def hidden(self, idx, cu_seqlens, kv_cache):
         """The final normed hidden states (B*T, C) of idx (B, T) token ids; cu_seqlens: the int32 attention segments of
         the flattened idx (document masking; data/loader.py PretrainingBatches). kv_cache (decoder prefill) receives
         every layer's keys and values."""
-        x = norm(embedding(self.wte.weight, idx))
+        x = norm(F.embedding(idx, self.wte.weight).to(torch.bfloat16))
         x0 = x
         for i, block in enumerate(self.blocks):
             # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 (no fp32 copies of the mix saved for
@@ -234,7 +245,8 @@ class GPT(nn.Module):
                 x = self.resid_lambdas[i] * x
             if self.config.x0:
                 x = x + self.x0_lambdas[i] * x0
-            ve = embedding(self.value_embeds[str(i)].weight, idx) if str(i) in self.value_embeds else None
+            ve = (F.embedding(idx, self.value_embeds[str(i)].weight).to(torch.bfloat16) if str(i) in self.value_embeds
+                  else None)
             x = block(x, ve, (self.cos, self.sin), self.window_sizes[i], kv_cache, cu_seqlens)
         return norm(x).flatten(0, 1)
 
@@ -265,7 +277,3 @@ def non_embedding_flops_per_token(model):
     matrices = sum(p.numel() for p in model.blocks.parameters() if p.ndim == 2)
     return 6 * matrices + sum(12 * model.config.n_embd * w for w in model.window_sizes)
 
-
-def flops_per_token(model):
-    """Training FLOPs per token: non_embedding_flops_per_token plus lm_head's 6 V C."""
-    return non_embedding_flops_per_token(model) + 6 * model.lm_head.weight.numel()

@@ -1,8 +1,10 @@
 """
 The model's QuACK GEMMs (Tri Dao, CuTe DSL; Dao-AILab/quack quack.gemm_interface) at one kernel config per (GEMM, model
-width) on the H100, fixed in TABLE; QuACK's run-time autotuner is not used (it keys on M and re-benchmarks every new
-shape). QuACK compiles kernels for symbolic shapes and caches them under QUACK_CACHE_DIR, so one width's kernels serve
-every M.
+width) on the H100, fixed in TABLE. QuACK's own selection does not subsume it: its autotuner (quack/autotuner.py) times
+each candidate once (triton do_bench) at the first call of every new shape in the training process, so the pick varies
+with GPU load between runs, and it offers neither cuBLAS nor an accuracy criterion for weight gradients; its analytic
+default (nvMatmulHeuristics, quack/nvmmh_heuristic.py) is not installed and is not a measurement. QuACK compiles kernels
+for symbolic shapes and caches them under QUACK_CACHE_DIR, so one width's kernels serve every M.
 
 GEMMs (C the width, h = 4C the MLP hidden size, V the vocabulary, M tokens; ops/linear.py, ops/cross_entropy.py):
   proj_fwd    x W^T                    (M, C) x (C, C)     attention projections c_q, c_k, c_v, c_o
@@ -20,7 +22,8 @@ GEMMs (C the width, h = 4C the MLP hidden size, V the vocabulary, M tokens; ops/
 TABLE holds the widths of the d8 smoke model (256) and the d24 production model (768). It is a measurement record on the
 H100 80 GB SXM5 (sm_90, at its 700 W power cap): median times of interleaved CUDA-graph rounds at
 M = config.MICRO_BATCH_TOKENS (98,304) of QuACK's SM90 candidates (all 44: tiles x pingpong x cluster 1x2 / 2x1 x
-swap_ab), the weight-gradient roles also at serial split-K 1..16 and cuBLAS (torch.mm, fp32 out; "cublas"):
+swap_ab), the weight-gradient roles also at serial split-K 1..16 and cuBLAS (torch.mm, fp32 out; "cublas"; the forward
+and dX roles against cuBLAS at 256 in profile_step: benchmarks/h100.txt):
 benchmarks/gemmsweep.py (gemmsweep_sm90.jsonl; benchmarks/gemmtable.py -> gemmtable_sm90.txt).
 Forward and dX roles: the fastest. Weight-gradient roles: among the configs within 1% of the fastest, the most accurate
 (rel. error vs fp64 depends only on the split-K factor s: 1.14e-4 / 5.67e-5 / 2.82e-5 / 1.38e-5 / 6.76e-6 at
@@ -66,10 +69,10 @@ TABLE = {
 }
 
 
-def gemm(A: Tensor, B: Tensor, role: str, C: int, out_dtype: torch.dtype, alpha) -> Tensor:
+def gemm(A: Tensor, B: Tensor, role: str, C: int, out_dtype: torch.dtype, alpha: float | Tensor) -> Tensor:
     """alpha A (M, K) @ B (K, N) in out_dtype with role's config at width C: QuACK's gemm_tuned.fn with the config given
-    (the function its autotuner wraps), split-K from the config; "cublas": torch.mm, alpha unused, as every role
-    mapped to it is a weight gradient of ops/linear.py called with alpha 1 (proj_dw, mlp_dw_proj, mlp_dw_fc)."""
+    (the function its autotuner wraps), split-K from the config; "cublas": torch.mm, alpha unused, as gemmsweep.py
+    offers cuBLAS only to roles called with alpha 1."""
     cfg = TABLE[C][role]
     if cfg == "cublas":
         return torch.mm(A, B, out_dtype=out_dtype)

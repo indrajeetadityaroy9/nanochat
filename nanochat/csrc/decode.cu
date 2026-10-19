@@ -23,7 +23,7 @@
  *     k_gemv  u = relu(norm(xo) Wfc^T)^2
  *     k_gemv  x = xo + u Wproj^T
  *   k_gemv    logits = norm(x) W_lm^T, their argmax (atomicMax on a packed key)
- *   k_commit  each active slot's argmax becomes its next input unless its prompt still supplies it.
+ *   k_commit  each active slot's argmax becomes its next input token and its position advances.
  *
  * Numerics follow the PyTorch model's eager forward op by op: the matrices and tables are bf16 copies of the fp32
  * parameters (rounded once, as the forward rounds them at use); the fp32 rotary table and q/k gains; the value-embedding
@@ -83,6 +83,7 @@ static __device__ __forceinline__ float warp_max(float v) {
  * of the MMA's MMA_N-wide n tiles; the MMA computes every output element from its own row and column only, and each
  * element's sum runs over K in the same order (K_BLOCK blocks in order, two k16 MMAs each) whatever the batch, so a
  * slot's outputs do not depend on B or on the other slots. Within a K_BLOCK block lane (g, t) = (lane / 4, lane % 4)
+ * (the m16n8k16 fragments' groupID and threadID_in_group, PTX ISA "Matrix Fragments for mma.m16n8k16")
  * loads the VEC consecutive k t*VEC.. of rows g and g + 8 and of its column's input (one 16-byte load each): A and B map
  * the MMA's k index to these physical k the same way, so the product is W . x.
  * The slots' inputs are made by the prologue (each value a bf16 value) a K chunk at a time into shared memory, [n tiles
@@ -233,12 +234,11 @@ static int gemv_chunk(int B, int K, int optin) {
 /* ---------------------------------------------------------------------------------------------------------------- */
 /* Embedding: x0 = rms_norm(wte[token]), one bf16 rounding. A block per slot, a thread per channel. */
 
-__global__ void k_embed(const int32_t *seq, int seq_slot, const int32_t *pos, const unsigned long long *active,
-                        const bf16 *wte, bf16 *x0, int C) {
+__global__ void k_embed(const int32_t *tokens, const unsigned long long *active, const bf16 *wte, bf16 *x0, int C) {
     __shared__ float r;
     const int b = blockIdx.x, tid = threadIdx.x;
     if (!live(*active, b)) return;
-    const bf16 *e = wte + (size_t)seq[(size_t)b * seq_slot + pos[b]] * C;
+    const bf16 *e = wte + (size_t)tokens[b] * C;
     if (tid < WARP) {
         float s = 0.f;
         for (int i = tid; i < C; i += WARP) s = __fmaf_rn(__bfloat162float(e[i]), __bfloat162float(e[i]), s);
@@ -275,8 +275,7 @@ typedef struct {
     bf16 *kc, *vc;             /* the layer's cache of slot 0, [max_len][C]; slot b's at + b kv_slot */
     size_t kv_slot;
     bf16 *out;                 /* [B][C] */
-    const int32_t *seq, *pos;
-    int seq_slot;
+    const int32_t *tokens, *pos;  /* [B]: each slot's input token and its position */
     const unsigned long long *active;
     float *part;               /* slot b, head h, split s: [(b H + h) part_slot + s][HEAD_DIM], each split's value sum */
     float *stat;               /* same index [2]: each split's maximum score m and exponential sum l */
@@ -295,7 +294,7 @@ static __device__ void attn_prologue(const Attn &a, int b, int head, int p, floa
     const bf16 *qkv = a.qkv + (size_t)b * 3 * a.C + head * HEAD_DIM;
     float t = __bfloat162float(qkv[2 * a.C + tid]);
     if (a.ve) {
-        const bf16 *h = a.h + (size_t)b * a.C, *ve = a.ve + (size_t)a.seq[(size_t)b * a.seq_slot + p] * a.C;
+        const bf16 *h = a.h + (size_t)b * a.C, *ve = a.ve + (size_t)a.tokens[b] * a.C;
         const float *w = a.ve_gate + (size_t)head * a.C;
         float d = 0.f;
         for (int i = lane; i < a.C; i += WARP) d = __fmaf_rn(__bfloat162float(h[i]), w[i], d);
@@ -435,18 +434,15 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
-/* Each active slot's argmax becomes its next input, unless its prompt still supplies it; its position advances, and the
- * token at it is reported in tokens[b]. A thread per slot. */
-__global__ void k_commit(int32_t *seq, int seq_slot, int32_t *pos, const int32_t *prompt_len, const unsigned long long *active,
-                         unsigned long long *argmax, int32_t *tokens, int B) {
+/* Each active slot's argmax becomes its next input token (reported to the host from tokens) and its position advances.
+ * A thread per slot. */
+__global__ void k_commit(int32_t *tokens, int32_t *pos, const unsigned long long *active, unsigned long long *argmax,
+                         int B) {
     const int b = threadIdx.x;
     if (b >= B || !live(*active, b)) return;
-    int32_t *s = seq + (size_t)b * seq_slot;
-    const int p = pos[b];
-    if (p + 1 >= prompt_len[b]) s[p + 1] = (int32_t)(0xffffffffu - (uint32_t)(argmax[b] & 0xffffffffu));
-    pos[b] = p + 1;
+    tokens[b] = (int32_t)(0xffffffffu - (uint32_t)(argmax[b] & 0xffffffffu));
+    pos[b] += 1;
     argmax[b] = 0ull;
-    tokens[b] = s[p + 1];
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -465,8 +461,7 @@ typedef struct {
     const bf16 *wte, *lm_head;
     const float *cos, *sin;   /* the fp32 rotary table [max_len][HALF] */
     Layer *layer;
-    int seq_slot;             /* max_len + 1: a slot's tokens (the step at max_len - 1 writes max_len) */
-    int32_t *seq, *pos, *prompt_len, *tokens;  /* [B][seq_slot], [B], [B], [B] */
+    int32_t *tokens, *pos;    /* [B]: each slot's input token (k_commit replaces it by the step's argmax), its position */
     unsigned long long *active;  /* device: the active slots' bit mask */
     int32_t *host_tokens;     /* pinned host [B]: the last step's tokens */
     unsigned long long *argmax;  /* [B] */
@@ -505,8 +500,8 @@ static void enqueue_step(Decoder *d) {
     const int C = d->C, F = d->F, L = d->L, B = d->B;
     cudaFuncAttributes fa;
     cudaFuncGetAttributes(&fa, k_embed);
-    k_embed<<<B, C < fa.maxThreadsPerBlock ? C : fa.maxThreadsPerBlock, 0, d->stream>>>(d->seq, d->seq_slot, d->pos,
-                                                                                       d->active, d->wte, d->x0, C);
+    k_embed<<<B, C < fa.maxThreadsPerBlock ? C : fa.maxThreadsPerBlock, 0, d->stream>>>(d->tokens, d->active, d->wte,
+                                                                                       d->x0, C);
     for (int l = 0; l < L; l++) {
         const Layer *ly = &d->layer[l];
         /* the layer's input: x0 before the first block, else the previous block's output */
@@ -518,7 +513,7 @@ static void enqueue_step(Decoder *d) {
         const int splits = (keys + d->attn_run - 1) / d->attn_run;
         const Attn a = {d->qkv_out, d->h, ly->ve, ly->ve_gate, ly->q_gain, ly->k_gain, d->cos, d->sin,
                         d->kc + (size_t)l * d->max_len * C, d->vc + (size_t)l * d->max_len * C,
-                        (size_t)L * d->max_len * C, d->att, d->seq, d->pos, d->seq_slot, d->active, d->attn_part,
+                        (size_t)L * d->max_len * C, d->att, d->tokens, d->pos, d->active, d->attn_part,
                         d->attn_part + (size_t)B * d->H * d->attn_wave * HEAD_DIM, d->attn_done, d->attn_wave, C, d->H,
                         ly->window, d->attn_run};
         k_attn<<<dim3(d->H, splits, B), HEAD_DIM, splits * sizeof(float), d->stream>>>(a);
@@ -534,7 +529,7 @@ static void enqueue_step(Decoder *d) {
     Gemv g = gemv(d, d->lm_head, d->vocab, C, PRO_NORM, d->x, EPI_ARGMAX, NULL);
     g.argmax = d->argmax;
     launch_gemv(d, g);
-    k_commit<<<1, MAX_BATCH, 0, d->stream>>>(d->seq, d->seq_slot, d->pos, d->prompt_len, d->active, d->argmax, d->tokens, B);
+    k_commit<<<1, MAX_BATCH, 0, d->stream>>>(d->tokens, d->pos, d->active, d->argmax, B);
     cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)B * sizeof(int32_t), cudaMemcpyDeviceToHost, d->stream);
 }
 
@@ -542,8 +537,8 @@ extern "C" void dec_destroy(void *handle) {
     Decoder *d = (Decoder *)handle;
     cudaGraphExecDestroy(d->exec);
     cudaGraphDestroy(d->graph);
-    void *bufs[] = {d->seq, d->pos, d->prompt_len, d->tokens, d->active, d->argmax, d->x, d->x0, d->xm, d->h,
-                    d->qkv_out, d->att, d->xo, d->u, d->kc, d->vc, d->attn_part, d->attn_done};
+    void *bufs[] = {d->tokens, d->pos, d->active, d->argmax, d->x, d->x0, d->xm, d->h, d->qkv_out, d->att, d->xo, d->u,
+                    d->kc, d->vc, d->attn_part, d->attn_done};
     for (void *b : bufs) cudaFree(b);
     cudaFreeHost(d->host_tokens);
     free(d->layer);
@@ -555,24 +550,26 @@ extern "C" int dec_max_batch() { return MAX_BATCH; }
 
 /*
  * cfg: L, C, MLP hidden width F (fc: [F][C]; proj: [C][F]), vocab (lm_head's rows), max_len, B (slots).
- * ptrs: wte, cos, sin (the fp32 rotary table [max_len][HALF] of every layer), lm_head; per layer: qkv, o, fc, proj,
- *       value-embedding table (0 if none), value-embedding gate (0 if none), q gain, k gain.
+ * ptrs: GLOBAL_PTRS pointers wte, cos, sin (the fp32 rotary table [max_len][HALF] of every layer), lm_head; then
+ *       LAYER_PTRS per layer: qkv, o, fc, proj, value-embedding table (0 if none), value-embedding gate (0 if none),
+ *       q gain, k gain.
  * scal: per layer: resid lambda, x0 lambda (bf16 values).
  * window: per layer, the keys before each query that it attends (FlashAttention's window_size left).
  * stream: the caller's CUDA stream (not the legacy default stream: captured), on which every call here enqueues its
  *         work; the caller owns it and keeps it alive past dec_destroy.
  */
+constexpr int GLOBAL_PTRS = 4, LAYER_PTRS = 8;
+
 extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *scal, const int *window, void *stream) {
     Decoder *d = (Decoder *)calloc(1, sizeof(Decoder));
     d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->B = cfg[5];
     d->H = d->C / HEAD_DIM;
-    d->seq_slot = d->max_len + 1;
     d->wte = (const bf16 *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
     d->lm_head = (const bf16 *)ptrs[3]; d->stream = (cudaStream_t)stream;
     const int L = d->L, C = d->C, B = d->B;
     d->layer = (Layer *)calloc(L, sizeof(Layer));
     for (int l = 0; l < L; l++) {
-        const uint64_t *p = ptrs + 4 + 8 * l;
+        const uint64_t *p = ptrs + GLOBAL_PTRS + LAYER_PTRS * l;
         d->layer[l] = {(const bf16 *)p[0], (const bf16 *)p[1], (const bf16 *)p[2], (const bf16 *)p[3], (const bf16 *)p[4],
                        (const float *)p[5], (const float *)p[6], (const float *)p[7], scal[2 * l], scal[2 * l + 1],
                        window[l]};
@@ -592,8 +589,7 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, d->attn_wave * sizeof(float));
     d->attn_wave = d->sms * resident / d->H;
     d->attn_run = (d->max_len - 1 + d->attn_wave - 1) / d->attn_wave;
-    cudaMalloc((void **)&d->seq, (size_t)B * d->seq_slot * sizeof(int32_t));
-    int32_t **ints[] = {&d->pos, &d->prompt_len, &d->tokens};
+    int32_t **ints[] = {&d->tokens, &d->pos};
     for (int32_t **p : ints) cudaMalloc((void **)p, (size_t)B * sizeof(int32_t));
     cudaMalloc((void **)&d->active, sizeof(unsigned long long));
     cudaMemset(d->active, 0, sizeof(unsigned long long));
@@ -616,21 +612,19 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     return d;
 }
 
-/* Start a sequence of n tokens in slot b from PyTorch's batch-1 KVCache of its first n_cached tokens, laid out (layer,
- * position, head, dim) with a layer stride of layer_stride elements. The slot's steps continue at position n_cached once
- * it is active (dec_set_active). Enqueued after the steps launched so far. */
-extern "C" void dec_set_prefilled(void *handle, int b, const int32_t *tokens, int n, int n_cached, const bf16 *k,
-                                  const bf16 *v, long long layer_stride) {
+/* Start a sequence in slot b from PyTorch's batch-1 KVCache of its first pos tokens, laid out (layer, position, head,
+ * dim) with a layer stride of layer_stride elements: its steps continue from token, its last, at position pos once the
+ * slot is active (dec_set_active). Enqueued after the steps launched so far. */
+extern "C" void dec_set_prefilled(void *handle, int b, int32_t token, int32_t pos, const bf16 *k, const bf16 *v,
+                                  long long layer_stride) {
     Decoder *d = (Decoder *)handle;
     const size_t row = (size_t)d->C * sizeof(bf16), dst_pitch = (size_t)d->max_len * row,
                  src_pitch = (size_t)layer_stride * sizeof(bf16), slot = (size_t)d->L * d->max_len * d->C;
-    cudaMemcpyAsync(d->seq + (size_t)b * d->seq_slot, tokens, (size_t)n * sizeof(int32_t), cudaMemcpyHostToDevice,
-                    d->stream);
-    cudaMemcpyAsync(d->prompt_len + b, &n, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpyAsync(d->pos + b, &n_cached, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpy2DAsync(d->kc + b * slot, dst_pitch, k, src_pitch, (size_t)n_cached * row, d->L, cudaMemcpyDeviceToDevice,
+    cudaMemcpyAsync(d->tokens + b, &token, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
+    cudaMemcpyAsync(d->pos + b, &pos, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
+    cudaMemcpy2DAsync(d->kc + b * slot, dst_pitch, k, src_pitch, (size_t)pos * row, d->L, cudaMemcpyDeviceToDevice,
                       d->stream);
-    cudaMemcpy2DAsync(d->vc + b * slot, dst_pitch, v, src_pitch, (size_t)n_cached * row, d->L, cudaMemcpyDeviceToDevice,
+    cudaMemcpy2DAsync(d->vc + b * slot, dst_pitch, v, src_pitch, (size_t)pos * row, d->L, cudaMemcpyDeviceToDevice,
                       d->stream);
 }
 
@@ -640,14 +634,14 @@ extern "C" void dec_set_active(void *handle, unsigned long long mask) {
     cudaMemcpyAsync(d->active, &mask, sizeof(mask), cudaMemcpyHostToDevice, d->stream);
 }
 
-/* Start one step of the active slots (asynchronous): each writes its token at its next position (the argmax, or its
- * prompt's while the prompt lasts), which dec_tokens returns. */
+/* Start one step of the active slots (asynchronous): each takes its argmax as its next token, which dec_tokens
+ * returns. */
 extern "C" void dec_launch(void *handle) {
     Decoder *d = (Decoder *)handle;
     cudaGraphLaunch(d->exec, d->stream);
 }
 
-/* Wait for the launched step; out[b]: the token slot b wrote (stale for inactive slots). */
+/* Wait for the launched step; out[b]: the token slot b took (stale for inactive slots). */
 extern "C" void dec_tokens(void *handle, int32_t *out) {
     Decoder *d = (Decoder *)handle;
     cudaStreamSynchronize(d->stream);

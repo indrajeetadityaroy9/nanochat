@@ -5,9 +5,9 @@ description = "nanochat fork: pretraining a Python and C++ code-generation base 
 readme = "README.md"
 # the Python of NVIDIA's NGC PyTorch images (26.09: 3.12), the environment nanochat runs in
 requires-python = ">=3.12"
-# PyTorch and what it needs (Triton, the CUDA libraries, numpy) come from the NGC PyTorch image as NVIDIA built them for
-# Blackwell: docker/Dockerfile prunes torch and numpy from the lock. Every other package is at its latest
-# release in uv.lock (uv lock --upgrade), FlashAttention-4 and QuACK at the latest commit of their repositories.
+# PyTorch and what it needs (Triton, the CUDA libraries, numpy) come from the NGC PyTorch image as NVIDIA built them:
+# docker/Dockerfile prunes torch and numpy from the lock. Every other package is at its latest release in uv.lock
+# (uv lock --upgrade), FlashAttention-4 and QuACK at the latest commit of their repositories.
 dependencies = [
     "duckdb",
     # FlashAttention-4 (CuTe DSL), from github.com/Dao-AILab/flash-attention (tool.uv.sources). It brings cuda-bindings,
@@ -22,12 +22,22 @@ dependencies = [
     "nvidia-cutlass-dsl[cu13]",
     "numpy",
     "obstore",
+    # the studies' and the report's tables: tidy results as DataFrames, CSV, Parquet and Markdown (experiments/studies.py,
+    # scripts/report.py)
+    "pandas",
     # 25.0.1: ParquetFile pre-buffers (coalesces) reads by default; 25.0.0 returns wrong doubles on Arm CPUs with SVE
     "pyarrow>=25.0.1",
+    # the ablation studies' designs: fractional factorials and their alias structure (experiments/studies.py)
+    "pydoe",
     # QuACK's CuTe DSL kernels, from github.com/Dao-AILab/quack (tool.uv.sources)
     "quack-kernels",
     # the LSH band count's integrals (nanochat/data/dedup.py rows)
     "scipy",
+    # the studies' estimates: factorial effects by OLS, ANOVA, WLS fits with their prediction intervals
+    # (experiments/studies.py)
+    "statsmodels",
+    # pandas' DataFrame.to_markdown
+    "tabulate",
     # OpenAI's encoder of the trained vocabulary (nanochat/data/tokenizer.py); the SA-BPE trainer is the crate nanochat/data/bpe
     "tiktoken",
     "torch",

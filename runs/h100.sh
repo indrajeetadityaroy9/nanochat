@@ -26,17 +26,18 @@ mkdir -p "$LOGS"
 } >>"$LOGS/runner.log"
 [[ -s $LOGS/ratio ]] || runs/container.sh python -m nanochat.train.stages "$DEPTH" | tail -n 1 >"$LOGS/ratio"
 RATIO=$(cat "$LOGS/ratio")
-read -r TAG STEPS _ < <(runs/container.sh python -m nanochat.train.schedule "$DEPTH" "$RATIO" "$SEED" | tail -n 1)
-# a checkpoint every 1% of the plan's steps: a failure loses at most 1% of the run
+read -r TAG STEPS REPO_START < <(runs/container.sh python -m nanochat.train.schedule "$DEPTH" "$RATIO" "$SEED" | tail -n 1)
+# a checkpoint every 1% of the plan's steps: a failure loses at most 1% of the run; kept besides: the model before the
+# repo-level stage (what the 32K stage adds)
 SAVE_EVERY=$(( (STEPS + 99) / 100 ))
-echo "$(date -Is) $TAG ratio $RATIO steps $STEPS save_every $SAVE_EVERY" >>"$LOGS/runner.log"
+echo "$(date -Is) $TAG ratio $RATIO steps $STEPS save_every $SAVE_EVERY keep $REPO_START" >>"$LOGS/runner.log"
 CKPT=$HOME/nanochat-runs/base_checkpoints/$TAG/checkpoint.pt
 # the checkpoint's modification time (0 before the first one): a relaunch continues only after progress
 saved() { stat -c %Y "$CKPT" 2>/dev/null || echo 0; }
 until
   start=$(saved)
   runs/container.sh python -m scripts.base_train --depth "$DEPTH" --target-param-data-ratio "$RATIO" --seed "$SEED" \
-    --save-every "$SAVE_EVERY" >>"$LOGS/train.log" 2>&1
+    --save-every "$SAVE_EVERY" --keep "$REPO_START" >>"$LOGS/train.log" 2>&1
 do
   end=$(saved)
   echo "$(date -Is) base_train failed: checkpoint saved at $start -> $end" >>"$LOGS/runner.log"

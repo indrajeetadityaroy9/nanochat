@@ -71,14 +71,14 @@ def max_ratio(depth, tokenizer):
     of the file-level stage's corpora, on the predicate "does not fit". The predicate is not monotone in the count (a
     run trains floor(n / g) x g micro-batches with g = grad_accum_steps rising with n, so the trained tokens dip where g
     steps up): the ratio returned fits, but a larger count that also fits may exist."""
-    params = plan(depth, 1.0, tokenizer.vocab_size).scaling_params
+    params = plan(depth, 1.0).scaling_params
     rows = sum(packed_rows(c, "train", tokenizer, FILE_STAGE.seq_len) for c in stage_mixture(FILE_STAGE, tokenizer))
 
     def ratio(n):
         return n * MICRO_BATCH_TOKENS / params
 
     n = bisect.bisect_left(range(rows * FILE_STAGE.seq_len // MICRO_BATCH_TOKENS + 1), True,
-                           key=lambda n: not fits(plan(depth, ratio(n), tokenizer.vocab_size), tokenizer))
+                           key=lambda n: not fits(plan(depth, ratio(n)), tokenizer))
     return ratio(n - 1)
 
 

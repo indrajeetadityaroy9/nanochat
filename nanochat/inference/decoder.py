@@ -18,7 +18,6 @@ import numpy as np
 import torch
 
 from nanochat.data.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX
-from nanochat.model.gpt import has_ve
 from nanochat.native import cuda_library
 
 
@@ -69,41 +68,43 @@ class NativeDecoder:
         lib = cuda_library("decode")
         lib.dec_create.argtypes = [ctypes.c_void_p] * 5
         lib.dec_create.restype = ctypes.c_void_p
-        lib.dec_set_prefilled.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-                                          ctypes.c_void_p, ctypes.c_void_p, ctypes.c_longlong]
+        lib.dec_set_prefilled.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int32, ctypes.c_int32, ctypes.c_void_p,
+                                          ctypes.c_void_p, ctypes.c_longlong]
         lib.dec_set_active.argtypes = [ctypes.c_void_p, ctypes.c_ulonglong]
         lib.dec_launch.argtypes = [ctypes.c_void_p]
         lib.dec_destroy.argtypes = [ctypes.c_void_p]
         lib.dec_tokens.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         self.lib, self.model = lib, model
-        cfg, p = model.config, dict(model.named_parameters())
+        cfg = model.config
         L, C, T = cfg.n_layer, cfg.n_embd, cfg.sequence_len
-        self.device = p["wte.weight"].device
+        self.device = model.wte.weight.device
         # decode.cu reads bf16 copies of the matrices and tables (the rounding the forward applies to the fp32
         # parameters at use) and fp32 copies of the q/k gains and value-embedding gate weights, which gpt.py uses in
-        # fp32, as it does the rotary table
-        def bf16(name):
-            return p[name].to(torch.bfloat16)
+        # fp32, as it does the rotary table. The weights are what the model has under its config's switches: value
+        # embeddings and gates on the layers of model.value_embeds; q/k gains (with qk_gain off, init_buffers's ones);
+        # resid lambdas 1 and x0 lambdas 0 when the model has none (its forward's identity: 1 x + 0 x0 = x, exact).
+        def bf16(t):
+            return t.to(torch.bfloat16)
 
-        def fp32(name):
-            return p[name].clone()
-
-        weights = [bf16("wte.weight"), model.cos, model.sin, bf16("lm_head.weight")]
-        for i in range(L):
-            a, m = f"blocks.{i}.attn.", f"blocks.{i}.mlp."
-            qkv = torch.cat([p[a + "c_q.weight"], p[a + "c_k.weight"], p[a + "c_v.weight"]]).to(torch.bfloat16)
-            ve = has_ve(i, L)
-            weights += [qkv, bf16(a + "c_o.weight"), bf16(m + "c_fc.weight"), bf16(m + "c_proj.weight"),
-                        bf16(f"value_embeds.{i}.weight") if ve else None, fp32(a + "ve_gate.weight") if ve else None,
-                        fp32(a + "q_gain"), fp32(a + "k_gain")]
+        weights = [bf16(model.wte.weight), model.cos, model.sin, bf16(model.lm_head.weight)]
+        for i, block in enumerate(model.blocks):
+            attn, mlp = block.attn, block.mlp
+            ve = str(i) in model.value_embeds
+            weights += [bf16(torch.cat([attn.c_q.weight, attn.c_k.weight, attn.c_v.weight])), bf16(attn.c_o.weight),
+                        bf16(mlp.c_fc.weight), bf16(mlp.c_proj.weight),
+                        bf16(model.value_embeds[str(i)].weight) if ve else None,
+                        attn.ve_gate.weight.clone() if ve else None, attn.q_gain.clone(), attn.k_gain.clone()]
         self._weights = weights  # referenced while the decoder reads them through pointers
         # the resid/x0 lambdas meet bf16 tensors as bf16 values (a 0-dim fp32 tensor times a bf16 tensor computes in
         # bf16), per layer (resid, x0)
-        scal = torch.stack([p["resid_lambdas"], p["x0_lambdas"]], 1).to(torch.bfloat16).float().cpu().numpy()
+        resid = torch.ones(L) if model.resid_lambdas is None else model.resid_lambdas.cpu()
+        x0 = torch.zeros(L) if model.x0_lambdas is None else model.x0_lambdas.cpu()
+        scal = torch.stack([resid, x0], 1).to(torch.bfloat16).float().numpy()
         # MLP hidden width F: c_fc is (F, C), c_proj (C, F)
-        hidden = p["blocks.0.mlp.c_fc.weight"].size(0)
-        # a slot's device memory (bf16 unless noted): KV caches 2 L T C, the per-vector buffers (x, x0, xm, h, att, xo
-        # 6 C, qkv 3 C, MLP F), fp32 attention partials H splits (D + 2) with splits at most T (one key each)
+        hidden = model.blocks[0].mlp.c_fc.weight.size(0)
+        # a slot's device memory in bytes, 2 per bf16 value: KV caches 2 L T C, the per-vector buffers (x, x0, xm, h,
+        # att, xo 6 C, qkv 3 C, MLP F); 4 per fp32 value: attention partials H splits (D sums + m, l) with splits at
+        # most T (one key each)
         slot_bytes = 2 * (2 * L * T * C + 9 * C + hidden) + 4 * cfg.n_head * T * (C // cfg.n_head + 2)
         self.batch = min(lib.dec_max_batch(), torch.cuda.mem_get_info()[0] // slot_bytes)
         config = np.array([L, C, hidden, cfg.vocab_size, T, self.batch], dtype=np.int32)
@@ -124,23 +125,23 @@ class NativeDecoder:
     def _prefill(self, b, tokens):
         """Start a sequence of tokens in slot b: the model's forward pass over all but its last token fills the slot's
         cache; the steps continue from the last token."""
-        cfg, n_cached = self.model.config, len(tokens) - 1
-        cache = KVCache(cfg.n_layer, n_cached, cfg.n_head, cfg.n_embd // cfg.n_head, self.device)
-        self.model.prefill(torch.tensor([tokens[:n_cached]], dtype=torch.int32, device=self.device), cache)
-        prompt = np.asarray(tokens, dtype=np.int32)  # referenced until the copy: ctypes passes only its address
+        cfg, n = self.model.config, len(tokens) - 1
+        cache = KVCache(cfg.n_layer, n, cfg.n_head, cfg.n_embd // cfg.n_head, self.device)
+        self.model.prefill(torch.tensor([tokens[:n]], dtype=torch.int32, device=self.device), cache)
         torch.cuda.synchronize()  # the decoder copies the cache on its own stream
-        self.lib.dec_set_prefilled(self.handle, b, prompt.ctypes.data, len(tokens), n_cached, cache.k_cache.data_ptr(),
-                                   cache.v_cache.data_ptr(), cache.k_cache.stride(0))
+        self.lib.dec_set_prefilled(self.handle, b, int(tokens[n]), n, cache.k_cache.data_ptr(), cache.v_cache.data_ptr(),
+                                   cache.k_cache.stride(0))
         torch.cuda.synchronize()  # the copies read the cache tensors, freed on return
 
     @torch.no_grad()
     def run(self, requests):
         """Greedy continuations of requests, an iterable (consumed lazily) of (prompt tokens: BOS and at least one more;
-        max_tokens; stop: None or a callable of the generated token ids so far, true when the sequence is done). Yields
-        (the request's index, its generated token ids) as each finishes, in completion order: at BOS (not included),
-        after max_tokens, or once the stop rule held (the token that made it hold included). A finished sequence's slot
-        takes the next request. The stop rule of a step's tokens is evaluated while the next step runs: a slot it ends
-        computes one step more, whose token is dropped."""
+        max_tokens; stop: None or a callable of the generated token ids so far, true when the sequence is done), each
+        with len(prompt) + max_tokens - 1 at most the model's sequence_len (the last step's position indexes the slot's
+        cache and the rotary table). Yields (the request's index, its generated token ids) as each finishes, in
+        completion order: at BOS (not included), after max_tokens, or once the stop rule held (the token that made it
+        hold included). A finished sequence's slot takes the next request. The stop rule of a step's tokens is evaluated
+        while the next step runs: a slot it ends computes one step more, whose token is dropped."""
         lib, handle, B, bos = self.lib, self.handle, self.batch, self.bos
         queue, slots, mask = enumerate(requests), [None] * B, 0
         stopping = []  # slots whose last token awaits its stop rule

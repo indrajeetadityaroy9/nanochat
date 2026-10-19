@@ -53,9 +53,8 @@ compiled documents and the packed 8K and 32K rows.
 | Gradient clipping | global L2 norm 1.0, `torch.nn.utils.clip_grad_norm_` | DeepSeek LLM §2.3, inherited by DeepSeek-Coder §3.4 |
 
 **Why clip.** A paired A/B at d8, 20 tokens per parameter, compared clipping at 1.0 with no clipping
-(`benchmarks/h100.txt`; repeated at 100 tokens per parameter as the `noclip` arm of `experiments/design.py`'s regime
-phase). Both arms used the same seed and data order, and training is deterministic, so the clipping is the only
-difference between them. With clipping:
+(`benchmarks/h100.txt`, `results/ablation_clip.md`). Both arms used the same seed and data order, and the training of
+that comparison was deterministic, so the clipping is the only difference between them. With clipping:
 
 - Mean validation bits per byte over all 11 corpora fell from 0.88119 to 0.87806.
 - Every corpus scored lower: Python 0.74504 → 0.74209, C++ 0.68317 → 0.67994.
@@ -70,12 +69,13 @@ The model's ops live in `nanochat/ops/` and their CUDA sources in `nanochat/csrc
 | Projections, MLP, LM-head GEMMs | QuACK SM90 GEMMs with a per-role tile table measured at M = 98,304 (`quack_gemm.TABLE`, `benchmarks/gemmsweep.py` → `gemmtable.py`); weight gradients use cuBLAS `torch.mm` or serial split-K, whichever is most accurate within 1% of the fastest |
 | ReLU² MLP | QuACK fused `gemm_act` / `gemm_dact` |
 | Cross entropy | QuACK, from bf16 logits read once; the loss and the logit gradient in one pass, the gradient written over the logits |
-| Attention | FlashAttention-4 varlen, deterministic backward |
-| q/k norm + gain + RoPE | `csrc/qk_prologue.cu`: one pass per direction; the backward is persistent and reduces the gain gradient in a fixed order (row math shared with the decoder through `csrc/qk_row.cuh`) |
-| Embeddings | `csrc/embedding.cu`: bf16 lookup; the gradient sums each token's rows in a fixed order (stable sort, partials of 32 rows, ordered sums) |
+| Attention | FlashAttention-4 varlen, its default (fastest) backward |
+| q/k norm + gain + RoPE | `csrc/qk_prologue.cu`: one pass per direction; the backward is persistent and reduces the gain gradient without atomics (row math shared with the decoder through `csrc/qk_row.cuh`) |
+| Embeddings | `F.embedding` with the bf16 cast fused by Inductor; its backward adds rows with atomics |
 | Decoding | `csrc/decode.cu` (wrapper `inference/decoder.py`): batched native decoder for the code benchmarks |
 
-Measured on the d24 step with real data (`benchmarks/profile_step.py 24 30 12`):
+Measured on the d24 step with real data (`benchmarks/profile_step.py 24 12`), before the switch to the fastest
+(atomic) gradient reductions, which take the step from 3,764 to 3,724 ms in `benchmarks/h100.txt`:
 
 - 3,764 ms per step, 313.4K tok/s.
 - 99% of the step's time is GPU kernels.
@@ -84,13 +84,11 @@ Measured on the d24 step with real data (`benchmarks/profile_step.py 24 30 12`):
 
 ## Reproducibility
 
-- **Bitwise-deterministic training.** Every gradient reduction runs in a fixed order: FA4's deterministic backward, and
-  the q/k prologue and embedding kernels, which use no atomics.
-  - `tests/determinism.py` repeats a d24 step 6 times. 0 of 220 parameter gradients differ between repeats; with
-    PyTorch's default kernels, 212 differ.
-  - A run killed and resumed from its checkpoint reproduces the uninterrupted run's losses bit for bit
-    (`tests/smoke.sh`).
-  - Cost: +1.5% per micro-batch, against +8% for `torch.use_deterministic_algorithms`.
+- **Fastest kernels over reproducibility.** Gradients are reduced by the fastest kernels, FA4's and Inductor's embedding
+  backward with atomics, so repeated steps differ in the last bits. Fixed-order reductions (FA4's deterministic
+  backward and a sorted embedding backward) made the d24 step bitwise reproducible at +1.1% per step (3,764 ms against
+  3,724 ms, `benchmarks/h100.txt`).
+- **Resume.** A run killed and resumed from its checkpoint continues it (`tests/smoke.sh`).
 - **Pinned environment.**
   - `docker/Dockerfile` pins every base image by digest (NGC PyTorch 26.09, uv, Go) and every git dependency by commit;
     `uv.lock` pins the Python packages.
@@ -115,10 +113,15 @@ tmux new -d -s h100 'cd ~/projects/nanochat && runs/h100.sh'
 What `runs/h100.sh` does:
 
 1. Derives the ratio and the tag `d24-r490.805-s42` (`python -m nanochat.train.schedule`: depth, ratio, seed).
-2. Trains both stages, saving a checkpoint every 812 steps (1%).
+2. Trains both stages, saving a checkpoint every 812 steps (1%) and keeping (`--keep`) the model before the repository
+   stage, at the configuration its weights trained in (8K, RoPE base 10^4).
 3. Relaunches after a failure, as long as the failed attempt saved a newer checkpoint.
-4. Runs `scripts/base_eval.py` on the final checkpoint: per-corpus validation bits per byte, reference-solution bits
-   per byte, EvalPlus HumanEval+/MBPP+, MultiPL-E C++ and HumanEval infilling, each scored by its official evaluator.
+4. Runs `scripts/base_eval.py` on the final checkpoint:
+   - validation bits and bytes per corpus at 8K, and at 32K per context bucket (≤8K, 8–16K, >16K tokens of context);
+   - one mixture bits per byte per group (`loss_eval.mixture_bpb`: val rows drawn as training draws them);
+   - reference-solution bits per byte;
+   - EvalPlus HumanEval+/MBPP+, MultiPL-E C++ and HumanEval infilling, each generated as its official generator does
+     and scored by its official evaluator.
 5. Writes its tables to `~/nanochat-runs/results/<tag>.md` (`scripts/report.py`).
 
 **Expected cost:** about 85 h at the measured 313.4K tok/s, about $365 at $4.29/h. This is an estimate: the
@@ -133,19 +136,57 @@ puts them back where `load_model`, `base_eval` and a resumed `base_train` read t
 
 ## Verification
 
-`tests/all.sh` runs these checks on the H100. Figures are from the run on the released code.
+`tests/all.sh` runs these checks on the H100, all on the data pipeline's rows. Figures are from the run on the released
+code.
 
 | Check | Result |
 |---|---|
-| `ops_check`: each op vs fp64, next to plain bf16 PyTorch | q/k prologue outputs and input gradients rel 1.7e-3 (bf16 PyTorch 3.9e-3), gain gradients rel 1.9e-7 (bf16 PyTorch 3.8e-3); embedding lookup exact, gradient rel 1.2e-7 and bitwise repeatable |
-| `model_check`: compiled d8 vs an independent fp64 reference (random init, perturbed) | loss rel 1.8e-5; no gradient worse than bf16 eager |
-| `model_check_data`: the data pipeline's rows at both stages | loss rel 3.5e-5 / 5.8e-6 (8K), 1.2e-6 (32K) |
-| `determinism`: d24 step repeated 6 times | 0 of 220 gradients differ |
-| `decoder_check`: native decoder vs eager greedy decoding | trained d8: 32/32 identical; random d24: tokens differ only where eager's top two logits are within 0.013 |
-| `smoke.sh`: d8 both stages, killed after the switch and resumed | losses on the overlapping steps bitwise equal |
+| `model_check`: compiled d8 vs an independent fp64 reference on the first micro-batch of each stage (random init, perturbed) | loss rel 3.5e-5 / 5.8e-6 (8K), 1.2e-6 (32K); no gradient worse than bf16 eager; the same for each switch off |
+| `model_check`, deletion equivalence: each switch off vs the canonical model with that component at its identity | losses bitwise equal; gradients equal within one bf16 rounding |
+| `decoder_check` (in `smoke.sh`): native decoder vs eager greedy decoding on the smoke's trained model | 32/32 identical, and with a stop rule and more requests than slots 96/96 |
+| `smoke.sh`: d8 both stages, killed after the switch and resumed | the relaunch resumes at the switch and trains to the end; the kept switch checkpoint survives |
 
 The fp64 reference (`tests/reference.py`) restates the window and value-embedding rules itself rather than importing
 them, so a bug in the model's rules shows up as a mismatch.
+
+## Appendix studies
+
+`experiments/studies.py` defines the paper's appendix studies: each a set of arms, a decision rule fixed before its
+arms ran, and an analysis. `experiments/run.sh <study> ...` trains and evaluates every arm without a record
+(`experiments/arm.py`; an arm is identified by its configuration, so a run shared by studies trains once), then writes
+the study's tables. The metric of every study is the code group's mixture bits per byte of the 8K val rows.
+
+| Study | Scale | Design | Question |
+|---|---|---|---|
+| `noise` | d8, 100 TPP | canonical model, 4 init × 2 data seeds | run-to-run SD; ANOVA variance components |
+| `screen` | d8, 100 TPP | 2^(7−3) resolution-IV fraction (`pydoe.fracfact`), common random numbers | which components earn their place: value embeddings, x0, resid, QK gains, windows; WSD vs D2Z; fixed vs τ-law weight decay |
+| `long_context` | d8, 100 TPP | 2 × 2 | the repo stage's schedule (continue / re-warm) × RoPE base (switch / one base), at 32K per context bucket and at 8K |
+| `confirm` | d24, 0.5B tokens | screen verdict vs canonical, 2 seed pairs | the pruned architecture at the target scale |
+| `lr_horizon` | d24, 0.5/1/2B tokens | peak lr × {0.5, 1, 2, 4} of the law's | the optimal lr per horizon, extrapolated to the production run |
+| `optimizer` | d24, 0.5B tokens | AdamW at the same lr grid | Muon+AdamW vs AdamW, each at its fitted optimum |
+| `batch` | d24 | gradient noise scale at the kept checkpoints | the critical batch's trend against the production batch |
+
+Decision rules:
+
+- **Screen** (main effects by OLS on the ±1 design; each tested one-sided against the noise SD with the noise arms'
+  degrees of freedom, Holm across the seven factors, and against Lenth's margin of error):
+  - a component that costs parameters stays only if it significantly helps;
+  - the windows, which save compute, go only if they significantly hurt;
+  - a regime alternative replaces the current choice only if it is significantly better.
+- **Confirm:** the architecture verdict stands unless the pruned model loses on both seed pairs.
+- **lr horizon:** the extrapolated lr replaces the law's only if its 95% interval excludes it. Each horizon's optimum is
+  the vertex of a quadratic in ln lr with its delta-method SE; the line of ln η* on ln D is fitted by WLS over the
+  horizons with an interior optimum.
+
+With the WSD schedule and fixed weight decay, an lr's horizons share one constant-lr phase, so each longer horizon
+continues the shorter one's checkpoint kept at its cooldown start: the same run, for 2.3B rather than 3.5B
+tokens per lr. The noise SD is between seeds; the screen's contrasts at shared seeds carry the divergence of a changed
+component, which it bounds.
+
+Outputs, in `results/studies/`: `<study>.md` (the appendix table) and `<study>.csv`, and three tidy tables for figures:
+`arms.csv` (one row per study arm: every Variant field, the plan, the optimizer hyperparameters, the train summary,
+the group bits per byte), `eval.csv` (bits, bytes and rows per arm, evaluation, corpus and context bucket) and
+`curves.parquet` (one row per arm and step; a branch's preceded by its parent's steps).
 
 ## Measured design decisions
 
@@ -158,8 +199,6 @@ Each entry has its measurement in `benchmarks/h100.txt`:
   from 168 ms to 93 ms per step.
 - **Value-embedding gate as an fp32 broadcast-sum** rather than fp32 GEMMs on CUDA cores: 0.88 vs 1.20 ms per layer,
   error unchanged (5e-8 vs fp64). bf16 would be faster but has gradient error 3e-3.
-- **Custom deterministic kernels** rather than `torch.use_deterministic_algorithms`: +1.5% vs +8% per micro-batch, both
-  bitwise reproducible.
 
 ## Layout
 
@@ -168,13 +207,15 @@ Each entry has its measurement in `benchmarks/h100.txt`:
 - `nanochat/ops/`: the ops above; `nanochat/csrc/`: their CUDA sources and the decoder's.
 - `nanochat/train/`: `optim.py`, `schedule.py` (plan and lr multiplier), `stages.py` (token budget, rows per stage),
   `checkpoint.py`, `metrics.py`.
-- `nanochat/eval/`: bits per byte and the code benchmarks.
+- `nanochat/eval/`: bits and bytes per context bucket and the mixture bits per byte (`loss_eval.py`), the code
+  benchmarks.
 - `nanochat/inference/`: the native decoder.
 - `nanochat/data/`: the data pipeline, including the Rust tokenizer, repository and packing crate in `bpe/`.
 - `scripts/`: `base_train.py`, `base_eval.py`, `report.py` (results tables).
 - `runs/`: `setup.sh` (fresh host), `container.sh` (run a command in the image), `h100.sh` (the production run),
   `release.sh` (publish a run).
-- `experiments/`: the ablation study (`design.py`: the arms and the analysis; `arm.py`: one arm; `run.sh`).
+- `experiments/`: the appendix studies (`studies.py`: arms, decision rules, analyses, tidy tables; `arm.py`: one arm;
+  `noise_scale.py`: the gradient noise scale of a checkpoint; `run.sh`).
 - `results/`: the tables the paper reports.
 - `tests/`: the checks above; `all.sh` runs them.
 - `benchmarks/`: the benchmarks, the GEMM sweep record and `h100.txt`, the measurement record the code cites.
