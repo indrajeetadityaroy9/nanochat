@@ -4,6 +4,7 @@
 //! (Gong et al. arXiv 2506.00204v1 §3.3, §5.1), and the pieces placed in rows by Best-Fit-Decreasing.
 
 use std::cell::OnceCell;
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fs::File;
 
@@ -115,11 +116,14 @@ fn statement_cuts(ids: &[u16], token_bytes: &[Vec<u8>], ends_line: &[bool], gram
     cuts
 }
 
-/// Fill-in-the-middle as AST-FIM trains it (arXiv 2506.00204v1 §5.1 "FIM", §3.3 "Masking Algorithm"): the share of
-/// pieces made FIM examples (rate); of those the share whose middle is a random character span (random: Rand-FIM)
-/// rather than AST-aligned; of AST-aligned middles the share by Single-Node rather than Aligned-Span masking (single);
-/// the share in SPM rather than PSM order (spm); the ids of <fim_prefix>, <fim_suffix>, <fim_middle> (sentinels).
-struct Fim {
+/// Fill-in-the-middle as AST-FIM trains it (arXiv 2506.00204v1 §5.1 "FIM", §3.3 "Masking Algorithm"), extracted from
+/// pack.py's mapping: the share of pieces made FIM examples (rate); of those the share whose middle is a random
+/// character span (random: Rand-FIM) rather than AST-aligned; of AST-aligned middles the share by Single-Node rather
+/// than Aligned-Span masking (single); the share in SPM rather than PSM order (spm); the ids of <fim_prefix>,
+/// <fim_suffix>, <fim_middle> (sentinels).
+#[derive(FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct Fim {
     rate: f64,
     random: f64,
     single: f64,
@@ -132,7 +136,8 @@ struct Fim {
 /// with probability rate: Some(the generator for the example's draws), else None (the piece is read left to right).
 fn fim_draw(fim: &Fim, document: usize, piece: usize) -> Option<ChaCha8Rng> {
     let mut key = [0; 32];
-    key[..16].copy_from_slice(&[document as u64, piece as u64].map(u64::to_le_bytes).concat());
+    key[..8].copy_from_slice(&(document as u64).to_le_bytes());
+    key[8..16].copy_from_slice(&(piece as u64).to_le_bytes());
     let mut rng = ChaCha8Rng::from_seed(key);
     rng.random_bool(fim.rate).then_some(rng)
 }
@@ -290,7 +295,7 @@ impl Split<'_> {
 /// in the order placed.
 fn best_fit_decreasing(lengths: &[usize], targeted: &[bool], row_len: usize) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..lengths.len()).collect();
-    order.sort_by(|&a, &b| lengths[b].cmp(&lengths[a]));
+    order.sort_by_key(|&p| Reverse(lengths[p]));
     // rows waiting by their room: [rows of targeted pieces only (room net of the final BOS slot), rows with a cut piece]
     let mut rows: Vec<Vec<usize>> = Vec::new();
     let mut waiting: [BTreeMap<usize, Vec<usize>>; 2] = [BTreeMap::new(), BTreeMap::new()];
@@ -357,12 +362,12 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize), fim
 /// the given paths) into rows of row_len tokens (pack_shard), its documents in parallel. token_bytes: every mergeable
 /// token's bytes by id (= rank), with the split pattern the tokenizer's encoder (tiktoken-rs's CoreBPE: OpenAI tiktoken's
 /// core, fancy-regex as in tiktoken) for FIM sections; grammar: a repository corpus's language (None for other
-/// documents); fim: (rate, random, single, spm, sentinel ids) for its train split (Fim). Returns the pack index entries
+/// documents); fim: AST-FIM's shares and sentinel ids for its train split (Fim). Returns the pack index entries
 /// (native-endian int64, 4 per piece), the pieces per row (int64) and the FIM tokens (uint16).
 #[pyfunction]
 #[pyo3(signature = (tokens_path, offsets_path, shard, *, row_len, token_bytes, pattern, grammar, fim, fim_base))]
 pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, shard: (usize, usize), row_len: usize, token_bytes: Vec<Vec<u8>>,
-                        pattern: &str, grammar: Option<Lang>, fim: Option<(f64, f64, f64, f64, [u32; 3])>, fim_base: usize)
+                        pattern: &str, grammar: Option<Lang>, fim: Option<Fim>, fim_base: usize)
                         -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>) {
     let tokens = unsafe { Mmap::map(&File::open(tokens_path).unwrap()).unwrap() }; // compiled files are written once and never modified
     let offsets = unsafe { Mmap::map(&File::open(offsets_path).unwrap()).unwrap() };
@@ -370,7 +375,6 @@ pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, 
     // a token starts a character unless its first byte is a UTF-8 continuation byte 10xxxxxx (RFC 3629 §3)
     let starts_char: Vec<bool> = token_bytes.iter().map(|token| token[0] & 0xC0 != 0x80).collect();
     let grammar = grammar.map(Grammar::new);
-    let fim = fim.map(|(rate, random, single, spm, sentinels)| Fim { rate, random, single, spm, sentinels });
     let bpe = fim.as_ref().map(|_| CoreBPE::new(token_bytes.iter().enumerate().map(|(rank, token)| (token.clone(), rank as u32)).collect(), Default::default(), pattern).unwrap());
     let (index, counts, fim_tokens) = py.detach(|| {
         let split = Split { tokens: bytemuck::cast_slice(&tokens), token_bytes: &token_bytes, ends_line: &ends_line, starts_char: &starts_char, row_len,

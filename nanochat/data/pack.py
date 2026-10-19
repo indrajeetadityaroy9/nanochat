@@ -58,8 +58,8 @@ def pack_split(source, split, tokenizer):
         files = json.load(f)["files"]
     bounds = np.cumsum([0] + [file["documents"] for file in files]).tolist()
     path = packed_path(source, split, tokenizer)
-    fim = ((FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, SPM_SHARE, [tokenizer.special_tokens[name] for name in FIM_TOKENS])
-           if fim_packed(source, split) else None)
+    fim = (dict(rate=FIM_RATE, random=RANDOM_SHARE, single=SINGLE_NODE_SHARE, spm=SPM_SHARE,
+                sentinels=[tokenizer.special_tokens[name] for name in FIM_TOKENS]) if fim_packed(source, split) else None)
     print(f"Packing {len(files)} {split} files of '{source}' into rows of {SEQ_LEN + 1} tokens{' with FIM' if fim else ''}: {path}")
     mergeable = tokenizer.token_bytes[:tokenizer.bos_token_id]
     placed, fim_tokens = 0, 0
