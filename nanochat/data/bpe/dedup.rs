@@ -76,7 +76,7 @@ pub(crate) fn sketch<'py>(py: Python<'py>, texts: Vec<PyBackedBytes>, n: usize, 
     let seeds: Vec<u64> = (0..slots + ROUNDS as usize).map(|_| rng.random()).collect();
     let (signatures, shingled) = py.detach(|| {
         let (mut signatures, mut shingled) = (vec![0u8; texts.len() * slots], vec![0u8; texts.len()]);
-        let mut values = vec![0u32; slots];
+        let (mut values, mut unfilled) = (vec![0u32; slots], Vec::with_capacity(slots));
         for (d, text) in texts.iter().enumerate() {
             let lower = std::str::from_utf8(text).unwrap().to_lowercase();
             values.fill(u32::MAX);
@@ -88,24 +88,33 @@ pub(crate) fn sketch<'py>(py: Python<'py>, texts: Vec<PyBackedBytes>, n: usize, 
                     values[slot] = values[slot].min((round << FRACTION_BITS) | (mixed >> (u64::BITS - FRACTION_BITS)) as u32);
                 }
             });
+            if shingled[d] == 0 {
+                continue; // no n-gram: its signature stays zeros
+            }
             // a round's rank is below FALLBACK, so a slot still at u32::MAX was filled by no round
-            let unfilled: Vec<usize> = (0..slots).filter(|&j| values[j] == u32::MAX).collect();
-            if shingled[d] == 1 && !unfilled.is_empty() {
+            unfilled.clear();
+            unfilled.extend((0..slots).filter(|&j| values[j] == u32::MAX));
+            if !unfilled.is_empty() {
                 for_each_ngram(&lower, n, |h| {
                     for &j in &unfilled {
                         values[j] = values[j].min(FALLBACK | (splitmix64(h ^ seeds[j]) >> (u64::BITS - FRACTION_BITS)) as u32);
                     }
                 });
             }
-            if shingled[d] == 1 {
-                for (byte, value) in signatures[d * slots..(d + 1) * slots].iter_mut().zip(&values) {
-                    *byte = *value as u8;
-                }
+            for (byte, value) in signatures[d * slots..(d + 1) * slots].iter_mut().zip(&values) {
+                *byte = *value as u8;
             }
         }
         (signatures, shingled)
     });
     (PyBytes::new(py, &signatures), PyBytes::new(py, &shingled))
+}
+
+/// The documents d < n that are members, by key (in parallel), each as (key, d).
+fn sorted<'a>(n: usize, key: impl Fn(u32) -> &'a [u8] + Sync, member: impl Fn(usize) -> bool + Sync) -> Vec<(&'a [u8], u32)> {
+    let mut keys: Vec<(&[u8], u32)> = (0..n).into_par_iter().filter(|&d| member(d)).map(|d| (key(d as u32), d as u32)).collect();
+    keys.par_sort_unstable();
+    keys
 }
 
 /// Which documents a deduplication keeps (1) or drops (0), from the files of its documents in order: their signatures
@@ -123,14 +132,9 @@ pub(crate) fn duplicates<'py>(py: Python<'py>, signatures: &str, ids: &str, take
         let signature = |d: u32| &signatures[d as usize * slots..(d as usize + 1) * slots];
         // least: the slots two documents of Jaccard similarity threshold share in expectation, a byte of two different
         // minima agreeing with probability 1 / 2^8 (Li and König); at least least equal slots = estimated J >= threshold
-        let chance = 1.0 / f64::from(u32::from(u8::MAX) + 1);
+        let chance = 1.0 / f64::from(1u32 << u8::BITS);
         let least = (slots as f64 * (threshold + (1.0 - threshold) * chance)).ceil() as usize;
         let similar = |x: u32, y: u32| signature(x).iter().zip(signature(y)).filter(|(a, b)| a == b).count() >= least;
-        fn sorted<'a>(n: usize, key: impl Fn(u32) -> &'a [u8] + Sync, member: impl Fn(usize) -> bool + Sync) -> Vec<(&'a [u8], u32)> {
-            let mut keys: Vec<(&[u8], u32)> = (0..n).into_par_iter().filter(|&d| member(d)).map(|d| (key(d as u32), d as u32)).collect();
-            keys.par_sort_unstable();
-            keys
-        }
         let mut clusters = UnionFind::<u32>::new(n);
         let id = |d: u32| &ids[d as usize * width..(d as usize + 1) * width];
         for pair in sorted(n, id, |d| takes_part[d] == 1).windows(2).filter(|pair| pair[0].0 == pair[1].0) {
@@ -145,11 +149,10 @@ pub(crate) fn duplicates<'py>(py: Python<'py>, signatures: &str, ids: &str, take
                     if leaders.iter().any(|&l| clusters.find_mut(l) == root) {
                         continue;
                     }
-                    match leaders.iter().copied().find(|&l| similar(l, d)) {
-                        Some(l) => {
-                            clusters.union(l, d);
-                        }
-                        None => leaders.push(d),
+                    if let Some(l) = leaders.iter().copied().find(|&l| similar(l, d)) {
+                        clusters.union(l, d);
+                    } else {
+                        leaders.push(d);
                     }
                 }
             }

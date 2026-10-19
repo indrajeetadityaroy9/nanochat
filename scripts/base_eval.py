@@ -1,221 +1,54 @@
 """
-Unified evaluation script for base models.
+Evaluation of a base_train run's final checkpoint, for both its raw weights and its tail average
+(train/checkpoint.load_model's estimators):
+- bits per byte of each training-mixture corpus's val split (eval/loss_eval.py), both estimators;
+- reference-solution bits per byte of HumanEval+, MBPP+ and HumanEval-X C++ (eval/code_eval.py), both estimators;
+- tail average only (the estimator S1 compares): greedy pass@1 of HumanEval+ / MBPP+ (EvalPlus base and plus) and
+  HumanEval-cpp / MBPP-cpp (MultiPL-E) (eval/code_eval.py); fill-in-the-middle pass@1 of HumanEval single-line,
+  multi-line and random-span infilling, PSM and SPM prompts (eval/fim_eval.py), --objective spec runs only (an ntp
+  model trains no sentinels).
+Written to <base_dir>/base_eval/<tag>.json: "bpb" and "solution_bpb" keyed by estimator ("raw", "tail").
 
-Supports three evaluation modes (comma-separated):
-  --eval core    : CORE metric (accuracy on ICL tasks)
-  --eval bpb     : Bits per byte on the train/val splits of each pretraining corpus
-  --eval sample  : Generate samples from the model
-
-Default is all three: --eval core,bpb,sample
-
-Examples:
-
-    # Evaluate a nanochat model (e.g. d24) using 8 GPUs
-    torchrun --nproc_per_node=8 -m scripts.base_eval --model-tag d24 --device-batch-size=16
-
-    # Quick/approximate evaluation using a single GPU
-    python -m scripts.base_eval --model-tag d24 --device-batch-size=16 --max-per-task=100 --split-tokens=524288
+    python -m scripts.base_eval --model-tag=d10-r8-spec-s42
 """
-import os
-import csv
-import time
-import json
-import yaml
-import random
 import argparse
+import os
+
 import torch
 
-from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type
-from nanochat.checkpoint_manager import load_model
-from nanochat.core_eval import evaluate_task
-from nanochat.data.eval.core import get_eval_bundle_dir
-from nanochat.data.pretrain.stream import PretrainingBatches, parse_mixture
-from nanochat.loss_eval import evaluate_bpb
-from nanochat.engine import Engine
+from nanochat.config import MICRO_BATCH_ROWS, MIXTURE, SEQ_LEN
+from nanochat.data.loader import mixture_corpora
+from nanochat.eval.code_eval import generation, solution_bpb, tasks
+from nanochat.eval.fim_eval import fim_generation
+from nanochat.eval.loss_eval import val_bpb
+from nanochat.paths import base_dir, write_json
+from nanochat.train.checkpoint import load_model
 
-# -----------------------------------------------------------------------------
-# CORE evaluation
-
-def evaluate_core(model, tokenizer, device, max_per_task=-1):
-    """
-    Evaluate a base model on the CORE benchmark.
-    Returns dict with results, centered_results, and core_metric.
-    """
-    eval_bundle_dir = get_eval_bundle_dir()
-
-    config_path = os.path.join(eval_bundle_dir, "core.yaml")
-    data_base_path = os.path.join(eval_bundle_dir, "eval_data")
-    eval_meta_data = os.path.join(eval_bundle_dir, "eval_meta_data.csv")
-
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    tasks = config['icl_tasks']
-
-    # Load random baseline values
-    random_baselines = {}
-    with open(eval_meta_data, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            task_name = row['Eval Task']
-            random_baseline = row['Random baseline']
-            random_baselines[task_name] = float(random_baseline)
-
-    # Evaluate each task
-    results = {}
-    centered_results = {}
-    for task in tasks:
-        start_time = time.time()
-        label = task['label']
-        task_meta = {
-            'task_type': task['icl_task_type'],
-            'dataset_uri': task['dataset_uri'],
-            'num_fewshot': task['num_fewshot'][0],
-            'continuation_delimiter': task.get('continuation_delimiter', ' ')
-        }
-        print0(f"Evaluating: {label} ({task_meta['num_fewshot']}-shot, type: {task_meta['task_type']})... ", end='')
-
-        data_path = os.path.join(data_base_path, task_meta['dataset_uri'])
-        with open(data_path, 'r', encoding='utf-8') as f:
-            data = [json.loads(line.strip()) for line in f]
-
-        # Shuffle for consistent subsampling when using max_per_task
-        shuffle_rng = random.Random(1337)
-        shuffle_rng.shuffle(data)
-        if max_per_task > 0:
-            data = data[:max_per_task]
-
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
-        results[label] = accuracy
-        random_baseline = random_baselines[label]
-        centered_result = (accuracy - 0.01 * random_baseline) / (1.0 - 0.01 * random_baseline)
-        centered_results[label] = centered_result
-        elapsed = time.time() - start_time
-        print0(f"accuracy: {accuracy:.4f} | centered: {centered_result:.4f} | time: {elapsed:.2f}s")
-
-    core_metric = sum(centered_results.values()) / len(centered_results)
-    out = {
-        "results": results,
-        "centered_results": centered_results,
-        "core_metric": core_metric
-    }
-    return out
-
-# -----------------------------------------------------------------------------
-# Main
 
 def main():
-    parser = argparse.ArgumentParser(description="Base model evaluation")
-    parser.add_argument('--eval', type=str, default='core,bpb,sample', help='Comma-separated evaluations to run: core,bpb,sample (default: all)')
-    parser.add_argument('--model-tag', type=str, default=None, help='nanochat model tag to identify the checkpoint directory')
-    parser.add_argument('--step', type=int, default=None, help='Model step to load (default = last)')
-    parser.add_argument('--max-per-task', type=int, default=-1, help='Max examples per CORE task (-1 = all)')
-    parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation')
-    parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
-    parser.add_argument('--dataset', type=str, default=None, help='Pretraining corpus or mixture for BPB, each corpus scored alone (default: what the checkpoint was trained on)')
-    parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
-    args = parser.parse_args()
-
-    # Parse evaluation modes
-    eval_modes = set(mode.strip() for mode in args.eval.split(','))
-    valid_modes = {'core', 'bpb', 'sample'}
-    invalid = eval_modes - valid_modes
-    if invalid:
-        parser.error(f"Invalid eval modes: {invalid}. Valid: {valid_modes}")
-
-    # Distributed / precision setup
-    device_type = autodetect_device_type() if args.device_type == '' else args.device_type
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-    # Load model and tokenizer
-    model, tokenizer, meta = load_model(device, phase="eval", model_tag=args.model_tag, step=args.step)
-    sequence_len = meta["model_config"]["sequence_len"]
-    token_bytes = tokenizer.get_token_bytes(device=device)
-    model_name = f"base_model (step {meta['step']})"
-    model_slug = f"base_model_{meta['step']:06d}"
-
-    print0(f"Evaluating model: {model_name}")
-    print0(f"Eval modes: {', '.join(sorted(eval_modes))}")
-
-    # Results to log
-    core_results = None
-    samples = []
-    unconditioned_samples = []
-
-    # --- Sampling ---
-    if 'sample' in eval_modes:
-        print0("\n" + "="*80)
-        print0("Model Samples")
-        print0("="*80)
-        if ddp_rank == 0:
-            prompts = [
-                "The capital of France is",
-                "The chemical symbol of gold is",
-                "If yesterday was Friday, then tomorrow will be",
-                "The opposite of hot is",
-                "The planets of the solar system are:",
-                "My favorite color is",
-                "If 5*x + 3 = 13, then x is",
-            ]
-            engine = Engine(model, tokenizer)
-            print0("\nConditioned samples:")
-            for prompt in prompts:
-                tokens = tokenizer.encode(prompt, prepend=tokenizer.get_bos_token_id())
-                sample = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-                sample_str = tokenizer.decode(sample[0])
-                print0("-" * 80)
-                print0(sample_str)
-                samples.append(sample_str)
-
-            print0("\nUnconditioned samples:")
-            tokens = tokenizer.encode("", prepend=tokenizer.get_bos_token_id())
-            uncond = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
-            for sample in uncond:
-                sample_str = tokenizer.decode(sample)
-                print0("-" * 80)
-                print0(sample_str)
-                unconditioned_samples.append(sample_str)
-
-    # --- BPB evaluation ---
-    if 'bpb' in eval_modes:
-        print0("\n" + "="*80)
-        print0("BPB Evaluation")
-        print0("="*80)
-        tokens_per_step = args.device_batch_size * sequence_len * ddp_world_size
-        if args.split_tokens % tokens_per_step != 0:
-            # Adjust to nearest multiple
-            args.split_tokens = (args.split_tokens // tokens_per_step) * tokens_per_step
-            print0(f"Adjusted split_tokens to {args.split_tokens} (must be divisible by {tokens_per_step})")
-        steps = args.split_tokens // tokens_per_step
-
-        # the compiled data of each corpus, read in order from the start of each split
-        for dataset in parse_mixture(args.dataset or meta["user_config"]["dataset"]):
-            for split_name in ["train", "val"]:
-                loader = PretrainingBatches({dataset: 1.0}, split_name, tokenizer, seq_len=sequence_len, batch_rows=args.device_batch_size,
-                                            device=device, rank=ddp_rank, world_size=ddp_world_size)
-                print0(f"{dataset} {split_name} bpb: {evaluate_bpb(model, loader, steps, token_bytes):.6f}")
-
-    # --- CORE evaluation ---
-    if 'core' in eval_modes:
-        print0("\n" + "="*80)
-        print0("CORE Evaluation")
-        print0("="*80)
-        core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task)
-
-        # Write CSV output
-        if ddp_rank == 0:
-            base_dir = get_base_dir()
-            output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}.csv")
-            os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
-            with open(output_csv_path, 'w', encoding='utf-8', newline='') as f:
-                f.write(f"{'Task':<35}, {'Accuracy':<10}, {'Centered':<10}\n")
-                for label in core_results["results"]:
-                    acc = core_results["results"][label]
-                    centered = core_results["centered_results"][label]
-                    f.write(f"{label:<35}, {acc:<10.6f}, {centered:<10.6f}\n")
-                f.write(f"{'CORE':<35}, {'':<10}, {core_results['core_metric']:<10.6f}\n")
-            print0(f"\nResults written to: {output_csv_path}")
-            print0(f"CORE metric: {core_results['core_metric']:.4f}")
-
-    compute_cleanup()
+    parser = argparse.ArgumentParser(description="Base model evaluation: the whole suite on a run's final checkpoint")
+    parser.add_argument('--model-tag', type=str, required=True, help='base_train run tag (base_checkpoints/<tag>)')
+    tag = parser.parse_args().model_tag
+    device = torch.device("cuda")
+    benchmarks = tasks()
+    results = {"run": tag, "bpb": {}, "solution_bpb": {}}
+    for estimator in ("raw", "tail"):  # tail last: generation reuses its model
+        model, tokenizer, meta = load_model(device, tag, estimator)
+        # losses from the compiled training forward, every batch MICRO_BATCH_ROWS x SEQ_LEN: one graph scores every
+        # corpus's bpb (cu_seqlens padded to one length), one more the solution bpb (no attention segments)
+        compiled = torch.compile(model, dynamic=False, fullgraph=True)
+        results["bpb"][estimator] = val_bpb(compiled, tokenizer, mixture_corpora(MIXTURE), batch_rows=MICRO_BATCH_ROWS, device=device)
+        results["solution_bpb"][estimator] = solution_bpb(compiled, tokenizer, device, MICRO_BATCH_ROWS, SEQ_LEN,
+                                                          benchmarks)
+        if estimator == "raw":
+            del model, compiled
+            torch._dynamo.reset()
+            torch.cuda.empty_cache()
+    results.update(step=meta["step"], objective=meta["objective"], codegen=generation(model, tokenizer, benchmarks))
+    if meta["objective"] == "spec":
+        results["fim"] = fim_generation(model, tokenizer)
+    os.makedirs(os.path.join(base_dir(), "base_eval"), exist_ok=True)
+    write_json(os.path.join(base_dir(), "base_eval", f"{tag}.json"), results)
 
 
 if __name__ == "__main__":

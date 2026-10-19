@@ -16,6 +16,7 @@ SLOTS one-byte slots, exact duplicates by the text's id (its sha1), LSH candidat
 similarity at THRESHOLD; a document without an n-gram (fewer than NGRAM words) is deduplicated exactly only.
 """
 
+import contextlib
 import os
 import shutil
 
@@ -60,9 +61,9 @@ def scan(task):
         s, h = bpe().sketch(texts, n=NGRAM, slots=SLOTS)
         signatures.append(s)
         shingled.append(h)
-        ids.append(b"".join(map(bytes.fromhex, table["id"].to_pylist())))
+        ids.append(bytes.fromhex("".join(table["id"].to_pylist())))
         takes_part.append(bytes(not (enry.is_vendor(p) or enry.is_generated(p, t)) for p, t in zip(table["relative_path"].to_pylist(), texts))
-                          if repository else bytes([True]) * len(texts))
+                          if repository else b"\x01" * len(texts))
     return [b"".join(parts) for parts in (signatures, ids, takes_part, shingled)]
 
 
@@ -71,26 +72,21 @@ def kept(files, pool):
     (spawned: go-enry's Go runtime) scans the files into scratch files of the data store, which the crate memory-maps."""
     directory = os.path.join(data_dir(), "dedup")
     os.makedirs(directory)
-    names = ("signatures", "ids", "takes_part", "shingled")
+    universes = {"repository_files": [source for source, spec in SOURCES.items() if spec.schema is REPOSITORY_FILE],
+                 "documents": [source for source, spec in SOURCES.items() if spec.schema is not REPOSITORY_FILE]}
     r = rows()
     keep = {}
-    for repository in (True, False):
-        sources = [source for source, spec in SOURCES.items() if (spec.schema is REPOSITORY_FILE) == repository]
-        paths = [os.path.join(directory, f"{repository}.{name}") for name in names]
-        outputs = [open(path, "wb") for path in paths]
-        for parts in pool.map(scan, [(source, path) for source in sources for path in files[source]]):
-            for output, part in zip(outputs, parts):
-                output.write(part)
-        for output in outputs:
-            output.close()
+    for universe, sources in universes.items():
+        paths = [os.path.join(directory, f"{universe}.{part}") for part in ("signatures", "ids", "takes_part", "shingled")]
+        with contextlib.ExitStack() as stack:
+            outputs = [stack.enter_context(open(path, "wb")) for path in paths]
+            for parts in pool.map(scan, [(source, path) for source in sources for path in files[source]]):
+                for output, part in zip(outputs, parts):
+                    output.write(part)
         mask = np.frombuffer(bpe().duplicates(*paths, rows=r, threshold=THRESHOLD), np.bool_)
-        at = 0
-        for source in sources:
-            keep[source] = []
-            for path in files[source]:
-                rows_in_file = pq.read_metadata(path).num_rows
-                keep[source].append(mask[at:at + rows_in_file])
-                at += rows_in_file
-        print(f"dedup {'repository files' if repository else 'documents'}: {len(mask):,}, kept {int(mask.sum()):,}", flush=True)
+        counts = [pq.read_metadata(path).num_rows for source in sources for path in files[source]]
+        masks = iter(np.split(mask, np.cumsum(counts)[:-1]))
+        keep |= {source: [next(masks) for _ in files[source]] for source in sources}
+        print(f"dedup {universe}: {len(mask):,}, kept {int(mask.sum()):,}")
     shutil.rmtree(directory)
     return keep

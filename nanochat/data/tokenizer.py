@@ -135,9 +135,8 @@ def prefix_targets(tokenizer, *, rows):
     mergeable = tokenizer.token_bytes[:tokenizer.bos_token_id]
     ids = {b: i for i, b in enumerate(mergeable)}
     table = torch.full((rows,), -1, dtype=torch.long)
-    for i, b in enumerate(mergeable):
-        if not b.isspace():
-            table[i] = next((ids[b[:n]] for n in range(len(b) - 1, 0, -1) if b[:n] in ids), -1)
+    table[:len(mergeable)] = torch.tensor([-1 if b.isspace() else next((ids[b[:n]] for n in range(len(b) - 1, 0, -1) if b[:n] in ids), -1)
+                                           for b in mergeable])
     return table
 
 
@@ -153,7 +152,7 @@ def keyed_documents(source, batch):
     if schema is REPOSITORY_FILE:
         keys = ["repo:" + name for name in batch["repo_name"].to_pylist()]
     elif schema is TEXT:
-        keys = [f"host:{urlsplit(r['url']).hostname}" if r["url"] else "doc:" + r["id"] for r in batch.select(["url", "id"]).to_pylist()]
+        keys = [f"host:{urlsplit(url).hostname}" if url else "doc:" + id for url, id in zip(batch["url"].to_pylist(), batch["id"].to_pylist())]
     else:
         keys = ["doc:" + id for id in batch["id"].to_pylist()]
     return list(zip(texts(source, batch), keys))

@@ -86,8 +86,8 @@ def curated_files(source, split):
 def column_bytes(path, column):
     """The uncompressed bytes of a column of a parquet file, from its footer."""
     md = pq.read_metadata(path)
-    return sum(md.row_group(g).column(j).total_uncompressed_size for g in range(md.num_row_groups)
-               for j in range(md.num_columns) if md.row_group(g).column(j).path_in_schema == column)
+    j = md.schema.names.index(column)
+    return sum(md.row_group(g).column(j).total_uncompressed_size for g in range(md.num_row_groups))
 
 
 def texts(source, table):
@@ -100,7 +100,7 @@ def texts(source, table):
     if spec.schema is not REPOSITORY_FILE:
         return contents
     comment = COMMENTS[spec.grammar]
-    return [f"{comment} {path}\n{text}" + "\n" * (not text.endswith("\n")) for path, text in zip(table["relative_path"].to_pylist(), contents)]
+    return [f"{comment} {path}\n{text.removesuffix('\n')}\n" for path, text in zip(table["relative_path"].to_pylist(), contents)]
 
 
 def documents(source, table):

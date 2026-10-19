@@ -8,14 +8,35 @@ mod repository;
 mod train;
 
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedStr;
 use tree_sitter::Language;
 
-/// The tree-sitter grammar of a repository source's language (sources.Source.grammar): "Python" or "C++".
-pub(crate) fn language(grammar: &str) -> Language {
-    match grammar {
-        "Python" => tree_sitter_python::LANGUAGE.into(),
-        "C++" => tree_sitter_cpp::LANGUAGE.into(),
-        _ => unreachable!(),
+/// A repository source's language, extracted from its name (sources.Source.grammar: "Python" or "C++").
+#[derive(Clone, Copy)]
+pub(crate) enum Lang {
+    Python,
+    Cpp,
+}
+
+impl Lang {
+    /// Its tree-sitter grammar.
+    pub(crate) fn language(self) -> Language {
+        match self {
+            Lang::Python => tree_sitter_python::LANGUAGE.into(),
+            Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        }
+    }
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Lang {
+    type Error = PyErr;
+
+    fn extract(name: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(match &*name.extract::<PyBackedStr>()? {
+            "Python" => Lang::Python,
+            "C++" => Lang::Cpp,
+            _ => unreachable!(),
+        })
     }
 }
 

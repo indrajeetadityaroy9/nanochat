@@ -34,7 +34,7 @@ def compile_row_group(task):
     ids = [get_tokenizer().enc.encode_to_numpy(text, disallowed_special=())
            for text in documents(source, pq.ParquetFile(path).read_row_group(row_group))]
     lengths = np.array([len(doc) for doc in ids], dtype=np.int64)
-    return np.frombuffer(b"".join(ids), np.uint32).astype(TOKEN_DTYPE), lengths
+    return np.concatenate(ids).astype(TOKEN_DTYPE), lengths
 
 
 def compile_split(source, split, tokenizer):

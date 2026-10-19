@@ -11,9 +11,10 @@ is config.MIXTURE, {group: (share, corpora)}: each group's share is split among 
 (mixture_weights).
 """
 
+import itertools
 import math
 import os
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import numpy as np
 import torch
@@ -46,22 +47,31 @@ def fim_packed(dataset, split):
     return SOURCES[dataset].grammar is not None and split == "train"
 
 
+class PackedSplit(NamedTuple):
+    """A packed split, memory-mapped: the compiled tokens; each document's first token, then the number of tokens; each
+    piece's PIECE_COLUMNS in row order; each row's first piece, then the number of pieces (row r is
+    pieces[rows[r]:rows[r + 1]]); the FIM examples' tokens of a split packed with them (fim_packed), else None (the file
+    is empty, which cannot be memory-mapped)."""
+    tokens: np.memmap
+    offsets: np.memmap
+    pieces: np.memmap
+    rows: np.memmap
+    fim: np.memmap | None
+
+
 def packed(dataset, split, tokenizer):
-    """(tokens, offsets, pieces, rows, fim) of a packed split, all memory-mapped: the compiled tokens, each document's
-    first token then the number of tokens, each piece's PIECE_COLUMNS in row order, each row's first piece then the
-    number of pieces (so row r is pieces[rows[r]:rows[r + 1]]), and the FIM examples' tokens of a split packed with them
-    (fim_packed), else None (the file is empty, which cannot be memory-mapped)."""
+    """The packed split of a corpus (pack.py), memory-mapped in place."""
     path, packing = split_path(dataset, split, tokenizer), packed_path(dataset, split, tokenizer)
-    return (np.memmap(path + ".bin", dtype=TOKEN_DTYPE, mode="r"),
-            np.memmap(path + ".idx", dtype=np.int64, mode="r"),
-            np.memmap(packing + ".pieces", dtype=np.int64, mode="r").reshape(-1, PIECE_COLUMNS),
-            np.memmap(packing + ".rows", dtype=np.int64, mode="r"),
-            np.memmap(packing + ".fim", dtype=TOKEN_DTYPE, mode="r") if fim_packed(dataset, split) else None)
+    return PackedSplit(np.memmap(path + ".bin", dtype=TOKEN_DTYPE, mode="r"),
+                       np.memmap(path + ".idx", dtype=np.int64, mode="r"),
+                       np.memmap(packing + ".pieces", dtype=np.int64, mode="r").reshape(-1, PIECE_COLUMNS),
+                       np.memmap(packing + ".rows", dtype=np.int64, mode="r"),
+                       np.memmap(packing + ".fim", dtype=TOKEN_DTYPE, mode="r") if fim_packed(dataset, split) else None)
 
 
 def packed_rows(dataset, split, tokenizer):
-    """The number of rows of a packed split (its row index: each row's first piece, then the number of pieces)."""
-    return len(packed(dataset, split, tokenizer)[3]) - 1
+    """The number of rows of a packed split."""
+    return len(packed(dataset, split, tokenizer).rows) - 1
 
 
 def mixture_corpora(groups):
@@ -116,7 +126,7 @@ class PretrainingBatches:
         self.fim = reading == "fim"
         self.start = start
         # segments per micro-batch: batch_rows x (the most pieces in a row + 1 for the padding)
-        self.num_segments = batch_rows * (max(int(np.diff(index).max()) for _, _, _, index, _ in self.packed.values()) + 1)
+        self.num_segments = batch_rows * (max(int(np.diff(packing.rows).max()) for packing in self.packed.values()) + 1)
 
     def assemble(self, out, name, row):
         """Write a corpus's row into out (its padding already in place): every piece after a BOS, and a BOS after the
@@ -127,11 +137,13 @@ class PretrainingBatches:
         document continues after has none: the BOS after it is written as PAD, an input BOS and an ignored target (or
         nothing, at the row's end). Returns where each piece starts in the row, then where the pieces end."""
         tokens, offsets, pieces, rows, fim = self.packed[name]
-        row_pieces = pieces[rows[row]:rows[row + 1]].tolist()
-        examples = [self.fim and f1 > f0 for _, _, f0, f1 in row_pieces]
-        targeted = [example or offsets[np.searchsorted(offsets, end)] == end for example, (_, end, _, _) in zip(examples, row_pieces)]
+        row_pieces = pieces[rows[row]:rows[row + 1]]
+        examples = (row_pieces[:, 3] > row_pieces[:, 2]) & self.fim
+        # a piece ending where a document ends (offsets) has its BOS as target, as has every FIM example
+        targeted = (examples | (offsets[np.searchsorted(offsets, row_pieces[:, 1])] == row_pieces[:, 1])).tolist()
+        examples = examples.tolist()
         at, starts = 0, []
-        for k, (start, end, f0, f1) in enumerate(row_pieces):
+        for k, (start, end, f0, f1) in enumerate(row_pieces.tolist()):
             starts.append(at)
             out[at] = self.bos if k == 0 or targeted[k - 1] else self.PAD
             part = fim[f0:f1] if examples[k] else tokens[start:end]
@@ -144,11 +156,9 @@ class PretrainingBatches:
     def __iter__(self):
         consumed = np.bincount(mixture_rows(self.weights, start=0, count=self.start), minlength=len(self.names))
         orders = [iter(order[skip:]) for order, skip in zip(self.orders, consumed)]
-        position = self.start
-        while True:
+        for position in itertools.count(self.start, self.batch_rows):
             corpora = mixture_rows(self.weights, start=position, count=self.batch_rows)
-            position += len(corpora)
-            batch = np.full((len(corpora), SEQ_LEN + 1), self.PAD, dtype=np.int32)
+            batch = np.full((self.batch_rows, SEQ_LEN + 1), self.PAD, dtype=np.int32)
             bounds = []
             for r, c in enumerate(corpora):
                 row = next(orders[c], None)
@@ -158,7 +168,7 @@ class PretrainingBatches:
                 # the pieces, then the padding if the inputs hold any
                 bounds += [r * SEQ_LEN + start for start in starts if start < SEQ_LEN]
             batch = torch.from_numpy(batch).pin_memory().to(self.device, non_blocking=True)  # page-locked, so the copy is asynchronous
-            cu = np.full(self.num_segments + 1, len(corpora) * SEQ_LEN, dtype=np.int32)
+            cu = np.full(self.num_segments + 1, self.batch_rows * SEQ_LEN, dtype=np.int32)
             cu[:len(bounds)] = bounds
             cu_seqlens = torch.from_numpy(cu).pin_memory().to(self.device, non_blocking=True)
             yield batch[:, :-1].masked_fill(batch[:, :-1] == self.PAD, self.bos), batch[:, 1:].to(torch.int64), cu_seqlens

@@ -18,6 +18,8 @@ use pyo3::pybacked::PyBackedStr;
 use rustc_hash::FxHashMap;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
+use crate::Lang;
+
 /// The import nodes of tree-sitter-python: pattern 0 an import statement, pattern 1 a from-import statement (Python
 /// Reference §7.11; `from __future__` is a future statement, §7.11.1, its own node kind).
 const PYTHON: &str = "(import_statement) @import (import_from_statement) @import";
@@ -75,24 +77,22 @@ fn components<'t>(node: Node, text: &'t str) -> Vec<&'t str> {
 /// last, above it the import names no file), target = base/m; the exact paths target.py (with a module m),
 /// target/__init__.py, and per name target/n.py, target/n/__init__.py.
 fn python(node: Node, pattern: usize, path: &str, text: &str, index: &Index, targets: &mut Vec<usize>) {
+    // module m by suffix: the file m.py or the package m/__init__.py (Python Reference §5.2)
+    let mut by_suffix = |module: &str| {
+        targets.extend(index.suffix(&format!("{module}.py")));
+        targets.extend(index.suffix(&format!("{module}/__init__.py")));
+    };
     let mut cursor = node.walk();
     let names: Vec<String> = node.children_by_field_name("name", &mut cursor).map(|name| components(name, text).join("/")).collect();
     if pattern == 0 {
-        for module in names {
-            targets.extend(index.suffix(&format!("{module}.py")));
-            targets.extend(index.suffix(&format!("{module}/__init__.py")));
-        }
+        names.iter().for_each(|module| by_suffix(module));
         return;
     }
     let module = node.child_by_field_name("module_name").unwrap();
     if module.kind() == "dotted_name" {
         let module = components(module, text).join("/");
-        targets.extend(index.suffix(&format!("{module}.py")));
-        targets.extend(index.suffix(&format!("{module}/__init__.py")));
-        for name in names {
-            targets.extend(index.suffix(&format!("{module}/{name}.py")));
-            targets.extend(index.suffix(&format!("{module}/{name}/__init__.py")));
-        }
+        by_suffix(&module);
+        names.iter().for_each(|name| by_suffix(&format!("{module}/{name}")));
         return;
     }
     let mut cursor = module.walk();
@@ -129,14 +129,14 @@ fn cleaned(path: &Path) -> Option<String> {
 /// clean(dir(f)/q), else by suffix clean(q); `#include <q>` by suffix clean(q); a clean(q) with a leading ".." matches
 /// no suffix.
 fn cpp(node: Node, pattern: usize, path: &str, text: &str, index: &Index, targets: &mut Vec<usize>) {
-    let name = if pattern == 0 {
-        // a string literal's content lies between its quotes, its first and last children
+    let quoted = pattern == 0;
+    // the header name between the delimiters: a string literal's quotes are its first and last children
+    let name = if quoted {
         &text[node.child(0).unwrap().end_byte()..node.child(node.child_count() - 1).unwrap().start_byte()]
     } else {
-        let range = node.byte_range();
-        &text[range.start + 1..range.end - 1]
+        &text[node.start_byte() + 1..node.end_byte() - 1]
     };
-    if pattern == 0 {
+    if quoted {
         let found = cleaned(&Path::new(path).parent().unwrap().join(name)).map_or(&[][..], |p| index.exact(&p));
         if !found.is_empty() {
             targets.extend(found);
@@ -159,18 +159,17 @@ fn cpp(node: Node, pattern: usize, path: &str, text: &str, index: &Index, target
 /// indices; a single file is one sample, without parsing.
 #[pyfunction]
 #[pyo3(signature = (paths, texts, *, grammar))]
-pub(crate) fn repository_samples(py: Python<'_>, paths: Vec<String>, texts: Vec<PyBackedStr>, grammar: &str) -> Vec<Vec<usize>> {
+pub(crate) fn repository_samples(py: Python<'_>, paths: Vec<String>, texts: Vec<PyBackedStr>, grammar: Lang) -> Vec<Vec<usize>> {
     py.detach(|| {
         let n = paths.len();
         if n == 1 {
             return vec![vec![0]];
         }
         let (source, imports): (&str, Imports) = match grammar {
-            "Python" => (PYTHON, python),
-            "C++" => (CPP, cpp),
-            _ => unreachable!(),
+            Lang::Python => (PYTHON, python),
+            Lang::Cpp => (CPP, cpp),
         };
-        let language = crate::language(grammar);
+        let language = grammar.language();
         let query = Query::new(&language, source).unwrap();
         let mut parser = Parser::new();
         parser.set_language(&language).unwrap();

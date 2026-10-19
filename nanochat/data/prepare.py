@@ -122,8 +122,9 @@ def fetch(source, file):
 @functools.cache
 def bytes_per_token(source):
     """The UTF-8 bytes per o200k_base (tiktoken) token of the source's first normalized row group."""
-    texts = pq.ParquetFile(normalized_path(source, 0)).read_row_group(0, columns=["content"])["content"].to_pylist()
-    return sum(len(t.encode()) for t in texts) / sum(map(len, tiktoken.get_encoding("o200k_base").encode_ordinary_batch(texts)))
+    texts = pq.ParquetFile(normalized_path(source, 0)).read_row_group(0, columns=["content"])["content"]
+    count = sum(map(len, tiktoken.get_encoding("o200k_base").encode_ordinary_batch(texts.to_pylist())))
+    return pc.sum(pc.binary_length(texts)).as_py() / count
 
 
 def tokens(source, k):
@@ -134,52 +135,56 @@ def tokens(source, k):
 # ---- normalize: one function per source family, raw table -> category schema plus the row's val group
 
 def sha1(texts):
-    return pa.array([hashlib.sha1(t.encode()).hexdigest() for t in texts.to_pylist()], pa.string())
+    """The hex sha1 of each text's UTF-8 bytes."""
+    return pa.array([hashlib.sha1(b).hexdigest() for b in texts.cast(pa.large_binary()).to_pylist()], pa.string())
 
 
-def source_text(text):
-    """A source file's text as Python and C++ read it: CR LF and a lone CR read as LF, a leading U+FEFF dropped.
+def source_text(texts):
+    """Source files' texts as Python and C++ read them: CR LF and a lone CR read as LF, a leading U+FEFF dropped.
     Python Language Reference §2.1.2 "Physical lines" and §2.1.4 "Encoding declarations"; C++23 [lex.phases] phase 1
     (CR LF and a CR not followed by LF become one new-line) and phase 2 (a first character U+FEFF is deleted)."""
-    return text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    return pc.replace_substring(pc.replace_substring(pc.replace_substring_regex(texts, "^\ufeff", ""), "\r\n", "\n"), "\r", "\n")
 
 
-def with_group(columns, schema, group):
-    return pa.table(columns, schema=schema).append_column("val_group", group)
+def normalized_schema(spec):
+    """A source's normalized schema: its category's schema and the row's val group."""
+    return spec.schema.append(pa.field("val_group", pa.string()))
+
+
+def with_group(columns, spec, group):
+    return pa.table(columns | {"val_group": group}, schema=normalized_schema(spec))
 
 
 def stack_edu(t, spec):
     n = t.num_rows
     return with_group({"id": sha1(t["text"]), "repo_name": t["repo_name"], "relative_path": t["path"], "content": t["text"],
-                       "language": pa.array([spec.language] * n, pa.string()), "int_score": t["int_score"],
-                       "quality_score": pa.nulls(n), "category": pa.nulls(n)},
-                      REPOSITORY_FILE, t["repo_name"])
+                       "language": pa.repeat(spec.language, n), "int_score": t["int_score"],
+                       "quality_score": pa.nulls(n), "category": pa.nulls(n)}, spec, t["repo_name"])
 
 
 def ultradata(t, spec):
     n = t.num_rows
     return with_group({"id": sha1(t["content"]), "repo_name": t["repo_name"], "relative_path": t["relative_path"], "content": t["content"],
-                       "language": pa.array([spec.language] * n, pa.string()), "int_score": pa.nulls(n),
-                       "quality_score": t["quality_score"], "category": t["category"]},
-                      REPOSITORY_FILE, t["repo_name"])
+                       "language": pa.repeat(spec.language, n), "int_score": pa.nulls(n),
+                       "quality_score": t["quality_score"], "category": t["category"]}, spec, t["repo_name"])
 
 
 def notebook(t, spec):
     ids = sha1(t["text"])
-    return with_group({"id": ids, "content": t["text"], "language": pa.array([spec.language] * t.num_rows, pa.string())}, spec.schema, ids)
+    return with_group({"id": ids, "content": t["text"], "language": pa.repeat(spec.language, t.num_rows)}, spec, ids)
 
 
 def text(t, spec):
     ids = sha1(t[spec.text])
     url = t["url"] if "url" in t.column_names else pa.nulls(t.num_rows)
-    return with_group({"id": ids, "url": url, "content": t[spec.text]}, spec.schema, ids)
+    return with_group({"id": ids, "url": url, "content": t[spec.text]}, spec, ids)
 
 
 def conversation(t, spec):
     """A codeforces_cots row as one document: the R1 prompt (ending with a line end) followed by the generation; its
     group is the problem's id, shared across subsets, so every generation of a problem is in one split."""
     content = pc.binary_join_element_wise(t["prompt"], t[spec.text], "")
-    return with_group({"id": sha1(content), "url": pa.nulls(t.num_rows), "content": content}, spec.schema, t["id"])
+    return with_group({"id": sha1(content), "url": pa.nulls(t.num_rows), "content": content}, spec, t["id"])
 
 
 NORMALIZE = {
@@ -214,19 +219,16 @@ def stage(task):
     warnings.filterwarnings("ignore", category=SyntaxWarning)  # invalid escapes in otherwise valid code
     partial = normalized_path(source, k) + ".partial"
     pf = pq.ParquetFile(path)
-    writer = None
-    for g in range(pf.num_row_groups):
-        raw = pf.read_row_group(g)
-        texts = raw.filter(pc.is_valid(raw[spec.text]))
-        if spec.grammar is not None:
-            canonical = [source_text(text) for text in texts[spec.text].to_pylist()]
-            texts = texts.set_column(texts.schema.get_field_index(spec.text), spec.text, pa.array(canonical, pa.string()))
-        table = NORMALIZE[source](texts, spec)
-        if spec.grammar == "Python":
-            table = table.filter(pa.array([parses_as_python3(t) for t in table["content"].to_pylist()], pa.bool_()))
-        writer = writer or pq.ParquetWriter(partial, table.schema)
-        writer.write_table(table)
-    writer.close()
+    with pq.ParquetWriter(partial, normalized_schema(spec)) as writer:
+        for g in range(pf.num_row_groups):
+            raw = pf.read_row_group(g)
+            texts = raw.filter(pc.is_valid(raw[spec.text]))
+            if spec.grammar is not None:
+                texts = texts.set_column(texts.schema.get_field_index(spec.text), spec.text, source_text(texts[spec.text]))
+            table = NORMALIZE[source](texts, spec)
+            if spec.grammar == "Python":
+                table = table.filter(pa.array([parses_as_python3(t) for t in table["content"].to_pylist()], pa.bool_()))
+            writer.write_table(table)
     os.replace(partial, normalized_path(source, k))
 
 
@@ -266,25 +268,31 @@ def shuffle(source, paths, masks):
                     f"TO '{shuffle_dir(source)}' (FORMAT parquet, PARTITION_BY (part))")
 
 
+def partition_row_groups(source, part):
+    """The row-group metadata of the files of a shuffle partition."""
+    directory = os.path.join(shuffle_dir(source), f"part={part}")
+    return [md.row_group(g) for md in (pq.read_metadata(os.path.join(directory, f)) for f in os.listdir(directory))
+            for g in range(md.num_row_groups)]
+
+
 def curate_partition(task):
     """One shuffle partition as a curated shard (partition 0 is val). Files are sorted by (repository, path, id) into
     one chunk, so a repository is a zero-copy slice (large_string: 64-bit offsets hold a partition beyond 2 GiB), split
     into samples (repository_samples) and written in sample order (SAMPLE_FILE), in row groups of whole samples, each but
     the last at least as long as the shuffle's longest row group."""
     source, part = task
-    directory = os.path.join(shuffle_dir(source), f"part={part}")
-    metadata = [pq.read_metadata(os.path.join(directory, f)) for f in os.listdir(directory)]
-    length = max(md.row_group(g).num_rows for md in metadata for g in range(md.num_row_groups))
-    table = pq.read_table(directory, schema=pa.schema([("repo_name", pa.string()), ("relative_path", pa.string()),
-                                                       ("content", pa.large_string()), ("id", pa.string())]))
+    length = max(row_group.num_rows for row_group in partition_row_groups(source, part))
+    table = pq.read_table(os.path.join(shuffle_dir(source), f"part={part}"),
+                          schema=pa.schema([("repo_name", pa.string()), ("relative_path", pa.string()),
+                                            ("content", pa.large_string()), ("id", pa.string())]))
     table = table.sort_by([(key, "ascending") for key in ("repo_name", "relative_path", "id")]).combine_chunks()
     paths, contents = table["relative_path"], table["content"]
-    groups = [[a + i for i in group]
+    groups = [np.add(group, a)
               for a, b in itertools.pairwise([0, *pc.run_end_encode(table["repo_name"].chunk(0)).run_ends.to_numpy()])
               for group in bpe().repository_samples(paths.slice(a, b - a).to_pylist(), contents.slice(a, b - a).to_pylist(),
                                                     grammar=SOURCES[source].grammar)]
     order = np.concatenate(groups)
-    samples = np.repeat(np.arange(len(groups)), list(map(len, groups)))
+    samples = np.repeat(np.arange(len(groups)), [len(group) for group in groups])
     cuts = [0]
     for start in np.flatnonzero(np.diff(samples, prepend=-1)).tolist():
         if start - cuts[-1] >= length:
@@ -303,17 +311,17 @@ def split_file(task):
     with duckdb.connect(config={"threads": 1}) as con:
         val = con.execute(f"SELECT {residue('val_group')} = 0 AS val FROM read_parquet('{path}', file_row_number = true) "
                           f"ORDER BY file_row_number").fetchnumpy()["val"]
+    held, trained = val & keep, ~val & keep
     pf = pq.ParquetFile(path)
-    writers = {split: pq.ParquetWriter(os.path.join(curated_dir(source, split), f"{k}.parquet"), spec.schema) for split in ("train", "val")}
-    start = 0
-    for g in range(pf.num_row_groups):
-        table = pf.read_row_group(g, columns=spec.schema.names)
-        held, kept = val[start:start + table.num_rows], keep[start:start + table.num_rows]
-        writers["val"].write_table(table.filter(pa.array(held & kept)))
-        writers["train"].write_table(table.filter(pa.array(~held & kept)))
-        start += table.num_rows
-    for writer in writers.values():
-        writer.close()
+    with (pq.ParquetWriter(os.path.join(curated_dir(source, "train"), f"{k}.parquet"), spec.schema) as train,
+          pq.ParquetWriter(os.path.join(curated_dir(source, "val"), f"{k}.parquet"), spec.schema) as held_out):
+        start = 0
+        for g in range(pf.num_row_groups):
+            table = pf.read_row_group(g, columns=spec.schema.names)
+            end = start + table.num_rows
+            held_out.write_table(table.filter(pa.array(held[start:end])))
+            train.write_table(table.filter(pa.array(trained[start:end])))
+            start = end
 
 
 def curate(normalized):
@@ -330,9 +338,7 @@ def curate(normalized):
             os.makedirs(curated_dir(source, split))
         if spec.schema is REPOSITORY_FILE:
             shuffle(source, paths[source], keep[source])
-            directories = [os.path.join(shuffle_dir(source), f"part={part}") for part in range(SPLIT)]
-            largest = max(sum(md.row_group(g).total_byte_size for md in map(pq.read_metadata, (os.path.join(d, f) for f in os.listdir(d)))
-                              for g in range(md.num_row_groups)) for d in directories)
+            largest = max(sum(row_group.total_byte_size for row_group in partition_row_groups(source, part)) for part in range(SPLIT))
             with ProcessPoolExecutor(min(os.cpu_count(), MEMORY // (2 * largest)), mp_context=SPAWN) as pool:
                 list(pool.map(curate_partition, [(source, part) for part in range(SPLIT)]))
             shutil.rmtree(shuffle_dir(source))
@@ -366,7 +372,7 @@ def prepare():
                     held += tokens(source, count)
                     count += 1
             normalized[source] = count
-            print(f"{source}: {count} of {len(files)} files", flush=True)
+            print(f"{source}: {count} of {len(files)} files")
         horizon = horizon or held / share
     curate(normalized)
 

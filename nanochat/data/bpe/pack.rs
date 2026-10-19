@@ -18,6 +18,8 @@ use rustc_hash::FxHashSet;
 use tiktoken_rs::CoreBPE;
 use tree_sitter::{Language, Node, Parser, Tree};
 
+use crate::Lang;
+
 /// A source language's tree-sitter grammar and its containers: the node kinds whose named children are a sequence of
 /// whole statements or declarations, so that a position between two of them cuts no statement. Python
 /// (tree-sitter-python): a module, a block. C++ (tree-sitter-cpp): a translation unit, a compound statement, a
@@ -36,15 +38,13 @@ struct Grammar {
 }
 
 impl Grammar {
-    /// The grammar of a source (sources.Source.grammar): "Python" or "C++".
-    fn new(name: &str) -> Self {
-        let containers: &[&str] = match name {
-            "Python" => &["module", "block"],
-            "C++" => &["translation_unit", "compound_statement", "declaration_list", "field_declaration_list", "preproc_if", "preproc_ifdef",
-                       "preproc_else", "preproc_elif", "preproc_elifdef", "case_statement"],
-            _ => unreachable!(),
+    fn new(lang: Lang) -> Self {
+        let containers: &[&str] = match lang {
+            Lang::Python => &["module", "block"],
+            Lang::Cpp => &["translation_unit", "compound_statement", "declaration_list", "field_declaration_list", "preproc_if", "preproc_ifdef",
+                           "preproc_else", "preproc_elif", "preproc_elifdef", "case_statement"],
         };
-        let language = crate::language(name);
+        let language = lang.language();
         let kind = |name: &str| language.id_for_node_kind(name, true);
         let containers = containers.iter().map(|&name| kind(name)).collect();
         let comment = kind("comment");
@@ -203,8 +203,8 @@ fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng:
     let (a, b) = (!random).then(|| ast_middle(text, grammar, fim.single, &mut rng)).flatten().unwrap_or_else(|| random_span(text, &mut rng));
     let (prefix, middle, suffix) = (bpe.encode_ordinary(&text[..a]), bpe.encode_ordinary(&text[a..b]), bpe.encode_ordinary(&text[b..]));
     let [pre, suf, mid] = fim.sentinels;
-    let parts = if spm { vec![vec![pre, suf], suffix, vec![mid], prefix, middle] } else { vec![vec![pre], prefix, vec![suf], suffix, vec![mid], middle] };
-    parts.concat().into_iter().map(|id| id as u16).collect() // ids fit uint16 (compiled tokens)
+    let sections: &[&[u32]] = if spm { &[&[pre, suf], &suffix, &[mid], &prefix, &middle] } else { &[&[pre], &prefix, &[suf], &suffix, &[mid], &middle] };
+    sections.iter().flat_map(|section| section.iter().map(|&id| id as u16)).collect() // ids fit uint16 (compiled tokens)
 }
 
 /// A piece of a document: its token range, and as a FIM example its tokens (fim_example).
@@ -356,13 +356,13 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize), fim
 /// Packs one curated shard (documents first..last) of a compiled split (its uint16 tokens and int64 document offsets at
 /// the given paths) into rows of row_len tokens (pack_shard), its documents in parallel. token_bytes: every mergeable
 /// token's bytes by id (= rank), with the split pattern the tokenizer's encoder (tiktoken-rs's CoreBPE: OpenAI tiktoken's
-/// core, fancy-regex as in tiktoken) for FIM sections; grammar: a repository corpus's ("Python", "C++"; None for other
+/// core, fancy-regex as in tiktoken) for FIM sections; grammar: a repository corpus's language (None for other
 /// documents); fim: (rate, random, single, spm, sentinel ids) for its train split (Fim). Returns the pack index entries
 /// (native-endian int64, 4 per piece), the pieces per row (int64) and the FIM tokens (uint16).
 #[pyfunction]
 #[pyo3(signature = (tokens_path, offsets_path, shard, *, row_len, token_bytes, pattern, grammar, fim, fim_base))]
 pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, shard: (usize, usize), row_len: usize, token_bytes: Vec<Vec<u8>>,
-                        pattern: &str, grammar: Option<&str>, fim: Option<(f64, f64, f64, f64, [u32; 3])>, fim_base: usize)
+                        pattern: &str, grammar: Option<Lang>, fim: Option<(f64, f64, f64, f64, [u32; 3])>, fim_base: usize)
                         -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>) {
     let tokens = unsafe { Mmap::map(&File::open(tokens_path).unwrap()).unwrap() }; // compiled files are written once and never modified
     let offsets = unsafe { Mmap::map(&File::open(offsets_path).unwrap()).unwrap() };
