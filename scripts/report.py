@@ -54,7 +54,7 @@ def main():
     val = {c: {t: bpb(r["8k"]["corpora"][c]) for t, r in results.items()} for c in first["8k"]["corpora"]}
     val |= {f"mixture: {g}": {t: r["8k"]["bpb"][g] for t, r in results.items()} for g in first["8k"]["bpb"]}
     tables = [tag_table("Validation bits per byte (8K rows)", val)]
-    if "32k" in first:
+    if first["32k"] is not None:
         edges = (0, *CONTEXTS, "")
         long = {f"{c}, context {edges[i] + 1}-{edges[i + 1]}": {
             t: r["32k"]["corpora"][c]["bits"][i] / r["32k"]["corpora"][c]["bytes"][i] for t, r in results.items()}

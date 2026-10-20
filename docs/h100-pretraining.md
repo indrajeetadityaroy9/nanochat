@@ -2,7 +2,8 @@
 
 A Python and C++ code-generation base model pretrained on one NVIDIA H100 80 GB SXM5 (sm_90) at the most tokens its data
 holds without any stage reading a document twice. The code is the specification; each section names the file that
-defines a setting, and every measured number is in `benchmarks/h100.txt`.
+defines a setting. Measurements and ablations, with the code that runs them, are in `ablations/` (`ablations.md`); the
+pre-launch runs' records are under `artifacts/` by tag and published with the model (`runs/release.sh`).
 
 ## Model
 
@@ -47,12 +48,16 @@ into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
 | Decay | linear to zero | Bergsma et al., arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
 | Optimizers | AdamW (fused) on tables and vectors; Muon with `match_rms_adamw` on matrices | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
-| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.317 at d24), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738; studied against 0.1 (DeepSeek LLM §2.3) |
-| Gradient clipping | none | studied against global norm 1.0 (DeepSeek LLM §2.3) |
+| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.317 at d24), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
+| Gradient clipping | none; the global gradient norm is logged every step | (DeepSeek LLM: 1.0, §2.3) |
 | Repository stage | continues the decay | DeepSeek-Coder §3.6 |
 
-With a fixed threshold of 1.0, the clipped fraction of steps ranged from 0.2% to 97% across the configurations of an
-earlier d8 screen, and the baseline's median gradient norm sat at the threshold: hence clipping is studied.
+No clipping: a fixed threshold is scale-dependent (at 1.0 the clipped fraction of steps ranged from 0.2% to 97% across
+the configurations of an earlier d8 screen). The one direct measurement, a single-seed d8 A/B in the previous regime
+(`ablations/ablations.md` §3), had clipping at 1.0 lower on all 11 corpora by 0.003 bits per byte on average, under the
+paired comparison's spread of per-pair differences (sd 0.0065 on 8K code); at the production batch and lr the gradient
+norm stays below 1.9 after warmup (d24 check below). Clipping is the regime choice the evidence leaves least settled; the
+pre-registered screen tests it (`ablations/ablations.md` §1).
 
 ## H100 implementation
 
@@ -62,7 +67,7 @@ coordinate-descent tuning (`runs/container.sh`).
 
 | Op | Implementation |
 |---|---|
-| Projection, MLP, LM-head GEMMs | QuACK SM90 GEMMs, per-role tiles measured at M = 98,304 on real operands (`quack_gemm.TABLE`, `benchmarks/gemmsweep.py` → `gemmtable.py`); weight gradients by cuBLAS or serial split-K, the most accurate within 1% of the fastest |
+| Projection, MLP, LM-head GEMMs | QuACK SM90 GEMMs, autotuned by QuACK (`quack.gemm_interface`, `tuned=True`); weight gradients in fp32 from the accumulators |
 | ReLU² MLP | QuACK `gemm_act` / `gemm_dact` |
 | Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them |
 | Attention | FlashAttention-4 varlen, its default backward |
@@ -70,25 +75,26 @@ coordinate-descent tuning (`runs/container.sh`).
 | Embeddings | `F.embedding`, bf16 cast fused by Inductor; backward adds rows with atomics |
 | Decoding | `csrc/decode.cu` (`inference/decoder.py`): batched native decoder for the code benchmarks |
 
-The d24 step on real rows (`benchmarks/profile_step.py 24 12 12 file`): 3,712 ms, 317.8K tok/s, 100% GPU-busy,
+The d24 step on real rows (`ablations/profile_step.py 24 12 12 file`): 3,712 ms, 317.8K tok/s, 100% GPU-busy,
 peak 69.6 GiB; GEMM 53%, FA4 25%, Inductor 13.5%. A fused q/k/v GEMM measured 3,729 ms and was not adopted.
 
 ## Reproducibility
 
 - **Fastest kernels.** FA4's and the embedding backward reduce with atomics, so repeated steps differ in the last bits;
-  fixed-order reductions cost 1.1% per step. Inductor's coordinate-descent tuning picks kernel configurations by timing,
-  so a rebuilt compiler cache can change reduction orders: the same code from two caches agreed on step 0 bitwise and
-  differed by ~10⁻⁶ relative from step 1 (d8, three steps); from one cache, the pre-refactor and refactored code agreed
-  bitwise.
+  FA4's deterministic backward costs 1–3% of a d24 micro-batch's forward and backward. Inductor's coordinate-descent
+  tuning picks kernel configurations by timing, so a rebuilt compiler cache can change reduction orders: the same code
+  from two caches agreed bitwise on the first steps and then differed by ~10⁻⁶ relative (d8); from one cache, the
+  pre-refactor and refactored code agreed bitwise.
 - **Resume.** A relaunched run continues from its newest checkpoint (weights, optimizer state, data position), written
   to a temporary file and renamed, so a kill mid-save leaves the previous one.
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
-- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seeds plus a hash of those, its changes from
-  the baseline and the git object ids of the code its result depends on (`config.CODE`: `nanochat/`, `scripts/`,
-  `docker/`, `pyproject.toml`, `uv.lock`); uncommitted changes there refuse to run. A run never resumes, appends to or
-  counts the artifacts of other code or another configuration, and a finished study run (its evaluation exists) is
-  skipped. `runs/h100.sh` also logs the commit and the image id at launch.
+- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seeds plus a hash of those and the git
+  object ids of the code its result depends on (`config.CODE`: `nanochat/`, `scripts/`, `docker/`, `pyproject.toml`,
+  `uv.lock`, `runs/container.sh`); uncommitted changes there refuse to run. The data is the dataset revision
+  `config.DATASET_REVISION` (`runs/setup.sh` downloads it), so it is part of the hash too. A run never resumes,
+  appends to or counts the artifacts of other code or another configuration. `runs/h100.sh` also logs the commit and
+  the image id at launch.
 - **Data order.** Each corpus's rows are permuted once by the data seed (NumPy `RandomState`).
 
 ## Reproducing the run
@@ -97,17 +103,16 @@ On a fresh Lambda `gpu_1x_h100_sxm5` (Ubuntu with Docker and the NVIDIA driver):
 
 ```bash
 git clone https://github.com/indrajeetadityaroy9/nanochat nanochat && cd nanochat
-HF_TOKEN=<read token> runs/setup.sh iaroy/nanochat-data   # CDI spec, docker group, image, artifacts/, tokenizer + data
+HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts/, tokenizer + data
 # log in again (docker group), then from the checkout:
-tmux new -d -s studies experiments/run.sh regime
-# apply the production run's changes on the last line of results/regime.md to the baseline code, then:
 tmux new -d -s h100 runs/h100.sh
 ```
 
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
 `runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/` (`<tag>.pt`, the resume checkpoint, and
-`<tag>-step<NNNNNN>.pt`, the model-only snapshots), `metrics/<tag>.jsonl`, `evals/`, `base_eval/` and `probes/`
-(`<tag>[-step<NNNNNN>].json`), `logs/` (`<script>-<tag>.log`) and `cache/`; `results/` (tracked) holds the tables.
+`<tag>-step<NNNNNN>.pt`, the model-only snapshots), `metrics/<tag>.jsonl`, `base_eval/` and `probes/`
+(`<tag>[-step<NNNNNN>].json`), `logs/` (`<script>-<tag>.log`) and `cache/`, plus `evals/<tag>.json`, the pre-launch
+runs' loss evaluations; `results/` (tracked) holds the tables.
 
 `runs/h100.sh` derives the ratio and the tag (`d24-r490.805-s0-d0-<hash>`), trains both stages with a checkpoint every
 1% of the steps and a model-only snapshot (weights, no optimizer state, ~2.1 GB) every 10% and at the repository
@@ -121,38 +126,38 @@ MultiPL-E C++ and HumanEval infilling, each generated and scored by its official
 
 **Expected cost:** 81,171 steps at 3.712 s, about 84 h, about $360 at $4.29/h.
 
-`runs/release.sh <tag> <repo>` uploads the checkpoint and snapshots, metrics, evaluations and tables to a Hugging Face
-model repository; `runs/container.sh hf download <repo> --local-dir /workspace/nanochat` (the checkout inside the
-container) restores them where `load_model`, `base_eval` and `base_train` read them.
+`runs/release.sh <tag> <repo>` uploads the checkpoint and snapshots, every run record under `artifacts/` (this run's and
+the pre-launch runs') and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
+--local-dir /workspace/nanochat` (the checkout inside the container) restores them where `load_model`, `base_eval` and
+`base_train` read them.
 
 ## Pre-launch verification
 
-Commit `60138de` on the H100, on the packed rows, before the studies and the production run.
+Commit `60138de` on the H100, on the packed rows; records under `artifacts/` by tag.
 
 | Check | Result |
 |---|---|
-| d24 compile and step (12 rows) for each scale-up configuration: baseline, value embeddings removed, Block Attention Residuals, key offset | all run |
 | Resume: d8, 20 tokens per parameter (`d8-r20-s0-d0-d69671850bea`), killed with `docker kill` at step 991 and relaunched | continued from its step-900 checkpoint, switched to the 32K stage at step 2,824 (`repo_start`), finished at step 2,987; the step-2,824 checkpoint kept |
 | Production path: `base_train` CLI, `base_eval` (loss, reference solutions, EvalPlus, MultiPL-E, infilling), `report` | all complete |
-| Study path: regime run `000-s0-d0` (weight decay 0.1, clip 1.0, rewarm), d8, 100 tokens per parameter | lr restarts at peak/40 at step 14,122, reaches the peak (2.236e-3) 40 steps later, then decays linearly to 0; 54% of steps clipped at 1.0; the gradient norm peaks at 3.4 at the rewarm peak and returns to 1.3 within 160 steps; evaluation recorded under `60138de` |
-| Run identity | 16 distinct tags for the then 2³ regime design; the production tag stable across calls; an untracked file under `nanochat/` refused |
+| Run identity | the production tag stable across calls; an untracked file under `nanochat/` refused |
 
 **Training record**, d8 at 20 tokens per parameter (2,987 steps of 98,304 tokens, peak lr 2.73e-3): mean training loss
-per window of steps, against runs of the previous regime (WSD, RoPE base 10^4 → 10^6 at the repository stage; weight
-decay 0.1 as recorded by `d8-r20-s42`, whose clip was 1.0; the `-g1`/`-ginf` records predate the weight-decay field).
-Seeds differ (0 vs 42), so data order differs.
+per window of steps, one record per step (a resumed run's repeated steps counted once), against runs of the previous
+regime (WSD, RoPE base 10^4 → 10^6 at the repository stage; weight decay 0.1 as recorded by `d8-r20-s42`, whose clip
+was 1.0; the `-g1`/`-ginf` records predate the weight-decay field). Seeds differ (0 vs 42), so data order differs.
 
 | Run | 0–40 | 40–250 | 250–500 | 500–1000 | 1000–1500 | 1500–2000 | 2000–2500 | 2500–2824 | 2824–2987 (32K) |
 |---|---|---|---|---|---|---|---|---|---|
-| This configuration (seed 0) | 8.742 | 5.485 | 3.660 | 2.624 | 2.347 | 2.207 | 2.094 | 2.025 | 1.701 |
-| Previous regime, clip 1.0 (`d8-r20-s42`) | 8.733 | 5.362 | 3.634 | 2.703 | 2.352 | 2.217 | 2.136 | 2.032 | 1.816 |
-| Previous regime, clip 1.0 (`d8-r20-s42-g1`) | 8.738 | 5.347 | 3.553 | 2.623 | 2.332 | 2.209 | 2.130 | 2.026 | 1.856 |
+| This configuration (seed 0) | 8.742 | 5.485 | 3.660 | 2.652 | 2.347 | 2.207 | 2.094 | 2.025 | 1.701 |
+| Previous regime, clip 1.0 (`d8-r20-s42`) | 8.733 | 5.362 | 3.634 | 2.703 | 2.352 | 2.217 | 2.136 | 2.032 | 1.785 |
+| Previous regime, clip 1.0 (`d8-r20-s42-g1`) | 8.738 | 5.347 | 3.553 | 2.623 | 2.332 | 2.209 | 2.130 | 2.026 | 1.808 |
 | Previous regime, no clip (`d8-r20-s42-ginf`) | 8.740 | 5.455 | 3.726 | 2.671 | 2.351 | 2.220 | 2.140 | 2.035 | 1.803 |
 
 No non-finite loss or gradient; median gradient norm over steps 1,000–2,824 1.49 (0.77–0.86 for the previous runs,
 whose weight decay is 0.1 against this configuration's 0.548 at this scale); throughput 2.3M tokens/s.
 
-**Held-out bits per byte** of the same runs (`base_eval`), unpaired:
+**Held-out bits per byte** of the same runs (`artifacts/base_eval/<tag>.json`; the `-g1`/`-ginf` files in the earlier
+evaluator's format), unpaired:
 
 | Validation split (8K rows) | This configuration (seed 0) | Previous, clip 1.0 (`-g1`) | Previous, no clip (`-ginf`) |
 |---|---|---|---|
@@ -178,10 +183,12 @@ This configuration's mixtures: 8K code 0.6354, all 0.7408; 32K repository 0.6200
 (HumanEval+ 0, MBPP+ base 0.0026, single-line infilling SPM 0.036): the check is that the evaluation runs.
 
 **Paired comparison against the standard regime**, d8 at 20 tokens per parameter, three seed pairs (seed = data seed
-∈ {0, 1, 2}; same initialization and data order within a pair). The standard regime is commit `c00d2f6`'s default
-(WSD, weight decay 0.1, clip 1.0, RoPE base 10^4 → 10^6), trained in its own worktree; both arms are evaluated by
-`60138de`'s `loss_evaluation` on the same held-out rows. Held-out bits per byte, new minus standard (paired t-test,
-df = 2; 95% CI from the t distribution):
+∈ {0, 1, 2}; same initialization and data order within a pair). This configuration's arm is `60138de`'s baseline
+(`d8-r20-s{0,1,2}-d{0,1,2}-{d69671850bea, ca426bc7cec9, ccd433c30eb2}`, tags reproduced from `60138de`'s `run_tag`);
+the standard regime is commit `c00d2f6`'s default (WSD, weight decay 0.1, clip 1.0, RoPE base 10^4 → 10^6), trained in
+its own worktree (`d8-r20-s{0,1,2}`). Both arms are evaluated by `60138de`'s `loss_evaluation` on the same held-out
+rows (`artifacts/evals/<tag>.json`; training records `artifacts/metrics/<tag>.jsonl`). Held-out bits per byte, new
+minus standard (paired t-test, df = 2; 95% CI from the t distribution):
 
 | Metric | new s0 | std s0 | new s1 | std s1 | new s2 | std s2 | Mean difference | 95% CI | p |
 |---|---|---|---|---|---|---|---|---|---|
@@ -200,8 +207,9 @@ higher at p = 0.07. Training: no non-finite loss or gradient in either arm; maxi
 without clipping against 7.85 / 10.00 / 6.16 (measured before the standard regime's clip); training loss over the last
 5% of steps (repository stage) 1.702 / 1.654 / 1.710 against 1.739 / 1.729 / 1.736.
 
-**Production settings at d24** (`d24-r490.805-s0-d0-c7c5fbbe4b31`): the production run's batch (1,179,648 tokens) and
-peak lr (9.3795e-4), cut to 0.5B tokens (423 steps), file-level stage. Per tenth of the run:
+**Production settings at d24** (`d24-r490.805-s0-d0-c7c5fbbe4b31`, `60138de`): the production run's batch (1,179,648
+tokens) and peak lr (9.3795e-4), cut to 0.5B tokens (423 steps), file-level stage; weight decay 3.814, the τ law at
+this 423-step horizon (production: 0.317). Per tenth of the run:
 
 | Steps | Mean loss | Gradient norm, median | Gradient norm, max | lr at the end | tok/s |
 |---|---|---|---|---|---|
@@ -216,19 +224,20 @@ peak lr (9.3795e-4), cut to 0.5B tokens (423 steps), file-level stage. Per tenth
 | 339–380 | 2.368 | 0.650 | 0.882 | 1.053e-4 | 314,567 |
 | 381–422 | 2.287 | 0.282 | 0.384 | 2.449e-6 | 314,405 |
 
-No non-finite loss or gradient; the gradient norm exceeds 1.9 only during warmup. Held-out bits per byte at 8K: code
-0.7485, text 1.4555, math 1.4454, all 0.8512: worse than the d8 run of 2,987 steps (code 0.6354), a model 13× smaller
-on fewer tokens. Per optimizer step d24 is lower at every matched step (2.275 vs 3.339 over steps 400-420); per token it
-is higher (3.225 vs 1.738 at 280M tokens): at the production batch 0.5B tokens is 423 optimizer steps. A proxy cut from
-the production plan measures early optimization speed, so `schedule.plan` sets every run's batch and lr at its own
-compute (DeepSeek LLM sets its scaling runs' by the same laws).
+No non-finite loss or gradient; the gradient norm exceeds 1.9 only during warmup. Held-out bits per byte at 8K
+(`artifacts/evals/<tag>.json`): code 0.7485, text 1.4555, math 1.4454, all 0.8512: worse than the d8 run of 2,987
+steps (code 0.6354), a model 13× smaller on fewer tokens. Per optimizer step d24 is lower at every step after the
+first (2.274 vs 3.332 over steps 400–420); per token it is higher (3.508 vs 2.024 over 250–270M tokens, both in the
+file-level stage): at the production batch 0.5B tokens is 423 optimizer steps. A proxy cut from the production plan
+measures early optimization speed, so `schedule.plan` sets every run's batch and lr at its own compute (DeepSeek LLM
+sets its scaling runs' by the same laws).
 
 ## Decoding and syntax analysis
 
 The paper's Evaluate & Break section rests on a **pre-registered probe set**: 25 failure hypotheses fixed before the
 production run from the literature and this pipeline's design, each a newly written input (no benchmark text, not in
 the training data) with a programmatic check (`nanochat/eval/probes.py`, `python -m nanochat.eval.probes --model-tag
-TAG` → `<base_dir>/probes/<tag>.json`, `.md`). Mitigations live at inference; pretraining is unchanged. Every probe runs
+TAG` → `artifacts/probes/<tag>.json`, `.md`). Mitigations live at inference; pretraining is unchanged. Every probe runs
 under each configuration that applies:
 
 | Configuration | Decoding |
@@ -316,37 +325,31 @@ are near zero; the probe set's results are reported on the production model.
 
 ## Appendix ablation
 
-`experiments/studies.py`: the regime study, a set of runs, a decision rule fixed before they run, and a report.
-`experiments/run.sh regime` trains and evaluates every run (`experiments/train_eval.py`) and writes
-`results/regime.md` and `.csv`, whose last line is the production run's changes from the baseline; the runs'
-records (`artifacts/metrics/<tag>.jsonl`, `artifacts/evals/<tag>.json`) stay the source. Metric: validation bits per
-byte of the code mixture at 8K; the text mixture's is reported alongside.
-
-| Scale | Design | Decides | Rule |
-|---|---|---|---|
-| d8, 100 tokens per parameter (τ-law weight decay 0.31, production's 0.32) | 2² full factorial × 2 seed pairs (8 runs), seed pair as a block; effects by OLS, SEs from the replicates | weight decay τ-law vs 0.1; no clipping vs 1.0 | a hand-set value replaces the baseline's only if significantly better on code (Holm across the two) |
+The paired comparison above tests this configuration's regime as a whole against the standard regime, and the d24
+check the production batch and lr. The pre-registered architecture and regime ablations (attention windows, head_dim,
+gradient clipping, mixture, MLP activation, depth against width), their designs, decision rules and results are in
+`ablations/ablations.md`; only changes they confirm reach production.
 
 Adopted without a study, on published evidence and the pre-launch measurements: linear decay to zero continuing
-through the repository stage, one RoPE base, SSSL windows (Gemma 3, arXiv 2503.19786 §5.2), learned QK-norm gains
-(Qwen3), the x0 and residual scalars (nanochat LOG 2026-01-11), and the peak lr of DeepSeek LLM's law (an
-lr-vs-horizon fit at affordable d24 horizons extrapolates 38× to production's tokens with an interval too wide to
-override it). Not studied, by expected value against GPU cost:
+through the repository stage, one RoPE base, learned QK-norm gains (Qwen3), the x0 and residual scalars (nanochat LOG
+2026-01-11), and the peak lr of DeepSeek LLM's law (an lr-vs-horizon fit at affordable d24 horizons extrapolates 38× to
+production's tokens with an interval too wide to override it). Not studied, by expected value against GPU cost:
 
-- **Value embeddings kept.** They cost 4.7% of the step; MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12
-  and −0.010 at d20, several times the ~0.0015 that 4.7% more compute buys at production (a loss–compute exponent near
-  0.05). A two-seed d24 test at 2.6 tokens per parameter (pair noise ~0.007, from the paired comparison) cannot resolve
-  that margin.
-- **Block Attention Residuals not adopted.** +12% step time (about 10 hours of production) for a published 1.1% loss
-  gain at 194M parameters (arXiv 2603.15031); the equal-time margin is below what two seed pairs detect, and adopting
-  it would need a native decode path.
+- **Value embeddings kept.** They cost 4.7% of the d24 step (measured before `60138de` with the removed switch; the
+  timing record was not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20, several
+  times the ~0.0015 that 4.7% more compute buys at production (a loss–compute exponent near 0.05). A two-seed d24 test
+  at 2.6 tokens per parameter (pair noise ~0.007, from the paired comparison) cannot resolve that margin.
+- **Block Attention Residuals not adopted.** +12% d24 step time (about 10 hours of production; measured before
+  `60138de`, record not kept) for a published 1.1% loss gain at 194M parameters (arXiv 2603.15031); the equal-time
+  margin is below what a few seed pairs detect, and adopting it would need a native decode path.
 - **Partial key offset not adopted.** A speedrun result (modded-nanogpt record #49, 124M, short training) with a small
   expected effect at 490 tokens per parameter and no native decode path.
-- **Repository-stage rewarm not studied.** Qwen2.5-Coder and DeepSeek-Coder continue the decay; the paired comparison
-  measured no repository-stage effect of the regime (−0.004, p = 0.42).
+- **Repository-stage rewarm not adopted.** Qwen2.5-Coder and DeepSeek-Coder continue the decay into the repository
+  stage; no run here isolates a rewarm.
 
 ## Measured design decisions
 
-Each in `benchmarks/h100.txt`:
+Each in `ablations/ablations.md` §2:
 
 - **Micro-batch 98,304** rather than 65,536: 1% faster per token, peak 69.6 GiB of 80 GB.
 - **FlashAttention-4** rather than cuDNN attention: faster forward and backward in every measured window/segment case.
@@ -354,8 +357,7 @@ Each in `benchmarks/h100.txt`:
 - **Value-embedding gate as an fp32 broadcast-sum** rather than fp32 GEMMs: 0.88 vs 1.20 ms per layer, same error.
 - **Inductor coordinate-descent tuning:** Inductor's kernels 533 → 500 ms per d24 step.
 - **Split q/k/v GEMMs** rather than one fused GEMM: 3,712 vs 3,729 ms per d24 step.
-- **Study runs one at a time:** one d8 run saturates the GPU (2.60M tok/s); two concurrent runs total 2.34M, four
-  2.57M.
+- **Runs one at a time:** one d8 run saturates the GPU (2.60M tok/s); two concurrent runs total 2.34M, four 2.57M.
 
 ## Layout
 
@@ -371,7 +373,7 @@ Each in `benchmarks/h100.txt`:
 - `nanochat/data/`: the data pipeline, including the Rust tokenizer, repository and packing crate in `bpe/`.
 - `scripts/`: `base_train.py`, `base_eval.py`, `report.py`.
 - `runs/`: `setup.sh`, `container.sh`, `h100.sh`, `curves.sh`, `release.sh`.
-- `experiments/`: `studies.py` (runs, rule, report), `train_eval.py`, `run.sh`.
 - `results/`: the tables the paper reports.
-- `benchmarks/`: `profile_step.py`, the GEMM sweep (`gemmsweep.py`, `gemmtable.py`, its record) and `h100.txt`.
+- `ablations/`: the ablation designs, runner and analysis (`study.py`, `report.py`, `swiglu.py`), the step profiler
+  (`profile_step.py`) and `ablations.md`.
 - `docker/Dockerfile`: the image.

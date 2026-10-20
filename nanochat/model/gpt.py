@@ -9,7 +9,7 @@ QK norm with learnable gains (arXiv 2505.09388 §2).
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
 - Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy.
 fp32 parameters, bf16 activations; the ops round weights to bf16. Gradient reductions use the fastest kernels, not a
-fixed order (FA4's and the embedding backward's atomics: ~1% faster per step, benchmarks/h100.txt).
+fixed order (FA4's and the embedding backward's atomics: ~1% faster per step, ablations/ablations.md).
 """
 
 import zlib
@@ -37,15 +37,17 @@ class GPTConfig:
     n_layer: int
     n_head: int
     n_embd: int
+    window_pattern: str  # per layer, tiled: S a local window, L the full context (layer_windows)
 
 
 def gpt_config(*, depth, stage):
     """nanochat's shape rule (92d63d4 scripts/base_train.py:51-52, 131-134): width ASPECT_RATIO x depth, rounded up to
-    whole 128-dim heads (LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM)."""
+    whole 128-dim heads (LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM); SSSL windows (LOG 2026-01-11; 92d63d4
+    gpt.py:287-314)."""
     head_dim = 128
     n_embd = -(-depth * ASPECT_RATIO // head_dim) * head_dim
     return GPTConfig(sequence_len=stage.seq_len, vocab_size=VOCAB_SIZE, rope_base=ROPE_BASE, n_layer=depth,
-                     n_head=n_embd // head_dim, n_embd=n_embd)
+                     n_head=n_embd // head_dim, n_embd=n_embd, window_pattern="SSSL")
 
 
 def has_ve(layer_idx, *, n_layer):
@@ -54,11 +56,10 @@ def has_ve(layer_idx, *, n_layer):
 
 
 def layer_windows(config):
-    """Keys before each query, per layer: SSSL tiled, the last layer full (LOG 2026-01-11; 92d63d4 gpt.py:287-314);
+    """Keys before each query, per layer: config.window_pattern tiled over the layers, the last layer full;
     S = 512, the smallest local window Gemma 3 finds near-lossless (arXiv 2503.19786 §5.2, Fig. 4)."""
-    pattern = "SSSL"
     window = {"S": min(512, config.sequence_len), "L": config.sequence_len}
-    sizes = [window[pattern[i % len(pattern)]] for i in range(config.n_layer)]
+    sizes = [window[config.window_pattern[i % len(config.window_pattern)]] for i in range(config.n_layer)]
     sizes[-1] = config.sequence_len
     return sizes
 
@@ -97,7 +98,7 @@ class Attention(nn.Module):
         B, T, C = n.size()
         q, k, v = (linear(n, w).view(B, T, self.n_head, -1) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once. Broadcast-sum gate
-        # fused by Inductor: 0.88 vs 1.20 ms per layer and micro-batch for fp32 GEMMs (benchmarks/h100.txt)
+        # fused by Inductor: 0.88 vs 1.20 ms per layer and micro-batch for fp32 GEMMs (ablations/ablations.md)
         if ve is not None:
             gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))
             v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)

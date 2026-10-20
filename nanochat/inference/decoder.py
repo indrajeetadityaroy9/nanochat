@@ -159,7 +159,7 @@ class NativeDecoder:
 
     @torch.no_grad()
     def __init__(self, model, *, bos_token_id, max_len):
-        lib = cuda_library("decode")
+        lib = cuda_library("decode", head_dim=model.config.n_embd // model.config.n_head)
         lib.dec_create.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dec_create.restype = ctypes.c_void_p
         lib.dec_batch.argtypes = [ctypes.c_void_p]

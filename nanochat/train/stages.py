@@ -11,16 +11,19 @@ import bisect
 import sys
 
 import numpy as np
+import torch
 
 from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE, Stage
 from nanochat.data.loader import mixture_rows, mixture_weights, packed_rows, row_shards
 from nanochat.data.tokenizer import Tokenizer, get_tokenizer
+from nanochat.model.gpt import GPT, gpt_config
 from nanochat.train.schedule import RunPlan, plan
 
 
 def drawn_rows(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan) -> dict[str, int]:
-    """{corpus: rows the stage draws}: steps x micro-batches x rows per micro-batch, split by mixture_rows."""
-    steps = run.repo_start if stage is FILE_STAGE else run.num_iterations - run.repo_start
+    """{corpus: rows the stage draws}: steps x micro-batches x rows per micro-batch, split by mixture_rows; every stage
+    but REPO_STAGE is a file-level stage (an ablation's may differ from FILE_STAGE in its mixture)."""
+    steps = run.num_iterations - run.repo_start if stage is REPO_STAGE else run.repo_start
     mixture = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
     count = steps * run.grad_accum_steps * stage.batch_rows
     drawn = np.bincount(mixture_rows(np.array(list(mixture.values())), start=0, count=count), minlength=len(mixture))
@@ -42,7 +45,9 @@ def readable_rows(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan) -> dict[s
 def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:
     """Bisection over whole micro-batches of tokens on "overdraws". Not monotone (grad_accum_steps steps up with the
     count, so trained tokens dip): the result fits, but a larger fitting count may exist."""
-    params = plan(depth=depth, ratio=1.0).scaling_params
+    with torch.device("meta"):
+        model = GPT(gpt_config(depth=depth, stage=FILE_STAGE))
+    params = plan(model=model, ratio=1.0).scaling_params
     rows = sum(packed_rows(c, "train", tokenizer, FILE_STAGE.seq_len)
                for c in mixture_weights(FILE_STAGE.mixture, tokenizer, FILE_STAGE.seq_len))
 
@@ -50,7 +55,7 @@ def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:
         return n * MICRO_BATCH_TOKENS / params
 
     def overdrawn(n):
-        run = plan(depth=depth, ratio=ratio(n))
+        run = plan(model=model, ratio=ratio(n))
         for stage in (FILE_STAGE, REPO_STAGE):
             readable = readable_rows(tokenizer, stage=stage, run=run)
             if any(drawn > len(readable[c]) for c, drawn in drawn_rows(tokenizer, stage=stage, run=run).items()):

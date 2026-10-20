@@ -50,6 +50,8 @@ from nanochat.model.gpt import GPT
 from nanochat.paths import PROBES
 from nanochat.train.checkpoint import checkpoint_name, load_model
 
+# PROBES/<name>.json: schema, run, step, seconds, results (a list of probe x configuration records)
+SCHEMA = 1
 Configuration = Literal["greedy", "healed", "fim", "fim_spm", "constrained", "system"]
 CONFIGURATIONS = typing.get_args(Configuration)
 FIM_MODES = {"fim": "psm", "fim_spm": "spm"}
@@ -830,7 +832,8 @@ def main():
     model, step = load_model(tag, step=args.step, device=torch.device("cuda"))
     probe_list, results, seconds = run(model, tokenizer)
     name = checkpoint_name(tag, step=args.step)
-    (PROBES / f"{name}.json").write_text(json.dumps({"run": tag, "step": step, "seconds": seconds, "results": results}))
+    (PROBES / f"{name}.json").write_text(json.dumps({"schema": SCHEMA, "run": tag, "step": step, "seconds": seconds,
+                                                     "results": results}, allow_nan=False), encoding="utf-8")
     text = report(tag, step, probe_list, results, seconds)
     (PROBES / f"{name}.md").write_text(text, encoding="utf-8")
     print(text)

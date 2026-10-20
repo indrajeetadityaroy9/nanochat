@@ -13,7 +13,7 @@ from torch import Tensor
 
 def fa4_window_left(window_left, T):
     """None (FA4's causal kernel) when the window spans T, else the local window: bitwise equal and 1-2% faster at d8
-    (benchmarks/h100.txt); FA4 does not make this switch (interface.py _resolve_causal_local_window)."""
+    (ablations/ablations.md); FA4 does not make this switch (interface.py _resolve_causal_local_window)."""
     return None if window_left >= T else window_left
 
 
@@ -36,7 +36,7 @@ def flash_attn_fake(q, k, v, window_left, cu_seqlens):
 @torch.library.custom_op("nanochat::flash_attn_bwd", mutates_args=(), device_types="cuda")
 def flash_attn_bwd(dout: Tensor, q: Tensor, k: Tensor, v: Tensor, out: Tensor, lse: Tensor, window_left: int,
                    cu_seqlens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """(dq, dk, dv); FA4's backward with atomic dq accumulation, its fastest (benchmarks/h100.txt)."""
+    """(dq, dk, dv); FA4's backward with atomic dq accumulation, its fastest (ablations/ablations.md)."""
     T = q.size(1)
     grads = _flash_attn_bwd(q.flatten(0, 1), k.flatten(0, 1), v.flatten(0, 1), out.flatten(0, 1), dout.flatten(0, 1),
                             lse, causal=True, window_size_left=fa4_window_left(window_left, T), cu_seqlens_q=cu_seqlens,

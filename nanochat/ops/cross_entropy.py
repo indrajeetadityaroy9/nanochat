@@ -5,19 +5,19 @@ LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z 
 
 nanochat::lm_loss (training): a GEMM writes bf16 z; QuACK's cross_entropy_fwd_out (quack/cross_entropy.py, dx = z as
 with inplace_backward) writes each row's loss and overwrites z with softmax(z) - onehot(t); two GEMMs with alpha = 1/n
-give dx (bf16) and dW (fp32 accumulators). QuACK's fused linear-cross-entropy is not faster at d8 (benchmarks/h100.txt).
+give dx (bf16) and dW (fp32 accumulators). QuACK's fused linear-cross-entropy is not faster at d8 (ablations/ablations.md).
 
 nanochat::lm_losses (evaluation): QuACK's lse_target_epi GEMM epilogue (quack/epilogue/library.py) reduces each row's
-logsumexp and gathers the target logit from the fp32 accumulators without storing z (benchmarks/h100.txt).
+logsumexp and gathers the target logit from the fp32 accumulators without storing z (ablations/ablations.md).
 """
 
 import torch
 from quack.cross_entropy import cross_entropy_fwd_out
 from quack.epilogue.library import lse_target_epi
+from quack.gemm_interface import gemm
 from torch import Tensor
 
 from nanochat.data.loader import PretrainingBatches
-from nanochat.ops.quack_gemm import gemm
 
 
 # Opaque to torch.compile: functionalizing the in-place logit gradient corrupted x's gradient.
@@ -29,9 +29,8 @@ def lm_loss(x: Tensor, weight: Tensor, target: Tensor) -> tuple[Tensor, Tensor, 
     scale = 1 / (target != PretrainingBatches.PAD).sum().float()
     loss = torch.empty(target.shape, device=x.device, dtype=torch.float32)
     cross_entropy_fwd_out(logits, target, None, loss, None, logits, None, PretrainingBatches.PAD)
-    C = x.shape[1]
-    return (loss.sum() * scale, gemm(logits, w, role="lm_dx", width=C, out_dtype=x.dtype, alpha=scale),
-            gemm(logits.t(), x, role="lm_dw", width=C, out_dtype=weight.dtype, alpha=scale))
+    return (loss.sum() * scale, gemm(logits, w, alpha=scale, out_dtype=x.dtype),
+            gemm(logits.t(), x, alpha=scale, out_dtype=weight.dtype))
 
 
 @lm_loss.register_fake

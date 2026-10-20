@@ -12,16 +12,18 @@ Metrics: train/metrics.py.
 
 import argparse
 import gc
+import math
 import time
 from collections.abc import Iterator
 from dataclasses import asdict
 from functools import partial
+from typing import Literal
 
 import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.config import FILE_STAGE, REPO_STAGE, run_tag
+from nanochat.config import FILE_STAGE, REPO_STAGE, Stage, run_tag
 from nanochat.data.loader import PretrainingBatches, mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
@@ -33,8 +35,8 @@ from nanochat.train.stages import readable_rows
 
 
 def optimizer_step(model: torch.nn.Module, batches: list[tuple[torch.Tensor, ...]], params: list[torch.Tensor],
-                   optimizers: tuple[torch.optim.Optimizer, ...],
-                   reads: Iterator | None) -> tuple[torch.Tensor, torch.Tensor, list]:
+                   optimizers: tuple[torch.optim.Optimizer, ...], reads: Iterator | None, *,
+                   max_norm: float) -> tuple[torch.Tensor, torch.Tensor, list]:
     """One optimizer step over micro-batches (inputs, targets, cu_seqlens). Each micro-batch's mean loss is weighted by
     its share of the step's valid targets, so the step loss is the mean over all. The next step's micro-batches are read
     from `reads` during backward (None on the last step). Returns (step loss fp64, gradient norm, next micro-batches)
@@ -48,33 +50,34 @@ def optimizer_step(model: torch.nn.Module, batches: list[tuple[torch.Tensor, ...
         loss.backward()
         if reads is not None:
             upcoming.append(next(reads))
-    grad_norm = torch.nn.utils.get_total_norm([p.grad for p in params])
+    grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm)
     for opt in optimizers:
         opt.step()
     model.zero_grad()
     return torch.stack(losses).double().sum(), grad_norm, upcoming
 
 
-def train(*, depth: int, ratio: float, seed: int, data_seed: int, save_every: int, snapshot_every: int, tag: str) -> GPT:
-    """Train (or resume) run `tag` and return its model: init by `seed`, data order by `data_seed`, the plan at this
-    depth and ratio, weight decay by the tau law (optim.tau_weight_decay), no gradient clipping. Resume checkpoint every
-    `save_every` steps; a model-only snapshot every `snapshot_every` steps and at repo_start (the model before the
-    repo-level stage), the final model being the last checkpoint."""
+def train(*, model: GPT, ratio: float, seed: int, data_seed: int, save_every: int, snapshot_every: int, tag: str,
+          max_norm: float, file_stage: Stage, matrix_optimizer: Literal["muon", "normuon"]) -> GPT:
+    """Train (or resume) run `tag` of `model` (shapes on the meta device, at file_stage's context) and return it: init
+    by `seed`, data order by `data_seed`, the plan at this ratio, weight decay by the tau law (optim.tau_weight_decay),
+    gradients clipped to global norm `max_norm` (inf: measured, not clipped), matrices by `matrix_optimizer`
+    (optim.optimizers), file_stage then REPO_STAGE. Resume checkpoint every `save_every` steps; a model-only snapshot
+    every `snapshot_every` steps and at repo_start (the model before the repo-level stage), the final model being the
+    last checkpoint."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
-    run = plan(depth=depth, ratio=ratio)
-    weight_decay = tau_weight_decay(lr=run.lr, steps=run.num_iterations, tokens_per_param=run.tokens_per_param)
-
-    with torch.device("meta"):
-        orig_model = GPT(gpt_config(depth=depth, stage=FILE_STAGE))
-    orig_model.to_empty(device=device)
-    orig_model.init_weights(seed=seed)
-    opts = optimizers(orig_model, lr=run.lr, weight_decay=weight_decay)
+    run = plan(model=model, ratio=ratio)
+    model.to_empty(device=device)
+    model.init_weights(seed=seed)
+    opts = optimizers(model, lr=run.lr, matrix_optimizer=matrix_optimizer,
+                      weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,
+                                                    tokens_per_param=run.tokens_per_param))
     path = checkpoint_path(tag, step=None)
     start_step = stage_rows = 0
     if path.exists():  # resume: weights into the optimizers' parameters, then optimizer state
         checkpoint = torch.load(path, map_location=device)
-        orig_model.load_state_dict(checkpoint["model"])
+        model.load_state_dict(checkpoint["model"])
         for opt, state in zip(opts, checkpoint["optimizers"], strict=True):
             opt.load_state_dict(state)
         start_step, stage_rows = checkpoint["step"], checkpoint["stage_rows"]
@@ -86,14 +89,14 @@ def train(*, depth: int, ratio: float, seed: int, data_seed: int, save_every: in
 
     def stage_at(s):
         """Repo-level stage from repo_start on."""
-        return REPO_STAGE if s >= run.repo_start else FILE_STAGE
+        return REPO_STAGE if s >= run.repo_start else file_stage
 
     # A checkpoint holds the context its weights trained in; stage_rows counts that stage's consumed rows
     stage = stage_at(start_step - 1)
-    orig_model.set_stage(stage)
+    model.set_stage(stage)
     if start_step == run.num_iterations:  # finished: the final checkpoint's model
-        return orig_model
-    model = torch.compile(orig_model, dynamic=False, fullgraph=True)
+        return model
+    compiled = torch.compile(model, dynamic=False, fullgraph=True)
 
     # A stage's packed rows (train/stages.py), each corpus permuted by the data seed (RandomState's stream is frozen
     # across numpy versions, so a resume sees the same order); FIM pieces read as FIM examples
@@ -111,31 +114,35 @@ def train(*, depth: int, ratio: float, seed: int, data_seed: int, save_every: in
     batches = [next(train_iter) for _ in range(run.grad_accum_steps)]
     # lr and weight decay as the optimizers hold them (a resumed run's come from its checkpoint)
     group = opts[0].param_groups[0]
+    attempt = metrics.attempt(tag)
     metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "data_seed": data_seed,
+                         "model": asdict(model.config) | {"mlp": type(model.blocks[0].mlp).__name__},
+                         "max_norm": None if math.isinf(max_norm) else max_norm, "matrix_optimizer": matrix_optimizer,
                          "lr": group["initial_lr"], "weight_decay": group["weight_decay"],
-                         "stage": asdict(first) | {"mixture": mixture}})
-    params = list(orig_model.parameters())
+                         "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
+    params = list(model.parameters())
 
     while True:
         last_step = step == run.num_iterations
         # the snapshot first: a kill while writing it leaves the previous checkpoint, so the resumed run writes it again
         if step != start_step and not last_step and (step % snapshot_every == 0 or step == run.repo_start):
-            save_checkpoint(checkpoint_path(tag, step=step), {"step": step, "model": orig_model.state_dict(),
-                                                              "model_config": asdict(orig_model.config)})
+            save_checkpoint(checkpoint_path(tag, step=step), {"step": step, "model": model.state_dict(),
+                                                              "model_config": asdict(model.config)})
         # state after `step` steps at the stage they trained in
         if step != start_step and (last_step or step % save_every == 0 or step == run.repo_start):
-            save_checkpoint(path, {"step": step, "model": orig_model.state_dict(),
+            save_checkpoint(path, {"step": step, "model": model.state_dict(),
                                    "optimizers": [opt.state_dict() for opt in opts],
-                                   "model_config": asdict(orig_model.config), "stage_rows": stage_rows})
+                                   "model_config": asdict(model.config), "stage_rows": stage_rows})
             gc.collect()
         if last_step:
-            return orig_model
+            return model
         if stage_at(step) is not stage:
             # repo-level stage: new context and compiled graph; its batches were read the step before
             stage, stage_rows = REPO_STAGE, 0
-            orig_model.set_stage(stage)
-            model = torch.compile(orig_model, dynamic=False, fullgraph=True)
-            metrics.append(tag, {"kind": "stage", "step": step, "stage": asdict(stage) | {"mixture": mixture}})
+            model.set_stage(stage)
+            compiled = torch.compile(model, dynamic=False, fullgraph=True)
+            metrics.append(tag, {"kind": "stage", "step": step, "stage": asdict(stage) | {"mixture": mixture}},
+                           attempt=attempt)
 
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -143,8 +150,9 @@ def train(*, depth: int, ratio: float, seed: int, data_seed: int, save_every: in
         if step + 1 < run.num_iterations and stage_at(step + 1) is not stage:
             mixture, train_iter = stage_batches(REPO_STAGE, 0)
         lr = schedulers[0].get_last_lr()[0]
-        loss, grad_norm, upcoming = optimizer_step(model, batches, params, opts,
-                                                   train_iter if step + 1 < run.num_iterations else None)
+        loss, grad_norm, upcoming = optimizer_step(compiled, batches, params, opts,
+                                                   train_iter if step + 1 < run.num_iterations else None,
+                                                   max_norm=max_norm)
         for scheduler in schedulers:
             scheduler.step()
         stage_rows += len(batches) * stage.batch_rows
@@ -154,9 +162,12 @@ def train(*, depth: int, ratio: float, seed: int, data_seed: int, save_every: in
 
         # one host synchronization for loss and grad norm
         loss_value, grad_norm_value = torch.stack([loss, grad_norm.double()]).tolist()
+        if not (math.isfinite(loss_value) and math.isfinite(grad_norm_value)):
+            metrics.append(tag, {"kind": "failure", "step": step, "loss": None, "grad_norm": None}, attempt=attempt)
+            raise FloatingPointError(f"{tag} step {step}: loss {loss_value}, grad_norm {grad_norm_value}")
         metrics.append(tag, {"kind": "train", "step": step, "tokens": (step + 1) * run.total_batch_size,
                              "loss": loss_value, "lr": lr, "grad_norm": grad_norm_value,
-                             "tok_per_s": run.total_batch_size / dt})
+                             "tok_per_s": run.total_batch_size / dt}, attempt=attempt)
         if step == start_step:
             # no cyclic garbage per step: keep the collector off after setup (scans cost ~500 ms) except after saves
             gc.collect()
@@ -173,9 +184,13 @@ def main():
     parser.add_argument("--save-every", type=int, required=True)
     parser.add_argument("--snapshot-every", type=int, required=True)
     args = parser.parse_args()
-    train(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
+    with torch.device("meta"):
+        model = GPT(gpt_config(depth=args.depth, stage=FILE_STAGE))
+    # no clipping (docs/h100-pretraining.md Regime): an infinite threshold only measures the norm
+    train(model=model, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
           save_every=args.save_every, snapshot_every=args.snapshot_every,
-          tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed))
+          tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed),
+          max_norm=math.inf, file_stage=FILE_STAGE, matrix_optimizer="muon")
 
 
 if __name__ == "__main__":

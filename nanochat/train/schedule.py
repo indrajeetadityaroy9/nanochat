@@ -3,7 +3,7 @@ Run plan (batch, steps, repo-level start, peak lr) from DeepSeek LLM's compute-o
 multiplier: one schedule across both stages (DeepSeek-Coder keeps its final pre-training lr for long context, arXiv
 2401.14196 §3.6).
 
-python -m nanochat.train.schedule <depth> <ratio> <seed> prints the run's tag, steps and repo_start.
+python -m nanochat.train.schedule <depth> <ratio> <seed> prints the production run's tag, steps and repo_start.
 """
 
 import sys
@@ -30,13 +30,11 @@ class RunPlan:
     lr: float                # peak lr of every optimizer group
 
 
-def plan(*, depth: int, ratio: float) -> RunPlan:
-    """Plan at `ratio` tokens per scaling parameter. With C = M D (M: non-embedding training FLOPs per token at the
-    file-level stage), B_opt = 0.2920 C^0.3271 tokens, rounded to whole micro-batches, and eta_opt = 0.3118 C^-0.1250
-    (DeepSeek LLM, arXiv 2401.02954 §3.1 Eq. 1). Every run, proxy or production, uses its own compute's batch and lr
-    for both stages."""
-    with torch.device("meta"):
-        model = GPT(gpt_config(depth=depth, stage=FILE_STAGE))
+def plan(*, model: GPT, ratio: float) -> RunPlan:
+    """Plan of `model` (any device, its file-level stage's context) at `ratio` tokens per scaling parameter. With C = M D
+    (M: non-embedding training FLOPs per token at the file-level stage), B_opt = 0.2920 C^0.3271 tokens, rounded to
+    whole micro-batches, and eta_opt = 0.3118 C^-0.1250 (DeepSeek LLM, arXiv 2401.02954 §3.1 Eq. 1). Every run, proxy or
+    production, uses its own compute's batch and lr for both stages."""
     params = scaling_params(model)
     compute = non_embedding_flops_per_token(model) * int(ratio * params)
     total_batch_size = round(0.2920 * compute ** 0.3271 / MICRO_BATCH_TOKENS) * MICRO_BATCH_TOKENS
@@ -60,5 +58,6 @@ def lr_multiplier(it: int, *, steps: int) -> float:
 
 if __name__ == "__main__":
     depth, ratio, seed = int(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
-    run = plan(depth=depth, ratio=ratio)
+    with torch.device("meta"):
+        run = plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=ratio)
     print(run_tag(depth=depth, ratio=ratio, seed=seed, data_seed=seed), run.num_iterations, run.repo_start)

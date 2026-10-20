@@ -1,6 +1,6 @@
-"""The block's GEMMs as torch.library ops (traceable by fullgraph torch.compile): fp32 master weight W rounded to x's
-dtype; dW in fp32 straight from the accumulators (QuACK's linear/mlp functions round dW to bf16, rel. error up to 2^-9).
-Each GEMM uses its ops/quack_gemm.py TABLE config.
+"""The block's GEMMs as torch.library ops (traceable by fullgraph torch.compile) on QuACK's autotuned SM90 kernels
+(quack.gemm_interface, tuned=True): fp32 master weight W rounded to x's dtype; dW in fp32 straight from the accumulators
+(QuACK's linear/mlp functions round dW to bf16, rel. error up to 2^-9).
 
 nanochat::linear (c_q, c_k, c_v, c_o): y = x W^T; backward dX = dY W, dW = dY^T X.
 
@@ -8,17 +8,14 @@ nanochat::relu2_mlp: c_proj(relu(c_fc x)^2) (karpathy/nanochat 92d63d4 gpt.py:13
 quack.mlp.mlp_func(activation="relu_sq"): relu^2 in the up-projection's epilogue (gemm_act, which stores the
 pre-activation), its derivative and the recomputed post-activation in the backward's gemm_dact."""
 import torch
-from quack.gemm_interface import gemm_act, gemm_dact
+from quack.gemm_interface import gemm, gemm_act, gemm_dact
 from torch import Tensor
-
-from nanochat.ops.quack_gemm import TABLE, gemm
 
 
 @torch.library.custom_op("nanochat::linear", mutates_args=(), device_types="cuda")
 def linear(x: Tensor, weight: Tensor) -> Tensor:
     """x (..., K), weight (N, K) -> (..., N) in x's dtype."""
-    C = x.shape[-1]
-    y = gemm(x.reshape(-1, C), weight.to(x.dtype).t(), role="proj_fwd", width=C, out_dtype=x.dtype, alpha=1)
+    y = gemm(x.reshape(-1, x.shape[-1]), weight.to(x.dtype).t(), out_dtype=x.dtype)
     return y.view(*x.shape[:-1], weight.shape[0])
 
 
@@ -30,10 +27,9 @@ def linear_fake(x, weight):
 @torch.library.custom_op("nanochat::linear_bwd", mutates_args=(), device_types="cuda")
 def linear_bwd(dy: Tensor, x: Tensor, weight: Tensor) -> tuple[Tensor, Tensor]:
     """(dX like x, dW in weight's dtype)."""
-    C = x.shape[-1]
-    dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, C)
-    dx = gemm(dy2, weight.to(x.dtype), role="proj_dx", width=C, out_dtype=x.dtype, alpha=1).view(x.shape)
-    return dx, gemm(dy2.t(), x2, role="proj_dw", width=C, out_dtype=weight.dtype, alpha=1)
+    dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
+    dx = gemm(dy2, weight.to(x.dtype), out_dtype=x.dtype).view(x.shape)
+    return dx, gemm(dy2.t(), x2, out_dtype=weight.dtype)
 
 
 @linear_bwd.register_fake
@@ -55,10 +51,9 @@ linear.register_autograd(linear_grad, setup_context=linear_save)
 @torch.library.custom_op("nanochat::relu2_mlp", mutates_args=(), device_types="cuda")
 def relu2_mlp(x: Tensor, w_fc: Tensor, w_proj: Tensor) -> tuple[Tensor, Tensor]:
     """x (..., C), w_fc (h, C), w_proj (C, h) -> (y (..., C), pre-activation (M, h) saved for the backward)."""
-    C = x.shape[-1]
-    x2 = x.reshape(-1, C)
-    preact, postact = gemm_act(x2, w_fc.to(x.dtype).t(), activation="relu_sq", config=TABLE[C]["mlp_up"])
-    y = gemm(postact, w_proj.to(x.dtype).t(), role="mlp_down", width=C, out_dtype=x.dtype, alpha=1)
+    x2 = x.reshape(-1, x.shape[-1])
+    preact, postact = gemm_act(x2, w_fc.to(x.dtype).t(), activation="relu_sq")
+    y = gemm(postact, w_proj.to(x.dtype).t(), out_dtype=x.dtype)
     return y.view(*x.shape[:-1], w_proj.shape[0]), preact
 
 
@@ -70,13 +65,12 @@ def relu2_mlp_fake(x, w_fc, w_proj):
 @torch.library.custom_op("nanochat::relu2_mlp_bwd", mutates_args=(), device_types="cuda")
 def relu2_mlp_bwd(dy: Tensor, x: Tensor, preact: Tensor, w_fc: Tensor, w_proj: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     """(dX like x, dW_fc, dW_proj in the weights' dtype)."""
-    C = x.shape[-1]
-    dy2, x2 = dy.reshape(-1, C), x.reshape(-1, C)
-    dpreact, postact = gemm_dact(dy2, w_proj.to(x.dtype), preact, activation="relu_sq", config=TABLE[C]["mlp_dact"])
-    dw_proj = gemm(dy2.t(), postact, role="mlp_dw_proj", width=C, out_dtype=w_proj.dtype, alpha=1)
+    dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
+    dpreact, postact = gemm_dact(dy2, w_proj.to(x.dtype), preact, activation="relu_sq")
+    dw_proj = gemm(dy2.t(), postact, out_dtype=w_proj.dtype)
     del postact
-    dx = gemm(dpreact, w_fc.to(x.dtype), role="mlp_dx", width=C, out_dtype=x.dtype, alpha=1).view(x.shape)
-    dw_fc = gemm(dpreact.t(), x2, role="mlp_dw_fc", width=C, out_dtype=w_fc.dtype, alpha=1)
+    dx = gemm(dpreact, w_fc.to(x.dtype), out_dtype=x.dtype).view(x.shape)
+    dw_fc = gemm(dpreact.t(), x2, out_dtype=w_fc.dtype)
     return dx, dw_fc, dw_proj
 
 

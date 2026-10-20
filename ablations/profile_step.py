@@ -1,10 +1,11 @@
-"""Profile one training step (scripts/base_train.optimizer_step, tau-law weight decay) on a stage's
-packed rows (fim reading): wall time of the first steady-state step, then one step under torch.profiler (GPU kernel time
-by category and per kernel, busy fraction).
+"""Profile one training step (scripts/base_train.optimizer_step, tau-law weight decay, no clipping) on a stage's packed
+rows (fim reading): wall time of the first steady-state step, then one step under torch.profiler (GPU kernel time by
+category and per kernel, busy fraction).
 Warm-up: one step (graph compile, optimizer state), then steps while each is slower than the previous (d24 12 x 12:
-3,461 / 3,719 / 3,775 / 3,790 / 3,795 / 3,781 ms, benchmarks/h100.txt).
-Usage: python -m benchmarks.profile_step DEPTH MICRO_STEPS ROWS file|repo"""
+3,461 / 3,719 / 3,775 / 3,790 / 3,795 / 3,781 ms, ablations/ablations.md).
+Usage: python -m ablations.profile_step DEPTH MICRO_STEPS ROWS file|repo"""
 import collections
+import math
 import sys
 import time
 
@@ -44,14 +45,15 @@ def main():
     tokenizer = get_tokenizer()
     # lr sets how far weights leave zero init (GEMM operands, hence power-capped clocks); Chinchilla's 20 tokens per
     # parameter (arXiv 2203.15556 §3)
-    run = plan(depth=depth, ratio=20)
-    weight_decay = tau_weight_decay(lr=run.lr, steps=run.num_iterations, tokens_per_param=run.tokens_per_param)
     with torch.device("meta"):
+        run = plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=20)
         orig = GPT(gpt_config(depth=depth, stage=stage))
     orig.to_empty(device=device)
     orig.init_weights(seed=0)  # fixed seeds (init, data order): every profile runs the same step
     model = torch.compile(orig, dynamic=False, fullgraph=True)
-    opts = optimizers(orig, lr=run.lr, weight_decay=weight_decay)
+    opts = optimizers(orig, lr=run.lr, weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,
+                                                                      tokens_per_param=run.tokens_per_param),
+                      matrix_optimizer="muon")
     mixture = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
     orders = {c: np.random.RandomState(0).permutation(packed_rows(c, "train", tokenizer, stage.seq_len))
               for c in mixture}
@@ -65,7 +67,7 @@ def main():
         nonlocal batches
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        _, _, batches = optimizer_step(model, batches, params, opts, reads)
+        _, _, batches = optimizer_step(model, batches, params, opts, reads, max_norm=math.inf)
         torch.cuda.synchronize()
         return time.perf_counter() - t0
 

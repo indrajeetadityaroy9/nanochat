@@ -20,7 +20,8 @@ DATASET, DATASET_REVISION = "iaroy/nanochat-data", "6744e4068949e32b7e335bde01dc
 VOCAB_SIZE = 2**15
 # {group: (share, corpora)}; corpora at their group's natural row share (data.loader.mixture_weights). Code 87% as
 # DeepSeek-Coder (arXiv 2401.14196 §2); math 3% as StarCoder2's OpenWebMath share (arXiv 2402.19173 Table 4); text the
-# rest. More code scores higher on coding benchmarks (Qwen2.5-Coder, arXiv 2409.12186 Table 3).
+# rest. Qwen2.5-Coder's 7B mixture ablation (arXiv 2409.12186 Table 3) is not monotone in the code share: 100:0:0
+# scored highest on its coding benchmarks, 70:20:10 next, 85:10:5 lowest (ablations/ablations.md tests 70:20:10).
 MIXTURE = {
     "code": (0.87, ["stack_edu_python", "ultradata_code_l2_python", "ultradata_stack_v3_l2_python", "kaggle_notebooks",
                     "codeforces_cots", "stack_edu_cpp", "ultradata_code_l2_cpp", "ultradata_stack_v3_l2_cpp"]),
@@ -28,7 +29,7 @@ MIXTURE = {
     "math": (0.03, ["opc_fineweb_math", "ultradata_math_l2"]),
 }
 # Most whole rows of both contexts (12 x 8K, 3 x 32K) whose d24 step fits 80 GB: peak 69.6 GiB; 131,072 tokens
-# does not fit (benchmarks/h100.txt)
+# does not fit (ablations/ablations.md)
 MICRO_BATCH_TOKENS = 98_304
 
 
@@ -56,14 +57,15 @@ ROPE_BASE = 1_000_000
 
 
 @cache
-def code_version() -> tuple[str, ...]:
-    """Git object ids of CODE at HEAD; raises on uncommitted changes so a result names the code that produced it."""
+def code_version(paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Git object ids of `paths` at HEAD; raises on uncommitted changes there so a result names the code that produced
+    it."""
     git = ["git", "-C", str(ROOT)]
-    dirty = subprocess.run([*git, "status", "--porcelain", "--", *CODE], capture_output=True, text=True,
+    dirty = subprocess.run([*git, "status", "--porcelain", "--", *paths], capture_output=True, text=True,
                            check=True).stdout
     if dirty:
         raise RuntimeError(f"commit the code a run depends on first; uncommitted:\n{dirty}")
-    return tuple(subprocess.run([*git, "rev-parse", *(f"HEAD:{p}" for p in CODE)], capture_output=True, text=True,
+    return tuple(subprocess.run([*git, "rev-parse", *(f"HEAD:{p}" for p in paths)], capture_output=True, text=True,
                                 check=True).stdout.split())
 
 
@@ -72,6 +74,6 @@ def run_tag(*, depth: int, ratio: float, seed: int, data_seed: int) -> str:
     depends on (those and code_version, which covers DATASET_REVISION), so a run never resumes or counts another's
     artifacts."""
     # float(ratio): JSON writes int 20 as "20" but float 20.0 as "20.0", so one run would get two names
-    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "data_seed": data_seed, "code": code_version()}
+    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "data_seed": data_seed, "code": code_version(CODE)}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return f"d{depth}-r{ratio:g}-s{seed}-d{data_seed}-{digest[:12]}"

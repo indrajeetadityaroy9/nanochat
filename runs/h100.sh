@@ -17,6 +17,9 @@ echo "$(date -Is) commit $(git -C "$ROOT" rev-parse HEAD)$(git -C "$ROOT" diff -
 # for evaluating intermediate models (capability curves)
 "$ROOT"/runs/container.sh python -m scripts.base_train --depth "$DEPTH" --target-param-data-ratio "$RATIO" \
   --seed "$SEED" --save-every $(((STEPS + 99) / 100)) --snapshot-every $(((STEPS + 9) / 10)) >>"$LOG" 2>&1
+# the evaluation runs the code that trained: the tag hashes config.CODE (config.run_tag), so a changed checkout refuses
+read -r CHECK _ < <("$ROOT"/runs/container.sh python -m nanochat.train.schedule "$DEPTH" "$RATIO" "$SEED" | tail -n 1)
+[ "$CHECK" = "$TAG" ] || { echo "$(date -Is) code changed since training ($CHECK != $TAG)" >>"$LOG"; exit 1; }
 "$ROOT"/runs/container.sh python -m scripts.base_eval --model-tag "$TAG" >>"$LOG" 2>&1
 "$ROOT"/runs/container.sh python -m nanochat.eval.probes --model-tag "$TAG" >>"$LOG" 2>&1
 "$ROOT"/runs/container.sh python -m scripts.report --name "$TAG" "$TAG" >>"$LOG" 2>&1
