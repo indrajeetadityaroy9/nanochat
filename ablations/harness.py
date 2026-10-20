@@ -200,5 +200,7 @@ def main(*, alternatives: dict[str, dict], settings: tuple[tuple[int, float, ran
                               "alternatives": {name: {"fields": changes}
                                                | compare(frames[name], frames["production"]).to_dict()
                                                for name, changes in alternatives.items()}})
-    (RESULTS / f"{experiment}.json").write_text(json.dumps({"settings": summaries}, allow_nan=False),
-                                                encoding="utf-8")
+    # HEAD names the runs' code: their tags, computed at HEAD from RUN_CODE's object ids, matched their evaluations
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    (RESULTS / f"{experiment}.json").write_text(json.dumps({"commit": commit, "settings": summaries},
+                                                           allow_nan=False), encoding="utf-8")

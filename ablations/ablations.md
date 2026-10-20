@@ -46,16 +46,18 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
   repository stage trains. *text*, *math*; tokens per second (median over training steps). Efficiency
   (`harness.efficiency`, from the run's records): parameters, non-embedding FLOPs per token, peak memory.
 - **Analysis** (manual, from `results/<experiment>.json`, per setting): per measure the alternative's mean minus
-  production's, the two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`). The
-  pre-registered criterion: an alternative is adopted iff its code is lower with p < 0.05 after Benjamini-Hochberg over
-  the family (scipy `false_discovery_control`: at most 5% of adoptions false in expectation; nine tests: three regime
-  alternatives, three architecture alternatives at two rungs) at some setting, its code difference has the same sign
-  at both rungs (architecture), and neither solutions nor repo_32k is higher with p < 0.05 at any setting; per
-  experiment, of its adopted alternatives, the one with the lowest code. `lr.ADOPTED` is set from `results/lr.json`
-  by the same criterion before the others run; a best multiplier at the grid's edge extends the grid by a factor of 2
-  first. An alternative's cost converts to bits per byte as 0.05 · L · ln r (L production's code, r production's
-  tokens per second over the alternative's; Kaplan et al., arXiv 2001.08361 §1.2: loss ∝ C^−0.050), reported beside
-  its difference.
+  production's, the two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`;
+  pooled with equal arm sizes is robust to unequal variances). Unpaired although arms share seeds: the six-run
+  comparison's per-pair differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048), and a
+  paired test at d16 would keep 3 of 6 degrees of freedom. The pre-registered criterion: an alternative is adopted iff
+  its code is lower with p < 0.05 after Benjamini-Hochberg over its family (scipy `false_discovery_control`: at most 5%
+  of adoptions false in expectation) at some setting, its code difference has the same sign at both rungs
+  (architecture), and neither solutions nor repo_32k is higher with p < 0.05 at any setting; per experiment, of its
+  adopted alternatives, the one with the lowest code. Two families, in order: `lr.py`'s two alternatives, which set
+  `lr.ADOPTED` (a best multiplier at the grid's edge extends the grid by a factor of 2 first); then the other seven
+  tests (clipping, three architecture alternatives at two rungs). An alternative's cost converts to bits per byte as
+  0.05 · L · ln r (L production's code, r production's tokens per second over the alternative's; Kaplan et al., arXiv
+  2001.08361 §1.2: loss ∝ C^−0.050), reported beside its difference.
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 ### Reference code models
