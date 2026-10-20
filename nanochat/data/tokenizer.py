@@ -14,11 +14,9 @@ python -m nanochat.data.tokenizer
 import base64
 import functools
 import hashlib
-import importlib.util
 import json
-import shutil
-import subprocess
 from pathlib import Path
+from types import ModuleType
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -29,8 +27,8 @@ import torch
 from nanochat.config import VOCAB_SIZE
 from nanochat.data.schema import REPOSITORY_FILE, TEXT
 from nanochat.data.sources import SOURCES, column_bytes, curated_files, texts
-from nanochat.native import native_library
-from nanochat.paths import CACHE, TOKENIZER
+from nanochat.native import crate_module
+from nanochat.paths import TOKENIZER
 
 BOS = "<|bos|>"  # starts every piece of a packed row (data/loader.py); as a target it ends a document or a FIM middle
 # Fill-in-the-middle sentinels (StarCoder's names; Bavarian et al. arXiv 2207.14255 §3): a FIM example is
@@ -44,73 +42,48 @@ SPECIAL_TOKENS = (BOS, *FIM_TOKENS)  # ids after the mergeable tokens, in this o
 # measurement at a 32K vocabulary: groups of 2 digits beat 1 and 3). A run of punctuation keeps the line breaks that
 # follow it ("):\n" is one chunk), and a run of whitespace up to its last line break is one chunk (trailing spaces and
 # blank lines join the break), so a chunk may span lines.
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]"""
+                 r"""|\s+(?!\S)|\s+""")
 
 
-@functools.cache
-def bpe():
-    """The crate's Python module (train: the tokenizer trainer; sketch, duplicates: data/dedup.py; repository_samples:
-    data/prepare.py curate; pack: data/pack.py), built by cargo once per version of its sources (native.native_library)."""
-    crate = Path(__file__).parent / "bpe"
-    target = CACHE / "native" / "bpe-target"
-
-    def build(path):
-        subprocess.run(["cargo", "build", "--release", "--locked", "--manifest-path", crate / "Cargo.toml",
-                        "--target-dir", target], check=True)
-        shutil.copyfile(target / "release" / "libnanochat_bpe.so", path)
-
-    sources = [*sorted(crate.glob("*.rs")), crate / "Cargo.toml", crate / "Cargo.lock"]
-    path = native_library("bpe", sources, build)
-    spec = importlib.util.spec_from_file_location("nanochat_bpe", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def bpe() -> ModuleType:
+    """The data crate's Python module (train: the tokenizer trainer; sketch, duplicates: data/dedup.py;
+    repository_samples: data/prepare.py curate; pack: data/pack.py; native.crate_module)."""
+    return crate_module(Path(__file__).parent / "bpe")
 
 
 class Tokenizer:
-    """A vocabulary, the bytes of its mergeable tokens in rank order, then its special tokens (SPECIAL_TOKENS), encoded by
-    OpenAI's tiktoken with the split pattern it was trained with."""
+    """A vocabulary, the bytes of its mergeable tokens in rank order, then its special tokens (SPECIAL_TOKENS),
+    encoded by OpenAI's tiktoken with the split pattern it was trained with."""
 
-    def __init__(self, mergeable, pattern):
+    def __init__(self, mergeable: list[bytes], pattern: str) -> None:
         self.pattern = pattern
         self.bos_token_id = len(mergeable)
         self.special_tokens = {name: len(mergeable) + i for i, name in enumerate(SPECIAL_TOKENS)}
-        self.token_bytes = [*mergeable, *(name.encode() for name in SPECIAL_TOKENS)]  # every id's bytes, a special as its text (as tiktoken decodes it)
+        # every id's bytes, a special token's as its text (as tiktoken decodes it)
+        self.token_bytes = [*mergeable, *(name.encode() for name in SPECIAL_TOKENS)]
         self.vocab_size = len(self.token_bytes)
-        self.serialized = "".join(f"{base64.b64encode(token).decode()} {rank}\n" for rank, token in enumerate(mergeable))  # tiktoken's file format
-        # data_key: identity of the documents' tokens, keying compiled and packed data (loader.split_path): SHA-256 of
-        # the split pattern, BOS (its id) and the tiktoken file; the special tokens after BOS do not enter it, though
-        # packs hold the FIM sentinels' ids. fingerprint: identity of the model's vocabulary, recorded in checkpoints:
-        # SHA-256 of the split pattern, every special token and the tiktoken file.
-        self.data_key = hashlib.sha256(json.dumps([pattern, {BOS: self.bos_token_id}, self.serialized]).encode()).hexdigest()
-        self.fingerprint = hashlib.sha256(json.dumps([pattern, self.special_tokens, self.serialized]).encode()).hexdigest()
-        self.enc = tiktoken.Encoding(self.fingerprint, pat_str=pattern, special_tokens=self.special_tokens,
+        # tiktoken's file format: each token in base64 and its rank
+        self.serialized = "".join(f"{base64.b64encode(token).decode()} {rank}\n"
+                                  for rank, token in enumerate(mergeable))
+        # identity of the documents' tokens, keying compiled and packed data (loader.split_path): SHA-256 of the split
+        # pattern, BOS (its id) and the tiktoken file; the special tokens after BOS do not enter it, though packs hold
+        # the FIM sentinels' ids
+        identity = json.dumps([pattern, {BOS: self.bos_token_id}, self.serialized])
+        self.data_key = hashlib.sha256(identity.encode()).hexdigest()
+        self.enc = tiktoken.Encoding(self.data_key, pat_str=pattern, special_tokens=self.special_tokens,
                                      mergeable_ranks={token: rank for rank, token in enumerate(mergeable)})
 
-    @classmethod
-    def train(cls, texts, sources, *, vocab_size):
-        """The tokenizer of vocab_size - len(SPECIAL_TOKENS) - 256 SA-BPE merges within the chunks of SPLIT_PATTERN on
-        documents texts, document d from source id sources[d]; the special tokens take the ids after the merges."""
-        mergeable = [bytes([i]) for i in range(256)]
-        for left, right in bpe().train(texts, sources, pattern=SPLIT_PATTERN, n_merges=vocab_size - len(SPECIAL_TOKENS) - 256):
-            mergeable.append(mergeable[left] + mergeable[right])
-        return cls(mergeable, SPLIT_PATTERN)
-
-    def get_token_bytes(self, *, device):
-        """Byte length of every token id, as an int32 tensor of shape (vocab_size,), used for vocab-size-invariant bits per
-        byte. Special tokens count 0 bytes."""
+    def get_token_bytes(self, *, device: torch.device | str) -> torch.Tensor:
+        """Byte length of every token id, as an int32 tensor of shape (vocab_size,), used for vocab-size-invariant bits
+        per byte. Special tokens count 0 bytes."""
         lengths = torch.tensor([len(b) for b in self.token_bytes], dtype=torch.int32)
         lengths[self.bos_token_id:] = 0
         return lengths.to(device)
 
-    def save(self):
-        """TOKENIZER/tokenizer.tiktoken: the mergeable tokens in tiktoken's format; tokenizer.pattern: the split pattern."""
-        for name, content in (("tokenizer.tiktoken", self.serialized), ("tokenizer.pattern", self.pattern)):
-            (TOKENIZER / name).write_text(content, newline="")
-
 
 @functools.cache
-def get_tokenizer():
+def get_tokenizer() -> Tokenizer:
     """The trained tokenizer of TOKENIZER, loaded once per process."""
     with open(TOKENIZER / "tokenizer.tiktoken", "rb") as f:
         mergeable = [base64.b64decode(line.split()[0]) for line in f]  # line i: token i, base64, and its rank i
@@ -118,49 +91,46 @@ def get_tokenizer():
         return Tokenizer(mergeable, f.read())
 
 
-# ---- training sample
-
-def keyed_documents(source, batch):
-    """(text, source key) of every row of a curated batch (sources.texts). A repository sample's files are its rows: they
-    split into the chunks of SPLIT_PATTERN the concatenated sample does, as each file's text ends with a line break and
-    the next begins with its path comment. The key names the row's authorship unit, whose count is SA-BPE's R: a file's
-    repository (one name across the corpora that hold the repository), a web page's host, else the document itself (a
-    notebook, a text without a URL, a codeforces_cots conversation)."""
-    schema = SOURCES[source].schema
-    if schema is REPOSITORY_FILE:
-        keys = ["repo:" + name for name in batch["repo_name"].to_pylist()]
-    elif schema is TEXT:
-        keys = [f"host:{urlsplit(url).hostname}" if url else "doc:" + id for url, id in zip(batch["url"].to_pylist(), batch["id"].to_pylist(), strict=False)]
-    else:
-        keys = ["doc:" + id for id in batch["id"].to_pylist()]
-    return list(zip(texts(source, batch), keys, strict=False))
-
-
-def sample(source, *, step):
-    """(text, source key) of a systematic sample of a source's curated train split: every step-th row, in file order."""
-    picks, at = [], 0
-    for path in curated_files(source, "train"):
-        shard = pq.ParquetFile(path)
-        for g in range(shard.num_row_groups):
-            batch = shard.read_row_group(g)
-            picks += keyed_documents(source, batch.take(np.arange(-at % step, batch.num_rows, step)))
-            at += batch.num_rows
-    return picks
-
-
 # ---- train the tokenizer on the curated sources
 
-def main():
-    """The tokenizer of config.VOCAB_SIZE trained on about equal byte shares of every source's curated train split:
-    every step-th row, step = the split's content bytes // the smallest split's (the smallest split whole; a share is
-    between 1 and 2 times the smallest split's bytes)."""
-    sizes = {source: sum(column_bytes(path, "content") for path in curated_files(source, "train")) for source in SOURCES}
-    picks = [pick for source in SOURCES for pick in sample(source, step=sizes[source] // min(sizes.values()))]
-    keys = {}  # source key -> source id
-    sources = [keys.setdefault(key, len(keys)) for _, key in picks]
-    tokenizer = Tokenizer.train([doc for doc, _ in picks], sources, vocab_size=VOCAB_SIZE)
-    tokenizer.save()
-    print(f"Tokenizer fingerprint: {tokenizer.fingerprint}, data key: {tokenizer.data_key}")
+def main() -> None:
+    """TOKENIZER/tokenizer.tiktoken and tokenizer.pattern: config.VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 SA-BPE merges
+    within the chunks of SPLIT_PATTERN (merge i makes token 256 + i), trained on about equal byte shares of every
+    source's curated train split: a systematic sample, every step-th row in file order as its text (sources.texts),
+    step = the split's content bytes // the smallest split's (the smallest split whole; a share is between 1 and 2
+    times the smallest split's bytes). A repository sample's files are its rows: they split into the chunks of
+    SPLIT_PATTERN the concatenated sample does, as each file's text ends with a line break and the next begins with its
+    path comment. Each row's source key names its authorship unit, whose count is SA-BPE's R: a file's repository (one
+    name across the corpora that hold the repository), a web page's host, else the document itself (a notebook, a text
+    without a URL, a codeforces_cots conversation)."""
+    sizes = {source: sum(column_bytes(path, "content") for path in curated_files(source, "train"))
+             for source in SOURCES}
+    docs, sources, keys = [], [], {}  # keys: source key -> source id
+    for source, spec in SOURCES.items():
+        step, at = sizes[source] // min(sizes.values()), 0
+        for path in curated_files(source, "train"):
+            shard = pq.ParquetFile(path)
+            for g in range(shard.num_row_groups):
+                group = shard.read_row_group(g)
+                batch = group.take(np.arange(-at % step, group.num_rows, step))
+                at += group.num_rows
+                if spec.schema is REPOSITORY_FILE:
+                    names = ["repo:" + name for name in batch["repo_name"].to_pylist()]
+                elif spec.schema is TEXT:
+                    names = [f"host:{urlsplit(url).hostname}" if url else "doc:" + id
+                             for url, id in zip(batch["url"].to_pylist(), batch["id"].to_pylist(), strict=True)]
+                else:
+                    names = ["doc:" + id for id in batch["id"].to_pylist()]
+                docs += texts(source, batch)
+                sources += [keys.setdefault(name, len(keys)) for name in names]
+    mergeable = [bytes([i]) for i in range(256)]
+    for left, right in bpe().train(docs, sources, pattern=SPLIT_PATTERN,
+                                   n_merges=VOCAB_SIZE - len(SPECIAL_TOKENS) - 256):
+        mergeable.append(mergeable[left] + mergeable[right])
+    tokenizer = Tokenizer(mergeable, SPLIT_PATTERN)
+    for name, content in (("tokenizer.tiktoken", tokenizer.serialized), ("tokenizer.pattern", SPLIT_PATTERN)):
+        (TOKENIZER / name).write_text(content, newline="")
+    print(f"Tokenizer data key: {tokenizer.data_key}")
 
 
 if __name__ == "__main__":

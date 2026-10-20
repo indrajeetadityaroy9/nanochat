@@ -9,9 +9,10 @@ cu_seqlens, the int32 offsets of the flattened (B*T) tokens (data/loader.py Pret
 import torch
 from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
 from torch import Tensor
+from torch.autograd.function import FunctionCtx
 
 
-def fa4_window_left(window_left, T):
+def fa4_window_left(window_left: int, T: int) -> int | None:
     """None (FA4's causal kernel) when the window spans T, else the local window: bitwise equal and 1-2% faster at d8
     (ablations/ablations.md); FA4 does not make this switch (interface.py _resolve_causal_local_window)."""
     return None if window_left >= T else window_left
@@ -28,7 +29,7 @@ def flash_attn(q: Tensor, k: Tensor, v: Tensor, window_left: int, cu_seqlens: Te
 
 
 @flash_attn.register_fake
-def flash_attn_fake(q, k, v, window_left, cu_seqlens):
+def flash_attn_fake(q: Tensor, k: Tensor, v: Tensor, window_left: int, cu_seqlens: Tensor) -> tuple[Tensor, Tensor]:
     B, T, H = q.shape[:3]
     return torch.empty_like(q), q.new_empty((H, B * T), dtype=torch.float32)
 
@@ -45,16 +46,18 @@ def flash_attn_bwd(dout: Tensor, q: Tensor, k: Tensor, v: Tensor, out: Tensor, l
 
 
 @flash_attn_bwd.register_fake
-def flash_attn_bwd_fake(dout, q, k, v, out, lse, window_left, cu_seqlens):
+def flash_attn_bwd_fake(dout: Tensor, q: Tensor, k: Tensor, v: Tensor, out: Tensor, lse: Tensor, window_left: int,
+                        cu_seqlens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     return torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
 
 
-def flash_attn_save(ctx, inputs, output):
+def flash_attn_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor, int, Tensor],
+                    output: tuple[Tensor, Tensor]) -> None:
     q, k, v, ctx.window_left, cu_seqlens = inputs
     ctx.save_for_backward(q, k, v, *output, cu_seqlens)
 
 
-def flash_attn_grad(ctx, dout, dlse):
+def flash_attn_grad(ctx: FunctionCtx, dout: Tensor, dlse: Tensor) -> tuple[Tensor, Tensor, Tensor, None, None]:
     q, k, v, out, lse, cu_seqlens = ctx.saved_tensors
     return *flash_attn_bwd(dout, q, k, v, out, lse, ctx.window_left, cu_seqlens), None, None
 

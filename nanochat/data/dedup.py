@@ -18,6 +18,8 @@ similarity at THRESHOLD; a document without an n-gram (fewer than NGRAM words) i
 
 import contextlib
 import shutil
+from concurrent.futures import Executor
+from pathlib import Path
 
 import enry
 import numpy as np
@@ -35,18 +37,18 @@ from nanochat.paths import DATA
 NGRAM, SLOTS, THRESHOLD = 5, 250, 0.7
 
 
-def rows():
+def rows() -> int:
     """The rows per LSH band of StarCoder2's (bands, rows) for THRESHOLD and SLOTS: the pair minimizing the false
     positive area below the threshold plus the false negative area above it (intra_dedup.py optimal_param, after
     datasketch), the first minimum in its (bands, rows) order."""
-    def error(b, r):
-        def candidate(s):
+    def error(b: int, r: int) -> float:
+        def candidate(s: float) -> float:
             return 1 - (1 - s ** r) ** b
         return quad(candidate, 0, THRESHOLD)[0] + quad(lambda s: 1 - candidate(s), THRESHOLD, 1)[0]
     return min(((b, r) for b in range(1, SLOTS + 1) for r in range(1, SLOTS // b + 1)), key=lambda br: error(*br))[1]
 
 
-def scan(task):
+def scan(task: tuple[str, Path]) -> list[bytes]:
     """A normalized file's documents: their signatures, ids, whether each takes part (not a repository file go-enry
     marks vendored or generated) and whether each has an n-gram. Texts go to the crate and go-enry as UTF-8 bytes
     (Arrow strings cast to binary), not as Python str, whose wide forms take four bytes per character."""
@@ -61,14 +63,16 @@ def scan(task):
         signatures.append(s)
         shingled.append(h)
         ids.append(bytes.fromhex("".join(table["id"].to_pylist())))
-        takes_part.append(bytes(not (enry.is_vendor(p) or enry.is_generated(p, t)) for p, t in zip(table["relative_path"].to_pylist(), texts, strict=False))
+        takes_part.append(bytes(not (enry.is_vendor(p) or enry.is_generated(p, t))
+                                for p, t in zip(table["relative_path"].to_pylist(), texts, strict=True))
                           if repository else b"\x01" * len(texts))
     return [b"".join(parts) for parts in (signatures, ids, takes_part, shingled)]
 
 
-def kept(files, pool):
+def kept(files: dict[str, list[Path]], pool: Executor) -> dict[str, list[np.ndarray]]:
     """{source: [the keep mask of each normalized file]} for files {source: normalized file paths in order}. pool
-    (spawned: go-enry's Go runtime) scans the files into scratch files of the data store, which the crate memory-maps."""
+    (spawned: go-enry's Go runtime) scans the files into scratch files of the data store, which the crate
+    memory-maps."""
     directory = DATA / "dedup"
     directory.mkdir()
     universes = {"repository_files": [source for source, spec in SOURCES.items() if spec.schema is REPOSITORY_FILE],
@@ -80,7 +84,7 @@ def kept(files, pool):
         with contextlib.ExitStack() as stack:
             outputs = [stack.enter_context(open(path, "wb")) for path in paths]
             for parts in pool.map(scan, [(source, path) for source in sources for path in files[source]]):
-                for output, part in zip(outputs, parts, strict=False):
+                for output, part in zip(outputs, parts, strict=True):
                     output.write(part)
         mask = np.frombuffer(bpe().duplicates(*map(str, paths), rows=r, threshold=THRESHOLD), np.bool_)
         counts = [pq.read_metadata(path).num_rows for source in sources for path in files[source]]

@@ -2,10 +2,10 @@
 The production run end to end: d24 at the most tokens per scaling parameter its data holds without rereading a
 document (train/stages.py max_ratio), seed 0, both stages, a resume checkpoint every 1% of steps and a model-only
 snapshot every 10% (scripts/base_train.py); then the final model's and every snapshot's evaluation
-(scripts/base_eval.py: loss, greedy and system decoding) and probes (eval/probes.py), and the run's tracked metrics
-(scripts/report.py: results/<tag>.jsonl, <tag>-curves.jsonl). Each step runs in its own process (torch.compile's
-caches and limits are per process), its output appended to LOGS/production-<tag>.log. Rerunning resumes training from
-its checkpoint and skips evaluations already written.
+(scripts/base_eval.py: loss, greedy and filtered decoding), and the run's tracked metrics (train/metrics.py export:
+results/<tag>.jsonl, <tag>-curves.jsonl). Training and each evaluation run in their own process (torch.compile's caches
+and limits are per process), their output appended to LOGS/production-<tag>.log. Rerunning resumes training from its
+checkpoint and evaluates every model again.
 
     runs/h100.sh    (runs/container.sh python -m scripts.production, in tmux)
 """
@@ -17,8 +17,8 @@ import torch
 from nanochat.config import FILE_STAGE, run_tag
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
-from nanochat.paths import BASE_EVAL, LOGS, PROBES
-from nanochat.train.checkpoint import checkpoint_name, snapshot_steps
+from nanochat.paths import CHECKPOINTS, LOGS
+from nanochat.train.metrics import export
 from nanochat.train.schedule import plan
 from nanochat.train.stages import max_ratio
 
@@ -40,13 +40,11 @@ def main() -> None:
 
         run("scripts.base_train", "--depth", DEPTH, "--target-param-data-ratio", repr(ratio), "--seed", SEED,
             "--save-every", -(-steps // SAVES), "--snapshot-every", -(-steps // SNAPSHOTS))
-        for step in (None, *snapshot_steps(tag)):
-            name, at = checkpoint_name(tag, step=step), () if step is None else ("--step", step)
-            if not (BASE_EVAL / f"{name}.json").exists():
-                run("scripts.base_eval", "--model-tag", tag, *at)
-            if not (PROBES / f"{name}.json").exists():
-                run("nanochat.eval.probes", "--model-tag", tag, *at)
-        run("scripts.report", tag)
+        # the model-only snapshots (checkpoint.py), ascending
+        snapshots = sorted(int(p.stem.removeprefix(f"{tag}-step")) for p in CHECKPOINTS.glob(f"{tag}-step*.pt"))
+        for step in (None, *snapshots):
+            run("scripts.base_eval", "--model-tag", tag, *(() if step is None else ("--step", step)))
+    export(tag)
 
 
 if __name__ == "__main__":

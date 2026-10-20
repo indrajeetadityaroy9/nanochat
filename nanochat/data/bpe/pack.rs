@@ -1,7 +1,8 @@
 //! The packer (nanochat/data/pack.py): one curated shard of a compiled split at a time, its documents cut into pieces
 //! that fit a training row, the pieces of a train split of a repository corpus drawn fill-in-the-middle examples
 //! (context-level FIM: per piece, after cutting; Bavarian et al. arXiv 2207.14255 §3.2) whose middles AST-FIM chooses
-//! (Gong et al. arXiv 2506.00204v1 §3.3, §5.1), and the pieces placed in rows by Best-Fit-Decreasing.
+//! (Gong et al. arXiv 2506.00204v1 §3.3, §5.1), half of them widened to whole lines (line-level infilling), and the
+//! pieces placed in rows by Best-Fit-Decreasing.
 
 use std::cell::OnceCell;
 use std::cmp::Reverse;
@@ -49,7 +50,7 @@ impl Grammar {
         let kind = |name: &str| language.id_for_node_kind(name, true);
         let containers = containers.iter().map(|&name| kind(name)).collect();
         let comment = kind("comment");
-        let headers = ["condition", "name", "value", "alternative"].iter().filter_map(|&name| language.field_id_for_name(name)).map(|id| id.get()).collect();
+        let headers = ["condition", "name", "value", "alternative"].iter().map(|&name| language.field_id_for_name(name).unwrap().get()).collect();
         Grammar { language, containers, comment, headers }
     }
 
@@ -119,14 +120,15 @@ fn statement_cuts(ids: &[u16], token_bytes: &[Vec<u8>], ends_line: &[bool], gram
 /// Fill-in-the-middle as AST-FIM trains it (arXiv 2506.00204v1 §5.1 "FIM", §3.3 "Masking Algorithm"), extracted from
 /// pack.py's mapping: the share of pieces made FIM examples (rate); of those the share whose middle is a random
 /// character span (random: Rand-FIM) rather than AST-aligned; of AST-aligned middles the share by Single-Node rather
-/// than Aligned-Span masking (single); the share in SPM rather than PSM order (spm); the ids of <fim_prefix>,
-/// <fim_suffix>, <fim_middle> (sentinels).
+/// than Aligned-Span masking (single); of AST-aligned middles the share widened to whole lines (line: whole_lines); the
+/// share in SPM rather than PSM order (spm); the ids of <fim_prefix>, <fim_suffix>, <fim_middle> (sentinels).
 #[derive(FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct Fim {
     rate: f64,
     random: f64,
     single: f64,
+    line: f64,
     spm: f64,
     sentinels: [u32; 3],
 }
@@ -156,14 +158,20 @@ fn random_span(text: &str, rng: &mut ChaCha8Rng) -> (usize, usize) {
 /// errors span at least one byte). With probability single, Single-Node masking: a named node below the root drawn with
 /// probability proportional to its bytes; else Aligned-Span masking: a random character span (random_span), the lowest
 /// named node holding it, and the run of that node's named children of the largest character intersection over union
-/// with the span (the node itself when it has no named child or none of them meets the span).
-fn ast_middle(text: &str, grammar: &Grammar, single: f64, rng: &mut ChaCha8Rng) -> Option<(usize, usize)> {
+/// with the span (the node itself when it has no named child or none of them meets the span). Then, with probability
+/// line (the last draw, so the syntactic choice is AST-FIM's), the middle widened to the line boundaries of line-level
+/// infilling (the single- and multi-line infilling of HumanEval, Fried et al. arXiv 2204.05999, Bavarian et al.: the
+/// prefix ends with a line break, the middle runs from its first line's indentation through its last line break): a
+/// moves to the start of its line when only spaces and tabs precede it there; b moves after the line break ending its
+/// line when only spaces and tabs follow it there (b stays when it already follows a line break, its line holds more
+/// after it, or the text ends without a line break).
+fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) -> Option<(usize, usize)> {
     let tree = grammar.parse(text.as_bytes());
     let root = tree.root_node();
     if root.has_error() || root.named_child_count() == 0 {
         return None;
     }
-    if rng.random_bool(single) {
+    let (a, b) = if rng.random_bool(fim.single) {
         let mut nodes = Vec::new();
         let mut stack: Vec<Node> = root.named_children(&mut root.walk()).collect();
         while let Some(node) = stack.pop() {
@@ -171,28 +179,41 @@ fn ast_middle(text: &str, grammar: &Grammar, single: f64, rng: &mut ChaCha8Rng) 
             nodes.push(node);
         }
         let node = nodes[rng.sample(WeightedIndex::new(nodes.iter().map(|node| node.byte_range().len())).unwrap())];
-        return Some((node.start_byte(), node.end_byte()));
-    }
-    let (s, e) = random_span(text, rng);
-    let node = root.named_descendant_for_byte_range(s, e).unwrap();
-    let children: Vec<Node> = node.named_children(&mut node.walk()).collect();
-    let (starts, ends): (Vec<usize>, Vec<usize>) = children.iter().map(|child| (child.start_byte(), child.end_byte())).unzip();
-    // For a fixed last child, IoU is largest at the last start <= s or the first start >= s (moving the start further
-    // out grows the union only, further in shrinks the intersection only); likewise the end at the last end <= e or the
-    // first end >= e. So the best run is one of these four.
-    let first = [starts.partition_point(|&a| a <= s).checked_sub(1), Some(starts.partition_point(|&a| a < s)).filter(|&i| i < children.len())];
-    let last = [ends.partition_point(|&b| b <= e).checked_sub(1), Some(ends.partition_point(|&b| b < e)).filter(|&j| j < children.len())];
-    let (mut best, mut best_iou) = ((node.start_byte(), node.end_byte()), (0, 1));
-    for i in first.into_iter().flatten() {
-        for j in last.into_iter().flatten().filter(|&j| j >= i) {
-            let (a, b) = (starts[i], ends[j]);
-            let iou = (b.min(e).saturating_sub(a.max(s)), b.max(e) - a.min(s));
-            if iou.0 * best_iou.1 > best_iou.0 * iou.1 {
-                (best, best_iou) = ((a, b), iou);
+        (node.start_byte(), node.end_byte())
+    } else {
+        let (s, e) = random_span(text, rng);
+        let node = root.named_descendant_for_byte_range(s, e).unwrap();
+        let children: Vec<Node> = node.named_children(&mut node.walk()).collect();
+        let (starts, ends): (Vec<usize>, Vec<usize>) = children.iter().map(|child| (child.start_byte(), child.end_byte())).unzip();
+        // For a fixed last child, IoU is largest at the last start <= s or the first start >= s (moving the start further
+        // out grows the union only, further in shrinks the intersection only); likewise the end at the last end <= e or the
+        // first end >= e. So the best run is one of these four.
+        let first = [starts.partition_point(|&a| a <= s).checked_sub(1), Some(starts.partition_point(|&a| a < s)).filter(|&i| i < children.len())];
+        let last = [ends.partition_point(|&b| b <= e).checked_sub(1), Some(ends.partition_point(|&b| b < e)).filter(|&j| j < children.len())];
+        let (mut best, mut best_iou) = ((node.start_byte(), node.end_byte()), (0, 1));
+        for i in first.into_iter().flatten() {
+            for j in last.into_iter().flatten().filter(|&j| j >= i) {
+                let (a, b) = (starts[i], ends[j]);
+                let iou = (b.min(e).saturating_sub(a.max(s)), b.max(e) - a.min(s));
+                if iou.0 * best_iou.1 > best_iou.0 * iou.1 {
+                    (best, best_iou) = ((a, b), iou);
+                }
             }
         }
+        best
+    };
+    if !rng.random_bool(fim.line) {
+        return Some((a, b));
     }
-    Some(best)
+    let text = text.as_bytes();
+    let blank = |bytes: &[u8]| bytes.iter().all(|&c| c == b' ' || c == b'\t');
+    let start = text[..a].iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
+    let a = if blank(&text[start..a]) { start } else { a };
+    let b = match text[b..].iter().position(|&c| c == b'\n') {
+        Some(i) if text[b - 1] != b'\n' && blank(&text[b..b + i]) => b + i + 1,
+        _ => b,
+    };
+    Some((a, b))
 }
 
 /// The FIM example of a piece's text: its middle a random character span (random_span) with probability random, else
@@ -205,7 +226,7 @@ fn ast_middle(text: &str, grammar: &Grammar, single: f64, rng: &mut ChaCha8Rng) 
 fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng: ChaCha8Rng) -> Vec<u16> {
     let spm = rng.random_bool(fim.spm);
     let random = rng.random_bool(fim.random);
-    let (a, b) = (!random).then(|| ast_middle(text, grammar, fim.single, &mut rng)).flatten().unwrap_or_else(|| random_span(text, &mut rng));
+    let (a, b) = (!random).then(|| ast_middle(text, grammar, fim, &mut rng)).flatten().unwrap_or_else(|| random_span(text, &mut rng));
     let (prefix, middle, suffix) = (bpe.encode_ordinary(&text[..a]), bpe.encode_ordinary(&text[a..b]), bpe.encode_ordinary(&text[b..]));
     let [pre, suf, mid] = fim.sentinels;
     let sections: &[&[u32]] = if spm { &[&[pre, suf], &suffix, &[mid], &prefix, &middle] } else { &[&[pre], &prefix, &[suf], &suffix, &[mid], &middle] };
@@ -331,11 +352,11 @@ fn best_fit_decreasing(lengths: &[usize], targeted: &[bool], row_len: usize) -> 
 /// One curated shard's documents first..last packed: the pack index entry of every piece in row order (token range
 /// [start, end) of the split, then the range of its FIM example in the split's FIM tokens, empty for a piece read left
 /// to right; data/loader.py PIECE_COLUMNS), the pieces per row, and the FIM examples' tokens in row order (from
-/// fim_base on in the split's). A piece's BOS is followed by its tokens: a FIM example's under --objective fim, else
-/// (ntp, and every piece read left to right) its range; it takes the longer of the two in its row. A piece has the
-/// BOS after it as its target when it ends its document or is a FIM example (the end of its middle); such pieces come
-/// first in their row and the pieces cut from their document left to right last, so the BOS after a piece is its
-/// target.
+/// fim_base on in the split's). A piece's BOS is followed by its tokens: a FIM example's when the loader reads "fim",
+/// else (reading "left_to_right", and every piece read left to right) its range; it takes the longer of the two in its
+/// row. A piece has the BOS after it as its target when it ends its document or is a FIM example (the end of its
+/// middle); such pieces come first in their row and the pieces cut from their document left to right last, so the BOS
+/// after a piece is its target.
 fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize), fim_base: usize) -> (Vec<[i64; 4]>, Vec<i64>, Vec<u16>) {
     let documents: Vec<Vec<Piece>> = (first..last).into_par_iter().map(|d| split.pieces(d, offsets[d] as usize, offsets[d + 1] as usize)).collect();
     let (mut pieces, mut targeted) = (Vec::new(), Vec::new());

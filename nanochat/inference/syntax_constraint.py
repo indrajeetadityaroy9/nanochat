@@ -8,7 +8,7 @@ arXiv 2606.21619); a complete one raises it, most for small models (Mündler et 
 Why not a library: SynCode's Python grammar (Lark's python.lark lineage) lexes an f-string as one regex token, so PEP 701
 f-strings ("f'{x["k"]}'") and PEP 695 type parameters are rejected, and it pins transformers and a HF tokenizer;
 llguidance has no INDENT/DEDENT (guidance-ai/llguidance issue #107: one byte may emit several DEDENTs); Melcer et al.
-(arXiv 2402.17988) ship no library. So the layers, in the Rust crate syntax/ (built on first use, native()):
+(arXiv 2402.17988) ship no library. So the layers, in the Rust crate syntax/ (built on first use, native.crate_module):
 - lexer (lexer.rs): CPython 3.12.3's tokenizer (Parser/tokenizer.c tok_get_normal_mode, tok_get_fstring_mode,
   verify_end_of_number) restated as a character-level machine whose states are values, so a prefix may end anywhere
   (mid-token, mid-indent, mid-UTF-8 character). Its input is the text as compile() sees it: "\\r\\n" and "\\r" read as
@@ -34,21 +34,16 @@ verdicts back to tokens. masks() computes a batch of constraints' masks in paral
 
 import ast
 import functools
-import importlib.util
 import keyword
-import shutil
-import subprocess
 import sys
 import token as pytoken
-import warnings
 from pathlib import Path
 
 import numpy as np
 from lark import Lark
 
 from nanochat.data.tokenizer import get_tokenizer
-from nanochat.native import native_library
-from nanochat.paths import CACHE
+from nanochat.native import crate_module
 
 CRATE = Path(__file__).resolve().parent / "syntax"
 OPERATORS = (*pytoken.EXACT_TOKEN_TYPES, "<>")  # tokenizer.c _PyToken_TwoChars: "<>" is NOTEQUAL (PEP 401)
@@ -56,24 +51,6 @@ SOFT_KEYWORDS = {"match": "MATCH_SOFT", "case": "CASE_SOFT", "type": "TYPE_SOFT"
 BASIC = ("NAME", "NUMBER", "STRING", "FSTRING_START", "FSTRING_END")
 SPECIAL = ("$END", "NEWLINE", "INDENT", "DEDENT")
 NO_ACTION = np.iinfo(np.int32).min
-
-
-@functools.cache
-def native():
-    """The crate's Python module (Syntax, Constraint, masks), built by cargo once per version of its sources
-    (native.native_library)."""
-    target = CACHE / "native" / "syntax-target"
-
-    def build(path):
-        subprocess.run(["cargo", "build", "--release", "--locked", "--manifest-path", CRATE / "Cargo.toml",
-                        "--target-dir", target], check=True)
-        shutil.copyfile(target / "release" / "libnanochat_syntax.so", path)
-
-    sources = [*sorted(CRATE.glob("*.rs")), CRATE / "Cargo.toml", CRATE / "Cargo.lock"]
-    spec = importlib.util.spec_from_file_location("nanochat_syntax", native_library("syntax", sources, build))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def identifier_ranges(chars: str, test) -> list[tuple[int, int]]:
@@ -84,14 +61,15 @@ def identifier_ranges(chars: str, test) -> list[tuple[int, int]]:
     return list(zip(hits[starts].tolist(), hits[ends].tolist(), strict=True))
 
 
-def tables() -> dict:
-    """The crate's Syntax arguments but the vocabulary's: Lark's LALR tables of python.lark (dense, terminals and
-    nonterminals by sorted name), the lexemes' terminals, and Python's identifier classes beyond ASCII (str.isidentifier
-    of c, of "a" + c)."""
+@functools.cache
+def python_syntax():
+    """The crate's Syntax of nanochat's tokenizer (data/tokenizer.get_tokenizer), built once per process and shared by
+    every constraint and thread: Lark's LALR tables of python.lark (dense, terminals and nonterminals by sorted name),
+    the lexemes' terminals, Python's identifier classes beyond ASCII (str.isidentifier of c, of "a" + c), the
+    vocabulary's byte trie, and the per-lexer-state token groupings, filled on first use."""
     lark = Lark((CRATE / "python.lark").read_text(), parser="lalr", lexer="basic", start="file_input", strict=True)
     conf = lark.parse_interactive().parser_state.parse_conf
     rows = conf.states
-    assert sorted(rows) == list(range(len(rows)))
     rules = list({arg for row in rows.values() for action, arg in row.values() if action.name == "Reduce"})
     rule_index = {rule: i for i, rule in enumerate(rules)}
     terminal = {t.pattern.value: t.name for t in lark.terminals}
@@ -109,7 +87,9 @@ def tables() -> dict:
             else:
                 goto[s, nid[t]] = arg
     chars = "".join(map(chr, range(0x80, sys.maxunicode + 1)))
-    return dict(
+    tokenizer = get_tokenizer()
+    bos = tokenizer.bos_token_id
+    return crate_module(CRATE).Syntax(
         keywords=[(w, [tid[terminal[w]]]) for w in keyword.kwlist],
         soft=[(w, [tid["NAME"], tid[t]]) for w, t in SOFT_KEYWORDS.items()],
         operators=[(op, [tid[terminal["!=" if op == "<>" else op]]]) for op in OPERATORS],
@@ -119,70 +99,50 @@ def tables() -> dict:
         rules=[(len(rule.expansion), nid[rule.origin.name]) for rule in rules],
         start=conf.start_state, end=conf.end_state,
         xid_start=identifier_ranges(chars, str.isidentifier),
-        xid_continue=identifier_ranges(chars, lambda c: ("a" + c).isidentifier()))
+        xid_continue=identifier_ranges(chars, lambda c: ("a" + c).isidentifier()),
+        token_bytes=tokenizer.token_bytes[:bos], vocab_size=tokenizer.vocab_size, bos=bos)
 
 
-class PythonSyntax:
-    """The Python 3.12 syntax of a tokenizer's vocabulary (the crate's Syntax: LALR tables, the vocabulary's byte trie,
-    the per-lexer-state token groupings filled on first use), shared by every constraint built here and by threads."""
-
-    def __init__(self, tokenizer):
-        self.bos = tokenizer.bos_token_id
-        self.native = native().Syntax(**tables(), token_bytes=tokenizer.token_bytes[:self.bos],
-                                      vocab_size=tokenizer.vocab_size, bos=self.bos)
-
-    def constraint(self, prefix: str, *, suffix: str = "") -> "SyntaxConstraint":
-        return SyntaxConstraint(self, prefix, suffix=suffix)
+def syntax_error(source: str) -> list[str]:
+    """source's syntax error as a diagnostic ("line:col: SyntaxError: message"), [] if it parses. Nesting too deep for
+    CPython's parser (its MemoryError "Parser stack overflowed", or RecursionError) is a failure to parse too."""
+    try:
+        ast.parse(source)
+    except SyntaxError as e:
+        return [f"{e.lineno}:{e.offset}: SyntaxError: {e.msg}"]
+    except (MemoryError, RecursionError) as e:
+        return [f"{type(e).__name__}: {e}"]
+    return []
 
 
 class SyntaxConstraint:
-    """decoder.Constraint for the tokens generated after prefix (the program's text before them). BOS is allowed iff
-    prefix + generated + suffix parses (suffix: a FIM middle's suffix). Raises ValueError when prefix is not a prefix of
-    any Python 3.12 module."""
+    """decoder.Constraint for the tokens generated after prefix (the program's text before them), its masks by masks().
+    BOS is allowed iff prefix + generated + suffix parses (suffix: a FIM middle's suffix). Raises ValueError when prefix
+    is not a prefix of any Python 3.12 module."""
 
-    def __init__(self, syntax: PythonSyntax, prefix: str, *, suffix: str):
-        self.syntax, self.suffix = syntax, suffix
-        self.native = syntax.native.constraint(prefix.encode(), bool(suffix))
+    def __init__(self, prefix: str, *, suffix: str):
+        self.suffix = suffix
+        self.native = python_syntax().constraint(prefix.encode(), bool(suffix))
 
     def parses(self) -> bool:
-        """Whether ast.parse accepts the text and suffix."""
+        """Whether the text (valid UTF-8) and suffix parse."""
         try:
             source = self.native.text.decode() + self.suffix
         except UnicodeDecodeError:
             return False
-        with warnings.catch_warnings(action="ignore"):  # ast.parse's SyntaxWarnings (invalid escapes) on every call
-            try:
-                ast.parse(source)
-            except SyntaxError:
-                return False
-        return True
-
-    def settle(self, mask: np.ndarray) -> np.ndarray:
-        """The mask with its BOS bit (set by the crate when BOS is a candidate) kept iff the text parses."""
-        word, bit = divmod(self.syntax.bos, 32)
-        if mask[word] >> bit & 1 and not self.parses():
-            mask[word] &= ~np.uint32(1 << bit)
-        return mask
-
-    def mask(self) -> np.ndarray:
-        return self.settle(np.frombuffer(self.native.mask(), dtype="<u4").copy())
+        return not syntax_error(source)
 
     def push(self, token: int) -> None:
         self.native.push(token)
 
 
 def masks(constraints: list[SyntaxConstraint]) -> np.ndarray:
-    """The next masks of constraints (rows, in order), computed by the crate in parallel without the GIL; then
-    ast.parse decides each BOS candidate."""
-    data = native().masks([c.native for c in constraints])
+    """The next masks of constraints (rows, in order), computed by the crate in parallel without the GIL, BOS's bit set
+    for a BOS candidate; then ast.parse decides each candidate (SyntaxConstraint.parses)."""
+    word, bit = divmod(get_tokenizer().bos_token_id, 32)
+    data = crate_module(CRATE).masks([c.native for c in constraints])
     rows = np.frombuffer(data, dtype="<u4").reshape(len(constraints), -1).copy()
     for c, row in zip(constraints, rows, strict=True):
-        c.settle(row)
+        if row[word] >> bit & 1 and not c.parses():
+            row[word] &= ~np.uint32(1 << bit)
     return rows
-
-
-@functools.cache
-def python_syntax() -> PythonSyntax:
-    """The PythonSyntax of nanochat's tokenizer (data/tokenizer.get_tokenizer), built once per process (the groupings it
-    fills are per process too)."""
-    return PythonSyntax(get_tokenizer())

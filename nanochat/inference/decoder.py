@@ -1,9 +1,10 @@
 """
-Batched decoding of a GPT (nanochat/model/gpt.py) by csrc/decode.cu: the model prefills each prompt but its last
-token, then captured CUDA graphs advance every active slot a token per step (the greedy argmax or a seeded sample,
-within its constraint's allowed tokens) until BOS, the token budget or the caller's stop rule; a freed slot takes the
-next request (continuous batching). The decoder snapshots the model's weights, context, windows and rotary tables at
-construction (a stage change needs a new decoder). fim_prompt builds FIM prompts; heal and AllOf build constraints.
+Batched decoding of a GPT (nanochat/model/gpt.py) by csrc/decode.cu: captured CUDA graphs advance every active slot a
+token per step, through its prompt and then its generation (the greedy argmax or a seeded sample, within its
+constraint's allowed tokens) until BOS, the token budget or the caller's stop rule; a freed slot takes the next request
+(continuous batching), so one slot's prompt runs in the same steps as the others' generations. The decoder snapshots
+the model's weights, context, windows and rotary tables at construction (a stage change needs a new decoder).
+fim_prompt builds FIM prompts; heal and AllOf build constraints.
 """
 
 import bisect
@@ -12,17 +13,20 @@ import functools
 import weakref
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal
 
 import numpy as np
 import torch
 
 from nanochat.data.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX
 from nanochat.inference import syntax_constraint
+from nanochat.model.gpt import GPT
 from nanochat.native import cuda_library
 
+type Constraint = FirstToken | AllOf | syntax_constraint.SyntaxConstraint
 
-def fim_prompt(tokenizer, prefix, suffix, *, mode: Literal["psm", "spm"]):
+
+def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm"]) -> list[int]:
     """The token ids of a fill-in-the-middle prompt for the text between prefix and suffix (strings, each encoded on its
     own), in the layout the packer trains (nanochat/data/pack.py, loader.py; Bavarian et al. arXiv 2207.14255 §3, App. D):
         psm: BOS <fim_prefix> prefix <fim_suffix> suffix <fim_middle>
@@ -38,17 +42,6 @@ def fim_prompt(tokenizer, prefix, suffix, *, mode: Literal["psm", "spm"]):
             return [tokenizer.bos_token_id, pre, suf, *s, mid, *p]
 
 
-class Constraint(Protocol):
-    """A restriction of a request's generated tokens, advanced token by token (NativeDecoder.run)."""
-
-    def mask(self) -> np.ndarray | None:
-        """The tokens allowed next: uint32[vocab_size // 32], bit t % 32 of word t // 32 set iff token t may come next
-        (BOS ends the generation; token_mask packs one); None: no restriction at this step."""
-
-    def push(self, token: int) -> None:
-        """Advance by the token chosen."""
-
-
 @dataclass(frozen=True, kw_only=True)
 class Request:
     """A continuation of prompt (BOS and at least one more token) by at most max_tokens tokens. stop: None or a
@@ -61,11 +54,6 @@ class Request:
     temperature: float = 0.0
     seed: int = 0
     constraint: Constraint | None = None
-
-
-def token_mask(allowed: np.ndarray) -> np.ndarray:
-    """Constraint.mask's layout of a boolean array over the vocabulary (its length a multiple of 32)."""
-    return np.packbits(allowed, bitorder="little").view("<u4")
 
 
 @functools.cache
@@ -89,7 +77,7 @@ class FirstToken:
         self.first = None
 
 
-def heal(tokenizer, prompt: list[int]) -> tuple[list[int], Constraint]:
+def heal(tokenizer, prompt: list[int]) -> tuple[list[int], FirstToken]:
     """Token healing (Lundberg, "The Art of Prompt Design: Prompt Boundaries and Token Healing", 2023; Guidance): the
     prompt without its last token, and a constraint whose first token's bytes start with that token's bytes (BOS
     excluded), so the model picks the token across the prompt's boundary; the text of the healed prompt and the
@@ -100,18 +88,15 @@ def heal(tokenizer, prompt: list[int]) -> tuple[list[int], Constraint]:
     hi = bisect.bisect_right(keys, dropped, lo=lo, key=lambda k: k[:len(dropped)])
     allowed = np.zeros(tokenizer.vocab_size, dtype=bool)
     allowed[ids[lo:hi]] = True
-    return prompt[:-1], FirstToken(token_mask(allowed))
+    # the decoder's mask layout: bit t % 32 of word t // 32 set iff token t is allowed
+    return prompt[:-1], FirstToken(np.packbits(allowed, bitorder="little").view("<u4"))
 
 
 class AllOf:
-    """The intersection of constraints: each step allows the tokens every constraint allows."""
+    """The intersection of constraints: each step allows the tokens every constraint allows (step_masks)."""
 
-    def __init__(self, *constraints: Constraint):
+    def __init__(self, *constraints: FirstToken | syntax_constraint.SyntaxConstraint):
         self.constraints = constraints
-
-    def mask(self) -> np.ndarray | None:
-        masks = [m for c in self.constraints if (m := c.mask()) is not None]
-        return functools.reduce(np.bitwise_and, masks) if masks else None
 
     def push(self, token: int) -> None:
         for c in self.constraints:
@@ -131,55 +116,71 @@ def step_masks(constraints: list[Constraint]) -> list[np.ndarray | None]:
     return out
 
 
-class KVCache:
-    """The model's prefill cache (gpt.py's kv_cache) for one row of seq_len tokens from position 0: keys and values per
-    layer in FlashAttention's (B, T, H, D) layout, filled in place by the attention layers."""
+# the prompt store's page in positions: a stored prompt takes whole pages anywhere in the store (vLLM's PagedAttention,
+# Kwon et al. arXiv 2309.06180, pages a KV cache likewise, 16 tokens a page by default; 64 keeps a code prompt to a
+# few copies, at most 63 positions unused)
+PAGE = 64
 
-    def __init__(self, *, num_layers, seq_len, num_heads, head_dim, device):
-        self.k_cache = torch.empty(num_layers, 1, seq_len, num_heads, head_dim, device=device, dtype=torch.bfloat16)
-        self.v_cache = torch.empty_like(self.k_cache)
+
+@dataclass
+class Stored:
+    """A prompt in the store: its pages, and the run (NativeDecoder.runs) that last used it."""
+    pages: list[int]
+    used: int
 
 
 @dataclass
 class Slot:
-    """A request in a decoder slot: its index, the request, the generated tokens."""
+    """A request in a decoder slot: its index, the request, the steps left in its prompt before the step that chooses
+    its first token, whether its prompt's K and V go to the prompt store once written, the generated tokens."""
     index: int
     request: Request
+    prompt_steps: int
+    save: bool
     out: list = field(default_factory=list)
 
 
 class NativeDecoder:
     """Decoding by decode.cu of up to `batch` sequences at once (slots); a sequence's tokens do not depend on the batch
-    (decode.cu computes each slot alone in a fixed order and draws a sample's noise from its request's seed and the
-    generated position; each prompt is prefilled at batch 1).
-    batch: dec_create's slot count, at most the active mask's bits, bounded by free device memory.
+    (decode.cu computes each slot alone in a fixed order, its prompt included, and draws a sample's noise from its
+    request's seed and the generated position).
+    batch: dec_create's slot count, at most decode.cu's MAX_BATCH, bounded by free device memory.
     max_len: a slot's cache capacity in positions, at most the model's sequence_len: the longest len(prompt) +
     max_tokens - 1 the caller will run (a slot's cache is 2 n_layer max_len n_embd bf16 values, so a smaller max_len
-    fits more slots). The tokens do not depend on it: decode.cu splits attention by the model's sequence_len."""
+    fits more slots). The tokens do not depend on it: decode.cu splits attention by the model's sequence_len.
+    prompt_store: positions requested for decode.cu's prompt store, which takes at most the device memory left after
+    the slots (2 n_layer n_embd bf16 values a position): a prompt's K and V at all but its last position are kept there
+    once written, and a later request with the same prompt starts from them at its last token, len(prompt) - 1 steps
+    fewer, its tokens unchanged (a prompt's K and V depend on its tokens alone). A prompt is kept while pages are free;
+    to free pages, prompts not used in this run or the previous one are dropped, the least recently used first, so a
+    search's rounds (a run each, reusing its prompts) keep the prompts they reuse, and a store smaller than a round's
+    prompts keeps a fixed part of them rather than cycling."""
 
     @torch.no_grad()
-    def __init__(self, model, *, bos_token_id, max_len):
+    def __init__(self, model: GPT, *, bos_token_id: int, max_len: int, prompt_store: int):
         lib = cuda_library("decode")
         lib.dec_create.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dec_create.restype = ctypes.c_void_p
         lib.dec_batch.argtypes = [ctypes.c_void_p]
-        lib.dec_set_prefilled.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int32, ctypes.c_int32, ctypes.c_void_p,
-                                          ctypes.c_void_p, ctypes.c_longlong, ctypes.c_float, ctypes.c_ulonglong]
+        lib.dec_set_prompt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32,
+                                       ctypes.c_float, ctypes.c_ulonglong]
+        for copy in (lib.dec_save_prompt, lib.dec_load_prompt):
+            copy.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        lib.dec_store.argtypes = [ctypes.c_void_p]
         lib.dec_masks.argtypes = [ctypes.c_void_p]
         lib.dec_masks.restype = ctypes.POINTER(ctypes.c_uint32)
-        lib.dec_set_active.argtypes = [ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong]
+        lib.dec_set_active.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         lib.dec_launch.argtypes = [ctypes.c_void_p]
         lib.dec_launch_body.argtypes = [ctypes.c_void_p]
         lib.dec_launch_head.argtypes = [ctypes.c_void_p]
         lib.dec_destroy.argtypes = [ctypes.c_void_p]
         lib.dec_tokens.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        self.lib, self.model = lib, model
+        self.lib = lib
         cfg = model.config
         L, C, T = cfg.n_layer, cfg.n_embd, cfg.sequence_len
         if not 1 < max_len <= T:
             raise ValueError(f"max_len {max_len} outside (1, sequence_len {T}]")
         self.max_len = max_len
-        self.device = model.wte.weight.device
         # bf16 copies of the matrices and tables (the forward's rounding at use); fp32 q/k gains, gate weights and
         # rotary table, as gpt.py uses them
         weights = [model.wte.weight.bfloat16(), model.cos, model.sin, model.lm_head.weight.bfloat16()]
@@ -194,10 +195,14 @@ class NativeDecoder:
         # per layer (resid, x0), rounded to bf16: a 0-dim fp32 tensor times a bf16 tensor computes in bf16
         scal = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).to(torch.bfloat16).float().cpu().numpy()
         # F: c_fc is (F, C)
-        config = np.array([L, C, model.blocks[0].mlp.c_fc.weight.size(0), cfg.vocab_size, max_len, T], dtype=np.int32)
+        config = np.array([L, C, model.blocks[0].mlp.c_fc.weight.size(0), cfg.vocab_size, max_len, T, prompt_store],
+                          dtype=np.int32)
+        # the prompt store: {prompt: its pages}, the free pages (once the decoder exists), the runs started
+        self.stored: dict[tuple[int, ...], Stored] = {}
+        self.runs = 0
         self.bos = bos_token_id
         # dec_destroy (the finalizer) releases every native resource; the buffers it reads are this object's tensors
-        self.stream = torch.cuda.Stream(self.device)
+        self.stream = torch.cuda.Stream(model.wte.weight.device)
         ptrs = np.array([0 if t is None else t.data_ptr() for t in weights], dtype=np.uint64)
         window = np.array(model.window_sizes, dtype=np.int32)
         torch.cuda.synchronize()  # the weight copies above are on the current stream; the decoder uses its own
@@ -206,22 +211,44 @@ class NativeDecoder:
         weakref.finalize(self, lib.dec_destroy, self.handle)
         self.batch = lib.dec_batch(self.handle)
         self.tokens = np.zeros(self.batch, dtype=np.int32)
+        self.free = list(range(lib.dec_store(self.handle) // PAGE))
         # the pinned host masks decode.cu copies to the masked slots (dec_masks), a Constraint.mask per slot
         self.masks = np.ctypeslib.as_array(lib.dec_masks(self.handle),
                                            shape=(self.batch, cfg.vocab_size // np.iinfo(np.uint32).bits))
 
-    @torch.no_grad()
-    def prefill(self, b: int, request: Request) -> None:
-        """Start a request in slot b: the model's prefill of all but the prompt's last token fills the slot's cache."""
-        cfg, tokens = self.model.config, request.prompt
-        n = len(tokens) - 1
-        cache = KVCache(num_layers=cfg.n_layer, seq_len=n, num_heads=cfg.n_head, head_dim=cfg.n_embd // cfg.n_head,
-                        device=self.device)
-        self.model.prefill(torch.tensor([tokens[:n]], dtype=torch.int32, device=self.device), cache)
-        torch.cuda.synchronize()  # the decoder copies the cache on its own stream
-        self.lib.dec_set_prefilled(self.handle, b, int(tokens[n]), n, cache.k_cache.data_ptr(), cache.v_cache.data_ptr(),
-                                   cache.k_cache.stride(0), request.temperature, request.seed)
-        torch.cuda.synchronize()  # the copies read the cache tensors, freed on return
+    def start(self, b: int, index: int, request: Request) -> Slot:
+        """Start request `index` in slot b: from its prompt's stored K and V at its last token, else at position 0."""
+        prompt = np.array(request.prompt, dtype=np.int32)
+        n = len(prompt) - 1  # the positions before the prompt's last token
+        stored = self.stored.get(tuple(request.prompt))
+        if stored is not None:
+            stored.used = self.runs
+            for i, page in enumerate(stored.pages):
+                self.lib.dec_load_prompt(self.handle, b, i * PAGE, page * PAGE, min(PAGE, n - i * PAGE))
+        start = 0 if stored is None else n
+        self.lib.dec_set_prompt(self.handle, b, prompt.ctypes.data, len(prompt), start, request.temperature,
+                                request.seed)
+        return Slot(index, request, prompt_steps=n - start, save=stored is None)
+
+    def save(self, b: int, prompt: list[int]) -> None:
+        """Keep slot b's prompt K and V (all but the last position, written by the launched steps) in free pages,
+        dropping prompts unused in this run and the previous one (least recently used first) if pages are short; not
+        kept if still short, or if a request with the same prompt kept it meanwhile."""
+        key, n = tuple(prompt), len(prompt) - 1
+        need = -(-n // PAGE)
+        if key in self.stored:
+            return
+        for old in sorted((k for k, s in self.stored.items() if s.used < self.runs - 1),
+                          key=lambda k: self.stored[k].used):
+            if len(self.free) >= need:
+                break
+            self.free += self.stored.pop(old).pages
+        if len(self.free) < need:
+            return
+        pages = [self.free.pop() for _ in range(need)]
+        for i, page in enumerate(pages):
+            self.lib.dec_save_prompt(self.handle, b, i * PAGE, page * PAGE, min(PAGE, n - i * PAGE))
+        self.stored[key] = Stored(pages, self.runs)
 
     @torch.no_grad()
     def run(self, requests: Iterable[Request]) -> Iterator[tuple[int, list[int]]]:
@@ -233,21 +260,27 @@ class NativeDecoder:
         steps launch the whole greedy step. Raises ValueError when len(prompt) + max_tokens - 1 > max_len or a
         constraint's mask allows no token (not even BOS)."""
         lib, handle, B, bos, max_len = self.lib, self.handle, self.batch, self.bos, self.max_len
-        queue, slots, active = enumerate(requests), [None] * B, 0
+        self.runs += 1
+        queue, slots = enumerate(requests), [None] * B
         stopping = []  # slots whose last token awaits its stop rule
+        # row 0: the active slots, row 1: the masked slots; dec_set_active takes each row as 64-bit words, slot b at
+        # bit b % 64 of word b // 64
+        flags = np.zeros((2, -(-B // 64) * 64), dtype=bool)
+
+        def set_active():
+            words = np.packbits(flags, axis=1, bitorder="little").view("<u8")
+            lib.dec_set_active(handle, words.ctypes.data)
 
         def start(b):
-            nonlocal active
             for i, request in queue:
                 if (end := len(request.prompt) + request.max_tokens - 1) > max_len:
                     raise ValueError(f"request {i}: len(prompt) {len(request.prompt)} + max_tokens "
                                      f"{request.max_tokens} - 1 = {end} > max_len {max_len}")
-                self.prefill(b, request)
-                slots[b] = Slot(i, request)
-                active |= 1 << b
+                slots[b] = self.start(b, i, request)
+                flags[0, b] = True
                 return
             slots[b] = None
-            active &= ~(1 << b)
+            flags[0, b] = False
 
         def finish(b):
             s = slots[b]
@@ -256,10 +289,11 @@ class NativeDecoder:
 
         for b in range(B):
             start(b)
-        lib.dec_set_active(handle, active, 0)
-        while active:
-            choosing = any(s is not None and (s.request.temperature > 0 or s.request.constraint is not None)
-                           for s in slots)
+        set_active()
+        while flags[0].any():
+            # slots whose step chooses a token: past their prompt (a prompt step's choice is replaced by the prompt)
+            choosers = [b for b, s in enumerate(slots) if s is not None and s.prompt_steps == 0]
+            choosing = any(slots[b].request.temperature > 0 or slots[b].request.constraint is not None for b in choosers)
             if choosing:
                 lib.dec_launch_body(handle)
             else:
@@ -267,10 +301,8 @@ class NativeDecoder:
             finished = sorted(b for b in stopping if slots[b].request.stop(slots[b].out))  # meanwhile the step runs
             stopping = []
             if choosing:
-                masked = 0
                 # a stopped slot's next token is dropped
-                constrained = [b for b, s in enumerate(slots)
-                               if s is not None and s.request.constraint is not None and b not in finished]
+                constrained = [b for b in choosers if slots[b].request.constraint is not None and b not in finished]
                 for b, mask in zip(constrained, step_masks([slots[b].request.constraint for b in constrained]),
                                    strict=True):
                     if mask is None:
@@ -279,12 +311,18 @@ class NativeDecoder:
                         raise ValueError(f"request {slots[b].index}: its constraint allows no token at position "
                                          f"{len(slots[b].out)}")
                     self.masks[b] = mask
-                    masked |= 1 << b
-                lib.dec_set_active(handle, active, masked)
+                    flags[1, b] = True
+                set_active()
+                flags[1] = False
                 lib.dec_launch_head(handle)
             lib.dec_tokens(handle, self.tokens.ctypes.data)
             for b, s in enumerate(slots):
                 if s is None or b in finished:
+                    continue
+                if s.prompt_steps:  # the step's next input is the prompt's next token
+                    s.prompt_steps -= 1
+                    if not s.prompt_steps and s.save:  # its K and V before the last prompt token are written
+                        self.save(b, s.request.prompt)
                     continue
                 token = int(self.tokens[b])
                 if token == bos:
@@ -300,4 +338,4 @@ class NativeDecoder:
             if finished:
                 for b in finished:
                     yield finish(b)
-                lib.dec_set_active(handle, active, 0)  # each choosing step sets its masks anew
+                set_active()  # each choosing step sets its masks anew

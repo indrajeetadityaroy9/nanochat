@@ -14,18 +14,13 @@ from nanochat.paths import CHECKPOINTS
 
 
 def checkpoint_name(tag: str, *, step: int | None) -> str:
-    """<tag> for the newest checkpoint (step None), <tag>-step<step:06d> for the snapshot at `step`; base_eval and
-    probes name their outputs for a checkpoint the same."""
+    """<tag> for the newest checkpoint (step None), <tag>-step<step:06d> for the snapshot at `step`; base_eval names its
+    output for a checkpoint the same."""
     return tag if step is None else f"{tag}-step{step:06d}"
 
 
 def checkpoint_path(tag: str, *, step: int | None) -> Path:
     return CHECKPOINTS / f"{checkpoint_name(tag, step=step)}.pt"
-
-
-def snapshot_steps(tag: str) -> list[int]:
-    """The steps of a run's model-only snapshots on disk, ascending."""
-    return sorted(int(p.stem.removeprefix(f"{tag}-step")) for p in CHECKPOINTS.glob(f"{tag}-step*.pt"))
 
 
 def save_checkpoint(path: Path, checkpoint: dict) -> None:

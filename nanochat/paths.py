@@ -12,17 +12,17 @@ DATA = ARTIFACTS / "data"                # the data pipeline's stages (nanochat/
 TOKENIZER = ARTIFACTS / "tokenizer"
 CHECKPOINTS = ARTIFACTS / "checkpoints"  # <tag>.pt (resume), <tag>-step<NNNNNN>.pt (model-only snapshots)
 METRICS = ARTIFACTS / "metrics"          # <tag>.jsonl (train/metrics.py)
-BASE_EVAL = ARTIFACTS / "base_eval"      # <tag>[-step<NNNNNN>].json (scripts/base_eval.py)
-PROBES = ARTIFACTS / "probes"            # <tag>[-step<NNNNNN>].json, .md (eval/probes.py)
+BASE_EVAL = ARTIFACTS / "base_eval"      # <tag>[-step<NNNNNN>].json (train/metrics.py save_evaluation)
 LOGS = ARTIFACTS / "logs"                # scripts/production.py, ablations/harness.py
-CACHE = ARTIFACTS / "cache"              # native libraries (native.py), compiler and dataset caches (docker/Dockerfile)
-RESULTS = ROOT / "results"               # scripts/report.py, ablations/harness.py (tracked; results/.gitkeep)
+CACHE = ARTIFACTS / "cache"              # compiler and dataset caches (docker/Dockerfile)
+NATIVE = CACHE / "native"                # native libraries and their build directories (native.py)
+RESULTS = ROOT / "results"               # train/metrics.py export, ablations/harness.py (tracked; results/.gitkeep)
 
 if __name__ == "__main__":
     from huggingface_hub import snapshot_download
 
     from nanochat.config import DATASET, DATASET_REVISION
 
-    for directory in (DATA, TOKENIZER, CHECKPOINTS, METRICS, BASE_EVAL, PROBES, LOGS, CACHE):
+    for directory in (DATA, TOKENIZER, CHECKPOINTS, METRICS, BASE_EVAL, LOGS, CACHE, NATIVE):
         directory.mkdir(parents=True, exist_ok=True)
     snapshot_download(DATASET, repo_type="dataset", revision=DATASET_REVISION, local_dir=ARTIFACTS)

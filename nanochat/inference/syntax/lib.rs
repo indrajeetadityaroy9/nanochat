@@ -69,31 +69,8 @@ struct Constraint {
     suffix: bool,
 }
 
-impl Constraint {
-    /// Whether BOS is a candidate: a suffix follows, or the lexer and parser end a module here.
-    fn bos_candidate(&self) -> bool {
-        self.suffix || self.syntax.complete(&self.state, matches!(self.text.last(), Some(b'\n' | b'\r')))
-    }
-}
-
-/// The masks (bit t % 32 of word t / 32 set iff token t keeps the text viable; BOS set iff it is a candidate, which
-/// the caller's ast.parse decides) of a constraint's state.
-fn mask_words(syntax: &vocab::Syntax, state: &vocab::State, bos: bool) -> Vec<u32> {
-    let mut words = syntax.allowed(state);
-    if bos {
-        words[syntax.bos as usize / 32] |= 1 << (syntax.bos % 32);
-    }
-    words
-}
-
 #[pymethods]
 impl Constraint {
-    /// The next mask, uint32 words as bytes, its BOS bit set iff BOS is a candidate.
-    fn mask<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        let words = py.detach(|| mask_words(&self.syntax, &self.state, self.bos_candidate()));
-        PyBytes::new(py, &words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
-    }
-
     /// Advance by a token; ValueError if its bytes end the text's viability (the state is then unchanged).
     fn push(&mut self, token: u32) -> PyResult<()> {
         let bytes = &self.syntax.token_bytes[token as usize];
@@ -111,8 +88,9 @@ impl Constraint {
     }
 }
 
-/// The next masks of constraints (as Constraint.mask, rows in order) computed in parallel without the GIL: the rows'
-/// uint32 words as bytes.
+/// The next masks of constraints, rows in order, computed in parallel without the GIL: the rows' uint32 words as
+/// bytes, bit t % 32 of word t / 32 set iff token t keeps the text viable, BOS's set iff it is a candidate (a suffix
+/// follows, or the lexer and parser end a module here), which the caller's ast.parse decides.
 #[pyfunction]
 fn masks<'py>(py: Python<'py>, constraints: Vec<Bound<'py, Constraint>>) -> Bound<'py, PyBytes> {
     let jobs: Vec<_> = constraints.iter().map(|c| {
@@ -121,7 +99,11 @@ fn masks<'py>(py: Python<'py>, constraints: Vec<Bound<'py, Constraint>>) -> Boun
         (c.syntax.clone(), c.state.clone(), c.suffix, ends_line)
     }).collect();
     let rows: Vec<Vec<u32>> = py.detach(|| jobs.par_iter().map(|(syntax, state, suffix, ends_line)| {
-        mask_words(syntax, state, *suffix || syntax.complete(state, *ends_line))
+        let mut words = syntax.allowed(state);
+        if *suffix || syntax.complete(state, *ends_line) {
+            words[syntax.bos as usize / 32] |= 1 << (syntax.bos % 32);
+        }
+        words
     }).collect());
     PyBytes::new(py, &rows.iter().flatten().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
 }

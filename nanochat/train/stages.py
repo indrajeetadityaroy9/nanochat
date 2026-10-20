@@ -21,8 +21,8 @@ from nanochat.train.schedule import RunPlan, plan
 
 
 def drawn_rows(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan) -> dict[str, int]:
-    """{corpus: rows the stage draws}: steps x micro-batches x rows per micro-batch, split by mixture_rows; every stage
-    but REPO_STAGE is a file-level stage (an ablation's may differ from FILE_STAGE in its mixture)."""
+    """{corpus: rows the stage (FILE_STAGE or REPO_STAGE) draws}: steps x micro-batches x rows per micro-batch, split
+    by mixture_rows."""
     steps = run.num_iterations - run.repo_start if stage is REPO_STAGE else run.repo_start
     mixture = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
     count = steps * run.grad_accum_steps * stage.batch_rows

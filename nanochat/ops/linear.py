@@ -11,6 +11,7 @@ pre-activation), its derivative and the recomputed post-activation in the backwa
 import torch
 from quack.gemm_interface import gemm, gemm_act, gemm_dact
 from torch import Tensor
+from torch.autograd.function import FunctionCtx
 
 
 @torch.library.custom_op("nanochat::linear", mutates_args=(), device_types="cuda")
@@ -21,7 +22,7 @@ def linear(x: Tensor, weight: Tensor) -> Tensor:
 
 
 @linear.register_fake
-def linear_fake(x, weight):
+def linear_fake(x: Tensor, weight: Tensor) -> Tensor:
     return x.new_empty(*x.shape[:-1], weight.shape[0])
 
 
@@ -34,15 +35,15 @@ def linear_bwd(dy: Tensor, x: Tensor, weight: Tensor) -> tuple[Tensor, Tensor]:
 
 
 @linear_bwd.register_fake
-def linear_bwd_fake(dy, x, weight):
+def linear_bwd_fake(dy: Tensor, x: Tensor, weight: Tensor) -> tuple[Tensor, Tensor]:
     return x.new_empty(x.shape), weight.new_empty(weight.shape)
 
 
-def linear_save(ctx, inputs, output):
+def linear_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor], output: Tensor) -> None:
     ctx.save_for_backward(*inputs)
 
 
-def linear_grad(ctx, dy):
+def linear_grad(ctx: FunctionCtx, dy: Tensor) -> tuple[Tensor, Tensor]:
     return linear_bwd(dy, *ctx.saved_tensors)
 
 
@@ -59,7 +60,7 @@ def relu2_mlp(x: Tensor, w_fc: Tensor, w_proj: Tensor) -> tuple[Tensor, Tensor]:
 
 
 @relu2_mlp.register_fake
-def relu2_mlp_fake(x, w_fc, w_proj):
+def relu2_mlp_fake(x: Tensor, w_fc: Tensor, w_proj: Tensor) -> tuple[Tensor, Tensor]:
     return x.new_empty(*x.shape[:-1], w_proj.shape[0]), x.new_empty(x.numel() // x.shape[-1], w_fc.shape[0])
 
 
@@ -76,15 +77,16 @@ def relu2_mlp_bwd(dy: Tensor, x: Tensor, preact: Tensor, w_fc: Tensor, w_proj: T
 
 
 @relu2_mlp_bwd.register_fake
-def relu2_mlp_bwd_fake(dy, x, preact, w_fc, w_proj):
+def relu2_mlp_bwd_fake(dy: Tensor, x: Tensor, preact: Tensor, w_fc: Tensor,
+                       w_proj: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     return x.new_empty(x.shape), w_fc.new_empty(w_fc.shape), w_proj.new_empty(w_proj.shape)
 
 
-def relu2_mlp_save(ctx, inputs, output):
+def relu2_mlp_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor], output: tuple[Tensor, Tensor]) -> None:
     ctx.save_for_backward(*inputs, output[1])
 
 
-def relu2_mlp_grad(ctx, dy, dpreact):
+def relu2_mlp_grad(ctx: FunctionCtx, dy: Tensor, dpreact: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     x, w_fc, w_proj, preact = ctx.saved_tensors
     return relu2_mlp_bwd(dy, x, preact, w_fc, w_proj)
 

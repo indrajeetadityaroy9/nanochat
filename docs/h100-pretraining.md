@@ -2,8 +2,9 @@
 
 A Python and C++ code-generation base model pretrained on one NVIDIA H100 80 GB SXM5 (sm_90) at the most tokens its data
 holds without any stage reading a document twice. The code is the specification; each section names the file that
-defines a setting. Measurements and ablations, with the code that runs them, are in `ablations/` (`ablations.md`); the
-pre-launch runs' records are under `artifacts/` by tag and published with the model (`runs/release.sh`).
+defines a setting. Measurements and ablations, with the code that runs them, are in `ablations/` (`ablations.md`). The
+pre-launch runs' numbers are stated here and in `ablations.md` (their raw records were not kept); the experiments'
+results are in `results/`.
 
 ## Model
 
@@ -16,9 +17,10 @@ learnable gains. Each layer is a `Block` of `Attention` and `MLP`, each applied 
 | Attention | per-head RMS norm → learned per-dim gain → RoPE over the full head, base 10^6; SSSL windows (S = 512), last layer full; FlashAttention-4 varlen with document masking |
 | MLP | ReLU², hidden 4C |
 | Residual | `x = resid_lambda·x + x0_lambda·x0` per layer; value embeddings on alternating layers (12 of 24) behind a `2·sigmoid` gate |
-| Head | untied `lm_head`, plain cross entropy |
+| Head | untied `lm_head`, zero init, plain cross entropy; no logit softcap or z-loss (QK norm bounds the attention logits) |
 | Vocabulary | 2^15 ids (SA-BPE, BOS + 3 FIM sentinels) |
-| Parameters | 195.1M scaling parameters (blocks + `lm_head`), plus 13 embedding tables (token + 12 value) of 32,768 × 768 |
+| Parameters | 195,096,576 scaling parameters (blocks 169,930,752 + `lm_head` 25,165,824), what the token budget counts; plus the token table (25,165,824) and 12 value-embedding tables (301,989,888, 1.55× the scaling parameters), lookups without FLOPs: 522,252,336 in all |
+| FLOPs per token | 1.557 GFLOP non-embedding: DeepSeek LLM's M (Eq. 2, 72·n_layer·d² + 12·n_layer·d·l_seq, l_seq each layer's window at 8K: 1.020 matrices + 0.538 attention), plus 0.151 for `lm_head` |
 | Init | stream-reading matrices and tables uniform with std C^-½; `c_o`, `c_proj`, `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
 | Precision | fp32 parameters, gradients and optimizer state; bf16 activations and GEMM inputs |
 
@@ -29,28 +31,31 @@ into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
 
 - **Mixture** (`config.MIXTURE`): code:text:math = 87:10:3 (DeepSeek-Coder's code share); code is 8 Python and C++
   corpora, text ClimbMix, math two corpora.
-- **Objective:** next token, with the packs' fill-in-the-middle pieces read as FIM examples (DeepSeek-Coder §3.1).
+- **Objective:** next token, with the packs' fill-in-the-middle pieces read as FIM examples (DeepSeek-Coder §3.1): half
+  the pieces of the repository corpora's train splits, in PSM or SPM order; a middle is a random character span (10%)
+  or AST-FIM's syntactic unit (Gong et al., arXiv 2506.00204), half of those widened to whole lines, the boundaries of
+  line-level infilling (`data/pack.py`).
 - **Stages** (`config.FILE_STAGE`, `config.REPO_STAGE`; Qwen2.5-Coder §3.2): 8,192-token rows of every corpus, then the
   last 300/5,500 of the steps on 32,768-token rows of the repository corpora. One RoPE base, 10^6 (`config.ROPE_BASE`:
   Qwen2.5-Coder's repository-stage base, above Men et al.'s lower bound for 32K, arXiv 2405.14591; Llama 3 trains at a
   large base from the start).
 - **Token budget** (`train/stages.py max_ratio`): the most tokens per scaling parameter at which no stage reads a
-  document twice: 490.80 at d24, 95.75B tokens.
+  document twice: 490.77 at d24, 95.75B tokens (dataset revision `1e711aa`).
 
 ## Regime
 
 | Setting | Value | Source |
 |---|---|---|
-| Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271 (`train/schedule.py`) |
-| Peak lr | 9.3795e-4, every group | DeepSeek LLM, η = 0.3118·C^-0.125 |
-| Steps | 81,171; repository stage from step 76,743 | `schedule.plan` |
-| Warmup | 40 steps, linear | 2/(1−β2) (Ma & Yarats, arXiv 1910.04209) |
+| Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271, C = M·D (`train/schedule.py`) |
+| Peak lr | 9.3796e-4, every group | DeepSeek LLM, η = 0.3118·C^-0.125 |
+| Steps | 81,166 (95.75B tokens, 490.77 per scaling parameter); repository stage from step 76,739 | `schedule.plan` |
+| Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (Ma & Yarats, arXiv 1910.04209) |
 | Decay | linear to zero | Bergsma et al., arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
 | Optimizers | AdamW (fused) on tables and vectors; Muon with `match_rms_adamw` on matrices | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
-| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.317 at d24), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
+| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.3173 at d24: 1/(ηλ) = 3,360 steps, 4.0B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
 | Gradient clipping | global norm 1.0 on the raw gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (`base_train.MAX_NORM`) |
-| Repository stage | continues the decay | DeepSeek-Coder §3.6 |
+| Repository stage | continues the decay: 5.46% of the peak lr at its first step, 0 at the last, over 4,427 steps (5.22B tokens) | DeepSeek-Coder §3.6 |
 
 Clipping at 1.0, decided on evidence rather than an experiment (`ablations/ablations.md` §1, Not tested). It rescales
 a step's raw gradient before Muon's momentum and AdamW's moments; both updates are invariant to a gradient scale that
@@ -70,8 +75,8 @@ done here.
 ## H100 implementation
 
 Ops in `nanochat/ops/`, CUDA sources in `nanochat/csrc/` (built on first use by `native.cuda_library`). Each is a
-`torch.library` op, so `torch.compile(fullgraph=True)` traces one graph per stage. Inductor runs with
-coordinate-descent tuning (`runs/container.sh`).
+`torch.library` op, so `torch.compile(fullgraph=True)` traces one graph per stage. Inductor's coordinate-descent tuning
+is off (`runs/container.sh`).
 
 | Op | Implementation |
 |---|---|
@@ -83,25 +88,25 @@ coordinate-descent tuning (`runs/container.sh`).
 | Embeddings | `F.embedding`, bf16 cast fused by Inductor; backward adds rows with atomics |
 | Decoding | `csrc/decode.cu` (`inference/decoder.py`): batched native decoder for the code benchmarks |
 
-The d24 step on real rows (`ablations/profile_step.py 24 12 12 file`): 3,705–3,713 ms, 318K tok/s, 100% GPU-busy,
-peak 69.6 GiB; GEMM 53%, FA4 25%, Inductor 13%; the repository stage's (`24 12 3 repo`) 4,016 ms. A fused q/k/v GEMM
-measured 3,729 ms and was not adopted.
+The d24 step on real rows (12 micro-batches of 12 rows, `torch.profiler`): 3,741 ms, 315K tok/s, 100% GPU-busy, peak
+69.6 GiB; GEMM 53%, FA4 25%, Inductor 14%; the repository stage's (12 of 3 rows) 4,016 ms with coordinate-descent
+tuning (0.8% faster at the file level; not used, `ablations/ablations.md` §2). A fused q/k/v GEMM measured 3,729 ms
+against 3,712 ms and was not adopted. At 3,741 ms the step computes 539 TFLOP/s by M plus `lm_head` (54.5% of the
+H100's 989 dense bf16), 369 TFLOP/s (37.3%) counting the weight matrices alone.
 
 ## Reproducibility
 
 - **Fastest kernels.** FA4's and the embedding backward reduce with atomics, so repeated steps differ in the last bits;
-  FA4's deterministic backward costs 1–3% of a d24 micro-batch's forward and backward. Inductor's coordinate-descent
-  tuning picks kernel configurations by timing, so a rebuilt compiler cache can change reduction orders: the same code
-  from two caches agreed bitwise on the first steps and then differed by ~10⁻⁶ relative (d8); from one cache, the
-  pre-refactor and refactored code agreed bitwise.
+  FA4's deterministic backward costs 1–3% of a d24 micro-batch's forward and backward. The forward is deterministic:
+  with Inductor's coordinate-descent tuning off, a compiled loss evaluation is bitwise equal across processes.
 - **Resume.** A relaunched run continues from its newest checkpoint (weights, optimizer state, data position), written
   to a temporary file and renamed, so a kill mid-save leaves the previous one.
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
-- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seeds plus a hash of those and its variant
-  (an ablation run's fields), so runs of different settings never share artifacts. Each run's metrics record its full
-  configuration (model, plan, seeds, lr, weight decay, clip threshold) and the dataset revision
-  `config.DATASET_REVISION` (`python -m nanochat.paths` downloads it).
+- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seeds plus a hash of those, its variant
+  (an ablation run's fields) and the dataset revision `config.DATASET_REVISION` (`python -m nanochat.paths` downloads
+  it), so runs of different settings or data never share artifacts. Each run's metrics record its full configuration
+  (model, plan, seeds, lr, weight decay, clip threshold) and the dataset revision.
 - **Data order.** Each corpus's rows are permuted once by the data seed (NumPy `RandomState`).
 
 ## Reproducing the run
@@ -117,26 +122,24 @@ tmux new -d -s h100 runs/h100.sh
 
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
 `runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/` (`<tag>.pt`, the resume checkpoint, and
-`<tag>-step<NNNNNN>.pt`, the model-only snapshots), `metrics/<tag>.jsonl`, `base_eval/` and `probes/`
-(`<tag>[-step<NNNNNN>].json`), `logs/` (`production-<tag>.log`, `<tag>.log` per ablation run) and `cache/`, plus
-`evals/<tag>.json`, the pre-launch runs' loss evaluations; `results/` (tracked) holds the data the paper's tables and
-figures are drawn from.
+`<tag>-step<NNNNNN>.pt`, the model-only snapshots), `metrics/<tag>.jsonl`, `base_eval/<tag>[-step<NNNNNN>].json`,
+`logs/` (`production-<tag>.log`, `<tag>.log` per ablation run) and `cache/`; `results/` (tracked) holds the data the
+paper's tables and figures are drawn from.
 
-`runs/h100.sh` runs `scripts/production.py`: it derives the ratio and the tag (`d24-r490.805-s0-d0-<hash>`), trains both
+`runs/h100.sh` runs `scripts/production.py`: it derives the ratio and the tag (`d24-r490.774-s0-d0-<hash>`), trains both
 stages with a checkpoint every 1% of the steps and a model-only snapshot (weights, no optimizer state, ~2.1 GB) every
 10% and at the repository stage's start, then evaluates the final model and every snapshot with `scripts/base_eval.py`
-(greedy and system decoding) and the probe set (`nanochat/eval/probes.py`): when pass@1 and each probe's robustness
-emerge. `scripts/report.py` then writes the run's tracked metrics: `results/<tag>.jsonl` (its records, every
-evaluation and probe result) and `results/<tag>-curves.jsonl` (its per-step records). Rerunning continues a stopped
-run and skips evaluations already written. `base_eval` reports validation bits and bytes per corpus at 8K and at 32K
-per context bucket (≤8K, >8K), reference-solution bits and bytes, and EvalPlus HumanEval+/MBPP+, MultiPL-E C++ and
-HumanEval infilling, each generated and scored by its official tools.
+(when pass@1 emerges) and exports the run's tracked metrics (`train/metrics.py export`): `results/<tag>.jsonl` (its
+records and every evaluation) and `results/<tag>-curves.jsonl` (its per-step records). Rerunning continues a stopped
+run from its checkpoint and evaluates every model again. `base_eval` reports validation bits and bytes per corpus at 8K
+and at 32K per context bucket (≤8K, >8K), reference-solution bits and bytes, and EvalPlus HumanEval+/MBPP+, MultiPL-E
+C++ and HumanEval infilling (Benchmarks, below), each scored by its official tools.
 
-**Expected cost:** 76,743 file-level steps at 3.709 s and 4,428 repository-stage steps at 4.016 s, about 84 h, about
-$360 at $4.29/h.
+**Expected cost:** 76,739 file-level steps at 3.741 s and 4,427 repository-stage steps at about 4.05 s (4,016 ms with
+coordinate-descent tuning, plus its 0.8%), about 85 h, about $365 at $4.29/h.
 
-`runs/release.sh <tag> <repo>` uploads the checkpoint and snapshots, every run record under `artifacts/` (this run's and
-the pre-launch runs') and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
+`runs/release.sh <tag> <repo>` uploads the checkpoint and snapshots, the run records under `artifacts/` (metrics and
+evaluations) and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
 --local-dir /workspace/nanochat` (the checkout inside the container) restores them where `load_model`, `base_eval` and
 `base_train` read them.
 
@@ -243,32 +246,34 @@ sets its scaling runs' by the same laws).
 
 ## Decoding and syntax analysis
 
-The paper's Evaluate & Break section rests on a **pre-registered probe set**: 25 failure hypotheses fixed before the
-production run from the literature and this pipeline's design, each a newly written input (no benchmark text, not in
-the training data) with a programmatic check (`nanochat/eval/probes.py`, `python -m nanochat.eval.probes --model-tag
-TAG` → `artifacts/probes/<tag>.json`, `.md`). Mitigations live at inference; pretraining is unchanged. Every probe runs
-under each configuration that applies:
+**Benchmarks** (`eval/code_eval.py`, `scripts/base_eval.py`). Each benchmark is decoded two ways:
 
-| Configuration | Decoding |
-|---|---|
-| `greedy` | left-to-right argmax, the literature's pass@1 setting |
-| `healed` | greedy after token healing: the prompt's last token removed, the first generated token constrained to start with its bytes (Guidance; Lundberg 2023) |
-| `fim`, `fim_spm` | the prompt as fill-in-the-middle, PSM / SPM, the format whose character-level random spans trained mid-token boundaries (`bpe/pack.rs:145-151`) |
-| `constrained` | greedy under the Python 3.12 syntax constraint (Python probes) |
-| `system` | healed, constrained greedy, then post-generation checks with seeded resampling until a candidate passes |
+| Mode | Decoding | Score |
+|---|---|---|
+| `greedy` | left-to-right argmax, one completion per problem | pass@1, the literature's greedy setting |
+| `filtered` | left-to-right prompts healed (Guidance; Lundberg 2023), Python and FIM middles under the syntax constraint (FIM: given the prefix and suffix, no healing); the greedy candidate, then seeded samples until one has no post-generation diagnostic and passes the prompt's own examples, at most 10 (`verify.ATTEMPTS`); the accepted candidate, else the greedy one | filtered pass@1 (Codex's filtered pass@k, Chen et al. arXiv 2107.03374 §3.5; AlphaCode §4.5): a system measurement, not comparable to pass@1 tables |
 
-| Area | Probes (hypothesis) |
-|---|---|
-| Decoding / prompting | D1 prompt ends after `"""` + newline (boundary unlike training's `"""\n` chunk); D2 ends mid-identifier (`import num`); D3 ends in partial indentation; D4 ends at `def f(x):` without newline; D5 C++ prompt ends at `{` (MultiPL-E strips the newline); D6 greedy repetition loop; D7 generation runs past the function; D8 FIM PSM vs SPM disagree; D9 FIM middle never ends; D10 FIM with nothing to fill; D11 the literal text `<fim_prefix>` in code |
-| Model / training | M1 cross-file use < 8K tokens back (training's `# path` headers, dependencies first); M2 ~24K tokens back (the 32K stage); M3 input > 32,768 tokens (must refuse); M4 dependency order reversed (helper only in the suffix); M5 2-space indentation; M6 tabs; M7 Python 2 input (training saw Python 3 only); M8 non-ASCII identifiers and strings; M9 C++ templates |
-| Software system | S1 missing import (undefined name); S2 return value contradicts `-> str`; S3 wrong answer the prompt's examples catch; S4 C++ compile error; S5 unbalanced brackets in a long expression |
+- **Comparability.** MultiPL-E pass@1 here is greedy, not MultiPL-E's sampled estimate; HumanEval infilling is
+  greedy, not Bavarian et al.'s (temperature 0.2, 100–200 samples). The prompts' examples overlap the scored base tests
+  (MBPP+: 373 of 378 prompt asserts use a base input; HumanEval+: 55 of 164 tasks share a doctest input), so the
+  filtered mode favours base over plus pass@1.
+- **Infilling** (human-eval-infilling, Bavarian et al.): each middle is cut to the reference middle's line count, a
+  single-line middle to its first line (the benchmark's standard post-processing for pass@1: arXiv 2410.03103; arXiv
+  2505.18789 Fig. 4), and decoding stops there; random-span middles end at BOS. Both orders, PSM and SPM, are scored
+  greedy; the filtered mode runs SPM.
+- **Contamination.** The training corpora were not decontaminated against the benchmarks: a benchmark problem in the
+  training data (HumanEval and MBPP are public on GitHub) inflates its score.
 
-**Decoder** (`inference/decoder.py`, `csrc/decode.cu`): batched continuous decoding with one captured CUDA graph per
-step. A `Request` carries the prompt, budget, stop rule, `temperature` (0 = argmax, ties to the lowest id), `seed` (the
-sample at position *i* depends only on seed and *i*, not on slot or batch) and an optional `Constraint` (`mask()` over
-the vocabulary before each token, `push(token)` after). `heal()` and `AllOf()` build constraints; each step takes the
-masks of all syntax-constrained slots in one batched call (`step_masks`); a prompt whose length plus budget exceeds the
-context raises `ValueError`.
+**Decoder** (`inference/decoder.py`, `csrc/decode.cu`): batched continuous decoding of up to 256 slots, each step one
+captured CUDA graph. A slot runs its prompt through the same kernels as its generation (a prompt token per step), so
+prompts and generations share steps; a prompt's K and V are kept in a paged prompt store and a later request with the
+same prompt (each search attempt after the first) starts at its last token. The GEMV runs a one-warp block per 16-row
+weight tile and 16-slot group, weights streamed through a register ring and inputs copied by `cp.async`; every sum's
+order depends on the shapes and the slot's position alone, so a request's tokens do not depend on the batch, the store
+or timing. A `Request` carries the prompt, budget, stop rule, `temperature` (0 = argmax, ties to the lowest id), `seed`
+(the sample at position *i* depends only on seed and *i*) and an optional constraint (`heal()`'s first token, the
+Python syntax constraint, `AllOf()` of both), whose masks each step takes for all constrained slots in one batched call
+(`step_masks`); a prompt whose length plus budget exceeds the context raises `ValueError`.
 
 **Constrained decoding: syntax, not types.** Type-constrained decoding (Mündler et al., PLDI 2025, arXiv 2504.09246)
 cut TypeScript compilation errors by 75.3% (HumanEval) and 52.1% (MBPP). Its artifact
@@ -312,10 +317,12 @@ code; pins `transformers`, needs a Hugging Face tokenizer), llguidance (no INDEN
 C++ is not constrained (its training files were not parse-filtered); it is checked after generation by
 `g++ -std=c++17 -fsyntax-only`, the MultiPL-E judge's compiler.
 
-**Post-generation checks** (`eval/verify.py`): Python — `ast.parse` and a static type checker limited to definite
-failures (undefined names, unknown attributes, call arity and argument types, return type against the annotation);
-C++ — `g++ -fsyntax-only`; both — the prompt's own examples (docstring `>>>` lines, MBPP+ `assert` lines) in a
-subprocess with a timeout, never the hidden tests.
+**Post-generation checks** (`eval/verify.py`): Python — the prompt plus completion parses (a parser overflow counts as
+a failure), the EvalPlus entry function exists and returns a value, and a static type checker limited to definite
+failures (undefined names, unknown attributes, call arity, return type against the annotation); then the prompt's own
+examples (docstring `>>>` lines, MBPP+ `assert` lines) run by value to the last one (an `exit()` fails) in a subprocess
+with a timeout. C++ — `g++ -fsyntax-only` (any error or nonzero exit). The examples are the prompt's, not the scored
+test suite, though they overlap its base tests (Benchmarks).
 
 **Not used:**
 - *Speculative decoding* (e.g. DSpark, arXiv 2607.05147): lossless by construction (greedy outputs identical), so no
@@ -325,13 +332,6 @@ subprocess with a timeout, never the hidden tests.
   2404.19737).
 - *Self-correction prompting*: a base model without instruction tuning; reasoning and repair come with SFT and RL.
 
-**First probe run** (pipeline check, `d8-r20-s0-d0-d69671850bea`, 14.7M scaling parameters, commit `60138de`): 114
-probe × configuration cells, no crashes, 16 pass, 154 s of generation. The context guard refuses M3 in every
-configuration; healing turns D5 (C++ `{`) from a run to the budget into a pass; `system` passes S5 (unbalanced
-brackets) on its 9th candidate where every single-shot configuration runs to the budget; FIM with an empty suffix
-rarely ends by itself (empty suffixes are rare in training: AST middles never end a piece). Pass rates at this scale
-are near zero; the probe set's results are reported on the production model.
-
 ## Appendix ablation
 
 The paired comparison above tests this configuration's regime as a whole against the standard regime, and the d24
@@ -339,9 +339,13 @@ check the production batch and lr. Each decision below was taken without a study
 the pre-launch measurements. The two whose result would change production have a pre-registered ablation,
 `ablations/<file>.py` (method, power, decision criterion and results in `ablations/ablations.md`):
 
-- **The peak lr of DeepSeek LLM's law** (`lr.py`: × 0.5, × 2, at d8 over production's ratio and d24 over 5 tokens per
-  parameter). An lr-vs-horizon fit at affordable d24 horizons extrapolates 38× to production's tokens with an interval
-  too wide to override it.
+- **The peak lr of DeepSeek LLM's law** (`lr.py`: × 1, × 2, × 4 at d24 over 5 tokens per parameter, times the
+  optimum's horizon trend measured at d8, × 1, × 2, × 4 over 5 against × 1 to × 8 over 200, its power-law exponent
+  carried to production's horizon range and corrected for production's larger batch growth by the square-root batch
+  rule). The transfer rules disagree on that trend: over d8's range Complete^(d)P's SDE rule (arXiv 2512.22382)
+  predicts × 0.354, Step-Law (arXiv 2503.04715) × 4.92.
+  The law was fit for AdamW under a multi-step schedule at 7.5× below production's compute; × 2 beat × 1 by 0.018 bits
+  per byte at d8 over 20.
 - **Value embeddings kept** (`value_embeds.py`: none, at d16). They cost 4.7% of the d24 step (measured before
   `60138de`, record not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20.
 
@@ -361,7 +365,8 @@ Each in `ablations/ablations.md` §2:
 - **FlashAttention-4** rather than cuDNN attention: faster forward and backward in every measured window/segment case.
 - **CUDA q/k prologue** rather than Inductor's fusion: 298.2K → 305.8K tok/s.
 - **Value-embedding gate as an fp32 broadcast-sum** rather than fp32 GEMMs: 0.88 vs 1.20 ms per layer, same error.
-- **Inductor coordinate-descent tuning:** Inductor's kernels 533 → 500 ms per d24 step.
+- **No Inductor coordinate-descent tuning:** it chooses kernels by timing, so two processes' compiled losses differ;
+  off, losses are bitwise equal across processes, for 0.8% of the d24 step.
 - **Split q/k/v GEMMs** rather than one fused GEMM: 3,712 vs 3,729 ms per d24 step.
 - **Runs one at a time:** one d8 run saturates the GPU (2.60M tok/s); two concurrent runs total 2.34M, four 2.57M.
 
@@ -372,14 +377,16 @@ Each in `ablations/ablations.md` §2:
 - `nanochat/ops/`, `nanochat/csrc/`: the ops above and the decoder.
 - `nanochat/train/`: `optim.py`, `schedule.py` (plan, lr multiplier), `stages.py` (token budget, rows per stage),
   `checkpoint.py`, `metrics.py`.
-- `nanochat/eval/`: bits and bytes per context bucket and mixture bits per byte (`loss_eval.py`), code benchmarks
-  (`code_eval.py`, `fim_eval.py`), post-generation checks (`verify.py`), the probe set (`probes.py`).
+- `nanochat/train/metrics.py` also holds the evaluation's metrics: bits and bytes per context bucket, mixture bits per
+  byte, reference-solution bits, the evaluation record and the tracked-metrics export.
+- `nanochat/eval/`: the code benchmarks (`code_eval.py`: EvalPlus, MultiPL-E, HumanEval infilling) and the
+  post-generation checks (`verify.py`).
 - `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
 - `nanochat/data/`: the data pipeline, including the Rust tokenizer, repository and packing crate in `bpe/`.
-- `scripts/`: `production.py` (the production run end to end), `base_train.py`, `base_eval.py`, `report.py`.
+- `scripts/`: `production.py` (the production run end to end), `base_train.py`, `base_eval.py`.
 - `runs/`: `setup.sh`, `container.sh`, `h100.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
-- `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`) and their mechanism (`harness.py`, `model.py`),
-  the step profiler (`profile_step.py`) and `ablations.md`.
+- `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`), their mechanism (`harness.py`, `model.py`) and
+  `ablations.md`.
 - `docker/Dockerfile`: the image.

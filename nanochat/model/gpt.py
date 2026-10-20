@@ -18,8 +18,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 
-from nanochat.config import ROPE_BASE, VOCAB_SIZE
+from nanochat.config import ROPE_BASE, VOCAB_SIZE, Stage
 from nanochat.ops.cross_entropy import lm_loss, lm_losses
 from nanochat.ops.flash_attn import flash_attn
 from nanochat.ops.linear import linear, relu2_mlp
@@ -39,7 +40,7 @@ class GPTConfig:
     n_embd: int
 
 
-def gpt_config(*, depth, stage):
+def gpt_config(*, depth: int, stage: Stage) -> GPTConfig:
     """nanochat's shape rule (92d63d4 scripts/base_train.py:51-52, 131-134): width ASPECT_RATIO x depth, rounded up to
     whole 128-dim heads (LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM)."""
     head_dim = 128
@@ -48,41 +49,30 @@ def gpt_config(*, depth, stage):
                      n_head=n_embd // head_dim, n_embd=n_embd)
 
 
-def has_ve(layer_idx, *, n_layer):
+def has_ve(layer_idx: int, *, n_layer: int) -> bool:
     """Alternating layers, the last included (92d63d4 gpt.py:53-55)."""
     return layer_idx % 2 == (n_layer - 1) % 2
 
 
-def layer_windows(config):
+def layer_windows(config: GPTConfig) -> list[int]:
     """Keys before each query, per layer: SSSL tiled, the last layer full (LOG 2026-01-11; 92d63d4 gpt.py:287-314);
     S = 512, the smallest local window Gemma 3 finds near-lossless (arXiv 2503.19786 §5.2, Fig. 4)."""
     pattern = "SSSL"
-    window = {"S": min(512, config.sequence_len), "L": config.sequence_len}
+    window = {"S": 512, "L": config.sequence_len}
     sizes = [window[pattern[i % len(pattern)]] for i in range(config.n_layer)]
     sizes[-1] = config.sequence_len
     return sizes
 
 
-def rotary_tables(config, *, device):
-    """fp32 cos/sin (sequence_len, head_dim/2) of t rope_base^(-2i/head_dim) (92d63d4 gpt.py:270-285), computed in
-    fp64 and rounded once (an fp32 angle errs by up to t 2^-24)."""
-    head_dim = config.n_embd // config.n_head
-    exponent = torch.arange(0, head_dim, 2, dtype=torch.float64, device=device) / head_dim
-    t = torch.arange(config.sequence_len, dtype=torch.float64, device=device)
-    freqs = torch.outer(t, config.rope_base ** -exponent)
-    return freqs.cos().float(), freqs.sin().float()
-
-
-def norm(x):
+def norm(x: Tensor) -> Tensor:
     """RMS norm, statistics in fp32, eps FLT_EPSILON (the convention of csrc/qk_prologue.cu and csrc/decode.cu)."""
     return F.rms_norm(x, (x.size(-1),), eps=torch.finfo(torch.float32).eps)
 
 
 class Attention(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config: GPTConfig, layer_idx: int) -> None:
         super().__init__()
         C, H = config.n_embd, config.n_head
-        self.layer_idx = layer_idx
         self.n_head = H
         self.c_q = nn.Linear(C, C, bias=False)
         self.c_k = nn.Linear(C, C, bias=False)
@@ -92,8 +82,9 @@ class Attention(nn.Module):
         self.k_gain = nn.Parameter(torch.empty(C // H))
         self.ve_gate = nn.Linear(C, H, bias=False) if has_ve(layer_idx, n_layer=config.n_layer) else None
 
-    def forward(self, n, ve, *, cos_sin, window_size, kv_cache, cu_seqlens):
-        """n: normed stream; ve: this layer's value embeddings or None; kv_cache (decoder prefill) receives k and v."""
+    def forward(self, n: Tensor, ve: Tensor | None, *, cos_sin: tuple[Tensor, Tensor], window_size: int,
+                cu_seqlens: Tensor) -> Tensor:
+        """n: normed stream; ve: this layer's value embeddings or None."""
         B, T, C = n.size()
         q, k, v = (linear(n, w).view(B, T, self.n_head, -1) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once. Broadcast-sum gate
@@ -102,33 +93,31 @@ class Attention(nn.Module):
             gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))
             v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
         q, k = qk_norm_rope(q, k, self.q_gain, self.k_gain, *cos_sin)
-        if kv_cache is not None:
-            kv_cache.k_cache[self.layer_idx, :, :T], kv_cache.v_cache[self.layer_idx, :, :T] = k, v
         return linear(flash_attn(q, k, v, window_size, cu_seqlens)[0].view(B, T, C), self.c_o.weight)
 
 
 class MLP(nn.Module):
     """c_proj(relu(c_fc(x))^2); activation and derivative run in QuACK GEMM epilogues (ops/linear.py)."""
 
-    def __init__(self, config):
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         C = config.n_embd
         self.c_fc = nn.Linear(C, 4 * C, bias=False)
         self.c_proj = nn.Linear(4 * C, C, bias=False)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         return relu2_mlp(x, self.c_fc.weight, self.c_proj.weight)[0]
 
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config: GPTConfig, layer_idx: int) -> None:
         super().__init__()
         self.attn = Attention(config, layer_idx)
         self.mlp = MLP(config)
 
 
 class GPT(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: GPTConfig) -> None:
         """Shapes only (meta device); init_weights sets values."""
         super().__init__()
         self.config = config
@@ -146,7 +135,7 @@ class GPT(nn.Module):
             self.register_buffer(name, None, persistent=False)
 
     @torch.no_grad()
-    def init_weights(self, *, seed):
+    def init_weights(self, *, seed: int) -> None:
         """Stream-reading matrices and tables: uniform, std C^-0.5 (LeCun et al., "Efficient BackProp" §4.6).
         Zero: c_o, c_proj, lm_head (blocks start as identity, modded-nanogpt record #5), VE gates (gate 1), x0_lambdas.
         One: resid_lambdas, gains (LOG 2026-01-11). Each random tensor draws from a generator seeded by `seed` and its
@@ -164,17 +153,24 @@ class GPT(nn.Module):
                            generator=torch.Generator(t.device).manual_seed(seed * 2**32 + zlib.crc32(name.encode())))
         self.init_buffers()
 
-    def init_buffers(self):
-        """Non-checkpointed buffers: the rotary tables."""
-        self.cos, self.sin = rotary_tables(self.config, device=self.wte.weight.device)
+    def init_buffers(self) -> None:
+        """Non-checkpointed buffers: the fp32 rotary tables cos/sin (sequence_len, head_dim/2) of
+        t rope_base^(-2i/head_dim) (92d63d4 gpt.py:270-285), computed in fp64 and rounded once (an fp32 angle errs by
+        up to t 2^-24)."""
+        config, device = self.config, self.wte.weight.device
+        head_dim = config.n_embd // config.n_head
+        exponent = torch.arange(0, head_dim, 2, dtype=torch.float64, device=device) / head_dim
+        t = torch.arange(config.sequence_len, dtype=torch.float64, device=device)
+        freqs = torch.outer(t, config.rope_base ** -exponent)
+        self.cos, self.sin = freqs.cos().float(), freqs.sin().float()
 
-    def set_stage(self, stage):
+    def set_stage(self, stage: Stage) -> None:
         """Switch to a stage's context: recompute windows and rotary tables; weights unchanged."""
         self.config.sequence_len = stage.seq_len
         self.window_sizes = layer_windows(self.config)
         self.init_buffers()
 
-    def hidden(self, idx, cu_seqlens, kv_cache):
+    def hidden(self, idx: Tensor, cu_seqlens: Tensor) -> Tensor:
         """Final normed hidden states (B*T, C) of idx (B, T); cu_seqlens: int32 document bounds in flattened idx."""
         x = norm(F.embedding(idx, self.wte.weight).to(torch.bfloat16))
         x0 = x
@@ -184,29 +180,25 @@ class GPT(nn.Module):
             ve = (F.embedding(idx, self.value_embeds[str(i)].weight).to(torch.bfloat16) if str(i) in self.value_embeds
                   else None)
             x = x + block.attn(norm(x), ve, cos_sin=(self.cos, self.sin), window_size=self.window_sizes[i],
-                               kv_cache=kv_cache, cu_seqlens=cu_seqlens)
+                               cu_seqlens=cu_seqlens)
             x = x + block.mlp(norm(x))
         return norm(x).flatten(0, 1)
 
-    def forward(self, idx, targets, cu_seqlens):
+    def forward(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor) -> Tensor:
         """Mean next-token loss over the non-padding targets, fp32."""
-        return lm_loss(self.hidden(idx, cu_seqlens, None), self.lm_head.weight, targets.flatten())[0]
+        return lm_loss(self.hidden(idx, cu_seqlens), self.lm_head.weight, targets.flatten())[0]
 
-    def losses(self, idx, targets, cu_seqlens):
+    def losses(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor) -> Tensor:
         """Per-position next-token loss (B*T,) fp32, 0 at padding targets."""
-        return lm_losses(self.hidden(idx, cu_seqlens, None), self.lm_head.weight, targets.flatten())
-
-    def prefill(self, idx, kv_cache):
-        """Fill kv_cache with the keys and values of one prompt idx (1, T)."""
-        self.hidden(idx, torch.tensor([0, idx.size(1)], dtype=torch.int32, device=idx.device), kv_cache)
+        return lm_losses(self.hidden(idx, cu_seqlens), self.lm_head.weight, targets.flatten())
 
 
-def scaling_params(model):
+def scaling_params(model: GPT) -> int:
     """Block parameters + lm_head: what the token budget scales with (92d63d4 scripts/base_train.py:263-267)."""
     return sum(p.numel() for p in model.blocks.parameters()) + model.lm_head.weight.numel()
 
 
-def non_embedding_flops_per_token(model):
+def non_embedding_flops_per_token(model: GPT) -> int:
     """DeepSeek LLM's M (arXiv 2401.02954 §3.1 Eq. 2): 6 per block matrix weight + 12 C l_seq per layer, l_seq the
     layer's window (92d63d4 gpt.py:319-339)."""
     matrices = sum(p.numel() for p in model.blocks.parameters() if p.ndim == 2)

@@ -1,11 +1,16 @@
 """
-Post-generation checks of a program and the resampling search that uses them (the "system" generation mode,
-eval/code_eval.py and eval/fim_eval.py):
+Post-generation checks of a program and the resampling search that uses them (the "filtered" generation mode,
+eval/code_eval.py: filtered pass@1, one candidate selected by these checks among at most ATTEMPTS samples, Codex's
+"filtered pass@k"):
 - python_diagnostics: Python 3 syntax errors (ast.parse), else the errors of a static type checker (basedpyright,
   pyproject.toml) limited to rules whose findings are definite runtime failures or contradict an annotation;
-- cpp_diagnostics: the errors of `g++ -std=c++17 -fsyntax-only`, the MultiPL-E judge's compiler and standard
-  (evaluation/src/eval_cpp.py) without code generation;
-- examples_pass: the prompt's own examples, never a benchmark's hidden tests;
+- solution_diagnostics: the certain failures an EvalPlus solution hides (sanitize keeps a parseable span): the
+  generated text's syntax error, an entry function without a returned value;
+- cpp_diagnostics: g++ -std=c++17 -fsyntax-only's failure (its error lines), the MultiPL-E judge's compiler and
+  standard (evaluation/src/eval_cpp.py) without code generation;
+- examples_pass: the prompt's own examples. Selection reads only the prompt, but the prompts' examples overlap the
+  scored base tests (MBPP+: 373 of 378 prompt asserts use a base input; HumanEval+: 55 of 164 tasks share a doctest
+  input with the base tests), so it favours base over plus pass@1;
 - search: per task a greedy candidate, then seeded samples, until one has no diagnostics and passes its prompt's
   examples (Codex, Chen et al., arXiv 2107.03374 §3.5: "evaluating the first sample which passes the 3 public unit
   tests"; AlphaCode's filtering by the problem's example tests, Li et al., arXiv 2203.07814 §4.5).
@@ -28,16 +33,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from nanochat.inference.decoder import Constraint, NativeDecoder, Request
-from nanochat.inference.syntax_constraint import python_syntax
+from nanochat.inference.decoder import NativeDecoder, Request
+from nanochat.inference.syntax_constraint import syntax_error
 
 # basedpyright rules (docs/configuration/config-files.md) whose errors on known types are runtime failures or
 # annotation contradictions: undefined variables (NameError), attribute accesses (AttributeError), call expressions and
-# their arguments (arity and keyword TypeErrors), argument types against parameter annotations, return types against
-# the declared return annotation. Every other rule is off (typeCheckingMode "off"): style, unknown types and
-# possibly-unbound or optional-member findings that a correct program may legitimately trigger.
-PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue", "reportArgumentType",
-                 "reportReturnType")
+# their arguments (arity and keyword TypeErrors), return types against the declared return annotation. Every other rule
+# is off (typeCheckingMode "off"): style, unknown types, possibly-unbound or optional-member findings that a correct
+# program may legitimately trigger, and argument types (reportArgumentType), which pyright also judges against types it
+# inferred itself (it rejects the canonical solutions of HumanEval/126 and /130).
+PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue", "reportReturnType")
 # the MultiPL-E judge's per-step timeout (safe_subprocess/__init__.py:33, eval_cpp.py: 15 s compile, 15 s run)
 CPP_TIMEOUT = 15
 # HumanEval's execution timeout (human_eval/execution.py check_correctness timeout=3.0; Codex §3.5: 3 seconds)
@@ -50,7 +55,8 @@ TEMPERATURE = 0.8
 ATTEMPTS = 10
 # examples_pass's child process: runs the program as a module named "program", then each example (stdin JSON source/want
 # pairs) in a copy of its namespace plus the modules the example names but the program does not bind (MBPP+ prompt
-# asserts call math.isclose, imported by the original MBPP's test_imports); a failing example raises (exit status 1).
+# asserts call math.isclose, imported by the original MBPP's test_imports); a failing example raises (exit status 1);
+# EXAMPLES_DONE, printed after the last example, marks a run that was not ended early (exit(), sys.exit()).
 # Values, not doctest's output text: HumanEval writes some wants in an equal but differently printed form ("21" for
 # '21', a list split over lines; HumanEval/65, /113) and some examples as bare comparisons without output (/108, /145):
 # an example with a want passes iff its value equals the want's; one without, iff an expression's value is None or
@@ -72,6 +78,7 @@ for source, want in data["examples"]:
         assert value is None or value is True
     else:
         exec(source, scope)
+print("EXAMPLES_DONE")
 """
 
 
@@ -83,17 +90,12 @@ def python_diagnostics(programs: list[str]) -> list[list[str]]:
     out, paths = [], {}
     with tempfile.TemporaryDirectory() as tmp:
         for i, program in enumerate(programs):
-            try:
-                ast.parse(program)
-            except SyntaxError as e:
-                out.append([f"{e.lineno}:{e.offset}: SyntaxError: {e.msg}"])
+            out.append(syntax_error(program))
+            if out[-1]:
                 continue
-            out.append([])
             paths[i] = Path(tmp, str(i), "program.py")
             paths[i].parent.mkdir()
             paths[i].write_text(program, encoding="utf-8")
-        if not paths:
-            return out
         config = Path(tmp, "pyrightconfig.json")
         config.write_text(json.dumps({"typeCheckingMode": "off", **dict.fromkeys(PYRIGHT_RULES, "error")}),
                           encoding="utf-8")
@@ -108,9 +110,33 @@ def python_diagnostics(programs: list[str]) -> list[list[str]]:
     return out
 
 
+def solution_diagnostics(source: str, solution: str, entry: str) -> list[str]:
+    """The certain failures of an EvalPlus solution (sanitize of source, prompt + completion, to the entry function and
+    its dependencies) that its own checks miss, sanitize having kept a parseable span: source's syntax error, and the
+    entry function (its last top-level definition) missing or without a `return <value>` in its own body (nested
+    functions and classes excluded): its every call returns None; a solution that does not parse, its syntax error."""
+    found = syntax_error(source)
+    unparsed = syntax_error(solution)
+    if unparsed:
+        return [*found, *unparsed]
+    functions = [n for n in ast.parse(solution).body
+                 if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef) and n.name == entry]
+    if not functions:
+        return [*found, f"{entry}: not defined"]
+    stack = list(functions[-1].body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Return) and node.value is not None:
+            return found
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            stack.extend(ast.iter_child_nodes(node))
+    return [*found, f"{entry}: returns no value"]
+
+
 def cpp_diagnostics(program: str) -> list[str]:
-    """The error lines of `g++ -std=c++17 -fsyntax-only` on the program ("program.cpp:line:col: error: ...";
-    ["timeout"] past CPP_TIMEOUT)."""
+    """`g++ -std=c++17 -fsyntax-only`'s failure on the program: [] if it compiles, else its error lines
+    ("program.cpp:line:col: error: ..." or "... fatal error: ...") or, without one, its last stderr line; ["timeout"]
+    past CPP_TIMEOUT."""
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, "program.cpp").write_text(program, encoding="utf-8")
         try:
@@ -118,16 +144,10 @@ def cpp_diagnostics(program: str) -> list[str]:
                                     capture_output=True, text=True, timeout=CPP_TIMEOUT)
         except subprocess.TimeoutExpired:
             return ["timeout"]
-    return [line for line in result.stderr.splitlines() if ": error: " in line]
-
-
-def parses(source: str) -> bool:
-    """Whether source is Python 3 syntax."""
-    try:
-        ast.parse(source)
-    except SyntaxError:
-        return False
-    return True
+    if result.returncode == 0:
+        return []
+    lines = result.stderr.splitlines()
+    return [line for line in lines if ": error: " in line or ": fatal error: " in line] or lines[-1:]
 
 
 def examples(prompt: str) -> list[tuple[str, str]]:
@@ -146,14 +166,14 @@ def examples(prompt: str) -> list[tuple[str, str]]:
                 with contextlib.suppress(ValueError):
                     found += [(e.source, e.want) for e in doctest.DocTestParser().get_examples(text)]
                 found += [(line.strip(), "") for line in text.splitlines()
-                          if line.lstrip().startswith("assert ") and parses(line.strip())]
+                          if line.lstrip().startswith("assert ") and not syntax_error(line.strip())]
     return found
 
 
-def examples_pass(prompt: str, program: str, *, language: Literal["python", "cpp"]) -> bool:
-    """Whether the program passes the prompt's examples (RUN_EXAMPLES: by value), run in a fresh isolated interpreter
-    in an empty directory within EXAMPLES_TIMEOUT. True without examples; C++ prompts have none here."""
-    found = examples(prompt) if language == "python" else []
+def examples_pass(prompt: str, program: str) -> bool:
+    """Whether the Python program passes the prompt's examples (RUN_EXAMPLES: by value, to the end), run in a fresh
+    isolated interpreter in an empty directory within EXAMPLES_TIMEOUT. True without examples."""
+    found = examples(prompt)
     if not found:
         return True
     data = json.dumps({"program": program, "examples": found})
@@ -163,32 +183,28 @@ def examples_pass(prompt: str, program: str, *, language: Literal["python", "cpp
                                     capture_output=True, text=True, timeout=EXAMPLES_TIMEOUT)
         except subprocess.TimeoutExpired:
             return False
-    return result.returncode == 0
+    return result.returncode == 0 and result.stdout.endswith("EXAMPLES_DONE\n")
 
 
-def verdicts(checks: list[tuple[str, str]], *, language: Literal["python", "cpp"]) -> list[tuple[list[str], bool]]:
-    """Each (prompt, program)'s (diagnostics, whether it passes the prompt's examples), the examples run only without
-    diagnostics: search's check of its candidates. Python's diagnostics come from one python_diagnostics call, C++'s
-    and the examples from a thread pool (each a child process)."""
+def verdicts(checks: list[tuple[str, str, list[str]]], *,
+             language: Literal["python", "cpp"]) -> list[tuple[list[str], bool]]:
+    """Each (prompt, program, diagnostics found already)'s (all its diagnostics, whether the program passes the prompt's
+    examples), the examples run only without diagnostics (C++ prompts have none here): search's check of its
+    candidates. Python's diagnostics come from one python_diagnostics call, C++'s and the examples from a thread pool
+    (each a child process)."""
+    programs = [program for _, program, _ in checks]
     with ThreadPoolExecutor(os.cpu_count()) as pool:
-        if language == "python":
-            diagnostics = python_diagnostics([program for _, program in checks])
-        else:
-            diagnostics = list(pool.map(cpp_diagnostics, [program for _, program in checks]))
-        passed = list(pool.map(lambda c, d: not d and examples_pass(*c, language=language), checks, diagnostics))
+        found = python_diagnostics(programs) if language == "python" else list(pool.map(cpp_diagnostics, programs))
+        diagnostics = [known + d for (_, _, known), d in zip(checks, found, strict=True)]
+        passed = list(pool.map(lambda c, d: not d and (language == "cpp" or examples_pass(*c[:2])), checks,
+                               diagnostics))
     return list(zip(diagnostics, passed, strict=True))
-
-
-def syntax_constraint(prefix: str, *, suffix: str = "") -> Constraint:
-    """The complete Python 3 syntax constraint of a generation after prefix (and before suffix, FIM), of the process's
-    PythonSyntax (python_syntax); the decoder computes the masks of all its slots' syntax constraints in one batch."""
-    return python_syntax().constraint(prefix, suffix=suffix)
 
 
 @dataclass(frozen=True, kw_only=True)
 class Candidate:
-    """A generated candidate: attempt 0 is greedy, attempt a > 0 a sample with seed a at TEMPERATURE."""
-    attempt: int
+    """A generated candidate: a task's candidates[0] is greedy, candidates[a] for a > 0 a sample with seed a at
+    TEMPERATURE."""
     ids: list[int]
     diagnostics: list[str]
     examples: bool  # the prompt's examples pass (checked only without diagnostics)
@@ -199,23 +215,25 @@ class Candidate:
 
 
 def search(decoder: NativeDecoder, request: Callable[[int], Request],
-           program: Callable[[int, list[int]], tuple[str, str]], *, language: Literal["python", "cpp"],
+           check: Callable[[int, list[int]], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
            count: int) -> list[list[Candidate]]:
     """The candidates of tasks 0..count-1 in attempt order: request(i) is task i's greedy request (a fresh constraint
-    each call), program(i, ids) the (prompt, program) that verdicts checks for generated ids. Each round decodes every
+    each call), check(i, ids) the (prompt, program, diagnostics) that verdicts checks for generated ids. Each round decodes every
     task without an accepted candidate yet (attempt a: request(i) at temperature 0 for a = 0, TEMPERATURE with seed a
-    after), at most ATTEMPTS rounds, then checks the round's candidates at once (verdicts)."""
+    after), at most ATTEMPTS rounds, each candidate's check built by a thread as it completes (while the decoder runs
+    the round's others), then checks the round's candidates at once (verdicts)."""
     tried = [[] for _ in range(count)]
     pending = list(range(count))
-    for attempt in range(ATTEMPTS):
-        sampling = {"temperature": 0.0 if attempt == 0 else TEMPERATURE, "seed": attempt}
-        generated = {}
-        for k, ids in decoder.run(dataclasses.replace(request(i), **sampling) for i in pending):
-            generated[pending[k]] = ids
-        checks = verdicts([program(i, generated[i]) for i in pending], language=language)
-        for i, (diagnostics, passed) in zip(pending, checks, strict=True):
-            tried[i].append(Candidate(attempt=attempt, ids=generated[i], diagnostics=diagnostics, examples=passed))
-        pending = [i for i in pending if not tried[i][-1].accepted]
+    with ThreadPoolExecutor(os.cpu_count()) as pool:
+        for attempt in range(ATTEMPTS):
+            sampling = {"temperature": 0.0 if attempt == 0 else TEMPERATURE, "seed": attempt}
+            generated, checks = {}, {}
+            for k, ids in decoder.run(dataclasses.replace(request(i), **sampling) for i in pending):
+                generated[pending[k]], checks[pending[k]] = ids, pool.submit(check, pending[k], ids)
+            results = verdicts([checks[i].result() for i in pending], language=language)
+            for i, (diagnostics, passed) in zip(pending, results, strict=True):
+                tried[i].append(Candidate(ids=generated[i], diagnostics=diagnostics, examples=passed))
+            pending = [i for i in pending if not tried[i][-1].accepted]
     return tried
 
 

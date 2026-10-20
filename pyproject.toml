@@ -28,16 +28,12 @@ dependencies = [
     "nvidia-cutlass-dsl[cu13]",
     "numpy",
     "obstore",
-    # the reports' tables: results as DataFrames and Markdown (scripts/report.py, ablations/harness.py)
-    "pandas",
     # 25.0.1: ParquetFile pre-buffers (coalesces) reads by default; 25.0.0 returns wrong doubles on Arm CPUs with SVE
     "pyarrow>=25.0.1",
     # QuACK's CuTe DSL kernels, from github.com/Dao-AILab/quack (tool.uv.sources)
     "quack-kernels",
     # the LSH band count's integrals (nanochat/data/dedup.py rows); the ablations' t-tests (ablations/harness.py)
     "scipy",
-    # pandas' DataFrame.to_markdown
-    "tabulate",
     # OpenAI's encoder of the trained vocabulary (nanochat/data/tokenizer.py); the SA-BPE trainer is the crate nanochat/data/bpe
     "tiktoken",
     "torch",
