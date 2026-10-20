@@ -98,12 +98,10 @@ measured 3,729 ms and was not adopted.
   to a temporary file and renamed, so a kill mid-save leaves the previous one.
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
-- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seeds plus a hash of those and the git
-  object ids of the code its result depends on (`config.CODE`: `nanochat/`, `scripts/`, `docker/`, `pyproject.toml`,
-  `uv.lock`, `runs/container.sh`); uncommitted changes there refuse to run. The data is the dataset revision
-  `config.DATASET_REVISION` (`runs/setup.sh` downloads it), so it is part of the hash too. A run never resumes,
-  appends to or counts the artifacts of other code or another configuration. `runs/h100.sh` also logs the commit and
-  the image id at launch.
+- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seeds plus a hash of those and its variant
+  (an ablation run's fields), so runs of different settings never share artifacts. Each run's metrics record its full
+  configuration (model, plan, seeds, lr, weight decay, clip threshold) and the dataset revision
+  `config.DATASET_REVISION` (`python -m nanochat.paths` downloads it).
 - **Data order.** Each corpus's rows are permuted once by the data seed (NumPy `RandomState`).
 
 ## Reproducing the run
@@ -112,7 +110,7 @@ On a fresh Lambda `gpu_1x_h100_sxm5` (Ubuntu with Docker and the NVIDIA driver):
 
 ```bash
 git clone https://github.com/indrajeetadityaroy9/nanochat nanochat && cd nanochat
-HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts/, tokenizer + data
+HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts/, tokenizer + data (nanochat/paths.py)
 # log in again (docker group), then from the checkout:
 tmux new -d -s h100 runs/h100.sh
 ```
@@ -120,18 +118,19 @@ tmux new -d -s h100 runs/h100.sh
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
 `runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/` (`<tag>.pt`, the resume checkpoint, and
 `<tag>-step<NNNNNN>.pt`, the model-only snapshots), `metrics/<tag>.jsonl`, `base_eval/` and `probes/`
-(`<tag>[-step<NNNNNN>].json`), `logs/` (`<script>-<tag>.log`) and `cache/`, plus `evals/<tag>.json`, the pre-launch
-runs' loss evaluations; `results/` (tracked) holds the tables.
+(`<tag>[-step<NNNNNN>].json`), `logs/` (`production-<tag>.log`, `<tag>.log` per ablation run) and `cache/`, plus
+`evals/<tag>.json`, the pre-launch runs' loss evaluations; `results/` (tracked) holds the data the paper's tables and
+figures are drawn from.
 
-`runs/h100.sh` derives the ratio and the tag (`d24-r490.805-s0-d0-<hash>`), trains both stages with a checkpoint every
-1% of the steps and a model-only snapshot (weights, no optimizer state, ~2.1 GB) every 10% and at the repository
-stage's start, then runs `scripts/base_eval.py` (greedy and system decoding), the probe set
-(`nanochat/eval/probes.py`) and writes `results/<tag>.md` (`scripts/report.py`). Rerunning it on the
-same code continues a stopped run. `runs/curves.sh <tag>` then evaluates every snapshot the same way (`--step`) and
-tables them with the final model in `results/<tag>-curves.md`: when pass@1 and each probe's robustness emerge.
-`base_eval` reports validation bits per byte per corpus at 8K and at 32K per context bucket (≤8K, >8K), the mixture
-bits per byte per group (`loss_eval.mixture_bpb`), reference-solution bits per byte, and EvalPlus HumanEval+/MBPP+,
-MultiPL-E C++ and HumanEval infilling, each generated and scored by its official tools.
+`runs/h100.sh` runs `scripts/production.py`: it derives the ratio and the tag (`d24-r490.805-s0-d0-<hash>`), trains both
+stages with a checkpoint every 1% of the steps and a model-only snapshot (weights, no optimizer state, ~2.1 GB) every
+10% and at the repository stage's start, then evaluates the final model and every snapshot with `scripts/base_eval.py`
+(greedy and system decoding) and the probe set (`nanochat/eval/probes.py`): when pass@1 and each probe's robustness
+emerge. `scripts/report.py` then writes the run's tracked metrics: `results/<tag>.jsonl` (its records, every
+evaluation and probe result) and `results/<tag>-curves.jsonl` (its per-step records). Rerunning continues a stopped
+run and skips evaluations already written. `base_eval` reports validation bits and bytes per corpus at 8K and at 32K
+per context bucket (≤8K, >8K), reference-solution bits and bytes, and EvalPlus HumanEval+/MBPP+, MultiPL-E C++ and
+HumanEval infilling, each generated and scored by its official tools.
 
 **Expected cost:** 76,743 file-level steps at 3.709 s and 4,428 repository-stage steps at 4.016 s, about 84 h, about
 $360 at $4.29/h.
@@ -378,9 +377,9 @@ Each in `ablations/ablations.md` §2:
 - `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
 - `nanochat/data/`: the data pipeline, including the Rust tokenizer, repository and packing crate in `bpe/`.
-- `scripts/`: `base_train.py`, `base_eval.py`, `report.py`.
-- `runs/`: `setup.sh`, `container.sh`, `h100.sh`, `curves.sh`, `release.sh`.
-- `results/`: the tables the paper reports.
+- `scripts/`: `production.py` (the production run end to end), `base_train.py`, `base_eval.py`, `report.py`.
+- `runs/`: `setup.sh`, `container.sh`, `h100.sh`, `release.sh`.
+- `results/`: the data the paper's tables and figures are drawn from.
 - `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`) and their mechanism (`harness.py`, `model.py`),
   the step profiler (`profile_step.py`) and `ablations.md`.
 - `docker/Dockerfile`: the image.

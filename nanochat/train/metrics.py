@@ -53,6 +53,14 @@ def train_steps(tag: str) -> dict[int, dict]:
     return {r["step"]: r for r in records(tag) if r["kind"] == "train"}
 
 
+def curves(tag: str) -> dict[str, list]:
+    """train_steps as columns, one per train record field (step, tokens, loss, lr, grad_norm, tok_per_s, attempt,
+    time), in step order."""
+    by_step = train_steps(tag)
+    steps = [by_step[s] for s in sorted(by_step)]
+    return {k: [s[k] for s in steps] for k in (steps[0] if steps else {}) if k not in ("schema", "tag", "kind")}
+
+
 def latest(tag: str, kind: str) -> dict:
     """The last record of a kind."""
     return [r for r in records(tag) if r["kind"] == kind][-1]

@@ -1,83 +1,39 @@
 """
-base_eval results (BASE_EVAL/<tag>.json) side by side as Markdown tables written to RESULTS/<name>.md: val bits per byte
-per corpus and per mixture group (eval/loss_eval.py mixture_bpb) at 8K, per corpus and context bucket at 32K, reference
-solutions, pass@1 of the generation and infilling benchmarks by generation mode (greedy, system) and the system
-mode's search statistics. RESULTS holds the tables the paper reports.
+Every tracked metric of a base_train run as JSON lines in RESULTS, the data the paper's tables and figures are drawn
+from: RESULTS/<tag>.jsonl, one record: the run's train/metrics.py records but the per-step ones (run, stage, end,
+failure), the evaluations of its final model and of its model-only snapshots verbatim (BASE_EVAL/<tag>[-step<NNNNNN>]
+.json, scripts/base_eval.py: val bits and bytes per corpus and context bucket, reference-solution bits, greedy and
+system decoding's per-task results) and its probe results (PROBES/<tag>[-step<NNNNNN>].json, eval/probes.py), each
+list in step order; RESULTS/<tag>-curves.jsonl, its per-step train records as columns (train/metrics.py curves).
+Aggregates (bits per byte, pass@1 tables) are drawn from these downstream.
 
-    python -m scripts.report --name=<name> <tag> [<tag> ...]   (a tag: base_eval's run name, <tag>[-step<step>])
+    python -m scripts.report <tag>    (scripts/production.py, after the run's and its snapshots' evaluations)
 """
-import argparse
 import json
+import sys
+from pathlib import Path
 
-import pandas as pd
-
-from nanochat.eval.loss_eval import CONTEXTS, bpb
-from nanochat.paths import BASE_EVAL, RESULTS
-
-
-def table(frame: pd.DataFrame, *, title: str, floatfmt: str = "g") -> str:
-    """A titled Markdown table."""
-    return f"### {title}\n\n{frame.to_markdown(floatfmt=floatfmt)}\n"
+from nanochat.paths import BASE_EVAL, PROBES, RESULTS
+from nanochat.train.metrics import curves, records
 
 
-def tag_table(title: str, rows: dict[str, dict[str, float]]) -> str:
-    """table of {row label: {tag: value}}, one column per tag."""
-    return table(pd.DataFrame(rows).T, title=title)
+def outputs(directory: Path, tag: str) -> list[dict]:
+    """The JSON results of a run's final model and snapshots in `directory`, in step order."""
+    paths = [p for p in (directory / f"{tag}.json", *directory.glob(f"{tag}-step*.json")) if p.exists()]
+    return sorted((json.loads(p.read_text(encoding="utf-8")) for p in paths), key=lambda r: r["step"])
 
 
-def search_rows(bench: str, modes: dict) -> dict[str, float]:
-    """A benchmark's generation-mode statistics (eval/code_eval.py checked, searched): the shares of tasks whose greedy
-    completion has diagnostics (code benchmarks), whose system candidate 0 (healed, syntax-constrained greedy) has
-    them, whose search accepted a candidate, whose chosen candidate has diagnostics; the mean attempts."""
-    system, n = modes["system"], len(modes["system"]["attempts"])
-    rows = {}
-    if "diagnostics" in modes["greedy"]:
-        rows["greedy with diagnostics"] = sum(d > 0 for d in modes["greedy"]["diagnostics"]) / n
-    rows["system candidate 0 with diagnostics"] = sum(d[0] > 0 for d in system["diagnostics"]) / n
-    rows["system accepted"] = sum(system["accepted"]) / n
-    # verify.chosen: the accepted candidate (no diagnostics), else candidate 0
-    rows["system chosen with diagnostics"] = sum(not a and d[0] > 0 for a, d in
-                                                 zip(system["accepted"], system["diagnostics"], strict=True)) / n
-    rows["system mean attempts"] = sum(system["attempts"]) / n
-    return {f"{bench}: {label}": value for label, value in rows.items()}
+def record(tag: str) -> dict:
+    """A run's tracked metrics but the per-step ones."""
+    return {"tag": tag, "records": [r for r in records(tag) if r["kind"] != "train"],
+            "evaluations": outputs(BASE_EVAL, tag), "probes": outputs(PROBES, tag)}
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--name", required=True, help="writes RESULTS/<name>.md")
-    parser.add_argument("tags", nargs="+")
-    args = parser.parse_args()
-    results = {}
-    for tag in args.tags:
-        results[tag] = json.loads((BASE_EVAL / f"{tag}.json").read_text(encoding="utf-8"))
-    first = results[args.tags[0]]
-    val = {c: {t: bpb(r["8k"]["corpora"][c]) for t, r in results.items()} for c in first["8k"]["corpora"]}
-    val |= {f"mixture: {g}": {t: r["8k"]["bpb"][g] for t, r in results.items()} for g in first["8k"]["bpb"]}
-    tables = [tag_table("Validation bits per byte (8K rows)", val)]
-    if first["32k"] is not None:
-        edges = (0, *CONTEXTS, "")
-        long = {f"{c}, context {edges[i] + 1}-{edges[i + 1]}": {
-            t: r["32k"]["corpora"][c]["bits"][i] / r["32k"]["corpora"][c]["bytes"][i] for t, r in results.items()}
-            for c in first["32k"]["corpora"] for i in range(len(CONTEXTS) + 1)}
-        long |= {f"mixture: {g}": {t: r["32k"]["bpb"][g] for t, r in results.items()} for g in first["32k"]["bpb"]}
-        tables.append(tag_table("Validation bits per byte (32K rows)", long))
-    solution = {b: {t: bpb(r["solution"][b]) for t, r in results.items()} for b in first["solution"]}
-    tables.append(tag_table("Reference-solution bits per byte", solution))
-    passes = {f"{bench} {key} ({mode})": {t: r["codegen"][bench][mode][key] for t, r in results.items()}
-              for bench, modes in first["codegen"].items() for mode, scores in modes.items() for key in scores
-              if key.endswith("pass@1")}
-    passes |= {f"{name} pass@1 ({mode})": {t: r["fim"][name][mode]["pass@1"] for t, r in results.items()}
-               for name, modes in first["fim"].items() for mode in modes}
-    tables.append(tag_table("pass@1 (greedy: plain greedy decoding; system: eval/verify.py search)", passes))
-    stats = {}
-    for t, r in results.items():
-        # FIM's system mode runs in SPM order only (eval/fim_eval.py SYSTEM_MODE)
-        for bench, modes in (*r["codegen"].items(), *((b, m) for b, m in r["fim"].items() if "system" in m)):
-            for label, value in search_rows(bench, modes).items():
-                stats.setdefault(label, {})[t] = value
-    tables.append(tag_table("Generation modes: shares of tasks with diagnostics, accepted, mean attempts", stats))
-    runs = "Runs (steps): " + ", ".join(f"`{t}` ({r['step']})" for t, r in results.items()) + "\n"
-    (RESULTS / f"{args.name}.md").write_text("\n".join([runs, *tables]), encoding="utf-8")
+    tag = sys.argv[1]
+    (RESULTS / f"{tag}.jsonl").write_text(json.dumps(record(tag), allow_nan=False) + "\n", encoding="utf-8")
+    (RESULTS / f"{tag}-curves.jsonl").write_text(json.dumps({"tag": tag} | curves(tag), allow_nan=False) + "\n",
+                                                 encoding="utf-8")
 
 
 if __name__ == "__main__":

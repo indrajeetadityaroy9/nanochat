@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.config import CODE, FILE_STAGE, REPO_STAGE, run_tag
+from nanochat.config import DATASET_REVISION, FILE_STAGE, REPO_STAGE, run_tag
 from nanochat.data.loader import PretrainingBatches, mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config, non_embedding_flops_per_token
@@ -120,7 +120,7 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, variant: dict, seed:
                          "model": asdict(model.config), "variant": variant,
                          "params": sum(p.numel() for p in params),
                          "flops_per_token": non_embedding_flops_per_token(model),
-                         "max_norm": MAX_NORM,
+                         "max_norm": MAX_NORM, "dataset_revision": DATASET_REVISION,
                          "lr": group["initial_lr"], "weight_decay": group["weight_decay"],
                          "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
 
@@ -195,7 +195,7 @@ def main():
           variant={},
           seed=args.seed, data_seed=args.seed, save_every=args.save_every, snapshot_every=args.snapshot_every,
           tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
-                      variant={}, code=CODE))
+                      variant={}))
 
 
 if __name__ == "__main__":

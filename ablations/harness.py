@@ -13,11 +13,10 @@ train/metrics.py failure record: a non-finite loss or gradient norm, an outcome 
 al., arXiv 2309.14322); any other failure stops the experiment, and a stopped run resumes from its repo_start checkpoint
 or restarts (train/metrics.py attempts keep both traceable). Then each alternative is compared with production over
 the evaluated runs; the experiment writes every tracked metric of every run, RESULTS/<experiment>.jsonl (a record per
-run: setting, fields, its train/metrics.py records but the per-step ones, its scripts/base_eval.py evaluation, the
-compared measures, efficiency, the step it diverged at) and RESULTS/<experiment>-curves.jsonl (per run, its per-step
-train records as columns), and RESULTS/<experiment>.json (per setting, each alternative's fields, its evaluated runs
-and, per measure, its difference from production, p and confidence interval; null where one run per arm leaves them
-undefined), for the decisions and figures ablations.md fixes.
+run: scripts/report.py's record, setting, fields, the compared measures, efficiency, the step it diverged at) and
+RESULTS/<experiment>-curves.jsonl (per run, train/metrics.py curves), and RESULTS/<experiment>.json (per setting,
+each alternative's fields, its evaluated runs and, per measure, its difference from production, p and confidence
+interval; null where one run per arm leaves them undefined), for the decisions and figures ablations.md fixes.
 
     python -m ablations.<experiment>       (every missing run, each in a child process, then the comparison)
     python -m ablations.harness '<fields>'  (one run: harness.Run's fields as JSON)
@@ -35,26 +34,25 @@ import torch
 from scipy.stats import ttest_ind
 
 from ablations.model import Candidate
-from nanochat.config import CODE, FILE_STAGE, REPO_STAGE, run_tag
+from nanochat.config import FILE_STAGE, REPO_STAGE, run_tag
 from nanochat.data.loader import mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.eval.code_eval import tasks
 from nanochat.eval.loss_eval import bpb, mixture_bpb
 from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import BASE_EVAL, LOGS, METRICS, RESULTS
-from nanochat.train.metrics import latest, records, train_steps
+from nanochat.train.metrics import curves, latest, records, train_steps
 from nanochat.train.optim import tau_weight_decay
 from nanochat.train.schedule import RunPlan, plan
 from scripts.base_eval import loss_evaluation, save
 from scripts.base_train import train
+from scripts.report import record
 
 # The conventional significance level (Fisher, Statistical Methods for Research Workers, 1925, §20): the confidence
 # intervals' 1 - ALPHA
 ALPHA = 0.05
 # Version of RESULTS/<experiment>.jsonl's records
 SCHEMA = 1
-# The code a run's result depends on: production's (config.CODE) and this mechanism
-RUN_CODE = (*CODE, "ablations/harness.py", "ablations/model.py")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -79,17 +77,17 @@ def model_of(run: Run) -> Candidate:
         return Candidate(gpt_config(depth=run.n_layer, stage=FILE_STAGE), value_embeds=run.value_embeds)
 
 
-
 def plan_of(run: Run) -> RunPlan:
     """The production model's plan at the run's depth and ratio (schedule.plan), at the run's peak lr."""
     with torch.device("meta"):
         production_plan = plan(model=GPT(gpt_config(depth=run.n_layer, stage=FILE_STAGE)), ratio=run.ratio)
     return dataclasses.replace(production_plan, lr=run.lr_scale * production_plan.lr)
 
+
 def tag_of(run: Run) -> str:
-    """config.run_tag over the run's fields and RUN_CODE."""
+    """config.run_tag over the run's fields."""
     return run_tag(depth=run.n_layer, ratio=run.ratio, seed=run.seed, data_seed=run.seed,
-                   variant=dataclasses.asdict(run), code=RUN_CODE)
+                   variant=dataclasses.asdict(run))
 
 
 def execute(run: Run) -> None:
@@ -179,7 +177,7 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], lr_
             raise RuntimeError(f"run {tag} failed: {LOGS / f'{tag}.log'}")
     summaries = []
     with ((RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f,
-          (RESULTS / f"{experiment}-curves.jsonl").open("w", encoding="utf-8") as curves):
+          (RESULTS / f"{experiment}-curves.jsonl").open("w", encoding="utf-8") as curve_lines):
         for (depth, ratio, seeds, alternatives), arms in zip(settings, cells, strict=True):
             evaluated = {name: [run for run in arm if (BASE_EVAL / f"{tag_of(run)}.json").exists()]
                          for name, arm in arms.items()}
@@ -191,29 +189,21 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], lr_
                     tag = tag_of(run)
                     scored = run in evaluated[name]
                     identity = {"schema": SCHEMA, "experiment": experiment, "arm": name, "tag": tag}
-                    f.write(json.dumps(identity | {
+                    f.write(json.dumps(identity | record(tag) | {
                         "setting": {"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds)},
                         "fields": dataclasses.asdict(run),
-                        "records": [r for r in records(tag) if r["kind"] != "train"],
-                        "evaluation": (json.loads((BASE_EVAL / f"{tag}.json").read_text(encoding="utf-8"))
-                                       if scored else None),
                         "measures": frames[name].loc[tag].to_dict() if scored else None,
                         "efficiency": efficiency(run) if scored else None,
                         "diverged_at": diverged(tag)}, allow_nan=False) + "\n")
-                    steps = list(train_steps(tag).values())
-                    curves.write(json.dumps(identity | {k: [s[k] for s in steps] for k in (steps[0] if steps else {})
-                                                        if k not in identity and k != "kind"},
-                                            allow_nan=False) + "\n")
+                    curve_lines.write(json.dumps(identity | curves(tag), allow_nan=False) + "\n")
             summaries.append({"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds), "lr_scale": lr_scale,
                               "production_runs": len(frames["production"]),
                               "alternatives": {name: {"fields": changes, "runs": len(frames[name])}
                                                | (compare(frames[name], frames["production"])
                                                   if len(frames[name]) and len(frames["production"]) else {})
                                                for name, changes in alternatives.items()}})
-    # HEAD names the runs' code: their tags, computed at HEAD from RUN_CODE's object ids, matched their evaluations
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-    (RESULTS / f"{experiment}.json").write_text(json.dumps({"commit": commit, "settings": summaries},
-                                                           allow_nan=False), encoding="utf-8")
+    (RESULTS / f"{experiment}.json").write_text(json.dumps({"settings": summaries}, allow_nan=False),
+                                                encoding="utf-8")
 
 
 if __name__ == "__main__":

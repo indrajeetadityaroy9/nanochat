@@ -1,7 +1,7 @@
 """
 Evaluation of a base_train run's newest checkpoint, written to BASE_EVAL/<tag>.json, or of its model-only
 snapshot at --step (CHECKPOINTS/<tag>-step<step:06d>.pt), written to BASE_EVAL/<tag>-step<step:06d>.json (that
-name is the result's "run" and scripts/report.py's tag):
+name is the result's "run"):
 - loss_evaluation: val bits and bytes of the training mixture in file-level rows, of the repo-level mixture per context
   bucket in repo-level rows (models at that context), and of the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions (eval/loss_eval.py, eval/code_eval.py);
@@ -13,7 +13,7 @@ name is the result's "run" and scripts/report.py's tag):
 A result is one JSON object: schema (SCHEMA), run, step, then those; a measurement not taken is null (the ablations'
 evaluations, ablations/harness.py, take loss_evaluation only).
 
-    python -m scripts.base_eval --model-tag=<tag> [--step=<step>]   (config.run_tag; runs/h100.sh logs it)
+    python -m scripts.base_eval --model-tag=<tag> [--step=<step>]   (config.run_tag; scripts/production.py)
 """
 import argparse
 import json

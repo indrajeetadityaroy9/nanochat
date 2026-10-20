@@ -23,6 +23,11 @@ def checkpoint_path(tag: str, *, step: int | None) -> Path:
     return CHECKPOINTS / f"{checkpoint_name(tag, step=step)}.pt"
 
 
+def snapshot_steps(tag: str) -> list[int]:
+    """The steps of a run's model-only snapshots on disk, ascending."""
+    return sorted(int(p.stem.removeprefix(f"{tag}-step")) for p in CHECKPOINTS.glob(f"{tag}-step*.pt"))
+
+
 def save_checkpoint(path: Path, checkpoint: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
     torch.save(checkpoint, tmp)

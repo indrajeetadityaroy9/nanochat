@@ -120,9 +120,8 @@ second, 711 s evaluation); d16 at 20: about 35 minutes (30 minutes training at 7
 evaluation). `lr.py`: 19 runs ≈ 8.3 h; `value_embeds.py`: 18 runs ≈ 7.0 h, 17 ≈ 6.1 h when `lr.ADOPTED` is on the
 sweep's grid (its d8 run at 490.8 is then `lr.py`'s); ≈ 14.4 to 15.3 h ($62 to $66 at $4.29/h).
 
-**Records.** A run's tag is production's `config.run_tag` over its fields and the code it depends on (`config.CODE`,
-`harness.py`, `model.py`), so a result names the code that produced it, and an arm shared by experiments trains once;
-each run is launched from its fields (`python -m ablations.harness '<fields>'`). Per run, in production's schemas:
+**Records.** A run's tag is production's `config.run_tag` over its fields, so an arm shared by experiments trains
+once; each run is launched from its fields (`python -m ablations.harness '<fields>'`). Per run, in production's schemas:
 `artifacts/metrics/<tag>.jsonl` (`nanochat/train/metrics.py`: every step and attempt, the learning curve and gradient
 norms included; the run record holds the model config, the run's fields as `variant`, parameters, FLOPs per token,
 the clip threshold, the plan, lr and weight decay; the end record the peak memory; a failure record the step a run

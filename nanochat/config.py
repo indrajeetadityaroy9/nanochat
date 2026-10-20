@@ -1,19 +1,13 @@
-"""Run settings shared by training and evaluation: vocabulary, mixture, micro-batch, stages, run identity."""
+"""Run settings shared by training and evaluation: vocabulary, mixture, micro-batch, stages, run names."""
 import hashlib
 import json
-import subprocess
 from dataclasses import dataclass
-from functools import cache
 
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
-from nanochat.paths import ROOT
 
-# Code a result depends on: model, ops, trainer, evaluation, data pipeline, scripts, image definition, and the container
-# launcher (its TORCHINDUCTOR_COORDINATE_DESCENT_TUNING sets kernel reduction orders)
-CODE = ("nanochat", "scripts", "docker", "pyproject.toml", "uv.lock", "runs/container.sh")
-# The prepared data (tokenizer, compiled and packed rows; runs/setup.sh downloads this revision): part of every run's
-# identity through CODE
+# The prepared data (tokenizer, compiled and packed rows) at its Hub revision: `python -m nanochat.paths` downloads it,
+# and every run records it (train/metrics.py)
 DATASET, DATASET_REVISION = "iaroy/nanochat-data", "6744e4068949e32b7e335bde01dcd3be746da0f8"
 
 # Ids including special tokens: nanochat's 2^15 (karpathy/nanochat 92d63d4 scripts/tok_train.py:19)
@@ -56,25 +50,11 @@ REPO_SHARE = 300e9 / (5.2e12 + 300e9)
 ROPE_BASE = 1_000_000
 
 
-@cache
-def code_version(paths: tuple[str, ...]) -> tuple[str, ...]:
-    """Git object ids of `paths` at HEAD; raises on uncommitted changes there so a result names the code that produced
-    it."""
-    git = ["git", "-C", str(ROOT)]
-    dirty = subprocess.run([*git, "status", "--porcelain", "--", *paths], capture_output=True, text=True,
-                           check=True).stdout
-    if dirty:
-        raise RuntimeError(f"commit the code a run depends on first; uncommitted:\n{dirty}")
-    return tuple(subprocess.run([*git, "rev-parse", *(f"HEAD:{p}" for p in paths)], capture_output=True, text=True,
-                                check=True).stdout.split())
-
-
-def run_tag(*, depth: int, ratio: float, seed: int, data_seed: int, variant: dict, code: tuple[str, ...]) -> str:
-    """Name for a run's checkpoints, metrics and evaluation: depth, ratio, seeds, then a hash of everything its result
-    depends on: those, `variant` (an ablation run's settings, ablations/harness.py; production's: none) and the git object
-    ids of `code` (CODE covers DATASET_REVISION), so a run never resumes or counts another's artifacts."""
+def run_tag(*, depth: int, ratio: float, seed: int, data_seed: int, variant: dict) -> str:
+    """Name for a run's checkpoints, metrics and evaluations: depth, ratio and seeds, then a hash of those and `variant`
+    (an ablation run's fields, ablations/harness.py; production's: none), so runs of different settings never share
+    artifacts."""
     # float(ratio): JSON writes int 20 as "20" but float 20.0 as "20.0", so one run would get two names
-    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "data_seed": data_seed, "variant": variant,
-                "code": code_version(code)}
+    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "data_seed": data_seed, "variant": variant}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return f"d{depth}-r{ratio:g}-s{seed}-d{data_seed}-{digest[:12]}"

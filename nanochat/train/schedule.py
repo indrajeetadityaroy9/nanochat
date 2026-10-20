@@ -2,17 +2,11 @@
 Run plan (batch, steps, repo-level start, peak lr) from DeepSeek LLM's compute-optimal laws, and the per-step lr
 multiplier: one schedule across both stages (DeepSeek-Coder keeps its final pre-training lr for long context, arXiv
 2401.14196 §3.6).
-
-python -m nanochat.train.schedule <depth> <ratio> <seed> prints the production run's tag, steps and repo_start.
 """
-
-import sys
 from dataclasses import dataclass
 
-import torch
-
-from nanochat.config import CODE, FILE_STAGE, MICRO_BATCH_TOKENS, REPO_SHARE, run_tag
-from nanochat.model.gpt import GPT, gpt_config, non_embedding_flops_per_token, scaling_params
+from nanochat.config import MICRO_BATCH_TOKENS, REPO_SHARE
+from nanochat.model.gpt import GPT, non_embedding_flops_per_token, scaling_params
 from nanochat.train.optim import BETAS
 
 # Linear warmup over 2 / (1 - beta2) steps (Ma & Yarats, arXiv 1910.04209): 40 at beta2 = 0.95
@@ -54,11 +48,3 @@ def lr_multiplier(it: int, *, steps: int) -> float:
     if it < WARMUP:
         return (it + 1) / WARMUP
     return (steps - it) / (steps - WARMUP)
-
-
-if __name__ == "__main__":
-    depth, ratio, seed = int(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
-    with torch.device("meta"):
-        run = plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=ratio)
-    print(run_tag(depth=depth, ratio=ratio, seed=seed, data_seed=seed, variant={}, code=CODE), run.num_iterations,
-          run.repo_start)
