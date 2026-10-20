@@ -12,10 +12,12 @@ whose evaluation exists is skipped (arms shared between experiments train once),
 train/metrics.py failure record: a non-finite loss or gradient norm, an outcome of a lr sweep's high end, Wortsman et
 al., arXiv 2309.14322); any other failure stops the experiment, and a stopped run resumes from its repo_start checkpoint
 or restarts (train/metrics.py attempts keep both traceable). Then each alternative is compared with production over
-the evaluated runs; the experiment writes RESULTS/<experiment>.jsonl (a record per run: its fields, evaluation and
-efficiency, or the step it diverged at) and RESULTS/<experiment>.json (per setting, each alternative's fields, its
-evaluated runs and, per measure, its difference from production, p and confidence interval; null where one run per
-arm leaves them undefined), for the decisions ablations.md fixes.
+the evaluated runs; the experiment writes every tracked metric of every run, RESULTS/<experiment>.jsonl (a record per
+run: setting, fields, its train/metrics.py records but the per-step ones, its scripts/base_eval.py evaluation, the
+compared measures, efficiency, the step it diverged at) and RESULTS/<experiment>-curves.jsonl (per run, its per-step
+train records as columns), and RESULTS/<experiment>.json (per setting, each alternative's fields, its evaluated runs
+and, per measure, its difference from production, p and confidence interval; null where one run per arm leaves them
+undefined), for the decisions and figures ablations.md fixes.
 
     python -m ablations.<experiment>       (every missing run, each in a child process, then the comparison)
     python -m ablations.harness '<fields>'  (one run: harness.Run's fields as JSON)
@@ -176,7 +178,8 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], lr_
         if child.returncode and diverged(tag) is None:
             raise RuntimeError(f"run {tag} failed: {LOGS / f'{tag}.log'}")
     summaries = []
-    with (RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f:
+    with ((RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f,
+          (RESULTS / f"{experiment}-curves.jsonl").open("w", encoding="utf-8") as curves):
         for (depth, ratio, seeds, alternatives), arms in zip(settings, cells, strict=True):
             evaluated = {name: [run for run in arm if (BASE_EVAL / f"{tag_of(run)}.json").exists()]
                          for name, arm in arms.items()}
@@ -187,11 +190,20 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], lr_
                 for run in arm:
                     tag = tag_of(run)
                     scored = run in evaluated[name]
-                    f.write(json.dumps({"schema": SCHEMA, "experiment": experiment, "arm": name, "tag": tag,
-                                        "fields": dataclasses.asdict(run),
-                                        "evaluation": frames[name].loc[tag].to_dict() if scored else None,
-                                        "efficiency": efficiency(run) if scored else None,
-                                        "diverged_at": diverged(tag)}, allow_nan=False) + "\n")
+                    identity = {"schema": SCHEMA, "experiment": experiment, "arm": name, "tag": tag}
+                    f.write(json.dumps(identity | {
+                        "setting": {"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds)},
+                        "fields": dataclasses.asdict(run),
+                        "records": [r for r in records(tag) if r["kind"] != "train"],
+                        "evaluation": (json.loads((BASE_EVAL / f"{tag}.json").read_text(encoding="utf-8"))
+                                       if scored else None),
+                        "measures": frames[name].loc[tag].to_dict() if scored else None,
+                        "efficiency": efficiency(run) if scored else None,
+                        "diverged_at": diverged(tag)}, allow_nan=False) + "\n")
+                    steps = list(train_steps(tag).values())
+                    curves.write(json.dumps(identity | {k: [s[k] for s in steps] for k in (steps[0] if steps else {})
+                                                        if k not in identity and k != "kind"},
+                                            allow_nan=False) + "\n")
             summaries.append({"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds), "lr_scale": lr_scale,
                               "production_runs": len(frames["production"]),
                               "alternatives": {name: {"fields": changes, "runs": len(frames[name])}
