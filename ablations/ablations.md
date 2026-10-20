@@ -127,11 +127,16 @@ each run is launched from its fields (`python -m ablations.harness '<fields>'`).
 norms included; the run record holds the model config, the run's fields as `variant`, parameters, FLOPs per token,
 the clip threshold, the plan, lr and weight decay; the end record the peak memory; a failure record the step a run
 diverged at), `artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only) and
-`artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment computes its aggregates
-from them: `results/<experiment>.jsonl` (schema 1, a record per run: arm, tag, fields, measures and efficiency, null
-for a diverged run, whose step it holds) and `results/<experiment>.json` (the commit and, per setting, depth, tokens
-per parameter, seeds, the lr multiplier, production's evaluated runs, and per alternative its fields, evaluated runs
-and per measure difference, p and confidence interval, null for one run per arm).
+`artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment gathers every tracked
+metric of its runs into `results/` (schema 1), so tables and figures need no rerun and no `artifacts/`:
+`<experiment>.jsonl`, a record per run (arm, tag, setting, fields; its metrics records but the per-step ones: run, stage,
+end, failure; its evaluation verbatim: per corpus and context bucket bits, bytes and rows at 8K and 32K, per benchmark
+solution bits and bytes; the compared measures; efficiency; the step it diverged at, measures and efficiency null
+then); `<experiment>-curves.jsonl`, per run its per-step train records as columns (step, tokens, loss, lr, gradient
+norm before clipping, tokens per second, attempt, time; 2,987 steps of d8 at 20 take 360 KB, so all runs about 48 MB);
+and `<experiment>.json`, the commit and per setting depth, tokens per parameter, seeds, the lr multiplier,
+production's evaluated runs, and per alternative its fields, evaluated runs and per measure difference, p and
+confidence interval, null for one run per arm.
 
 ### Not tested, and why
 
@@ -363,8 +368,14 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
   - *Analysis* (planted code with its optimum at × 0.5, all three `lr.py` settings through `harness.main`, 19 records):
     the quadratic vertices are × 0.505 (d8 over 50, 12 runs), × 0.484 (d8 over 490.8, 4) and × 0.498 (d24 over 5, 3).
   - *Production's arm, run 0 at 20 tokens per parameter* (whole run through `harness.evaluation` and `efficiency`,
-    2026-10-22, 248 s): code 0.6354, solutions 0.6964, repo_32k 0.6201, repo_beyond_8k 0.4048, text 1.3619, math
-    1.3498; 2.28M tokens per second; peak memory 14.0 GB.
+    2026-10-22, 248 s, unclipped): code 0.6354, solutions 0.6964, repo_32k 0.6201, repo_beyond_8k 0.4048, text 1.3619,
+    math 1.3498; 2.28M tokens per second; peak memory 14.0 GB. The same run clipped at 1.0, launched from its fields
+    (`d8-r20-s0-d0-73e955e0631c`, 237 s): code 0.6320, solutions 0.6958, repo_32k 0.6158, repo_beyond_8k 0.3938, text
+    1.3614, math 1.3473, 2.27M tokens per second; 75.4% of its steps clipped (one seed each, under σ's resolution).
+  - *Divergence* (planted failure records, `harness.main`): diverged runs are skipped on rerun, written with their step
+    and null measures, and dropped from the comparisons (an arm left without runs is reported with 0 evaluated runs).
+  - *Export* (`d8-r20-s0-d0-73e955e0631c` through `harness.main`): its record holds the run, stage and end records, the
+    evaluation verbatim (11 corpora at 8K, 6 at 32K, 3 benchmarks) and the measures; its curve 8 columns of 2,987 steps.
   - *Real data* (screen run 0, `d8-r20-s0-d0-2449fca0cf29`): the data on disk is the pinned Hub revision
     (`6744e406…`, the download's recorded commit); the run record's mixture is the 11 production corpora at their
     weights; the first training micro-batch, rebuilt as `train` reads it (data seed 0), decodes to real C++ files and
