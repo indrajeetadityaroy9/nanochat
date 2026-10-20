@@ -26,8 +26,8 @@ buckets and samples pool exactly; bpb and mixture_bpb form the ratios. Sums are 
 order.
 
 Loss evaluation of a checkpoint: BASE_EVAL/<name>.json (name: checkpoint.checkpoint_name), one JSON object: schema
-(EVALUATION_SCHEMA), run (the name), step, then loss_evaluation's results and the caller's (scripts/base_eval.py:
-"codegen", "fim"; ablations/harness.py: null).
+(EVALUATION_SCHEMA), run (the name), step, then loss_evaluation's results and the caller's (scripts/production.py
+evaluate: "codegen", "fim"; ablations/harness.py: null).
 
 Export: RESULTS/<tag>.jsonl, one record: the run's records but the per-step ones (run, stage, end, failure) and the
 evaluations of its final model and of its model-only snapshots verbatim, in step order; RESULTS/<tag>-curves.jsonl,

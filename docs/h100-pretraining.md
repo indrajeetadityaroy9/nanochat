@@ -129,11 +129,11 @@ holds the data the paper's tables and figures are drawn from.
 
 `scripts/production.py` derives the ratio and the tag (`d24-r490.774-s0-<hash>`), trains both stages with a checkpoint
 every 1% of the steps and a model-only snapshot (weights, no optimizer state, ~2.1 GB) every 10% and at the repository
-stage's start, then evaluates the final model and every snapshot with `scripts/base_eval.py` (when pass@1 emerges) and
+stage's start, then evaluates the final model and every snapshot (`evaluate`, when pass@1 emerges) and
 exports the run's tracked metrics (`train/metrics.py export`): `results/<tag>.jsonl` (its records and every
 evaluation) and `results/<tag>-curves.jsonl` (its per-step records). Training and each evaluation run in a fresh
 process (torch.compile's recompile limit and the CUDA caching allocator's reservations are per process). Rerunning
-continues a stopped run from its checkpoint and evaluates every model again. `base_eval` reports validation bits and
+continues a stopped run from its checkpoint and evaluates every model again. The evaluation reports validation bits and
 bytes per corpus at 8K and at 32K per context bucket (≤8K, >8K), reference-solution bits and bytes, and EvalPlus
 HumanEval+/MBPP+, MultiPL-E C++ and HumanEval infilling (Benchmarks, below), each scored by its official tools.
 
@@ -142,8 +142,8 @@ coordinate-descent tuning, plus its 0.8%), about 85 h, about $365 at $4.29/h.
 
 `runs/release.sh <tag> <repo>` uploads the checkpoint and snapshots, the run records under `artifacts/` (metrics and
 evaluations) and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
---local-dir /workspace/nanochat` (the checkout inside the container) restores them where `load_model`, `base_eval` and
-a resumed production run read them.
+--local-dir /workspace/nanochat` (the checkout inside the container) restores them where `load_model` and a resumed
+production run read them.
 
 ## Pre-launch verification
 
@@ -248,7 +248,7 @@ sets its scaling runs' by the same laws).
 
 ## Decoding and syntax analysis
 
-**Benchmarks** (`eval/code_eval.py`, `scripts/base_eval.py`). Each benchmark is decoded two ways:
+**Benchmarks** (`eval/code_eval.py`, `scripts/production.py` `evaluate`). Each benchmark is decoded two ways:
 
 | Mode | Decoding | Score |
 |---|---|---|
@@ -388,8 +388,8 @@ Each in `ablations/ablations.md` §2:
 - `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
 - `nanochat/data/`: the data pipeline, including the Rust tokenizer, repository and packing crate in `bpe/`.
-- `scripts/`: `production.py` (the production run end to end), `base_train.py` (the training loop), `base_eval.py` (a
-  checkpoint's evaluation).
+- `scripts/`: `production.py` (the production run end to end, a checkpoint's evaluation included), `base_train.py` (the
+  training loop).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
 - `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`), their mechanism (`harness.py`, `model.py`) and

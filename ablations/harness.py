@@ -75,8 +75,9 @@ def tag_of(run: Run) -> str:
 
 
 def execute(run: Run) -> None:
-    """Train and evaluate one run: its metrics as production's (train/metrics.py), its evaluation as base_eval's schema
-    with loss_evaluation only; resume checkpoints at repo_start and the end only, no snapshots."""
+    """Train and evaluate one run: its metrics as production's (train/metrics.py), its evaluation in production's schema
+    (scripts/production.py evaluate) with loss_evaluation only; resume checkpoints at repo_start and the end only, no
+    snapshots."""
     tag, run_plan = tag_of(run), plan_of(run)
     steps = run_plan.num_iterations
     with torch.device("meta"):

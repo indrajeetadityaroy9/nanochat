@@ -8,7 +8,6 @@ Callers: scripts/production.py, ablations/harness.py. Metrics: train/metrics.py.
 import gc
 import math
 import time
-from collections.abc import Iterator
 from dataclasses import asdict
 from functools import partial
 
@@ -32,36 +31,14 @@ from nanochat.train.stages import readable_rows
 MAX_NORM = 1.0
 
 
-def optimizer_step(model: torch.nn.Module, batches: list[tuple[torch.Tensor, ...]], params: list[torch.Tensor],
-                   optimizers: tuple[torch.optim.Optimizer, ...], reads: Iterator | None
-                   ) -> tuple[torch.Tensor, torch.Tensor, list]:
-    """One optimizer step over micro-batches (inputs, targets, cu_seqlens). Each micro-batch's mean loss is weighted by
-    its share of the step's valid targets, so the step loss is the mean over all. The next step's micro-batches are read
-    from `reads` during backward (None on the last step); gradients clipped to global norm MAX_NORM. Returns (step loss
-    fp64, gradient norm before clipping, next micro-batches) on device, without host synchronization."""
-    valid = torch.stack([(y != PretrainingBatches.PAD).sum() for _, y, _ in batches]).double()
-    shares = (valid / valid.sum()).float()
-    losses, upcoming = [], []
-    for micro_step, (x, y, cu_seqlens) in enumerate(batches):
-        loss = model(x, y, cu_seqlens) * shares[micro_step]
-        losses.append(loss.detach())
-        loss.backward()
-        if reads is not None:
-            upcoming.append(next(reads))
-    grad_norm = torch.nn.utils.clip_grad_norm_(params, MAX_NORM)
-    for opt in optimizers:
-        opt.step()
-    model.zero_grad()
-    return torch.stack(losses).double().sum(), grad_norm, upcoming
-
-
 def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, save_every: int, snapshots: frozenset[int],
           tag: str) -> GPT:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
     (schedule.plan at the caller's peak lr) and return it: initialization and data order by `seed`, decoupled weight
-    decay by the tau law at the run's lr (optim.tau_weight_decay), FILE_STAGE then REPO_STAGE from run.repo_start;
-    `variant` (config.run_tag's) recorded with the run. A resume checkpoint every `save_every` steps, at repo_start and
-    at the end (the final model); a model-only snapshot at each step in `snapshots`."""
+    decay by the tau law at the run's lr (optim.tau_weight_decay), gradients clipped to global norm MAX_NORM,
+    FILE_STAGE then REPO_STAGE from run.repo_start; `variant` (config.run_tag's) recorded with the run. A resume
+    checkpoint every `save_every` steps, at repo_start and at the end (the final model); a model-only snapshot at each
+    step in `snapshots`."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
     model.to_empty(device=device)
@@ -145,12 +122,26 @@ def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, save_every: int
 
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        # next step's micro-batches are read during this step (the repo-level stage's if the next step starts it)
-        if step + 1 < run.num_iterations and stage_at(step + 1) is not stage:
+        # the next step's micro-batches are read during this step's backward (the repo-level stage's if the next step
+        # starts it), none after the last step
+        reading = step + 1 < run.num_iterations
+        if reading and stage_at(step + 1) is not stage:
             mixture, train_iter = stage_batches(REPO_STAGE, 0)
         lr = schedulers[0].get_last_lr()[0]
-        loss, grad_norm, upcoming = optimizer_step(compiled, batches, params, opts,
-                                                   train_iter if step + 1 < run.num_iterations else None)
+        # each micro-batch's mean loss weighted by its share of the step's valid targets: the step loss is their mean
+        valid = torch.stack([(y != PretrainingBatches.PAD).sum() for _, y, _ in batches]).double()
+        shares = (valid / valid.sum()).float()
+        losses, upcoming = [], []
+        for (x, y, cu_seqlens), share in zip(batches, shares, strict=True):
+            loss = compiled(x, y, cu_seqlens) * share
+            losses.append(loss.detach())
+            loss.backward()
+            if reading:
+                upcoming.append(next(train_iter))
+        grad_norm = torch.nn.utils.clip_grad_norm_(params, MAX_NORM)
+        for opt in opts:
+            opt.step()
+        model.zero_grad()
         for scheduler in schedulers:
             scheduler.step()
         stage_rows += len(batches) * stage.batch_rows
@@ -159,7 +150,7 @@ def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, save_every: int
         dt = time.perf_counter() - t0
 
         # one host synchronization for loss and grad norm
-        loss_value, grad_norm_value = torch.stack([loss, grad_norm.double()]).tolist()
+        loss_value, grad_norm_value = torch.stack([torch.stack(losses).double().sum(), grad_norm.double()]).tolist()
         if not (math.isfinite(loss_value) and math.isfinite(grad_norm_value)):
             metrics.append(tag, {"kind": "failure", "step": step, "loss": None, "grad_norm": None}, attempt=attempt)
             raise FloatingPointError(f"{tag} step {step}: loss {loss_value}, grad_norm {grad_norm_value}")

@@ -2,26 +2,27 @@
 The production run end to end: d24 at the most tokens per scaling parameter its data holds without rereading a
 document (train/stages.py max_ratio), seed 0, the peak lr LR_SCALE times the plan's, both stages, a resume checkpoint
 every 1% of steps and a model-only snapshot every 10% and at the repository stage's start (scripts/base_train.py);
-then the final model's and every snapshot's evaluation (scripts/base_eval.py: loss, greedy and filtered decoding) and
-the run's tracked metrics (train/metrics.py export: results/<tag>.jsonl, <tag>-curves.jsonl). Training and each
-evaluation run in a fresh process of their own: torch.compile's recompile limit and the CUDA caching allocator's
-reservations are per process, so no phase inherits another's. Rerunning resumes training from its checkpoint and
-evaluates every model again.
+then the final model's and every snapshot's evaluation (evaluate) and the run's tracked metrics (train/metrics.py
+export: results/<tag>.jsonl, <tag>-curves.jsonl). Training and each evaluation run in a fresh process of their own.
+Rerunning resumes training from its checkpoint and evaluates every model again.
 
     runs/container.sh python -m scripts.production
 """
 import multiprocessing
+import warnings
+from collections.abc import Callable
 from dataclasses import replace
 
 import torch
 
 from nanochat.config import FILE_STAGE, run_tag
 from nanochat.data.tokenizer import get_tokenizer
+from nanochat.eval.code_eval import fim_generation, generation, tasks
 from nanochat.model.gpt import GPT, gpt_config
-from nanochat.train.metrics import export
+from nanochat.train.checkpoint import checkpoint_name, load_model
+from nanochat.train.metrics import export, loss_evaluation, save_evaluation
 from nanochat.train.schedule import plan
 from nanochat.train.stages import max_ratio
-from scripts.base_eval import evaluate
 from scripts.base_train import train
 
 DEPTH, SEED = 24, 0
@@ -34,6 +35,38 @@ LR_SCALE = 2.546731698195362
 SAVES, SNAPSHOTS = 100, 10
 
 
+def evaluate(tag: str, *, step: int | None) -> None:
+    """BASE_EVAL/<checkpoint_name>.json (train/metrics.save_evaluation; its "run" that name) of run `tag`'s checkpoint,
+    its newest (step None) or its model-only snapshot at `step`:
+    - train/metrics.loss_evaluation: val bits and bytes of the training mixture in file-level rows, of the repo-level
+      mixture per context bucket in repo-level rows (models at that context), and of the HumanEval+, MBPP+ and
+      HumanEval-X C++ reference solutions;
+    - pass@1 of HumanEval+ / MBPP+ (EvalPlus) and HumanEval-cpp / MBPP-cpp (MultiPL-E) and FIM pass@1 of HumanEval
+      single-line, multi-line and random-span infilling, PSM and SPM (eval/code_eval.py), each by two generation modes
+      (FIM's filtered mode in SPM order only): "greedy" and "filtered" (filtered pass@1: the Python syntax constraint,
+      of the prefix and suffix for FIM, left-to-right prompts also healed, then seeded resampling until a candidate
+      passes the static checks and its prompt's examples; eval/verify.py), with per-task diagnostics counts and the
+      filtered mode's attempts; FIM middles cut to the reference's lines (eval/code_eval.py fim_lines)."""
+    # SyntaxWarnings of ast.parse on generated code (eval/verify.py, inference/)
+    warnings.filterwarnings("ignore", category=SyntaxWarning)
+    device = torch.device("cuda")
+    benchmarks, tokenizer = tasks(), get_tokenizer()
+    model, trained_steps = load_model(tag, step=step, device=device)
+    save_evaluation(checkpoint_name(tag, step=step), trained_steps,
+                    loss_evaluation(model, tokenizer, benchmarks, device=device) |
+                    {"codegen": generation(model, tokenizer, benchmarks), "fim": fim_generation(model, tokenizer)})
+
+
+def isolated(target: Callable[..., object], **kwargs: object) -> None:
+    """target(**kwargs) in a fresh process, raising if it fails: torch.compile's recompile limit and the CUDA caching
+    allocator's reservations are per process, so no phase inherits another's."""
+    process = multiprocessing.get_context("spawn").Process(target=target, kwargs=kwargs)
+    process.start()
+    process.join()
+    if process.exitcode != 0:
+        raise ChildProcessError(f"{target.__name__} exited with {process.exitcode}")
+
+
 def main() -> None:
     ratio = max_ratio(get_tokenizer(), depth=DEPTH)
     with torch.device("meta"):
@@ -44,16 +77,10 @@ def main() -> None:
     tag = run_tag(depth=DEPTH, ratio=ratio, seed=SEED, variant=variant)
     every = -(-run.num_iterations // SNAPSHOTS)
     snapshots = sorted({*range(every, run.num_iterations, every), run.repo_start})
-    phases = [(train, {"model": model, "run": run, "variant": variant, "seed": SEED,
-                       "save_every": -(-run.num_iterations // SAVES), "snapshots": frozenset(snapshots), "tag": tag})]
-    phases += [(evaluate, {"tag": tag, "step": step}) for step in (None, *snapshots)]
-    spawn = multiprocessing.get_context("spawn")
-    for target, kwargs in phases:
-        process = spawn.Process(target=target, kwargs=kwargs)
-        process.start()
-        process.join()
-        if process.exitcode != 0:
-            raise ChildProcessError(f"{target.__name__} of {tag} exited with {process.exitcode}")
+    isolated(train, model=model, run=run, variant=variant, seed=SEED, save_every=-(-run.num_iterations // SAVES),
+             snapshots=frozenset(snapshots), tag=tag)
+    for step in (None, *snapshots):
+        isolated(evaluate, tag=tag, step=step)
     export(tag)
 
 
