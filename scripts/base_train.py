@@ -2,7 +2,7 @@
 Pretrain a base model:
 
     python -m scripts.base_train --depth=<depth> --target-param-data-ratio=<tokens per scaling parameter> --seed=<seed>
-        --save-every=<steps> --snapshot-every=<steps>
+        --lr-scale=<times the plan's peak lr> --save-every=<steps> --snapshot-every=<steps>
 
 Everything else is derived (config.py, train/schedule.py, train/optim.py). File-level stage, then the repo-level stage
 from repo_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
@@ -15,7 +15,7 @@ import gc
 import math
 import time
 from collections.abc import Iterator
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from functools import partial
 
 import numpy as np
@@ -184,18 +184,21 @@ def main():
     parser.add_argument("--depth", type=int, required=True)
     parser.add_argument("--target-param-data-ratio", type=float, required=True)
     parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--lr-scale", type=float, required=True)
     parser.add_argument("--save-every", type=int, required=True)
     parser.add_argument("--snapshot-every", type=int, required=True)
     args = parser.parse_args()
     with torch.device("meta"):
         model = GPT(gpt_config(depth=args.depth, stage=FILE_STAGE))
     run = plan(model=model, ratio=args.target_param_data_ratio)
+    run = replace(run, lr=args.lr_scale * run.lr)
+    variant = {"lr_scale": args.lr_scale}
     train(model=model, run=run,
           weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations, tokens_per_param=run.tokens_per_param),
-          variant={},
+          variant=variant,
           seed=args.seed, data_seed=args.seed, save_every=args.save_every, snapshot_every=args.snapshot_every,
           tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
-                      variant={}))
+                      variant=variant))
 
 
 if __name__ == "__main__":

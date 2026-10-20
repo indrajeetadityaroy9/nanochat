@@ -47,13 +47,13 @@ into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
 | Setting | Value | Source |
 |---|---|---|
 | Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271, C = M·D (`train/schedule.py`) |
-| Peak lr | 9.3796e-4, every group | DeepSeek LLM, η = 0.3118·C^-0.125 |
+| Peak lr | 2.3887e-3, every group: 2.5467 × the law's 9.3796e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured (`scripts/production.py` `LR_SCALE`; Appendix ablation) |
 | Steps | 81,166 (95.75B tokens, 490.77 per scaling parameter); repository stage from step 76,739 | `schedule.plan` |
 | Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (Ma & Yarats, arXiv 1910.04209) |
 | Decay | linear to zero | Bergsma et al., arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
 | Optimizers | AdamW (fused) on tables and vectors; Muon with `match_rms_adamw` on matrices | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
-| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.3173 at d24: 1/(ηλ) = 3,360 steps, 4.0B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
+| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.1246 at d24's peak lr: 1/(ηλ) = 3,360 steps, 4.0B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
 | Gradient clipping | global norm 1.0 on the raw gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (`base_train.MAX_NORM`) |
 | Repository stage | continues the decay: 5.46% of the peak lr at its first step, 0 at the last, over 4,427 steps (5.22B tokens) | DeepSeek-Coder §3.6 |
 
@@ -104,9 +104,9 @@ H100's 989 dense bf16), 369 TFLOP/s (37.3%) counting the weight matrices alone.
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
 - **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seeds plus a hash of those, its variant
-  (an ablation run's fields) and the dataset revision `config.DATASET_REVISION` (`python -m nanochat.paths` downloads
-  it), so runs of different settings or data never share artifacts. Each run's metrics record its full configuration
-  (model, plan, seeds, lr, weight decay, clip threshold) and the dataset revision.
+  (an ablation run's fields; production's lr scale) and the dataset revision `config.DATASET_REVISION`
+  (`python -m nanochat.paths` downloads it), so runs of different settings or data never share artifacts. Each run's
+  metrics record its full configuration (model, plan, seeds, lr, weight decay, clip threshold) and the dataset revision.
 - **Data order.** Each corpus's rows are permuted once by the data seed (NumPy `RandomState`).
 
 ## Reproducing the run
@@ -150,8 +150,8 @@ Commit `60138de` on the H100, on the packed rows; records under `artifacts/` by 
 | Check | Result |
 |---|---|
 | Resume: d8, 20 tokens per parameter (`d8-r20-s0-d0-d69671850bea`), killed with `docker kill` at step 991 and relaunched | continued from its step-900 checkpoint, switched to the 32K stage at step 2,824 (`repo_start`), finished at step 2,987; the step-2,824 checkpoint kept |
-| Production path: `base_train` CLI, `base_eval` (loss, reference solutions, EvalPlus, MultiPL-E, infilling), `report` | all complete |
-| Run identity | the production tag stable across calls; an untracked file under `nanochat/` refused |
+| Production path (2026-10-20): `base_train` CLI with `--lr-scale` (d8, 74 steps), `base_eval` (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
+| Run identity | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
 
 **Training record**, d8 at 20 tokens per parameter (2,987 steps of 98,304 tokens, peak lr 2.73e-3): mean training loss
 per window of steps, one record per step (a resumed run's repeated steps counted once), against runs of the previous
@@ -340,12 +340,14 @@ the pre-launch measurements. The two whose result would change production have a
 `ablations/<file>.py` (method, power, decision criterion and results in `ablations/ablations.md`):
 
 - **The peak lr of DeepSeek LLM's law** (`lr.py`: × 1, × 2, × 4 at d24 over 5 tokens per parameter, times the
-  optimum's horizon trend measured at d8, × 1, × 2, × 4 over 5 against × 1 to × 8 over 200, its power-law exponent
-  carried to production's horizon range and corrected for production's larger batch growth by the square-root batch
-  rule). The transfer rules disagree on that trend: over d8's range Complete^(d)P's SDE rule (arXiv 2512.22382)
-  predicts × 0.354, Step-Law (arXiv 2503.04715) × 4.92.
-  The law was fit for AdamW under a multi-step schedule at 7.5× below production's compute; × 2 beat × 1 by 0.018 bits
-  per byte at d8 over 20.
+  optimum's horizon trend measured at d8, × 1 to × 8 over 5 and over 200, its power-law exponent carried to
+  production's horizon range and corrected for production's larger batch growth by the square-root batch rule). The
+  transfer rules disagreed on that trend: over d8's range Complete^(d)P's SDE rule (arXiv 2512.22382) predicts × 0.354,
+  Step-Law (arXiv 2503.04715) × 4.92. Measured (`results/lr.json`): optima × 2.0235 (d24 over 5), × 3.4669 and
+  × 3.1565 (d8 over 5 and 200), so a d8 ratio of 0.9105: the optimum relative to the law barely moves with the horizon
+  (the law's own C^−0.125 carries the trend), against both rules. Production's multiplier × 2.5467 (2.3887e-3) is
+  adopted; the best arm beat the law by 0.0044 to 0.125 bits per byte, no run diverged, and the optima agree within 7%
+  with nanochat's hand-tuned Muon lr at the same widths (`ablations/ablations.md` §3).
 - **Value embeddings kept** (`value_embeds.py`: none, at d16). They cost 4.7% of the d24 step (measured before
   `60138de`, record not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20.
 

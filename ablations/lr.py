@@ -49,22 +49,23 @@ STEP_LAW_D = 0.307
 
 
 def fit(lines: list[dict]) -> dict:
-    """A setting's quadratic of code in u = ln(multiplier) over its evaluated runs: curvature, vertex (as a multiplier;
-    None without a minimum) and the grid extension by a factor of 2 the rule calls for ("down", "up" or None): toward
-    the vertex when it lies outside the grid, toward the grid's lower-code end when the curvature is not positive, and
-    down when divergences leave fewer than the fit's 3 runs (the high end diverged)."""
-    runs = sorted((line for line in lines if line["measures"] is not None), key=lambda line: line["fields"]["lr_scale"])
-    if len(runs) < 3:
-        return {"runs": len(runs), "curvature": None, "vertex": None, "extend": "down"}
+    """A setting's optimum from its runs in lr order, a diverged run counting as worse than any evaluated one: the grid
+    extension by a factor of 2 ("down" or "up") while its lowest-code run is at an end of the grid; else the vertex (as
+    a multiplier) of the parabola in u = ln(multiplier) through the lowest-code run and its two neighbours, positive
+    curvature by construction (amended 2026-10-20 from one quadratic over every run, whose vertex a curve steeper below
+    its optimum than above pulls low: ablations.md, Analysis), or the lowest-code run itself when the neighbour above
+    it diverged."""
+    runs = sorted(lines, key=lambda line: line["fields"]["lr_scale"])
     u = [math.log(line["fields"]["lr_scale"]) for line in runs]
-    code = [line["measures"]["code"] for line in runs]
-    a, b, _ = np.polyfit(u, code, 2)
-    vertex = -b / (2 * a)
-    if a <= 0:
-        extend = "down" if code[0] < code[-1] else "up"
-    else:
-        extend = "down" if vertex < u[0] else "up" if vertex > u[-1] else None
-    return {"runs": len(runs), "curvature": float(a), "vertex": math.exp(vertex) if a > 0 else None, "extend": extend}
+    code = [math.inf if line["measures"] is None else line["measures"]["code"] for line in runs]
+    best = int(np.argmin(code))
+    evaluated = sum(math.isfinite(c) for c in code)
+    if best == 0 or best == len(runs) - 1:
+        return {"runs": evaluated, "curvature": None, "vertex": None, "extend": "down" if best == 0 else "up"}
+    if not math.isfinite(code[best + 1]):
+        return {"runs": evaluated, "curvature": None, "vertex": math.exp(u[best]), "extend": None}
+    a, b, _ = np.polyfit(u[best - 1:best + 2], code[best - 1:best + 2], 2)
+    return {"runs": evaluated, "curvature": float(a), "vertex": math.exp(-b / (2 * a)), "extend": None}
 
 
 def analysis(lines: list[dict]) -> dict:
@@ -108,11 +109,21 @@ def analysis(lines: list[dict]) -> dict:
 
 
 if __name__ == "__main__":
-    grid = {"lr x2": {"lr_scale": 2.0}, "lr x4": {"lr_scale": 4.0}}
-    # the cheap settings first
-    main(settings=((8, SHORT, range(1), grid), (8, LONG, range(1), grid | {"lr x8": {"lr_scale": 8.0}}),
-                   (24, SHORT, range(1), grid)))
-    lines = [json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
+    # multipliers of the law's lr per (depth, tokens per parameter), the cheap settings first; a grid the rule extends
+    # (fit) gains the next factor of 2 and the experiment runs again (harness.main skips evaluated runs)
+    grids = {(8, SHORT): [1, 2, 4], (8, LONG): [1, 2, 4, 8], (24, SHORT): [1, 2, 4]}
+    while True:
+        main(settings=tuple((depth, ratio, range(1), {f"lr x{s:g}": {"lr_scale": float(s)} for s in scales if s != 1})
+                            for (depth, ratio), scales in grids.items()))
+        lines = [json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
+        extend = {(depth, ratio): fit([line for line in lines if (line["setting"]["depth"],
+                                                                   line["setting"]["tokens_per_param"]) == (depth, ratio)])
+                  ["extend"] for depth, ratio in grids}
+        if not any(extend.values()):
+            break
+        for key, direction in extend.items():
+            if direction is not None:
+                grids[key].append(min(grids[key]) / 2 if direction == "down" else max(grids[key]) * 2)
     summary = json.loads((RESULTS / "lr.json").read_text(encoding="utf-8"))
     (RESULTS / "lr.json").write_text(json.dumps(summary | {"analysis": analysis(lines)}, allow_nan=False),
                                      encoding="utf-8")

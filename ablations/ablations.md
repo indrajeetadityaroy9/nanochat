@@ -43,9 +43,11 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
   2.3× its scaling parameters against d24's 1.55×. Architecture rankings can change with scale (Tay et al., arXiv
   2207.10551); for data recipes a single proxy 7× below the target picks the target's better of two in about 80% of
   pairs, best with likelihood metrics such as bits per byte (DataDecide, arXiv 2504.11393).
-- **Order.** `lr.py` first; its adopted multiplier goes into `schedule.plan`'s peak lr, so `value_embeds.py` (and
-  production) train at it and compare against a tuned baseline (under-tuned baselines inflate gains: Kaddour et al.,
-  arXiv 2307.06440; Wen et al.). A run's tag hashes its peak lr, so runs at a superseded lr are never reused.
+- **Order.** `lr.py` first; its multiplier is production's peak lr (`scripts/production.py` `LR_SCALE`, hashed into
+  production's tag). `value_embeds.py`'s arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each
+  measured optimum: its baseline is under-tuned unless its settings take their own optima (under-tuned baselines
+  inflate gains: Kaddour et al., arXiv 2307.06440; Wen et al.). A run's tag hashes its peak lr, so runs at a superseded
+  lr are never reused.
 - **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
   production's corpus weights, the decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled (the benchmarks' pass@1 is near zero at this size). *repo_32k*: 32K
@@ -53,10 +55,15 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
   repository stage trains. *text*, *math*; tokens per second (median over training steps). Efficiency (from the run's
   run and end records): parameters, non-embedding FLOPs per token, peak memory.
 - **Analysis** (from `results/<experiment>.jsonl` and `.json`), pre-registered. *lr* (computed by `lr.py` into
-  `results/lr.json`'s `analysis`, every number from the runs' records and plans): per setting, code is fitted as a
-  quadratic in u = ln(multiplier) over its evaluated runs (numpy `polyfit`, Bjorck et al.'s method) and the vertex u*
-  read off; a vertex outside the grid, or no minimum (non-positive curvature), first extends that grid by a factor of 2
-  in its direction (down when divergences leave fewer than three runs). The measured d8 ratio r = exp(u*_d8@200 −
+  `results/lr.json`'s `analysis`, every number from the runs' records and plans): per setting, while its lowest-code
+  run is at an end of the grid (a diverged run counting as worse than any evaluated one) the grid gains the next factor
+  of 2 in that direction and the experiment runs again (`lr.py` repeats this until every grid brackets its optimum);
+  then the vertex u* of the parabola in u = ln(multiplier) through the lowest-code run and its two neighbours (positive
+  curvature by construction), or that run's own u when the neighbour above it diverged. Amended 2026-10-20, after d8 at
+  5's grid (× 1, 2, 4: code 0.89491, 0.78969, 0.76960) put its lowest run at the grid's top with one quadratic over
+  all runs placing the vertex inside (× 3.33): that quadratic's vertex is pulled by the far arms of an asymmetric curve
+  (planted below: an optimum × 3.0 four times steeper below than above, read × 3.95 by one quadratic over × 1–8, × 3.72
+  by the bracketing parabola). The measured d8 ratio r = exp(u*_d8@200 −
   u*_d8@5) is the optimum's change over a token ratio m_D,d8 = 40.0, assumed width-independent (Bjorck et al.'s
   size-independent horizon exponent, arXiv 2409.19913), and the test of the transfer rules, which disagree on its
   direction: Complete^(d)P's AdamW SDE rule, η ∝ √(m_B / m_D) (Mlodozeniec et al., arXiv 2512.22382, Table 1), over the
@@ -91,8 +98,8 @@ Where production departs from the code models it is measured against, and what e
 | MLP | ReLU², hidden 4C | SwiGLU (DeepSeek-Coder, Qwen2.5-Coder, Code Llama); StarCoder2 GELU |
 | Value embeddings | alternating layers, gated (nanochat) | none |
 | Optimizer | Muon on matrices, AdamW on tables and vectors | AdamW, β = (0.9, 0.95) (DeepSeek-Coder §3.4, Code Llama) |
-| Peak lr | DeepSeek LLM's law, as the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
-| Weight decay | τ law (d8: 0.55, d24: 0.32) | 0.1 (DeepSeek LLM §2.3) |
+| Peak lr | DeepSeek LLM's law × 2.5467 (`lr.py`), as the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
+| Weight decay | τ law (d8: 0.55, d24: 0.1246 at its peak lr) | 0.1 (DeepSeek LLM §2.3) |
 | Gradient clipping | 1.0 | 1.0 (DeepSeek LLM §2.3) |
 | Context stages | 8K file level, then the last 5.45% of steps at 32K on repositories | Qwen2.5-Coder: the same 8K → 32K repository stage; DeepSeek-Coder: 16K repository-ordered files; Code Llama: a 16K long-context stage |
 | Data | code:text:math 87:10:3 | DeepSeek-Coder 87% code, 10% code-related English, 3% Chinese; Qwen2.5-Coder code:text:math 70:20:10 |
@@ -110,7 +117,7 @@ One per decision `docs/h100-pretraining.md` records without a study of its own w
 
 | File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
-| `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) as the peak lr, adopted without a study | × 2 and × 4 (× 8 at d8 at 200, where Step-Law points): the law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
+| `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) × 2.5467, adopted 2026-10-20 (§3, lr.py) | × 2 and × 4 (× 8 at d8): the law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
 | `value_embeds.py` | d16 at 20 (4 seeds), d8 at 20 (4) and 490.8 (1) | value embeddings (MoVE: −0.016 at d12), absent from every reference model; 302M parameters, 1.55× the scaling parameters | none | −4.7% of the d24 step, 12 vocabulary tables fewer |
 
 **Power.** The paired comparison's six runs (two configurations × three seeds, d8 at 20 tokens per parameter,
@@ -387,6 +394,26 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
   is not comparable): code bits per byte 0.6323 and 0.6324 at the law's lr, 0.6144 and 0.6137 at × 2 (paired
   differences −0.0179, −0.0187); solutions −0.014, 32K repository −0.018, text −0.030, math −0.033. The law's lr is
   below the optimum at this horizon; `lr.py`'s grids start at × 1 where they look upward.
+- **lr.py** (2026-10-20, dataset revision `1e711aa`, seed 0; `results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`): code
+  bits per byte at × 1 / 2 / 4 / 8 of the law's lr: d8 at 5 0.89491 / 0.78969 / 0.76960 / 0.81791 (× 8 the amended
+  rule's extension), vertex × 3.4669; d8 at 200 0.52774 / 0.51750 / 0.51592 / 0.52431, × 3.1565; d24 at 5 0.44230 /
+  0.43787 / 0.44201, × 2.0235. The measured d8 ratio r = 0.9105 (horizon exponent −0.0254) is neither rule's (SDE
+  × 0.354, Step-Law × 4.92): relative to the law the optimum barely moves, the law's own C^−0.125 carrying most of the
+  horizon trend. Production's multiplier × 2.5467 = 2.0235 · 0.9105^(ln 98.17 / ln 40.05) · √2, peak lr 2.3887e-3
+  (weight decay 0.1246), adopted as `scripts/production.py` `LR_SCALE`. No run diverged (up to × 8 at d8, 6.66e-3 at
+  d24); each setting's best arm beats the law by 0.1253 (d8 at 5), 0.0118 (d8 at 200) and 0.0044 (d24 at 5). Checks:
+  every derived number recomputed from the raw run records by an independent script (closed-form parabola) agrees to
+  6e-15; each run's logged lr equals plan × schedule at every step and its weight decay the τ law (lr × wd constant
+  within a setting); seeds and evaluation rows are identical within a setting; the last-5% train loss ranks each
+  setting's arms as code does; `torch.optim.Muon` decays by the unscaled lr and steps by lr · 0.2√max(A, B)
+  (Moonlight's form). Against references: nanochat's hand-tuned Muon lr 0.02 under its √max(1, rows/cols) scaling
+  (karpathy/nanochat 92d63d4 `optim.py:393`) is the AdamW-matched 0.1/√C, 3.61e-3 at width 768 and 6.25e-3 at 256,
+  against the measured optima 3.37e-3 (d24 at 5) and 6.47e-3 (d8 at 200); d8's optimal lr falls to 0.574 over 40×
+  the tokens with its batch doubled (exponent 0.150, 0.244 net of √2 for the batch), against DeepSeek LLM's 0.125 under
+  the same batch co-scaling and Bjorck et al.'s 0.32 at fixed batch and weight decay, where the τ law moves the weight
+  decay instead (Wang & Aitchison, arXiv 2405.13698); the SDE rule's exponent 1/2 is too large, as arXiv 2604.27077
+  also finds. At d24 at 5's curvature (0.0089 per (ln lr)²) a 30% lr error costs 0.0006. Wall time 13:09–18:39 UTC,
+  37 minutes of it the GPU idle between the two `lr.py` invocations (a waiting script matched its own tmux session).
 - **Compiler caches**, d8 (`base_train`, seed 0, real data), 2026-10-20: from two Inductor/Triton caches the same code
   agrees on the first steps and then differs by ~1e-6 relative (coordinate-descent tuning times kernels); over 2,987
   steps the mean loss of the last 5% of steps differed by 2e-4 (1.70273 vs 1.70255).
@@ -411,11 +438,14 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
     (d8), m_D 98.18 (production) and 40.05 (d8), the law's fall 0.6306; predictions for the d8 ratio × 0.3544 (SDE
     rule) and × 4.9231 (Step-Law).
   - *Analysis* (planted code, `lr.py` through `harness.main` over planted records, optima × 2.4 and × 3.0 at d8 over 5
-    and 200, × 1.8 at d24 over 5): a quadratic in u is recovered exactly (vertices × 2.4000, 3.0000, 1.8000; r ×
-    1.2500, horizon exponent 0.060472, production's multiplier × 3.359307 = 1.8 · 1.25^(ln 98.18 / ln 40.05) · √2,
-    lr 3.1509e-3), also with d8 over 200's × 8 diverged (its 3 other runs); an optimum outside its grid (× 8 at d8 over
-    5) is reported as extend "up" with the derived values null; a curve steeper above its optimum (0.02 (e^d − 1 − d),
-    d = u − u*) biases each vertex low, × 2.240, 2.554, 1.679 (r × 1.140, multiplier × 2.795 against 3.359).
+    and 200, × 1.8 at d24 over 5; before the 2026-10-20 amendment): a quadratic in u is recovered exactly (vertices
+    × 2.4000, 3.0000, 1.8000; r × 1.2500, horizon exponent 0.060472, production's multiplier × 3.359307 = 1.8 ·
+    1.25^(ln 98.18 / ln 40.05) · √2, lr 3.1509e-3), also with d8 over 200's × 8 diverged (its 3 other runs); an optimum
+    outside its grid (× 8 at d8 over 5) is reported as extend "up" with the derived values null; a curve steeper above
+    its optimum (0.02 (e^d − 1 − d), d = u − u*) biases each vertex low, × 2.240, 2.554, 1.679 (r × 1.140, multiplier
+    × 2.795 against 3.359). The amended fit (2026-10-20, synthetic records): an optimum × 2.4 on a symmetric curve read
+    × 2.4000 from × 1–8; × 3.0 on a curve four times steeper below read × 3.72 (one quadratic: × 3.95); a lowest run at
+    either end of the grid extends it; a diverged run above the lowest gives the lowest run's multiplier.
   - *Production's arm, run 0 at 20 tokens per parameter* (whole run through `harness.evaluation` and its efficiency,
     2026-10-22, 248 s, unclipped): code 0.6354, solutions 0.6964, repo_32k 0.6201, repo_beyond_8k 0.4048, text 1.3619,
     math 1.3498; 2.28M tokens per second; peak memory 14.0 GB. The same run clipped at 1.0, launched from its fields
