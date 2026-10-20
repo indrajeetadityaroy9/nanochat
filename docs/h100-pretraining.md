@@ -329,8 +329,8 @@ are near zero; the probe set's results are reported on the production model.
 
 The paired comparison above tests this configuration's regime as a whole against the standard regime, and the d24
 check the production batch and lr. The pre-registered ablations (attention windows, gradient clipping, MLP activation,
-matrix optimizer, weight decay, value embeddings, residual scalars, the repository stage at d8 and d12; the peak lr;
-depth against width at d16), each against the choice of DeepSeek-Coder and the code models it is compared with or
+matrix optimizer, weight decay, value embeddings, residual scalars, the repository stage; the peak lr) at d8 with 100
+tokens per parameter and d12 with 20, each against the choice of DeepSeek-Coder and the code models it is compared with or
 against deleting the component, their designs, decision rules and results are in `ablations/ablations.md`; only
 changes confirmed at d16 reach production.
 

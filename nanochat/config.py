@@ -71,7 +71,7 @@ def code_version(paths: tuple[str, ...]) -> tuple[str, ...]:
 
 def run_tag(*, depth: int, ratio: float, seed: int, data_seed: int, variant: dict, code: tuple[str, ...]) -> str:
     """Name for a run's checkpoints, metrics and evaluation: depth, ratio, seeds, then a hash of everything its result
-    depends on: those, `variant` (an ablation run's settings, ablations/study.py; production's: none) and the git object
+    depends on: those, `variant` (an ablation run's settings, ablations/harness.py; production's: none) and the git object
     ids of `code` (CODE covers DATASET_REVISION), so a run never resumes or counts another's artifacts."""
     # float(ratio): JSON writes int 20 as "20" but float 20.0 as "20.0", so one run would get two names
     identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "data_seed": data_seed, "variant": variant,

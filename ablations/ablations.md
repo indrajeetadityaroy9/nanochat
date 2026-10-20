@@ -3,8 +3,9 @@
 Everything measured to choose this repository's architecture, training regime and H100 implementation, with the code
 that measures it. Two kinds:
 
-- **Architecture and regime** (§1): pre-registered designs whose runs train and evaluate through the production code
-  (`study.py`, analysis `report.py`). Not yet run.
+- **Architecture and regime** (§1): pre-registered experiments, one file each (`lr.py`, `mlp.py`, `weight_decay.py`,
+  `confirm.py`) on one shared mechanism (`harness.py`), whose runs train and evaluate through the production code.
+  Not yet run.
 - **H100 implementation** (§2): kernel and throughput measurements that chose each op (`profile_step.py`), and the
   parity records of the code paths (§3).
 
@@ -12,18 +13,30 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
 
 ## 1. Architecture and regime (pre-registered)
 
-### Base
+### Method
 
-Every run goes through production's code: `scripts/base_train.train` (batch and peak lr by DeepSeek LLM's laws,
-linear warmup and decay to zero, τ-law weight decay, the file-level then the repository stage, the production data
-order by seed) and `scripts/base_eval.loss_evaluation` (the same held-out rows for every run). A run differs from
-production only in the fields of `study.Run`; its plan (batch, steps, peak lr, weight decay) is the production model's
-at the run's shape (`study.plan_of`), so the arms of a comparison match in tokens and hyperparameters. What an
-alternative needs lives in the main code where it is intertwined with it (`GPTConfig.window_pattern`;
-`train(run=, weight_decay=, max_norm=, matrix_optimizer=)`, the plan and weight decay given by the caller) and here
-when it is isolated (`swiglu.py`; `study.model_of` dropping the value embeddings or freezing the residual scalars at
-their identity; `study.plan_of` scaling the lr or dropping the repository stage). GEMMs of every width and MLP run on
-QuACK's autotuned kernels (`quack.gemm_interface`, `tuned=True`), weight gradients on cuBLAS.
+- **Arms.** An experiment is production and one arm per alternative, each on the same seeds; an arm differs from
+  production only in the fields of `harness.Run` (MLP, weight decay, lr multiplier). Every run goes through
+  production's code: `scripts/base_train.train` (the file-level then the repository stage, linear warmup and decay to
+  zero, the production data order by seed) and `scripts/base_eval.loss_evaluation` (the same held-out rows for every
+  run). Its plan (batch, steps, peak lr) is the production model's at the setting (`harness.plan_of`), so arms match
+  in tokens and hyperparameters. GEMMs of every MLP run on QuACK's autotuned kernels, weight gradients on cuBLAS.
+- **Setting.** d8 (14.7M scaling parameters) at 100 tokens per parameter (14,937 steps of 98,304 tokens), 8 seeds per
+  arm. 100 moves five times from Chinchilla's 20 toward production's 490.8 and is where d8's weight-decay contrast is
+  production's: DeepSeek LLM's 0.1 decays on an EMA timescale 1/(ηλ) of 30% of the run against the τ law's 9.6%
+  (3.1×); at d24 and 490.8, 13% against 4.1% (3.2×); at d8 and 20, 123% against 22% (5.5×: 0.1 barely decays within
+  the run).
+- **Decision** (`harness.better`). An alternative is better iff its mean *code* (8K validation bits per byte of the
+  code group at production's corpus weights) is lower than production's with a two-sided pooled t-test p < 0.05
+  (scipy), and neither guard is higher with p < 0.05: *solutions* (bits per byte of the HumanEval+, MBPP+ and
+  HumanEval-X C++ reference solutions given their prompts, pooled; the benchmarks' pass@1 is near zero at this size)
+  and *repo_32k* (32K repository bits per byte of the code group). A false adoption has probability 0.025 per
+  alternative. Of an experiment's better alternatives, the one with the lowest mean code is adopted. Reported too:
+  text, math, tokens per second (each alternative's cost in production hours).
+- **Confirmation** (`confirm.py`). The adopted changes together against production one scale up, d16 (67.1M) at 20
+  tokens per parameter (6,828 steps of 196,608 tokens), 4 seeds per arm, by the same rule. Production takes the
+  bundle only if it is confirmed.
+- **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 ### Code models against this architecture
 
@@ -42,112 +55,75 @@ Where production departs from the code models it is measured against, and what e
 | Data | code:text:math 87:10:3 | DeepSeek-Coder 87% code, 10% code-related English, 3% Chinese; Qwen2.5-Coder code:text:math 70:20:10 |
 | FIM | 50% PSM in the packed data | 50% (DeepSeek-Coder, StarCoder2); Code Llama 90% |
 
-### What is tested and why
+### Experiments
 
-A choice is tested only if a result can change production: its alternative is adoptable (no rebuild of the data or
-of the decoder beyond its MLP) or deletes a component, and its effect plausibly exceeds the design's resolution
-(Power).
-
-| Factor | Production | Alternative | Evidence for production | Why it is questioned | Production cost if adopted |
+| File | Production | Alternative | Evidence for production | Why it is questioned | Production cost if adopted |
 |---|---|---|---|---|---|
-| Attention windows | SSSL, S = 512, last layer full | full attention in every layer | Gemma 3 §5.2 Fig. 4 (local windows near-lossless); nanochat LOG 2026-01-11 | measured on text; code reuses definitions thousands of tokens back; DeepSeek-Coder, Qwen2.5-Coder and Code Llama attend fully | ≈ +4.4% step, ≈ +3.7 h (§2: FA4 at window 8192 1.25× window 512 per layer on real rows; 18 of d24's 24 layers) |
-| Gradient clipping | none | global norm 1.0 | the paired comparison (`docs/h100-pretraining.md`) | the single-seed A/B (§3): clipping at 1.0 lower on all 11 corpora, −0.003 bits per byte on average; DeepSeek LLM clips at 1.0 | none |
-| MLP | ReLU², hidden 4C | SwiGLU, hidden 8C/3 (parameter-matched) | Primer (arXiv 2109.08668); nanochat LOG 2026-02-05 (SwiGLU worse at d12 and d24) | DeepSeek-Coder, Qwen2.5-Coder and Code Llama use SwiGLU | `csrc/decode.cu`'s MLP gated; step time in the run records |
-| Matrix optimizer | `torch.optim.Muon` (5 Newton-Schulz steps) | NorMuon (`dion`, as OLMo-core uses it): Polar Express, neuron-wise normalization, cautious weight decay | Moonlight (arXiv 2502.16982) | nanochat trains with it (LOG 2026-01-10); NorMuon paper (arXiv 2510.05491): 6% and 15% efficiency at 124M and 350M | none |
-| Peak lr (the lr design) | the law's lr | × 2^(k/2), k = −2..2 | DeepSeek LLM §3.1 | the law was fit for AdamW under the multi-step schedule; production uses it as the peak of linear decay to zero (59% of that schedule's mean lr), for Muon | none |
-| Weight decay | τ law: λ = 1/(η τ T) | 0.1 | the τ law (`train/optim.py`), the paired comparison | the code models' 0.1 is 5× smaller at d8 and 3× at d24 | none |
-| Value embeddings | 4 of 8 layers at d8 (12 of 24 at d24) | none | ResFormer (arXiv 2410.17897); MoVE (arXiv 2601.22887): −0.016 bits per byte at d12 | no code model uses them; they cost 4.7% of the d24 step and 12 vocabulary tables | none (decoder takes layers without them) |
-| Residual scalars | per layer x = λ_resid·x + λ_x0·x0, learned | λ_resid = 1, λ_x0 = 0, frozen (a plain residual stream) | nanochat LOG 2026-01-11 (x0: −0.004 to −0.010 bits per byte, d8–d20) | no code model uses them; the resid scalars were never ablated apart from x0 | none (deletes 2·depth parameters) |
-| Repository stage | the last 5.45% of steps at 32K on repositories | every step file-level at 8K (scored at 32K too) | Qwen2.5-Coder §3.2; DeepSeek-Coder §2 | no published ablation at this share; the stage's steps are 8% slower | none (≈ −0.4 h) |
-| Shape | width 30·depth (d24: 24 × 768) | one head narrower at the same scaling parameters (d16: 31 × 384 against 16 × 512) | MobileLLM §2.2.2 (deep and thin better at 125M and 350M) | measured on commonsense tasks, not code; nanochat uses 64·depth | per-token speed in the run records; at d24 the same move gives one head narrower at 195.1M |
+| `lr.py` | DeepSeek LLM's law (§3.1) as the peak lr | the peak lr × 0.5 and × 2 | the law; the d24 check (`docs/h100-pretraining.md`) | the law was fit for AdamW under a multi-step schedule holding the peak for 80% of tokens; production applies it to Muon as the peak of linear decay to zero, whose mean lr is 59% of that schedule's | none |
+| `mlp.py` | ReLU², hidden 4C | SwiGLU, hidden 8C/3 (parameter-matched, `swiglu.py`) | Primer (arXiv 2109.08668); nanochat LOG 2026-02-05 (SwiGLU worse at d12 and d24) | DeepSeek-Coder, Qwen2.5-Coder and Code Llama use SwiGLU | `csrc/decode.cu`'s MLP gated; step time in the run records |
+| `weight_decay.py` | τ law, λ = 1/(η τ* T) (Power Lines, arXiv 2505.13738): 0.317 at d24 | 0.1 | the τ law; the paired comparison | DeepSeek LLM's and the code models' 0.1 decays 3.2× more slowly at d24 | none |
+| `confirm.py` | production at d16 | the bundle of every adopted change | — | a change adopted at d8 may not hold one scale up | that of its changes |
 
-### Designs
+**Power.** The paired comparison's six runs (two configurations × three seeds, d8 at 20 tokens per parameter,
+`docs/h100-pretraining.md`) give a within-configuration σ of 0.0034 bits per byte on code (0.0044 on solutions, 0.0036
+on 32K repository). 8 runs against 8 (14 df) have a standard error of σ/2 = 0.0017: 80% power at an effect of 0.0051
+bits per byte, about the gain of 19% more compute at a loss–compute exponent near 0.05. The confirmation, 4 against
+4 (6 df): 80% power at about 0.008 if σ at d16 is d8's. Each experiment's table reports the observed spread.
 
-| Design | Model | Points | Runs |
-|---|---|---|---|
-| screen | d8 (8 × 256, 14.7M scaling parameters; 2,987 steps of 98,304 tokens) and d12 (12 × 384, 33.8M; 6,882 steps of 98,304), 20 tokens per parameter | at each depth a 2^(8−4) fractional factorial over the eight screen factors, generators E = BCD, F = ACD, G = ABC, H = ABD (resolution IV: main effects aliased only with three-factor interactions; Box, Hunter & Hunter, *Statistics for Experimenters*, 2nd ed., Table 6.22; built by `pydoe.fracfact`), each point twice, every run its own seed | 2 × 32 |
-| lr | d8 and d12, production | the peak lr × 0.5, 0.71, 1, 1.41, 2 | 2 × 5 × 2 seeds (two shared with the screen) |
-| shape | the d16 count (67.1M scaling parameters), 20 tokens per parameter: 16 × 512 (production rule) and 31 × 384 | one head narrower and deeper at the count | 2 × 4 seeds |
-| confirm | 16 × 512 | each change the screen and the lr design adopt, against the shape design's 16 × 512 runs | 4 per change |
+**Cost.** Production throughput at d8 is 2.30M tokens per second (25-step run, 2026-10-20), so a d8 run at 100
+trains in 10.7 minutes; whole runs (child process, compilation, both stages, loss evaluation) about 13 minutes
+[estimate; a d8 run at 20 took 234 s, 128 s of it training]. 40 runs (production 8, lr 16, mlp 8, weight decay 8)
+≈ 8.7 h; the confirmation, 8 d16 runs at about 35 minutes (0.74M tokens per second), ≈ 4.7 h if anything is adopted;
+≈ 13.4 h ($57 at $4.29/h).
 
-**Cost.** Measured production throughput (25-step runs, 2026-10-20): d8 2.30M, d12 1.20M, d16 0.74M tokens per
-second, so training takes 2.1, 9.4 and 30.2 minutes. A whole d8 screen run (child process, compilation, both stages,
-loss evaluation) took 234 s (`d8-r20-s0-d0-2449fca0cf29`, screen run 0); d12 and d16 runs at about 12 and 35 minutes
-[estimate]: screen ≈ 8.5 h, lr ≈ 2.4 h, shape ≈ 4.7 h, confirm ≈ 2.3 h per adopted change; ≈ 15.6 h ($67 at
-$4.29/h) before confirmation.
-
-Runs train one at a time, each in its own process (`python -m ablations.study screen|lr|shape|confirm`); a run's tag is
-production's `config.run_tag` over its fields and the code it depends on (`config.CODE`, `study.py`, `swiglu.py`), so a
-result names the code that produced it. Records, in production's schemas: `artifacts/metrics/<tag>.jsonl`
-(`nanochat/train/metrics.py`: every step, every attempt; the run record holds the model, its MLP, value-embedding
-layers and frozen parameters, the plan, lr, weight decay, clip threshold and matrix optimizer) and
-`artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only); `report.py` computes every aggregate
-from them and writes its tables to `results/`.
-
-### Metrics and decision rules (`report.py`)
-
-- **Primary:** *code*, the 8K validation bits per byte of the code group at production's corpus weights; *solutions*,
-  the bits per byte of the HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their prompts, pooled (the
-  generation benchmarks' pass@1 is near zero at these sizes); *repo_32k*, the 32K repository bits per byte of the
-  code group. **Secondary**, reported only: text, math, the repository bits per byte beyond the file-level context,
-  each benchmark's solutions, tokens per second.
-- **Rule.** At one depth a candidate is *better* iff its effect is negative with Holm-adjusted p < 0.05 (Holm across
-  the design's candidates) on a primary metric, and not positive with unadjusted p < 0.05 on any. It is *adopted* iff
-  it is better at the deepest depth of its design and its effect on each of those metrics is negative at every other
-  depth too (the result replicates one scale down).
-- **screen:** per depth, OLS of each metric on the eight factors (−1 production, +1 alternative; 23 residual degrees
-  of freedom; two-factor interactions, aliased in groups, left to the residual); effect = 2 × coefficient.
-- **lr:** per depth, OLS on the multiplier (treatment contrasts against 1); of the adopted multipliers, the one with the
-  lowest mean code bits per byte at d12.
-- **shape:** OLS on the shape (contrast against 16 × 512); 31 × 384 is adopted iff better.
-- **confirm:** an adopted change is confirmed iff, on each metric it was adopted for, its four d16 runs are lower than
-  the four 16 × 512 runs by a one-sided pooled t-test at p < 0.05. Only confirmed changes reach production, so every
-  change has held at d8, d12 and d16.
-- **Equal tokens.** Comparisons hold tokens fixed: the production run's length is set by its data (no document read
-  twice), not by time. Tokens per second is reported, so each alternative's cost in production hours is explicit.
-
-**Power.** The paired comparison's six runs (two configurations × three seeds, `docs/h100-pretraining.md`) give a
-within-configuration σ of 0.0034 bits per byte on 8K code (0.0044 on solutions, 0.0036 on 32K repository); the same
-seed moved the two configurations in opposite directions (correlation −0.98 across seeds), so seeds are not blocks
-and every run has its own. A screen main effect at one depth has a standard error of 2σ/√32 = 0.0012: 80% power at an
-effect of 0.0035 bits per byte (unadjusted, 23 df), 0.0047 for Holm's strictest step (α/8); at a loss–compute exponent
-near 0.05 that is the gain of about 12% (16%) more compute. An lr contrast, 2 runs against 2, is coarser (standard
-error σ = 0.0034): the sweep finds the optimum's side, not small differences. The shape contrast, 4 runs against 4
-(6 df), has a standard error of σ/√2 = 0.0024 (80% power at about 0.008); confirm's one-sided test at about 0.007, if
-σ at d16 is d8's. `report.py` estimates σ at each depth from the residuals.
+**Records.** A run's tag is production's `config.run_tag` over its fields and the code it depends on (`config.CODE`,
+`harness.py`, `swiglu.py`), so a result names the code that produced it, and an arm shared by experiments (production's)
+trains once. Records, in production's schemas: `artifacts/metrics/<tag>.jsonl` (`nanochat/train/metrics.py`: every
+step, every attempt; the run record holds the model, its MLP, the plan, lr and weight decay),
+`artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only) and `artifacts/logs/<tag>.log` (the
+run's output, a failure's traceback included). Each experiment computes every aggregate from them and writes
+`results/<experiment>.md` and `results/<experiment>.json` (the adopted change's fields).
 
 ### Not tested, and why
 
-- **head_dim 64.** The decoder's attention is built for head_dim 128 (`csrc/qk_row.cuh` HEAD_DIM, `decode.cu`
-  lanes), so adoption rewrites it; at d8 the test is 2 heads against 4, not d24's 6 against 12. nanochat measured 128
-  better on text (LOG 2026-01-17).
-- **Mixture.** The primary code metric falls with the code share by construction, and the coding gain Qwen2.5-Coder
-  reports for 70:20:10 (Table 3, 7B on 5.5T tokens; non-monotone: 100:0:0 best, 85:10:5 worst) is a capability no
-  14.7M-parameter run on 294M tokens shows; production keeps DeepSeek-Coder's 87:10:3.
-- **Four shapes.** Four shapes × 2 seeds leave 3 residual degrees of freedom (80% power only near 0.017 bits per
-  byte); the two-shape design spends the same runs on the one direction MobileLLM supports.
-- **FIM rate and format.** DeepSeek-Coder's ablation (1.3B, Python; Fig. 3): 50% PSM balances infilling and
-  left-to-right completion, 100% hurts completion; Bavarian et al. (arXiv 2207.14255) find FIM nearly free for
-  left-to-right. The rate is fixed in the packed data, so a test repacks every corpus, and its benefit (infilling) is
-  not a loss metric here.
+A result here could not change production, or the literature already gives it:
+
+- **Attention windows.** Gemma 3 finds 512-token local windows near-lossless (arXiv 2503.19786 §5.2, Fig. 4); full
+  attention in every layer would add about 4.4% to the d24 step (§2: FA4 at window 8192 1.25× window 512 per layer).
+- **Gradient clipping.** Muon's orthogonalized and AdamW's normalized updates are nearly invariant to the gradient's
+  scale, so clipping mainly reweights steps inside the momentum; its value is protection from rare spikes over a long
+  run, which no short run measures. At d8 the median gradient norm exceeds 1 in every step of the second half, at d24
+  in 47% of steps 211–423 (§3), so a threshold of 1.0 tests a different intensity at each scale.
+- **NorMuon.** Its reported gain (arXiv 2510.05491: 6% efficiency at 124M) is about 0.002 bits per byte, below the
+  experiments' resolution.
+- **Value embeddings, residual scalars.** nanochat and MoVE (arXiv 2601.22887) measure their gains (−0.016 bits per
+  byte at d12 for value embeddings; −0.004 to −0.010 for the x0 scalars, LOG 2026-01-11).
+- **The repository stage.** A model never trained at 32K is worse at 32K by construction (Qwen2.5-Coder §3.2).
+- **Shape.** One head narrower and deeper at d16's scaling parameters (31 × 384 against 16 × 512, MobileLLM §2.2.2)
+  takes 26.7% more FLOPs per token (685M against 541M) and trains 27% slower (540K against 741K tokens per second,
+  measured), so an equal-token comparison gives it more compute and the d24 analogue (35 × 640) would lengthen
+  production by about as much [inference].
+- **head_dim 64.** The decoder's attention is built for head_dim 128 (`csrc/qk_row.cuh` HEAD_DIM), so adoption
+  rewrites it; nanochat measured 128 better (LOG 2026-01-17).
+- **Mixture.** The code metric falls with the code share by construction, and the coding gain Qwen2.5-Coder reports
+  for 70:20:10 (Table 3, 7B on 5.5T tokens; non-monotone: 100:0:0 best, 85:10:5 worst) is a capability no small run
+  shows; production keeps DeepSeek-Coder's 87:10:3.
+- **FIM rate and format.** DeepSeek-Coder's ablation (Fig. 3): 50% PSM balances infilling and left-to-right
+  completion; Bavarian et al. (arXiv 2207.14255) find FIM nearly free for left-to-right. A test repacks every corpus.
 - **Vocabulary (2^15).** A test retrains the tokenizer and repacks every corpus.
 - **Grouped-query attention.** Its benefit is KV-cache memory; the decoder's slots are capped at 64 by its active mask
-  (`csrc/decode.cu` MAX_BATCH), and d24's cache for 64 slots of the longest benchmark request (1,158 tokens) is 5.5 GB
-  (2 × 24 layers × 768 × 2 bytes per token), so no decoding throughput is to be bought.
-- **Horizon.** Every design trains at 20 tokens per parameter; production trains at 490.8. The lr and batch laws carry
-  the compute and the τ law the tokens per parameter, but no design measures an effect at production's horizon: d8 at
-  490.8 tokens per parameter takes 52 minutes of training per run (36,596 steps of 196,608 tokens), 4 seeds per arm.
+  (`csrc/decode.cu` MAX_BATCH), and d24's cache for 64 slots of the longest benchmark request (1,158 tokens) is 5.5 GB.
 - **QK norm, untied head, RoPE base, the batch law:** the published evidence and pre-launch measurements in
   `docs/h100-pretraining.md`.
+- **Production's horizon.** No experiment trains at 490.8 tokens per parameter (d8 there trains for 52 minutes per
+  run: 36,596 steps of 196,608 tokens).
 - **Library alternatives without a measured gain at this scale** (a 2026 survey of torchtitan, OLMo-core, Megatron,
   nanotron, Marin, modded-nanogpt, nanochat): FP8 training, Liger and Cut Cross-Entropy losses, fused RMSNorm/RoPE
-  libraries, DCP checkpointing, config frameworks. The LR schedule already follows torchtitan's (`LambdaLR` with a
-  closed-form warmup and decay).
+  libraries, DCP checkpointing, config frameworks.
 
 ### Results
 
-`results/{screen,lr,shape,confirm}.md` and the decisions `results/screen.json`, `results/lr.json` (written by
-`report.py`); none yet.
+`results/{lr,mlp,weight_decay,confirm}.md` and `.json`; none yet.
 
 ## 2. H100 implementation
 

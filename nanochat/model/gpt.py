@@ -37,17 +37,15 @@ class GPTConfig:
     n_layer: int
     n_head: int
     n_embd: int
-    window_pattern: str  # per layer, tiled: S a local window, L the full context (layer_windows)
 
 
 def gpt_config(*, depth, stage):
     """nanochat's shape rule (92d63d4 scripts/base_train.py:51-52, 131-134): width ASPECT_RATIO x depth, rounded up to
-    whole 128-dim heads (LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM); SSSL windows (LOG 2026-01-11; 92d63d4
-    gpt.py:287-314)."""
+    whole 128-dim heads (LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM)."""
     head_dim = 128
     n_embd = -(-depth * ASPECT_RATIO // head_dim) * head_dim
     return GPTConfig(sequence_len=stage.seq_len, vocab_size=VOCAB_SIZE, rope_base=ROPE_BASE, n_layer=depth,
-                     n_head=n_embd // head_dim, n_embd=n_embd, window_pattern="SSSL")
+                     n_head=n_embd // head_dim, n_embd=n_embd)
 
 
 def has_ve(layer_idx, *, n_layer):
@@ -56,10 +54,11 @@ def has_ve(layer_idx, *, n_layer):
 
 
 def layer_windows(config):
-    """Keys before each query, per layer: config.window_pattern tiled over the layers, the last layer full;
+    """Keys before each query, per layer: SSSL tiled, the last layer full (LOG 2026-01-11; 92d63d4 gpt.py:287-314);
     S = 512, the smallest local window Gemma 3 finds near-lossless (arXiv 2503.19786 §5.2, Fig. 4)."""
+    pattern = "SSSL"
     window = {"S": min(512, config.sequence_len), "L": config.sequence_len}
-    sizes = [window[config.window_pattern[i % len(config.window_pattern)]] for i in range(config.n_layer)]
+    sizes = [window[pattern[i % len(pattern)]] for i in range(config.n_layer)]
     sizes[-1] = config.sequence_len
     return sizes
 

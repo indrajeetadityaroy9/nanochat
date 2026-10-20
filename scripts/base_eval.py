@@ -11,7 +11,7 @@ name is the result's "run" and scripts/report.py's tag):
   then seeded resampling until a candidate passes the static checks and its prompt's examples; eval/verify.py), with
   per-task diagnostics counts and the system mode's attempts.
 A result is one JSON object: schema (SCHEMA), run, step, then those; a measurement not taken is null (the ablations'
-evaluations, ablations/study.py, take loss_evaluation only).
+evaluations, ablations/harness.py, take loss_evaluation only).
 
     python -m scripts.base_eval --model-tag=<tag> [--step=<step>]   (config.run_tag; runs/h100.sh logs it)
 """

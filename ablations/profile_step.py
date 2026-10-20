@@ -5,7 +5,6 @@ Warm-up: one step (graph compile, optimizer state), then steps while each is slo
 3,461 / 3,719 / 3,775 / 3,790 / 3,795 / 3,781 ms, ablations/ablations.md).
 Usage: python -m ablations.profile_step DEPTH MICRO_STEPS ROWS file|repo"""
 import collections
-import math
 import sys
 import time
 
@@ -53,8 +52,7 @@ def main():
     orig.init_weights(seed=0)  # fixed seeds (init, data order): every profile runs the same step
     model = torch.compile(orig, dynamic=False, fullgraph=True)
     opts = optimizers(orig, lr=run.lr, weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,
-                                                                      tokens_per_param=run.tokens_per_param),
-                      matrix_optimizer="muon")
+                                                                      tokens_per_param=run.tokens_per_param))
     mixture = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
     orders = {c: np.random.RandomState(0).permutation(packed_rows(c, "train", tokenizer, stage.seq_len))
               for c in mixture}
@@ -68,7 +66,7 @@ def main():
         nonlocal batches
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        _, _, batches = optimizer_step(model, batches, params, opts, reads, max_norm=math.inf)
+        _, _, batches = optimizer_step(model, batches, params, opts, reads)
         torch.cuda.synchronize()
         return time.perf_counter() - t0
 
