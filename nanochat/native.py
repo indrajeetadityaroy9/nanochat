@@ -29,17 +29,16 @@ def native_library(name, sources, build, settings=b""):
     return path
 
 
-def cuda_library(name):
-    """csrc/<name>.cu and qk_row.cuh built by nvcc for the current device's architecture, keyed by the nvcc command and
-    version, loaded by ctypes."""
+def cuda_library(source: Path, *, headers: tuple[Path, ...], defines: tuple[str, ...]):
+    """`source` (a .cu including `headers`) built by nvcc with -D`defines` for the current device's architecture, keyed
+    by the nvcc command and version, loaded by ctypes."""
     major, minor = torch.cuda.get_device_capability()
     arch = f"sm_{major}{minor}"
-    source = CSRC / f"{name}.cu"
-    command = ["nvcc", f"-arch={arch}", "-Xcompiler", "-fPIC", "-shared", "-o"]
+    command = ["nvcc", f"-arch={arch}", *(f"-D{d}" for d in defines), "-Xcompiler", "-fPIC", "-shared", "-o"]
     version = subprocess.run(["nvcc", "--version"], capture_output=True, check=True).stdout
 
     def build(path):
         subprocess.run([*command, path, source], check=True)
 
     settings = " ".join(command).encode() + version
-    return ctypes.CDLL(native_library(f"{name}-{arch}", [source, CSRC / "qk_row.cuh"], build, settings))
+    return ctypes.CDLL(native_library(f"{source.stem}-{arch}", [source, *headers], build, settings))

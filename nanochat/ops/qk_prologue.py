@@ -10,12 +10,12 @@ import functools
 import torch
 from torch import Tensor
 
-from nanochat.native import cuda_library
+from nanochat.native import CSRC, cuda_library
 
 
 @functools.cache
 def qk_library():
-    return cuda_library("qk_prologue")
+    return cuda_library(CSRC / "qk_prologue.cu", headers=(CSRC / "qk_row.cuh",), defines=())
 
 
 def launch(kernel, *tensors):

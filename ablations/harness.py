@@ -1,9 +1,10 @@
 """
-The mechanism every ablation experiment (ablations/{lr,mlp,weight_decay,confirm}.py; ablations.md) shares. An experiment
-is production at a setting (depth, tokens per scaling parameter) and one arm per alternative, the arms differing from
-production only in their Run fields, each on the same seeds. A run trains by scripts/base_train.train and is scored by
-scripts/base_eval.loss_evaluation, the production code paths; its plan (batch, steps, peak lr) is the production
-model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
+The mechanism every ablation experiment (ablations/<experiment>.py, one per open decision of docs/h100-pretraining.md;
+ablations.md) shares. An experiment is production at a setting (depth, tokens per scaling parameter) and one arm per
+alternative, the arms differing from production only in their Run fields, each on the same seeds. A run trains by
+scripts/base_train.train and is scored by scripts/base_eval.loss_evaluation, the production code paths; its model is
+ablations/model.py's Candidate (production's GPT when every structural field is production's); its plan (batch, steps,
+peak lr) is the production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process), its output, a failure's traceback included, appended to LOGS/<tag>.log. A run whose evaluation exists is
@@ -17,16 +18,18 @@ writes RESULTS/<experiment>.md and RESULTS/<experiment>.json ({"adopted": the Ru
 """
 import dataclasses
 import json
+import math
 import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import partial
 
 import pandas as pd
 import torch
 from scipy.stats import ttest_ind
 
-from ablations.swiglu import SwiGLU
+from ablations.model import Candidate
 from nanochat.config import CODE, FILE_STAGE, run_tag
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.eval.code_eval import tasks
@@ -35,16 +38,17 @@ from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import BASE_EVAL, LOGS, RESULTS
 from nanochat.train.metrics import train_steps
 from nanochat.train.optim import tau_weight_decay
-from nanochat.train.schedule import RunPlan, plan
+from nanochat.train.schedule import RunPlan, lr_multiplier, plan
 from scripts.base_eval import loss_evaluation, save
 from scripts.base_train import train
 
 # Chinchilla's compute-optimal tokens per parameter (arXiv 2203.15556 §3)
 CHINCHILLA = 20
-# The experiments' setting: d8 (14.7M scaling parameters) at 100 tokens per parameter, where the weight-decay contrast
-# is production's (DeepSeek LLM's 0.1 decays on an EMA timescale 3.1x the tau law's, 3.2x at d24 and 490.8;
-# ablations.md); the confirmation's: d16 (67.1M) at CHINCHILLA
-SETTING = (8, 100)
+# (depth, tokens per scaling parameter): the architecture experiments' d8 (14.7M scaling parameters) at CHINCHILLA; the
+# regime experiments' d8 at 100, about sqrt(20 x 490.8) = 99, the geometric midpoint between CHINCHILLA and production's
+# ratio (runs/h100.sh), toward the horizon a regime is chosen for; the confirmation's d16 (67.1M) at CHINCHILLA
+ARCHITECTURE = (8, CHINCHILLA)
+REGIME = (8, 100)
 CONFIRM = (16, CHINCHILLA)
 # Seeds per arm: d8's and d16's (ablations.md, Power)
 SEEDS = range(8)
@@ -54,33 +58,46 @@ ALPHA = 0.05
 # The metric that decides and those an alternative must not worsen (metrics)
 DECISION, GUARDS = "code", ("solutions", "repo_32k")
 # The code a run's result depends on: production's (config.CODE) and this mechanism
-RUN_CODE = (*CODE, "ablations/harness.py", "ablations/swiglu.py")
+RUN_CODE = (*CODE, "ablations/harness.py", "ablations/model.py", "ablations/swiglu.py", "ablations/depth_attention.py",
+            "ablations/depth_attention.cu")
 
 
 @dataclass(frozen=True, kw_only=True)
 class Run:
-    """A run: production except these fields."""
+    """A run: production except these fields (the structural ones: ablations/model.py)."""
     n_layer: int
-    ratio: float                # tokens per scaling parameter
-    mlp: str                    # "relu2" (gpt.MLP) or "swiglu" (ablations/swiglu.py)
-    weight_decay: float | str   # "tau" (optim.tau_weight_decay) or a fixed value
-    lr_scale: float             # times the plan's peak lr (schedule.plan)
-    seed: int                   # init and data order
+    ratio: float         # tokens per scaling parameter
+    lr_scale: float      # times the plan's peak lr (schedule.plan)
+    max_norm: float      # gradient clip threshold; inf: none
+    schedule: str        # "decay" (schedule.lr_multiplier over the run) or "rewarm" (lr_schedule_of)
+    mlp: str             # "relu2" or "swiglu"
+    value_embeds: str    # "alternating" or "none"
+    residual: str        # "scalars", "identity" or "attn_res"
+    qk_gains: str        # "learned" or "fixed"
+    windows: str         # "SSSL" or "full"
+    rope: str            # "one" or "staged"
+    key_offset: str      # "off" or "on"
+    seed: int            # init and data order
 
 
 def production(*, depth: int, ratio: float, seed: int) -> Run:
-    """Production's MLP, weight decay and lr (scripts/base_train.py main) at this depth and ratio."""
-    return Run(n_layer=depth, ratio=ratio, mlp="relu2", weight_decay="tau", lr_scale=1.0, seed=seed)
+    """Production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio."""
+    return Run(n_layer=depth, ratio=ratio, lr_scale=1.0, max_norm=math.inf, schedule="decay", mlp="relu2",
+               value_embeds="alternating", residual="scalars", qk_gains="learned", windows="SSSL", rope="one",
+               key_offset="off", seed=seed)
 
 
-def model_of(run: Run) -> GPT:
-    """Production's model at the run's depth with its MLP, on the meta device."""
+def fields(run: Run) -> dict:
+    """The run's fields as JSON values (no clipping, an infinite threshold, as null)."""
+    return {k: None if v == math.inf else v for k, v in dataclasses.asdict(run).items()}
+
+
+def model_of(run: Run) -> Candidate:
+    """The run's model on the meta device."""
     with torch.device("meta"):
-        model = GPT(gpt_config(depth=run.n_layer, stage=FILE_STAGE))
-        if run.mlp == "swiglu":
-            for block in model.blocks:
-                block.mlp = SwiGLU(model.config)
-    return model
+        return Candidate(gpt_config(depth=run.n_layer, stage=FILE_STAGE), mlp=run.mlp, value_embeds=run.value_embeds,
+                         residual=run.residual, qk_gains=run.qk_gains, windows=run.windows, rope=run.rope,
+                         key_offset=run.key_offset)
 
 
 def plan_of(run: Run) -> RunPlan:
@@ -90,25 +107,36 @@ def plan_of(run: Run) -> RunPlan:
     return dataclasses.replace(production_plan, lr=run.lr_scale * production_plan.lr)
 
 
-def weight_decay_of(run: Run, run_plan: RunPlan) -> float:
-    if run.weight_decay == "tau":
-        return tau_weight_decay(lr=run_plan.lr, steps=run_plan.num_iterations,
-                                tokens_per_param=run_plan.tokens_per_param)
-    return run.weight_decay
+def rewarm(it: int, *, repo_start: int, steps: int) -> float:
+    """Production's multiplier in the file-level stage; from repo_start, warmed up again to 1 and decayed to zero over
+    the repository stage's steps (schedule.lr_multiplier; re-warming for a new data distribution, Gupta et al., arXiv
+    2308.04014)."""
+    if it < repo_start:
+        return lr_multiplier(it, steps=steps)
+    return lr_multiplier(it - repo_start, steps=steps - repo_start)
+
+
+def lr_schedule_of(run: Run, run_plan: RunPlan):
+    if run.schedule == "decay":
+        return partial(lr_multiplier, steps=run_plan.num_iterations)
+    return partial(rewarm, repo_start=run_plan.repo_start, steps=run_plan.num_iterations)
 
 
 def tag_of(run: Run) -> str:
     """config.run_tag over the run's fields and RUN_CODE."""
-    return run_tag(depth=run.n_layer, ratio=run.ratio, seed=run.seed, data_seed=run.seed,
-                   variant=dataclasses.asdict(run), code=RUN_CODE)
+    return run_tag(depth=run.n_layer, ratio=run.ratio, seed=run.seed, data_seed=run.seed, variant=fields(run),
+                   code=RUN_CODE)
 
 
 def execute(run: Run) -> None:
     """Train and evaluate one run: its metrics as production's (train/metrics.py), its evaluation as base_eval's schema
-    with loss_evaluation only. Checkpoints at repo_start and the end only."""
+    with loss_evaluation only; tau-law weight decay (production's); checkpoints at repo_start and the end only."""
     tag, run_plan = tag_of(run), plan_of(run)
     steps = run_plan.num_iterations
-    model = train(model=model_of(run), run=run_plan, weight_decay=weight_decay_of(run, run_plan), seed=run.seed,
+    model = train(model=model_of(run), run=run_plan,
+                  weight_decay=tau_weight_decay(lr=run_plan.lr, steps=steps,
+                                                tokens_per_param=run_plan.tokens_per_param),
+                  lr_schedule=lr_schedule_of(run, run_plan), max_norm=run.max_norm, variant=fields(run), seed=run.seed,
                   data_seed=run.seed, save_every=steps, snapshot_every=steps, tag=tag)
     save(tag, steps, loss_evaluation(model, get_tokenizer(), tasks(), device=torch.device("cuda")) |
          {"codegen": None, "fim": None})
@@ -120,10 +148,10 @@ def metrics(run: Run) -> dict[str, float]:
     solutions, the bits per byte of the HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their prompts,
     pooled (code_eval.solution_bits); repo_32k, the 32K repository bits per byte of the code group; tok_per_s, the
     median over the file-level stage's steps of the step's tokens per second."""
-    tag = tag_of(run)
+    tag, repo_start = tag_of(run), plan_of(run).repo_start
     result = json.loads((BASE_EVAL / f"{tag}.json").read_text(encoding="utf-8"))
     solution = result["solution"].values()
-    rates = [r["tok_per_s"] for step, r in train_steps(tag).items() if step < plan_of(run).repo_start]
+    rates = [r["tok_per_s"] for step, r in train_steps(tag).items() if step < repo_start]
     return {"code": result["8k"]["bpb"]["code"],
             "solutions": bpb({k: [sum(sum(s[k]) for s in solution)] for k in ("bits", "bytes")}),
             "repo_32k": result["32k"]["bpb"]["code"], "text": result["8k"]["bpb"]["text"],
@@ -136,23 +164,24 @@ def compare(alternative: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
                              "p": ttest_ind(alternative[m], baseline[m]).pvalue} for m in baseline}).T
 
 
-def better(table: pd.DataFrame) -> bool:
-    """The decision rule: DECISION lower with p < ALPHA and no guard higher with p < ALPHA (a false adoption has
-    probability ALPHA / 2 per alternative)."""
-    return (table.at[DECISION, "difference"] < 0 and table.at[DECISION, "p"] < ALPHA
+def better(table: pd.DataFrame, decision_p: float) -> bool:
+    """The decision rule: DECISION lower with `decision_p` (its p, adjusted where a family is tested) < ALPHA and no
+    guard higher with p < ALPHA."""
+    return (table.at[DECISION, "difference"] < 0 and decision_p < ALPHA
             and not any(table.at[m, "difference"] > 0 and table.at[m, "p"] < ALPHA for m in GUARDS))
 
 
 def main(*, alternatives: dict[str, dict], setting: tuple[int, float], seeds: range) -> None:
     """Run the calling experiment (python -m ablations.<experiment>): production at `setting` and an arm per
-    alternative {name: Run fields}, on `seeds`; then compare each alternative with production and adopt, of those
-    better by the rule, the one with the lowest mean DECISION."""
+    alternative {name: Run fields}, on `seeds`; then compare each alternative with production. RESULTS/<experiment>.md
+    marks each better or not by its own p; RESULTS/<experiment>.json holds each alternative's fields, differences and
+    p, from which ablations/confirm.py decides across every experiment's alternatives."""
     module = sys.modules["__main__"].__spec__.name
     experiment = module.rsplit(".", 1)[1]
     depth, ratio = setting
     baseline = [production(depth=depth, ratio=ratio, seed=seed) for seed in seeds]
-    arms = {"production": baseline} | {name: [dataclasses.replace(run, **fields) for run in baseline]
-                                       for name, fields in alternatives.items()}
+    arms = {"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
+                                       for name, changes in alternatives.items()}
     runs = [run for arm in arms.values() for run in arm]
     if len(sys.argv) == 2:
         execute(runs[int(sys.argv[1])])
@@ -166,14 +195,13 @@ def main(*, alternatives: dict[str, dict], setting: tuple[int, float], seeds: ra
     frames = {name: pd.DataFrame([metrics(run) for run in arm], index=pd.Index(map(tag_of, arm), name="tag"))
               for name, arm in arms.items()}
     tables = {name: compare(frames[name], frames["production"]) for name in alternatives}
-    passing = [name for name in alternatives if better(tables[name])]
-    adopted = min(passing, key=lambda name: frames[name][DECISION].mean(), default=None)
-    lines = [f"# {experiment}: d{depth} at {ratio} tokens per parameter, {len(seeds)} seeds per arm\n",
-             f"Adopted: {adopted or 'none'}\n", "## Means\n",
+    lines = [f"# {experiment}: d{depth} at {ratio} tokens per parameter, {len(seeds)} seeds per arm\n", "## Means\n",
              pd.DataFrame({name: frame.mean() for name, frame in frames.items()}).to_markdown()]
     for name, table in tables.items():
-        lines += [f"\n## {name} against production\n", table.to_markdown()]
+        verdict = "better" if better(table, table.at[DECISION, "p"]) else "not better"
+        lines += [f"\n## {name} against production: {verdict}\n", table.to_markdown()]
     lines += ["\n## Runs\n", pd.concat(frames, names=["arm"]).to_markdown()]
     (RESULTS / f"{experiment}.md").write_text("\n".join(lines), encoding="utf-8")
-    (RESULTS / f"{experiment}.json").write_text(json.dumps({"adopted": alternatives[adopted] if adopted else {}},
-                                                           allow_nan=False), encoding="utf-8")
+    (RESULTS / f"{experiment}.json").write_text(json.dumps(
+        {"alternatives": {name: {"fields": alternatives[name]} | table.to_dict() for name, table in tables.items()}},
+        allow_nan=False), encoding="utf-8")

@@ -5,6 +5,7 @@ Warm-up: one step (graph compile, optimizer state), then steps while each is slo
 3,461 / 3,719 / 3,775 / 3,790 / 3,795 / 3,781 ms, ablations/ablations.md).
 Usage: python -m ablations.profile_step DEPTH MICRO_STEPS ROWS file|repo"""
 import collections
+import math
 import sys
 import time
 
@@ -66,7 +67,7 @@ def main():
         nonlocal batches
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        _, _, batches = optimizer_step(model, batches, params, opts, reads)
+        _, _, batches = optimizer_step(model, batches, params, opts, reads, max_norm=math.inf)
         torch.cuda.synchronize()
         return time.perf_counter() - t0
 

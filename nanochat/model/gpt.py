@@ -92,9 +92,9 @@ class Attention(nn.Module):
         self.k_gain = nn.Parameter(torch.empty(C // H))
         self.ve_gate = nn.Linear(C, H, bias=False) if has_ve(layer_idx, n_layer=config.n_layer) else None
 
-    def forward(self, n, ve, *, cos_sin, window_size, kv_cache, cu_seqlens):
-        """n: normed stream; ve: this layer's value embeddings or None; kv_cache (decoder prefill) receives k and v."""
-        B, T, C = n.size()
+    def qkv(self, n, ve, *, cos_sin):
+        """q, k, v (B, T, H, D) of the normed stream n; ve: this layer's value embeddings or None."""
+        B, T, _ = n.size()
         q, k, v = (linear(n, w).view(B, T, self.n_head, -1) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once. Broadcast-sum gate
         # fused by Inductor: 0.88 vs 1.20 ms per layer and micro-batch for fp32 GEMMs (ablations/ablations.md)
@@ -102,6 +102,12 @@ class Attention(nn.Module):
             gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))
             v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
         q, k = qk_norm_rope(q, k, self.q_gain, self.k_gain, *cos_sin)
+        return q, k, v
+
+    def forward(self, n, ve, *, cos_sin, window_size, kv_cache, cu_seqlens):
+        """kv_cache (decoder prefill) receives k and v."""
+        B, T, C = n.size()
+        q, k, v = self.qkv(n, ve, cos_sin=cos_sin)
         if kv_cache is not None:
             kv_cache.k_cache[self.layer_idx, :, :T], kv_cache.v_cache[self.layer_idx, :, :T] = k, v
         return linear(flash_attn(q, k, v, window_size, cu_seqlens)[0].view(B, T, C), self.c_o.weight)

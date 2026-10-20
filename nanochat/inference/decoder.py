@@ -19,7 +19,7 @@ import torch
 
 from nanochat.data.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX
 from nanochat.inference import syntax_constraint
-from nanochat.native import cuda_library
+from nanochat.native import CSRC, cuda_library
 
 
 def fim_prompt(tokenizer, prefix, suffix, *, mode: Literal["psm", "spm"]):
@@ -159,7 +159,7 @@ class NativeDecoder:
 
     @torch.no_grad()
     def __init__(self, model, *, bos_token_id, max_len):
-        lib = cuda_library("decode")
+        lib = cuda_library(CSRC / "decode.cu", headers=(CSRC / "qk_row.cuh",), defines=())
         lib.dec_create.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dec_create.restype = ctypes.c_void_p
         lib.dec_batch.argtypes = [ctypes.c_void_p]
