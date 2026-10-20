@@ -1,19 +1,23 @@
 """
-The GPT: karpathy/nanochat 92d63d4 nanochat/gpt.py with the wins of its experiment log (dev/LOG.md, "LOG") and Qwen3's
-QK norm with learnable gains (arXiv 2505.09388 §2).
+The GPT: karpathy/nanochat 92d63d4 nanochat/gpt.py (a Block applies pre-norm attention and MLP, each added back; GPT's
+layer loop mixes in x0 and looks up value embeddings) with the wins of its experiment log (dev/LOG.md, "LOG") and
+Qwen3's QK norm with learnable gains (arXiv 2505.09388 §2).
 - Normed token embedding, no positional embedding; RoPE over the full head (92d63d4 gpt.py:57-65).
 - Per layer x = resid_lambda x + x0_lambda x0, x0 the normed embedding (LOG 2026-01-11).
 - Attention: MHA, head_dim config.HEAD_DIM; per-head RMS norm, a per-dim gain shared across heads, then RoPE
   (transformers modeling_qwen3.py Qwen3Attention.forward); SSSL windows; value embeddings on alternating layers behind a
-  gate (ResFormer, arXiv 2410.17897; LOG 2026-01-17); FlashAttention-4 with document masking.
+  per-head gate 2 sigmoid(.) of the normed stream, zero init (ResFormer, arXiv 2410.17897; nanochat e85db6b, whose gate
+  read the stream's first 32 channels); FlashAttention-4 with document masking.
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
 - Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy.
+Not taken from 92d63d4: its smear, backout and logit softcap, its QK order (RoPE, norm, x 1.2) and its init
+(init_weights states this model's).
 fp32 parameters, bf16 activations; the ops round weights to bf16. Gradient reductions use the fastest kernels, not a
 fixed order (FA4's and the embedding backward's atomics: ~1% faster per step, ablations/ablations.md).
 """
 
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn as nn
@@ -30,7 +34,7 @@ from nanochat.ops.qk_prologue import qk_norm_rope
 ASPECT_RATIO = 960 // 32
 
 
-@dataclass(kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class GPTConfig:
     sequence_len: int
     n_layer: int
@@ -109,6 +113,11 @@ class Block(nn.Module):
         self.attn = Attention(config, layer_idx)
         self.mlp = MLP(config)
 
+    def forward(self, x: Tensor, ve: Tensor | None, *, cos_sin: tuple[Tensor, Tensor], window_size: int,
+                cu_seqlens: Tensor) -> Tensor:
+        x = x + self.attn(norm(x), ve, cos_sin=cos_sin, window_size=window_size, cu_seqlens=cu_seqlens)
+        return x + self.mlp(norm(x))
+
 
 class GPT(nn.Module):
     def __init__(self, config: GPTConfig) -> None:
@@ -116,13 +125,13 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         self.window_sizes = layer_windows(config)
-        C, V = config.n_embd, VOCAB_SIZE
-        self.wte = nn.Embedding(V, C)
+        C = config.n_embd
+        self.wte = nn.Embedding(VOCAB_SIZE, C)
         self.blocks = nn.ModuleList([Block(config, i) for i in range(config.n_layer)])
-        self.lm_head = nn.Linear(C, V, bias=False)
+        self.lm_head = nn.Linear(C, VOCAB_SIZE, bias=False)
         self.resid_lambdas = nn.Parameter(torch.empty(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.empty(config.n_layer))
-        self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(V, C) for i in range(config.n_layer)
+        self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(VOCAB_SIZE, C) for i in range(config.n_layer)
                                            if has_ve(i, n_layer=config.n_layer)})
         # Rotary tables, set by init_buffers
         for name in ("cos", "sin"):
@@ -159,22 +168,19 @@ class GPT(nn.Module):
 
     def set_stage(self, stage: Stage) -> None:
         """Switch to a stage's context: recompute windows and rotary tables; weights unchanged."""
-        self.config.sequence_len = stage.seq_len
+        self.config = replace(self.config, sequence_len=stage.seq_len)
         self.window_sizes = layer_windows(self.config)
         self.init_buffers()
 
     def hidden(self, idx: Tensor, cu_seqlens: Tensor) -> Tensor:
         """Final normed hidden states (B*T, C) of idx (B, T); cu_seqlens: int32 document bounds in flattened idx."""
-        x = norm(F.embedding(idx, self.wte.weight).to(torch.bfloat16))
-        x0 = x
+        x = x0 = norm(F.embedding(idx, self.wte.weight).to(torch.bfloat16))
         for i, block in enumerate(self.blocks):
             # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 without fp32 copies of the mix
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = (F.embedding(idx, self.value_embeds[str(i)].weight).to(torch.bfloat16) if str(i) in self.value_embeds
                   else None)
-            x = x + block.attn(norm(x), ve, cos_sin=(self.cos, self.sin), window_size=self.window_sizes[i],
-                               cu_seqlens=cu_seqlens)
-            x = x + block.mlp(norm(x))
+            x = block(x, ve, cos_sin=(self.cos, self.sin), window_size=self.window_sizes[i], cu_seqlens=cu_seqlens)
         return norm(x).flatten(0, 1)
 
     def forward(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor) -> Tensor:

@@ -9,20 +9,22 @@ results are in `results/`.
 ## Model
 
 `nanochat/model/gpt.py`: karpathy/nanochat 92d63d4 plus the wins of its experiment log, with Qwen3's QK norm and
-learnable gains. Each layer is a `Block` of `Attention` and `MLP`, each applied to the RMS-normed stream and added back.
+learnable gains. Each layer mixes x0 into the stream and looks up its value embeddings (`GPT.hidden`); its `Block` then
+applies `Attention` and `MLP` to the RMS-normed stream, each added back.
 
 | | d24 (production) |
 |---|---|
 | Shape | 24 layers × 768 (`gpt_config`: width 30 × depth rounded up to whole 128-dim heads), 6 heads × 128, MHA |
 | Attention | per-head RMS norm → learned per-dim gain → RoPE over the full head, base 10^6; SSSL windows (S = 512), last layer full; FlashAttention-4 varlen with document masking |
 | MLP | ReLU², hidden 4C |
-| Residual | `x = resid_lambda·x + x0_lambda·x0` per layer; value embeddings on alternating layers (12 of 24) behind a `2·sigmoid` gate |
+| Residual | `x = resid_lambda·x + x0_lambda·x0` per layer; value embeddings on alternating layers (12 of 24) behind a per-head `2·sigmoid` gate of the normed stream, zero init (gate 1) |
 | Head | untied `lm_head`, zero init, plain cross entropy; no logit softcap or z-loss (QK norm bounds the attention logits) |
 | Vocabulary | 2^15 ids (SA-BPE, BOS + 3 FIM sentinels) |
 | Parameters | 195,096,576 scaling parameters (blocks 169,930,752 + `lm_head` 25,165,824), what the token budget counts; plus the token table (25,165,824) and 12 value-embedding tables (301,989,888, 1.55× the scaling parameters), lookups without FLOPs: 522,252,336 in all |
-| FLOPs per token | 1.557 GFLOP non-embedding: DeepSeek LLM's M (Eq. 2, 72·n_layer·d² + 12·n_layer·d·l_seq, l_seq each layer's window at 8K: 1.020 matrices + 0.538 attention), plus 0.151 for `lm_head` |
+| FLOPs per token | 1.557 GFLOP non-embedding: DeepSeek LLM's M (Eq. 2): 6 per block matrix weight (72·n_layer·d² and the value-embedding gates' 0.0003) + 12·n_layer·d·l_seq, l_seq each layer's window at 8K: 1.020 matrices + 0.538 attention; plus 0.151 for `lm_head` |
 | Init | stream-reading matrices and tables uniform with std C^-½; `c_o`, `c_proj`, `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
 | Precision | fp32 parameters, gradients and optimizer state; bf16 activations and GEMM inputs |
+| Lineage | From nanochat 92d63d4: the block layout, value-embedding layers, MLP and window pattern. Not taken: its smear, backout and logit softcap, QK order (RoPE → norm → ×1.2), short window (a quarter of the context), RoPE base (10^5) and init (`wte` N(0, 0.8), `lm_head` N(0, 0.001), `c_fc` at 0.4×, ramped lambdas). The gate is nanochat e85db6b's (2·sigmoid, zero init) read over the full width rather than its first 32 channels; 92d63d4 has 3·sigmoid of 12 channels, U(0, 0.02) init. The full-width read is not ablated |
 
 ## Data and stages
 
@@ -156,6 +158,7 @@ Commit `60138de` on the H100, on the packed rows; records under `artifacts/` by 
 | Production path (2026-10-20, through the `base_train` command line `scripts/production.py` has since replaced with direct calls in spawned processes): `base_train` with lr scale 2.5 (d8, 74 steps), `base_eval` (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
 | Run identity | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
 | Checkpoints and lineage (2026-10-20, NVIDIA GB10, sm_121; the image of this `uv.lock`; `train` on synthetic token rows, d8, 74 steps, checkpoints at 20, 40, 70 and 74) | a run killed after its step-40 checkpoint resumed there (attempt 1), switched to the 32K stage at step 70 and ended at 74; the final checkpoint reloaded reproduces the live model's loss bitwise; against the code of `results/lr.json` (`8caecb9`) the lr is bitwise equal at every step and the loss bitwise through step 5, then within 5.1e-6 relative, as an uninterrupted and a resumed run of the same code differ (4.8e-6: the backward's atomics) |
+| Model against this document's Model table (2026-10-20, NVIDIA GB10; each op and the whole model against fp64 restatements written from the table, forward and backward) | d24's shapes, parameter counts, value-embedding layers, windows and FLOPs and d8's init exactly as stated. Ops: GEMMs and ReLU² within 3.7e-3 relative (fp32 weight gradients 4.4e-6); q/k prologue 1.7e-3 (gain gradients 1.5e-7); FA4 within 3.6e-3, its window boundary exact (keys 512 back attended, 513 not: worst row 2.7e-3 against 1.0–2.3 for either off-by-one) and document masking held (4.1 without); cross entropy 1.7e-3. Whole model (4 × 256, every component perturbed to matter): per-position loss within 5.0e-3 of the restatement, against 5.1e-2–1.5e-1 for restatements each breaking one rule (no x0, σ gate, no value embeddings, RoPE +θ, no document mask); gradients within 1.7e-2. Native decoder: 499 of 512 greedy tokens the forward's argmax, the rest within 0.014 of its maximum logit |
 
 **Training record**, d8 at 20 tokens per parameter (2,987 steps of 98,304 tokens, peak lr 2.73e-3): mean training loss
 per window of steps, one record per step (a resumed run's repeated steps counted once), against runs of the previous
@@ -378,7 +381,7 @@ Each in `ablations/ablations.md` §2:
 
 ## Layout
 
-- `nanochat/config.py`: vocabulary, mixture, micro-batch, stages, RoPE base, run tag.
+- `nanochat/config.py`: vocabulary, head width, mixture, micro-batch, stages, RoPE base, run tag.
 - `nanochat/model/gpt.py`: the model, scaling parameters and FLOPs per token.
 - `nanochat/ops/`, `nanochat/csrc/`: the ops above and the decoder.
 - `nanochat/train/`: `optim.py`, `schedule.py` (plan, lr multiplier), `stages.py` (token budget, rows per stage),

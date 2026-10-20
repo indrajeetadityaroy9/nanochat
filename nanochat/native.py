@@ -46,8 +46,8 @@ def cuda_library(name: str) -> ctypes.CDLL:
     def build(path: Path) -> None:
         subprocess.run([*command, path, source], check=True)
 
-    settings = " ".join(command).encode() + version
-    return ctypes.CDLL(native_library(f"{name}-{arch}", [source, CSRC / "qk_row.cuh"], build, settings=settings))
+    return ctypes.CDLL(native_library(f"{name}-{arch}", [source, CSRC / "qk_row.cuh"], build,
+                                      settings=" ".join(command).encode() + version))
 
 
 @functools.cache
