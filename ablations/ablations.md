@@ -299,7 +299,13 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
   - *Plans:* every screen arm of a depth shares production's (d8: 2,987 steps of 98,304 tokens, `repo_start` 2,824,
     lr 2.7337e-3, weight decay 0.548; d12: 6,882, 6,507, 2.1768e-3, 0.299); the shapes 16 × 512 (67.1M, 6,828 steps
     of 196,608) and 31 × 384 (67.5M, 6,862). Production's d24 plan unchanged: 81,171 steps, `repo_start` 76,743.
-  - *Analysis* (`report.py` on planted effects, σ 0.0034, its metrics replaced): the screen recovers the planted code
-    effects at d12 (clip −0.0065 for −0.006, value embeddings +0.0131 for +0.012, SwiGLU +0.0036 for +0.004, the
-    null factors within ±0.002) and adopts clip alone; the lr design adopts the planted best multiplier; confirm
-    confirms both at d16.
+  - *Analysis code* (`report.py` with its `metrics` replaced by planted effects plus σ 0.0034 noise: a check of the
+    statistics only, no result uses it): the screen recovers the planted code effects at d12 (clip −0.0065 for
+    −0.006, value embeddings +0.0131 for +0.012, SwiGLU +0.0036 for +0.004, the null factors within ±0.002) and adopts
+    clip alone; the lr design adopts the planted best multiplier; confirm confirms both at d16.
+  - *Real data* (screen run 0, `d8-r20-s0-d0-2449fca0cf29`): the data on disk is the pinned Hub revision
+    (`6744e406…`, the download's recorded commit); the run record's mixture is the 11 production corpora at their
+    weights; the first training micro-batch, rebuilt as `train` reads it (data seed 0), decodes to real C++ files and
+    a FIM example; the loss evaluation reads the held-out val splits (stack_edu_python's first document: a word2vec
+    module) and the benchmarks' reference solutions (HumanEval+ 164, MBPP+ 378, HumanEval-X C++ 164). The trained
+    model's loss on that batch is 1.869 nats against 11.705 on uniformly random tokens (ln V = 10.397).
