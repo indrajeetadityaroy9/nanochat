@@ -333,6 +333,10 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
     sets each arm's weight decay from its lr, keeping the decay's timescale as the lr moves. Production's d24 plan
     unchanged: 81,171 steps, `repo_start` 76,743.
   - *Candidate* (`model.py`, real rows, 2026-10-21): with production's fields `Candidate` equals `GPT` bitwise.
+  - *Every arm* (2026-10-22): `lr.py`'s at d8 over 490.80456005542607 (`max_ratio` of d24, 20.6 s) and at d24 over 5,
+    `value_embeds.py`'s at d16, compiled and trained 4 steps through both stages on real rows with finite losses;
+    weight decay 0.3597 at d8's peak lr (0.7194 at × 0.5, 0.1798 at × 2), 0.3914 at d24's; parameters: d8 56,627,216,
+    d24 522,252,336, d16 218,124,320 (83,890,208 without value embeddings).
   - *Production's arm, run 0 at 20 tokens per parameter* (whole run through `harness.evaluation` and `efficiency`,
     2026-10-22, 248 s): code 0.6354, solutions 0.6964, repo_32k 0.6201, repo_beyond_8k 0.4048, text 1.3619, math
     1.3498; 2.28M tokens per second; peak memory 14.0 GB.
