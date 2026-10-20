@@ -24,7 +24,11 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
   production model's at the setting (`harness.plan_of`), so arms match in tokens and hyperparameters, and every run
   completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
   compared before its decay, where loss curves cross and rankings flip (Wen et al., arXiv 2509.02046; Hägele et al.,
-  arXiv 2405.18392).
+  arXiv 2405.18392). An lr arm's weight decay follows its lr by the τ law, λ = 1/(η τ T), as production's would: the
+  sweep varies η at the fixed EMA timescale τ that sets the decay's effect (Wang & Aitchison, arXiv 2405.13698; Power
+  Lines, arXiv 2505.13738). A run that diverges (a non-finite loss or gradient norm; its failure record) is an outcome
+  of a sweep's high end (Wortsman et al., arXiv 2309.14322): it is recorded with its step and excluded from the fits
+  and comparisons, and the experiment continues; any other failure stops it.
 - **Settings.** No affordable run reaches production (d24 at 490.8 tokens per scaling parameter), so each experiment
   measures its decision's dependence on training length at d8 and on width at a short length, and combines them as
   separable, the form Bjorck et al. fit for the optimal lr, LR*(N, D) = C N^−α D^−β, with β independent of model size
@@ -54,9 +58,9 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
   vertex u* read off; at d8 over 50, σ is the production arm's seed spread and σ_d the spread of within-seed differences
   between arms. The optimum's fall with tokens beyond the law's own D^−0.125 is Δβ = (u*(d8, 50) − u*(d8, 490.8)) /
   ln(490.8 / 50), and production's predicted optimum is u*(d24, 5) − Δβ · ln(490.8 / 5). `lr.ADOPTED` is its
-  exponential if it lies within a factor √2 of d8's vertex at 490.8, else that vertex's (the setting matching
-  production's length); a vertex outside its grid, or no minimum (non-positive curvature), first extends that grid by
-  a factor of 2. *Value embeddings*: per setting and measure the difference of means, the two-sided pooled t-test's p
+  exponential if it lies within a factor √2 of d8's vertex at 490.8 (half the grid's factor-2 step), else that
+  vertex's (the setting matching production's length); a vertex outside its grid, or no minimum (non-positive
+  curvature), first extends that grid by a factor of 2.
   and the difference's 95% confidence interval (scipy `ttest_ind`; pooled with equal arm sizes is robust to unequal
   variances); their gain g is code without them minus code with them. Production's gain is predicted as
   g(d16, 20) · g(d8, 490.8) / g(d8, 20) · (g(d16, 20) / g(d8, 20))^0.70 (0.70 = ln(195.1 / 67.1) / ln(67.1 / 14.7),
@@ -117,15 +121,17 @@ evaluation). `lr.py`: 19 runs ≈ 8.3 h; `value_embeds.py`: 18 runs ≈ 7.0 h, 1
 sweep's grid (its d8 run at 490.8 is then `lr.py`'s); ≈ 14.4 to 15.3 h ($62 to $66 at $4.29/h).
 
 **Records.** A run's tag is production's `config.run_tag` over its fields and the code it depends on (`config.CODE`,
-`harness.py`, `model.py`), so a result names the code that produced it, and an arm shared by experiments trains once.
-Per run, in production's schemas: `artifacts/metrics/<tag>.jsonl` (`nanochat/train/metrics.py`: every step and
-attempt; the run record holds the model config, the run's fields as `variant`, parameters, FLOPs per token, the plan,
-lr and weight decay; the end record the peak memory), `artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss
-evaluation only) and `artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment
-computes its aggregates from them: `results/<experiment>.jsonl` (schema 1, a record per run: arm, tag, fields,
-measures, efficiency) and `results/<experiment>.json` (the commit and, per setting, depth, tokens per parameter,
-seeds, the lr multiplier, and per alternative its fields and per measure difference, p and confidence interval, null
-for one seed).
+`harness.py`, `model.py`), so a result names the code that produced it, and an arm shared by experiments trains once;
+each run is launched from its fields (`python -m ablations.harness '<fields>'`). Per run, in production's schemas:
+`artifacts/metrics/<tag>.jsonl` (`nanochat/train/metrics.py`: every step and attempt, the learning curve and gradient
+norms included; the run record holds the model config, the run's fields as `variant`, parameters, FLOPs per token,
+the clip threshold, the plan, lr and weight decay; the end record the peak memory; a failure record the step a run
+diverged at), `artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only) and
+`artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment computes its aggregates
+from them: `results/<experiment>.jsonl` (schema 1, a record per run: arm, tag, fields, measures and efficiency, null
+for a diverged run, whose step it holds) and `results/<experiment>.json` (the commit and, per setting, depth, tokens
+per parameter, seeds, the lr multiplier, production's evaluated runs, and per alternative its fields, evaluated runs
+and per measure difference, p and confidence interval, null for one run per arm).
 
 ### Not tested, and why
 

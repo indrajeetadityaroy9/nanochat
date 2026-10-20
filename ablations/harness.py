@@ -7,15 +7,18 @@ Candidate (production's GPT when every structural field is production's); its pl
 production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
-per process), its output, a failure's traceback included, appended to LOGS/<tag>.log. A run whose evaluation exists is
-skipped (arms shared between experiments train once); a stopped run resumes from its repo_start checkpoint or restarts
-(train/metrics.py attempts keep both traceable). Then each alternative is compared with production; the experiment
-writes RESULTS/<experiment>.jsonl (a record per run: its fields, evaluation and efficiency) and RESULTS/<experiment>.json
-(per setting, each alternative's fields and, per measure, its difference from production, p and confidence interval;
-null where one seed leaves them undefined), for the decisions ablations.md fixes.
+per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A run
+whose evaluation exists is skipped (arms shared between experiments train once), as is one that diverged (its
+train/metrics.py failure record: a non-finite loss or gradient norm, an outcome of a lr sweep's high end, Wortsman et
+al., arXiv 2309.14322); any other failure stops the experiment, and a stopped run resumes from its repo_start checkpoint
+or restarts (train/metrics.py attempts keep both traceable). Then each alternative is compared with production over
+the evaluated runs; the experiment writes RESULTS/<experiment>.jsonl (a record per run: its fields, evaluation and
+efficiency, or the step it diverged at) and RESULTS/<experiment>.json (per setting, each alternative's fields, its
+evaluated runs and, per measure, its difference from production, p and confidence interval; null where one run per
+arm leaves them undefined), for the decisions ablations.md fixes.
 
-    python -m ablations.<experiment>            (every missing run, each in a child process, then the comparison)
-    python -m ablations.<experiment> <index>    (one run)
+    python -m ablations.<experiment>       (every missing run, each in a child process, then the comparison)
+    python -m ablations.harness '<fields>'  (one run: harness.Run's fields as JSON)
 """
 import dataclasses
 import json
@@ -36,8 +39,8 @@ from nanochat.data.tokenizer import get_tokenizer
 from nanochat.eval.code_eval import tasks
 from nanochat.eval.loss_eval import bpb, mixture_bpb
 from nanochat.model.gpt import GPT, gpt_config
-from nanochat.paths import BASE_EVAL, LOGS, RESULTS
-from nanochat.train.metrics import latest, train_steps
+from nanochat.paths import BASE_EVAL, LOGS, METRICS, RESULTS
+from nanochat.train.metrics import latest, records, train_steps
 from nanochat.train.optim import tau_weight_decay
 from nanochat.train.schedule import RunPlan, plan
 from scripts.base_eval import loss_evaluation, save
@@ -132,9 +135,9 @@ def efficiency(run: Run) -> dict[str, int]:
 
 
 def compare(alternative: pd.DataFrame, baseline: pd.DataFrame) -> dict[str, dict[str, float | None]]:
-    """{statistic: {measure (column): value}}: the alternative's mean minus the baseline's, the two-sided pooled t-test's
-    p and the difference's 1 - ALPHA confidence interval (scipy ttest_ind); None where one run per arm leaves them
-    undefined."""
+    """{statistic: {measure (column): value}}: the alternative's mean minus the baseline's, the two-sided pooled
+    t-test's p and the difference's 1 - ALPHA confidence interval (scipy ttest_ind); None where one run per arm leaves
+    them undefined."""
     stats = {"difference": {}, "p": {}, "ci_low": {}, "ci_high": {}}
     for m in baseline:
         test = ttest_ind(alternative[m], baseline[m])
@@ -145,42 +148,61 @@ def compare(alternative: pd.DataFrame, baseline: pd.DataFrame) -> dict[str, dict
     return stats
 
 
+def diverged(tag: str) -> int | None:
+    """The step at which run `tag` stopped on a non-finite loss or gradient norm (its failure record), or None."""
+    if not (METRICS / f"{tag}.jsonl").exists():
+        return None
+    failures = [r["step"] for r in records(tag) if r["kind"] == "failure"]
+    return failures[-1] if failures else None
+
+
 def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], lr_scale: float) -> None:
     """Run the calling experiment (python -m ablations.<experiment>): at each setting (depth, tokens per scaling
     parameter, seeds, alternatives), production at peak lr `lr_scale` times the plan's and an arm per alternative
     {name: Run fields}; then compare each alternative with production at each setting."""
-    module = sys.modules["__main__"].__spec__.name
-    experiment = module.rsplit(".", 1)[1]
+    experiment = sys.modules["__main__"].__spec__.name.rsplit(".", 1)[1]
     cells = []
     for depth, ratio, seeds, alternatives in settings:
         baseline = [production(depth=depth, ratio=ratio, lr_scale=lr_scale, seed=seed) for seed in seeds]
         cells.append({"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
                                                  for name, changes in alternatives.items()})
-    runs = [run for arms in cells for arm in arms.values() for run in arm]
-    if len(sys.argv) == 2:
-        execute(runs[int(sys.argv[1])])
-        return
-    for i, run in enumerate(runs):
+    for run in (run for arms in cells for arm in arms.values() for run in arm):
         tag = tag_of(run)
-        if not (BASE_EVAL / f"{tag}.json").exists():
-            with (LOGS / f"{tag}.log").open("a", encoding="utf-8") as log:
-                subprocess.run([sys.executable, "-m", module, str(i)], stdout=log, stderr=subprocess.STDOUT,
-                               check=True)
+        if (BASE_EVAL / f"{tag}.json").exists() or diverged(tag) is not None:
+            continue
+        with (LOGS / f"{tag}.log").open("a", encoding="utf-8") as log:
+            child = subprocess.run([sys.executable, "-m", "ablations.harness", json.dumps(dataclasses.asdict(run))],
+                                   stdout=log, stderr=subprocess.STDOUT)
+        if child.returncode and diverged(tag) is None:
+            raise RuntimeError(f"run {tag} failed: {LOGS / f'{tag}.log'}")
     summaries = []
     with (RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f:
         for (depth, ratio, seeds, alternatives), arms in zip(settings, cells, strict=True):
-            frames = {name: pd.DataFrame([evaluation(run) for run in arm],
-                                         index=pd.Index(map(tag_of, arm), name="tag")) for name, arm in arms.items()}
+            evaluated = {name: [run for run in arm if (BASE_EVAL / f"{tag_of(run)}.json").exists()]
+                         for name, arm in arms.items()}
+            frames = {name: pd.DataFrame([evaluation(run) for run in runs],
+                                         index=pd.Index(map(tag_of, runs), name="tag"))
+                      for name, runs in evaluated.items()}
             for name, arm in arms.items():
                 for run in arm:
                     tag = tag_of(run)
+                    scored = run in evaluated[name]
                     f.write(json.dumps({"schema": SCHEMA, "experiment": experiment, "arm": name, "tag": tag,
-                                        "fields": dataclasses.asdict(run), "evaluation": frames[name].loc[tag].to_dict(),
-                                        "efficiency": efficiency(run)}, allow_nan=False) + "\n")
+                                        "fields": dataclasses.asdict(run),
+                                        "evaluation": frames[name].loc[tag].to_dict() if scored else None,
+                                        "efficiency": efficiency(run) if scored else None,
+                                        "diverged_at": diverged(tag)}, allow_nan=False) + "\n")
             summaries.append({"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds), "lr_scale": lr_scale,
-                              "alternatives": {name: {"fields": changes} | compare(frames[name], frames["production"])
+                              "production_runs": len(frames["production"]),
+                              "alternatives": {name: {"fields": changes, "runs": len(frames[name])}
+                                               | (compare(frames[name], frames["production"])
+                                                  if len(frames[name]) and len(frames["production"]) else {})
                                                for name, changes in alternatives.items()}})
     # HEAD names the runs' code: their tags, computed at HEAD from RUN_CODE's object ids, matched their evaluations
     commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     (RESULTS / f"{experiment}.json").write_text(json.dumps({"commit": commit, "settings": summaries},
                                                            allow_nan=False), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    execute(Run(**json.loads(sys.argv[1])))
