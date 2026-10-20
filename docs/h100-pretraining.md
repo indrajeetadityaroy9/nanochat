@@ -49,15 +49,23 @@ into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
 | Optimizers | AdamW (fused) on tables and vectors; Muon with `match_rms_adamw` on matrices | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
 | Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.317 at d24), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
-| Gradient clipping | none; the global gradient norm is logged every step | (DeepSeek LLM: 1.0, §2.3) |
+| Gradient clipping | global norm 1.0 on the raw gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (`base_train.MAX_NORM`) |
 | Repository stage | continues the decay | DeepSeek-Coder §3.6 |
 
-No clipping: a fixed threshold is scale-dependent (at 1.0 the clipped fraction of steps ranged from 0.2% to 97% across
-the configurations of an earlier d8 screen). The one direct measurement, a single-seed d8 A/B in the previous regime
-(`ablations/ablations.md` §3), had clipping at 1.0 lower on all 11 corpora by 0.003 bits per byte on average, under the
-paired comparison's spread of per-pair differences (sd 0.0065 on 8K code); at the production batch and lr the gradient
-norm stays below 1.9 after warmup (d24 check below). Clipping is the regime choice the evidence leaves least settled,
-and its expected effect is below what an affordable ablation resolves (`ablations/ablations.md` §1, Not tested).
+Clipping at 1.0, decided on evidence rather than an experiment (`ablations/ablations.md` §1, Not tested). It rescales
+a step's raw gradient before Muon's momentum and AdamW's moments; both updates are invariant to a gradient scale that
+varies slowly (Adam's m/√v, Newton–Schulz orthogonalization), so clipping changes training only where the norm jumps,
+by down-weighting that step's gradient. That makes a fixed threshold's scale-dependence harmless (at 1.0 the clipped
+fraction of steps ranged from 0.2% to 97% across the configurations of an earlier d8 screen), including the norm's
+late rise under a decaying lr and weight decay (Defazio, arXiv 2506.02285; d8 here: medians 0.46, 1.09 and 1.52 over
+the run's thirds, §3). The one direct measurement, a single-seed d8 A/B in the previous regime (`ablations/ablations.md`
+§3), had clipping lower on all 11 corpora by 0.003 bits per byte on average, under the paired comparison's spread of
+per-pair differences (sd 0.0065 on 8K code); at the production batch and lr the norm stays below 1.9 after warmup (d24
+check below), so outside spikes a clip scales the gradient by at least 0.53. nanochat deleted its clipping because its
+norms never reached 1.0, leaving it inactive (karpathy/nanochat LOG 2026-01-08); its cost there was the norm's
+all-reduce, here one device's norm the log computes anyway. Clipping the orthogonalized update instead, as Megatron-LM
+and DeepSpeed have done for Muon, rescales the step itself (Megatron-LM PR 5395, DeepSpeed issue 8439); it is not
+done here.
 
 ## H100 implementation
 
@@ -338,8 +346,8 @@ the pre-launch measurements. The two whose result would change production have a
 - **Value embeddings kept** (`value_embeds.py`: none, at d16). They cost 4.7% of the d24 step (measured before
   `60138de`, record not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20.
 
-The others rest on their evidence alone (`ablations/ablations.md` §1, Not tested): no gradient clipping (Regime); one
-RoPE base; ReLU² (nanochat LOG 2026-02-05); linear decay to zero continuing through the repository stage, as
+The others rest on their evidence alone (`ablations/ablations.md` §1, Not tested): gradient clipping at 1.0 (Regime);
+one RoPE base; ReLU² (nanochat LOG 2026-02-05); linear decay to zero continuing through the repository stage, as
 Qwen2.5-Coder and DeepSeek-Coder; learned QK-norm gains (Qwen3) and the x0 and residual scalars (nanochat LOG
 2026-01-11); SSSL windows (Gemma 3's near-lossless local windows); Block Attention Residuals not adopted (+12% d24 step
 time, measured before `60138de`, record not kept, for a published 1.1% loss gain at 194M parameters, arXiv

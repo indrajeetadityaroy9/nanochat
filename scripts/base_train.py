@@ -32,15 +32,19 @@ from nanochat.train.optim import optimizers, tau_weight_decay
 from nanochat.train.schedule import RunPlan, lr_multiplier, plan
 from nanochat.train.stages import readable_rows
 
+# Global gradient-norm clip, every reference code model's (DeepSeek LLM, arXiv 2401.02954 §2.3): Adam's and
+# Newton-Schulz's updates are invariant to a slowly varying gradient scale, so it damps only spikes
+# (docs/h100-pretraining.md Regime)
+MAX_NORM = 1.0
+
 
 def optimizer_step(model: torch.nn.Module, batches: list[tuple[torch.Tensor, ...]], params: list[torch.Tensor],
-                   optimizers: tuple[torch.optim.Optimizer, ...], reads: Iterator | None, *,
-                   max_norm: float) -> tuple[torch.Tensor, torch.Tensor, list]:
+                   optimizers: tuple[torch.optim.Optimizer, ...], reads: Iterator | None
+                   ) -> tuple[torch.Tensor, torch.Tensor, list]:
     """One optimizer step over micro-batches (inputs, targets, cu_seqlens). Each micro-batch's mean loss is weighted by
     its share of the step's valid targets, so the step loss is the mean over all. The next step's micro-batches are read
-    from `reads` during backward (None on the last step); gradients clipped to global norm `max_norm` (inf: none).
-    Returns (step loss fp64, gradient norm before clipping, next micro-batches) on device, without host
-    synchronization."""
+    from `reads` during backward (None on the last step); gradients clipped to global norm MAX_NORM. Returns (step loss
+    fp64, gradient norm before clipping, next micro-batches) on device, without host synchronization."""
     valid = torch.stack([(y != PretrainingBatches.PAD).sum() for _, y, _ in batches]).double()
     shares = (valid / valid.sum()).float()
     losses, upcoming = [], []
@@ -50,21 +54,20 @@ def optimizer_step(model: torch.nn.Module, batches: list[tuple[torch.Tensor, ...
         loss.backward()
         if reads is not None:
             upcoming.append(next(reads))
-    grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm)
+    grad_norm = torch.nn.utils.clip_grad_norm_(params, MAX_NORM)
     for opt in optimizers:
         opt.step()
     model.zero_grad()
     return torch.stack(losses).double().sum(), grad_norm, upcoming
 
 
-def train(*, model: GPT, run: RunPlan, weight_decay: float, max_norm: float, variant: dict, seed: int, data_seed: int,
-          save_every: int, snapshot_every: int, tag: str) -> GPT:
+def train(*, model: GPT, run: RunPlan, weight_decay: float, variant: dict, seed: int, data_seed: int, save_every: int,
+          snapshot_every: int, tag: str) -> GPT:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
-    (schedule.plan) and return it: init by `seed`, data order by `data_seed`, decoupled `weight_decay`, gradients
-    clipped to global norm `max_norm` (inf: none), FILE_STAGE then REPO_STAGE from run.repo_start; `variant`
-    (config.run_tag's) recorded with the run. Resume checkpoint every `save_every` steps; a model-only snapshot every
-    `snapshot_every` steps and at repo_start (the model before the repo-level stage), the final model being the last
-    checkpoint."""
+    (schedule.plan) and return it: init by `seed`, data order by `data_seed`, decoupled `weight_decay`, FILE_STAGE then
+    REPO_STAGE from run.repo_start; `variant` (config.run_tag's) recorded with the run. Resume checkpoint every
+    `save_every` steps; a model-only snapshot every `snapshot_every` steps and at repo_start (the model before the
+    repo-level stage), the final model being the last checkpoint."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
     model.to_empty(device=device)
@@ -117,7 +120,7 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, max_norm: float, var
                          "model": asdict(model.config), "variant": variant,
                          "params": sum(p.numel() for p in params),
                          "flops_per_token": non_embedding_flops_per_token(model),
-                         "max_norm": None if math.isinf(max_norm) else max_norm,
+                         "max_norm": MAX_NORM,
                          "lr": group["initial_lr"], "weight_decay": group["weight_decay"],
                          "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
 
@@ -152,8 +155,7 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, max_norm: float, var
             mixture, train_iter = stage_batches(REPO_STAGE, 0)
         lr = schedulers[0].get_last_lr()[0]
         loss, grad_norm, upcoming = optimizer_step(compiled, batches, params, opts,
-                                                   train_iter if step + 1 < run.num_iterations else None,
-                                                   max_norm=max_norm)
+                                                   train_iter if step + 1 < run.num_iterations else None)
         for scheduler in schedulers:
             scheduler.step()
         stage_rows += len(batches) * stage.batch_rows
@@ -188,10 +190,9 @@ def main():
     with torch.device("meta"):
         model = GPT(gpt_config(depth=args.depth, stage=FILE_STAGE))
     run = plan(model=model, ratio=args.target_param_data_ratio)
-    # no clipping (docs/h100-pretraining.md Regime): an infinite threshold only measures the norm
     train(model=model, run=run,
           weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations, tokens_per_param=run.tokens_per_param),
-          max_norm=math.inf, variant={},
+          variant={},
           seed=args.seed, data_seed=args.seed, save_every=args.save_every, snapshot_every=args.snapshot_every,
           tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
                       variant={}, code=CODE))

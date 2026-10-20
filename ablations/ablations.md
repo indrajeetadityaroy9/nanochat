@@ -80,7 +80,7 @@ Where production departs from the code models it is measured against, and what e
 | Optimizer | Muon on matrices, AdamW on tables and vectors | AdamW, β = (0.9, 0.95) (DeepSeek-Coder §3.4, Code Llama) |
 | Peak lr | DeepSeek LLM's law, as the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
 | Weight decay | τ law (d8: 0.55, d24: 0.32) | 0.1 (DeepSeek LLM §2.3) |
-| Gradient clipping | none | 1.0 (DeepSeek LLM §2.3) |
+| Gradient clipping | 1.0 | 1.0 (DeepSeek LLM §2.3) |
 | Context stages | 8K file level, then the last 5.45% of steps at 32K on repositories | Qwen2.5-Coder: the same 8K → 32K repository stage; DeepSeek-Coder: 16K repository-ordered files; Code Llama: a 16K long-context stage |
 | Data | code:text:math 87:10:3 | DeepSeek-Coder 87% code, 10% code-related English, 3% Chinese; Qwen2.5-Coder code:text:math 70:20:10 |
 | FIM | 50% PSM in the packed data | 50% (DeepSeek-Coder, StarCoder2); Code Llama 90% |
@@ -138,10 +138,10 @@ no result here could change:
   production. Warmup's benefit is a larger stable peak lr (Kalra & Barkeshli, arXiv 2406.09405) by bounding early
   update size, which normalized matrix updates such as Muon's already bound (Kosson et al., arXiv 2410.23922);
   `lr.py`'s × 2 arm probes that margin, its per-step loss and gradient norms showing any early instability.
-- **Gradient clipping.** Its one measurement, a paired d8 A/B (§3), had clipping at 1.0 lower on all 11 corpora by
-  0.003 bits per byte; an affordable experiment resolves about 0.008 (Power), so it could not separate that effect
-  from zero and its result would leave production as it is. The decision rests on that A/B, the reference models'
-  universal 1.0 and d24's gradient norms (§3; `docs/h100-pretraining.md`, Regime).
+- **Gradient clipping.** Adopted at 1.0 without an experiment: its one measurement, a paired d8 A/B (§3), had it lower
+  on all 11 corpora by 0.003 bits per byte, which an affordable experiment (resolving about 0.008, Power) could not
+  separate from zero; Adam's and Newton–Schulz's updates are invariant to a slowly varying gradient scale, so it
+  damps only norm jumps, at no cost on one device (`docs/h100-pretraining.md`, Regime).
 - **RoPE base staging.** Production's single base, 10^6, meets Men et al.'s lower bound for a 32K context (arXiv
   2405.14591) from the first step, as Llama 3 trains at 5 × 10^5 from the start (arXiv 2407.21783 §3.2); Code Llama's
   ablation (Appendix G.4) shows the base must be raised for long context, which production's already is. Staging

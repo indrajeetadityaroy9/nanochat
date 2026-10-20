@@ -7,9 +7,9 @@ seconds), then the kind's fields. Unavailable values are null; NaN and infinitie
 run (each process start): step (the first step it trains), plan (schedule.RunPlan), seed, data_seed, model
     (model/gpt.py GPTConfig as the model was built), variant (an ablation run's fields, ablations/harness.py; {} for
     production), params (the model's parameters), flops_per_token (model/gpt.py non_embedding_flops_per_token at the
-    stage it starts in), max_norm (the gradient clip threshold; null: no clipping), lr and weight_decay (as the
-    optimizers hold them; a resumed process's come from its checkpoint), stage (config.Stage as the model runs it,
-    mixture as {corpus: row weight}).
+    stage it starts in), max_norm (the gradient clip threshold; null: a run from before 1.0 was adopted, unclipped), lr
+    and weight_decay (as the optimizers hold them; a resumed process's come from its checkpoint), stage (config.Stage
+    as the model runs it, mixture as {corpus: row weight}).
 stage (switch to the repo-level stage): step, stage.
 train (each optimizer step, 0-based): step; tokens (row positions after it, padding included); loss (mean next-token
     loss in nats over the step's valid targets, fp64); lr (LambdaLR's at the step); grad_norm (global L2 norm of the

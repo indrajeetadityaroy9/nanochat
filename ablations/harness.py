@@ -95,7 +95,7 @@ def execute(run: Run) -> None:
     model = train(model=model_of(run), run=run_plan,
                   weight_decay=tau_weight_decay(lr=run_plan.lr, steps=steps,
                                                 tokens_per_param=run_plan.tokens_per_param),
-                  max_norm=math.inf, variant=dataclasses.asdict(run), seed=run.seed,
+                  variant=dataclasses.asdict(run), seed=run.seed,
                   data_seed=run.seed, save_every=steps, snapshot_every=steps, tag=tag)
     save(tag, steps, loss_evaluation(model, get_tokenizer(), tasks(), device=torch.device("cuda")) |
          {"codegen": None, "fim": None})
