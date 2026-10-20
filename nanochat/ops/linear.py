@@ -1,6 +1,7 @@
-"""The block's GEMMs as torch.library ops (traceable by fullgraph torch.compile) on QuACK's autotuned SM90 kernels
-(quack.gemm_interface, tuned=True): fp32 master weight W rounded to x's dtype; dW in fp32 straight from the accumulators
-(QuACK's linear/mlp functions round dW to bf16, rel. error up to 2^-9).
+"""The block's GEMMs as torch.library ops (traceable by fullgraph torch.compile): forward and dX on QuACK's autotuned
+SM90 kernels (quack.gemm_interface, tuned=True), fp32 master weight W rounded to x's dtype; dW in fp32 on cuBLAS
+(torch.mm), whose split over K = M tokens beats QuACK's tiles on these small outputs in time and accuracy (d24 c_q dW
+0.19 vs 0.54 ms, rel. error 1.8e-5 vs 2.3e-4; ablations/ablations.md).
 
 nanochat::linear (c_q, c_k, c_v, c_o): y = x W^T; backward dX = dY W, dW = dY^T X.
 
@@ -29,7 +30,7 @@ def linear_bwd(dy: Tensor, x: Tensor, weight: Tensor) -> tuple[Tensor, Tensor]:
     """(dX like x, dW in weight's dtype)."""
     dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
     dx = gemm(dy2, weight.to(x.dtype), out_dtype=x.dtype).view(x.shape)
-    return dx, gemm(dy2.t(), x2, out_dtype=weight.dtype)
+    return dx, torch.mm(dy2.t(), x2, out_dtype=weight.dtype)
 
 
 @linear_bwd.register_fake
@@ -67,10 +68,10 @@ def relu2_mlp_bwd(dy: Tensor, x: Tensor, preact: Tensor, w_fc: Tensor, w_proj: T
     """(dX like x, dW_fc, dW_proj in the weights' dtype)."""
     dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
     dpreact, postact = gemm_dact(dy2, w_proj.to(x.dtype), preact, activation="relu_sq")
-    dw_proj = gemm(dy2.t(), postact, out_dtype=w_proj.dtype)
+    dw_proj = torch.mm(dy2.t(), postact, out_dtype=w_proj.dtype)
     del postact
     dx = gemm(dpreact, w_fc.to(x.dtype), out_dtype=x.dtype).view(x.shape)
-    dw_fc = gemm(dpreact.t(), x2, out_dtype=w_fc.dtype)
+    dw_fc = torch.mm(dpreact.t(), x2, out_dtype=w_fc.dtype)
     return dx, dw_fc, dw_proj
 
 

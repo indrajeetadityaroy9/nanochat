@@ -67,7 +67,7 @@ coordinate-descent tuning (`runs/container.sh`).
 
 | Op | Implementation |
 |---|---|
-| Projection, MLP, LM-head GEMMs | QuACK SM90 GEMMs, autotuned by QuACK (`quack.gemm_interface`, `tuned=True`); weight gradients in fp32 from the accumulators |
+| Projection, MLP, LM-head GEMMs | forward and dX: QuACK SM90 GEMMs autotuned by QuACK (`quack.gemm_interface`, `tuned=True`); fp32 weight gradients: cuBLAS `torch.mm`, faster and more accurate than QuACK's tiles on their small outputs (`ablations/ablations.md`) |
 | ReLU² MLP | QuACK `gemm_act` / `gemm_dact` |
 | Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them |
 | Attention | FlashAttention-4 varlen, its default backward |
@@ -75,8 +75,9 @@ coordinate-descent tuning (`runs/container.sh`).
 | Embeddings | `F.embedding`, bf16 cast fused by Inductor; backward adds rows with atomics |
 | Decoding | `csrc/decode.cu` (`inference/decoder.py`): batched native decoder for the code benchmarks |
 
-The d24 step on real rows (`ablations/profile_step.py 24 12 12 file`): 3,712 ms, 317.8K tok/s, 100% GPU-busy,
-peak 69.6 GiB; GEMM 53%, FA4 25%, Inductor 13.5%. A fused q/k/v GEMM measured 3,729 ms and was not adopted.
+The d24 step on real rows (`ablations/profile_step.py 24 12 12 file`): 3,705–3,713 ms, 318K tok/s, 100% GPU-busy,
+peak 69.6 GiB; GEMM 53%, FA4 25%, Inductor 13%; the repository stage's (`24 12 3 repo`) 4,016 ms. A fused q/k/v GEMM
+measured 3,729 ms and was not adopted.
 
 ## Reproducibility
 
@@ -124,7 +125,8 @@ tables them with the final model in `results/<tag>-curves.md`: when pass@1 and e
 bits per byte per group (`loss_eval.mixture_bpb`), reference-solution bits per byte, and EvalPlus HumanEval+/MBPP+,
 MultiPL-E C++ and HumanEval infilling, each generated and scored by its official tools.
 
-**Expected cost:** 81,171 steps at 3.712 s, about 84 h, about $360 at $4.29/h.
+**Expected cost:** 76,743 file-level steps at 3.709 s and 4,428 repository-stage steps at 4.016 s, about 84 h, about
+$360 at $4.29/h.
 
 `runs/release.sh <tag> <repo>` uploads the checkpoint and snapshots, every run record under `artifacts/` (this run's and
 the pre-launch runs') and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>

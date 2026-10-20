@@ -45,10 +45,10 @@ def swiglu_mlp_bwd(dy: Tensor, x: Tensor, preact: Tensor, w_gate: Tensor, w_fc: 
     C, h = x.shape[-1], w_fc.shape[0]
     dy2, x2 = dy.reshape(-1, C), x.reshape(-1, C)
     dpreact, postact = gemm_dgated(dy2, w_proj.to(x.dtype), preact, activation="swiglu")
-    dw_proj = gemm(dy2.t(), postact, out_dtype=w_proj.dtype)
+    dw_proj = torch.mm(dy2.t(), postact, out_dtype=w_proj.dtype)
     del postact
     dx = gemm(dpreact, interleave(w_gate, w_fc, dtype=x.dtype), out_dtype=x.dtype).view(x.shape)
-    dw_gate, dw_fc = gemm(dpreact.t(), x2, out_dtype=w_fc.dtype).view(h, 2, C).unbind(1)
+    dw_gate, dw_fc = torch.mm(dpreact.t(), x2, out_dtype=w_fc.dtype).view(h, 2, C).unbind(1)
     return dx, dw_gate.contiguous(), dw_fc.contiguous(), dw_proj
 
 
