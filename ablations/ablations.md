@@ -25,17 +25,22 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
   completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
   compared before its decay, where loss curves cross and rankings flip (Wen et al., arXiv 2509.02046; Hägele et al.,
   arXiv 2405.18392).
-- **Settings.** `lr.py` brackets production (d24 at 490.8 tokens per scaling parameter) from both sides, one seed per
-  arm: its horizon at d8 (36,656 steps of 196,608 tokens, C = 7.0e17) and its width at d24 over 5 tokens per parameter
-  (3,307 steps of 294,912 tokens, C = 1.5e18), the longest d24 run three arms afford. The optimal lr falls with
-  training length with an exponent constant across model sizes (Bjorck et al., arXiv 2409.19913), so d8 at
-  production's ratio measures the horizon effect; Muon's optimum moves little with width (Essential AI, arXiv
-  2505.02222), which d24's short run checks at production's width. Both lie inside the compute range the law was fit
-  on (1e17 to 2e19 FLOPs; production: 1.5e20). `value_embeds.py`: d16 (67.1M scaling parameters, 1/2.9 of d24) at
-  Chinchilla's 20, 4 seeds per arm: value embeddings' gain shrinks with scale (−0.016 at d12, −0.010 at d20, MoVE)
-  and d8's tables are 2.3× its scaling parameters against d24's 1.55×. Architecture rankings can change with scale
-  (Tay et al., arXiv 2207.10551); for data recipes a single proxy 7× below the target picks the target's better of two
-  in about 80% of pairs, best with likelihood metrics such as bits per byte (DataDecide, arXiv 2504.11393).
+- **Settings.** No affordable run reaches production (d24 at 490.8 tokens per scaling parameter), so each experiment
+  measures its decision's dependence on training length at d8 and on width at a short length, and combines them as
+  separable, the form Bjorck et al. fit for the optimal lr, LR*(N, D) = C N^−α D^−β, with β independent of model size
+  (0.32 from 50M to 2.7B; arXiv 2409.19913). `lr.py`: d8 at 50, 4 seeds, for the noise of a seed and of the
+  difference between arms sharing one (init and data order); d8 at production's ratio, one seed (36,656 steps of
+  196,608 tokens); d24 at 5, one seed (3,307 steps of 294,912 tokens), the longest d24 run the sweep affords. Both d8
+  settings' plan batches are within 3% of the law's after rounding to micro-batches, so their difference is the
+  horizon's (d24 at 5: 1.14×). Width transfer is the better-supported assumption: Muon's optimum moves little with
+  width (Essential AI, arXiv 2505.02222) and nanochat keeps Muon's lr fixed from d12 to d24 ("all tuning was done on
+  d12 but generalized easily to larger models", karpathy/nanochat 6ed7d1d), while μP leaves the horizon's shift in
+  place (Bjorck et al.). `value_embeds.py`: d16 (67.1M scaling parameters, 1/2.9 of d24) at Chinchilla's 20, 4 seeds,
+  the decision's setting; d8 at 20, 4 seeds, and at production's ratio, one seed, for the gain's trends in width and
+  length: it shrinks with scale (−0.016 at d12, −0.010 at d20, MoVE), and d8's tables are 2.3× its scaling
+  parameters against d24's 1.55×. Architecture rankings can change with scale (Tay et al., arXiv 2207.10551); for data
+  recipes a single proxy 7× below the target picks the target's better of two in about 80% of pairs, best with
+  likelihood metrics such as bits per byte (DataDecide, arXiv 2504.11393).
 - **Order.** `lr.py` first; `value_embeds.py` trains at its adopted multiplier, `lr.ADOPTED`, so it compares against a
   tuned baseline (under-tuned baselines inflate gains: Kaddour et al., arXiv 2307.06440; Wen et al.).
 - **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
@@ -44,17 +49,23 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
   repository rows of the code group; *repo_beyond_8k*: the same rows' positions past 8,192, the context only the
   repository stage trains. *text*, *math*; tokens per second (median over training steps). Efficiency
   (`harness.efficiency`, from the run's records): parameters, non-embedding FLOPs per token, peak memory.
-- **Analysis** (manual, from `results/<experiment>.json` and `.jsonl`), pre-registered. *lr*: per setting, code
-  against ln lr over the three arms. An alternative multiplier is adopted iff at both settings its code is below
-  ×1's by more than 1.96 · √2 · σ = 0.0094 (σ = 0.0034, Power: the 95% bound on the difference of two single runs)
-  and neither solutions nor repo_32k is higher by as much; otherwise the law stands. *Value embeddings*: per measure
-  the difference of means, the two-sided pooled t-test's p and the difference's 95% confidence interval (scipy
-  `ttest_ind`; pooled with equal arm sizes is robust to unequal variances). They are removed iff code without them is
-  not higher with p < 0.05 and its mean difference is below the compute their removal frees, 0.05 · L · ln r (L
-  production's code, r the alternative's tokens per second over production's; Kaplan et al., arXiv 2001.08361 §1.2:
-  loss ∝ C^−0.050); otherwise they stay, with their gain and its interval reported.
-  Unpaired although arms share seeds: the six-run comparison's per-pair differences (sd 0.0065) show no gain from
-  pairing over independent runs (√2 σ = 0.0048), and a paired test keeps 3 of 6 degrees of freedom.
+- **Analysis** (manual, from `results/<experiment>.jsonl` and `.json`), pre-registered. *lr*: per setting, code is
+  fitted as a quadratic in u = ln(multiplier) over all its runs (numpy `polyfit`, Bjorck et al.'s method) and the
+  vertex u* read off; at d8 over 50, σ is the production arm's seed spread and σ_d the spread of within-seed differences
+  between arms. The optimum's fall with tokens beyond the law's own D^−0.125 is Δβ = (u*(d8, 50) − u*(d8, 490.8)) /
+  ln(490.8 / 50), and production's predicted optimum is u*(d24, 5) − Δβ · ln(490.8 / 5). `lr.ADOPTED` is its
+  exponential if it lies within a factor √2 of d8's vertex at 490.8, else that vertex's (the setting matching
+  production's length); a vertex outside its grid, or no minimum (non-positive curvature), first extends that grid by
+  a factor of 2. *Value embeddings*: per setting and measure the difference of means, the two-sided pooled t-test's p
+  and the difference's 95% confidence interval (scipy `ttest_ind`; pooled with equal arm sizes is robust to unequal
+  variances); their gain g is code without them minus code with them. Production's gain is predicted as
+  g(d16, 20) · g(d8, 490.8) / g(d8, 20) · (g(d16, 20) / g(d8, 20))^0.70 (0.70 = ln(195.1 / 67.1) / ln(67.1 / 14.7),
+  log-linear in scaling parameters), or g(d16, 20) alone if g(d8, 20)'s interval includes zero. They are removed iff
+  that prediction is below the compute their removal frees, 0.05 · L · ln r (L production's code, r the alternative's
+  tokens per second over production's at d16; Kaplan et al., arXiv 2001.08361 §1.2: loss ∝ C^−0.050); otherwise they
+  stay, their gain and its interval reported. Unpaired although arms share seeds: the six-run comparison's per-pair
+  differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048); `lr.py`'s σ_d measures
+  it again for arms that differ in lr alone.
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 ### Reference code models
@@ -86,20 +97,24 @@ One per decision `docs/h100-pretraining.md` records without a study of its own w
 
 | File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
-| `lr.py` | d8 at 490.8, d24 at 5; 1 seed | DeepSeek LLM's law (§3.1) as the peak lr, adopted without a study | × 0.5 and × 2: the law was fit for AdamW under a schedule holding the peak for 80% of tokens; production applies it to Muon as the peak of linear decay to zero, 7.5× beyond the compute it was fit on | none |
-| `value_embeds.py` | d16 at 20; 4 seeds | value embeddings (MoVE: −0.016 at d12), absent from every reference model; 302M parameters, 1.55× the scaling parameters | none | −4.7% of the d24 step, 12 vocabulary tables fewer |
+| `lr.py` | d8 at 50 (4 seeds) and 490.8 (1), d24 at 5 (1) | DeepSeek LLM's law (§3.1) as the peak lr, adopted without a study | × 0.5 and × 2, and × 0.25 at 490.8: the law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and falls with tokens as D^−0.125 where the measured optimum falls as D^−0.32 | none |
+| `value_embeds.py` | d16 at 20 (4 seeds), d8 at 20 (4) and 490.8 (1) | value embeddings (MoVE: −0.016 at d12), absent from every reference model; 302M parameters, 1.55× the scaling parameters | none | −4.7% of the d24 step, 12 vocabulary tables fewer |
 
 **Power.** The paired comparison's six runs (two configurations × three seeds, d8 at 20 tokens per parameter,
 `docs/h100-pretraining.md`) give a within-configuration σ of 0.0034 bits per byte on code (0.0044 on solutions, 0.0036
-on 32K repository). Value embeddings, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an effect
-of 0.008, below the published 0.010 to 0.016; d16's σ is the production arm's four runs'. lr, one run per arm: a
-multiplier is adopted only for a difference above 0.0094 at both settings; smaller lr effects leave the law in place.
+on 32K repository); `lr.py`'s d8 at 50 and both experiments' 4-seed settings measure it where they run. Value
+embeddings at d16, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an effect of 0.008, below the
+published 0.010 to 0.016. lr: a single-seed sweep's vertex rests on the arms' differences within the seed; at the
+curvature Bjorck et al.'s Llama-1 estimate implies (0.027 nats for a 2.5× lr; about 0.026 bits per byte per (ln lr)²
+at 3.5 bytes per token [assumed]) and per-run noise σ, the four-point fit places the vertex within about ±9% (one
+standard error), the three-point fit within about ±14%; `lr.py` measures the curvature itself.
 
-**Cost** (measured: whole runs, child process, compilation, both stages, loss evaluation; §2). d8 at 490.8: about
-54 minutes per run (52 minutes training at 2.29M tokens per second, 91 s evaluation); d24 at 5: about 65 minutes (52
-minutes training at 311K tokens per second, 711 s evaluation); d16 at 20: about 35 minutes (30 minutes training at
-746K tokens per second, 299 s evaluation). `lr.py`: 6 runs ≈ 6.0 h; `value_embeds.py`: 8 runs ≈ 4.7 h; ≈ 10.7 h ($46
-at $4.29/h).
+**Cost** (measured: whole runs, child process, compilation, both stages, loss evaluation; §2). d8 at 20: 234 s; d8 at
+50: about 7 minutes [estimate: 320 s training at 2.29M tokens per second, d8's 106 s overhead]; d8 at 490.8: about
+54 minutes (52 minutes training, 91 s evaluation); d24 at 5: about 65 minutes (52 minutes training at 311K tokens per
+second, 711 s evaluation); d16 at 20: about 35 minutes (30 minutes training at 746K tokens per second, 299 s
+evaluation). `lr.py`: 19 runs ≈ 8.3 h; `value_embeds.py`: 18 runs ≈ 7.0 h, 17 ≈ 6.1 h when `lr.ADOPTED` is on the
+sweep's grid (its d8 run at 490.8 is then `lr.py`'s); ≈ 14.4 to 15.3 h ($62 to $66 at $4.29/h).
 
 **Records.** A run's tag is production's `config.run_tag` over its fields and the code it depends on (`config.CODE`,
 `harness.py`, `model.py`), so a result names the code that produced it, and an arm shared by experiments trains once.
@@ -163,8 +178,9 @@ no result here could change:
 - **Grouped-query attention.** Its benefit is KV-cache memory; the decoder's slots are capped at 64 by its active mask
   (`csrc/decode.cu` MAX_BATCH), and d24's cache for 64 slots of the longest benchmark request (1,158 tokens) is 5.5 GB.
 - **Untied head, the batch law:** the published evidence and pre-launch measurements in `docs/h100-pretraining.md`.
-- **Production's horizon and scale together.** `lr.py` reaches production's ratio at d8 and production's width at 5
-  tokens per parameter, never both; value embeddings are measured at d16 only.
+- **Production's width and length together.** No run: the experiments combine d8's length trend with the short
+  settings' width trend, assuming separability (Bjorck et al.'s size-independent β for the lr; a log-linear trend for
+  value embeddings), which only a d24 run at 490.8 could check.
 - **Library alternatives without a measured gain at this scale** (a 2026 survey of torchtitan, OLMo-core, Megatron,
   nanotron, Marin, modded-nanogpt, nanochat): FP8 training, Liger and Cut Cross-Entropy losses, fused RMSNorm/RoPE
   libraries, DCP checkpointing, config frameworks.

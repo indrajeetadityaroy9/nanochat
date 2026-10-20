@@ -145,14 +145,14 @@ def compare(alternative: pd.DataFrame, baseline: pd.DataFrame) -> dict[str, dict
     return stats
 
 
-def main(*, alternatives: dict[str, dict], settings: tuple[tuple[int, float, range], ...], lr_scale: float) -> None:
+def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], lr_scale: float) -> None:
     """Run the calling experiment (python -m ablations.<experiment>): at each setting (depth, tokens per scaling
-    parameter, seeds), production at peak lr `lr_scale` times the plan's and an arm per alternative {name: Run fields};
-    then compare each alternative with production at each setting."""
+    parameter, seeds, alternatives), production at peak lr `lr_scale` times the plan's and an arm per alternative
+    {name: Run fields}; then compare each alternative with production at each setting."""
     module = sys.modules["__main__"].__spec__.name
     experiment = module.rsplit(".", 1)[1]
     cells = []
-    for depth, ratio, seeds in settings:
+    for depth, ratio, seeds, alternatives in settings:
         baseline = [production(depth=depth, ratio=ratio, lr_scale=lr_scale, seed=seed) for seed in seeds]
         cells.append({"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
                                                  for name, changes in alternatives.items()})
@@ -168,7 +168,7 @@ def main(*, alternatives: dict[str, dict], settings: tuple[tuple[int, float, ran
                                check=True)
     summaries = []
     with (RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f:
-        for (depth, ratio, seeds), arms in zip(settings, cells, strict=True):
+        for (depth, ratio, seeds, alternatives), arms in zip(settings, cells, strict=True):
             frames = {name: pd.DataFrame([evaluation(run) for run in arm],
                                          index=pd.Index(map(tag_of, arm), name="tag")) for name, arm in arms.items()}
             for name, arm in arms.items():
