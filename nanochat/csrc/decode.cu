@@ -19,7 +19,7 @@
  * body runs (decoder.py). The whole step's GEMVs compile without the choice (k_gemv's CHOICE).
  *
  * Each step (gpt.py's forward at one position; C width, H heads of HEAD_DIM, x0 the normed embedding):
- *   k_embed   x0 = norm(wte[token])
+ *   k_norm    x0 = norm(wte[token])
  *   per layer i:
  *     k_norm  xm = resid_lambdas[i] x + x0_lambdas[i] x0 (x = x0 before layer 0), h = norm(xm)
  *     k_gemv  [q k v] = h [Wq Wk Wv]^T
@@ -83,7 +83,7 @@ static_assert(MASK_BITS % GROUP_SLOTS == 0, "a slot group lies in one word of th
 constexpr int NORM_WARPS = 4;                      /* k_norm: slots (a warp each) per block */
 constexpr int WORD_BITS = CHAR_BIT * sizeof(uint32_t);  /* tokens per word of an allowed-token mask */
 
-enum { NORM, RESID_NORM };
+enum { NORM, RESID_NORM, EMBED };
 enum { EPI_STORE, EPI_RESID, EPI_RELU2, EPI_ARGMAX };
 
 /* A failed CUDA runtime call (an allocation lost to another process between cudaMemGetInfo and cudaMalloc, an
@@ -303,33 +303,17 @@ static int gemv_chunk(int K, int optin) {
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
-/* Embedding: x0 = rms_norm(wte[token]), one bf16 rounding. A block per slot, a thread per channel. */
-
-__global__ void k_embed(const int32_t *tokens, const unsigned long long *active, const bf16 *wte, bf16 *x0, int C) {
-    __shared__ float r;
-    const int b = blockIdx.x, tid = threadIdx.x;
-    if (!live(active, b)) return;
-    const bf16 *e = wte + (size_t)tokens[b] * C;
-    if (tid < WARP) {
-        float s = 0.f;
-        for (int i = tid; i < C; i += WARP) s = __fmaf_rn(__bfloat162float(e[i]), __bfloat162float(e[i]), s);
-        s = warp_sum(s);
-        if (tid == 0) r = rsqrtf(s / (float)C + FLT_EPSILON);
-    }
-    __syncthreads();
-    for (int i = tid; i < C; i += blockDim.x) x0[(size_t)b * C + i] = __float2bfloat16_rn(__bfloat162float(e[i]) * r);
-}
-
-/* RMS norm of each active slot's input, a warp per slot, the sum of squares over K in lane-strided order then
- * warp_sum, r = rsqrt(mean + FLT_EPSILON): NORM out = bf16(in r); RESID_NORM mixed = bf16(bf16(l1 in) + bf16(l2 in2))
- * (the resid and x0 lambdas, bf16 values), out = bf16(mixed r). */
-__global__ void k_norm(int kind, const bf16 *in, const bf16 *in2, float l1, float l2, bf16 *mixed, bf16 *out,
-                       const unsigned long long *active, int B, int K) {
+/* RMS norm of each active slot's input row, a warp per slot, the sum of squares over K in lane-strided order then
+ * warp_sum, r = rsqrt(mean + FLT_EPSILON): NORM out = bf16(in r) of the slot's row of in; EMBED the same of in's row
+ * tokens[b] (x0 = rms_norm(wte[token])); RESID_NORM mixed = bf16(bf16(l1 in) + bf16(l2 in2)) (the resid and x0
+ * lambdas, bf16 values), out = bf16(mixed r). */
+__global__ void k_norm(int kind, const bf16 *in, const bf16 *in2, const int32_t *tokens, float l1, float l2,
+                       bf16 *mixed, bf16 *out, const unsigned long long *active, int B, int K) {
     const int b = blockIdx.x * NORM_WARPS + threadIdx.x / WARP, lane = threadIdx.x % WARP;
     if (b >= B || !live(active, b)) return;
-    const size_t row = (size_t)b * K;
+    const size_t row = (size_t)b * K, src = kind == EMBED ? (size_t)tokens[b] * K : row;
     auto value = [&](int i) {
-        const float v = __bfloat162float(in[row + i]);
+        const float v = __bfloat162float(in[src + i]);
         return kind == RESID_NORM ? bfr(bfr(l1 * v) + bfr(l2 * __bfloat162float(in2[row + i]))) : v;
     };
     float s = 0.f;
@@ -601,8 +585,8 @@ static Gemv gemv(const Decoder *d, const bf16 *w, int rows, int cols, const bf16
 
 static void launch_norm(Decoder *d, int kind, const bf16 *in, const bf16 *in2, float l1, float l2, bf16 *mixed,
                         bf16 *out) {
-    k_norm<<<(d->B + NORM_WARPS - 1) / NORM_WARPS, NORM_WARPS * WARP, 0, d->stream>>>(kind, in, in2, l1, l2, mixed,
-                                                                                    out, d->active, d->B, d->C);
+    k_norm<<<(d->B + NORM_WARPS - 1) / NORM_WARPS, NORM_WARPS * WARP, 0, d->stream>>>(
+        kind, in, in2, d->tokens, l1, l2, mixed, out, d->active, d->B, d->C);
 }
 
 /* A one-warp block per (slot group, row tile); groups without an active slot exit at once. */
@@ -616,10 +600,7 @@ template <bool CHOICE> static void launch_gemv(Decoder *d, Gemv g) {
 /* The step's body on d->stream: every layer of every active slot, up to x before the final norm. */
 static void enqueue_body(Decoder *d) {
     const int C = d->C, F = d->F, L = d->L, B = d->B;
-    cudaFuncAttributes fa;
-    cudaFuncGetAttributes(&fa, k_embed);
-    k_embed<<<B, C < fa.maxThreadsPerBlock ? C : fa.maxThreadsPerBlock, 0, d->stream>>>(d->tokens, d->active, d->wte,
-                                                                                       d->x0, C);
+    launch_norm(d, EMBED, d->wte, NULL, 0.f, 0.f, NULL, d->x0);
     for (int l = 0; l < L; l++) {
         const Layer *ly = &d->layer[l];
         /* input: x0 at layer 0, else the previous layer's output */

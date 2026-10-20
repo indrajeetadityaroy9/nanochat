@@ -266,13 +266,15 @@ class NativeDecoder:
         stopping = []  # slots whose last token awaits its stop rule
         # row 0: the active slots, row 1: the masked slots; dec_set_active takes each row as 64-bit words, slot b at
         # bit b % 64 of word b // 64
-        flags = np.zeros((2, -(-B // 64) * 64), dtype=bool)
+        word = np.iinfo(np.uint64).bits
+        flags = np.zeros((2, -(-B // word) * word), dtype=bool)
 
         def set_active():
             words = np.packbits(flags, axis=1, bitorder="little").view("<u8")
             lib.dec_set_active(handle, words.ctypes.data)
 
-        def start(b):
+        def fill(b):
+            """Slot b takes the next request (NativeDecoder.start), or idles once none is left."""
             for i, request in queue:
                 if (end := len(request.prompt) + request.max_tokens - 1) > max_len:
                     raise ValueError(f"request {i}: len(prompt) {len(request.prompt)} + max_tokens "
@@ -283,13 +285,8 @@ class NativeDecoder:
             slots[b] = None
             flags[0, b] = False
 
-        def finish(b):
-            s = slots[b]
-            start(b)
-            return s.index, s.out
-
         for b in range(B):
-            start(b)
+            fill(b)
         set_active()
         while flags[0].any():
             # slots whose step chooses a token: past their prompt (a prompt step's choice is replaced by the prompt)
@@ -338,5 +335,7 @@ class NativeDecoder:
                     stopping.append(b)
             if finished:
                 for b in finished:
-                    yield finish(b)
+                    done = slots[b]
+                    fill(b)
+                    yield done.index, done.out
                 set_active()  # each choosing step sets its masks anew
