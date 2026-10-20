@@ -71,9 +71,10 @@ of the decoder beyond its MLP) or deletes a component, and its effect plausibly 
 | confirm | 16 × 512 | each change the screen and the lr design adopt, against the shape design's 16 × 512 runs | 4 per change |
 
 **Cost.** Measured production throughput (25-step runs, 2026-10-20): d8 2.30M, d12 1.20M, d16 0.74M tokens per
-second, so training takes 2.1, 9.4 and 30.2 minutes; with compilation and evaluation about 5, 13 and 36 minutes per run
-[estimate]: screen ≈ 9.6 h, lr ≈ 2.7 h, shape ≈ 4.8 h, confirm ≈ 2.4 h per adopted change, ≈ 17 h ($74 at $4.29/h)
-before confirmation.
+second, so training takes 2.1, 9.4 and 30.2 minutes. A whole d8 screen run (child process, compilation, both stages,
+loss evaluation) took 234 s (`d8-r20-s0-d0-2449fca0cf29`, screen run 0); d12 and d16 runs at about 12 and 35 minutes
+[estimate]: screen ≈ 8.5 h, lr ≈ 2.4 h, shape ≈ 4.7 h, confirm ≈ 2.3 h per adopted change; ≈ 15.6 h ($67 at
+$4.29/h) before confirmation.
 
 Runs train one at a time, each in its own process (`python -m ablations.study screen|lr|shape|confirm`); a run's tag is
 production's `config.run_tag` over its fields and the code it depends on (`config.CODE`, `study.py`, `swiglu.py`), so a
