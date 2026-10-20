@@ -5,7 +5,7 @@ regime had clipping lower on all 11 corpora by 0.003 bits per byte (ablations.md
 
     python -m ablations.clip    (ablations/harness.py; ablations.md)
 """
-from ablations.harness import REGIME, SEEDS, main
+from ablations.harness import REGIME, main
 
 if __name__ == "__main__":
-    main(alternatives={"clip 1.0": {"max_norm": 1.0}}, setting=REGIME, seeds=SEEDS)
+    main(alternatives={"clip 1.0": {"max_norm": 1.0}}, setting=REGIME)

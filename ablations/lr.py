@@ -6,7 +6,7 @@ update RMS, train/optim.py) as the peak of linear decay to zero, whose mean lr i
 
     python -m ablations.lr    (ablations/harness.py; ablations.md)
 """
-from ablations.harness import REGIME, SEEDS, main
+from ablations.harness import REGIME, main
 
 if __name__ == "__main__":
-    main(alternatives={"lr x0.5": {"lr_scale": 0.5}, "lr x2": {"lr_scale": 2.0}}, setting=REGIME, seeds=SEEDS)
+    main(alternatives={"lr x0.5": {"lr_scale": 0.5}, "lr x2": {"lr_scale": 2.0}}, setting=REGIME)

@@ -329,26 +329,24 @@ are near zero; the probe set's results are reported on the production model.
 
 The paired comparison above tests this configuration's regime as a whole against the standard regime, and the d24
 check the production batch and lr. Each decision below was taken without a study of its own, on published evidence and
-the pre-launch measurements; each has a pre-registered ablation, `ablations/<file>.py` (method, power and results in
-`ablations/ablations.md`), and only changes confirmed together at d16 (`ablations/confirm.py`) reach production.
+the pre-launch measurements. Those that depart from the reference code models or that the evidence leaves open have a
+pre-registered ablation, `ablations/<file>.py` (method, power, decision criterion and results in
+`ablations/ablations.md`):
 
 - **The peak lr of DeepSeek LLM's law** (`lr.py`: × 0.5, × 2). An lr-vs-horizon fit at affordable d24 horizons
   extrapolates 38× to production's tokens with an interval too wide to override it.
 - **No gradient clipping** (`clip.py`: 1.0), the regime choice the evidence leaves least settled (Regime).
-- **Linear decay to zero continuing through the repository stage** (`rewarm.py`: a re-warmed repository stage).
-  Qwen2.5-Coder and DeepSeek-Coder continue the decay into it.
 - **One RoPE base** (`rope.py`: 10^4 at 8K, 10^6 at 32K, as Code Llama).
-- **Learned QK-norm gains** (`qk_gains.py`: fixed at 1), Qwen3's.
-- **The x0 and residual scalars** (`residual_scalars.py`: a plain residual stream), nanochat LOG 2026-01-11.
 - **Value embeddings kept** (`value_embeds.py`: none). They cost 4.7% of the d24 step (measured before `60138de`, record
   not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20.
-- **SSSL windows** (`windows.py`: full attention), Gemma 3's near-lossless local windows.
 - **ReLU²** (`mlp.py`: SwiGLU), nanochat LOG 2026-02-05.
-- **Block Attention Residuals not adopted** (`attn_res.py`). +12% d24 step time (about 10 hours of production;
-  measured before `60138de`, record not kept) for a published 1.1% loss gain at 194M parameters (arXiv 2603.15031);
-  adopting it would need a native decode path.
-- **Partial key offset not adopted** (`key_offset.py`). A speedrun result (modded-nanogpt record #49, 124M, short
-  training); adopting it would need a native decode path.
+
+The others rest on their evidence alone (`ablations/ablations.md` §1, Not tested): linear decay to zero continuing
+through the repository stage, as Qwen2.5-Coder and DeepSeek-Coder; learned QK-norm gains (Qwen3) and the x0 and
+residual scalars (nanochat LOG 2026-01-11); SSSL windows (Gemma 3's near-lossless local windows); Block Attention
+Residuals not adopted (+12% d24 step time, measured before `60138de`, record not kept, for a published 1.1% loss gain
+at 194M parameters, arXiv 2603.15031); the partial key offset not adopted (a speedrun result, modded-nanogpt record
+#49, 124M); either of the last two would need a native decode path.
 
 ## Measured design decisions
 

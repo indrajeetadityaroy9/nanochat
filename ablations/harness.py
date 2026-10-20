@@ -1,18 +1,19 @@
 """
-The mechanism every ablation experiment (ablations/<experiment>.py, one per open decision of docs/h100-pretraining.md;
-ablations.md) shares. An experiment is production at a setting (depth, tokens per scaling parameter) and one arm per
-alternative, the arms differing from production only in their Run fields, each on the same seeds. A run trains by
-scripts/base_train.train and is scored by scripts/base_eval.loss_evaluation, the production code paths; its model is
-ablations/model.py's Candidate (production's GPT when every structural field is production's); its plan (batch, steps,
-peak lr) is the production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
+The mechanism every ablation experiment (ablations/{lr,clip,rope,value_embeds,mlp}.py, the decisions
+docs/h100-pretraining.md records without a study whose result could change production; ablations.md) shares. An
+experiment is production at a setting (depth, tokens per scaling parameter) and one arm per alternative, the arms
+differing from production only in their Run fields, each on the same seeds. A run trains by scripts/base_train.train
+and is scored by scripts/base_eval.loss_evaluation, the production code paths; its model is ablations/model.py's
+Candidate (production's GPT when every structural field is production's); its plan (batch, steps, peak lr) is the
+production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process), its output, a failure's traceback included, appended to LOGS/<tag>.log. A run whose evaluation exists is
 skipped (arms shared between experiments train once); a stopped run resumes from its repo_start checkpoint or restarts
 (train/metrics.py attempts keep both traceable). Then each alternative is compared with production; the experiment
-writes RESULTS/<experiment>.jsonl (a record per run: its fields, evaluation and efficiency), RESULTS/<experiment>.json
-(each alternative's fields, differences, p and confidence intervals, ablations/confirm.py's input) and
-RESULTS/<experiment>.md (the tables).
+writes RESULTS/<experiment>.jsonl (a record per run: its fields, evaluation and efficiency) and RESULTS/<experiment>.json
+(each alternative's fields and, per measure, its difference from production, p and confidence interval), for the
+decisions ablations.md fixes.
 
     python -m ablations.<experiment>            (every missing run, each in a child process, then the comparison)
     python -m ablations.<experiment> <index>    (one run)
@@ -24,7 +25,6 @@ import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
-from functools import partial
 
 import pandas as pd
 import torch
@@ -40,7 +40,7 @@ from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import BASE_EVAL, LOGS, RESULTS
 from nanochat.train.metrics import latest, train_steps
 from nanochat.train.optim import tau_weight_decay
-from nanochat.train.schedule import RunPlan, lr_multiplier, plan
+from nanochat.train.schedule import RunPlan, plan
 from scripts.base_eval import loss_evaluation, save
 from scripts.base_train import train
 
@@ -48,22 +48,18 @@ from scripts.base_train import train
 CHINCHILLA = 20
 # (depth, tokens per scaling parameter): the architecture experiments' d8 (14.7M scaling parameters) at CHINCHILLA; the
 # regime experiments' d8 at 100, about sqrt(20 x 490.8) = 99, the geometric midpoint between CHINCHILLA and production's
-# ratio (runs/h100.sh), toward the horizon a regime is chosen for; the confirmation's d16 (67.1M) at CHINCHILLA
+# ratio (runs/h100.sh), toward the horizon a regime is chosen for
 ARCHITECTURE = (8, CHINCHILLA)
 REGIME = (8, 100)
-CONFIRM = (16, CHINCHILLA)
-# Seeds per arm: d8's and d16's (ablations.md, Power)
+# Seeds per arm (ablations.md, Power)
 SEEDS = range(8)
-CONFIRM_SEEDS = range(4)
-# The conventional significance level (Fisher, Statistical Methods for Research Workers, 1925, §20)
+# The conventional significance level (Fisher, Statistical Methods for Research Workers, 1925, §20): the confidence
+# intervals' 1 - ALPHA
 ALPHA = 0.05
-# The metric that decides and those an alternative must not worsen (metrics)
-DECISION, GUARDS = "code", ("solutions", "repo_32k")
 # Version of RESULTS/<experiment>.jsonl's records
 SCHEMA = 1
 # The code a run's result depends on: production's (config.CODE) and this mechanism
-RUN_CODE = (*CODE, "ablations/harness.py", "ablations/model.py", "ablations/swiglu.py", "ablations/depth_attention.py",
-            "ablations/depth_attention.cu")
+RUN_CODE = (*CODE, "ablations/harness.py", "ablations/model.py", "ablations/swiglu.py")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -73,22 +69,16 @@ class Run:
     ratio: float         # tokens per scaling parameter
     lr_scale: float      # times the plan's peak lr (schedule.plan)
     max_norm: float      # gradient clip threshold; inf: none
-    schedule: str        # "decay" (schedule.lr_multiplier over the run) or "rewarm" (lr_schedule_of)
     mlp: str             # "relu2" or "swiglu"
     value_embeds: str    # "alternating" or "none"
-    residual: str        # "scalars", "identity" or "attn_res"
-    qk_gains: str        # "learned" or "fixed"
-    windows: str         # "SSSL" or "full"
     rope: str            # "one" or "staged"
-    key_offset: str      # "off" or "on"
     seed: int            # init and data order
 
 
 def production(*, depth: int, ratio: float, seed: int) -> Run:
     """Production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio."""
-    return Run(n_layer=depth, ratio=ratio, lr_scale=1.0, max_norm=math.inf, schedule="decay", mlp="relu2",
-               value_embeds="alternating", residual="scalars", qk_gains="learned", windows="SSSL", rope="one",
-               key_offset="off", seed=seed)
+    return Run(n_layer=depth, ratio=ratio, lr_scale=1.0, max_norm=math.inf, mlp="relu2", value_embeds="alternating",
+               rope="one", seed=seed)
 
 
 def fields(run: Run) -> dict:
@@ -100,8 +90,7 @@ def model_of(run: Run) -> Candidate:
     """The run's model on the meta device."""
     with torch.device("meta"):
         return Candidate(gpt_config(depth=run.n_layer, stage=FILE_STAGE), mlp=run.mlp, value_embeds=run.value_embeds,
-                         residual=run.residual, qk_gains=run.qk_gains, windows=run.windows, rope=run.rope,
-                         key_offset=run.key_offset)
+                         rope=run.rope)
 
 
 def plan_of(run: Run) -> RunPlan:
@@ -110,20 +99,6 @@ def plan_of(run: Run) -> RunPlan:
         production_plan = plan(model=GPT(gpt_config(depth=run.n_layer, stage=FILE_STAGE)), ratio=run.ratio)
     return dataclasses.replace(production_plan, lr=run.lr_scale * production_plan.lr)
 
-
-def rewarm(it: int, *, repo_start: int, steps: int) -> float:
-    """Production's multiplier in the file-level stage; from repo_start, warmed up again to 1 and decayed to zero over
-    the repository stage's steps (schedule.lr_multiplier; re-warming for a new data distribution, Gupta et al., arXiv
-    2308.04014)."""
-    if it < repo_start:
-        return lr_multiplier(it, steps=steps)
-    return lr_multiplier(it - repo_start, steps=steps - repo_start)
-
-
-def lr_schedule_of(run: Run, run_plan: RunPlan):
-    if run.schedule == "decay":
-        return partial(lr_multiplier, steps=run_plan.num_iterations)
-    return partial(rewarm, repo_start=run_plan.repo_start, steps=run_plan.num_iterations)
 
 
 def tag_of(run: Run) -> str:
@@ -140,7 +115,7 @@ def execute(run: Run) -> None:
     model = train(model=model_of(run), run=run_plan,
                   weight_decay=tau_weight_decay(lr=run_plan.lr, steps=steps,
                                                 tokens_per_param=run_plan.tokens_per_param),
-                  lr_schedule=lr_schedule_of(run, run_plan), max_norm=run.max_norm, variant=fields(run), seed=run.seed,
+                  max_norm=run.max_norm, variant=fields(run), seed=run.seed,
                   data_seed=run.seed, save_every=steps, snapshot_every=steps, tag=tag)
     save(tag, steps, loss_evaluation(model, get_tokenizer(), tasks(), device=torch.device("cuda")) |
          {"codegen": None, "fim": None})
@@ -172,8 +147,8 @@ def efficiency(run: Run) -> dict[str, int]:
     """A run's model size and cost from its records (train/metrics.py run and end records)."""
     tag = tag_of(run)
     started, ended = latest(tag, "run"), latest(tag, "end")
-    return {"params": started["params"], "trained_params": started["trained_params"],
-            "flops_per_token": started["flops_per_token"], "peak_memory_bytes": ended["peak_memory_bytes"]}
+    return {"params": started["params"], "flops_per_token": started["flops_per_token"],
+            "peak_memory_bytes": ended["peak_memory_bytes"]}
 
 
 def compare(alternative: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
@@ -188,22 +163,13 @@ def compare(alternative: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).T
 
 
-def better(table: pd.DataFrame, decision_p: float) -> bool:
-    """The decision rule: DECISION lower with `decision_p` (its p, adjusted where a family is tested) < ALPHA and no
-    guard higher with p < ALPHA."""
-    return (table.at[DECISION, "difference"] < 0 and decision_p < ALPHA
-            and not any(table.at[m, "difference"] > 0 and table.at[m, "p"] < ALPHA for m in GUARDS))
-
-
-def main(*, alternatives: dict[str, dict], setting: tuple[int, float], seeds: range) -> None:
+def main(*, alternatives: dict[str, dict], setting: tuple[int, float]) -> None:
     """Run the calling experiment (python -m ablations.<experiment>): production at `setting` and an arm per
-    alternative {name: Run fields}, on `seeds`; then compare each alternative with production. RESULTS/<experiment>.md
-    marks each better or not by its own p; RESULTS/<experiment>.json holds each alternative's fields, differences and
-    p, from which ablations/confirm.py decides across every experiment's alternatives."""
+    alternative {name: Run fields}, on SEEDS; then compare each alternative with production."""
     module = sys.modules["__main__"].__spec__.name
     experiment = module.rsplit(".", 1)[1]
     depth, ratio = setting
-    baseline = [production(depth=depth, ratio=ratio, seed=seed) for seed in seeds]
+    baseline = [production(depth=depth, ratio=ratio, seed=seed) for seed in SEEDS]
     arms = {"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
                                        for name, changes in alternatives.items()}
     runs = [run for arm in arms.values() for run in arm]
@@ -218,23 +184,14 @@ def main(*, alternatives: dict[str, dict], setting: tuple[int, float], seeds: ra
                                check=True)
     frames = {name: pd.DataFrame([evaluation(run) for run in arm], index=pd.Index(map(tag_of, arm), name="tag"))
               for name, arm in arms.items()}
-    costs = {name: pd.DataFrame([efficiency(run) for run in arm], index=frames[name].index)
-             for name, arm in arms.items()}
-    tables = {name: compare(frames[name], frames["production"]) for name in alternatives}
     with (RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f:
         for name, arm in arms.items():
             for run in arm:
                 tag = tag_of(run)
                 f.write(json.dumps({"schema": SCHEMA, "experiment": experiment, "arm": name, "tag": tag,
                                     "fields": fields(run), "evaluation": frames[name].loc[tag].to_dict(),
-                                    "efficiency": costs[name].loc[tag].to_dict()}, allow_nan=False) + "\n")
-    lines = [f"# {experiment}: d{depth} at {ratio} tokens per parameter, {len(seeds)} seeds per arm\n", "## Means\n",
-             pd.DataFrame({name: pd.concat([frames[name].mean(), costs[name].mean()]) for name in arms}).to_markdown()]
-    for name, table in tables.items():
-        verdict = "better" if better(table, table.at[DECISION, "p"]) else "not better"
-        lines += [f"\n## {name} against production: {verdict}\n", table.to_markdown()]
-    lines += ["\n## Runs\n", pd.concat(frames, names=["arm"]).to_markdown()]
-    (RESULTS / f"{experiment}.md").write_text("\n".join(lines), encoding="utf-8")
+                                    "efficiency": efficiency(run)}, allow_nan=False) + "\n")
     (RESULTS / f"{experiment}.json").write_text(json.dumps(
-        {"alternatives": {name: {"fields": alternatives[name]} | table.to_dict() for name, table in tables.items()}},
-        allow_nan=False), encoding="utf-8")
+        {"setting": {"depth": depth, "tokens_per_param": ratio}, "seeds": len(SEEDS),
+         "alternatives": {name: {"fields": changes} | compare(frames[name], frames["production"]).to_dict()
+                          for name, changes in alternatives.items()}}, allow_nan=False), encoding="utf-8")

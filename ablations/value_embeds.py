@@ -5,7 +5,7 @@ step and 12 vocabulary tables. Alternative: none, as every code model cited in a
 
     python -m ablations.value_embeds    (ablations/harness.py; ablations.md)
 """
-from ablations.harness import ARCHITECTURE, SEEDS, main
+from ablations.harness import ARCHITECTURE, main
 
 if __name__ == "__main__":
-    main(alternatives={"no value embeddings": {"value_embeds": "none"}}, setting=ARCHITECTURE, seeds=SEEDS)
+    main(alternatives={"no value embeddings": {"value_embeds": "none"}}, setting=ARCHITECTURE)

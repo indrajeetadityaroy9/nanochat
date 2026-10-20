@@ -6,15 +6,14 @@ seconds), then the kind's fields. Unavailable values are null; NaN and infinitie
 
 run (each process start): step (the first step it trains), plan (schedule.RunPlan), seed, data_seed, model
     (model/gpt.py GPTConfig as the model was built), variant (an ablation run's fields, ablations/harness.py; {} for
-    production), params and trained_params (the model's parameters, all and those the optimizers train),
-    flops_per_token (model/gpt.py non_embedding_flops_per_token at the stage it starts in), max_norm (the gradient clip
-    threshold; null: no clipping), lr and weight_decay (as the optimizers hold them; a resumed process's come from its
-    checkpoint), stage (config.Stage as the model runs it, mixture as {corpus: row weight}).
+    production), params (the model's parameters), flops_per_token (model/gpt.py non_embedding_flops_per_token at the
+    stage it starts in), max_norm (the gradient clip threshold; null: no clipping), lr and weight_decay (as the
+    optimizers hold them; a resumed process's come from its checkpoint), stage (config.Stage as the model runs it,
+    mixture as {corpus: row weight}).
 stage (switch to the repo-level stage): step, stage.
 train (each optimizer step, 0-based): step; tokens (row positions after it, padding included); loss (mean next-token
     loss in nats over the step's valid targets, fp64); lr (LambdaLR's at the step); grad_norm (global L2 norm of the
-    trained parameters' gradient before clipping); tok_per_s (row positions per second between the step's two CUDA
-    synchronizations).
+    gradient before clipping); tok_per_s (row positions per second between the step's two CUDA synchronizations).
 end (the last step trained): step; peak_memory_bytes (torch.cuda.max_memory_allocated of the process).
 failure (a non-finite loss or gradient norm; the run stops): step, loss and grad_norm (null).
 

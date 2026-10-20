@@ -14,7 +14,7 @@ import argparse
 import gc
 import math
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import asdict
 from functools import partial
 
@@ -57,14 +57,14 @@ def optimizer_step(model: torch.nn.Module, batches: list[tuple[torch.Tensor, ...
     return torch.stack(losses).double().sum(), grad_norm, upcoming
 
 
-def train(*, model: GPT, run: RunPlan, weight_decay: float, lr_schedule: Callable[[int], float], max_norm: float,
-          variant: dict, seed: int, data_seed: int, save_every: int, snapshot_every: int, tag: str) -> GPT:
+def train(*, model: GPT, run: RunPlan, weight_decay: float, max_norm: float, variant: dict, seed: int, data_seed: int,
+          save_every: int, snapshot_every: int, tag: str) -> GPT:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
-    (schedule.plan) and return it: init by `seed`, data order by `data_seed`, decoupled `weight_decay`, each step's lr
-    the plan's times `lr_schedule(step)`, gradients clipped to global norm `max_norm` (inf: none), FILE_STAGE then
-    REPO_STAGE from run.repo_start; `variant` (config.run_tag's) recorded with the run. Resume checkpoint every
-    `save_every` steps; a model-only snapshot every `snapshot_every` steps and at repo_start (the model before the
-    repo-level stage), the final model being the last checkpoint."""
+    (schedule.plan) and return it: init by `seed`, data order by `data_seed`, decoupled `weight_decay`, gradients
+    clipped to global norm `max_norm` (inf: none), FILE_STAGE then REPO_STAGE from run.repo_start; `variant`
+    (config.run_tag's) recorded with the run. Resume checkpoint every `save_every` steps; a model-only snapshot every
+    `snapshot_every` steps and at repo_start (the model before the repo-level stage), the final model being the last
+    checkpoint."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
     model.to_empty(device=device)
@@ -79,8 +79,9 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, lr_schedule: Callabl
             opt.load_state_dict(state)
         start_step, stage_rows = checkpoint["step"], checkpoint["stage_rows"]
         del checkpoint
-    # a resumed scheduler restarts at start_step
-    schedulers = [LambdaLR(opt, lr_schedule, last_epoch=start_step - 1) for opt in opts]
+    # group lr = initial lr x lr_multiplier(step); a resumed scheduler restarts at start_step
+    schedulers = [LambdaLR(opt, partial(lr_multiplier, steps=run.num_iterations), last_epoch=start_step - 1)
+                  for opt in opts]
     step = start_step
 
     def stage_at(s):
@@ -111,11 +112,10 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, lr_schedule: Callabl
     # lr and weight decay as the optimizers hold them (a resumed run's come from its checkpoint)
     group = opts[0].param_groups[0]
     attempt = metrics.attempt(tag)
-    params = [p for p in model.parameters() if p.requires_grad]
+    params = list(model.parameters())
     metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "data_seed": data_seed,
                          "model": asdict(model.config), "variant": variant,
-                         "params": sum(p.numel() for p in model.parameters()),
-                         "trained_params": sum(p.numel() for p in params),
+                         "params": sum(p.numel() for p in params),
                          "flops_per_token": non_embedding_flops_per_token(model),
                          "max_norm": None if math.isinf(max_norm) else max_norm,
                          "lr": group["initial_lr"], "weight_decay": group["weight_decay"],
@@ -191,7 +191,7 @@ def main():
     # no clipping (docs/h100-pretraining.md Regime): an infinite threshold only measures the norm
     train(model=model, run=run,
           weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations, tokens_per_param=run.tokens_per_param),
-          lr_schedule=partial(lr_multiplier, steps=run.num_iterations), max_norm=math.inf, variant={},
+          max_norm=math.inf, variant={},
           seed=args.seed, data_seed=args.seed, save_every=args.save_every, snapshot_every=args.snapshot_every,
           tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
                       variant={}, code=CODE))
