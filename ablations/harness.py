@@ -9,9 +9,10 @@ peak lr) is the production model's at its depth and ratio, so every arm matches 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process), its output, a failure's traceback included, appended to LOGS/<tag>.log. A run whose evaluation exists is
 skipped (arms shared between experiments train once); a stopped run resumes from its repo_start checkpoint or restarts
-(train/metrics.py attempts keep both traceable). Then each alternative is compared with production and the experiment
-writes RESULTS/<experiment>.md and RESULTS/<experiment>.json ({"adopted": the Run fields of the adopted alternative,
-{} for none}).
+(train/metrics.py attempts keep both traceable). Then each alternative is compared with production; the experiment
+writes RESULTS/<experiment>.jsonl (a record per run: its fields, evaluation and efficiency), RESULTS/<experiment>.json
+(each alternative's fields, differences, p and confidence intervals, ablations/confirm.py's input) and
+RESULTS/<experiment>.md (the tables).
 
     python -m ablations.<experiment>            (every missing run, each in a child process, then the comparison)
     python -m ablations.<experiment> <index>    (one run)
@@ -30,13 +31,14 @@ import torch
 from scipy.stats import ttest_ind
 
 from ablations.model import Candidate
-from nanochat.config import CODE, FILE_STAGE, run_tag
+from nanochat.config import CODE, FILE_STAGE, REPO_STAGE, run_tag
+from nanochat.data.loader import mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.eval.code_eval import tasks
-from nanochat.eval.loss_eval import bpb
+from nanochat.eval.loss_eval import bpb, mixture_bpb
 from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import BASE_EVAL, LOGS, RESULTS
-from nanochat.train.metrics import train_steps
+from nanochat.train.metrics import latest, train_steps
 from nanochat.train.optim import tau_weight_decay
 from nanochat.train.schedule import RunPlan, lr_multiplier, plan
 from scripts.base_eval import loss_evaluation, save
@@ -57,6 +59,8 @@ CONFIRM_SEEDS = range(4)
 ALPHA = 0.05
 # The metric that decides and those an alternative must not worsen (metrics)
 DECISION, GUARDS = "code", ("solutions", "repo_32k")
+# Version of RESULTS/<experiment>.jsonl's records
+SCHEMA = 1
 # The code a run's result depends on: production's (config.CODE) and this mechanism
 RUN_CODE = (*CODE, "ablations/harness.py", "ablations/model.py", "ablations/swiglu.py", "ablations/depth_attention.py",
             "ablations/depth_attention.cu")
@@ -142,26 +146,46 @@ def execute(run: Run) -> None:
          {"codegen": None, "fim": None})
 
 
-def metrics(run: Run) -> dict[str, float]:
-    """A run's metrics (bits per byte; tokens per second) from its evaluation and its per-step records: code, text and
-    math, the 8K validation bits per byte of each group at production's corpus weights (loss_eval.val_bits "bpb");
-    solutions, the bits per byte of the HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their prompts,
-    pooled (code_eval.solution_bits); repo_32k, the 32K repository bits per byte of the code group; tok_per_s, the
-    median over the file-level stage's steps of the step's tokens per second."""
+def evaluation(run: Run) -> dict[str, float]:
+    """A run's compared measures (bits per byte; tokens per second) from its evaluation and its per-step records: code,
+    text and math, the 8K validation bits per byte of each group at production's corpus weights (loss_eval.val_bits
+    "bpb"); solutions, the bits per byte of the HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their
+    prompts, pooled (code_eval.solution_bits); repo_32k, the 32K repository bits per byte of the code group, and
+    repo_beyond_8k, the same over the targets beyond the file-level context (loss_eval CONTEXTS' last bucket);
+    tok_per_s, the median over the file-level stage's steps of the step's tokens per second."""
     tag, repo_start = tag_of(run), plan_of(run).repo_start
     result = json.loads((BASE_EVAL / f"{tag}.json").read_text(encoding="utf-8"))
     solution = result["solution"].values()
+    beyond = {c: {"bits": r["bits"][-1:], "bytes": r["bytes"][-1:], "rows": r["rows"]}
+              for c, r in result["32k"]["corpora"].items()}
     rates = [r["tok_per_s"] for step, r in train_steps(tag).items() if step < repo_start]
     return {"code": result["8k"]["bpb"]["code"],
             "solutions": bpb({k: [sum(sum(s[k]) for s in solution)] for k in ("bits", "bytes")}),
-            "repo_32k": result["32k"]["bpb"]["code"], "text": result["8k"]["bpb"]["text"],
-            "math": result["8k"]["bpb"]["math"], "tok_per_s": statistics.median(rates)}
+            "repo_32k": result["32k"]["bpb"]["code"],
+            "repo_beyond_8k": mixture_bpb(beyond, mixture_weights(REPO_STAGE.mixture, get_tokenizer(),
+                                                                  REPO_STAGE.seq_len)),
+            "text": result["8k"]["bpb"]["text"], "math": result["8k"]["bpb"]["math"],
+            "tok_per_s": statistics.median(rates)}
+
+
+def efficiency(run: Run) -> dict[str, int]:
+    """A run's model size and cost from its records (train/metrics.py run and end records)."""
+    tag = tag_of(run)
+    started, ended = latest(tag, "run"), latest(tag, "end")
+    return {"params": started["params"], "trained_params": started["trained_params"],
+            "flops_per_token": started["flops_per_token"], "peak_memory_bytes": ended["peak_memory_bytes"]}
 
 
 def compare(alternative: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
-    """Per metric (column): the alternative's mean minus the baseline's, and the two-sided pooled t-test's p (scipy)."""
-    return pd.DataFrame({m: {"difference": alternative[m].mean() - baseline[m].mean(),
-                             "p": ttest_ind(alternative[m], baseline[m]).pvalue} for m in baseline}).T
+    """Per measure (column): the alternative's mean minus the baseline's, the two-sided pooled t-test's p and the
+    difference's 1 - ALPHA confidence interval (scipy ttest_ind)."""
+    rows = {}
+    for m in baseline:
+        test = ttest_ind(alternative[m], baseline[m])
+        interval = test.confidence_interval(confidence_level=1 - ALPHA)
+        rows[m] = {"difference": alternative[m].mean() - baseline[m].mean(), "p": test.pvalue,
+                   "ci_low": interval.low, "ci_high": interval.high}
+    return pd.DataFrame(rows).T
 
 
 def better(table: pd.DataFrame, decision_p: float) -> bool:
@@ -192,11 +216,20 @@ def main(*, alternatives: dict[str, dict], setting: tuple[int, float], seeds: ra
             with (LOGS / f"{tag}.log").open("a", encoding="utf-8") as log:
                 subprocess.run([sys.executable, "-m", module, str(i)], stdout=log, stderr=subprocess.STDOUT,
                                check=True)
-    frames = {name: pd.DataFrame([metrics(run) for run in arm], index=pd.Index(map(tag_of, arm), name="tag"))
+    frames = {name: pd.DataFrame([evaluation(run) for run in arm], index=pd.Index(map(tag_of, arm), name="tag"))
               for name, arm in arms.items()}
+    costs = {name: pd.DataFrame([efficiency(run) for run in arm], index=frames[name].index)
+             for name, arm in arms.items()}
     tables = {name: compare(frames[name], frames["production"]) for name in alternatives}
+    with (RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f:
+        for name, arm in arms.items():
+            for run in arm:
+                tag = tag_of(run)
+                f.write(json.dumps({"schema": SCHEMA, "experiment": experiment, "arm": name, "tag": tag,
+                                    "fields": fields(run), "evaluation": frames[name].loc[tag].to_dict(),
+                                    "efficiency": costs[name].loc[tag].to_dict()}, allow_nan=False) + "\n")
     lines = [f"# {experiment}: d{depth} at {ratio} tokens per parameter, {len(seeds)} seeds per arm\n", "## Means\n",
-             pd.DataFrame({name: frame.mean() for name, frame in frames.items()}).to_markdown()]
+             pd.DataFrame({name: pd.concat([frames[name].mean(), costs[name].mean()]) for name in arms}).to_markdown()]
     for name, table in tables.items():
         verdict = "better" if better(table, table.at[DECISION, "p"]) else "not better"
         lines += [f"\n## {name} against production: {verdict}\n", table.to_markdown()]

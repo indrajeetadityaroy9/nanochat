@@ -25,7 +25,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from nanochat.config import CODE, FILE_STAGE, REPO_STAGE, run_tag
 from nanochat.data.loader import PretrainingBatches, mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
-from nanochat.model.gpt import GPT, gpt_config
+from nanochat.model.gpt import GPT, gpt_config, non_embedding_flops_per_token
 from nanochat.train import metrics
 from nanochat.train.checkpoint import checkpoint_path, save_checkpoint
 from nanochat.train.optim import optimizers, tau_weight_decay
@@ -111,12 +111,15 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, lr_schedule: Callabl
     # lr and weight decay as the optimizers hold them (a resumed run's come from its checkpoint)
     group = opts[0].param_groups[0]
     attempt = metrics.attempt(tag)
+    params = [p for p in model.parameters() if p.requires_grad]
     metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "data_seed": data_seed,
                          "model": asdict(model.config), "variant": variant,
+                         "params": sum(p.numel() for p in model.parameters()),
+                         "trained_params": sum(p.numel() for p in params),
+                         "flops_per_token": non_embedding_flops_per_token(model),
                          "max_norm": None if math.isinf(max_norm) else max_norm,
                          "lr": group["initial_lr"], "weight_decay": group["weight_decay"],
                          "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
-    params = [p for p in model.parameters() if p.requires_grad]
 
     while True:
         last_step = step == run.num_iterations
@@ -131,6 +134,8 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, lr_schedule: Callabl
                                    "model_config": asdict(model.config), "stage_rows": stage_rows})
             gc.collect()
         if last_step:
+            metrics.append(tag, {"kind": "end", "step": step, "peak_memory_bytes": torch.cuda.max_memory_allocated()},
+                           attempt=attempt)
             return model
         if stage_at(step) is not stage:
             # repo-level stage: new context and compiled graph; its batches were read the step before
