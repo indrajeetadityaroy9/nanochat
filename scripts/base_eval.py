@@ -1,15 +1,20 @@
 """
-Evaluation of a base_train run's newest checkpoint, written to <base_dir>/base_eval/<tag>.json:
+Evaluation of a base_train run's newest checkpoint, written to BASE_EVAL/<tag>.json, or of its model-only
+snapshot at --step (CHECKPOINTS/<tag>-step<step:06d>.pt), written to BASE_EVAL/<tag>-step<step:06d>.json (that
+name is the result's "run" and scripts/report.py's tag):
 - loss_evaluation: val bits and bytes of the training mixture in file-level rows, of the repo-level mixture per context
   bucket in repo-level rows (models at that context), and of the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions (eval/loss_eval.py, eval/code_eval.py);
-- greedy pass@1 of HumanEval+ / MBPP+ (EvalPlus) and HumanEval-cpp / MBPP-cpp (MultiPL-E) (eval/code_eval.py);
-- FIM pass@1 of HumanEval single-line, multi-line and random-span infilling, PSM and SPM (eval/fim_eval.py).
+- pass@1 of HumanEval+ / MBPP+ (EvalPlus) and HumanEval-cpp / MBPP-cpp (MultiPL-E) (eval/code_eval.py) and FIM pass@1
+  of HumanEval single-line, multi-line and random-span infilling, PSM and SPM (eval/fim_eval.py), each by two
+  generation modes (FIM's system mode in SPM order only): "greedy" and "system" (healing, the Python syntax constraint,
+  then seeded resampling until a candidate passes the static checks and its prompt's examples; eval/verify.py), with
+  per-task diagnostics counts and the system mode's attempts.
 
-    python -m scripts.base_eval --model-tag=<tag>   (config.run_tag; runs/h100.sh logs it)
+    python -m scripts.base_eval --model-tag=<tag> [--step=<step>]   (config.run_tag; runs/h100.sh logs it)
 """
 import argparse
-import os
+import json
 
 import torch
 
@@ -19,8 +24,8 @@ from nanochat.eval.code_eval import generation, solution_bits, tasks
 from nanochat.eval.fim_eval import fim_generation
 from nanochat.eval.loss_eval import val_bits
 from nanochat.model.gpt import GPT
-from nanochat.paths import base_dir, write_json
-from nanochat.train.checkpoint import load_model
+from nanochat.paths import BASE_EVAL
+from nanochat.train.checkpoint import checkpoint_name, load_model
 
 
 def loss_evaluation(model: GPT, tokenizer: Tokenizer, benchmarks: dict, *, device: torch.device) -> dict:
@@ -38,14 +43,15 @@ def loss_evaluation(model: GPT, tokenizer: Tokenizer, benchmarks: dict, *, devic
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-tag", required=True)
-    tag = parser.parse_args().model_tag
+    parser.add_argument("--step", type=int, default=None, help="a model-only snapshot <tag>-step<step>.pt; default: newest")
+    args = parser.parse_args()
+    run = checkpoint_name(args.model_tag, step=args.step)
     device = torch.device("cuda")
     benchmarks, tokenizer = tasks(), get_tokenizer()
-    model, step = load_model(tag, step=None, device=device)
-    results = {"run": tag, "step": step, **loss_evaluation(model, tokenizer, benchmarks, device=device),
+    model, step = load_model(args.model_tag, step=args.step, device=device)
+    results = {"run": run, "step": step, **loss_evaluation(model, tokenizer, benchmarks, device=device),
                "codegen": generation(model, tokenizer, benchmarks), "fim": fim_generation(model, tokenizer)}
-    os.makedirs(os.path.join(base_dir(), "base_eval"), exist_ok=True)
-    write_json(os.path.join(base_dir(), "base_eval", f"{tag}.json"), results)
+    (BASE_EVAL / f"{run}.json").write_text(json.dumps(results))
 
 
 if __name__ == "__main__":

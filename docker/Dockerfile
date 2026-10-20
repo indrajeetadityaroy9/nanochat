@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
-# nanochat image for the NVIDIA H100 (sm_90). Neither code nor data is baked in: runs/container.sh mounts this checkout
-# at /workspace/nanochat, an experiment base dir at /runs (NANOCHAT_BASE_DIR: tokenizer, checkpoints, eval results,
-# caches) and the data store at /runs/data.
+# nanochat image for the NVIDIA H100 (sm_90). Neither code nor data is baked in: runs/container.sh mounts the checkout at
+# the working directory /workspace/nanochat, nanochat/paths.py's ROOT; data, checkpoints, results and caches live in its
+# artifacts/ (created by runs/setup.sh).
 #
 # Built on NVIDIA's NGC PyTorch image, which supplies PyTorch as NVIDIA built it: torch, everything only torch needs
 # (Triton, the CUDA libraries, nvcc for nanochat/native.py) and numpy (which the image's numba pins below 2.5). uv.lock
@@ -36,7 +36,7 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy VIRTUAL_ENV=/opt/venv PATH=/opt/venv
 WORKDIR /workspace/nanochat
 
 # Rust toolchain for the tokenizer crate (nanochat/data/bpe), built on first use like the CUDA decoder: rustup's minimal
-# profile at a pinned version. Crates fetched on that first build go to CARGO_HOME under /runs (set below): the
+# profile at a pinned version. Crates fetched on that first build go to CARGO_HOME in artifacts/cache (set below): the
 # container's user cannot write the image's /usr/local.
 ENV RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
 RUN curl -sSf https://sh.rustup.rs | CARGO_HOME=/usr/local/cargo sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.99.1
@@ -81,10 +81,12 @@ RUN uv pip install --no-deps --no-build-isolation /tmp/enry && rm -rf /tmp/enry
 # (10-bit mantissa); the precision policy keeps fp32 as fp32.
 # HF_XET_HIGH_PERFORMANCE: saturate network and CPUs when pulling raw corpora from the Hugging Face Hub. The compiler and
 # kernel caches (Inductor, Triton, quack, FlashAttention-4 CuTe, cargo's crates) and the user cache directory (evalplus's
-# data releases and ground truth: appdirs' XDG_CACHE_HOME) live under /runs so that every run after the first reuses
-# them instead of redoing them in each fresh container.
-ENV NANOCHAT_BASE_DIR=/runs HF_HOME=/runs/data/huggingface \
+# data releases and ground truth: appdirs' XDG_CACHE_HOME) live in the mounted checkout's artifacts/cache, so every run
+# after the first reuses them instead of redoing them in each fresh container.
+ENV HF_HOME=/workspace/nanochat/artifacts/data/huggingface \
     HF_XET_HIGH_PERFORMANCE=1 HF_HUB_DISABLE_PROGRESS_BARS=1 OMP_NUM_THREADS=1 PYTHONUNBUFFERED=1 \
-    TORCHINDUCTOR_CACHE_DIR=/runs/cache/inductor TRITON_CACHE_DIR=/runs/cache/triton QUACK_CACHE_DIR=/runs/cache/quack \
-    FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1 FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=/runs/cache/flash_attn \
-    CARGO_HOME=/runs/cache/cargo XDG_CACHE_HOME=/runs/cache TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
+    TORCHINDUCTOR_CACHE_DIR=/workspace/nanochat/artifacts/cache/inductor \
+    TRITON_CACHE_DIR=/workspace/nanochat/artifacts/cache/triton QUACK_CACHE_DIR=/workspace/nanochat/artifacts/cache/quack \
+    FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1 FLASH_ATTENTION_CUTE_DSL_CACHE_DIR=/workspace/nanochat/artifacts/cache/flash_attn \
+    CARGO_HOME=/workspace/nanochat/artifacts/cache/cargo XDG_CACHE_HOME=/workspace/nanochat/artifacts/cache \
+    TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0

@@ -14,7 +14,7 @@ python -m nanochat.data.compile
 """
 
 import itertools
-import os
+import json
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
@@ -23,7 +23,6 @@ import pyarrow.parquet as pq
 from nanochat.data.loader import TOKEN_DTYPE, split_path
 from nanochat.data.sources import SOURCES, curated_files, documents
 from nanochat.data.tokenizer import get_tokenizer
-from nanochat.paths import write_json
 
 
 def compile_row_group(task):
@@ -41,12 +40,12 @@ def compile_split(source, split, tokenizer):
     """Compile a source's curated shards of a split into <split>.bin and <split>.idx, with <split>.json beside them."""
     files = curated_files(source, split)
     path = split_path(source, split, tokenizer)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     row_groups = {file: pq.read_metadata(file).num_row_groups for file in files}
     tasks = [(source, file, i) for file, count in row_groups.items() for i in range(count)]
     print(f"Compiling {len(files)} {split} files ({len(tasks):,} row groups) of '{source}' into {path}.bin")
     per_file, offset = [], 0
-    with ProcessPoolExecutor() as pool, open(path + ".bin", "wb") as bin_file, open(path + ".idx", "wb") as idx_file:
+    with (ProcessPoolExecutor() as pool, open(path.with_suffix(".bin"), "wb") as bin_file,
+          open(path.with_suffix(".idx"), "wb") as idx_file):
         idx_file.write(np.zeros(1, np.int64))
         results = pool.map(compile_row_group, tasks)  # in task order, whichever worker finishes first
         for count in row_groups.values():
@@ -57,11 +56,13 @@ def compile_split(source, split, tokenizer):
                 offset += len(tokens)
                 documents_in_file += len(lengths)
             per_file.append({"documents": documents_in_file})
-    write_json(path + ".json", {"files": per_file})
+    path.with_suffix(".json").write_text(json.dumps({"files": per_file}))
 
 
 if __name__ == "__main__":
     tokenizer = get_tokenizer()
     for source in SOURCES:
+        # a new output directory per source and tokenizer: compile does not resume
+        split_path(source, "val", tokenizer).parent.mkdir(parents=True)
         for split in ("val", "train"):
             compile_split(source, split, tokenizer)

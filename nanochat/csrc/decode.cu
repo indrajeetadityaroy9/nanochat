@@ -1,11 +1,17 @@
 /*
- * Greedy decoding of a nanochat GPT (nanochat/model/gpt.py) for B independent sequences (slots); one step of all slots
- * is captured as a CUDA graph (nanochat/inference/decoder.py).
+ * Decoding of a nanochat GPT (nanochat/model/gpt.py) for B independent sequences (slots): each step advances every
+ * active slot by one token, chosen greedily or sampled, optionally restricted to a per-slot set of allowed tokens
+ * (nanochat/inference/decoder.py).
  *
  * A small-batch step is bound by weight reads and kernel launches: each weight is read once for all slots, and the
- * step's 5 kernels per layer plus 3 replay as one graph. Positions, input tokens, KV caches and the active-slot mask
- * live in device memory. A slot starts from the model's batch-1 prefill of its prompt but the last token
- * (dec_set_prefilled); inactive slots are skipped by every kernel.
+ * step's 5 kernels per layer plus 3 replay as one CUDA graph. Positions, input tokens, KV caches, the active-slot mask
+ * and each slot's sampling parameters and allowed tokens live in device memory. A slot starts from the model's batch-1
+ * prefill of its prompt but the last token (dec_set_prefilled); inactive slots are skipped by every kernel.
+ *
+ * The step is captured whole (dec_launch), the greedy argmax for every slot, and as its body, everything before the
+ * lm_head GEMV, and a head that chooses by each slot's allowed tokens and temperature (dec_launch_body,
+ * dec_launch_head): the host supplies the allowed tokens, which follow from each slot's previous token, while the
+ * body runs (decoder.py). The whole step's GEMVs compile without the choice (k_gemv's CHOICE).
  *
  * Each step (gpt.py's forward at one position; C width, H heads of HEAD_DIM, x0 the normed embedding):
  *   k_embed   x0 = norm(wte[token])
@@ -18,17 +24,20 @@
  *     k_gemv  xo = xm + y Wo^T
  *     k_gemv  u = relu(norm(xo) Wfc^T)^2
  *     k_gemv  x = xo + u Wproj^T
- *   k_gemv    argmax of norm(x) W_lm^T (atomicMax on a packed key)
- *   k_commit  the argmax becomes each active slot's next token
+ *   k_gemv    the token choice from s = norm(x) W_lm^T over the slot's allowed tokens (all if it has none): argmax s at
+ *             temperature 0, else argmax s / T + Gumbel noise (sampling softmax(s / T), gumbel), by atomicMax on a
+ *             packed key
+ *   k_commit  the choice becomes each active slot's next token
  *
  * Numerics follow the eager forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary table, q/k
  * gains and value-embedding gate (no contraction), the gate's mix rounded once to bf16; resid/x0 lambdas as bf16 values
  * on bf16 tensors (PyTorch's 0-dim fp32 x bf16 promotion), each product and sum rounded; ReLU^2 from the fp32
- * accumulators as QuACK's gemm_act relu_sq (quack/activation.py), one bf16 rounding; F.rms_norm's fp32 epsilon; argmax
- * over fp32 logits.
+ * accumulators as QuACK's gemm_act relu_sq (quack/activation.py), one bf16 rounding; F.rms_norm's fp32 epsilon; the
+ * choice over fp32 logits.
  *
  * No sum mixes slots and every sum's order is fixed by the shapes and the slot's position (GEMV: MMAs over K in fixed
- * order; attention: split count from the position), so a sequence's tokens do not depend on the batch or on timing.
+ * order; attention: split count from the position), and a sample's noise depends only on its request's seed and the
+ * generated position, so a sequence's tokens do not depend on the batch or on timing.
  *
  * Launch shapes: a GEMV runs a warp per MMA_M-row tile in blocks sized by cudaOccupancyMaxPotentialBlockSize, fewer
  * warps when that would leave SMs idle, at most one resident wave; attention runs a thread per head dim in (head,
@@ -38,6 +47,8 @@
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
+
+#include <curand_kernel.h>
 
 #include "qk_row.cuh"
 
@@ -51,6 +62,7 @@ constexpr int GROUP = WARP / MMA_N, ACC = MMA_M * MMA_N / WARP;
 constexpr int K_BLOCK = GROUP * VEC;               /* k per group step: VEC per lane */
 static_assert(K_BLOCK == 2 * MMA_K, "a K_BLOCK block is two k16 MMAs (k_gemv)");
 constexpr int NTILES = MAX_BATCH / MMA_N;          /* the MMA's n tiles of the slots */
+constexpr int WORD_BITS = CHAR_BIT * sizeof(uint32_t);  /* tokens per word of an allowed-token mask */
 
 enum { PRO_COPY, PRO_RESID_NORM, PRO_NORM };
 enum { EPI_STORE, EPI_RESID, EPI_RELU2, EPI_ARGMAX };
@@ -70,6 +82,18 @@ static __device__ __forceinline__ float warp_sum(float v) {
 static __device__ __forceinline__ float warp_max(float v) {
     for (int o = WARP / 2; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
     return v;
+}
+
+/* Gumbel noise -log(-log(u)) of token row at generated position i under a request's seed, u uniform on (0, 1) from the
+ * counter-based Philox4x32-10 (Salmon et al., SC'11 "Parallel random numbers: as easy as 1, 2, 3"; cuRAND's
+ * curand_Philox4x32_10) at counter (row, i), key seed: so the draw depends on (seed, i, row) alone. u = (2r + 1)
+ * 2^-DBL_MANT_DIG of DBL_MANT_DIG - 1 random bits r is exact in double and never 0 or 1. argmax over tokens of
+ * s / T + noise samples softmax(s / T) (the Gumbel-max trick; Maddison et al., NeurIPS 2014 "A* Sampling", §2). */
+static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, int row) {
+    const uint4 x = curand_Philox4x32_10(make_uint4((uint32_t)row, (uint32_t)i, 0u, 0u),
+                                         make_uint2((uint32_t)seed, (uint32_t)(seed >> 32)));
+    const unsigned long long r = ((unsigned long long)x.x << 32 | x.y) >> (64 - (DBL_MANT_DIG - 1));
+    return (float)-log(-log(ldexp(2.0 * (double)r + 1.0, -DBL_MANT_DIG)));
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -92,10 +116,19 @@ typedef struct {
     int epi;                     /* epilogue: what is done with each output */
     bf16 *out;                   /* [B][rows]: STORE/RESID/RELU2 output */
     const bf16 *res;             /* [B][rows]: RESID: residual added */
-    unsigned long long *argmax;  /* [B] ARGMAX: packed (ordered logit, ~row) maximum */
-    const unsigned long long *active;  /* the active slots' bit mask */
+    unsigned long long *argmax;  /* [B] ARGMAX: packed (ordered score, ~row) maximum */
+    const unsigned long long *active;  /* [2]: the active slots' bit mask, then the masked slots' (CHOICE) */
     int B;
 } Gemv;
+
+/* The per-slot inputs of a CHOICE ARGMAX, a kernel argument of their own: growing Gemv changes the compiled GEMVs. */
+typedef struct {
+    const uint32_t *allow;           /* [B][rows / WORD_BITS]: a masked slot's allowed rows, bit row % WORD_BITS of
+                                      * word row / WORD_BITS */
+    const float *temperature;        /* [B]: 0 the logits' argmax, else Gumbel-max sampling at that temperature */
+    const unsigned long long *seed;  /* [B] */
+    const int32_t *pos, *first;      /* [B]: the input's position and the first generated token's (i = pos - first) */
+} Choice;
 
 static __device__ __forceinline__ void mma16816(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
                                                 uint32_t b1) {
@@ -113,7 +146,10 @@ static __device__ __forceinline__ float pro_value(const Gemv &a, size_t at, floa
     return a.pro == PRO_COPY ? v : bfr(v * r);
 }
 
-__global__ void k_gemv(Gemv a) {
+/* CHOICE: ARGMAX honours each slot's allowed tokens and temperature (c; the head graph); without it, the logits' argmax
+ * (the whole-step graph). A compile-time argument: code added to the kernel changes the compiled loops of every GEMV
+ * (measured: +0.45 ms of a 3.5 ms d8 step at 64 slots), so greedy steps run the kernel compiled without it. */
+template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
     extern __shared__ __align__(16) unsigned char gemv_buf[];
     const int K = a.cols, kc = a.chunk, ks = kc + VEC, tid = threadIdx.x, nthreads = blockDim.x, warp = tid / WARP,
               lane = tid % WARP, warps = nthreads / WARP, g = lane / GROUP, t = lane % GROUP;
@@ -194,9 +230,19 @@ __global__ void k_gemv(Gemv a) {
                     a.out[at] = __float2bfloat16_rn(y);
                 } else if (a.epi == EPI_RESID) {
                     a.out[at] = __float2bfloat16_rn(__bfloat162float(a.res[at]) + y);
-                } else {  /* EPI_ARGMAX: largest fp32 logit, lowest row among exact ties; the IEEE bits mapped to an
-                           * unsigned order (negatives inverted, positives above them) */
-                    const uint32_t bits = __float_as_uint(s);
+                } else {  /* EPI_ARGMAX: largest score, lowest row among exact ties: the fp32 logit, or with CHOICE
+                           * over a masked slot's allowed rows, at temperature T > 0 logit / T + gumbel; the IEEE bits
+                           * mapped to an unsigned order (negatives inverted, positives above them) */
+                    float score = s;
+                    if constexpr (CHOICE) {
+                        if (live(a.active[1], b) && !((c.allow[(size_t)b * (a.rows / WORD_BITS) + row / WORD_BITS] >>
+                                                       (row % WORD_BITS)) & 1u))
+                            continue;
+                        if (c.temperature[b] > 0.f)
+                            score = __fadd_rn(__fdiv_rn(s, c.temperature[b]),
+                                              gumbel(c.seed[b], c.pos[b] - c.first[b], row));
+                    }
+                    const uint32_t bits = __float_as_uint(score);
                     const uint32_t ordered = (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
                     atomicMax(a.argmax + b, ((unsigned long long)ordered << 32) | (UINT32_MAX - (uint32_t)row));
                 }
@@ -251,7 +297,7 @@ typedef struct {
     const bf16 *qkv, *h, *ve;  /* [B][3C], [B][C] (the normed input), the layer's value-embedding table or NULL */
     const float *ve_gate;      /* [H][C] fp32: the value-embedding gate's weights */
     const float *q_gain, *k_gain;  /* [HEAD_DIM] fp32, shared by the heads */
-    const float *cos, *sin;    /* the rotary table [max_len][HALF], fp32 */
+    const float *cos, *sin;    /* the rotary table [context][HALF], fp32 */
     bf16 *kc, *vc;             /* the layer's cache of slot 0, [max_len][C]; slot b's at + b kv_slot */
     size_t kv_slot;
     bf16 *out;                 /* [B][C] */
@@ -413,7 +459,8 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
-/* Each active slot's argmax becomes its next token and its position advances; a thread per slot. */
+/* Each active slot's chosen token (ARGMAX's maximum) becomes its next token and its position advances; a thread per
+ * slot. */
 __global__ void k_commit(int32_t *tokens, int32_t *pos, const unsigned long long *active, unsigned long long *argmax,
                          int B) {
     const int b = threadIdx.x;
@@ -424,7 +471,7 @@ __global__ void k_commit(int32_t *tokens, int32_t *pos, const unsigned long long
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
-/* Host side: one decoder per model, its step captured as a CUDA graph. */
+/* Host side: one decoder per model, its step captured as CUDA graphs. */
 
 typedef struct {
     const bf16 *qkv, *o, *fc, *proj, *ve;  /* fc: [F][C]; ve: NULL in a layer without value embeddings */
@@ -435,12 +482,19 @@ typedef struct {
 } Layer;
 
 typedef struct {
-    int B, L, H, C, F, vocab, max_len, sms, optin, attn_wave, attn_run;  /* optin: the opt-in shared memory per block */
+    /* max_len: a slot's cache positions (the caller's longest sequence); context: the model's sequence_len, which sets
+     * the rotary table and attn_run. optin: the opt-in shared memory per block */
+    int B, L, H, C, F, vocab, max_len, context, sms, optin, attn_wave, attn_run;
     const bf16 *wte, *lm_head;
-    const float *cos, *sin;   /* the fp32 rotary table [max_len][HALF] */
+    const float *cos, *sin;   /* the fp32 rotary table [context][HALF] */
     Layer *layer;
     int32_t *tokens, *pos;    /* [B]: each slot's input token and position */
-    unsigned long long *active;  /* device: the active slots' bit mask */
+    int32_t *first;           /* [B]: the position of each slot's first generated token's input */
+    float *temperature;       /* [B] */
+    unsigned long long *seed; /* [B] */
+    uint32_t *allow;          /* [B][vocab / WORD_BITS]: each masked slot's allowed tokens */
+    uint32_t *host_allow;     /* pinned host, as allow: written by the caller (dec_masks), copied by dec_set_active */
+    unsigned long long *active;  /* device [2]: the active slots' bit mask, then the masked slots' */
     int32_t *host_tokens;     /* pinned host [B]: the last step's tokens */
     unsigned long long *argmax;  /* [B] */
     bf16 *x, *x0, *xm, *h, *qkv_out, *att, *xo, *u;  /* [B][...] */
@@ -449,8 +503,7 @@ typedef struct {
     float2 *attn_stat;        /* [B][H][attn_wave]: their (m, l) */
     unsigned *attn_done;      /* [B][H]: k_attn's counters, zero between launches */
     cudaStream_t stream;      /* the caller's */
-    cudaGraph_t graph;
-    cudaGraphExec_t exec;
+    cudaGraphExec_t step, body, head;  /* the whole step; before the lm_head GEMV; from it on */
 } Decoder;
 
 /* f(buffer, bytes per slot) for each per-slot device buffer. */
@@ -459,6 +512,10 @@ template <class F> static void slot_buffers(Decoder *d, F f) {
     f((void **)&d->tokens, sizeof(int32_t));
     f((void **)&d->pos, sizeof(int32_t));
     f((void **)&d->argmax, sizeof(unsigned long long));
+    f((void **)&d->first, sizeof(int32_t));
+    f((void **)&d->temperature, sizeof(float));
+    f((void **)&d->seed, sizeof(unsigned long long));
+    f((void **)&d->allow, d->vocab / WORD_BITS * sizeof(uint32_t));
     for (bf16 **b : {&d->x, &d->x0, &d->xm, &d->h, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
     f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
     f((void **)&d->u, d->F * sizeof(bf16));
@@ -478,20 +535,21 @@ static Gemv gemv(const Decoder *d, const bf16 *w, int rows, int cols, int pro, c
 
 /* Block size from cudaOccupancyMaxPotentialBlockSize, fewer warps when that would leave SMs without a block; grid at
  * most one resident wave (warps loop over the tiles). */
-static void launch_gemv(Decoder *d, Gemv g) {
+template <bool CHOICE> static void launch_gemv(Decoder *d, Gemv g) {
     g.chunk = gemv_chunk(g.B, g.cols, d->optin);
     const size_t smem = gemv_smem(g.B, g.chunk);
     const int tiles = (g.rows + MMA_M - 1) / MMA_M;
     int grid, block, resident;
-    cudaOccupancyMaxPotentialBlockSize(&grid, &block, k_gemv, smem);
+    cudaOccupancyMaxPotentialBlockSize(&grid, &block, k_gemv<CHOICE>, smem);
     const int spread = (tiles + d->sms - 1) / d->sms, warps = spread < block / WARP ? spread : block / WARP;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_gemv, WARP * warps, smem);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_gemv<CHOICE>, WARP * warps, smem);
     const int needed = (tiles + warps - 1) / warps, wave = d->sms * resident;
-    k_gemv<<<needed < wave ? needed : wave, WARP * warps, smem, d->stream>>>(g);
+    const Choice c = {d->allow, d->temperature, d->seed, d->pos, d->first};
+    k_gemv<CHOICE><<<needed < wave ? needed : wave, WARP * warps, smem, d->stream>>>(g, c);
 }
 
-/* One step of every active slot on d->stream (captured once into the graph). */
-static void enqueue_step(Decoder *d) {
+/* The step's body on d->stream: every layer of every active slot, up to x before the final norm. */
+static void enqueue_body(Decoder *d) {
     const int C = d->C, F = d->F, L = d->L, B = d->B;
     cudaFuncAttributes fa;
     cudaFuncGetAttributes(&fa, k_embed);
@@ -502,8 +560,8 @@ static void enqueue_step(Decoder *d) {
         /* input: x0 at layer 0, else the previous layer's output */
         Gemv g = gemv(d, ly->qkv, 3 * C, C, PRO_RESID_NORM, l == 0 ? d->x0 : d->x, EPI_STORE, d->qkv_out);
         g.in2 = d->x0; g.l1 = ly->resid_lambda; g.l2 = ly->x0_lambda; g.pro_out = d->xm; g.pro_out2 = d->h;
-        launch_gemv(d, g);
-        /* splits per head and slot: runs of attn_run keys over at most the window */
+        launch_gemv<false>(d, g);
+        /* splits per head and slot: runs of attn_run keys over at most the window and the cache */
         const int keys = ly->window < d->max_len - 1 ? ly->window : d->max_len - 1;
         const int splits = (keys + d->attn_run - 1) / d->attn_run;
         const Attn a = {d->qkv_out, d->h, ly->ve, ly->ve_gate, ly->q_gain, ly->k_gain, d->cos, d->sin,
@@ -514,27 +572,43 @@ static void enqueue_step(Decoder *d) {
         k_attn<<<dim3(d->H, splits, B), HEAD_DIM, splits * sizeof(float), d->stream>>>(a);
         g = gemv(d, ly->o, C, C, PRO_COPY, d->att, EPI_RESID, d->xo);
         g.res = d->xm;
-        launch_gemv(d, g);
-        launch_gemv(d, gemv(d, ly->fc, F, C, PRO_NORM, d->xo, EPI_RELU2, d->u));
+        launch_gemv<false>(d, g);
+        launch_gemv<false>(d, gemv(d, ly->fc, F, C, PRO_NORM, d->xo, EPI_RELU2, d->u));
         g = gemv(d, ly->proj, C, F, PRO_COPY, d->u, EPI_RESID, d->x);
         g.res = d->xo;
-        launch_gemv(d, g);
+        launch_gemv<false>(d, g);
     }
-    /* the final norm in lm_head's prologue, the argmax in its epilogue */
-    Gemv g = gemv(d, d->lm_head, d->vocab, C, PRO_NORM, d->x, EPI_ARGMAX, NULL);
+}
+
+/* The step's head on d->stream: the final norm in lm_head's prologue, the token choice in its epilogue (k_gemv's
+ * CHOICE), the commit and the tokens' copy to the host. */
+template <bool CHOICE> static void enqueue_head(Decoder *d) {
+    Gemv g = gemv(d, d->lm_head, d->vocab, d->C, PRO_NORM, d->x, EPI_ARGMAX, NULL);
     g.argmax = d->argmax;
-    launch_gemv(d, g);
-    k_commit<<<1, MAX_BATCH, 0, d->stream>>>(d->tokens, d->pos, d->active, d->argmax, B);
-    cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)B * sizeof(int32_t), cudaMemcpyDeviceToHost, d->stream);
+    launch_gemv<CHOICE>(d, g);
+    k_commit<<<1, MAX_BATCH, 0, d->stream>>>(d->tokens, d->pos, d->active, d->argmax, d->B);
+    cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)d->B * sizeof(int32_t), cudaMemcpyDeviceToHost, d->stream);
+}
+
+/* The executable graph of the work enqueue() puts on d->stream. */
+template <class F> static cudaGraphExec_t capture(Decoder *d, F enqueue) {
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    cudaStreamBeginCapture(d->stream, cudaStreamCaptureModeThreadLocal);
+    enqueue();
+    cudaStreamEndCapture(d->stream, &graph);
+    cudaGraphInstantiate(&exec, graph, 0);
+    cudaGraphDestroy(graph);  /* an executable graph does not reference its source graph */
+    return exec;
 }
 
 extern "C" void dec_destroy(void *handle) {
     Decoder *d = (Decoder *)handle;
-    cudaGraphExecDestroy(d->exec);
-    cudaGraphDestroy(d->graph);
+    for (cudaGraphExec_t exec : {d->step, d->body, d->head}) cudaGraphExecDestroy(exec);
     slot_buffers(d, [](void **p, size_t) { cudaFree(*p); });
     cudaFree(d->active);
     cudaFreeHost(d->host_tokens);
+    cudaFreeHost(d->host_allow);
     free(d->layer);
     free(d);
 }
@@ -543,8 +617,9 @@ extern "C" void dec_destroy(void *handle) {
 extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
 
 /*
- * cfg: L, C, MLP hidden width F (fc: [F][C]; proj: [C][F]), vocab (lm_head's rows), max_len.
- * ptrs: GLOBAL_PTRS pointers wte, cos, sin (the fp32 rotary table [max_len][HALF] of every layer), lm_head; then
+ * cfg: L, C, MLP hidden width F (fc: [F][C]; proj: [C][F]), vocab (lm_head's rows), max_len (a slot's cache positions,
+ *      at most context), context (the model's sequence_len).
+ * ptrs: GLOBAL_PTRS pointers wte, cos, sin (the fp32 rotary table [context][HALF] of every layer), lm_head; then
  *       LAYER_PTRS per layer: qkv, o, fc, proj, value-embedding table (0 if none), value-embedding gate (0 if none),
  *       q gain, k gain.
  * scal: per layer: resid lambda, x0 lambda (bf16 values).
@@ -555,7 +630,7 @@ constexpr int GLOBAL_PTRS = 4, LAYER_PTRS = 8;
 
 extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *scal, const int *window, void *stream) {
     Decoder *d = (Decoder *)calloc(1, sizeof(Decoder));
-    d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4];
+    d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->context = cfg[5];
     d->H = d->C / HEAD_DIM;
     d->wte = (const bf16 *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
     d->lm_head = (const bf16 *)ptrs[3]; d->stream = (cudaStream_t)stream;
@@ -571,15 +646,17 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     cudaGetDevice(&device);
     cudaDeviceGetAttribute(&d->sms, cudaDevAttrMultiProcessorCount, device);
     cudaDeviceGetAttribute(&d->optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    cudaFuncSetAttribute(k_gemv, cudaFuncAttributeMaxDynamicSharedMemorySize, d->optin);
+    for (const void *kernel : {(const void *)k_gemv<false>, (const void *)k_gemv<true>})
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, d->optin);
     /* attn_wave: (head, split) blocks the SMs hold at once, per head; residency is retaken with the per-split shared
-     * memory of that wave (fewer splits fit). attn_run: keys per split, so max_len - 1 keys take one wave */
+     * memory of that wave (fewer splits fit). attn_run: keys per split, so context - 1 keys take one wave; from the
+     * context, not max_len, so a position's splits, and the order its keys are summed in, do not depend on max_len */
     int resident;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, 0);
     d->attn_wave = d->sms * resident / d->H;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, d->attn_wave * sizeof(float));
     d->attn_wave = d->sms * resident / d->H;
-    d->attn_run = (d->max_len - 1 + d->attn_wave - 1) / d->attn_wave;
+    d->attn_run = (d->context - 1 + d->attn_wave - 1) / d->attn_wave;
     /* B: the most slots (at most MAX_BATCH) that fit free memory, leaving one slot's bytes for the batch-1 prefill
      * (its KV cache of at most max_len tokens) */
     size_t slot = 0, free_bytes, total_bytes;
@@ -590,41 +667,71 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
         cudaMalloc(p, d->B * bytes);
         cudaMemset(*p, 0, d->B * bytes);
     });
-    cudaMalloc((void **)&d->active, sizeof(unsigned long long));
-    cudaMemset(d->active, 0, sizeof(unsigned long long));
+    cudaMalloc((void **)&d->active, 2 * sizeof(unsigned long long));
+    cudaMemset(d->active, 0, 2 * sizeof(unsigned long long));
     cudaHostAlloc((void **)&d->host_tokens, d->B * sizeof(int32_t), cudaHostAllocDefault);
-    cudaStreamBeginCapture(d->stream, cudaStreamCaptureModeThreadLocal);
-    enqueue_step(d);
-    cudaStreamEndCapture(d->stream, &d->graph);
-    cudaGraphInstantiate(&d->exec, d->graph, 0);
+    cudaHostAlloc((void **)&d->host_allow, (size_t)d->B * (d->vocab / WORD_BITS) * sizeof(uint32_t),
+                  cudaHostAllocDefault);
+    d->step = capture(d, [d] { enqueue_body(d); enqueue_head<false>(d); });
+    d->body = capture(d, [d] { enqueue_body(d); });
+    d->head = capture(d, [d] { enqueue_head<true>(d); });
     return d;
 }
 
 /* Start slot b from PyTorch's batch-1 KVCache of its first pos tokens ((layer, position, head, dim), layer stride
- * layer_stride elements); its steps continue from token at position pos once active. Stream-ordered. */
+ * layer_stride elements); its steps continue from token at position pos once active, choosing tokens at temperature
+ * (0: argmax) with noise from seed (gumbel). Stream-ordered. */
 extern "C" void dec_set_prefilled(void *handle, int b, int32_t token, int32_t pos, const bf16 *k, const bf16 *v,
-                                  long long layer_stride) {
+                                  long long layer_stride, float temperature, unsigned long long seed) {
     Decoder *d = (Decoder *)handle;
     const size_t row = (size_t)d->C * sizeof(bf16), dst_pitch = (size_t)d->max_len * row,
                  src_pitch = (size_t)layer_stride * sizeof(bf16), slot = (size_t)d->L * d->max_len * d->C;
     cudaMemcpyAsync(d->tokens + b, &token, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpyAsync(d->pos + b, &pos, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
+    cudaMemcpyAsync(d->first + b, &pos, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
+    cudaMemcpyAsync(d->temperature + b, &temperature, sizeof(float), cudaMemcpyHostToDevice, d->stream);
+    cudaMemcpyAsync(d->seed + b, &seed, sizeof(seed), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpy2DAsync(d->kc + b * slot, dst_pitch, k, src_pitch, (size_t)pos * row, d->L, cudaMemcpyDeviceToDevice,
                       d->stream);
     cudaMemcpy2DAsync(d->vc + b * slot, dst_pitch, v, src_pitch, (size_t)pos * row, d->L, cudaMemcpyDeviceToDevice,
                       d->stream);
 }
 
-/* The active slots (bit b: slot b) of the next steps. Stream-ordered. */
-extern "C" void dec_set_active(void *handle, unsigned long long mask) {
+/* The pinned host masks [B][vocab / WORD_BITS], bit t % WORD_BITS of word t / WORD_BITS of row b set iff slot b may
+ * choose token t; the caller writes a masked slot's row before dec_set_active, after the previous step completed. */
+extern "C" uint32_t *dec_masks(void *handle) { return ((Decoder *)handle)->host_allow; }
+
+/* The active slots (bit b: slot b) and the masked slots, whose rows of dec_masks restrict their next token choices (the
+ * rows of the lowest to the highest masked slot are copied). Stream-ordered. */
+extern "C" void dec_set_active(void *handle, unsigned long long active, unsigned long long masked) {
     Decoder *d = (Decoder *)handle;
-    cudaMemcpyAsync(d->active, &mask, sizeof(mask), cudaMemcpyHostToDevice, d->stream);
+    const unsigned long long slots[2] = {active, masked};
+    cudaMemcpyAsync(d->active, slots, sizeof(slots), cudaMemcpyHostToDevice, d->stream);
+    if (masked) {
+        const size_t words = d->vocab / WORD_BITS, lo = __builtin_ctzll(masked),
+                     hi = MAX_BATCH - 1 - __builtin_clzll(masked);
+        cudaMemcpyAsync(d->allow + lo * words, d->host_allow + lo * words, (hi + 1 - lo) * words * sizeof(uint32_t),
+                        cudaMemcpyHostToDevice, d->stream);
+    }
 }
 
-/* Launch one step (asynchronous); dec_tokens returns its tokens. */
+/* Launch one greedy step (asynchronous): every slot takes its logits' argmax; dec_tokens returns its tokens. */
 extern "C" void dec_launch(void *handle) {
     Decoder *d = (Decoder *)handle;
-    cudaGraphLaunch(d->exec, d->stream);
+    cudaGraphLaunch(d->step, d->stream);
+}
+
+/* Launch one step's body (asynchronous): everything before the token choice, which dec_launch_head then launches. */
+extern "C" void dec_launch_body(void *handle) {
+    Decoder *d = (Decoder *)handle;
+    cudaGraphLaunch(d->body, d->stream);
+}
+
+/* Launch one step's head (asynchronous) after its body: every slot chooses by its mask (if dec_set_active marks it
+ * masked) and temperature; dec_tokens returns its tokens. */
+extern "C" void dec_launch_head(void *handle) {
+    Decoder *d = (Decoder *)handle;
+    cudaGraphLaunch(d->head, d->stream);
 }
 
 /* Wait for the launched step; out[b]: the token slot b took (stale for inactive slots). */

@@ -1,23 +1,23 @@
 """
-AdamW (fused) on the token tables, lm_head and 1-D parameters; Muon on every other matrix with its update scaled to
-AdamW's RMS (adjust_lr_fn "match_rms_adamw", Moonlight, arXiv 2502.16982 §2.2), so every group shares one lr and weight
-decay. Muon's momentum 0.95, Newton-Schulz coefficients and 5 steps and AdamW's eps are PyTorch's defaults.
+AdamW (fused) on token tables, lm_head and 1-D parameters; Muon on all other matrices, its update scaled to AdamW's RMS
+(adjust_lr_fn "match_rms_adamw", Moonlight, arXiv 2502.16982 §2.2) so all groups share one lr and weight decay. Muon's
+momentum 0.95, Newton-Schulz coefficients and 5 steps, and AdamW's eps are PyTorch defaults.
 """
 
 import torch
 
-# DeepSeek LLM §2.3 (arXiv 2401.02954): betas (0.9, 0.95), weight decay 0.1, gradient clip 1.0
-BETAS, WEIGHT_DECAY, GRAD_CLIP = (0.9, 0.95), 0.1, 1.0
+# DeepSeek LLM §2.3 (arXiv 2401.02954)
+BETAS = (0.9, 0.95)
 
 
 def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float:
-    """The weight decay whose EMA timescale 1 / (lr wd) is tau* = 1.084 TPP^-0.527 of the run's steps (Power Lines,
+    """Weight decay whose EMA timescale 1 / (lr wd) is tau* = 1.084 TPP^-0.527 of the run's steps (Power Lines,
     arXiv 2505.13738 Finding 3; Wang & Aitchison, arXiv 2405.13698)."""
     return 1 / (lr * 1.084 * tokens_per_param ** -0.527 * steps)
 
 
 def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tuple[torch.optim.Optimizer, ...]:
-    """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, none on 1-D parameters (nanoGPT
+    """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, not 1-D parameters (nanoGPT
     configure_optimizers)."""
     tables = [model.wte.weight, model.lm_head.weight, *model.value_embeds.parameters()]
     table_ids = {id(p) for p in tables}

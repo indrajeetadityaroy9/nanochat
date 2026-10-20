@@ -20,7 +20,7 @@ from nanochat.data.loader import PretrainingBatches
 from nanochat.ops.quack_gemm import gemm
 
 
-# Opaque to torch.compile: the in-place logit gradient, once functionalized, corrupted the gradient of x.
+# Opaque to torch.compile: functionalizing the in-place logit gradient corrupted x's gradient.
 @torch.library.custom_op("nanochat::lm_loss", mutates_args=(), device_types="cuda")
 def lm_loss(x: Tensor, weight: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     """x (M, C) bf16, fp32 weight (V, C), target (M,) int64 -> (mean loss fp32, dloss/dx in x's dtype, dloss/dW fp32)."""

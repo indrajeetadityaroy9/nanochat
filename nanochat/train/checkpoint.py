@@ -1,27 +1,32 @@
 """
-Checkpoints under <base_dir>/base_checkpoints/<tag>/: checkpoint.pt, the newest ({"step", "model", "optimizers",
-"model_config", "stage_rows"}), written to a temporary file and renamed (os.replace is atomic), so a run killed
-mid-save resumes from a complete file; step_<step:06d>.pt, hard links of the newest at the steps the run keeps.
+Checkpoints are flat files in CHECKPOINTS, each written to a temp file then replaced (atomic), so a run killed mid-save
+keeps the previous file. <tag>.pt is the newest, for resuming ({"step", "model", "optimizers", "model_config",
+"stage_rows"}); <tag>-step<step:06d>.pt are model-only snapshots ({"step", "model", "model_config"}, no optimizer
+state) for evaluating intermediate models.
 """
 
-import os
+from pathlib import Path
 
 import torch
 
 from nanochat.model.gpt import GPT, GPTConfig
-from nanochat.paths import base_dir
+from nanochat.paths import CHECKPOINTS
 
 
-def checkpoint_path(tag: str, *, step: int | None) -> str:
-    """The newest checkpoint (step None) or the one kept at `step`."""
-    name = "checkpoint.pt" if step is None else f"step_{step:06d}.pt"
-    return os.path.join(base_dir(), "base_checkpoints", tag, name)
+def checkpoint_name(tag: str, *, step: int | None) -> str:
+    """<tag> for the newest checkpoint (step None), <tag>-step<step:06d> for the snapshot at `step`; base_eval and
+    probes name their outputs for a checkpoint the same."""
+    return tag if step is None else f"{tag}-step{step:06d}"
 
 
-def save_checkpoint(path: str, checkpoint: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(checkpoint, path + ".tmp")
-    os.replace(path + ".tmp", path)
+def checkpoint_path(tag: str, *, step: int | None) -> Path:
+    return CHECKPOINTS / f"{checkpoint_name(tag, step=step)}.pt"
+
+
+def save_checkpoint(path: Path, checkpoint: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(checkpoint, tmp)
+    tmp.replace(path)
 
 
 def load_model(tag: str, *, step: int | None, device: torch.device) -> tuple[GPT, int]:

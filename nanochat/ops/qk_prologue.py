@@ -1,6 +1,6 @@
 """
-Fused q/k prologue of model/gpt.py (csrc/qk_prologue.cu), one launch per direction for q and k: per-head RMS norm with
-F.rms_norm's fp32 epsilon, fp32 per-dim gain (Qwen3, arXiv 2505.09388 §2), rotary by -theta over the full head
+Fused q/k prologue of model/gpt.py (csrc/qk_prologue.cu), one launch per direction covering q and k: per-head RMS norm
+with F.rms_norm's fp32 epsilon, fp32 per-dim gain (Qwen3, arXiv 2505.09388 §2), rotary by -theta over the full head
 (karpathy/nanochat 92d63d4 gpt.py:57-65); fp32 math, one bf16 rounding per output.
 """
 

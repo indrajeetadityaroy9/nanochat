@@ -37,9 +37,10 @@ evaluation.
     python -m nanochat.data.prepare
     python -m nanochat.data.tokenizer
     python -m nanochat.data.compile
-    python -m nanochat.data.pack
+    python -m nanochat.data.pack --stage file
+    python -m nanochat.data.pack --stage repo
 
-Everything is stored under <base_dir>/data (paths.data_dir):
+Everything is stored under paths.DATA:
     raw/<source>/                          fetched files at their Hub paths (Stack-Edu: metadata with Software
                                            Heritage text)
     normalized/<source>/                   <k>.parquet normalized documents, one per raw file

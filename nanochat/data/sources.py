@@ -9,7 +9,6 @@ codeforces_cots document is its `prompt` followed by this `generation`).
 """
 
 import itertools
-import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -17,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from nanochat.data.schema import NOTEBOOK, REPOSITORY_FILE, TEXT
-from nanochat.paths import data_dir
+from nanochat.paths import DATA
 
 # The line comment of each repository-file language: Python Language Reference §2.1.3 "Comments", C++23 [lex.comment]
 COMMENTS = {"Python": "#", "C++": "//"}
@@ -72,15 +71,14 @@ SOURCES = {
 
 
 def curated_dir(source, split):
-    """<data_dir>/curated/<source>/<split>: the source's curated shards of a split (prepare.curate)."""
-    return os.path.join(data_dir(), "curated", source, split)
+    """DATA/curated/<source>/<split>: the source's curated shards of a split (prepare.curate)."""
+    return DATA / "curated" / source / split
 
 
 def curated_files(source, split):
     """Local paths of the source's curated shards of a split in the order of their number k (<k>.parquet: a
     repository-file source's partition, any other source's normalized file; prepare.curate)."""
-    directory = curated_dir(source, split)
-    return [os.path.join(directory, f) for f in sorted(os.listdir(directory), key=lambda f: int(f.removesuffix(".parquet")))]
+    return sorted(curated_dir(source, split).iterdir(), key=lambda path: int(path.stem))
 
 
 def column_bytes(path, column):
@@ -100,7 +98,7 @@ def texts(source, table):
     if spec.schema is not REPOSITORY_FILE:
         return contents
     comment = COMMENTS[spec.grammar]
-    return [f"{comment} {path}\n{text.removesuffix('\n')}\n" for path, text in zip(table["relative_path"].to_pylist(), contents)]
+    return [f"{comment} {path}\n{text.removesuffix('\n')}\n" for path, text in zip(table["relative_path"].to_pylist(), contents, strict=False)]
 
 
 def documents(source, table):
@@ -110,4 +108,4 @@ def documents(source, table):
     if SOURCES[source].schema is not REPOSITORY_FILE:
         return rows
     starts = np.flatnonzero(np.diff(table["sample"].to_numpy(), prepend=-1)).tolist()
-    return ["".join(rows[a:b]) for a, b in itertools.pairwise(starts + [len(rows)])]
+    return ["".join(rows[a:b]) for a, b in itertools.pairwise([*starts, len(rows)])]

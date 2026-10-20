@@ -1,30 +1,31 @@
-"""Native libraries (CUDA kernels, the Rust tokenizer crate), built on first use, cached under <base_dir>/cache/native."""
+"""Native libraries (CUDA kernels, the Rust tokenizer crate), built on first use, cached under CACHE/native."""
 
 import ctypes
 import hashlib
 import os
 import subprocess
+from pathlib import Path
 
 import torch
 
-from nanochat.paths import base_dir
+from nanochat.paths import CACHE
 
-CSRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csrc")
+CSRC = Path(__file__).resolve().parent / "csrc"
 
 
 def native_library(name, sources, build, settings=b""):
-    """<base_dir>/cache/native/<name>-<sha256(settings, sources)>.so, built by build(tmp) and renamed atomically, so
+    """CACHE/native/<name>-<sha256(settings, sources)>.so, built by build(tmp) and renamed atomically, so
     concurrent first builds never share a file."""
     digest = hashlib.sha256(settings)
     for source in sources:
-        with open(source, "rb") as f:
-            digest.update(f.read())
-    path = os.path.join(base_dir(), "cache", "native", f"{name}-{digest.hexdigest()}.so")
-    if not os.path.exists(path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.{os.getpid()}.tmp"
+        digest.update(source.read_bytes())
+    path = CACHE / "native" / f"{name}-{digest.hexdigest()}.so"
+    if not path.exists():
+        # a cache shared by every build and process: its directory may already exist (resuming is its design)
+        path.parent.mkdir(exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         build(tmp)
-        os.replace(tmp, path)
+        tmp.replace(path)
     return path
 
 
@@ -33,7 +34,7 @@ def cuda_library(name):
     version, loaded by ctypes."""
     major, minor = torch.cuda.get_device_capability()
     arch = f"sm_{major}{minor}"
-    source = os.path.join(CSRC, f"{name}.cu")
+    source = CSRC / f"{name}.cu"
     command = ["nvcc", f"-arch={arch}", "-Xcompiler", "-fPIC", "-shared", "-o"]
     version = subprocess.run(["nvcc", "--version"], capture_output=True, check=True).stdout
 
@@ -41,4 +42,4 @@ def cuda_library(name):
         subprocess.run([*command, path, source], check=True)
 
     settings = " ".join(command).encode() + version
-    return ctypes.CDLL(native_library(f"{name}-{arch}", [source, os.path.join(CSRC, "qk_row.cuh")], build, settings))
+    return ctypes.CDLL(native_library(f"{name}-{arch}", [source, CSRC / "qk_row.cuh"], build, settings))

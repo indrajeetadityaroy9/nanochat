@@ -1,6 +1,6 @@
 """
-The model's QuACK GEMMs (Dao-AILab/quack quack.gemm_interface) at one config per (role, width), fixed in TABLE. QuACK's
-autotuner (quack/autotuner.py) times each candidate once per new shape, so its pick varies with GPU load, and offers
+The model's QuACK GEMMs (Dao-AILab/quack quack.gemm_interface), one config per (role, width), fixed in TABLE. QuACK's
+autotuner (quack/autotuner.py) times each candidate once per new shape, so its pick varies with GPU load, and it offers
 neither cuBLAS nor an accuracy criterion for weight gradients. Kernels compile for symbolic M (QUACK_CACHE_DIR).
 
 Roles (C width, h = 4C, V vocabulary, M tokens; ops/linear.py, ops/cross_entropy.py):
@@ -16,13 +16,13 @@ Roles (C width, h = 4C, V vocabulary, M tokens; ops/linear.py, ops/cross_entropy
   lm_dx       dz W_lm                  (M, V) x (V, C)
   lm_dw       dz^T x -> fp32           (V, M) x (M, C)
 
-TABLE: widths of d8 (256) and d24 (768), measured on the H100 SXM5 (sm_90, 700 W cap) at M = config.MICRO_BATCH_TOKENS
-over QuACK's 44 SM90 candidates, weight-gradient roles also at serial split-K 1..16 and cuBLAS ("cublas"; torch.mm,
-fp32 out): benchmarks/gemmsweep.py -> gemmsweep_sm90.jsonl -> benchmarks/gemmtable.py -> gemmtable_sm90.txt. Forward
-and dX roles: the fastest. Weight-gradient roles: within the fastest's median absolute deviation, the most accurate
-(rel. error vs fp64 1.14e-4 / 5.67e-5 / 2.82e-5 / 1.38e-5 / 6.76e-6 at split-K 1 / 2 / 4 / 8 / 16; cuBLAS 1.38e-5 to
-5.68e-5), then the fastest. Not dynamic-persistent, as quack.gemm_config._get_sm90_configs; one GemmConfig object per
-entry because QuACK's launch cache keys on the object.
+TABLE: d8 (256) and d24 (768) widths, measured on H100 SXM5 (sm_90, 700 W cap) at M = config.MICRO_BATCH_TOKENS over
+QuACK's 44 SM90 candidates, plus serial split-K 1..16 and cuBLAS ("cublas"; torch.mm, fp32 out) for weight-gradient
+roles: benchmarks/gemmsweep.py -> gemmsweep_sm90.jsonl -> benchmarks/gemmtable.py -> gemmtable_sm90.txt. Forward and dX
+roles: fastest. Weight-gradient roles: most accurate within the fastest's median absolute deviation (rel. error vs fp64
+1.14e-4 / 5.67e-5 / 2.82e-5 / 1.38e-5 / 6.76e-6 at split-K 1 / 2 / 4 / 8 / 16; cuBLAS 1.38e-5 to 5.68e-5), ties broken
+by speed. Not dynamic-persistent, as quack.gemm_config._get_sm90_configs. One GemmConfig object per entry because
+QuACK's launch cache keys on the object.
 """
 from functools import partial
 

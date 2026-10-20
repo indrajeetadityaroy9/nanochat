@@ -29,9 +29,9 @@ from nanochat.data.loader import PretrainingBatches, mixture_weights, packed_row
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
 from nanochat.ops import cross_entropy, linear
-from nanochat.train.optim import optimizers
+from nanochat.train.optim import optimizers, tau_weight_decay
 from nanochat.train.schedule import plan
-from scripts.base_train import Variant, optimizer_settings, optimizer_step
+from scripts.base_train import optimizer_step
 
 SPLITS = (1, 2, 4, 8, 16)  # 1 and quack.gemm_interface._expand_split_k_configs's (2, 4, 8, 16)
 # QuACK's errors for a config the call does not support
@@ -85,10 +85,11 @@ def roles(depth, device_configs):
     orig.to_empty(device=device)
     orig.init_weights(seed=0)
     model = torch.compile(orig, dynamic=False, fullgraph=True)
-    lr, weight_decay, max_norm = optimizer_settings(plan(depth=depth, ratio=20, tokens=None), Variant())
-    opts = optimizers(orig, lr=lr, weight_decay=weight_decay)
+    run = plan(depth=depth, ratio=20)
+    weight_decay = tau_weight_decay(lr=run.lr, steps=run.num_iterations, tokens_per_param=run.tokens_per_param)
+    opts = optimizers(orig, lr=run.lr, weight_decay=weight_decay)
     for _ in range(2):
-        optimizer_step(model, [batch], list(orig.parameters()), opts, None, max_norm=max_norm)
+        optimizer_step(model, [batch], list(orig.parameters()), opts, None)
     del opts
     calls = {}  # role -> (function, args, kwargs) of its first call
     epilogue_roles = {"gemm_act": "mlp_up", "gemm_dact": "mlp_dact"}

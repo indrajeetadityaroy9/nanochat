@@ -1,0 +1,18 @@
+[package]
+name = "nanochat_syntax"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[dependencies]
+pyo3 = { version = "0.30.1", features = ["extension-module"] }
+# the masks of a batch of constraints, one per worker
+rayon = "1.12.0"
+# FxHash maps of the lexer states' token groupings and of the vocabulary trie's subtrees
+rustc-hash = "2.1.3"
+
+[profile.release]
+codegen-units = 1
+lto = true

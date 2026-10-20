@@ -1,0 +1,94 @@
+// An LALR(1) grammar accepting every token sequence of CPython 3.12's PEG grammar (Grammar/python.gram); Lark builds
+// its tables (strict mode proves them conflict-free) and the crate reads them as a viable-prefix recognizer.
+// Terminals beside the literals: the token types of CPython's tokenizer (Lib/token.py), FSTRING_MIDDLE dropped (an
+// f-string's literal text never decides a parse: python.gram fstring_middle* and fstring_format_spec* repeat freely),
+// and the soft keywords read as keywords (python.gram match_stmt, case_block, type_alias).
+file_input: (NEWLINE | stmt)*
+stmt: simple_stmts | compound_stmt
+simple_stmts: small_stmt (";" small_stmt)* [";"] NEWLINE
+small_stmt: expr_stmt | yield_expr | "pass" | "break" | "continue" | "del" exprlist
+          | "return" [testlist_star_expr] | "raise" [test ["from" test]]
+          | ("global" | "nonlocal") NAME ("," NAME)* | "assert" test ["," test]
+          | import_name | import_from | type_alias
+expr_stmt: testlist_star_expr [":" test ["=" rhs] | augassign rhs | ("=" rhs)+]
+rhs: yield_expr | testlist_star_expr
+augassign: "+=" | "-=" | "*=" | "@=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "**=" | "//="
+testlist_star_expr: test_or_star ("," test_or_star)* [","]
+test_or_star: test | star_expr
+star_expr: "*" expr
+import_name: "import" dotted_as_name ("," dotted_as_name)*
+dotted_as_name: dotted_name ["as" NAME]
+dotted_name: NAME ("." NAME)*
+import_from: "from" (dots [dotted_name] | dotted_name) "import" import_targets
+import_targets: "*" | "(" import_as_name ("," import_as_name)* [","] ")" | import_as_name ("," import_as_name)*
+dots: ("." | "...")+
+import_as_name: NAME ["as" NAME]
+type_alias: TYPE_SOFT NAME [type_params] "=" test
+type_params: "[" type_param ("," type_param)* [","] "]"
+type_param: NAME [":" test] | "*" NAME | "**" NAME
+
+compound_stmt: if_stmt | while_stmt | for_stmt | try_stmt | with_stmt | funcdef | classdef | decorated | async_stmt
+             | match_stmt
+async_stmt: "async" (funcdef | with_stmt | for_stmt)
+if_stmt: "if" namedexpr_test ":" suite ("elif" namedexpr_test ":" suite)* ["else" ":" suite]
+while_stmt: "while" namedexpr_test ":" suite ["else" ":" suite]
+for_stmt: "for" exprlist "in" testlist_star_expr ":" suite ["else" ":" suite]
+try_stmt: "try" ":" suite (except_clause+ ["else" ":" suite] ["finally" ":" suite] | "finally" ":" suite)
+except_clause: "except" ["*" test ["as" NAME] | test ["as" NAME]] ":" suite
+with_stmt: "with" with_item ("," with_item)* ":" suite
+with_item: test ["as" expr]
+funcdef: "def" NAME [type_params] "(" [param ("," param)* [","]] ")" ["->" test] ":" suite
+param: NAME [":" test] ["=" test] | "*" [NAME [":" test_or_star]] | "**" NAME [":" test] | "/"
+classdef: "class" NAME [type_params] ["(" [arglist] ")"] ":" suite
+decorated: ("@" namedexpr_test NEWLINE)+ (classdef | funcdef | "async" funcdef)
+suite: simple_stmts | NEWLINE INDENT stmt+ DEDENT
+
+match_stmt: MATCH_SOFT named_or_star ("," named_or_star)* [","] ":" NEWLINE INDENT case_block+ DEDENT
+case_block: CASE_SOFT patterns ["if" namedexpr_test] ":" suite
+patterns: maybe_star_pattern ("," maybe_star_pattern)* [","]
+maybe_star_pattern: "*" NAME | pattern
+pattern: closed_pattern ("|" closed_pattern)* ["as" NAME]
+closed_pattern: literal_pattern | name_or_attr ["(" [class_arg ("," class_arg)* [","]] ")"]
+              | "(" [patterns] ")" | "[" [patterns] "]" | "{" [mapping_item ("," mapping_item)* [","]] "}"
+literal_pattern: ["-"] NUMBER [("+" | "-") NUMBER] | strings | "None" | "True" | "False"
+name_or_attr: NAME ("." NAME)*
+mapping_item: (literal_pattern | name_or_attr) ":" pattern | "**" NAME
+class_arg: pattern | NAME "=" pattern
+
+namedexpr_test: test [":=" test]
+named_or_star: namedexpr_test | star_expr
+test: or_test ["if" or_test "else" test] | lambdef
+lambdef: "lambda" [lambda_param ("," lambda_param)* [","]] ":" test
+lambda_param: NAME ["=" test] | "*" [NAME] | "**" NAME | "/"
+or_test: and_test ("or" and_test)*
+and_test: not_test ("and" not_test)*
+not_test: "not" not_test | comparison
+comparison: expr (comp_op expr)*
+comp_op: "<" | ">" | "==" | ">=" | "<=" | "!=" | "in" | "not" "in" | "is" | "is" "not"
+expr: xor_expr ("|" xor_expr)*
+xor_expr: and_expr ("^" and_expr)*
+and_expr: shift_expr ("&" shift_expr)*
+shift_expr: arith_expr (("<<" | ">>") arith_expr)*
+arith_expr: term (("+" | "-") term)*
+term: factor (("*" | "@" | "/" | "%" | "//") factor)*
+factor: ("+" | "-" | "~") factor | power
+power: ["await"] atom trailer* ["**" factor]
+trailer: "(" [arglist] ")" | "[" subscript ("," subscript)* [","] "]" | "." NAME
+atom: "(" [yield_expr | paren_item (comp_for | ("," paren_item)* [","])] ")"
+    | "[" [named_or_star (comp_for | ("," named_or_star)* [","])] "]"
+    | "{" [dict_item (comp_for | ("," dict_item)* [","]) | named_or_star (comp_for | ("," named_or_star)* [","])] "}"
+    | NAME | NUMBER | strings | "..." | "None" | "True" | "False"
+paren_item: named_or_star ["as" expr]
+dict_item: test ":" test | "**" expr
+subscript: named_or_star | [test] ":" [test] [":" [test]]
+arglist: argument ("," argument)* [","]
+argument: test [comp_for | ":=" test | "=" test] | "*" test | "**" test
+comp_for: ["async"] "for" exprlist "in" or_test [comp_iter]
+comp_iter: comp_for | "if" or_test [comp_iter]
+exprlist: (expr | star_expr) ("," (expr | star_expr))* [","]
+yield_expr: "yield" ["from" test | testlist_star_expr]
+strings: (STRING | fstring)+
+fstring: FSTRING_START fstring_field* FSTRING_END
+fstring_field: "{" (yield_expr | testlist_star_expr) ["="] ["!" NAME] [":" fstring_field*] "}"
+
+%declare NAME NUMBER STRING FSTRING_START FSTRING_END NEWLINE INDENT DEDENT MATCH_SOFT CASE_SOFT TYPE_SOFT

@@ -9,6 +9,9 @@ requires-python = ">=3.12"
 # docker/Dockerfile prunes torch and numpy from the lock. Every other package is at its latest release in uv.lock
 # (uv lock --upgrade), FlashAttention-4 and QuACK at the latest commit of their repositories.
 dependencies = [
+    # the static type checker of the system generation mode's diagnostics (nanochat/eval/verify.py
+    # python_diagnostics); pyright's fork that bundles Node.js as a wheel (nodejs-wheel), so the image needs no Node
+    "basedpyright",
     "duckdb",
     # FlashAttention-4 (CuTe DSL), from github.com/Dao-AILab/flash-attention (tool.uv.sources). It brings cuda-bindings,
     # TVM FFI and QuACK; not its cu13 extra, whose PyTorch index conflicts with QuACK's while torch comes from the image.
@@ -18,24 +21,21 @@ dependencies = [
     # boto3, ollama, transformers), which only its code generation imports
     "evalplus",
     "huggingface-hub",
+    # the LALR(1) tables of the Python syntax constraint (nanochat/inference/syntax/python.lark, read by the crate there
+    # via inference/syntax_constraint.py); interegular for Lark's strict mode, which rejects any shift/reduce conflict
+    "lark[interegular]",
     # CuTe DSL with its CUDA 13 libraries, matching the image's CUDA 13
     "nvidia-cutlass-dsl[cu13]",
     "numpy",
     "obstore",
-    # the studies' and the report's tables: results as DataFrames, CSV and Markdown (experiments/studies.py,
-    # scripts/report.py)
+    # the report's tables: results as DataFrames and Markdown (scripts/report.py)
     "pandas",
     # 25.0.1: ParquetFile pre-buffers (coalesces) reads by default; 25.0.0 returns wrong doubles on Arm CPUs with SVE
     "pyarrow>=25.0.1",
-    # the regime study's full factorial (experiments/studies.py)
-    "pydoe",
     # QuACK's CuTe DSL kernels, from github.com/Dao-AILab/quack (tool.uv.sources)
     "quack-kernels",
     # the LSH band count's integrals (nanochat/data/dedup.py rows)
     "scipy",
-    # the studies' estimates: factorial effects by OLS, Holm adjustment, WLS fits with their prediction intervals
-    # (experiments/studies.py)
-    "statsmodels",
     # pandas' DataFrame.to_markdown
     "tabulate",
     # OpenAI's encoder of the trained vocabulary (nanochat/data/tokenizer.py); the SA-BPE trainer is the crate nanochat/data/bpe

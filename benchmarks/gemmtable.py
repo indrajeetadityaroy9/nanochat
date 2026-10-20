@@ -1,7 +1,7 @@
 """ops/quack_gemm.py TABLE entries from gemmsweep.py records. Forward and dX roles: lowest median time. Weight-gradient
 roles: among configs whose median is within the fastest's median absolute deviation over rounds of the fastest median,
 lowest error vs fp64, then fastest. Prints each pick against the fastest, then the TABLE entries.
-Usage: python -m benchmarks.gemmtable gemmsweep.jsonl"""
+Usage: python -m benchmarks.gemmtable benchmarks/gemmsweep_sm90.jsonl"""
 import collections
 import json
 import statistics

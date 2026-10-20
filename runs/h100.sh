@@ -1,20 +1,22 @@
 #!/bin/bash
-# The production run on one H100 80 GB SXM5: d24 at the most tokens per scaling parameter the data holds without reading
-# a document twice (nanochat/train/stages.py max_ratio), seed 0 (the d24 studies' seed-0 init and data order), both
-# stages, then base_eval and its tables (scripts/report.py). Rerunning on the same code (config.run_tag) continues from
-# the newest checkpoint.
+# Production run on one H100 80 GB SXM5: d24 at the most tokens per scaling parameter the data holds without rereading a
+# document (nanochat/train/stages.py max_ratio), seed 0, both stages; then base_eval (loss, greedy and system decoding),
+# the probe set (nanochat/eval/probes.py) and the table results/<tag>.md (scripts/report.py). Rerunning on the same code
+# (config.run_tag) resumes from the checkpoint. Log: artifacts/logs/h100-<tag>.log.
 #
-#   tmux new -d -s h100 'cd ~/projects/nanochat-next && runs/h100.sh'
+#   tmux new -d -s h100 runs/h100.sh    (from the checkout)
 set -euo pipefail
-cd "$(dirname "$0")/.."
-DEPTH=24 SEED=0 LOGS=$HOME/nanochat-runs/logs/h100
-mkdir -p "$LOGS"
-echo "$(date -Is) commit $(git rev-parse HEAD)$(git diff --quiet HEAD || echo -dirty)" \
-  "image $(docker image inspect -f '{{.Id}}' nanochat)" >>"$LOGS/runner.log"
-RATIO=$(runs/container.sh python -m nanochat.train.stages "$DEPTH" | tail -n 1)
-read -r TAG STEPS _ < <(runs/container.sh python -m nanochat.train.schedule "$DEPTH" "$RATIO" "$SEED" | tail -n 1)
-# a checkpoint every 1% of the steps: a failure costs at most 1% of the run
-runs/container.sh python -m scripts.base_train --depth "$DEPTH" --target-param-data-ratio "$RATIO" --seed "$SEED" \
-  --save-every $(((STEPS + 99) / 100)) >>"$LOGS/train.log" 2>&1
-runs/container.sh python -m scripts.base_eval --model-tag "$TAG" >>"$LOGS/eval.log" 2>&1
-runs/container.sh python -m scripts.report --out "/runs/results/$TAG.md" "$TAG" >>"$LOGS/eval.log" 2>&1
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+DEPTH=24 SEED=0
+RATIO=$("$ROOT"/runs/container.sh python -m nanochat.train.stages "$DEPTH" | tail -n 1)
+read -r TAG STEPS _ < <("$ROOT"/runs/container.sh python -m nanochat.train.schedule "$DEPTH" "$RATIO" "$SEED" | tail -n 1)
+LOG=$ROOT/artifacts/logs/h100-$TAG.log
+echo "$(date -Is) commit $(git -C "$ROOT" rev-parse HEAD)$(git -C "$ROOT" diff --quiet HEAD || echo -dirty)" \
+  "image $(docker image inspect -f '{{.Id}}' nanochat)" >>"$LOG"
+# checkpoint every 1% of steps: a failure costs at most 1% of the run; a model-only snapshot every 10% (~2.1 GB each)
+# for evaluating intermediate models (capability curves)
+"$ROOT"/runs/container.sh python -m scripts.base_train --depth "$DEPTH" --target-param-data-ratio "$RATIO" \
+  --seed "$SEED" --save-every $(((STEPS + 99) / 100)) --snapshot-every $(((STEPS + 9) / 10)) >>"$LOG" 2>&1
+"$ROOT"/runs/container.sh python -m scripts.base_eval --model-tag "$TAG" >>"$LOG" 2>&1
+"$ROOT"/runs/container.sh python -m nanochat.eval.probes --model-tag "$TAG" >>"$LOG" 2>&1
+"$ROOT"/runs/container.sh python -m scripts.report --name "$TAG" "$TAG" >>"$LOG" 2>&1

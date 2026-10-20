@@ -1,21 +1,24 @@
 """Run settings shared by training and evaluation: vocabulary, mixture, micro-batch, stages, run identity."""
 import hashlib
 import json
-import os
 import subprocess
 from dataclasses import dataclass
 from functools import cache
 
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
+from nanochat.paths import ROOT
 
-# The code a run's result depends on: model, ops, trainer, evaluation and data pipeline, the training and evaluation
-# scripts, and the image's definition
-CODE = ("nanochat", "scripts", "docker", "pyproject.toml", "uv.lock")
+# Code a result depends on: model, ops, trainer, evaluation, data pipeline, scripts, image definition, and the container
+# launcher (its TORCHINDUCTOR_COORDINATE_DESCENT_TUNING sets kernel reduction orders)
+CODE = ("nanochat", "scripts", "docker", "pyproject.toml", "uv.lock", "runs/container.sh")
+# The prepared data (tokenizer, compiled and packed rows; runs/setup.sh downloads this revision): part of every run's
+# identity through CODE
+DATASET, DATASET_REVISION = "iaroy/nanochat-data", "6744e4068949e32b7e335bde01dcd3be746da0f8"
 
 # Ids including special tokens: nanochat's 2^15 (karpathy/nanochat 92d63d4 scripts/tok_train.py:19)
 VOCAB_SIZE = 2**15
-# {group: (share, corpora)}, each corpus at its group's natural row share (data.loader.mixture_weights). Code 87% as
+# {group: (share, corpora)}; corpora at their group's natural row share (data.loader.mixture_weights). Code 87% as
 # DeepSeek-Coder (arXiv 2401.14196 §2); math 3% as StarCoder2's OpenWebMath share (arXiv 2402.19173 Table 4); text the
 # rest. More code scores higher on coding benchmarks (Qwen2.5-Coder, arXiv 2409.12186 Table 3).
 MIXTURE = {
@@ -24,8 +27,8 @@ MIXTURE = {
     "text": (0.10, ["climbmix"]),
     "math": (0.03, ["opc_fineweb_math", "ultradata_math_l2"]),
 }
-# The most whole rows of both contexts (12 x 8K, 3 x 32K) whose d24 step fits 80 GB: peak 69.6 GiB; 131,072 tokens
-# exceeds 80 GB (benchmarks/h100.txt)
+# Most whole rows of both contexts (12 x 8K, 3 x 32K) whose d24 step fits 80 GB: peak 69.6 GiB; 131,072 tokens
+# does not fit (benchmarks/h100.txt)
 MICRO_BATCH_TOKENS = 98_304
 
 
@@ -45,7 +48,7 @@ class Stage:
 FILE_STAGE = Stage(seq_len=8192, mixture=MIXTURE)
 REPO_STAGE = Stage(seq_len=32_768,
                    mixture={"code": (1.0, [c for c in MIXTURE["code"][1] if SOURCES[c].schema is REPOSITORY_FILE])})
-# The repo-level stage's share of tokens: Qwen2.5-Coder's 300B of 5.2T + 300B (§3.2.1-2)
+# Repo-level share of tokens: Qwen2.5-Coder's 300B of 5.2T + 300B (§3.2.1-2)
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
 # One RoPE base for both stages: Qwen2.5-Coder's repo-level 10^6 (§3.2.2), above Men et al.'s lower bound for a 32K
 # context (arXiv 2405.14591); Llama 3 trains at a large base (5 x 10^5) from the start (arXiv 2407.21783 §3.2)
@@ -54,8 +57,8 @@ ROPE_BASE = 1_000_000
 
 @cache
 def code_version() -> tuple[str, ...]:
-    """Git object ids of CODE at HEAD. Uncommitted changes there fail: a result names the code that produced it."""
-    git = ["git", "-C", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+    """Git object ids of CODE at HEAD; raises on uncommitted changes so a result names the code that produced it."""
+    git = ["git", "-C", str(ROOT)]
     dirty = subprocess.run([*git, "status", "--porcelain", "--", *CODE], capture_output=True, text=True,
                            check=True).stdout
     if dirty:
@@ -64,11 +67,11 @@ def code_version() -> tuple[str, ...]:
                                 check=True).stdout.split())
 
 
-def run_tag(*, depth: int, ratio: float, seed: int, data_seed: int, changes: dict) -> str:
-    """A run's checkpoint directory, metrics and evaluation file name: its depth, ratio and seeds, then a hash of all
-    its result depends on (those, the Variant changes from the baseline, code_version), so a run never resumes,
-    appends to or counts the artifacts of other code or another configuration."""
-    identity = {"depth": depth, "ratio": ratio, "seed": seed, "data_seed": data_seed, "changes": changes,
-                "code": code_version()}
+def run_tag(*, depth: int, ratio: float, seed: int, data_seed: int) -> str:
+    """Name for a run's checkpoints, metrics and evaluation: depth, ratio, seeds, then a hash of everything its result
+    depends on (those and code_version, which covers DATASET_REVISION), so a run never resumes or counts another's
+    artifacts."""
+    # float(ratio): JSON writes int 20 as "20" but float 20.0 as "20.0", so one run would get two names
+    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "data_seed": data_seed, "code": code_version()}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return f"d{depth}-r{ratio:g}-s{seed}-d{data_seed}-{digest[:12]}"

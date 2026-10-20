@@ -4,8 +4,6 @@ __pycache__/
 dev-ignore/
 report.md
 eval_bundle/
-runs/logs/
-runs/.gpu/
 .worktrees/
 
 # Secrets
@@ -15,3 +13,4 @@ runs/.gpu/
 CLAUDE.md
 .omp/
 wandb/
+/artifacts/

@@ -17,7 +17,6 @@ similarity at THRESHOLD; a document without an n-gram (fewer than NGRAM words) i
 """
 
 import contextlib
-import os
 import shutil
 
 import enry
@@ -29,7 +28,7 @@ from scipy.integrate import quad
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
 from nanochat.data.tokenizer import bpe
-from nanochat.paths import data_dir
+from nanochat.paths import DATA
 
 # StarCoder2's near-deduplication (bigcode-dataset near_deduplication/bigcode-v2: intra_dedup.py defaults ngram_size,
 # num_perm; run.sh THRESHOLD): 5-grams of words, 250 permutations, Jaccard similarity 0.7
@@ -62,7 +61,7 @@ def scan(task):
         signatures.append(s)
         shingled.append(h)
         ids.append(bytes.fromhex("".join(table["id"].to_pylist())))
-        takes_part.append(bytes(not (enry.is_vendor(p) or enry.is_generated(p, t)) for p, t in zip(table["relative_path"].to_pylist(), texts))
+        takes_part.append(bytes(not (enry.is_vendor(p) or enry.is_generated(p, t)) for p, t in zip(table["relative_path"].to_pylist(), texts, strict=False))
                           if repository else b"\x01" * len(texts))
     return [b"".join(parts) for parts in (signatures, ids, takes_part, shingled)]
 
@@ -70,20 +69,20 @@ def scan(task):
 def kept(files, pool):
     """{source: [the keep mask of each normalized file]} for files {source: normalized file paths in order}. pool
     (spawned: go-enry's Go runtime) scans the files into scratch files of the data store, which the crate memory-maps."""
-    directory = os.path.join(data_dir(), "dedup")
-    os.makedirs(directory)
+    directory = DATA / "dedup"
+    directory.mkdir()
     universes = {"repository_files": [source for source, spec in SOURCES.items() if spec.schema is REPOSITORY_FILE],
                  "documents": [source for source, spec in SOURCES.items() if spec.schema is not REPOSITORY_FILE]}
     r = rows()
     keep = {}
     for universe, sources in universes.items():
-        paths = [os.path.join(directory, f"{universe}.{part}") for part in ("signatures", "ids", "takes_part", "shingled")]
+        paths = [directory / f"{universe}.{part}" for part in ("signatures", "ids", "takes_part", "shingled")]
         with contextlib.ExitStack() as stack:
             outputs = [stack.enter_context(open(path, "wb")) for path in paths]
             for parts in pool.map(scan, [(source, path) for source in sources for path in files[source]]):
-                for output, part in zip(outputs, parts):
+                for output, part in zip(outputs, parts, strict=False):
                     output.write(part)
-        mask = np.frombuffer(bpe().duplicates(*paths, rows=r, threshold=THRESHOLD), np.bool_)
+        mask = np.frombuffer(bpe().duplicates(*map(str, paths), rows=r, threshold=THRESHOLD), np.bool_)
         counts = [pq.read_metadata(path).num_rows for source in sources for path in files[source]]
         masks = iter(np.split(mask, np.cumsum(counts)[:-1]))
         keep |= {source: [next(masks) for _ in files[source]] for source in sources}

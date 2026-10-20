@@ -65,15 +65,11 @@ from nanochat.data import dedup
 from nanochat.data.schema import REPOSITORY_FILE, SAMPLE_FILE
 from nanochat.data.sources import EDU, SOURCES, column_bytes, curated_dir
 from nanochat.data.tokenizer import bpe
-from nanochat.paths import data_dir
+from nanochat.paths import DATA
 
 # Workers start without the parent's threads (DuckDB's, obstore's, go-enry's Go runtime): Go does not support fork
 # without exec, and a forked child's calls into Go block.
 SPAWN = multiprocessing.get_context("spawn")
-
-
-def normalized_root():
-    return os.path.join(data_dir(), "normalized")
 
 
 # ---- fetch
@@ -108,12 +104,12 @@ def fetch(source, file):
     """The local path of one of the source's Hub files. Stack-Edu's blobs are fetched by a pool that lives for that file
     only, so its workers hold no memory beside normalize's."""
     spec = SOURCES[source]
-    directory = os.path.join(data_dir(), "raw", source)
+    directory = DATA / "raw" / source
     if spec.repo != EDU[0]:
         return hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision, local_dir=directory)
-    path = os.path.join(directory, file)
+    path = directory / file
     meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)  # prepare resumes: a raw directory may exist
     with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
           pq.ParquetWriter(path, pq.read_schema(meta).append(pa.field("text", pa.string()))) as writer):
         for table in pool.map(blob_texts, [(meta, g) for g in range(pq.ParquetFile(meta).num_row_groups)]):
@@ -209,7 +205,7 @@ def parses_as_python3(text):
 
 
 def normalized_path(source, k):
-    return os.path.join(normalized_root(), source, f"{k}.parquet")
+    return DATA / "normalized" / source / f"{k}.parquet"
 
 
 def stage(task):
@@ -219,7 +215,8 @@ def stage(task):
     source, k, path = task
     spec = SOURCES[source]
     warnings.filterwarnings("ignore", category=SyntaxWarning)  # invalid escapes in otherwise valid code
-    partial = normalized_path(source, k) + ".partial"
+    output = normalized_path(source, k)
+    partial = output.with_name(output.name + ".partial")
     pf = pq.ParquetFile(path)
     with pq.ParquetWriter(partial, normalized_schema(spec)) as writer:
         for g in range(pf.num_row_groups):
@@ -231,7 +228,7 @@ def stage(task):
             if spec.grammar == "Python":
                 table = table.filter(pa.array([parses_as_python3(t) for t in table["content"].to_pylist()], pa.bool_()))
             writer.write_table(table)
-    os.replace(partial, normalized_path(source, k))
+    partial.replace(output)
 
 
 # ---- curate: deduplication (dedup.py), the val split, repository files as repository samples
@@ -252,7 +249,7 @@ EXTENT = {"code": 0.7, "text": 0.2, "math": 0.1}
 
 
 def shuffle_dir(source):
-    return os.path.join(data_dir(), "shuffle", source)
+    return DATA / "shuffle" / source
 
 
 def shuffle(source, paths, masks):
@@ -261,21 +258,22 @@ def shuffle(source, paths, masks):
     (DuckDB COPY ... PARTITION_BY). file_index is a file's position in paths; file_row_number its row's position."""
     rows = [np.flatnonzero(~mask) for mask in masks]
     drops = pa.table({"file": np.repeat(np.arange(len(rows)), list(map(len, rows))), "row": np.concatenate(rows)})
-    os.makedirs(os.path.join(data_dir(), "shuffle"), exist_ok=True)  # DuckDB creates the spill and partition directories only
+    # shuffle/ outlives each repository source (curate removes shuffle/<source> only); DuckDB creates the spill and
+    # partition directories only
+    (DATA / "shuffle").mkdir(exist_ok=True)
     # DuckDB in MEMORY, spilling to the data store, without insertion order (the troubleshooting guide cited at MEMORY)
-    with duckdb.connect(config={"memory_limit": f"{MEMORY}B", "temp_directory": os.path.join(data_dir(), "shuffle", "spill"),
+    with duckdb.connect(config={"memory_limit": f"{MEMORY}B", "temp_directory": str(DATA / "shuffle" / "spill"),
                                 "preserve_insertion_order": False}) as con:
         con.register("drops", drops)
         con.execute(f"COPY (SELECT n.repo_name, n.relative_path, n.content, n.id, {residue('n.val_group')} AS part "
-                    f"FROM read_parquet({paths}, file_row_number = true) AS n "
+                    f"FROM read_parquet({[str(path) for path in paths]}, file_row_number = true) AS n "
                     f"ANTI JOIN drops AS d ON d.file = n.file_index AND d.row = n.file_row_number) "
                     f"TO '{shuffle_dir(source)}' (FORMAT parquet, PARTITION_BY (part))")
 
 
 def partition_row_groups(source, part):
     """The row-group metadata of the files of a shuffle partition."""
-    directory = os.path.join(shuffle_dir(source), f"part={part}")
-    return [md.row_group(g) for md in (pq.read_metadata(os.path.join(directory, f)) for f in os.listdir(directory))
+    return [md.row_group(g) for md in map(pq.read_metadata, (shuffle_dir(source) / f"part={part}").iterdir())
             for g in range(md.num_row_groups)]
 
 
@@ -286,7 +284,7 @@ def curate_partition(task):
     the last at least as long as the shuffle's longest row group."""
     source, part = task
     length = max(row_group.num_rows for row_group in partition_row_groups(source, part))
-    table = pq.read_table(os.path.join(shuffle_dir(source), f"part={part}"),
+    table = pq.read_table(shuffle_dir(source) / f"part={part}",
                           schema=pa.schema([("repo_name", pa.string()), ("relative_path", pa.string()),
                                             ("content", pa.large_string()), ("id", pa.string())]))
     table = table.sort_by([(key, "ascending") for key in ("repo_name", "relative_path", "id")]).combine_chunks()
@@ -302,8 +300,8 @@ def curate_partition(task):
         if start - cuts[-1] >= length:
             cuts.append(start)
     columns = table.select(["repo_name", "relative_path", "content"])
-    with pq.ParquetWriter(os.path.join(curated_dir(source, "val" if part == 0 else "train"), f"{part}.parquet"), SAMPLE_FILE) as writer:
-        for a, b in itertools.pairwise(cuts + [len(order)]):
+    with pq.ParquetWriter(curated_dir(source, "val" if part == 0 else "train") / f"{part}.parquet", SAMPLE_FILE) as writer:
+        for a, b in itertools.pairwise([*cuts, len(order)]):
             writer.write_table(columns.take(order[a:b]).append_column("sample", pa.array(samples[a:b])).cast(SAMPLE_FILE))
 
 
@@ -317,8 +315,8 @@ def split_file(task):
                           f"ORDER BY file_row_number").fetchnumpy()["val"]
     held, trained = val & keep, ~val & keep
     pf = pq.ParquetFile(path)
-    with (pq.ParquetWriter(os.path.join(curated_dir(source, "train"), f"{k}.parquet"), spec.schema) as train,
-          pq.ParquetWriter(os.path.join(curated_dir(source, "val"), f"{k}.parquet"), spec.schema) as held_out):
+    with (pq.ParquetWriter(curated_dir(source, "train") / f"{k}.parquet", spec.schema) as train,
+          pq.ParquetWriter(curated_dir(source, "val") / f"{k}.parquet", spec.schema) as held_out):
         start = 0
         for g in range(pf.num_row_groups):
             table = pf.read_row_group(g, columns=spec.schema.names)
@@ -339,7 +337,7 @@ def curate(normalized):
         keep = dedup.kept(paths, pool)
     for source, spec in SOURCES.items():
         for split in ("train", "val"):
-            os.makedirs(curated_dir(source, split))
+            curated_dir(source, split).mkdir(parents=True)
         if spec.schema is REPOSITORY_FILE:
             shuffle(source, paths[source], keep[source])
             largest = max(sum(row_group.total_byte_size for row_group in partition_row_groups(source, part)) for part in range(SPLIT))
@@ -362,17 +360,18 @@ def prepare():
             spec = SOURCES[source]
             files = sorted(f for f in list_repo_files(spec.repo, repo_type="dataset", revision=spec.revision)
                            if any(fnmatch.fnmatchcase(f, glob) for glob in spec.files.values()))
-            os.makedirs(os.path.join(normalized_root(), source), exist_ok=True)
+            # prepare resumes: an existing normalized file is whole (stage), so its directory may exist
+            normalized_path(source, 0).parent.mkdir(parents=True, exist_ok=True)
             if horizon is None:
                 with ProcessPoolExecutor(mp_context=SPAWN) as pool:
                     list(pool.map(stage, [(source, k, fetch(source, file)) for k, file in enumerate(files)
-                                          if not os.path.exists(normalized_path(source, k))]))
+                                          if not normalized_path(source, k).exists()]))
                 count = len(files)
                 held += sum(tokens(source, k) for k in range(count))
             else:
                 count = 0
                 while count < len(files) and held < share * horizon:
-                    if not os.path.exists(normalized_path(source, count)):
+                    if not normalized_path(source, count).exists():
                         stage((source, count, fetch(source, files[count])))
                     held += tokens(source, count)
                     count += 1

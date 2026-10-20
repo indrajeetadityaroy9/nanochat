@@ -15,14 +15,13 @@ is config.MIXTURE, {group: (share, corpora)}: each group's share is split among 
 import itertools
 import json
 import math
-import os
 from typing import Literal, NamedTuple
 
 import numpy as np
 import torch
 
 from nanochat.data.sources import SOURCES
-from nanochat.paths import data_dir
+from nanochat.paths import DATA
 
 # the Weyl sequence frac(n * GOLDEN) spreads every prefix of itself most evenly over [0, 1) (Knuth, TAOCP Vol. 3 §6.4)
 GOLDEN = (math.sqrt(5) - 1) / 2
@@ -35,12 +34,12 @@ PIECE_COLUMNS = 4
 def split_path(dataset, split, tokenizer):
     """The stem of a compiled split's files (compile.py: .bin tokens, .idx document offsets, .json documents per file),
     in compiled/<corpus>-<tokenizer data key>/."""
-    return os.path.join(data_dir(), "compiled", f"{dataset}-{tokenizer.data_key}", split)
+    return DATA / "compiled" / f"{dataset}-{tokenizer.data_key}" / split
 
 
 def packed_path(dataset, split, tokenizer, seq_len):
     """The stem of a packed split's files (pack.py: .pieces, .rows, .fim), the compiled split's at the row length."""
-    return f"{split_path(dataset, split, tokenizer)}-T{seq_len}"
+    return split_path(dataset, split, tokenizer).with_name(f"{split}-T{seq_len}")
 
 
 def fim_packed(dataset, split):
@@ -63,11 +62,11 @@ class PackedSplit(NamedTuple):
 def packed(dataset, split, tokenizer, seq_len):
     """The packed split of a corpus at rows of seq_len + 1 tokens (pack.py), memory-mapped in place."""
     path, packing = split_path(dataset, split, tokenizer), packed_path(dataset, split, tokenizer, seq_len)
-    return PackedSplit(np.memmap(path + ".bin", dtype=TOKEN_DTYPE, mode="r"),
-                       np.memmap(path + ".idx", dtype=np.int64, mode="r"),
-                       np.memmap(packing + ".pieces", dtype=np.int64, mode="r").reshape(-1, PIECE_COLUMNS),
-                       np.memmap(packing + ".rows", dtype=np.int64, mode="r"),
-                       np.memmap(packing + ".fim", dtype=TOKEN_DTYPE, mode="r") if fim_packed(dataset, split) else None)
+    return PackedSplit(np.memmap(path.with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r"),
+                       np.memmap(path.with_suffix(".idx"), dtype=np.int64, mode="r"),
+                       np.memmap(packing.with_suffix(".pieces"), dtype=np.int64, mode="r").reshape(-1, PIECE_COLUMNS),
+                       np.memmap(packing.with_suffix(".rows"), dtype=np.int64, mode="r"),
+                       np.memmap(packing.with_suffix(".fim"), dtype=TOKEN_DTYPE, mode="r") if fim_packed(dataset, split) else None)
 
 
 def packed_rows(dataset, split, tokenizer, seq_len):
@@ -79,8 +78,8 @@ def row_shards(dataset, split, tokenizer, seq_len):
     """Each row's curated shard of a packed split: the packer packs one shard at a time (pack.py), so a row's pieces
     share the shard of its first piece's first token (compiled <split>.json: each file's documents, in order)."""
     _, offsets, pieces, rows, _ = packed(dataset, split, tokenizer, seq_len)
-    with open(split_path(dataset, split, tokenizer) + ".json") as f:
-        documents = np.cumsum([0] + [file["documents"] for file in json.load(f)["files"]])
+    files = json.loads(split_path(dataset, split, tokenizer).with_suffix(".json").read_text())["files"]
+    documents = np.cumsum([0] + [file["documents"] for file in files])
     return np.searchsorted(offsets[documents[:-1]], pieces[rows[:-1], 0], side="right") - 1
 
 
@@ -161,11 +160,11 @@ class PretrainingBatches:
             at += 1 + len(part)
         if targeted[-1]:  # write the last piece's target BOS
             out[at] = self.bos
-        return starts + [at]
+        return [*starts, at]
 
     def __iter__(self):
         consumed = np.bincount(mixture_rows(self.weights, start=0, count=self.start), minlength=len(self.names))
-        orders = [iter(order[skip:]) for order, skip in zip(self.orders, consumed)]
+        orders = [iter(order[skip:]) for order, skip in zip(self.orders, consumed, strict=False)]
         for position in itertools.count(self.start, self.batch_rows):
             corpora = mixture_rows(self.weights, start=position, count=self.batch_rows)
             batch = np.full((self.batch_rows, self.seq_len + 1), self.PAD, dtype=np.int32)

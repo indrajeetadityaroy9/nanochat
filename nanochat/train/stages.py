@@ -1,8 +1,8 @@
 """
-The packed rows each stage of a run reads, with no document read twice: of each repository corpus, the repo-level stage
-reads the fewest trailing curated shards (shuffled by repository, data/prepare.py curate_partition) that hold the rows
-it draws; the file-level stage reads the rest. max_ratio: the most tokens per scaling parameter at which no stage draws
-more rows of a corpus than it may read (data/loader.py PretrainingBatches stops at an exhausted corpus).
+Packed rows each stage reads, no document twice: per repository corpus, the repo-level stage reads the fewest trailing
+curated shards (shuffled by repository, data/prepare.py curate_partition) holding the rows it draws; the file-level stage
+reads the rest. max_ratio: the most tokens per scaling parameter at which no stage draws more rows of a corpus than it
+may read (data/loader.py PretrainingBatches stops at an exhausted corpus).
 
 python -m nanochat.train.stages <depth> prints max_ratio.
 """
@@ -28,7 +28,7 @@ def drawn_rows(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan) -> dict[str,
 
 
 def readable_rows(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan) -> dict[str, np.ndarray]:
-    """{corpus: the rows the stage may read}."""
+    """{corpus: rows the stage may read}."""
     rows = {}
     for corpus, need in drawn_rows(tokenizer, stage=REPO_STAGE, run=run).items():
         per_shard = np.bincount(row_shards(corpus, "train", tokenizer, REPO_STAGE.seq_len))
@@ -41,8 +41,8 @@ def readable_rows(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan) -> dict[s
 
 def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:
     """Bisection over whole micro-batches of tokens on "overdraws". Not monotone (grad_accum_steps steps up with the
-    count, so trained tokens dip): the result fits; a larger fitting count may exist."""
-    params = plan(depth=depth, ratio=1.0, tokens=None).scaling_params
+    count, so trained tokens dip): the result fits, but a larger fitting count may exist."""
+    params = plan(depth=depth, ratio=1.0).scaling_params
     rows = sum(packed_rows(c, "train", tokenizer, FILE_STAGE.seq_len)
                for c in mixture_weights(FILE_STAGE.mixture, tokenizer, FILE_STAGE.seq_len))
 
@@ -50,7 +50,7 @@ def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:
         return n * MICRO_BATCH_TOKENS / params
 
     def overdrawn(n):
-        run = plan(depth=depth, ratio=ratio(n), tokens=None)
+        run = plan(depth=depth, ratio=ratio(n))
         for stage in (FILE_STAGE, REPO_STAGE):
             readable = readable_rows(tokenizer, stage=stage, run=run)
             if any(drawn > len(readable[c]) for c, drawn in drawn_rows(tokenizer, stage=stage, run=run).items()):

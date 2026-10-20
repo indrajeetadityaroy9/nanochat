@@ -1,7 +1,7 @@
 """
 Bits per byte: summed next-token loss in bits over summed UTF-8 bytes of the targets (special tokens 0 bytes, padding
 excluded). Evaluations return both sums per context bucket (CONTEXTS) so corpora, buckets and samples pool exactly; bpb
-and mixture_bpb form the ratios. Sums are fp64 on the device, reduced in a fixed order (bitwise reproducible).
+and mixture_bpb form the ratios. Sums are fp64 on the device, reduced in a fixed order.
 """
 import math
 from itertools import islice

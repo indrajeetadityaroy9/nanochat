@@ -65,8 +65,7 @@ FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5, 0.5
 def pack_split(source, split, tokenizer, seq_len):
     """Pack a compiled split into <split>-T<seq_len>.pieces, .rows and .fim."""
     compiled = split_path(source, split, tokenizer)
-    with open(compiled + ".json") as f:
-        files = json.load(f)["files"]
+    files = json.loads(compiled.with_suffix(".json").read_text())["files"]
     bounds = np.cumsum([0] + [file["documents"] for file in files]).tolist()
     path = packed_path(source, split, tokenizer, seq_len)
     fim = (dict(rate=FIM_RATE, random=RANDOM_SHARE, single=SINGLE_NODE_SHARE, spm=SPM_SHARE,
@@ -74,9 +73,11 @@ def pack_split(source, split, tokenizer, seq_len):
     print(f"Packing {len(files)} {split} files of '{source}' into rows of {seq_len + 1} tokens{' with FIM' if fim else ''}: {path}")
     mergeable = tokenizer.token_bytes[:tokenizer.bos_token_id]
     placed, fim_tokens = 0, 0
-    with open(path + ".pieces", "wb") as pieces_file, open(path + ".rows", "wb") as rows_file, open(path + ".fim", "wb") as fim_file:
+    with (open(path.with_suffix(".pieces"), "wb") as pieces_file, open(path.with_suffix(".rows"), "wb") as rows_file,
+          open(path.with_suffix(".fim"), "wb") as fim_file):
         for shard in itertools.pairwise(bounds):
-            pieces, counts, tokens = bpe().pack(compiled + ".bin", compiled + ".idx", shard, row_len=seq_len + 1,
+            pieces, counts, tokens = bpe().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")), shard,
+                                                row_len=seq_len + 1,
                                                 token_bytes=mergeable, pattern=tokenizer.pattern,
                                                 grammar=SOURCES[source].grammar, fim=fim, fim_base=fim_tokens)
             counts = np.frombuffer(counts, dtype=np.int64)

@@ -1,6 +1,6 @@
-"""The block's GEMMs as torch.library ops (traceable by fullgraph torch.compile): the fp32 master weight W rounded to x's
-dtype, dW in fp32 straight from the accumulators (QuACK's linear/mlp functions round dW to bf16, rel. error up to 2^-9).
-Every GEMM at its config in ops/quack_gemm.py TABLE.
+"""The block's GEMMs as torch.library ops (traceable by fullgraph torch.compile): fp32 master weight W rounded to x's
+dtype; dW in fp32 straight from the accumulators (QuACK's linear/mlp functions round dW to bf16, rel. error up to 2^-9).
+Each GEMM uses its ops/quack_gemm.py TABLE config.
 
 nanochat::linear (c_q, c_k, c_v, c_o): y = x W^T; backward dX = dY W, dW = dY^T X.
 

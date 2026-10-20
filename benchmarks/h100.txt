@@ -18,7 +18,7 @@ d24 step, real data, 12 x 12 rows (profile_step.py 24 12 12 file):
     backward 168.4 ms; VE-gate fp32 GEMMs on CUDA cores (sm80_xmma f32 + simt sgemm) 80.6 ms.
   VE gate as fp32 broadcast-sum, persistent atomic-free qk prologue backward: 3,724 ms, 316.8K tok/s; qk prologue
     forward 75.2 ms, backward 92.7 ms.
-  Canonical regime (base_train.optimizer_settings: d2z, tau weight decay, no clip): steps 2-7 3,461 / 3,719 / 3,775 /
+  Production regime (base_train: d2z, tau weight decay, no clip): steps 2-7 3,461 / 3,719 / 3,775 /
     3,790 / 3,795 / 3,781 ms; profile_step's step 5: 3,736 ms, 315.7K tok/s, peak 69.6 GiB; GPU 100% busy: GEMM 52.9%,
     FA4 24.9%, Inductor 14.3%, other 6.4%, cross entropy 1.5%. 1 x 12 rows: step 4 327 ms, 301.0K tok/s, peak 67.6 GiB.
 VE gate alone, fwd+bwd of gate and mix per layer at M = 98,304 (torch.utils.benchmark median), rel err vs fp64 of
@@ -67,3 +67,7 @@ Fused q/k/v projection (one QuACK GEMM on cat(c_q, c_k, c_v) weights, N = 3C, th
   fused, prologue on the (B, T, 3, H, D) output, writing dq, dk into the (B, T, 3C) gradient, copying v out and dv in:
     3729 ms, 73.1 GiB; GEMM 1982.5, Inductor 468.3, q/k prologue 173.9, v/dv copies 59.1.
   -> split kept: fusion saves no measurable GEMM time (sweep: <= 10 ms per step), less than the copies its layout needs.
+Concurrent d8 training processes, 2026-10-20 (profile_step.py 8 16 12 file, each timing a 16-micro-batch step,
+  1,572,864 tokens, started together; peak 13.3 GiB each): 1 process 2,598,140 tok/s; 2 processes 1,155,960 +
+  1,179,686 = 2,335,646 aggregate (-10%); 4 processes 589,606 + 614,366 + 672,177 + 692,019 = 2,568,168 (-1%).
+  -> one d8 run saturates the GPU (its 280-440 W power draw understates SM occupancy): runs train one at a time.

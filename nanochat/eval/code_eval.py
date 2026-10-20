@@ -23,20 +23,26 @@ Scores:
 - solution bits: bits and bytes (loss_eval.evaluate) of each reference solution given its prompt (BOS, prompt, solution;
   scored from the first token starting at or after the prompt's end) on humaneval_plus, mbpp_plus and humaneval_x_cpp;
   their bits per byte track pass@1 across checkpoints where corpus loss does not (Xing et al., arXiv 2604.07769).
-- pass@1 of one greedy completion per problem.
+- pass@1 of one completion per problem, by two generation modes: "greedy", plain greedy decoding (the literature's
+  pass@1); "system", verify.search: healed prompts (decoder.heal), Python under the complete Python 3 syntax
+  constraint (inference/syntax_constraint.py), the greedy candidate then seeded samples until one has no diagnostics
+  (verify.python_diagnostics / cpp_diagnostics) and passes its prompt's own examples, scored by the same evaluators.
 Every evaluator runs as a fresh process (exec), never a fork of this torch/CUDA process.
 """
 
 import bisect
 import codecs
+import functools
 import itertools
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import NamedTuple
+from pathlib import Path
+from typing import Literal, NamedTuple
 
 import pyarrow.parquet as pq
 import torch
@@ -47,7 +53,8 @@ from huggingface_hub import hf_hub_download
 
 from nanochat.data.loader import PretrainingBatches
 from nanochat.eval.loss_eval import evaluate
-from nanochat.inference.decoder import NativeDecoder
+from nanochat.eval.verify import chosen, search, syntax_constraint, verdicts
+from nanochat.inference.decoder import AllOf, NativeDecoder, Request, heal
 
 # HF dataset revisions
 MULTIPL_E = {"repo_id": "nuprl/MultiPL-E", "revision": "28441b6024e71d4a1c1c0f6bf171c935cd5a43f2"}
@@ -119,31 +126,93 @@ def solution_bits(losses, tokenizer, benchmarks, *, batch_rows, seq_len, device)
 
 class StopAt:
     """NativeDecoder.run's stop rule: true once the generated text holds a stop sequence (incremental UTF-8 decoding;
-    search starts where a stop sequence could still begin)."""
+    search starts where a stop sequence could still begin). healed: the bytes of the prompt token that decoder.heal
+    dropped, which the generation's first token begins with; they belong to the prompt and are not searched."""
 
-    def __init__(self, tokenizer, stops):
+    def __init__(self, tokenizer, stops, *, healed=b""):
         self.token_bytes, self.stops, self.longest = tokenizer.token_bytes, stops, max(map(len, stops))
         self.utf8, self.text, self.n, self.searched = codecs.getincrementaldecoder("utf-8")("replace"), "", 0, 0
+        self.healed = len(healed)
 
     def __call__(self, ids):
-        self.text += "".join(self.utf8.decode(self.token_bytes[t]) for t in ids[self.n:])
+        data = b"".join(self.token_bytes[t] for t in ids[self.n:])
+        self.text += self.utf8.decode(data[self.healed:] if self.n == 0 else data)
         self.n, start, self.searched = len(ids), max(0, self.searched - self.longest + 1), len(self.text)
         return any(s in self.text[start:] for s in self.stops)
 
 
-def complete(decoder, tokenizer, items, prompts, budgets, *, special):
-    """Greedy completions of `prompts` within `budgets` new tokens, each cut before its task's first stop sequence
-    (MultiPL-E stop_at_stop_token; EvalPlus vLLM stop strings). Special tokens (ids >= BOS, data/tokenizer.py) are
-    "skip"ped (EvalPlus skip_special_tokens) or "stop" the completion (MultiPL-E automodel.py:99-101)."""
+def completion(tokenizer, task, ids, *, special: Literal["skip", "stop"], healed=b""):
+    """The completion text of generated ids, cut before the task's first stop sequence (MultiPL-E stop_at_stop_token;
+    EvalPlus vLLM stop strings). Special tokens (ids >= BOS, data/tokenizer.py) are "skip"ped (EvalPlus
+    skip_special_tokens) or "stop" the completion (MultiPL-E automodel.py:99-101); healed (StopAt) bytes dropped."""
     bos = tokenizer.bos_token_id
-    requests = (([bos, *tokenizer.enc.encode_ordinary(p)], m, StopAt(tokenizer, t.stops))
+    ids = [t for t in ids if t < bos] if special == "skip" else list(itertools.takewhile(lambda t: t < bos, ids))
+    text = tokenizer.enc.decode_bytes(ids)[len(healed):].decode("utf-8", "replace")  # as enc.decode
+    return text[:min([j for j in (text.find(s) for s in task.stops) if j >= 0], default=len(text))]
+
+
+def complete(decoder, tokenizer, items, prompts, budgets, *, special: Literal["skip", "stop"]):
+    """Greedy completions (completion) of `prompts` within `budgets` new tokens."""
+    bos = tokenizer.bos_token_id
+    requests = (Request(prompt=[bos, *tokenizer.enc.encode_ordinary(p)], max_tokens=m, stop=StopAt(tokenizer, t.stops))
                 for t, p, m in zip(items, prompts, budgets, strict=True))
     out = [None] * len(items)
     for i, ids in decoder.run(requests):
-        ids = [t for t in ids if t < bos] if special == "skip" else list(itertools.takewhile(lambda t: t < bos, ids))
-        text = tokenizer.enc.decode(ids)
-        out[i] = text[:min([j for j in (text.find(s) for s in items[i].stops) if j >= 0], default=len(text))]
+        out[i] = completion(tokenizer, items[i], ids, special=special)
     return out
+
+
+def system_complete(decoder, tokenizer, items, prompts, budgets, *, special: Literal["skip", "stop"],
+                    program: Callable, language: Literal["python", "cpp"]):
+    """The system mode's completions and verify.search's candidates per task: candidates of the healed prompt
+    (decoder.heal; one more token of budget, the dropped token regenerated), Python tasks also under the syntax
+    constraint of the healed prompt's text (verify.syntax_constraint); each candidate checked (verify.verdicts) as the
+    program(task, completion) its evaluator scores; the completion of verify.chosen's candidate per task."""
+    bos = tokenizer.bos_token_id
+    full = [[bos, *tokenizer.enc.encode_ordinary(p)] for p in prompts]
+    healed = [tokenizer.token_bytes[ids[-1]] for ids in full]
+
+    def request(i):
+        prompt, constraint = heal(tokenizer, full[i])
+        if language == "python":
+            constraint = AllOf(constraint, syntax_constraint(tokenizer.enc.decode(prompt[1:])))
+        return Request(prompt=prompt, max_tokens=budgets[i] + 1, constraint=constraint,
+                       stop=StopAt(tokenizer, items[i].stops, healed=healed[i]))
+
+    def check(i, ids):
+        text = completion(tokenizer, items[i], ids, special=special, healed=healed[i])
+        return items[i].prompt, program(items[i], text)
+
+    tried = search(decoder, request, check, language=language, count=len(items))
+    return [completion(tokenizer, t, chosen(c).ids, special=special, healed=h)
+            for t, c, h in zip(items, tried, healed, strict=True)], tried
+
+
+def searched(tried):
+    """A system mode's search record per task: candidates tried, whether one was accepted (verify.Candidate), each
+    candidate's diagnostics count and whether it passed its prompt's examples."""
+    return {"attempts": [len(c) for c in tried], "accepted": [c[-1].accepted for c in tried],
+            "diagnostics": [[len(x.diagnostics) for x in c] for c in tried],
+            "examples": [[x.examples for x in c] for c in tried]}
+
+
+def checked(items, completions, *, program: Callable, language: Literal["python", "cpp"]):
+    """The greedy mode's record in searched's terms: each completion's diagnostics count and whether it passed its
+    prompt's examples (verify.verdicts of its scored program)."""
+    results = verdicts([(t.prompt, program(t, c)) for t, c in zip(items, completions, strict=True)], language=language)
+    return {"diagnostics": [len(d) for d, _ in results], "examples": [e for _, e in results]}
+
+
+def evalplus_solution(task, text):
+    """The solution EvalPlus scores of a completion text: its tabs replaced by four spaces, sanitize(prompt +
+    completion, entry point)."""
+    return sanitize(task.prompt + text.replace("\t", "    "), entrypoint=task.entry)
+
+
+def multipl_e_program(task, text):
+    """The judge's program of a completion text (prompt + completion + "\\n" + tests, main.py:34) up to the tests'
+    first line, the function's closing "}" (the stop token "\\n}" its completion is cut before)."""
+    return task.prompt + text + "\n}"
 
 
 def evalplus(name, items, completions):
@@ -151,15 +220,13 @@ def evalplus(name, items, completions):
     "base_status", "plus_status"}."""
     dataset = EVALPLUS[name][0]
     with tempfile.TemporaryDirectory() as tmp:
-        samples, scored = os.path.join(tmp, "samples.jsonl"), os.path.join(tmp, "results.json")
-        with open(samples, "w", encoding="utf-8") as f:
+        samples, scored = Path(tmp, "samples.jsonl"), Path(tmp, "results.json")
+        with samples.open("w", encoding="utf-8") as f:
             for t, c in zip(items, completions, strict=True):
-                solution = sanitize(t.prompt + c.replace("\t", "    "), entrypoint=t.entry)
-                f.write(json.dumps({"task_id": t.id, "solution": solution}) + "\n")
+                f.write(json.dumps({"task_id": t.id, "solution": evalplus_solution(t, c)}) + "\n")
         subprocess.run([sys.executable, "-I", "-m", "evalplus.evaluate", "--dataset", dataset, "--samples", samples,
                         "--output_file", scored], cwd=tmp, check=True)
-        with open(scored, encoding="utf-8") as f:
-            result = json.load(f)
+        result = json.loads(scored.read_text(encoding="utf-8"))
     verdicts = [result["eval"][t.id][0] for t in items]
     return {"base pass@1": result["pass_at_k"]["base"]["pass@1"], "plus pass@1": result["pass_at_k"]["plus"]["pass@1"],
             "ids": [t.id for t in items], "completions": completions,
@@ -170,41 +237,52 @@ def multipl_e(items, completions):
     """MultiPL-E's evaluation of one completion per problem: {"pass@1" (pass_k.py), "ids", "completions", "status"}.
     Each problem is a completions file as multipl_e/completions.py writes it, judged by its own main.py --file process
     (--dir runs problems serially), os.cpu_count() at once; the scripts import siblings, so no -I."""
-    root = os.environ["MULTIPL_E"]
-    main = os.path.join(root, "evaluation", "src", "main.py")
+    root = Path(os.environ["MULTIPL_E"])
+    main = root / "evaluation" / "src" / "main.py"
     with tempfile.TemporaryDirectory() as tmp:
         files = []
         for t, c in zip(items, completions, strict=True):
-            files.append(os.path.join(tmp, f"{t.id}.json"))
-            with open(files[-1], "w", encoding="utf-8") as f:
-                json.dump({"name": t.id, "language": "cpp", "prompt": t.prompt, "tests": t.entry, "completions": [c]}, f)
+            files.append(Path(tmp, f"{t.id}.json"))
+            files[-1].write_text(json.dumps({"name": t.id, "language": "cpp", "prompt": t.prompt, "tests": t.entry,
+                                             "completions": [c]}), encoding="utf-8")
         with ThreadPoolExecutor(os.cpu_count()) as pool:
             list(pool.map(lambda file: subprocess.run([sys.executable, main, "--file", file, "--output-dir", tmp],
                                                       cwd=tmp, check=True), files))
         # pass_k.py's one CSV line: Dataset,Pass@k,Estimate,NumProblems,MinCompletions,MaxCompletions
-        pass_at_1 = float(subprocess.run([sys.executable, os.path.join(root, "pass_k.py"), "--suppress-header", tmp],
+        pass_at_1 = float(subprocess.run([sys.executable, root / "pass_k.py", "--suppress-header", tmp],
                                          cwd=tmp, capture_output=True, text=True, check=True).stdout.split(",")[2])
         status = []
         for t in items:
-            with open(os.path.join(tmp, f"{t.id}.results.json"), encoding="utf-8") as f:
-                status.append(json.load(f)["results"][0]["status"])
+            status.append(json.loads(Path(tmp, f"{t.id}.results.json").read_text(encoding="utf-8"))["results"][0]["status"])
     return {"pass@1": pass_at_1, "ids": [t.id for t in items], "completions": completions, "status": status}
 
 
 def generation(model, tokenizer, benchmarks):
-    """{benchmark: official evaluation} of greedy completions of the EvalPlus and MultiPL-E benchmarks."""
-    decoder, results = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id), {}
-    for name in EVALPLUS:
+    """{benchmark: {"greedy": official evaluation of greedy completions and their checked record, "system": that of
+    system_complete's completions and their searched record}} of the EvalPlus and MultiPL-E benchmarks."""
+    runs = {}
+    for name in (*EVALPLUS, *MULTIPL_E_BENCHMARKS):
         items = benchmarks[name]
-        # EvalPlus: at most 768 new tokens (evalplus/provider/base.py:13 max_new_tokens)
-        completions = complete(decoder, tokenizer, items, [t.prompt for t in items], [768] * len(items), special="skip")
-        results[name] = evalplus(name, items, completions)
-    for name in MULTIPL_E_BENCHMARKS:
-        items = benchmarks[name]
-        prompts = [t.prompt.strip() for t in items]
-        # MultiPL-E: at most 1024 tokens of prompt and completion (multipl_e/completions.py --max-tokens,
-        # automodel.py:67 generate(max_length=...)), the BOS among them
-        budgets = [1024 - 1 - len(tokenizer.enc.encode_ordinary(p)) for p in prompts]
-        completions = complete(decoder, tokenizer, items, prompts, budgets, special="stop")
-        results[name] = multipl_e(items, completions)
+        if name in EVALPLUS:
+            prompts = [t.prompt for t in items]
+            budgets = [768] * len(items)  # EvalPlus: at most 768 new tokens (evalplus/provider/base.py:13)
+            runs[name] = items, prompts, budgets, "skip", evalplus_solution, "python", functools.partial(evalplus, name)
+        else:
+            prompts = [t.prompt.strip() for t in items]
+            # MultiPL-E: at most 1024 tokens of prompt and completion (multipl_e/completions.py --max-tokens,
+            # automodel.py:67 generate(max_length=...)), the BOS among them
+            budgets = [1024 - 1 - len(tokenizer.enc.encode_ordinary(p)) for p in prompts]
+            runs[name] = items, prompts, budgets, "stop", multipl_e_program, "cpp", multipl_e
+    # the longest request: BOS + prompt + budget - 1 (complete); system_complete's healed prompt is a token shorter and
+    # its budget a token longer, the same length
+    max_len = max(len(tokenizer.enc.encode_ordinary(p)) + m for _, prompts, budgets, *_ in runs.values()
+                  for p, m in zip(prompts, budgets, strict=True))
+    decoder, results = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id, max_len=max_len), {}
+    for name, (items, prompts, budgets, special, program, language, score) in runs.items():
+        greedy = complete(decoder, tokenizer, items, prompts, budgets, special=special)
+        system, tried = system_complete(decoder, tokenizer, items, prompts, budgets, special=special, program=program,
+                                        language=language)
+        results[name] = {
+            "greedy": {**score(items, greedy), **checked(items, greedy, program=program, language=language)},
+            "system": {**score(items, system), **searched(tried)}}
     return results

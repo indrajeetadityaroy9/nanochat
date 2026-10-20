@@ -4,7 +4,7 @@ BPE tokenizer in the style of GPT-4: merges trained by source-attributed BPE (SA
 regex engine (fancy-regex) the trainer shares.
 
 Trained on every curated source's train split in about equal byte shares (main), writing
-<base_dir>/tokenizer/tokenizer.tiktoken and tokenizer.pattern. Equal byte shares minimize the expected compute per byte
+TOKENIZER/tokenizer.tiktoken and tokenizer.pattern. Equal byte shares minimize the expected compute per byte
 over a uniform prior on mixtures, compute per byte being linear in the byte mixture (our derivation, following Tao et
 al. 2024, arXiv 2407.13623, Eq. 5).
 
@@ -13,13 +13,12 @@ python -m nanochat.data.tokenizer
 
 import base64
 import functools
-import glob
 import hashlib
 import importlib.util
 import json
-import os
 import shutil
 import subprocess
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -31,7 +30,7 @@ from nanochat.config import VOCAB_SIZE
 from nanochat.data.schema import REPOSITORY_FILE, TEXT
 from nanochat.data.sources import SOURCES, column_bytes, curated_files, texts
 from nanochat.native import native_library
-from nanochat.paths import base_dir
+from nanochat.paths import CACHE, TOKENIZER
 
 BOS = "<|bos|>"  # starts every piece of a packed row (data/loader.py); as a target it ends a document or a FIM middle
 # Fill-in-the-middle sentinels (StarCoder's names; Bavarian et al. arXiv 2207.14255 §3): a FIM example is
@@ -52,15 +51,15 @@ SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| 
 def bpe():
     """The crate's Python module (train: the tokenizer trainer; sketch, duplicates: data/dedup.py; repository_samples:
     data/prepare.py curate; pack: data/pack.py), built by cargo once per version of its sources (native.native_library)."""
-    crate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bpe")
-    manifest = os.path.join(crate, "Cargo.toml")
-    target = os.path.join(base_dir(), "cache", "native", "bpe-target")
+    crate = Path(__file__).parent / "bpe"
+    target = CACHE / "native" / "bpe-target"
 
     def build(path):
-        subprocess.run(["cargo", "build", "--release", "--locked", "--manifest-path", manifest, "--target-dir", target])
-        shutil.copyfile(os.path.join(target, "release", "libnanochat_bpe.so"), path)
+        subprocess.run(["cargo", "build", "--release", "--locked", "--manifest-path", crate / "Cargo.toml",
+                        "--target-dir", target], check=True)
+        shutil.copyfile(target / "release" / "libnanochat_bpe.so", path)
 
-    sources = sorted(glob.glob(os.path.join(crate, "*.rs"))) + [os.path.join(crate, name) for name in ("Cargo.toml", "Cargo.lock")]
+    sources = [*sorted(crate.glob("*.rs")), crate / "Cargo.toml", crate / "Cargo.lock"]
     path = native_library("bpe", sources, build)
     spec = importlib.util.spec_from_file_location("nanochat_bpe", path)
     module = importlib.util.module_from_spec(spec)
@@ -97,13 +96,6 @@ class Tokenizer:
             mergeable.append(mergeable[left] + mergeable[right])
         return cls(mergeable, SPLIT_PATTERN)
 
-    @classmethod
-    def from_directory(cls, tokenizer_dir):
-        with open(os.path.join(tokenizer_dir, "tokenizer.tiktoken"), "rb") as f:
-            mergeable = [base64.b64decode(line.split()[0]) for line in f]  # line i: token i, base64, and its rank i
-        with open(os.path.join(tokenizer_dir, "tokenizer.pattern"), newline="") as f:
-            return cls(mergeable, f.read())
-
     def get_token_bytes(self, *, device):
         """Byte length of every token id, as an int32 tensor of shape (vocab_size,), used for vocab-size-invariant bits per
         byte. Special tokens count 0 bytes."""
@@ -111,18 +103,19 @@ class Tokenizer:
         lengths[self.bos_token_id:] = 0
         return lengths.to(device)
 
-    def save(self, tokenizer_dir):
-        """tokenizer.tiktoken: the mergeable tokens in tiktoken's format; tokenizer.pattern: the split pattern."""
-        os.makedirs(tokenizer_dir, exist_ok=True)
+    def save(self):
+        """TOKENIZER/tokenizer.tiktoken: the mergeable tokens in tiktoken's format; tokenizer.pattern: the split pattern."""
         for name, content in (("tokenizer.tiktoken", self.serialized), ("tokenizer.pattern", self.pattern)):
-            with open(os.path.join(tokenizer_dir, name), "w", newline="") as f:
-                f.write(content)
+            (TOKENIZER / name).write_text(content, newline="")
 
 
 @functools.cache
 def get_tokenizer():
-    """The trained tokenizer of <base_dir>/tokenizer, loaded once per process."""
-    return Tokenizer.from_directory(os.path.join(base_dir(), "tokenizer"))
+    """The trained tokenizer of TOKENIZER, loaded once per process."""
+    with open(TOKENIZER / "tokenizer.tiktoken", "rb") as f:
+        mergeable = [base64.b64decode(line.split()[0]) for line in f]  # line i: token i, base64, and its rank i
+    with open(TOKENIZER / "tokenizer.pattern", newline="") as f:
+        return Tokenizer(mergeable, f.read())
 
 
 # ---- training sample
@@ -137,10 +130,10 @@ def keyed_documents(source, batch):
     if schema is REPOSITORY_FILE:
         keys = ["repo:" + name for name in batch["repo_name"].to_pylist()]
     elif schema is TEXT:
-        keys = [f"host:{urlsplit(url).hostname}" if url else "doc:" + id for url, id in zip(batch["url"].to_pylist(), batch["id"].to_pylist())]
+        keys = [f"host:{urlsplit(url).hostname}" if url else "doc:" + id for url, id in zip(batch["url"].to_pylist(), batch["id"].to_pylist(), strict=False)]
     else:
         keys = ["doc:" + id for id in batch["id"].to_pylist()]
-    return list(zip(texts(source, batch), keys))
+    return list(zip(texts(source, batch), keys, strict=False))
 
 
 def sample(source, *, step):
@@ -166,7 +159,7 @@ def main():
     keys = {}  # source key -> source id
     sources = [keys.setdefault(key, len(keys)) for _, key in picks]
     tokenizer = Tokenizer.train([doc for doc, _ in picks], sources, vocab_size=VOCAB_SIZE)
-    tokenizer.save(os.path.join(base_dir(), "tokenizer"))
+    tokenizer.save()
     print(f"Tokenizer fingerprint: {tokenizer.fingerprint}, data key: {tokenizer.data_key}")
 
 
