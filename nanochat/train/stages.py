@@ -16,7 +16,7 @@ import torch
 from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE, Stage
 from nanochat.data.loader import mixture_rows, mixture_weights, packed_rows, row_shards
 from nanochat.data.tokenizer import Tokenizer, get_tokenizer
-from nanochat.model.gpt import GPT, gpt_config
+from nanochat.model.gpt import GPT, gpt_config, scaling_params
 from nanochat.train.schedule import RunPlan, plan
 
 
@@ -47,7 +47,7 @@ def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:
     count, so trained tokens dip): the result fits, but a larger fitting count may exist."""
     with torch.device("meta"):
         model = GPT(gpt_config(depth=depth, stage=FILE_STAGE))
-    params = plan(model=model, ratio=1.0).scaling_params
+    params = scaling_params(model)
     rows = sum(packed_rows(c, "train", tokenizer, FILE_STAGE.seq_len)
                for c in mixture_weights(FILE_STAGE.mixture, tokenizer, FILE_STAGE.seq_len))
 

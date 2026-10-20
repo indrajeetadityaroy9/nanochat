@@ -7,11 +7,11 @@ Runs first: the other experiments train at ADOPTED (ablations.md, Order).
 
     python -m ablations.lr    (ablations/harness.py; ablations.md)
 """
-from ablations.harness import REGIME, main
+from ablations.harness import HORIZON, main
 
 # Peak lr the other experiments train at, in units of the law's: the law's own, until results/lr.json adopts an
 # alternative's (ablations.md, Analysis)
 ADOPTED = 1.0
 
 if __name__ == "__main__":
-    main(alternatives={"lr x0.5": {"lr_scale": 0.5}, "lr x2": {"lr_scale": 2.0}}, settings=REGIME, lr_scale=1.0)
+    main(alternatives={"lr x0.5": {"lr_scale": 0.5}, "lr x2": {"lr_scale": 2.0}}, setting=HORIZON, lr_scale=1.0)

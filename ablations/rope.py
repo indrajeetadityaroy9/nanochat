@@ -5,8 +5,8 @@ for the repository stage, as Code Llama's long-context stage does (arXiv 2308.12
 
     python -m ablations.rope    (ablations/harness.py; ablations.md)
 """
-from ablations.harness import ARCHITECTURE, main
+from ablations.harness import HORIZON, main
 from ablations.lr import ADOPTED
 
 if __name__ == "__main__":
-    main(alternatives={"staged RoPE base": {"rope": "staged"}}, settings=ARCHITECTURE, lr_scale=ADOPTED)
+    main(alternatives={"staged RoPE base": {"rope": "staged"}}, setting=HORIZON, lr_scale=ADOPTED)
