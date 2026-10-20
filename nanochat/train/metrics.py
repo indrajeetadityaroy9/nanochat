@@ -5,9 +5,10 @@ step's record from the latest attempt supersedes the earlier ones; records are n
 seconds), then the kind's fields. Unavailable values are null; NaN and infinities are not JSON and are never written.
 
 run (each process start): step (the first step it trains), plan (schedule.RunPlan), seed, data_seed, model
-    (model/gpt.py GPTConfig as the model was built, and mlp: its MLP class), max_norm (the gradient clip threshold;
-    null: no clipping), matrix_optimizer (train/optim.py), lr and weight_decay (as the optimizers hold them; a resumed
-    process's come from its checkpoint), stage (config.Stage as the model runs it, mixture as {corpus: row weight}).
+    (model/gpt.py GPTConfig as the model was built; mlp: its MLP class; value_embeds: the layers with value embeddings;
+    frozen: the parameters not trained), max_norm (the gradient clip threshold; null: no clipping), matrix_optimizer
+    (train/optim.py), lr and weight_decay (as the optimizers hold them; a resumed process's come from its checkpoint),
+    stage (config.Stage as the model runs it, mixture as {corpus: row weight}).
 stage (switch to the repo-level stage): step, stage.
 train (each optimizer step, 0-based): step; tokens (row positions after it, padding included); loss (mean next-token
     loss in nats over the step's valid targets, fp64); lr (LambdaLR's at the step); grad_norm (global L2 norm of the

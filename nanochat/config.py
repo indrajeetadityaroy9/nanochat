@@ -21,7 +21,7 @@ VOCAB_SIZE = 2**15
 # {group: (share, corpora)}; corpora at their group's natural row share (data.loader.mixture_weights). Code 87% as
 # DeepSeek-Coder (arXiv 2401.14196 §2); math 3% as StarCoder2's OpenWebMath share (arXiv 2402.19173 Table 4); text the
 # rest. Qwen2.5-Coder's 7B mixture ablation (arXiv 2409.12186 Table 3) is not monotone in the code share: 100:0:0
-# scored highest on its coding benchmarks, 70:20:10 next, 85:10:5 lowest (ablations/ablations.md tests 70:20:10).
+# scored highest on its coding benchmarks, 70:20:10 next, 85:10:5 lowest (ablations/ablations.md: why not tested).
 MIXTURE = {
     "code": (0.87, ["stack_edu_python", "ultradata_code_l2_python", "ultradata_stack_v3_l2_python", "kaggle_notebooks",
                     "codeforces_cots", "stack_edu_cpp", "ultradata_code_l2_cpp", "ultradata_stack_v3_l2_cpp"]),

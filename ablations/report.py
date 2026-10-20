@@ -41,6 +41,7 @@ from statsmodels.stats.weightstats import ttest_ind
 from ablations.study import (
     FACTORS,
     GENERATORS,
+    LR_SCALES,
     SEEDS,
     SHAPE_DEPTH,
     adopted,
@@ -158,17 +159,17 @@ def screen_report() -> str:
 
 
 def lr_report() -> str:
-    df = frame(lr(), lambda run: {"lr_scale": run.lr_scale})
-    scales = sorted(set(df.lr_scale) - {1.0})
-    terms = {f"x{s:.3g}": f"C(lr_scale, Treatment(1.0))[T.{s}]" for s in scales}
-    fits = {depth: ols(group, ["lr_scale"], "C(lr_scale, Treatment(1.0))", terms, 1)
-            for depth, group in df.groupby("depth")}
-    candidates, scale_of = replicated(fits), dict(zip(terms, scales, strict=True))
+    scales = {f"x{s:.3g}": s for s in LR_SCALES}  # label -> multiplier; production's is "x1"
+    df = frame(lr(), lambda run: {"lr": f"x{run.lr_scale:.3g}"})
+    contrast = "C(lr, Treatment('x1'))"
+    terms = {label: f"{contrast}[T.{label}]" for label, s in scales.items() if s != 1}
+    fits = {depth: ols(group, ["lr"], contrast, terms, 1) for depth, group in df.groupby("depth")}
+    candidates = replicated(fits)
     # at most one multiplier: the adopted one with the lowest mean code at the deciding depth
-    code = df[df.depth == max(fits)].groupby("lr_scale").code.mean()
-    decisions = {c: candidates[c] for c in sorted(candidates, key=lambda c: code[scale_of[c]])[:1]}
-    write_decisions("lr", decisions, {c: {"lr_scale": s} for c, s in scale_of.items()}, fits)
-    means = df.groupby(["depth", "lr_scale"]).mean(numeric_only=True).drop(columns="seed")
+    code = df[df.depth == max(fits)].groupby("lr").code.mean()
+    decisions = {c: candidates[c] for c in sorted(candidates, key=code.get)[:1]}
+    write_decisions("lr", decisions, {label: {"lr_scale": s} for label, s in scales.items()}, fits)
+    means = df.groupby(["depth", "lr"]).mean(numeric_only=True).drop(columns="seed")
     return "\n".join(["# Peak lr: multiples of the law's\n", "## Means over seeds\n", means.to_markdown(), "",
                       "Effect: the multiplier minus 1 (bits per byte; tokens per second for tok_per_s).\n",
                       *tables(fits), f"## Adopted\n\n{json.dumps(decisions) if decisions else 'none'}\n",
@@ -194,10 +195,10 @@ def confirm_report() -> str:
     better_on = {c: on for design in ("screen", "lr")
                  for c, on in json.loads((RESULTS / f"{design}.json").read_text())["better_on"].items()}
     baseline = frame([production(depth=SHAPE_DEPTH, seed=seed) for seed in SEEDS], lambda run: {})
-    runs = confirm()  # each adopted change's runs, one per seed
+    runs = confirm()
     lines = [f"# Confirmation at d{SHAPE_DEPTH}\n"]
-    for i, name in enumerate(adopted()):
-        change = frame(runs[i * len(SEEDS):(i + 1) * len(SEEDS)], lambda run: {})
+    for name, fields in adopted().items():
+        change = frame([r for r in runs if all(getattr(r, f) == v for f, v in fields.items())], lambda run: {})
         # adopted on a metric only for a negative (better) effect: the change's mean is tested smaller
         p = {m: ttest_ind(change[m], baseline[m], alternative="smaller")[1] for m in better_on[name]}
         lines += [f"## {name}: {'confirmed' if all(v < ALPHA for v in p.values()) else 'not confirmed'}\n",

@@ -329,13 +329,14 @@ are near zero; the probe set's results are reported on the production model.
 
 The paired comparison above tests this configuration's regime as a whole against the standard regime, and the d24
 check the production batch and lr. The pre-registered ablations (attention windows, gradient clipping, MLP activation,
-matrix optimizer, peak lr, weight decay, value embeddings, the repository stage, depth against width), each against the
-choice of DeepSeek-Coder and the code models it is compared with, their designs, decision rules and results are in
-`ablations/ablations.md`; only changes they confirm reach production.
+matrix optimizer, weight decay, value embeddings, residual scalars, the repository stage at d8 and d12; the peak lr;
+depth against width at d16), each against the choice of DeepSeek-Coder and the code models it is compared with or
+against deleting the component, their designs, decision rules and results are in `ablations/ablations.md`; only
+changes confirmed at d16 reach production.
 
 Adopted without a study, on published evidence and the pre-launch measurements: linear decay to zero continuing
-through the repository stage, one RoPE base, learned QK-norm gains (Qwen3), the x0 and residual scalars (nanochat LOG
-2026-01-11). Not studied, by expected value against GPU cost:
+through the repository stage, one RoPE base, learned QK-norm gains (Qwen3). Not studied, by expected value against
+GPU cost:
 
 - **Block Attention Residuals not adopted.** +12% d24 step time (about 10 hours of production; measured before
   `60138de`, record not kept) for a published 1.1% loss gain at 194M parameters (arXiv 2603.15031); the equal-time

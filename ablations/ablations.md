@@ -14,13 +14,15 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
 
 ### Base
 
-Every run goes through production's code: `scripts/base_train.train` (batch and peak lr by DeepSeek LLM's laws at the
-run's own compute, linear warmup and decay to zero, τ-law weight decay, the file-level then the repository stage, the
-production data order by seed) and `scripts/base_eval.loss_evaluation` (the same held-out rows for every run). A run
-differs from production only in the fields of `study.Run`. What an alternative needs lives in the main code where it is
-intertwined with it (`GPTConfig.window_pattern`; `train(run=, weight_decay=, max_norm=, matrix_optimizer=)`, the plan
-and weight decay given by the caller) and here when it is isolated (`swiglu.py`; `study.model_of` dropping the value
-embeddings; `study.plan_of` scaling the lr and dropping the repository stage). GEMMs of every width and MLP run on
+Every run goes through production's code: `scripts/base_train.train` (batch and peak lr by DeepSeek LLM's laws,
+linear warmup and decay to zero, τ-law weight decay, the file-level then the repository stage, the production data
+order by seed) and `scripts/base_eval.loss_evaluation` (the same held-out rows for every run). A run differs from
+production only in the fields of `study.Run`; its plan (batch, steps, peak lr, weight decay) is the production model's
+at the run's shape (`study.plan_of`), so the arms of a comparison match in tokens and hyperparameters. What an
+alternative needs lives in the main code where it is intertwined with it (`GPTConfig.window_pattern`;
+`train(run=, weight_decay=, max_norm=, matrix_optimizer=)`, the plan and weight decay given by the caller) and here
+when it is isolated (`swiglu.py`; `study.model_of` dropping the value embeddings or freezing the residual scalars at
+their identity; `study.plan_of` scaling the lr or dropping the repository stage). GEMMs of every width and MLP run on
 QuACK's autotuned kernels (`quack.gemm_interface`, `tuned=True`), weight gradients on cuBLAS.
 
 ### Code models against this architecture
@@ -42,8 +44,9 @@ Where production departs from the code models it is measured against, and what e
 
 ### What is tested and why
 
-A factor is tested only if a result can change production: its alternative is adoptable (no rebuild of the data or
-the decoder beyond its MLP) and its effect plausibly exceeds the screen's resolution (Power).
+A choice is tested only if a result can change production: its alternative is adoptable (no rebuild of the data or
+of the decoder beyond its MLP) or deletes a component, and its effect plausibly exceeds the design's resolution
+(Power).
 
 | Factor | Production | Alternative | Evidence for production | Why it is questioned | Production cost if adopted |
 |---|---|---|---|---|---|
@@ -51,9 +54,10 @@ the decoder beyond its MLP) and its effect plausibly exceeds the screen's resolu
 | Gradient clipping | none | global norm 1.0 | the paired comparison (`docs/h100-pretraining.md`) | the single-seed A/B (§3): clipping at 1.0 lower on all 11 corpora, −0.003 bits per byte on average; DeepSeek LLM clips at 1.0 | none |
 | MLP | ReLU², hidden 4C | SwiGLU, hidden 8C/3 (parameter-matched) | Primer (arXiv 2109.08668); nanochat LOG 2026-02-05 (SwiGLU worse at d12 and d24) | DeepSeek-Coder, Qwen2.5-Coder and Code Llama use SwiGLU | `csrc/decode.cu`'s MLP gated; step time in the run records |
 | Matrix optimizer | `torch.optim.Muon` (5 Newton-Schulz steps) | NorMuon (`dion`, as OLMo-core uses it): Polar Express, neuron-wise normalization, cautious weight decay | Moonlight (arXiv 2502.16982) | nanochat trains with it (LOG 2026-01-10); NorMuon paper (arXiv 2510.05491): 6% and 15% efficiency at 124M and 350M | none |
-| Peak lr | the law's lr as the peak | × 1.683: the peak at which linear decay to zero (mean 1/2) matches the mean of the schedule the law was fit under (0.8 + 0.1 × 0.316 + 0.1 × 0.1) | DeepSeek LLM §3.1 | the law was fit for AdamW under the multi-step schedule; production uses it as the peak of a decay with 59% of that mean lr, for Muon | none |
+| Peak lr (the lr design) | the law's lr | × 2^(k/2), k = −2..2 | DeepSeek LLM §3.1 | the law was fit for AdamW under the multi-step schedule; production uses it as the peak of linear decay to zero (59% of that schedule's mean lr), for Muon | none |
 | Weight decay | τ law: λ = 1/(η τ T) | 0.1 | the τ law (`train/optim.py`), the paired comparison | the code models' 0.1 is 5× smaller at d8 and 3× at d24 | none |
 | Value embeddings | 4 of 8 layers at d8 (12 of 24 at d24) | none | ResFormer (arXiv 2410.17897); MoVE (arXiv 2601.22887): −0.016 bits per byte at d12 | no code model uses them; they cost 4.7% of the d24 step and 12 vocabulary tables | none (decoder takes layers without them) |
+| Residual scalars | per layer x = λ_resid·x + λ_x0·x0, learned | λ_resid = 1, λ_x0 = 0, frozen (a plain residual stream) | nanochat LOG 2026-01-11 (x0: −0.004 to −0.010 bits per byte, d8–d20) | no code model uses them; the resid scalars were never ablated apart from x0 | none (deletes 2·depth parameters) |
 | Repository stage | the last 5.45% of steps at 32K on repositories | every step file-level at 8K (scored at 32K too) | Qwen2.5-Coder §3.2; DeepSeek-Coder §2 | no published ablation at this share; the stage's steps are 8% slower | none (≈ −0.4 h) |
 | Shape | width 30·depth (d24: 24 × 768) | one head narrower at the same scaling parameters (d16: 31 × 384 against 16 × 512) | MobileLLM §2.2.2 (deep and thin better at 125M and 350M) | measured on commonsense tasks, not code; nanochat uses 64·depth | per-token speed in the run records; at d24 the same move gives one head narrower at 195.1M |
 
@@ -61,17 +65,23 @@ the decoder beyond its MLP) and its effect plausibly exceeds the screen's resolu
 
 | Design | Model | Points | Runs |
 |---|---|---|---|
-| screen | d8 (8 × 256, 14.7M scaling parameters), 20 tokens per parameter (2,987 steps of 98,304 tokens) | 2^(8−4) fractional factorial over the first eight factors, generators E = BCD, F = ACD, G = ABC, H = ABD (resolution IV: main effects aliased only with three-factor interactions; Box, Hunter & Hunter, *Statistics for Experimenters*, 2nd ed., Table 6.22; built by `pydoe.fracfact`), each point twice, every run its own seed | 32 |
+| screen | d8 (8 × 256, 14.7M scaling parameters; 2,987 steps of 98,304 tokens) and d12 (12 × 384, 33.8M; 6,882 steps of 98,304), 20 tokens per parameter | at each depth a 2^(8−4) fractional factorial over the eight screen factors, generators E = BCD, F = ACD, G = ABC, H = ABD (resolution IV: main effects aliased only with three-factor interactions; Box, Hunter & Hunter, *Statistics for Experimenters*, 2nd ed., Table 6.22; built by `pydoe.fracfact`), each point twice, every run its own seed | 2 × 32 |
+| lr | d8 and d12, production | the peak lr × 0.5, 0.71, 1, 1.41, 2 | 2 × 5 × 2 seeds (two shared with the screen) |
 | shape | the d16 count (67.1M scaling parameters), 20 tokens per parameter: 16 × 512 (production rule) and 31 × 384 | one head narrower and deeper at the count | 2 × 4 seeds |
-| confirm | 16 × 512 | each factor the screen adopts at its alternative, against the shape design's 16 × 512 runs | 4 per factor |
+| confirm | 16 × 512 | each change the screen and the lr design adopt, against the shape design's 16 × 512 runs | 4 per change |
 
-Runs train one at a time, each in its own process (`python -m ablations.study screen|shape|confirm`); a run's tag is
+**Cost.** Measured production throughput (25-step runs, 2026-10-20): d8 2.30M, d12 1.20M, d16 0.74M tokens per
+second, so training takes 2.1, 9.4 and 30.2 minutes; with compilation and evaluation about 5, 13 and 36 minutes per run
+[estimate]: screen ≈ 9.6 h, lr ≈ 2.7 h, shape ≈ 4.8 h, confirm ≈ 2.4 h per adopted change, ≈ 17 h ($74 at $4.29/h)
+before confirmation.
+
+Runs train one at a time, each in its own process (`python -m ablations.study screen|lr|shape|confirm`); a run's tag is
 production's `config.run_tag` over its fields and the code it depends on (`config.CODE`, `study.py`, `swiglu.py`), so a
 result names the code that produced it. Records, in production's schemas: `artifacts/metrics/<tag>.jsonl`
-(`nanochat/train/metrics.py`: every step, every attempt; the run record holds the model, its MLP and value-embedding
-layers, the plan, lr, weight decay, clip threshold and matrix optimizer) and `artifacts/base_eval/<tag>.json`
-(`scripts/base_eval.py`, loss evaluation only); `report.py` computes every aggregate from them and writes its tables to
-`results/`.
+(`nanochat/train/metrics.py`: every step, every attempt; the run record holds the model, its MLP, value-embedding
+layers and frozen parameters, the plan, lr, weight decay, clip threshold and matrix optimizer) and
+`artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only); `report.py` computes every aggregate
+from them and writes its tables to `results/`.
 
 ### Metrics and decision rules (`report.py`)
 
@@ -80,23 +90,30 @@ layers, the plan, lr, weight decay, clip threshold and matrix optimizer) and `ar
   generation benchmarks' pass@1 is near zero at these sizes); *repo_32k*, the 32K repository bits per byte of the
   code group. **Secondary**, reported only: text, math, the repository bits per byte beyond the file-level context,
   each benchmark's solutions, tokens per second.
-- **screen:** OLS of each metric on the eight factors (−1 production, +1 alternative; 23 residual degrees of freedom;
-  two-factor interactions, aliased in groups, left to the residual); effect = 2 × coefficient. A factor is adopted
-  iff its effect is negative with Holm-adjusted p < 0.05 (Holm across the eight factors) on a primary metric, and not
-  positive with unadjusted p < 0.05 on any.
-- **shape:** OLS on the shape (contrast against 16 × 512); 31 × 384 is better by the screen's rule.
-- **confirm:** an adopted factor is confirmed iff, on each metric it was adopted for, its four d16 runs are lower than
-  the four 16 × 512 runs by a one-sided pooled t-test at p < 0.05. Only confirmed changes reach production.
+- **Rule.** At one depth a candidate is *better* iff its effect is negative with Holm-adjusted p < 0.05 (Holm across
+  the design's candidates) on a primary metric, and not positive with unadjusted p < 0.05 on any. It is *adopted* iff
+  it is better at the deepest depth of its design and its effect on each of those metrics is negative at every other
+  depth too (the result replicates one scale down).
+- **screen:** per depth, OLS of each metric on the eight factors (−1 production, +1 alternative; 23 residual degrees
+  of freedom; two-factor interactions, aliased in groups, left to the residual); effect = 2 × coefficient.
+- **lr:** per depth, OLS on the multiplier (treatment contrasts against 1); of the adopted multipliers, the one with the
+  lowest mean code bits per byte at d12.
+- **shape:** OLS on the shape (contrast against 16 × 512); 31 × 384 is adopted iff better.
+- **confirm:** an adopted change is confirmed iff, on each metric it was adopted for, its four d16 runs are lower than
+  the four 16 × 512 runs by a one-sided pooled t-test at p < 0.05. Only confirmed changes reach production, so every
+  change has held at d8, d12 and d16.
 - **Equal tokens.** Comparisons hold tokens fixed: the production run's length is set by its data (no document read
   twice), not by time. Tokens per second is reported, so each alternative's cost in production hours is explicit.
 
 **Power.** The paired comparison's six runs (two configurations × three seeds, `docs/h100-pretraining.md`) give a
 within-configuration σ of 0.0034 bits per byte on 8K code (0.0044 on solutions, 0.0036 on 32K repository); the same
 seed moved the two configurations in opposite directions (correlation −0.98 across seeds), so seeds are not blocks
-and every run has its own. A screen main effect has a standard error of 2σ/√32 = 0.0012: 80% power at an effect of
-0.0035 bits per byte (unadjusted, 23 df), 0.0047 for Holm's strictest step (α/8); at a loss–compute exponent near 0.05
-that is the gain of about 12% (16%) more compute. The shape contrast, 4 runs against 4 (6 df), has a standard error
-of σ/√2 = 0.0024 (80% power at about 0.008); confirm's one-sided test at about 0.007, if σ at d16 is d8's.
+and every run has its own. A screen main effect at one depth has a standard error of 2σ/√32 = 0.0012: 80% power at an
+effect of 0.0035 bits per byte (unadjusted, 23 df), 0.0047 for Holm's strictest step (α/8); at a loss–compute exponent
+near 0.05 that is the gain of about 12% (16%) more compute. An lr contrast, 2 runs against 2, is coarser (standard
+error σ = 0.0034): the sweep finds the optimum's side, not small differences. The shape contrast, 4 runs against 4
+(6 df), has a standard error of σ/√2 = 0.0024 (80% power at about 0.008); confirm's one-sided test at about 0.007, if
+σ at d16 is d8's. `report.py` estimates σ at each depth from the residuals.
 
 ### Not tested, and why
 
@@ -116,8 +133,11 @@ of σ/√2 = 0.0024 (80% power at about 0.008); confirm's one-sided test at abou
 - **Grouped-query attention.** Its benefit is KV-cache memory; the decoder's slots are capped at 64 by its active mask
   (`csrc/decode.cu` MAX_BATCH), and d24's cache for 64 slots of the longest benchmark request (1,158 tokens) is 5.5 GB
   (2 × 24 layers × 768 × 2 bytes per token), so no decoding throughput is to be bought.
-- **x0/residual scalars, QK norm, untied head, RoPE base, the batch law:** the published evidence and pre-launch
-  measurements in `docs/h100-pretraining.md`.
+- **Horizon.** Every design trains at 20 tokens per parameter; production trains at 490.8. The lr and batch laws carry
+  the compute and the τ law the tokens per parameter, but no design measures an effect at production's horizon: d8 at
+  490.8 tokens per parameter takes 52 minutes of training per run (36,596 steps of 196,608 tokens), 4 seeds per arm.
+- **QK norm, untied head, RoPE base, the batch law:** the published evidence and pre-launch measurements in
+  `docs/h100-pretraining.md`.
 - **Library alternatives without a measured gain at this scale** (a 2026 survey of torchtitan, OLMo-core, Megatron,
   nanotron, Marin, modded-nanogpt, nanochat): FP8 training, Liger and Cut Cross-Entropy losses, fused RMSNorm/RoPE
   libraries, DCP checkpointing, config frameworks. The LR schedule already follows torchtitan's (`LambdaLR` with a
@@ -125,8 +145,8 @@ of σ/√2 = 0.0024 (80% power at about 0.008); confirm's one-sided test at abou
 
 ### Results
 
-`results/screen.md`, `results/shape.md`, `results/confirm.md` and the screen's decisions `results/screen.json`
-(written by `report.py`); none yet.
+`results/{screen,lr,shape,confirm}.md` and the decisions `results/screen.json`, `results/lr.json` (written by
+`report.py`); none yet.
 
 ## 2. H100 implementation
 
@@ -269,7 +289,16 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
   - *NorMuon* (`dion`): one step on the 52 d8 block matrices vs the documented algorithm around dion's own Polar
     Express: at weight decay 0, median 2.6e-2 (two bf16 orthogonalizations of the same input); cautious decay applied
     to dion's own update, median 9.0e-3. Polar Express vs the exact polar factor (SVD, norm-matched): median 0.11.
-  - *Every screen alternative* (full windows, head_dim 64, clip 1.0, the 70:20:10 mixture, SwiGLU, NorMuon) at d8:
-    compiled, three optimizer steps on real rows, finite losses; the shapes' plans from 31 × 384 to 6 × 768.
-  - *Production paths:* plans unchanged by the harness (d24: 81,171 steps of 1,179,648 tokens, `repo_start` 76,743,
-    lr 9.3795e-4; d8: 2,987, 2,824, 2.7337e-3).
+  - *Every screen alternative* (full windows, clip 1.0, SwiGLU, NorMuon, weight decay 0.1, no value embeddings,
+    identity residual scalars, no repository stage) at d8: compiled, three optimizer steps on real rows, finite
+    losses; the run records hold each alternative (value-embedding layers `[]`; frozen `resid_lambdas`, `x0_lambdas`,
+    still 1 and 0 after the steps; clip 1.0; weight decay 0.1); without the repository stage the model ends at 8K and
+    `loss_evaluation` scores it at 32K. Full windows change the forward on real rows (one file-stage micro-batch: 79
+    of 3,300 segments are longer than 512 and hold 88,486 of its 98,304 tokens).
+  - *Plans:* every screen arm of a depth shares production's (d8: 2,987 steps of 98,304 tokens, `repo_start` 2,824,
+    lr 2.7337e-3, weight decay 0.548; d12: 6,882, 6,507, 2.1768e-3, 0.299); the shapes 16 × 512 (67.1M, 6,828 steps
+    of 196,608) and 31 × 384 (67.5M, 6,862). Production's d24 plan unchanged: 81,171 steps, `repo_start` 76,743.
+  - *Analysis* (`report.py` on planted effects, σ 0.0034, its metrics replaced): the screen recovers the planted code
+    effects at d12 (clip −0.0065 for −0.006, value embeddings +0.0131 for +0.012, SwiGLU +0.0036 for +0.004, the
+    null factors within ±0.002) and adopts clip alone; the lr design adopts the planted best multiplier; confirm
+    confirms both at d16.

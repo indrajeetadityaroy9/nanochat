@@ -38,7 +38,7 @@ from nanochat.config import CODE, FILE_STAGE, REPO_STAGE, run_tag
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.eval.code_eval import tasks
 from nanochat.model.gpt import GPT, gpt_config, scaling_params
-from nanochat.paths import BASE_EVAL, RESULTS
+from nanochat.paths import BASE_EVAL, LOGS, RESULTS
 from nanochat.train.optim import tau_weight_decay
 from nanochat.train.schedule import RunPlan, plan
 from scripts.base_eval import loss_evaluation, save
@@ -222,8 +222,12 @@ def main():
         execute(design[int(sys.argv[2])])
         return
     for i, run in enumerate(design):
-        if not (BASE_EVAL / f"{tag_of(run)}.json").exists():
-            subprocess.run([sys.executable, "-m", "ablations.study", sys.argv[1], str(i)], check=True)
+        tag = tag_of(run)
+        if not (BASE_EVAL / f"{tag}.json").exists():
+            # every attempt's output, a failure's traceback included, appended to the run's log
+            with (LOGS / f"{tag}.log").open("a", encoding="utf-8") as log:
+                subprocess.run([sys.executable, "-m", "ablations.study", sys.argv[1], str(i)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True)
 
 
 if __name__ == "__main__":
