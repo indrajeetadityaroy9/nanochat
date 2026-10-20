@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import torch
 
-from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_SHARE, run_tag
+from nanochat.config import CODE, FILE_STAGE, MICRO_BATCH_TOKENS, REPO_SHARE, run_tag
 from nanochat.model.gpt import GPT, gpt_config, non_embedding_flops_per_token, scaling_params
 from nanochat.train.optim import BETAS
 
@@ -60,4 +60,5 @@ if __name__ == "__main__":
     depth, ratio, seed = int(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
     with torch.device("meta"):
         run = plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=ratio)
-    print(run_tag(depth=depth, ratio=ratio, seed=seed, data_seed=seed), run.num_iterations, run.repo_start)
+    print(run_tag(depth=depth, ratio=ratio, seed=seed, data_seed=seed, variant={}, code=CODE), run.num_iterations,
+          run.repo_start)

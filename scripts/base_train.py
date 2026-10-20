@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.config import FILE_STAGE, REPO_STAGE, Stage, run_tag
+from nanochat.config import CODE, FILE_STAGE, REPO_STAGE, Stage, run_tag
 from nanochat.data.loader import PretrainingBatches, mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
@@ -189,7 +189,8 @@ def main():
     # no clipping (docs/h100-pretraining.md Regime): an infinite threshold only measures the norm
     train(model=model, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
           save_every=args.save_every, snapshot_every=args.snapshot_every,
-          tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed),
+          tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
+                      variant={}, code=CODE),
           max_norm=math.inf, file_stage=FILE_STAGE, matrix_optimizer="muon")
 
 

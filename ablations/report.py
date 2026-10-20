@@ -35,8 +35,8 @@ from ablations.study import (
     FACTORS,
     GENERATORS,
     RATIO,
-    RESULTS,
     SEEDS,
+    SHAPE_DEPTH,
     confirm,
     model_of,
     production,
@@ -44,11 +44,12 @@ from ablations.study import (
     shape,
     tag_of,
 )
-from nanochat.config import REPO_STAGE
+from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.loader import mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.eval.loss_eval import bpb, mixture_bpb
-from nanochat.paths import BASE_EVAL
+from nanochat.model.gpt import gpt_config
+from nanochat.paths import BASE_EVAL, RESULTS
 from nanochat.train.metrics import train_steps
 from nanochat.train.schedule import plan
 
@@ -96,8 +97,8 @@ def holm(p_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def screen_report() -> str:
-    df = frame(screen(), lambda run: {name: -1 if getattr(run, field) == low else 1
-                                      for name, (field, low, _) in FACTORS.items()})
+    df = frame(screen(), lambda run: {name: 1 if getattr(run, field) == level else -1
+                                      for name, (field, level) in FACTORS.items()})
     effects, se, p_raw = {}, {}, {}
     for metric in df.columns.drop([*FACTORS, "seed"]):
         fit = smf.ols(f"{metric} ~ {' + '.join(FACTORS)} + C(seed)", data=df).fit()
@@ -110,20 +111,19 @@ def screen_report() -> str:
                                          encoding="utf-8")
     letters = ", ".join(f"{chr(ord('a') + i)} = {name}" for i, name in enumerate(FACTORS))
     aliases = "\n".join(f"- {chain}" for chain in fracfact_aliasing(fracfact(GENERATORS))[0])
-    lines = [f"# Screen: d8, {len(df)} runs\n",
-             f"Design: 2^(6-2), generators {GENERATORS} ({letters}); aliasing (pydoe fracfact_aliasing):\n\n{aliases}\n",
+    lines = [f"# Screen: {len(df)} runs\n",
+             f"Design: generators {GENERATORS} ({letters}); aliasing (pydoe fracfact_aliasing):\n\n{aliases}\n",
              "Effect: alternative minus production (bits per byte; tokens per second for tok_per_s).\n",
-             "## Effects\n", effects.to_markdown(floatfmt=".5f"), "\n## Standard errors\n", se.to_markdown(floatfmt=".5f"),
-             "\n## p (primary metrics: Holm across factors)\n", p_holm.to_markdown(floatfmt=".4f"),
-             "\n## p (unadjusted)\n", p_raw.to_markdown(floatfmt=".4f"),
+             "## Effects\n", effects.to_markdown(), "\n## Standard errors\n", se.to_markdown(),
+             "\n## p (primary metrics: Holm across factors)\n", p_holm.to_markdown(),
+             "\n## p (unadjusted)\n", p_raw.to_markdown(),
              f"\n## Adopted\n\n{json.dumps(decisions) if decisions else 'none'}\n",
-             "\n## Runs\n", df.to_markdown(floatfmt=".5f")]
+             "\n## Runs\n", df.to_markdown()]
     return "\n".join(lines)
 
 
 def shape_report() -> str:
-    reference = production(depth=16, seed=0)
-    label = f"{reference.n_layer}x{reference.n_embd}"
+    label = f"{SHAPE_DEPTH}x{gpt_config(depth=SHAPE_DEPTH, stage=FILE_STAGE).n_embd}"
     df = frame(shape(), lambda run: {"shape": f"{run.n_layer}x{run.n_embd}"})
     effects, p_raw = {}, {}
     for metric in df.columns.drop(["shape", "seed"]):
@@ -136,25 +136,25 @@ def shape_report() -> str:
     decisions = adopted_by_rule(effects, p_holm, p_raw)
     means = df.groupby("shape").mean(numeric_only=True).drop(columns="seed")
     lines = [f"# Shape: depth vs width at {label}'s scaling parameters\n", "## Means over seeds\n",
-             means.to_markdown(floatfmt=".5f"), f"\n## Contrasts against {label}\n", effects.to_markdown(floatfmt=".5f"),
-             "\n## p (primary metrics: Holm across contrasts)\n", p_holm.to_markdown(floatfmt=".4f"),
+             means.to_markdown(), f"\n## Contrasts against {label}\n", effects.to_markdown(),
+             "\n## p (primary metrics: Holm across contrasts)\n", p_holm.to_markdown(),
              f"\n## Better than {label}\n\n{json.dumps(decisions) if decisions else 'none'}\n",
-             "\n## Runs\n", df.to_markdown(floatfmt=".5f")]
+             "\n## Runs\n", df.to_markdown()]
     return "\n".join(lines)
 
 
 def confirm_report() -> str:
     screen_result = json.loads((RESULTS / "screen.json").read_text())
     runs = confirm()  # each adopted factor's runs, one per seed
-    diff = (frame(runs, lambda run: {}) - frame([production(depth=16, seed=run.seed) for run in runs],
+    diff = (frame(runs, lambda run: {}) - frame([production(depth=SHAPE_DEPTH, seed=run.seed) for run in runs],
                                                 lambda run: {})).drop(columns="seed")
-    lines = ["# Confirmation at d16\n"]
+    lines = [f"# Confirmation at d{SHAPE_DEPTH}\n"]
     for i, name in enumerate(screen_result["adopted"]):
         factor = diff.iloc[i * len(SEEDS):(i + 1) * len(SEEDS)]
         signs = {m: screen_result["effects"][m][name] for m in screen_result["better_on"][name]}
         confirmed = all((factor[m] * signs[m] > 0).all() for m in signs)
         lines += [f"## {name}: {'confirmed' if confirmed else 'not confirmed'}\n",
-                  f"Screen effects: {json.dumps(signs)}\n", factor.to_markdown(floatfmt=".5f"), ""]
+                  f"Screen effects: {json.dumps(signs)}\n", factor.to_markdown(), ""]
     return "\n".join(lines)
 
 

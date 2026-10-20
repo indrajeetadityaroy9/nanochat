@@ -43,11 +43,11 @@ width and MLP run on QuACK's autotuned kernels (`quack.gemm_interface`, `tuned=T
 | confirm | 16 × 512 | each factor the screen adopts at its alternative, against the shape design's 16 × 512 runs | 2 per factor |
 
 Runs train one at a time, each in its own process (`python -m ablations.study screen|shape|confirm`); a run's tag is
-`config.run_tag` (which hashes `config.CODE`) plus its width and a hash of its fields and of `study.py` and `swiglu.py`,
-so a result names the code that produced it. Records, in production's schemas: `artifacts/metrics/<tag>.jsonl`
+production's `config.run_tag` over its fields and the code it depends on (`config.CODE`, `study.py`, `swiglu.py`), so a
+result names the code that produced it. Records, in production's schemas: `artifacts/metrics/<tag>.jsonl`
 (`nanochat/train/metrics.py`: every step, every attempt; the run record holds the model, MLP, clip threshold, matrix
-optimizer and mixture) and `artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only); `report.py` computes
-every aggregate from them.
+optimizer and mixture) and `artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only);
+`report.py` computes every aggregate from them and writes its tables to `results/`.
 
 ### Metrics and decision rules (`report.py`)
 
@@ -88,7 +88,8 @@ screen main effect has a standard error of 2σ/√32 = 0.0016: 80% power at an e
 
 ### Results
 
-`results/screen.md`, `results/shape.md`, `results/confirm.md` (written by `report.py`); none yet.
+`results/screen.md`, `results/shape.md`, `results/confirm.md` and the screen's decisions `results/screen.json`
+(written by `report.py`); none yet.
 
 ## 2. H100 implementation
 

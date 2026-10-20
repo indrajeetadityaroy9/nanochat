@@ -18,6 +18,7 @@ from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
 from nanochat.train.optim import optimizers, tau_weight_decay
 from nanochat.train.schedule import plan
+from nanochat.train.stages import max_ratio
 from scripts.base_train import optimizer_step
 
 
@@ -43,10 +44,10 @@ def main():
     stage = {"file": FILE_STAGE, "repo": REPO_STAGE}[sys.argv[4]]
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
-    # lr sets how far weights leave zero init (GEMM operands, hence power-capped clocks); Chinchilla's 20 tokens per
-    # parameter (arXiv 2203.15556 §3)
+    # production's lr and weight decay at this depth (its tokens per parameter, train/stages.py max_ratio): lr sets how
+    # far weights leave zero init (GEMM operands, hence power-capped clocks)
     with torch.device("meta"):
-        run = plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=20)
+        run = plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=max_ratio(tokenizer, depth=depth))
         orig = GPT(gpt_config(depth=depth, stage=stage))
     orig.to_empty(device=device)
     orig.init_weights(seed=0)  # fixed seeds (init, data order): every profile runs the same step
