@@ -200,8 +200,8 @@ no result here could change:
   takes 26.7% more FLOPs per token (685M against 541M) and trains 27% slower (540K against 741K tokens per second,
   measured), so an equal-token comparison gives it more compute and the d24 analogue (35 × 640) would lengthen
   production by about as much [inference].
-- **head_dim 64.** The decoder's attention is built for head_dim 128 (`csrc/qk_row.cuh` HEAD_DIM), so adoption
-  rewrites it; nanochat measured 128 better (LOG 2026-01-17).
+- **head_dim 64.** The decoder's attention is built for head_dim 128 (`config.HEAD_DIM`, compiled into its kernels),
+  so adoption rewrites it; nanochat measured 128 better (LOG 2026-01-17).
 - **Mixture.** The code metric falls with the code share by construction, and the coding gain Qwen2.5-Coder reports
   for 70:20:10 (Table 3, 7B on 5.5T tokens; non-monotone: 100:0:0 best, 85:10:5 worst) is a capability no small run
   shows; production keeps DeepSeek-Coder's 87:10:3.

@@ -3,7 +3,7 @@ The GPT: karpathy/nanochat 92d63d4 nanochat/gpt.py with the wins of its experime
 QK norm with learnable gains (arXiv 2505.09388 §2).
 - Normed token embedding, no positional embedding; RoPE over the full head (92d63d4 gpt.py:57-65).
 - Per layer x = resid_lambda x + x0_lambda x0, x0 the normed embedding (LOG 2026-01-11).
-- Attention: MHA, head_dim 128 (LOG 2026-01-17); per-head RMS norm, a per-dim gain shared across heads, then RoPE
+- Attention: MHA, head_dim config.HEAD_DIM; per-head RMS norm, a per-dim gain shared across heads, then RoPE
   (transformers modeling_qwen3.py Qwen3Attention.forward); SSSL windows; value embeddings on alternating layers behind a
   gate (ResFormer, arXiv 2410.17897; LOG 2026-01-17); FlashAttention-4 with document masking.
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from nanochat.config import ROPE_BASE, VOCAB_SIZE, Stage
+from nanochat.config import HEAD_DIM, ROPE_BASE, VOCAB_SIZE, Stage
 from nanochat.ops.cross_entropy import lm_loss, lm_losses
 from nanochat.ops.flash_attn import flash_attn
 from nanochat.ops.linear import linear, relu2_mlp
@@ -33,20 +33,15 @@ ASPECT_RATIO = 960 // 32
 @dataclass(kw_only=True)
 class GPTConfig:
     sequence_len: int
-    vocab_size: int  # rows of wte, value_embeds and lm_head
-    rope_base: float
     n_layer: int
-    n_head: int
     n_embd: int
 
 
 def gpt_config(*, depth: int, stage: Stage) -> GPTConfig:
     """nanochat's shape rule (92d63d4 scripts/base_train.py:51-52, 131-134): width ASPECT_RATIO x depth, rounded up to
-    whole 128-dim heads (LOG 2026-01-17; csrc/qk_row.cuh HEAD_DIM)."""
-    head_dim = 128
-    n_embd = -(-depth * ASPECT_RATIO // head_dim) * head_dim
-    return GPTConfig(sequence_len=stage.seq_len, vocab_size=VOCAB_SIZE, rope_base=ROPE_BASE, n_layer=depth,
-                     n_head=n_embd // head_dim, n_embd=n_embd)
+    whole heads."""
+    return GPTConfig(sequence_len=stage.seq_len, n_layer=depth,
+                     n_embd=-(-depth * ASPECT_RATIO // HEAD_DIM) * HEAD_DIM)
 
 
 def has_ve(layer_idx: int, *, n_layer: int) -> bool:
@@ -72,21 +67,20 @@ def norm(x: Tensor) -> Tensor:
 class Attention(nn.Module):
     def __init__(self, config: GPTConfig, layer_idx: int) -> None:
         super().__init__()
-        C, H = config.n_embd, config.n_head
-        self.n_head = H
+        C = config.n_embd
         self.c_q = nn.Linear(C, C, bias=False)
         self.c_k = nn.Linear(C, C, bias=False)
         self.c_v = nn.Linear(C, C, bias=False)
         self.c_o = nn.Linear(C, C, bias=False)
-        self.q_gain = nn.Parameter(torch.empty(C // H))
-        self.k_gain = nn.Parameter(torch.empty(C // H))
-        self.ve_gate = nn.Linear(C, H, bias=False) if has_ve(layer_idx, n_layer=config.n_layer) else None
+        self.q_gain = nn.Parameter(torch.empty(HEAD_DIM))
+        self.k_gain = nn.Parameter(torch.empty(HEAD_DIM))
+        self.ve_gate = nn.Linear(C, C // HEAD_DIM, bias=False) if has_ve(layer_idx, n_layer=config.n_layer) else None
 
     def forward(self, n: Tensor, ve: Tensor | None, *, cos_sin: tuple[Tensor, Tensor], window_size: int,
                 cu_seqlens: Tensor) -> Tensor:
         """n: normed stream; ve: this layer's value embeddings or None."""
         B, T, C = n.size()
-        q, k, v = (linear(n, w).view(B, T, self.n_head, -1) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
+        q, k, v = (linear(n, w).view(B, T, -1, HEAD_DIM) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once. Broadcast-sum gate
         # fused by Inductor: 0.88 vs 1.20 ms per layer and micro-batch for fp32 GEMMs (ablations/ablations.md)
         if ve is not None:
@@ -122,7 +116,7 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         self.window_sizes = layer_windows(config)
-        C, V = config.n_embd, config.vocab_size
+        C, V = config.n_embd, VOCAB_SIZE
         self.wte = nn.Embedding(V, C)
         self.blocks = nn.ModuleList([Block(config, i) for i in range(config.n_layer)])
         self.lm_head = nn.Linear(C, V, bias=False)
@@ -154,14 +148,13 @@ class GPT(nn.Module):
         self.init_buffers()
 
     def init_buffers(self) -> None:
-        """Non-checkpointed buffers: the fp32 rotary tables cos/sin (sequence_len, head_dim/2) of
-        t rope_base^(-2i/head_dim) (92d63d4 gpt.py:270-285), computed in fp64 and rounded once (an fp32 angle errs by
+        """Non-checkpointed buffers: the fp32 rotary tables cos/sin (sequence_len, HEAD_DIM/2) of
+        t ROPE_BASE^(-2i/HEAD_DIM) (92d63d4 gpt.py:270-285), computed in fp64 and rounded once (an fp32 angle errs by
         up to t 2^-24)."""
-        config, device = self.config, self.wte.weight.device
-        head_dim = config.n_embd // config.n_head
-        exponent = torch.arange(0, head_dim, 2, dtype=torch.float64, device=device) / head_dim
-        t = torch.arange(config.sequence_len, dtype=torch.float64, device=device)
-        freqs = torch.outer(t, config.rope_base ** -exponent)
+        device = self.wte.weight.device
+        exponent = torch.arange(0, HEAD_DIM, 2, dtype=torch.float64, device=device) / HEAD_DIM
+        t = torch.arange(self.config.sequence_len, dtype=torch.float64, device=device)
+        freqs = torch.outer(t, ROPE_BASE ** -exponent)
         self.cos, self.sin = freqs.cos().float(), freqs.sin().float()
 
     def set_stage(self, stage: Stage) -> None:

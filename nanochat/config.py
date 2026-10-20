@@ -1,4 +1,4 @@
-"""Run settings shared by training and evaluation: vocabulary, mixture, micro-batch, stages, run names."""
+"""Run settings shared by training and evaluation: vocabulary, head width, mixture, micro-batch, stages, run names."""
 import hashlib
 import json
 from dataclasses import dataclass
@@ -12,6 +12,9 @@ DATASET, DATASET_REVISION = "iaroy/nanochat-data", "1e711aa7b84062d026839af0224e
 
 # Ids including special tokens: nanochat's 2^15 (karpathy/nanochat 92d63d4 scripts/tok_train.py:19)
 VOCAB_SIZE = 2**15
+# Attention head width: nanochat's 128, measured better than 64 (dev/LOG.md 2026-01-17); compiled into csrc's kernels
+# (native.py), whose register arrays need it at compile time
+HEAD_DIM = 128
 # {group: (share, corpora)}; corpora at their group's natural row share (data.loader.mixture_weights). Code 87% as
 # DeepSeek-Coder (arXiv 2401.14196 §2); math 3% as StarCoder2's OpenWebMath share (arXiv 2402.19173 Table 4); text the
 # rest. Qwen2.5-Coder's 7B mixture ablation (arXiv 2409.12186 Table 3) is not monotone in the code share: 100:0:0

@@ -18,6 +18,7 @@ from typing import Literal
 import numpy as np
 import torch
 
+from nanochat.config import VOCAB_SIZE
 from nanochat.data.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX
 from nanochat.inference import syntax_constraint
 from nanochat.model.gpt import GPT
@@ -195,7 +196,7 @@ class NativeDecoder:
         # per layer (resid, x0), rounded to bf16: a 0-dim fp32 tensor times a bf16 tensor computes in bf16
         scal = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).to(torch.bfloat16).float().cpu().numpy()
         # F: c_fc is (F, C)
-        config = np.array([L, C, model.blocks[0].mlp.c_fc.weight.size(0), cfg.vocab_size, max_len, T, prompt_store],
+        config = np.array([L, C, model.blocks[0].mlp.c_fc.weight.size(0), VOCAB_SIZE, max_len, T, prompt_store],
                           dtype=np.int32)
         # the prompt store: {prompt: its pages}, the free pages (once the decoder exists), the runs started
         self.stored: dict[tuple[int, ...], Stored] = {}
@@ -214,7 +215,7 @@ class NativeDecoder:
         self.free = list(range(lib.dec_store(self.handle) // PAGE))
         # the pinned host masks decode.cu copies to the masked slots (dec_masks), a Constraint.mask per slot
         self.masks = np.ctypeslib.as_array(lib.dec_masks(self.handle),
-                                           shape=(self.batch, cfg.vocab_size // np.iinfo(np.uint32).bits))
+                                           shape=(self.batch, VOCAB_SIZE // np.iinfo(np.uint32).bits))
 
     def start(self, b: int, index: int, request: Request) -> Slot:
         """Start request `index` in slot b: from its prompt's stored K and V at its last token, else at position 0."""

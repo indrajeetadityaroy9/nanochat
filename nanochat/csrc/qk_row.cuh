@@ -15,7 +15,7 @@
 typedef __nv_bfloat16 bf16;
 
 constexpr int WARP = 32;                           /* threads per warp (CUDA C++ Programming Guide, warpSize) */
-constexpr int HEAD_DIM = 128;                      /* model/gpt.py gpt_config head_dim; compile time: register arrays */
+/* HEAD_DIM: config.HEAD_DIM, defined by native.py's nvcc command */
 constexpr int HALF = HEAD_DIM / 2;                 /* rotation pairs per head: dims i and i + HALF */
 constexpr int VEC = sizeof(uint4) / sizeof(bf16);  /* bf16 per 16-byte access */
 constexpr int QK_LANES = HALF / VEC;               /* threads per head row, one rotation pair of vectors each */

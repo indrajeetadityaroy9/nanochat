@@ -13,6 +13,7 @@ from types import ModuleType
 
 import torch
 
+from nanochat.config import HEAD_DIM
 from nanochat.paths import NATIVE
 
 CSRC = Path(__file__).resolve().parent / "csrc"
@@ -34,12 +35,12 @@ def native_library(name: str, sources: list[Path], build: Callable[[Path], None]
 
 @functools.cache
 def cuda_library(name: str) -> ctypes.CDLL:
-    """csrc/<name>.cu and qk_row.cuh built by nvcc for the current device's architecture, keyed by the nvcc command and
-    version, loaded by ctypes once per process."""
+    """csrc/<name>.cu and qk_row.cuh built by nvcc for the current device's architecture with config.HEAD_DIM, keyed by
+    the nvcc command and version, loaded by ctypes once per process."""
     major, minor = torch.cuda.get_device_capability()
     arch = f"sm_{major}{minor}"
     source = CSRC / f"{name}.cu"
-    command = ["nvcc", f"-arch={arch}", "-Xcompiler", "-fPIC", "-shared", "-o"]
+    command = ["nvcc", f"-arch={arch}", f"-DHEAD_DIM={HEAD_DIM}", "-Xcompiler", "-fPIC", "-shared", "-o"]
     version = subprocess.run(["nvcc", "--version"], capture_output=True, check=True).stdout
 
     def build(path: Path) -> None:
