@@ -344,15 +344,18 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
   over steps 0–298 0.464 (9% of steps above 1), 298–1,493 1.093 (57%), 1,493–2,987 1.522 (100%); d24 cut run
   (`d24-r490.805-s0-d0-c7c5fbbe4b31`), steps 0–42 1.866 (86%), 42–211 1.145 (83%), 211–423 0.969 (47%).
 - **The experiments' components**, 2026-10-20:
-  - *Arms*: `lr.py`'s d8 at 490.8 shares production's plan (36,656 steps of 196,608 tokens, `repo_start` 34,657, peak lr
-    1.8324e-3), its d24 at 5 likewise (3,307 steps of 294,912 tokens, `repo_start` 3,127, peak lr 1.6641e-3); the τ law
-    sets each arm's weight decay from its lr, keeping the decay's timescale as the lr moves. Production's d24 plan
-    unchanged: 81,171 steps, `repo_start` 76,743.
+  - *Arms* share production's plan at their setting: d8 at 50, 7,468 steps of 98,304 tokens (`repo_start` 7,061, peak
+    lr 2.4378e-3); d8 at 490.8, 36,656 steps of 196,608 tokens (34,657, 1.8324e-3); d24 at 5, 3,307 steps of 294,912
+    tokens (3,127, 1.6641e-3); the τ law sets each arm's weight decay from its lr, keeping the decay's timescale as the
+    lr moves. Production's d24 plan unchanged: 81,171 steps, `repo_start` 76,743.
   - *Candidate* (`model.py`, real rows, 2026-10-21): with production's fields `Candidate` equals `GPT` bitwise.
-  - *Every arm* (2026-10-22): `lr.py`'s at d8 over 490.80456005542607 (`max_ratio` of d24, 20.6 s) and at d24 over 5,
-    `value_embeds.py`'s at d16, compiled and trained 4 steps through both stages on real rows with finite losses;
-    weight decay 0.3597 at d8's peak lr (0.7194 at × 0.5, 0.1798 at × 2), 0.3914 at d24's; parameters: d8 56,627,216,
-    d24 522,252,336, d16 218,124,320 (83,890,208 without value embeddings).
+  - *Every arm* (2026-10-22): `lr.py`'s at d8 over 50 and over 490.80456005542607 (`max_ratio` of d24, 20.6 s; × 0.25
+    included) and at d24 over 5, `value_embeds.py`'s at d8 over 20 and 490.8 and at d16 over 20, compiled and trained
+    4 steps through both stages on real rows with finite losses; weight decay at d8 over 490.8: 0.3597 (1.4387 at
+    × 0.25, 0.7194 at × 0.5, 0.1798 at × 2), over 50: 0.3982, d24 over 5: 0.3914; parameters: d8 56,627,216, d24
+    522,252,336, d16 218,124,320 (83,890,208 without value embeddings).
+  - *Analysis* (planted code with its optimum at × 0.5, all three `lr.py` settings through `harness.main`, 19 records):
+    the quadratic vertices are × 0.505 (d8 over 50, 12 runs), × 0.484 (d8 over 490.8, 4) and × 0.498 (d24 over 5, 3).
   - *Production's arm, run 0 at 20 tokens per parameter* (whole run through `harness.evaluation` and `efficiency`,
     2026-10-22, 248 s): code 0.6354, solutions 0.6964, repo_32k 0.6201, repo_beyond_8k 0.4048, text 1.3619, math
     1.3498; 2.28M tokens per second; peak memory 14.0 GB.
