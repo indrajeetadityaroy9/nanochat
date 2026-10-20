@@ -6,6 +6,7 @@ of DeepSeek-Coder, Qwen2.5-Coder and Code Llama. Adopting it also needs csrc/dec
     python -m ablations.mlp    (ablations/harness.py; ablations.md)
 """
 from ablations.harness import ARCHITECTURE, main
+from ablations.lr import ADOPTED
 
 if __name__ == "__main__":
-    main(alternatives={"swiglu": {"mlp": "swiglu"}}, setting=ARCHITECTURE)
+    main(alternatives={"swiglu": {"mlp": "swiglu"}}, settings=ARCHITECTURE, lr_scale=ADOPTED)

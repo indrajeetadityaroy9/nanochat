@@ -22,22 +22,40 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
   `scripts/base_eval.loss_evaluation` (the same held-out rows for every run); its model is `model.Candidate`, which is
   production's GPT unless a structural field differs. Its plan (batch, steps, peak lr) is the production model's at
   the setting (`harness.plan_of`), so arms match in tokens and hyperparameters.
-- **Settings.** d8 (14.7M scaling parameters), 8 seeds per arm. The architecture experiments at Chinchilla's 20 tokens
-  per parameter (2,987 steps of 98,304 tokens); the regime experiments (lr, clipping) at 100 (14,937 steps), about
-  √(20 × 490.8) = 99, the geometric midpoint toward the horizon production trains at.
+- **Settings** (`harness.REGIME`, `harness.ARCHITECTURE`). Regime (lr, clipping): d8 (14.7M scaling parameters) at
+  100 tokens per parameter (14,937 steps of 98,304 tokens), about √(20 × 490.8) = 99, the geometric midpoint toward
+  the horizon production trains at; 8 seeds per arm. Architecture: a two-rung ladder at Chinchilla's 20, d8 (2,987
+  steps; 8 seeds) and d16 (67.1M, 1/2.9 of d24; 6,828 steps of 196,608 tokens; 4 seeds). d8's shape is far from
+  d24's (2 heads of 128 against 6; the untied head 57% of its scaling parameters against 13%), architecture rankings
+  can change with scale (Tay et al., arXiv 2207.10551), and published gains shrink with it (value embeddings: −0.016
+  at d12, −0.010 at d20, MoVE; matrix optimizers: 1.4× at 130M, 1.1× at 1.2B, Wen et al., arXiv 2509.02046), so an
+  architecture effect is read at d16 with its direction across the rungs. For data recipes, a single proxy 7× below
+  the target in parameters picks the target's better of two in about 80% of pairs, best with continuous likelihood
+  metrics such as bits per byte (DataDecide, arXiv 2504.11393); d16 is 2.9× below d24. No rung at d24: one run at 20
+  tokens per parameter is 3.9B tokens, 3.4 h at its measured 318K tokens per second.
+- **Order.** `lr.py` first; the others train at its adopted multiplier, `lr.ADOPTED`, so each compares against a tuned
+  baseline (under-tuned baselines inflate gains: Kaddour et al., arXiv 2307.06440; Wen et al.). The multiplier found
+  at d8 and 100 tokens per parameter applies at every setting: the law already scales the lr with compute (DeepSeek
+  LLM §3.1), and the optimal lr's horizon exponent is constant across model sizes (Bjorck et al., arXiv 2409.19913);
+  that its correction transfers is an assumption. Alternatives train at production's lr; one whose optimum lies a
+  factor s away loses about ½·k·(ln s)², k the curvature of code against ln lr that `lr.py`'s three points give.
 - **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
   production's corpus weights, the decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled (the benchmarks' pass@1 is near zero at this size). *repo_32k*: 32K
   repository rows of the code group; *repo_beyond_8k*: the same rows' positions past 8,192, the context only the
   repository stage trains. *text*, *math*; tokens per second (median over training steps). Efficiency
   (`harness.efficiency`, from the run's records): parameters, non-embedding FLOPs per token, peak memory.
-- **Analysis** (manual, from `results/<experiment>.json`): per measure the alternative's mean minus production's, the
-  two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`). The pre-registered
-  criterion: an alternative is adopted iff its code is lower with p < 0.05 after Benjamini-Hochberg over the six
-  alternatives of the five experiments (scipy `false_discovery_control`: at most 5% of adoptions false in
-  expectation), and neither solutions nor repo_32k is higher with p < 0.05; per experiment, of its adopted
-  alternatives, the one with the lowest code. An adoption's production cost is read from its tokens per second and
-  efficiency.
+- **Analysis** (manual, from `results/<experiment>.json`, per setting): per measure the alternative's mean minus
+  production's, the two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`). The
+  pre-registered criterion: an alternative is adopted iff its code is lower with p < 0.05 after Benjamini-Hochberg over
+  the family (scipy `false_discovery_control`: at most 5% of adoptions false in expectation; nine tests: three regime
+  alternatives, three architecture alternatives at two rungs) at some setting, its code difference has the same sign
+  at both rungs (architecture), and neither solutions nor repo_32k is higher with p < 0.05 at any setting; per
+  experiment, of its adopted alternatives, the one with the lowest code. `lr.ADOPTED` is set from `results/lr.json`
+  by the same criterion before the others run; a best multiplier at the grid's edge extends the grid by a factor of 2
+  first. An alternative's cost converts to bits per byte as 0.05 · L · ln r (L production's code, r production's
+  tokens per second over the alternative's; Kaplan et al., arXiv 2001.08361 §1.2: loss ∝ C^−0.050), reported beside
+  its difference.
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 ### Reference code models
@@ -77,15 +95,18 @@ the reference code models or the evidence leaves the choice open, and a result c
 
 **Power.** The paired comparison's six runs (two configurations × three seeds, d8 at 20 tokens per parameter,
 `docs/h100-pretraining.md`) give a within-configuration σ of 0.0034 bits per byte on code (0.0044 on solutions, 0.0036
-on 32K repository). 8 runs against 8 (14 df) have a standard error of σ/2 = 0.0017: 80% power at an effect of 0.0051
-bits per byte, about the gain of 19% more compute at a loss–compute exponent near 0.05. Each experiment's records
-give the observed spread.
+on 32K repository). d8, 8 runs against 8 (14 df): standard error σ/2 = 0.0017, 80% power at an effect of 0.0051 bits
+per byte, about the gain of 19% more compute at a loss–compute exponent of 0.05. d16, 4 against 4 (6 df) if σ is
+d8's: standard error 0.71σ = 0.0024, 80% power at 0.008; the sign of a 0.005 effect wrong in 2% of experiments
+(Φ(−0.005/0.0024)). Each experiment's records give the observed spread at each rung.
 
-**Cost** (measured whole runs: child process, compilation, both stages, loss evaluation). A d8 run at 20 tokens per
-parameter took 234 s, one at 100 took 758 s (659 s training at 2.30M tokens per second). Each arm's d8 throughput
-relative to production's 2.29M tokens per second (file-level steps 10–29, real rows, §2): SwiGLU −5.1%, no value
-embeddings +4.2%, the others within ±1%. Architecture: production and three alternatives, 32 runs ≈ 2.1 h; regime:
-production and three alternatives, 32 runs ≈ 6.7 h; ≈ 8.8 h ($38 at $4.29/h).
+**Cost** (measured whole d8 runs: child process, compilation, both stages, loss evaluation). A d8 run at 20 tokens per
+parameter took 234 s, one at 100 took 758 s (659 s training at 2.30M tokens per second). d16's step: 264 ms per
+196,608 tokens (745.6K tokens per second, peak 34.3 GiB, 2026-10-22), 30 minutes of training per run, ≈ 35 minutes
+whole [estimate: d8's overhead scaled]. Each arm's d8 throughput relative to production's 2.29M tokens per second
+(file-level steps 10–29, real rows, §2): SwiGLU −5.1%, no value embeddings +4.2%, the others within ±1%. `lr.py`:
+24 runs ≈ 5.1 h; then `clip.py`: 8 runs ≈ 1.7 h (production's arm is `lr.py`'s at the adopted multiplier);
+architecture: 32 d8 runs ≈ 2.1 h and 16 d16 runs ≈ 9.3 h; ≈ 18.2 h ($78 at $4.29/h).
 
 **Records.** A run's tag is production's `config.run_tag` over its fields and the code it depends on (`config.CODE`,
 `harness.py`, `model.py`, `swiglu.py`), so a result names the code that produced it, and production's arm at a
@@ -95,8 +116,8 @@ setting trains once for every experiment there. Per run, in production's schemas
 memory), `artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only) and
 `artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment computes its aggregates
 from them: `results/<experiment>.jsonl` (schema 1, a record per run: arm, tag, fields, measures, efficiency) and
-`results/<experiment>.json` (the setting, seeds, and per alternative its fields and per measure difference, p and
-confidence interval).
+`results/<experiment>.json` (per setting: depth, tokens per parameter, seeds, the lr multiplier, and per alternative
+its fields and per measure difference, p and confidence interval).
 
 ### Not tested, and why
 
@@ -105,6 +126,10 @@ no result here could change:
 
 - **Weight decay.** The τ law (Power Lines, arXiv 2505.13738) is the regime's documented choice, tested with the
   regime as a whole by the paired comparison.
+- **Warmup.** 2/(1 − β₂) = 40 steps (Ma & Yarats, arXiv 1910.04209): 0.27% of a regime run, 0.05% of production.
+  Warmup's benefit is a larger stable peak lr (Kalra & Barkeshli, arXiv 2406.09405) by bounding early update size,
+  which normalized matrix updates such as Muon's already bound (Kosson et al., arXiv 2410.23922); `lr.py`'s × 2 arm
+  probes that margin, its per-step loss and gradient norms showing any early instability.
 - **The repository stage's schedule.** The linear decay continues through it, as DeepSeek-Coder (§3.6) and
   Qwen2.5-Coder continue theirs; re-warming (Gupta et al., arXiv 2308.04014) is measured for continued pretraining
   after a finished schedule.

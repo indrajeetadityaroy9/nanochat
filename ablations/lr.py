@@ -3,10 +3,15 @@ Peak lr. Production: DeepSeek LLM's law eta = 0.3118 C^-0.125 (arXiv 2401.02954 
 peak lr, adopted without a study (docs/h100-pretraining.md). Alternatives: it halved and doubled. The law was fit for
 AdamW under a multi-step schedule holding the peak for 80% of tokens; production applies it to Muon (matched to AdamW's
 update RMS, train/optim.py) as the peak of linear decay to zero, whose mean lr is 59% of that schedule's.
+Runs first: the other experiments train at ADOPTED (ablations.md, Order).
 
     python -m ablations.lr    (ablations/harness.py; ablations.md)
 """
 from ablations.harness import REGIME, main
 
+# Peak lr the other experiments train at, in units of the law's: the law's own, until results/lr.json adopts an
+# alternative's (ablations.md, Analysis)
+ADOPTED = 1.0
+
 if __name__ == "__main__":
-    main(alternatives={"lr x0.5": {"lr_scale": 0.5}, "lr x2": {"lr_scale": 2.0}}, setting=REGIME)
+    main(alternatives={"lr x0.5": {"lr_scale": 0.5}, "lr x2": {"lr_scale": 2.0}}, settings=REGIME, lr_scale=1.0)

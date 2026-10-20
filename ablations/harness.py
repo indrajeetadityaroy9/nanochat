@@ -46,13 +46,13 @@ from scripts.base_train import train
 
 # Chinchilla's compute-optimal tokens per parameter (arXiv 2203.15556 §3)
 CHINCHILLA = 20
-# (depth, tokens per scaling parameter): the architecture experiments' d8 (14.7M scaling parameters) at CHINCHILLA; the
-# regime experiments' d8 at 100, about sqrt(20 x 490.8) = 99, the geometric midpoint between CHINCHILLA and production's
-# ratio (runs/h100.sh), toward the horizon a regime is chosen for
-ARCHITECTURE = (8, CHINCHILLA)
-REGIME = (8, 100)
-# Seeds per arm (ablations.md, Power)
-SEEDS = range(8)
+# Settings (depth, tokens per scaling parameter, seeds). Architecture: a two-rung ladder at CHINCHILLA, d8 (14.7M
+# scaling parameters) and d16 (67.1M, 1/2.9 of production's d24), the direction of an effect checked across scale
+# (Tay et al., arXiv 2207.10551: architecture rankings change with scale); regime: d8 at 100, about
+# sqrt(20 x 490.8) = 99, the geometric midpoint between CHINCHILLA and production's ratio (runs/h100.sh), toward the
+# horizon a regime is chosen for. Seeds: ablations.md, Power
+ARCHITECTURE = ((8, CHINCHILLA, range(8)), (16, CHINCHILLA, range(4)))
+REGIME = ((8, 100, range(8)),)
 # The conventional significance level (Fisher, Statistical Methods for Research Workers, 1925, §20): the confidence
 # intervals' 1 - ALPHA
 ALPHA = 0.05
@@ -75,10 +75,11 @@ class Run:
     seed: int            # init and data order
 
 
-def production(*, depth: int, ratio: float, seed: int) -> Run:
-    """Production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio."""
-    return Run(n_layer=depth, ratio=ratio, lr_scale=1.0, max_norm=math.inf, mlp="relu2", value_embeds="alternating",
-               rope="one", seed=seed)
+def production(*, depth: int, ratio: float, lr_scale: float, seed: int) -> Run:
+    """Production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio, its peak lr
+    `lr_scale` times the plan's."""
+    return Run(n_layer=depth, ratio=ratio, lr_scale=lr_scale, max_norm=math.inf, mlp="relu2",
+               value_embeds="alternating", rope="one", seed=seed)
 
 
 def fields(run: Run) -> dict:
@@ -163,16 +164,18 @@ def compare(alternative: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).T
 
 
-def main(*, alternatives: dict[str, dict], setting: tuple[int, float]) -> None:
-    """Run the calling experiment (python -m ablations.<experiment>): production at `setting` and an arm per
-    alternative {name: Run fields}, on SEEDS; then compare each alternative with production."""
+def main(*, alternatives: dict[str, dict], settings: tuple[tuple[int, float, range], ...], lr_scale: float) -> None:
+    """Run the calling experiment (python -m ablations.<experiment>): at each setting (depth, tokens per scaling
+    parameter, seeds), production at peak lr `lr_scale` times the plan's and an arm per alternative {name: Run fields};
+    then compare each alternative with production at each setting."""
     module = sys.modules["__main__"].__spec__.name
     experiment = module.rsplit(".", 1)[1]
-    depth, ratio = setting
-    baseline = [production(depth=depth, ratio=ratio, seed=seed) for seed in SEEDS]
-    arms = {"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
-                                       for name, changes in alternatives.items()}
-    runs = [run for arm in arms.values() for run in arm]
+    cells = []
+    for depth, ratio, seeds in settings:
+        baseline = [production(depth=depth, ratio=ratio, lr_scale=lr_scale, seed=seed) for seed in seeds]
+        cells.append({"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
+                                                 for name, changes in alternatives.items()})
+    runs = [run for arms in cells for arm in arms.values() for run in arm]
     if len(sys.argv) == 2:
         execute(runs[int(sys.argv[1])])
         return
@@ -182,16 +185,20 @@ def main(*, alternatives: dict[str, dict], setting: tuple[int, float]) -> None:
             with (LOGS / f"{tag}.log").open("a", encoding="utf-8") as log:
                 subprocess.run([sys.executable, "-m", module, str(i)], stdout=log, stderr=subprocess.STDOUT,
                                check=True)
-    frames = {name: pd.DataFrame([evaluation(run) for run in arm], index=pd.Index(map(tag_of, arm), name="tag"))
-              for name, arm in arms.items()}
+    summaries = []
     with (RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f:
-        for name, arm in arms.items():
-            for run in arm:
-                tag = tag_of(run)
-                f.write(json.dumps({"schema": SCHEMA, "experiment": experiment, "arm": name, "tag": tag,
-                                    "fields": fields(run), "evaluation": frames[name].loc[tag].to_dict(),
-                                    "efficiency": efficiency(run)}, allow_nan=False) + "\n")
-    (RESULTS / f"{experiment}.json").write_text(json.dumps(
-        {"setting": {"depth": depth, "tokens_per_param": ratio}, "seeds": len(SEEDS),
-         "alternatives": {name: {"fields": changes} | compare(frames[name], frames["production"]).to_dict()
-                          for name, changes in alternatives.items()}}, allow_nan=False), encoding="utf-8")
+        for (depth, ratio, seeds), arms in zip(settings, cells, strict=True):
+            frames = {name: pd.DataFrame([evaluation(run) for run in arm],
+                                         index=pd.Index(map(tag_of, arm), name="tag")) for name, arm in arms.items()}
+            for name, arm in arms.items():
+                for run in arm:
+                    tag = tag_of(run)
+                    f.write(json.dumps({"schema": SCHEMA, "experiment": experiment, "arm": name, "tag": tag,
+                                        "fields": fields(run), "evaluation": frames[name].loc[tag].to_dict(),
+                                        "efficiency": efficiency(run)}, allow_nan=False) + "\n")
+            summaries.append({"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds), "lr_scale": lr_scale,
+                              "alternatives": {name: {"fields": changes}
+                                               | compare(frames[name], frames["production"]).to_dict()
+                                               for name, changes in alternatives.items()}})
+    (RESULTS / f"{experiment}.json").write_text(json.dumps({"settings": summaries}, allow_nan=False),
+                                                encoding="utf-8")
