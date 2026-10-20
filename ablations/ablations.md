@@ -4,9 +4,9 @@ Everything measured to choose this repository's architecture, training regime an
 that measures it. Two kinds:
 
 - **Architecture and regime** (§1): pre-registered experiments, one file per decision that `docs/h100-pretraining.md`
-  records without a study of its own and that departs from the reference code models or that the evidence leaves
-  open, on one shared mechanism (`harness.py`, `model.py`), whose runs train and evaluate through the production code.
-  Not yet run.
+  records without a study of its own and whose result would change production: the peak lr and value embeddings, on
+  one shared mechanism (`harness.py`, `model.py`) whose runs train and evaluate through the production code. Not yet
+  run.
 - **H100 implementation** (§2): kernel and throughput measurements that chose each op (`profile_step.py`), and the
   parity records of the code paths (§3).
 
@@ -16,52 +16,45 @@ H100 80GB HBM3 SXM5 (700 W cap), image `nanochat` (NGC 26.09), bf16, compiled as
 
 ### Method
 
-- **Arms.** An experiment is production and one arm per alternative, each on the same seeds; an arm differs from
-  production only in the fields of `harness.Run`. Every run goes through production's code: `scripts/base_train.train`
-  (the file-level then the repository stage, the production data order by seed, τ-law weight decay) and
-  `scripts/base_eval.loss_evaluation` (the same held-out rows for every run); its model is `model.Candidate`, which is
-  production's GPT unless a structural field differs. Its plan (batch, steps, peak lr) is the production model's at
-  the setting (`harness.plan_of`), so arms match in tokens and hyperparameters.
-- **Settings** (`harness.HORIZON`, `harness.WIDTH`), one per experiment by what its effect depends on; 4 seeds per
-  arm. *HORIZON*, for the lr, clipping and the RoPE base: d8 (14.7M scaling parameters) at 100 tokens per parameter
-  (14,937 steps of 98,304 tokens), about √(20 × 490.8) = 99, the geometric midpoint toward production's horizon. The
-  optimal lr's dependence on training length has the same exponent across model sizes (Bjorck et al., arXiv
-  2409.19913) and Muon's optimum moves little with width (Essential AI, arXiv 2505.02222, whose telescoping search
-  sweeps most broadly at the smallest width); training instabilities and their mitigations, clipping's subject,
-  reproduce in small models (Wortsman et al., arXiv 2309.14322); the RoPE base a context needs is set by head size and
-  context length (Men et al., arXiv 2405.14591), equal at d8 and d24, and this repository stage trains 80.1M tokens
-  (815 steps), more than d16's at 20 (73.1M), in a third of the run time. *WIDTH*, for value embeddings and SwiGLU:
-  d16 (67.1M, 1/2.9 of d24) at Chinchilla's 20 (6,828 steps of 196,608 tokens). Their effects depend on width and
-  parameter share, and d8's shape is far from d24's (2 heads of 128 against 6; the untied head 57% of its scaling
-  parameters against 13%; value-embedding tables 2.3× its scaling parameters against 1.55×); value embeddings' gain
-  shrinks with scale (−0.016 at d12, −0.010 at d20, MoVE) and nanochat's SwiGLU result spans d12 to d24.
-  Architecture rankings can change with scale (Tay et al., arXiv 2207.10551); for data recipes, a single proxy 7×
-  below the target in parameters picks the target's better of two in about 80% of pairs, best with continuous
-  likelihood metrics such as bits per byte (DataDecide, arXiv 2504.11393). No setting at d24: one run at 20 tokens
-  per parameter is 3.9B tokens, 3.4 h at its measured 318K tokens per second.
-- **Order.** `lr.py` first; the others train at its adopted multiplier, `lr.ADOPTED`, so each compares against a tuned
-  baseline (under-tuned baselines inflate gains: Kaddour et al., arXiv 2307.06440; Wen et al., arXiv 2509.02046). The
-  multiplier found at HORIZON applies at WIDTH too: the law already scales the lr with compute (DeepSeek LLM §3.1);
-  that its correction transfers is an assumption. Alternatives train at production's lr; one whose optimum lies a
-  factor s away loses about ½·k·(ln s)², k the curvature of code against ln lr that `lr.py`'s three points give.
+- **Arms.** An experiment is production and one arm per alternative at each of its settings, each on the same seeds;
+  an arm differs from production only in the fields of `harness.Run`. Every run goes through production's code:
+  `scripts/base_train.train` (the file-level then the repository stage, the production data order by seed, τ-law
+  weight decay) and `scripts/base_eval.loss_evaluation` (the same held-out rows for every run); its model is
+  `model.Candidate`, which is production's GPT unless `value_embeds` differs. Its plan (batch, steps, peak lr) is the
+  production model's at the setting (`harness.plan_of`), so arms match in tokens and hyperparameters, and every run
+  completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
+  compared before its decay, where loss curves cross and rankings flip (Wen et al., arXiv 2509.02046; Hägele et al.,
+  arXiv 2405.18392).
+- **Settings.** `lr.py` brackets production (d24 at 490.8 tokens per scaling parameter) from both sides, one seed per
+  arm: its horizon at d8 (36,656 steps of 196,608 tokens, C = 7.0e17) and its width at d24 over 5 tokens per parameter
+  (3,307 steps of 294,912 tokens, C = 1.5e18), the longest d24 run three arms afford. The optimal lr falls with
+  training length with an exponent constant across model sizes (Bjorck et al., arXiv 2409.19913), so d8 at
+  production's ratio measures the horizon effect; Muon's optimum moves little with width (Essential AI, arXiv
+  2505.02222), which d24's short run checks at production's width. Both lie inside the compute range the law was fit
+  on (1e17 to 2e19 FLOPs; production: 1.5e20). `value_embeds.py`: d16 (67.1M scaling parameters, 1/2.9 of d24) at
+  Chinchilla's 20, 4 seeds per arm: value embeddings' gain shrinks with scale (−0.016 at d12, −0.010 at d20, MoVE)
+  and d8's tables are 2.3× its scaling parameters against d24's 1.55×. Architecture rankings can change with scale
+  (Tay et al., arXiv 2207.10551); for data recipes a single proxy 7× below the target picks the target's better of two
+  in about 80% of pairs, best with likelihood metrics such as bits per byte (DataDecide, arXiv 2504.11393).
+- **Order.** `lr.py` first; `value_embeds.py` trains at its adopted multiplier, `lr.ADOPTED`, so it compares against a
+  tuned baseline (under-tuned baselines inflate gains: Kaddour et al., arXiv 2307.06440; Wen et al.).
 - **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
   production's corpus weights, the decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled (the benchmarks' pass@1 is near zero at this size). *repo_32k*: 32K
   repository rows of the code group; *repo_beyond_8k*: the same rows' positions past 8,192, the context only the
   repository stage trains. *text*, *math*; tokens per second (median over training steps). Efficiency
   (`harness.efficiency`, from the run's records): parameters, non-embedding FLOPs per token, peak memory.
-- **Analysis** (manual, from `results/<experiment>.json`): per measure the alternative's mean minus production's, the
-  two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`; pooled with equal arm
-  sizes is robust to unequal variances). Unpaired although arms share seeds: the six-run comparison's per-pair
-  differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048), and a paired test keeps 3
-  of 6 degrees of freedom. The pre-registered criterion: an alternative is adopted iff its code is lower with p < 0.05
-  after Benjamini-Hochberg over its family (scipy `false_discovery_control`: at most 5% of adoptions false in
-  expectation) and neither solutions nor repo_32k is higher with p < 0.05; per experiment, of its adopted
-  alternatives, the one with the lowest code. Two families, in order: `lr.py`'s two alternatives, which set
-  `lr.ADOPTED` (a best multiplier at the grid's edge extends the grid by a factor of 2 first); then the other four
-  (clipping, RoPE base, value embeddings, SwiGLU). An alternative's cost converts to bits per byte as 0.05 · L · ln r
-  (L production's code, r production's tokens per second over the alternative's; Kaplan et al., arXiv 2001.08361 §1.2:
-  loss ∝ C^−0.050), reported beside its difference.
+- **Analysis** (manual, from `results/<experiment>.json` and `.jsonl`), pre-registered. *lr*: per setting, code
+  against ln lr over the three arms. An alternative multiplier is adopted iff at both settings its code is below
+  ×1's by more than 1.96 · √2 · σ = 0.0094 (σ = 0.0034, Power: the 95% bound on the difference of two single runs)
+  and neither solutions nor repo_32k is higher by as much; otherwise the law stands. *Value embeddings*: per measure
+  the difference of means, the two-sided pooled t-test's p and the difference's 95% confidence interval (scipy
+  `ttest_ind`; pooled with equal arm sizes is robust to unequal variances). They are removed iff code without them is
+  not higher with p < 0.05 and its mean difference is below the compute their removal frees, 0.05 · L · ln r (L
+  production's code, r the alternative's tokens per second over production's; Kaplan et al., arXiv 2001.08361 §1.2:
+  loss ∝ C^−0.050); otherwise they stay, with their gain and its interval reported.
+  Unpaired although arms share seeds: the six-run comparison's per-pair differences (sd 0.0065) show no gain from
+  pairing over independent runs (√2 σ = 0.0048), and a paired test keeps 3 of 6 degrees of freedom.
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 ### Reference code models
@@ -88,42 +81,36 @@ level, annealing data, GitHub stars). None ablates architecture details such as 
 
 ### Experiments
 
-One per decision `docs/h100-pretraining.md` records without a study of its own, kept where production departs from
-the reference code models or the evidence leaves the choice open, and a result could change production:
+One per decision `docs/h100-pretraining.md` records without a study of its own whose result would change production
+(the rest: Not tested):
 
-| File | Setting | Production (the recorded decision) | Alternative | Production cost if adopted |
+| File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
-| `lr.py` | HORIZON | DeepSeek LLM's law (§3.1) as the peak lr, adopted without a study | × 0.5 and × 2: the law was fit for AdamW under a schedule holding the peak for 80% of tokens; production applies it to Muon as the peak of linear decay to zero | none |
-| `clip.py` | HORIZON | no clipping, "the regime choice the evidence leaves least settled" | global norm 1.0 (DeepSeek LLM §2.3), every reference model's; a single-seed A/B had it lower on all 11 corpora by 0.003 (§3) | none |
-| `rope.py` | HORIZON | one RoPE base, 10^6, in both stages (Qwen2.5-Coder's repository-stage base) | 10^4 at 8K, raised to 10^6 at 32K (Code Llama §2.4, the reference ablation above) | none |
-| `value_embeds.py` | WIDTH | value embeddings (MoVE: −0.016 at d12), absent from every reference model | none | −4.7% of the d24 step, 12 vocabulary tables fewer |
-| `mlp.py` | WIDTH | ReLU² (Primer; nanochat LOG 2026-02-05: SwiGLU worse at d12 and d24) | SwiGLU, hidden 8C/3, parameter-matched (`swiglu.py`), the reference models' MLP | `csrc/decode.cu`'s MLP gated |
+| `lr.py` | d8 at 490.8, d24 at 5; 1 seed | DeepSeek LLM's law (§3.1) as the peak lr, adopted without a study | × 0.5 and × 2: the law was fit for AdamW under a schedule holding the peak for 80% of tokens; production applies it to Muon as the peak of linear decay to zero, 7.5× beyond the compute it was fit on | none |
+| `value_embeds.py` | d16 at 20; 4 seeds | value embeddings (MoVE: −0.016 at d12), absent from every reference model; 302M parameters, 1.55× the scaling parameters | none | −4.7% of the d24 step, 12 vocabulary tables fewer |
 
 **Power.** The paired comparison's six runs (two configurations × three seeds, d8 at 20 tokens per parameter,
 `docs/h100-pretraining.md`) give a within-configuration σ of 0.0034 bits per byte on code (0.0044 on solutions, 0.0036
-on 32K repository). 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an effect of 0.008 bits per
-byte, about the gain of 29% more compute at a loss–compute exponent of 0.05; 8 against 8 would reach 0.0051 for twice
-the runs. The effects published for the tested choices (value embeddings: 0.010 to 0.016, MoVE) exceed 0.008;
-smaller ones fall below what this budget resolves, and their decisions rest on the cited evidence. d16's σ is
-unmeasured: its production arm's four runs give it.
+on 32K repository). Value embeddings, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an effect
+of 0.008, below the published 0.010 to 0.016; d16's σ is the production arm's four runs'. lr, one run per arm: a
+multiplier is adopted only for a difference above 0.0094 at both settings; smaller lr effects leave the law in place.
 
-**Cost** (measured: whole runs, child process, compilation, both stages, loss evaluation; §2). A d8 run at 100 tokens
-per parameter takes 758 s (659 s training, 91 s loss evaluation); a d16 run at 20 about 35 minutes (30 minutes
-training at 745.6K tokens per second, 299 s loss evaluation). Each arm's d8 throughput relative to production's 2.29M
-tokens per second: SwiGLU −5.1%, no value embeddings +4.2%, the others within ±1%. HORIZON: production and four
-alternatives, 20 runs ≈ 4.2 h (`clip.py`'s and `rope.py`'s production arm is `lr.py`'s at the adopted multiplier);
-WIDTH: production and two alternatives, 12 runs ≈ 7.1 h; ≈ 11.3 h ($48 at $4.29/h).
+**Cost** (measured: whole runs, child process, compilation, both stages, loss evaluation; §2). d8 at 490.8: about
+54 minutes per run (52 minutes training at 2.29M tokens per second, 91 s evaluation); d24 at 5: about 65 minutes (52
+minutes training at 311K tokens per second, 711 s evaluation); d16 at 20: about 35 minutes (30 minutes training at
+746K tokens per second, 299 s evaluation). `lr.py`: 6 runs ≈ 6.0 h; `value_embeds.py`: 8 runs ≈ 4.7 h; ≈ 10.7 h ($46
+at $4.29/h).
 
 **Records.** A run's tag is production's `config.run_tag` over its fields and the code it depends on (`config.CODE`,
-`harness.py`, `model.py`, `swiglu.py`), so a result names the code that produced it, and production's arm at a
-setting trains once for every experiment there. Per run, in production's schemas: `artifacts/metrics/<tag>.jsonl`
-(`nanochat/train/metrics.py`: every step and attempt; the run record holds the model config, the run's fields as
-`variant`, parameters, FLOPs per token, the clip threshold, the plan, lr and weight decay; the end record the peak
-memory), `artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss evaluation only) and
-`artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment computes its aggregates
-from them: `results/<experiment>.jsonl` (schema 1, a record per run: arm, tag, fields, measures, efficiency) and
-`results/<experiment>.json` (the commit, depth, tokens per parameter, seeds, the lr multiplier, and per alternative
-its fields and per measure difference, p and confidence interval).
+`harness.py`, `model.py`), so a result names the code that produced it, and an arm shared by experiments trains once.
+Per run, in production's schemas: `artifacts/metrics/<tag>.jsonl` (`nanochat/train/metrics.py`: every step and
+attempt; the run record holds the model config, the run's fields as `variant`, parameters, FLOPs per token, the plan,
+lr and weight decay; the end record the peak memory), `artifacts/base_eval/<tag>.json` (`scripts/base_eval.py`, loss
+evaluation only) and `artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment
+computes its aggregates from them: `results/<experiment>.jsonl` (schema 1, a record per run: arm, tag, fields,
+measures, efficiency) and `results/<experiment>.json` (the commit and, per setting, depth, tokens per parameter,
+seeds, the lr multiplier, and per alternative its fields and per measure difference, p and confidence interval, null
+for one seed).
 
 ### Not tested, and why
 
@@ -132,10 +119,21 @@ no result here could change:
 
 - **Weight decay.** The τ law (Power Lines, arXiv 2505.13738) is the regime's documented choice, tested with the
   regime as a whole by the paired comparison.
-- **Warmup.** 2/(1 − β₂) = 40 steps (Ma & Yarats, arXiv 1910.04209): 0.27% of a regime run, 0.05% of production.
-  Warmup's benefit is a larger stable peak lr (Kalra & Barkeshli, arXiv 2406.09405) by bounding early update size,
-  which normalized matrix updates such as Muon's already bound (Kosson et al., arXiv 2410.23922); `lr.py`'s × 2 arm
-  probes that margin, its per-step loss and gradient norms showing any early instability.
+- **Warmup.** 2/(1 − β₂) = 40 steps (Ma & Yarats, arXiv 1910.04209): 0.11% of d8's run at 490.8, 0.05% of
+  production. Warmup's benefit is a larger stable peak lr (Kalra & Barkeshli, arXiv 2406.09405) by bounding early
+  update size, which normalized matrix updates such as Muon's already bound (Kosson et al., arXiv 2410.23922);
+  `lr.py`'s × 2 arm probes that margin, its per-step loss and gradient norms showing any early instability.
+- **Gradient clipping.** Its one measurement, a paired d8 A/B (§3), had clipping at 1.0 lower on all 11 corpora by
+  0.003 bits per byte; an affordable experiment resolves about 0.008 (Power), so it could not separate that effect
+  from zero and its result would leave production as it is. The decision rests on that A/B, the reference models'
+  universal 1.0 and d24's gradient norms (§3; `docs/h100-pretraining.md`, Regime).
+- **RoPE base staging.** Production's single base, 10^6, meets Men et al.'s lower bound for a 32K context (arXiv
+  2405.14591) from the first step, as Llama 3 trains at 5 × 10^5 from the start (arXiv 2407.21783 §3.2); Code Llama's
+  ablation (Appendix G.4) shows the base must be raised for long context, which production's already is. Staging
+  (10^4 at 8K, as Code Llama and Qwen2.5-Coder) would add a base change for the repository stage to adapt to, with no
+  published gain at 8K.
+- **SwiGLU.** nanochat measured it worse than ReLU² at d12 and d24 under Muon (LOG 2026-02-05); at matched parameters
+  it cost 5.1% of d8's throughput and would need a gated decode MLP (`csrc/decode.cu`).
 - **The repository stage's schedule.** The linear decay continues through it, as DeepSeek-Coder (§3.6) and
   Qwen2.5-Coder continue theirs; re-warming (Gupta et al., arXiv 2308.04014) is measured for continued pretraining
   after a finished schedule.
@@ -165,36 +163,34 @@ no result here could change:
 - **Grouped-query attention.** Its benefit is KV-cache memory; the decoder's slots are capped at 64 by its active mask
   (`csrc/decode.cu` MAX_BATCH), and d24's cache for 64 slots of the longest benchmark request (1,158 tokens) is 5.5 GB.
 - **Untied head, the batch law:** the published evidence and pre-launch measurements in `docs/h100-pretraining.md`.
-- **Production's horizon and scale.** No experiment trains at 490.8 tokens per parameter (d8 there trains for 52
-  minutes per run: 36,596 steps of 196,608 tokens), and none above d8: an adopted change reaches d24 untested at any
-  other scale.
+- **Production's horizon and scale together.** `lr.py` reaches production's ratio at d8 and production's width at 5
+  tokens per parameter, never both; value embeddings are measured at d16 only.
 - **Library alternatives without a measured gain at this scale** (a 2026 survey of torchtitan, OLMo-core, Megatron,
   nanotron, Marin, modded-nanogpt, nanochat): FP8 training, Liger and Cut Cross-Entropy losses, fused RMSNorm/RoPE
   libraries, DCP checkpointing, config frameworks.
 
 ### Results
 
-`results/<experiment>.jsonl` and `.json` for each experiment; none yet.
+`results/lr.jsonl`, `.json` and `results/value_embeds.jsonl`, `.json`; none yet.
 
 ## 2. H100 implementation
 
 ### The experiments' runs
 
-Each arm's d8 file-level throughput (steps 10–29 of a run on real rows, 2026-10-21): production 2.287M; clip 2.274M;
-staged RoPE 2.274M; no value embeddings 2.383M; SwiGLU 2.171M. SwiGLU's cost is its kernels' (QuACK's gated
-epilogues over a 2 × 680-wide up projection). Production's d24 step (`profile_step.py 24 12 12 file`, two runs):
-3,700 / 3,689 ms, GEMM 1,966 ms, FA4 935 ms, peak 69.6 GiB.
+d8 file-level throughput (steps 10–29 of a run on real rows, 2026-10-21): production 2.287M tokens per second, no
+value embeddings 2.383M. Production's d24 step (`profile_step.py 24 12 12 file`, two runs): 3,700 / 3,689 ms, GEMM
+1,966 ms, FA4 935 ms, peak 69.6 GiB.
 
 Where a run's time goes (2026-10-22). Steps: d8 (`profile_step.py 8 1 12 file`) 43 ms per 98,304 tokens, GPU 93%
 busy (GEMM 49%, FA4 18%, cross entropy 12%, Inductor 11%); d16 (`16 2 12 file`) 264 ms per 196,608 tokens, 98% busy
-(GEMM 49%, FA4 25%). The loss evaluation reads 640M tokens whatever the depth (390M at 8K over 11 corpora, 250M at
-32K over 6): d8 52.5 s at 8K, 35.7 s at 32K, 2.4 s on solutions; d16 173.7, 115.5 and 9.4 s, 14% of a d16 run and
-12% of a d8 run at 100. A d8 run at 20 (`d8-r20-s0-d0-2449fca0cf29`): 9 s to its run record, 135 s training, 5.5 s at
-the repository stage's switch (snapshot and recompilation at 32K), 90 s evaluation. So the runs are bound by library
-kernels (QuACK GEMMs, FlashAttention-4) at ≥ 93% GPU occupancy; d8's 7% idle is the most CUDA graphs could recover
-(≈ 0.3 h of the HORIZON runs), against capture constraints on the varlen and custom-kernel paths production does not
-need at d24 (98% busy), so no kernel or graph work is spent on the experiments. Their cost lever is the number and
-size of runs (§1, Settings).
+(GEMM 49%, FA4 25%); d24 (`24 2 12 file`) 633 ms per 196,608 tokens (311K tokens per second), 98% busy. The loss
+evaluation reads 640M tokens whatever the depth (390M at 8K over 11 corpora, 250M at 32K over 6): 8K, 32K and
+solutions take 52.5, 35.7 and 2.4 s at d8; 173.7, 115.5 and 9.4 s at d16; 409.8, 282.9 and 18.6 s at d24. A d8 run at
+20 (`d8-r20-s0-d0-2449fca0cf29`): 9 s to its run record, 135 s training, 5.5 s at the repository stage's switch
+(snapshot and recompilation at 32K), 90 s evaluation. So the runs are bound by library kernels (QuACK GEMMs,
+FlashAttention-4) at ≥ 93% GPU occupancy; d8's 7% idle is the most CUDA graphs could recover (≈ 11 minutes of
+`lr.py`), against capture constraints on the varlen and custom-kernel paths production does not need at d24 (98%
+busy), so no kernel or graph work is spent on the experiments. Their cost lever is the number and size of runs (§1).
 
 ### q/k prologue
 
@@ -332,20 +328,11 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
   over steps 0–298 0.464 (9% of steps above 1), 298–1,493 1.093 (57%), 1,493–2,987 1.522 (100%); d24 cut run
   (`d24-r490.805-s0-d0-c7c5fbbe4b31`), steps 0–42 1.866 (86%), 42–211 1.145 (83%), 211–423 0.969 (47%).
 - **The experiments' components**, 2026-10-20:
-  - *SwiGLU* (`swiglu.py`, QuACK `gemm_gated`/`gemm_dgated`) vs fp64 at M 98,304, C 256: y 3.7e-3, dx 4.2e-3, dW
-    3.5e-3 / 3.5e-3 / 3.9e-3 (ReLU² on the same inputs 3.4e-3 / 4.0e-3 / 3.3e-3 / 4.1e-3); against the
-    gate/up-swapped reference 0.77, so the interleave is right.
-  - *Arms* at d8 and 100 tokens per parameter share production's plan (14,937 steps of 98,304 tokens, `repo_start`
-    14,122): peak lr 2.2355e-3 with τ-law weight decay 0.3128; × 0.5: 1.1178e-3 and 0.6257, × 2: 4.471e-3 and 0.1564
-    (the τ law keeps the decay's timescale as the lr moves). Production's d24 plan unchanged: 81,171 steps,
-    `repo_start` 76,743.
-  - *Candidate mechanisms* (`model.py`, real rows, 2026-10-21): with production's fields `Candidate` equals `GPT`
-    bitwise; staged RoPE (base 10^4 at 8K, 10^6 at 32K, tables equal to `rotary_tables` at each) changes the loss of
-    one micro-batch.
-  - *Every arm* (production, lr × 2, clip, staged RoPE, no value embeddings, SwiGLU), 2026-10-22: compiled and
-    trained 4 steps through both stages on real rows, finite losses, the logged lr following the plan; logged d8
-    parameters 56,627,216 (no value embeddings 23,070,736; SwiGLU 56,610,832) and non-embedding FLOPs per token
-    97,529,856 (97,517,568; 97,431,552).
+  - *Arms*: `lr.py`'s d8 at 490.8 shares production's plan (36,656 steps of 196,608 tokens, `repo_start` 34,657, peak lr
+    1.8324e-3), its d24 at 5 likewise (3,307 steps of 294,912 tokens, `repo_start` 3,127, peak lr 1.6641e-3); the τ law
+    sets each arm's weight decay from its lr, keeping the decay's timescale as the lr moves. Production's d24 plan
+    unchanged: 81,171 steps, `repo_start` 76,743.
+  - *Candidate* (`model.py`, real rows, 2026-10-21): with production's fields `Candidate` equals `GPT` bitwise.
   - *Production's arm, run 0 at 20 tokens per parameter* (whole run through `harness.evaluation` and `efficiency`,
     2026-10-22, 248 s): code 0.6354, solutions 0.6964, repo_32k 0.6201, repo_beyond_8k 0.4048, text 1.3619, math
     1.3498; 2.28M tokens per second; peak memory 14.0 GB.

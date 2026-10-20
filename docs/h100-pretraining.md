@@ -56,8 +56,8 @@ No clipping: a fixed threshold is scale-dependent (at 1.0 the clipped fraction o
 the configurations of an earlier d8 screen). The one direct measurement, a single-seed d8 A/B in the previous regime
 (`ablations/ablations.md` §3), had clipping at 1.0 lower on all 11 corpora by 0.003 bits per byte on average, under the
 paired comparison's spread of per-pair differences (sd 0.0065 on 8K code); at the production batch and lr the gradient
-norm stays below 1.9 after warmup (d24 check below). Clipping is the regime choice the evidence leaves least settled;
-`ablations/clip.py` tests it (`ablations/ablations.md` §1).
+norm stays below 1.9 after warmup (d24 check below). Clipping is the regime choice the evidence leaves least settled,
+and its expected effect is below what an affordable ablation resolves (`ablations/ablations.md` §1, Not tested).
 
 ## H100 implementation
 
@@ -329,24 +329,22 @@ are near zero; the probe set's results are reported on the production model.
 
 The paired comparison above tests this configuration's regime as a whole against the standard regime, and the d24
 check the production batch and lr. Each decision below was taken without a study of its own, on published evidence and
-the pre-launch measurements. Those that depart from the reference code models or that the evidence leaves open have a
-pre-registered ablation, `ablations/<file>.py` (method, power, decision criterion and results in
-`ablations/ablations.md`):
+the pre-launch measurements. The two whose result would change production have a pre-registered ablation,
+`ablations/<file>.py` (method, power, decision criterion and results in `ablations/ablations.md`):
 
-- **The peak lr of DeepSeek LLM's law** (`lr.py`: × 0.5, × 2). An lr-vs-horizon fit at affordable d24 horizons
-  extrapolates 38× to production's tokens with an interval too wide to override it.
-- **No gradient clipping** (`clip.py`: 1.0), the regime choice the evidence leaves least settled (Regime).
-- **One RoPE base** (`rope.py`: 10^4 at 8K, 10^6 at 32K, as Code Llama).
-- **Value embeddings kept** (`value_embeds.py`: none). They cost 4.7% of the d24 step (measured before `60138de`, record
-  not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20.
-- **ReLU²** (`mlp.py`: SwiGLU), nanochat LOG 2026-02-05.
+- **The peak lr of DeepSeek LLM's law** (`lr.py`: × 0.5, × 2, at d8 over production's ratio and d24 over 5 tokens per
+  parameter). An lr-vs-horizon fit at affordable d24 horizons extrapolates 38× to production's tokens with an interval
+  too wide to override it.
+- **Value embeddings kept** (`value_embeds.py`: none, at d16). They cost 4.7% of the d24 step (measured before
+  `60138de`, record not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20.
 
-The others rest on their evidence alone (`ablations/ablations.md` §1, Not tested): linear decay to zero continuing
-through the repository stage, as Qwen2.5-Coder and DeepSeek-Coder; learned QK-norm gains (Qwen3) and the x0 and
-residual scalars (nanochat LOG 2026-01-11); SSSL windows (Gemma 3's near-lossless local windows); Block Attention
-Residuals not adopted (+12% d24 step time, measured before `60138de`, record not kept, for a published 1.1% loss gain
-at 194M parameters, arXiv 2603.15031); the partial key offset not adopted (a speedrun result, modded-nanogpt record
-#49, 124M); either of the last two would need a native decode path.
+The others rest on their evidence alone (`ablations/ablations.md` §1, Not tested): no gradient clipping (Regime); one
+RoPE base; ReLU² (nanochat LOG 2026-02-05); linear decay to zero continuing through the repository stage, as
+Qwen2.5-Coder and DeepSeek-Coder; learned QK-norm gains (Qwen3) and the x0 and residual scalars (nanochat LOG
+2026-01-11); SSSL windows (Gemma 3's near-lossless local windows); Block Attention Residuals not adopted (+12% d24 step
+time, measured before `60138de`, record not kept, for a published 1.1% loss gain at 194M parameters, arXiv
+2603.15031); the partial key offset not adopted (a speedrun result, modded-nanogpt record #49, 124M); either of the
+last two would need a native decode path.
 
 ## Measured design decisions
 
@@ -375,6 +373,6 @@ Each in `ablations/ablations.md` §2:
 - `scripts/`: `base_train.py`, `base_eval.py`, `report.py`.
 - `runs/`: `setup.sh`, `container.sh`, `h100.sh`, `curves.sh`, `release.sh`.
 - `results/`: the tables the paper reports.
-- `ablations/`: the ablation designs, runner and analysis (`study.py`, `report.py`, `swiglu.py`), the step profiler
-  (`profile_step.py`) and `ablations.md`.
+- `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`) and their mechanism (`harness.py`, `model.py`),
+  the step profiler (`profile_step.py`) and `ablations.md`.
 - `docker/Dockerfile`: the image.
