@@ -7,12 +7,12 @@ attempt (the run's process start it belongs to, 0-based: a resumed run repeats t
 step's record from the latest attempt supersedes the earlier ones; records are never rewritten), kind, time (Unix
 seconds), then the kind's fields. NaN and infinities are not JSON and are never written.
 
-run (each process start): step (the first step it trains), plan (schedule.RunPlan), seed, data_seed, model
-    (model/gpt.py GPTConfig as the model was built), variant (an ablation run's fields, ablations/harness.py; {} for
-    production), params (the model's parameters), flops_per_token (model/gpt.py non_embedding_flops_per_token at the
-    stage it starts in), max_norm (the gradient clip threshold), dataset_revision (config.DATASET_REVISION), lr and
-    weight_decay (as the optimizers hold them; a resumed process's come from its checkpoint), stage (config.Stage as
-    the model runs it, mixture as {corpus: row weight}).
+run (each process start): step (the first step it trains), plan (schedule.RunPlan), seed (initialization and data
+    order), model (model/gpt.py GPTConfig as the model was built), variant (an ablation run's fields,
+    ablations/harness.py; production's lr scale), params (the model's parameters), flops_per_token (model/gpt.py
+    non_embedding_flops_per_token at the stage it starts in), max_norm (the gradient clip threshold), dataset_revision
+    (config.DATASET_REVISION), lr and weight_decay (as the optimizers hold them; a resumed process's come from its
+    checkpoint), stage (config.Stage as the model runs it, mixture as {corpus: row weight}).
 stage (switch to the repo-level stage): step, stage.
 train (each optimizer step, 0-based): step; tokens (row positions after it, padding included); loss (mean next-token
     loss in nats over the step's valid targets, fp64); lr (LambdaLR's at the step); grad_norm (global L2 norm of the

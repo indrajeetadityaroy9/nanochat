@@ -50,12 +50,12 @@ REPO_SHARE = 300e9 / (5.2e12 + 300e9)
 ROPE_BASE = 1_000_000
 
 
-def run_tag(*, depth: int, ratio: float, seed: int, data_seed: int, variant: dict) -> str:
-    """Name for a run's checkpoints, metrics and evaluations: depth, ratio and seeds, then a hash of those, `variant`
-    (an ablation run's fields, ablations/harness.py; production's: none) and DATASET_REVISION, so runs of different
-    settings or data never share artifacts."""
+def run_tag(*, depth: int, ratio: float, seed: int, variant: dict) -> str:
+    """Name for a run's checkpoints, metrics and evaluations: depth, ratio and seed, then a hash of those, `variant`
+    (an ablation run's fields, ablations/harness.py; production's lr scale, scripts/production.py) and
+    DATASET_REVISION, so runs of different settings or data never share artifacts."""
     # float(ratio): JSON writes int 20 as "20" but float 20.0 as "20.0", so one run would get two names
-    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "data_seed": data_seed, "variant": variant,
+    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "variant": variant,
                 "dataset_revision": DATASET_REVISION}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    return f"d{depth}-r{ratio:g}-s{seed}-d{data_seed}-{digest[:12]}"
+    return f"d{depth}-r{ratio:g}-s{seed}-{digest[:12]}"

@@ -1,26 +1,28 @@
 """
 The production run end to end: d24 at the most tokens per scaling parameter its data holds without rereading a
 document (train/stages.py max_ratio), seed 0, the peak lr LR_SCALE times the plan's, both stages, a resume checkpoint
-every 1% of steps and a model-only snapshot every 10% (scripts/base_train.py); then the final model's and every
-snapshot's evaluation (scripts/base_eval.py: loss, greedy and filtered decoding), and the run's tracked metrics
-(train/metrics.py export: results/<tag>.jsonl, <tag>-curves.jsonl). Training and each evaluation run in their own
-process (torch.compile's caches and limits are per process), their output appended to LOGS/production-<tag>.log.
-Rerunning resumes training from its checkpoint and evaluates every model again.
+every 1% of steps and a model-only snapshot every 10% and at the repository stage's start (scripts/base_train.py);
+then the final model's and every snapshot's evaluation (scripts/base_eval.py: loss, greedy and filtered decoding) and
+the run's tracked metrics (train/metrics.py export: results/<tag>.jsonl, <tag>-curves.jsonl). Training and each
+evaluation run in a fresh process of their own: torch.compile's recompile limit and the CUDA caching allocator's
+reservations are per process, so no phase inherits another's. Rerunning resumes training from its checkpoint and
+evaluates every model again.
 
-    runs/h100.sh    (runs/container.sh python -m scripts.production, in tmux)
+    runs/container.sh python -m scripts.production
 """
-import subprocess
-import sys
+import multiprocessing
+from dataclasses import replace
 
 import torch
 
 from nanochat.config import FILE_STAGE, run_tag
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
-from nanochat.paths import CHECKPOINTS, LOGS
 from nanochat.train.metrics import export
 from nanochat.train.schedule import plan
 from nanochat.train.stages import max_ratio
+from scripts.base_eval import evaluate
+from scripts.base_train import train
 
 DEPTH, SEED = 24, 0
 # Production's multiplier of the plan's (DeepSeek LLM law's) peak lr: ablations/lr.py's pre-registered estimator,
@@ -35,19 +37,23 @@ SAVES, SNAPSHOTS = 100, 10
 def main() -> None:
     ratio = max_ratio(get_tokenizer(), depth=DEPTH)
     with torch.device("meta"):
-        steps = plan(model=GPT(gpt_config(depth=DEPTH, stage=FILE_STAGE)), ratio=ratio).num_iterations
-    tag = run_tag(depth=DEPTH, ratio=ratio, seed=SEED, data_seed=SEED, variant={"lr_scale": LR_SCALE})
-    with (LOGS / f"production-{tag}.log").open("a", encoding="utf-8") as log:
-        def run(module: str, *args: object) -> None:
-            subprocess.run([sys.executable, "-m", module, *map(str, args)], stdout=log, stderr=subprocess.STDOUT,
-                           check=True)
-
-        run("scripts.base_train", "--depth", DEPTH, "--target-param-data-ratio", repr(ratio), "--seed", SEED,
-            "--lr-scale", repr(LR_SCALE), "--save-every", -(-steps // SAVES), "--snapshot-every", -(-steps // SNAPSHOTS))
-        # the model-only snapshots (checkpoint.py), ascending
-        snapshots = sorted(int(p.stem.removeprefix(f"{tag}-step")) for p in CHECKPOINTS.glob(f"{tag}-step*.pt"))
-        for step in (None, *snapshots):
-            run("scripts.base_eval", "--model-tag", tag, *(() if step is None else ("--step", step)))
+        model = GPT(gpt_config(depth=DEPTH, stage=FILE_STAGE))
+    law = plan(model=model, ratio=ratio)
+    run = replace(law, lr=LR_SCALE * law.lr)
+    variant = {"lr_scale": LR_SCALE}
+    tag = run_tag(depth=DEPTH, ratio=ratio, seed=SEED, variant=variant)
+    every = -(-run.num_iterations // SNAPSHOTS)
+    snapshots = sorted({*range(every, run.num_iterations, every), run.repo_start})
+    phases = [(train, {"model": model, "run": run, "variant": variant, "seed": SEED,
+                       "save_every": -(-run.num_iterations // SAVES), "snapshots": frozenset(snapshots), "tag": tag})]
+    phases += [(evaluate, {"tag": tag, "step": step}) for step in (None, *snapshots)]
+    spawn = multiprocessing.get_context("spawn")
+    for target, kwargs in phases:
+        process = spawn.Process(target=target, kwargs=kwargs)
+        process.start()
+        process.join()
+        if process.exitcode != 0:
+            raise ChildProcessError(f"{target.__name__} of {tag} exited with {process.exitcode}")
     export(tag)
 
 

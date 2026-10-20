@@ -40,7 +40,6 @@ from nanochat.eval.code_eval import tasks
 from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import BASE_EVAL, LOGS, METRICS, RESULTS
 from nanochat.train import metrics
-from nanochat.train.optim import tau_weight_decay
 from nanochat.train.schedule import RunPlan, plan
 from scripts.base_train import train
 
@@ -71,22 +70,19 @@ def plan_of(run: Run) -> RunPlan:
 def tag_of(run: Run) -> str:
     """config.run_tag over the run's fields and its peak lr (so a change of the plan's lr, an adopted lr.py result, is
     a new run)."""
-    return run_tag(depth=run.n_layer, ratio=run.ratio, seed=run.seed, data_seed=run.seed,
+    return run_tag(depth=run.n_layer, ratio=run.ratio, seed=run.seed,
                    variant=dataclasses.asdict(run) | {"lr": plan_of(run).lr})
 
 
 def execute(run: Run) -> None:
     """Train and evaluate one run: its metrics as production's (train/metrics.py), its evaluation as base_eval's schema
-    with loss_evaluation only; tau-law weight decay (production's); checkpoints at repo_start and the end only."""
+    with loss_evaluation only; resume checkpoints at repo_start and the end only, no snapshots."""
     tag, run_plan = tag_of(run), plan_of(run)
     steps = run_plan.num_iterations
     with torch.device("meta"):
         model = Candidate(gpt_config(depth=run.n_layer, stage=FILE_STAGE), value_embeds=run.value_embeds)
-    model = train(model=model, run=run_plan,
-                  weight_decay=tau_weight_decay(lr=run_plan.lr, steps=steps,
-                                                tokens_per_param=run_plan.tokens_per_param),
-                  variant=dataclasses.asdict(run), seed=run.seed,
-                  data_seed=run.seed, save_every=steps, snapshot_every=steps, tag=tag)
+    model = train(model=model, run=run_plan, variant=dataclasses.asdict(run), seed=run.seed, save_every=steps,
+                  snapshots=frozenset(), tag=tag)
     results = metrics.loss_evaluation(model, get_tokenizer(), tasks(), device=torch.device("cuda"))
     metrics.save_evaluation(tag, steps, results | {"codegen": None, "fim": None})
 

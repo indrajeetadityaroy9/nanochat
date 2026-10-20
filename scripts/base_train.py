@@ -1,35 +1,29 @@
 """
-Pretrain a base model:
-
-    python -m scripts.base_train --depth=<depth> --target-param-data-ratio=<tokens per scaling parameter> --seed=<seed>
-        --lr-scale=<times the plan's peak lr> --save-every=<steps> --snapshot-every=<steps>
-
-Everything else is derived (config.py, train/schedule.py, train/optim.py). File-level stage, then the repo-level stage
-from repo_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
+The training loop. train() pretrains (or resumes) a run: the file-level stage, then the repo-level stage from
+repo_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
 data/pack.py). Each start resumes from the tag's newest checkpoint (weights, optimizer state, data position).
-Metrics: train/metrics.py.
+Callers: scripts/production.py, ablations/harness.py. Metrics: train/metrics.py.
 """
 
-import argparse
 import gc
 import math
 import time
 from collections.abc import Iterator
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from functools import partial
 
 import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.config import DATASET_REVISION, FILE_STAGE, REPO_STAGE, run_tag
+from nanochat.config import DATASET_REVISION, FILE_STAGE, REPO_STAGE
 from nanochat.data.loader import PretrainingBatches, mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
-from nanochat.model.gpt import GPT, gpt_config, non_embedding_flops_per_token
+from nanochat.model.gpt import GPT, non_embedding_flops_per_token
 from nanochat.train import metrics
 from nanochat.train.checkpoint import checkpoint_path, save_checkpoint
 from nanochat.train.optim import optimizers, tau_weight_decay
-from nanochat.train.schedule import RunPlan, lr_multiplier, plan
+from nanochat.train.schedule import RunPlan, lr_multiplier
 from nanochat.train.stages import readable_rows
 
 # Global gradient-norm clip, every reference code model's (DeepSeek LLM, arXiv 2401.02954 §2.3): Adam's and
@@ -61,18 +55,19 @@ def optimizer_step(model: torch.nn.Module, batches: list[tuple[torch.Tensor, ...
     return torch.stack(losses).double().sum(), grad_norm, upcoming
 
 
-def train(*, model: GPT, run: RunPlan, weight_decay: float, variant: dict, seed: int, data_seed: int, save_every: int,
-          snapshot_every: int, tag: str) -> GPT:
+def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, save_every: int, snapshots: frozenset[int],
+          tag: str) -> GPT:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
-    (schedule.plan) and return it: init by `seed`, data order by `data_seed`, decoupled `weight_decay`, FILE_STAGE then
-    REPO_STAGE from run.repo_start; `variant` (config.run_tag's) recorded with the run. Resume checkpoint every
-    `save_every` steps; a model-only snapshot every `snapshot_every` steps and at repo_start (the model before the
-    repo-level stage), the final model being the last checkpoint."""
+    (schedule.plan at the caller's peak lr) and return it: initialization and data order by `seed`, decoupled weight
+    decay by the tau law at the run's lr (optim.tau_weight_decay), FILE_STAGE then REPO_STAGE from run.repo_start;
+    `variant` (config.run_tag's) recorded with the run. A resume checkpoint every `save_every` steps, at repo_start and
+    at the end (the final model); a model-only snapshot at each step in `snapshots`."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
     model.to_empty(device=device)
     model.init_weights(seed=seed)
-    opts = optimizers(model, lr=run.lr, weight_decay=weight_decay)
+    opts = optimizers(model, lr=run.lr, weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,
+                                                                      tokens_per_param=run.tokens_per_param))
     path = checkpoint_path(tag, step=None)
     start_step = stage_rows = 0
     if path.exists():  # resume: weights into the optimizers' parameters, then optimizer state
@@ -98,12 +93,12 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, variant: dict, seed:
         return model
     compiled = torch.compile(model, dynamic=False, fullgraph=True)
 
-    # A stage's packed rows (train/stages.py), each corpus permuted by the data seed (RandomState's stream is frozen
-    # across numpy versions, so a resume sees the same order); FIM pieces read as FIM examples
+    # A stage's packed rows (train/stages.py), each corpus permuted by the seed (RandomState's stream is frozen across
+    # numpy versions, so a resume sees the same order); FIM pieces read as FIM examples
     def stage_batches(stage, start):
         mixture = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
         readable = readable_rows(tokenizer, stage=stage, run=run)
-        orders = {corpus: np.random.RandomState(data_seed).permutation(readable[corpus]) for corpus in mixture}
+        orders = {corpus: np.random.RandomState(seed).permutation(readable[corpus]) for corpus in mixture}
         batches = PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=stage.seq_len,
                                      batch_rows=stage.batch_rows, device=device, reading="fim", start=start)
         return mixture, iter(batches)
@@ -116,7 +111,7 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, variant: dict, seed:
     group = opts[0].param_groups[0]
     attempt = metrics.attempt(tag)
     params = list(model.parameters())
-    metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "data_seed": data_seed,
+    metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed,
                          "model": asdict(model.config), "variant": variant,
                          "params": sum(p.numel() for p in params),
                          "flops_per_token": non_embedding_flops_per_token(model),
@@ -127,7 +122,7 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, variant: dict, seed:
     while True:
         last_step = step == run.num_iterations
         # the snapshot first: a kill while writing it leaves the previous checkpoint, so the resumed run writes it again
-        if step != start_step and not last_step and (step % snapshot_every == 0 or step == run.repo_start):
+        if step != start_step and not last_step and step in snapshots:
             save_checkpoint(checkpoint_path(tag, step=step), {"step": step, "model": model.state_dict(),
                                                               "model_config": asdict(model.config)})
         # state after `step` steps at the stage they trained in
@@ -178,28 +173,3 @@ def train(*, model: GPT, run: RunPlan, weight_decay: float, variant: dict, seed:
             gc.disable()
         step += 1
 
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--depth", type=int, required=True)
-    parser.add_argument("--target-param-data-ratio", type=float, required=True)
-    parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--lr-scale", type=float, required=True)
-    parser.add_argument("--save-every", type=int, required=True)
-    parser.add_argument("--snapshot-every", type=int, required=True)
-    args = parser.parse_args()
-    with torch.device("meta"):
-        model = GPT(gpt_config(depth=args.depth, stage=FILE_STAGE))
-    run = plan(model=model, ratio=args.target_param_data_ratio)
-    run = replace(run, lr=args.lr_scale * run.lr)
-    variant = {"lr_scale": args.lr_scale}
-    train(model=model, run=run,
-          weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations, tokens_per_param=run.tokens_per_param),
-          variant=variant,
-          seed=args.seed, data_seed=args.seed, save_every=args.save_every, snapshot_every=args.snapshot_every,
-          tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
-                      variant=variant))
-
-
-if __name__ == "__main__":
-    main()

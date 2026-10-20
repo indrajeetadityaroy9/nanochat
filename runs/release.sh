@@ -3,7 +3,7 @@
 # artifacts/checkpoints/<tag>.pt and its snapshots <tag>-step<NNNNNN>.pt, the run records under artifacts/ (metrics,
 # base_eval) and results/.
 # `runs/container.sh hf download <repo> --local-dir /workspace/nanochat` restores them for train/checkpoint.load_model,
-# scripts/base_eval.py and a resumed base_train. Needs a write token (runs/container.sh hf auth login).
+# scripts/base_eval.py and a resumed production run. Needs a write token (runs/container.sh hf auth login).
 #
 #   runs/release.sh <tag> <repo>
 set -euo pipefail

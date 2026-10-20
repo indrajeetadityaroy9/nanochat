@@ -1,7 +1,7 @@
 """
-Evaluation of a base_train run's newest checkpoint, written to BASE_EVAL/<tag>.json, or of its model-only
-snapshot at --step (CHECKPOINTS/<tag>-step<step:06d>.pt), written to BASE_EVAL/<tag>-step<step:06d>.json (that
-name is the result's "run"):
+Evaluation of a run's checkpoint: evaluate(tag, step=None) of its newest checkpoint, written to BASE_EVAL/<tag>.json,
+or evaluate(tag, step=s) of its model-only snapshot at step s (CHECKPOINTS/<tag>-step<s:06d>.pt), written to
+BASE_EVAL/<tag>-step<s:06d>.json (that name is the result's "run"):
 - train/metrics.loss_evaluation: val bits and bytes of the training mixture in file-level rows, of the repo-level
   mixture per context bucket in repo-level rows (models at that context), and of the HumanEval+, MBPP+ and HumanEval-X
   C++ reference solutions;
@@ -12,10 +12,8 @@ name is the result's "run"):
   static checks and its prompt's examples; eval/verify.py), with per-task diagnostics counts and the filtered mode's
   attempts; FIM middles cut to the reference's lines (eval/code_eval.py fim_lines).
 Saved by train/metrics.save_evaluation (the ablations' evaluations, ablations/harness.py, take loss_evaluation only).
-
-    python -m scripts.base_eval --model-tag=<tag> [--step=<step>]   (config.run_tag; scripts/production.py)
+Caller: scripts/production.py, one process per checkpoint.
 """
-import argparse
 import warnings
 
 import torch
@@ -26,19 +24,12 @@ from nanochat.train.checkpoint import checkpoint_name, load_model
 from nanochat.train.metrics import loss_evaluation, save_evaluation
 
 
-def main() -> None:
+def evaluate(tag: str, *, step: int | None) -> None:
+    """BASE_EVAL/<checkpoint_name>.json of run `tag`'s checkpoint: its newest (step None) or its snapshot at `step`."""
     warnings.filterwarnings("ignore", category=SyntaxWarning)  # ast.parse of generated code (eval/verify.py, inference/)
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-tag", required=True)
-    parser.add_argument("--step", type=int, default=None, help="a model-only snapshot <tag>-step<step>.pt; default: newest")
-    args = parser.parse_args()
     device = torch.device("cuda")
     benchmarks, tokenizer = tasks(), get_tokenizer()
-    model, step = load_model(args.model_tag, step=args.step, device=device)
-    save_evaluation(checkpoint_name(args.model_tag, step=args.step), step,
+    model, trained_steps = load_model(tag, step=step, device=device)
+    save_evaluation(checkpoint_name(tag, step=step), trained_steps,
                     loss_evaluation(model, tokenizer, benchmarks, device=device) |
                     {"codegen": generation(model, tokenizer, benchmarks), "fim": fim_generation(model, tokenizer)})
-
-
-if __name__ == "__main__":
-    main()

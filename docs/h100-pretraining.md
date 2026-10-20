@@ -103,11 +103,12 @@ H100's 989 dense bf16), 369 TFLOP/s (37.3%) counting the weight matrices alone.
   to a temporary file and renamed, so a kill mid-save leaves the previous one.
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
-- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seeds plus a hash of those, its variant
+- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seed plus a hash of those, its variant
   (an ablation run's fields; production's lr scale) and the dataset revision `config.DATASET_REVISION`
   (`python -m nanochat.paths` downloads it), so runs of different settings or data never share artifacts. Each run's
-  metrics record its full configuration (model, plan, seeds, lr, weight decay, clip threshold) and the dataset revision.
-- **Data order.** Each corpus's rows are permuted once by the data seed (NumPy `RandomState`).
+  metrics record its full configuration (model, plan, seed, lr, weight decay, clip threshold) and the dataset revision.
+- **Data order.** Each corpus's rows are permuted once by the run's seed (NumPy `RandomState`), which also seeds its
+  initialization.
 
 ## Reproducing the run
 
@@ -117,23 +118,24 @@ On a fresh Lambda `gpu_1x_h100_sxm5` (Ubuntu with Docker and the NVIDIA driver):
 git clone https://github.com/indrajeetadityaroy9/nanochat nanochat && cd nanochat
 HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts/, tokenizer + data (nanochat/paths.py)
 # log in again (docker group), then from the checkout:
-tmux new -d -s h100 runs/h100.sh
+tmux new -d -s h100 'runs/container.sh python -m scripts.production 2>&1 | tee -a artifacts/logs/production.log'
 ```
 
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
 `runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/` (`<tag>.pt`, the resume checkpoint, and
 `<tag>-step<NNNNNN>.pt`, the model-only snapshots), `metrics/<tag>.jsonl`, `base_eval/<tag>[-step<NNNNNN>].json`,
-`logs/` (`production-<tag>.log`, `<tag>.log` per ablation run) and `cache/`; `results/` (tracked) holds the data the
-paper's tables and figures are drawn from.
+`logs/` (`production.log`, the launch's output; `<tag>.log` per ablation run) and `cache/`; `results/` (tracked)
+holds the data the paper's tables and figures are drawn from.
 
-`runs/h100.sh` runs `scripts/production.py`: it derives the ratio and the tag (`d24-r490.774-s0-d0-<hash>`), trains both
-stages with a checkpoint every 1% of the steps and a model-only snapshot (weights, no optimizer state, ~2.1 GB) every
-10% and at the repository stage's start, then evaluates the final model and every snapshot with `scripts/base_eval.py`
-(when pass@1 emerges) and exports the run's tracked metrics (`train/metrics.py export`): `results/<tag>.jsonl` (its
-records and every evaluation) and `results/<tag>-curves.jsonl` (its per-step records). Rerunning continues a stopped
-run from its checkpoint and evaluates every model again. `base_eval` reports validation bits and bytes per corpus at 8K
-and at 32K per context bucket (≤8K, >8K), reference-solution bits and bytes, and EvalPlus HumanEval+/MBPP+, MultiPL-E
-C++ and HumanEval infilling (Benchmarks, below), each scored by its official tools.
+`scripts/production.py` derives the ratio and the tag (`d24-r490.774-s0-<hash>`), trains both stages with a checkpoint
+every 1% of the steps and a model-only snapshot (weights, no optimizer state, ~2.1 GB) every 10% and at the repository
+stage's start, then evaluates the final model and every snapshot with `scripts/base_eval.py` (when pass@1 emerges) and
+exports the run's tracked metrics (`train/metrics.py export`): `results/<tag>.jsonl` (its records and every
+evaluation) and `results/<tag>-curves.jsonl` (its per-step records). Training and each evaluation run in a fresh
+process (torch.compile's recompile limit and the CUDA caching allocator's reservations are per process). Rerunning
+continues a stopped run from its checkpoint and evaluates every model again. `base_eval` reports validation bits and
+bytes per corpus at 8K and at 32K per context bucket (≤8K, >8K), reference-solution bits and bytes, and EvalPlus
+HumanEval+/MBPP+, MultiPL-E C++ and HumanEval infilling (Benchmarks, below), each scored by its official tools.
 
 **Expected cost:** 76,739 file-level steps at 3.741 s and 4,427 repository-stage steps at about 4.05 s (4,016 ms with
 coordinate-descent tuning, plus its 0.8%), about 85 h, about $365 at $4.29/h.
@@ -141,7 +143,7 @@ coordinate-descent tuning, plus its 0.8%), about 85 h, about $365 at $4.29/h.
 `runs/release.sh <tag> <repo>` uploads the checkpoint and snapshots, the run records under `artifacts/` (metrics and
 evaluations) and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
 --local-dir /workspace/nanochat` (the checkout inside the container) restores them where `load_model`, `base_eval` and
-`base_train` read them.
+a resumed production run read them.
 
 ## Pre-launch verification
 
@@ -150,7 +152,7 @@ Commit `60138de` on the H100, on the packed rows; records under `artifacts/` by 
 | Check | Result |
 |---|---|
 | Resume: d8, 20 tokens per parameter (`d8-r20-s0-d0-d69671850bea`), killed with `docker kill` at step 991 and relaunched | continued from its step-900 checkpoint, switched to the 32K stage at step 2,824 (`repo_start`), finished at step 2,987; the step-2,824 checkpoint kept |
-| Production path (2026-10-20): `base_train` CLI with `--lr-scale` (d8, 74 steps), `base_eval` (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
+| Production path (2026-10-20, through the `base_train` command line `scripts/production.py` has since replaced with direct calls in spawned processes): `base_train` with lr scale 2.5 (d8, 74 steps), `base_eval` (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
 | Run identity | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
 
 **Training record**, d8 at 20 tokens per parameter (2,987 steps of 98,304 tokens, peak lr 2.73e-3): mean training loss
@@ -386,8 +388,9 @@ Each in `ablations/ablations.md` §2:
 - `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
 - `nanochat/data/`: the data pipeline, including the Rust tokenizer, repository and packing crate in `bpe/`.
-- `scripts/`: `production.py` (the production run end to end), `base_train.py`, `base_eval.py`.
-- `runs/`: `setup.sh`, `container.sh`, `h100.sh`, `release.sh`.
+- `scripts/`: `production.py` (the production run end to end), `base_train.py` (the training loop), `base_eval.py` (a
+  checkpoint's evaluation).
+- `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
 - `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`), their mechanism (`harness.py`, `model.py`) and
   `ablations.md`.
