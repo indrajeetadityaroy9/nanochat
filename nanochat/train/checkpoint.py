@@ -1,8 +1,7 @@
 """
-Checkpoints are flat files in CHECKPOINTS, each written to a temp file then replaced (atomic), so a run killed mid-save
-keeps the previous file. <tag>.pt is the newest, for resuming ({"step", "model", "optimizers", "model_config",
-"stage_rows"}); <tag>-step<step:06d>.pt are model-only snapshots ({"step", "model", "model_config"}, no optimizer
-state) for evaluating intermediate models.
+Checkpoints: CHECKPOINTS/<tag>-step<step>.pt, a run's full state after `step` steps ({"model", "optimizers",
+"model_config", "stage_rows"}), each written to a temp file then renamed, so a run killed mid-save never leaves a
+partial one. Every checkpoint is both a resume point (a run resumes from its newest) and a model to evaluate.
 """
 
 from pathlib import Path
@@ -13,14 +12,13 @@ from nanochat.model.gpt import GPT, GPTConfig
 from nanochat.paths import CHECKPOINTS
 
 
-def checkpoint_name(tag: str, *, step: int | None) -> str:
-    """<tag> for the newest checkpoint (step None), <tag>-step<step:06d> for the snapshot at `step`; the evaluation
-    (scripts/production.py evaluate) names its output for a checkpoint the same."""
-    return tag if step is None else f"{tag}-step{step:06d}"
+def checkpoint_name(tag: str, step: int) -> str:
+    """<tag>-step<step>; a checkpoint's evaluation (train/metrics.save_evaluation) is named the same."""
+    return f"{tag}-step{step}"
 
 
-def checkpoint_path(tag: str, *, step: int | None) -> Path:
-    return CHECKPOINTS / f"{checkpoint_name(tag, step=step)}.pt"
+def checkpoint_path(tag: str, step: int) -> Path:
+    return CHECKPOINTS / f"{checkpoint_name(tag, step)}.pt"
 
 
 def save_checkpoint(path: Path, checkpoint: dict) -> None:
@@ -29,11 +27,11 @@ def save_checkpoint(path: Path, checkpoint: dict) -> None:
     tmp.replace(path)
 
 
-def load_model(tag: str, *, step: int | None, device: torch.device) -> tuple[GPT, int]:
-    """(model, step) of a checkpoint, at the stage (context, RoPE base) its weights trained in."""
-    checkpoint = torch.load(checkpoint_path(tag, step=step), map_location=device)
+def load_model(tag: str, step: int, *, device: torch.device) -> GPT:
+    """A checkpoint's model, at the stage (context, RoPE base) its weights trained in."""
+    checkpoint = torch.load(checkpoint_path(tag, step), map_location=device)
     with torch.device("meta"):
         model = GPT(GPTConfig(**checkpoint["model_config"]))
     model.load_state_dict(checkpoint["model"], assign=True)
     model.init_buffers()
-    return model, checkpoint["step"]
+    return model

@@ -100,7 +100,8 @@ H100's 989 dense bf16), 369 TFLOP/s (37.3%) counting the weight matrices alone.
   FA4's deterministic backward costs 1–3% of a d24 micro-batch's forward and backward. The forward is deterministic:
   with Inductor's coordinate-descent tuning off, a compiled loss evaluation is bitwise equal across processes.
 - **Resume.** A relaunched run continues from its newest checkpoint (weights, optimizer state, data position), written
-  to a temporary file and renamed, so a kill mid-save leaves the previous one.
+  to a temporary file and renamed, so a kill mid-save leaves the previous one; checkpoints at each tenth of the run
+  bound a failure's loss to a tenth.
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
 - **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seed plus a hash of those, its variant
@@ -122,25 +123,25 @@ tmux new -d -s h100 'runs/container.sh python -m scripts.production 2>&1 | tee -
 ```
 
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
-`runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/` (`<tag>.pt`, the resume checkpoint, and
-`<tag>-step<NNNNNN>.pt`, the model-only snapshots), `metrics/<tag>.jsonl`, `base_eval/<tag>[-step<NNNNNN>].json`,
-`logs/` (`production.log`, the launch's output; `<tag>.log` per ablation run) and `cache/`; `results/` (tracked)
-holds the data the paper's tables and figures are drawn from.
+`runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/<tag>-step<step>.pt` (each a run's full state),
+`metrics/<tag>.jsonl`, `base_eval/<tag>-step<step>.json`, `logs/` (`production.log`, the launch's output; `<tag>.log`
+per ablation run) and `cache/`; `results/` (tracked) holds the data the paper's tables and figures are drawn from.
 
 `scripts/production.py` derives the ratio and the tag (`d24-r490.774-s0-<hash>`), trains both stages with a checkpoint
-every 1% of the steps and a model-only snapshot (weights, no optimizer state, ~2.1 GB) every 10% and at the repository
-stage's start, then evaluates the final model and every snapshot (`evaluate`, when pass@1 emerges) and
-exports the run's tracked metrics (`train/metrics.py export`): `results/<tag>.jsonl` (its records and every
+(the run's full state: weights, optimizer state and data position, ~5.6 GB) at each tenth of the steps and at the
+repository stage's start, then evaluates every checkpoint (`evaluate`: the curve over training, and the final model)
+and exports the run's tracked metrics (`train/metrics.py export`): `results/<tag>.jsonl` (its records and every
 evaluation) and `results/<tag>-curves.jsonl` (its per-step records). Training and each evaluation run in a fresh
 process (torch.compile's recompile limit and the CUDA caching allocator's reservations are per process). Rerunning
-continues a stopped run from its checkpoint and evaluates every model again. The evaluation reports validation bits and
-bytes per corpus at 8K and at 32K per context bucket (≤8K, >8K), reference-solution bits and bytes, and EvalPlus
-HumanEval+/MBPP+, MultiPL-E C++ and HumanEval infilling (Benchmarks, below), each scored by its official tools.
+continues a stopped run from its newest checkpoint and evaluates every checkpoint again. The evaluation reports
+validation bits and bytes per corpus at 8K and at 32K per context bucket (≤8K, >8K), reference-solution bits and
+bytes, and EvalPlus HumanEval+/MBPP+, MultiPL-E C++ and HumanEval infilling (Benchmarks, below), each scored by its
+official tools.
 
 **Expected cost:** 76,739 file-level steps at 3.741 s and 4,427 repository-stage steps at about 4.05 s (4,016 ms with
 coordinate-descent tuning, plus its 0.8%), about 85 h, about $365 at $4.29/h.
 
-`runs/release.sh <tag> <repo>` uploads the checkpoint and snapshots, the run records under `artifacts/` (metrics and
+`runs/release.sh <tag> <repo>` uploads the checkpoints, the run records under `artifacts/` (metrics and
 evaluations) and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
 --local-dir /workspace/nanochat` (the checkout inside the container) restores them where `load_model` and a resumed
 production run read them.
@@ -154,6 +155,7 @@ Commit `60138de` on the H100, on the packed rows; records under `artifacts/` by 
 | Resume: d8, 20 tokens per parameter (`d8-r20-s0-d0-d69671850bea`), killed with `docker kill` at step 991 and relaunched | continued from its step-900 checkpoint, switched to the 32K stage at step 2,824 (`repo_start`), finished at step 2,987; the step-2,824 checkpoint kept |
 | Production path (2026-10-20, through the `base_train` command line `scripts/production.py` has since replaced with direct calls in spawned processes): `base_train` with lr scale 2.5 (d8, 74 steps), `base_eval` (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
 | Run identity | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
+| Checkpoints and lineage (2026-10-20, NVIDIA GB10, sm_121; the image of this `uv.lock`; `train` on synthetic token rows, d8, 74 steps, checkpoints at 20, 40, 70 and 74) | a run killed after its step-40 checkpoint resumed there (attempt 1), switched to the 32K stage at step 70 and ended at 74; the final checkpoint reloaded reproduces the live model's loss bitwise; against the code of `results/lr.json` (`8caecb9`) the lr is bitwise equal at every step and the loss bitwise through step 5, then within 5.1e-6 relative, as an uninterrupted and a resumed run of the same code differ (4.8e-6: the backward's atomics) |
 
 **Training record**, d8 at 20 tokens per parameter (2,987 steps of 98,304 tokens, peak lr 2.73e-3): mean training loss
 per window of steps, one record per step (a resumed run's repeated steps counted once), against runs of the previous

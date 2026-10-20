@@ -139,15 +139,15 @@ evaluation); d16 at 20: about 35 minutes (30 minutes training at 746K tokens per
 3 × 3 min + 4 × 24 min + 3 × 65 min ≈ 5.0 h; `value_embeds.py`: 18 runs ≈ 7.0 h; ≈ 12.0 h ($51 at $4.29/h).
 
 **Records.** A run's tag is production's `config.run_tag` over its fields (its peak lr and the dataset revision
-hashed with them), and a rerun experiment resumes: a run with an evaluation or a divergence is not trained again,
-a stopped one resumes from its checkpoint; each run is launched from its fields (`python -m ablations.harness
-'<fields>'`). Per run, in production's schemas:
+hashed with them), and a rerun experiment resumes: a run with an evaluation or a divergence is not trained again, a
+stopped one trains again from its start (its one checkpoint is its final model); each run is launched from its fields
+(`python -m ablations.harness '<fields>'`). Per run, in production's schemas:
 `artifacts/metrics/<tag>.jsonl` (`nanochat/train/metrics.py`: every step and attempt, the learning curve and gradient
 norms included; the run record holds the model config, the run's fields as `variant`, parameters, FLOPs per token,
 the clip threshold, the plan, lr and weight decay; the end record the peak memory; a failure record the step a run
-diverged at), `artifacts/base_eval/<tag>.json` (`train/metrics.save_evaluation`, loss evaluation only) and
+diverged at), `artifacts/base_eval/<tag>-step<steps>.json` (`train/metrics.save_evaluation`, loss evaluation only) and
 `artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment gathers every tracked
-metric of its runs into `results/` (schema 1), so tables and figures need no rerun and no `artifacts/`:
+metric of its runs into `results/`, so tables and figures need no rerun and no `artifacts/`:
 `<experiment>.jsonl`, a record per run (arm, tag, setting, fields; `train/metrics.record`: its metrics records but the
 per-step ones: run, stage, end, failure; its evaluation verbatim: per corpus and context bucket bits, bytes and rows at
 8K and 32K, per benchmark solution bits and bytes; the compared measures; efficiency; the step it diverged at,

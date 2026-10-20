@@ -2,7 +2,7 @@
 Every tracked metric: a run's training records, its models' loss evaluations, and the export the paper's tables and
 figures are drawn from.
 
-Training records: METRICS/<tag>.jsonl, UTF-8 JSON lines, each an object parseable on its own: schema (SCHEMA), tag,
+Training records: METRICS/<tag>.jsonl, UTF-8 JSON lines, each an object parseable on its own: tag,
 attempt (the run's process start it belongs to, 0-based: a resumed run repeats the steps after its checkpoint, and a
 step's record from the latest attempt supersedes the earlier ones; records are never rewritten), kind, time (Unix
 seconds), then the kind's fields. NaN and infinities are not JSON and are never written.
@@ -25,13 +25,13 @@ Bits per byte: summed next-token loss in bits (nats / ln 2) over summed UTF-8 by
 buckets and samples pool exactly; bpb and mixture_bpb form the ratios. Sums are fp64 on the device, reduced in a fixed
 order.
 
-Loss evaluation of a checkpoint: BASE_EVAL/<name>.json (name: checkpoint.checkpoint_name), one JSON object: schema
-(EVALUATION_SCHEMA), run (the name), step, then loss_evaluation's results and the caller's (scripts/production.py
-evaluate: "codegen", "fim"; ablations/harness.py: null).
+Loss evaluation of a checkpoint: BASE_EVAL/<name>.json (name: checkpoint.checkpoint_name), one JSON object: run (the
+name), step, then loss_evaluation's results and the caller's (scripts/production.py evaluate: "codegen", "fim";
+ablations/harness.py: null).
 
 Export: RESULTS/<tag>.jsonl, one record: the run's records but the per-step ones (run, stage, end, failure) and the
-evaluations of its final model and of its model-only snapshots verbatim, in step order; RESULTS/<tag>-curves.jsonl,
-its per-step train records as columns (curves). Aggregates (bits per byte, pass@1 tables) are drawn from these
+evaluations of its checkpoints verbatim, in step order; RESULTS/<tag>-curves.jsonl, its per-step train records as
+columns (curves). Aggregates (bits per byte, pass@1 tables) are drawn from these
 downstream.
 """
 import bisect
@@ -51,8 +51,6 @@ from nanochat.data.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT
 from nanochat.paths import BASE_EVAL, METRICS, RESULTS
 
-SCHEMA = 2
-EVALUATION_SCHEMA = 1
 # Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the
 # whole split if smaller; arms are scored on identical rows, so the subsample's sampling error cancels in differences
 VAL_TOKENS = 80 * 2**19
@@ -64,20 +62,16 @@ CONTEXTS = (FILE_STAGE.seq_len,)
 SOLUTION_BENCHMARKS = ("humaneval_plus", "mbpp_plus", "humaneval_x_cpp")
 
 
-def attempt(tag: str) -> int:
-    """The attempt a process starting run `tag` now is: the run records already written (0 for a new run)."""
-    return sum(r["kind"] == "run" for r in records(tag)) if (METRICS / f"{tag}.jsonl").exists() else 0
-
-
 def append(tag: str, record: dict, *, attempt: int) -> None:
-    line = json.dumps({"schema": SCHEMA, "tag": tag, "attempt": attempt, "time": time.time(), **record},
-                      allow_nan=False)
+    line = json.dumps({"tag": tag, "attempt": attempt, "time": time.time(), **record}, allow_nan=False)
     with (METRICS / f"{tag}.jsonl").open("a", encoding="utf-8") as f:
         f.write(line + "\n")
 
 
 def records(tag: str) -> list[dict]:
-    return [json.loads(line) for line in (METRICS / f"{tag}.jsonl").read_text(encoding="utf-8").splitlines()]
+    """Run `tag`'s records in file order; none for a run not yet started."""
+    path = METRICS / f"{tag}.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
 
 def train_steps(tag: str) -> dict[int, dict]:
@@ -90,7 +84,7 @@ def curves(tag: str) -> dict[str, list]:
     time), in step order."""
     by_step = train_steps(tag)
     steps = [by_step[s] for s in sorted(by_step)]
-    return {k: [s[k] for s in steps] for k in steps[0] if k not in ("schema", "tag", "kind")}
+    return {k: [s[k] for s in steps] for k in steps[0] if k not in ("tag", "kind")}
 
 
 def latest(tag: str, kind: str) -> dict:
@@ -202,14 +196,14 @@ def loss_evaluation(model: GPT, tokenizer: Tokenizer, benchmarks: dict, *, devic
 
 def save_evaluation(name: str, step: int, results: dict) -> None:
     """BASE_EVAL/<name>.json; NaN and infinities are not JSON and raise."""
-    (BASE_EVAL / f"{name}.json").write_text(json.dumps({"schema": EVALUATION_SCHEMA, "run": name, "step": step}
-                                                       | results, allow_nan=False), encoding="utf-8")
+    (BASE_EVAL / f"{name}.json").write_text(json.dumps({"run": name, "step": step} | results, allow_nan=False),
+                                            encoding="utf-8")
 
 
 def record(tag: str) -> dict:
     """A run's tracked metrics but the per-step ones: its non-train records and the evaluations (save_evaluation) of
-    its final model and snapshots on disk, in step order (a diverged run has none)."""
-    paths = [*BASE_EVAL.glob(f"{tag}.json"), *BASE_EVAL.glob(f"{tag}-step*.json")]
+    its checkpoints on disk, in step order (a diverged run has none)."""
+    paths = BASE_EVAL.glob(f"{tag}-step*.json")
     return {"tag": tag, "records": [r for r in records(tag) if r["kind"] != "train"],
             "evaluations": sorted((json.loads(p.read_text(encoding="utf-8")) for p in paths), key=lambda r: r["step"])}
 

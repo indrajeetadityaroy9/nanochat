@@ -3,19 +3,16 @@ Packed rows each stage reads, no document twice: per repository corpus, the repo
 curated shards (shuffled by repository, data/prepare.py curate_partition) holding the rows it draws; the file-level stage
 reads the rest. max_ratio: the most tokens per scaling parameter at which no stage draws more rows of a corpus than it
 may read (data/loader.py PretrainingBatches stops at an exhausted corpus).
-
-python -m nanochat.train.stages <depth> prints max_ratio.
 """
 
 import bisect
-import sys
 
 import numpy as np
 import torch
 
 from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE, Stage
 from nanochat.data.loader import mixture_rows, mixture_weights, packed_rows, row_shards
-from nanochat.data.tokenizer import Tokenizer, get_tokenizer
+from nanochat.data.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT, gpt_config, scaling_params
 from nanochat.train.schedule import RunPlan, plan
 
@@ -64,7 +61,3 @@ def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:
 
     n = bisect.bisect_left(range(rows * FILE_STAGE.seq_len // MICRO_BATCH_TOKENS + 1), True, key=overdrawn)
     return ratio(n - 1)
-
-
-if __name__ == "__main__":
-    print(repr(max_ratio(get_tokenizer(), depth=int(sys.argv[1]))))

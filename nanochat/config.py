@@ -58,4 +58,4 @@ def run_tag(*, depth: int, ratio: float, seed: int, variant: dict) -> str:
     identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "variant": variant,
                 "dataset_revision": DATASET_REVISION}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    return f"d{depth}-r{ratio:g}-s{seed}-{digest[:12]}"
+    return f"d{depth}-r{ratio:g}-s{seed}-{digest}"

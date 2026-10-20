@@ -1,10 +1,10 @@
 """
 The production run end to end: d24 at the most tokens per scaling parameter its data holds without rereading a
-document (train/stages.py max_ratio), seed 0, the peak lr LR_SCALE times the plan's, both stages, a resume checkpoint
-every 1% of steps and a model-only snapshot every 10% and at the repository stage's start (scripts/base_train.py);
-then the final model's and every snapshot's evaluation (evaluate) and the run's tracked metrics (train/metrics.py
-export: results/<tag>.jsonl, <tag>-curves.jsonl). Training and each evaluation run in a fresh process of their own.
-Rerunning resumes training from its checkpoint and evaluates every model again.
+document (train/stages.py max_ratio), seed 0, the peak lr LR_SCALE times the plan's, both stages, a checkpoint at each
+tenth of the run and at the repository stage's start (scripts/base_train.py); then every checkpoint's evaluation
+(evaluate) and the run's tracked metrics (train/metrics.py export: results/<tag>.jsonl, <tag>-curves.jsonl). Training
+and each evaluation run in a fresh process of their own. Rerunning resumes training from its newest checkpoint and
+evaluates every checkpoint again.
 
     runs/container.sh python -m scripts.production
 """
@@ -30,14 +30,14 @@ DEPTH, SEED = 24, 0
 # results/lr.json "analysis" "production_multiplier" (d24 at 5's optimum x2.0235, carried over production's horizon by
 # the d8 ratio 0.9105 measured over 5 -> 200 tokens per parameter and the square-root batch rule; ablations.md)
 LR_SCALE = 2.546731698195362
-# Checkpoints per run: a resume checkpoint every 1% of steps (a failure costs at most 1% of the run), a model-only
-# snapshot every 10% (capability curves; ~2.1 GB each)
-SAVES, SNAPSHOTS = 100, 10
+# Checkpoints at each tenth of the run (the capability curve over training; the tenth tenth is the final model) and at
+# the repository stage's start (the model before it); each is a resume point and an evaluated model
+TENTHS = 10
 
 
-def evaluate(tag: str, *, step: int | None) -> None:
-    """BASE_EVAL/<checkpoint_name>.json (train/metrics.save_evaluation; its "run" that name) of run `tag`'s checkpoint,
-    its newest (step None) or its model-only snapshot at `step`:
+def evaluate(tag: str, step: int) -> None:
+    """BASE_EVAL/<checkpoint_name>.json (train/metrics.save_evaluation; its "run" that name) of run `tag`'s checkpoint
+    after `step` steps:
     - train/metrics.loss_evaluation: val bits and bytes of the training mixture in file-level rows, of the repo-level
       mixture per context bucket in repo-level rows (models at that context), and of the HumanEval+, MBPP+ and
       HumanEval-X C++ reference solutions;
@@ -51,8 +51,8 @@ def evaluate(tag: str, *, step: int | None) -> None:
     warnings.filterwarnings("ignore", category=SyntaxWarning)
     device = torch.device("cuda")
     benchmarks, tokenizer = tasks(), get_tokenizer()
-    model, trained_steps = load_model(tag, step=step, device=device)
-    save_evaluation(checkpoint_name(tag, step=step), trained_steps,
+    model = load_model(tag, step, device=device)
+    save_evaluation(checkpoint_name(tag, step), step,
                     loss_evaluation(model, tokenizer, benchmarks, device=device) |
                     {"codegen": generation(model, tokenizer, benchmarks), "fim": fim_generation(model, tokenizer)})
 
@@ -75,11 +75,9 @@ def main() -> None:
     run = replace(law, lr=LR_SCALE * law.lr)
     variant = {"lr_scale": LR_SCALE}
     tag = run_tag(depth=DEPTH, ratio=ratio, seed=SEED, variant=variant)
-    every = -(-run.num_iterations // SNAPSHOTS)
-    snapshots = sorted({*range(every, run.num_iterations, every), run.repo_start})
-    isolated(train, model=model, run=run, variant=variant, seed=SEED, save_every=-(-run.num_iterations // SAVES),
-             snapshots=frozenset(snapshots), tag=tag)
-    for step in (None, *snapshots):
+    checkpoints = {round(run.num_iterations * k / TENTHS) for k in range(1, TENTHS + 1)} | {run.repo_start}
+    isolated(train, model=model, run=run, variant=variant, seed=SEED, checkpoints=frozenset(checkpoints), tag=tag)
+    for step in sorted(checkpoints):
         isolated(evaluate, tag=tag, step=step)
     export(tag)
 

@@ -31,28 +31,28 @@ from nanochat.train.stages import readable_rows
 MAX_NORM = 1.0
 
 
-def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, save_every: int, snapshots: frozenset[int],
-          tag: str) -> GPT:
+def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, checkpoints: frozenset[int], tag: str) -> GPT:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
     (schedule.plan at the caller's peak lr) and return it: initialization and data order by `seed`, decoupled weight
     decay by the tau law at the run's lr (optim.tau_weight_decay), gradients clipped to global norm MAX_NORM,
-    FILE_STAGE then REPO_STAGE from run.repo_start; `variant` (config.run_tag's) recorded with the run. A resume
-    checkpoint every `save_every` steps, at repo_start and at the end (the final model); a model-only snapshot at each
-    step in `snapshots`."""
+    FILE_STAGE then REPO_STAGE from run.repo_start; `variant` (config.run_tag's) recorded with the run. A checkpoint
+    after each step count in `checkpoints` (run.num_iterations among them: the final model); a run resumes from its
+    newest."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
     model.to_empty(device=device)
     model.init_weights(seed=seed)
     opts = optimizers(model, lr=run.lr, weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,
                                                                       tokens_per_param=run.tokens_per_param))
-    path = checkpoint_path(tag, step=None)
+    saved = [s for s in sorted(checkpoints) if checkpoint_path(tag, s).exists()]
     start_step = stage_rows = 0
-    if path.exists():  # resume: weights into the optimizers' parameters, then optimizer state
-        checkpoint = torch.load(path, map_location=device)
+    if saved:  # resume: weights into the optimizers' parameters, then optimizer state
+        start_step = saved[-1]
+        checkpoint = torch.load(checkpoint_path(tag, start_step), map_location=device)
         model.load_state_dict(checkpoint["model"])
         for opt, state in zip(opts, checkpoint["optimizers"], strict=True):
             opt.load_state_dict(state)
-        start_step, stage_rows = checkpoint["step"], checkpoint["stage_rows"]
+        stage_rows = checkpoint["stage_rows"]
         del checkpoint
     # group lr = initial lr x lr_multiplier(step); a resumed scheduler restarts at start_step
     schedulers = [LambdaLR(opt, partial(lr_multiplier, steps=run.num_iterations), last_epoch=start_step - 1)
@@ -84,31 +84,28 @@ def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, save_every: int
     first = stage_at(start_step)
     mixture, train_iter = stage_batches(first, stage_rows if first is stage else 0)
     batches = [next(train_iter) for _ in range(run.grad_accum_steps)]
-    # lr and weight decay as the optimizers hold them (a resumed run's come from its checkpoint)
-    group = opts[0].param_groups[0]
-    attempt = metrics.attempt(tag)
+    # the attempt this process is (the run's process starts before it); lr and weight decay as the optimizers hold them
+    # (a resumed run's come from its checkpoint)
+    attempt = sum(r["kind"] == "run" for r in metrics.records(tag))
     params = list(model.parameters())
     metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed,
                          "model": asdict(model.config), "variant": variant,
                          "params": sum(p.numel() for p in params),
                          "flops_per_token": non_embedding_flops_per_token(model),
                          "max_norm": MAX_NORM, "dataset_revision": DATASET_REVISION,
-                         "lr": group["initial_lr"], "weight_decay": group["weight_decay"],
+                         "lr": opts[0].param_groups[0]["initial_lr"],
+                         "weight_decay": opts[0].param_groups[0]["weight_decay"],
                          "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
 
     while True:
-        last_step = step == run.num_iterations
-        # the snapshot first: a kill while writing it leaves the previous checkpoint, so the resumed run writes it again
-        if step != start_step and not last_step and step in snapshots:
-            save_checkpoint(checkpoint_path(tag, step=step), {"step": step, "model": model.state_dict(),
-                                                              "model_config": asdict(model.config)})
         # state after `step` steps at the stage they trained in
-        if step != start_step and (last_step or step % save_every == 0 or step == run.repo_start):
-            save_checkpoint(path, {"step": step, "model": model.state_dict(),
-                                   "optimizers": [opt.state_dict() for opt in opts],
-                                   "model_config": asdict(model.config), "stage_rows": stage_rows})
+        if step != start_step and step in checkpoints:
+            save_checkpoint(checkpoint_path(tag, step), {"model": model.state_dict(),
+                                                         "optimizers": [opt.state_dict() for opt in opts],
+                                                         "model_config": asdict(model.config),
+                                                         "stage_rows": stage_rows})
             gc.collect()
-        if last_step:
+        if step == run.num_iterations:
             metrics.append(tag, {"kind": "end", "step": step, "peak_memory_bytes": torch.cuda.max_memory_allocated()},
                            attempt=attempt)
             return model
