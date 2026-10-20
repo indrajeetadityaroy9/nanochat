@@ -23,14 +23,14 @@ import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.config import CODE, FILE_STAGE, REPO_STAGE, Stage, run_tag
+from nanochat.config import CODE, FILE_STAGE, REPO_STAGE, run_tag
 from nanochat.data.loader import PretrainingBatches, mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, gpt_config
 from nanochat.train import metrics
 from nanochat.train.checkpoint import checkpoint_path, save_checkpoint
 from nanochat.train.optim import optimizers, tau_weight_decay
-from nanochat.train.schedule import lr_multiplier, plan
+from nanochat.train.schedule import RunPlan, lr_multiplier, plan
 from nanochat.train.stages import readable_rows
 
 
@@ -57,22 +57,19 @@ def optimizer_step(model: torch.nn.Module, batches: list[tuple[torch.Tensor, ...
     return torch.stack(losses).double().sum(), grad_norm, upcoming
 
 
-def train(*, model: GPT, ratio: float, seed: int, data_seed: int, save_every: int, snapshot_every: int, tag: str,
-          max_norm: float, file_stage: Stage, matrix_optimizer: Literal["muon", "normuon"]) -> GPT:
-    """Train (or resume) run `tag` of `model` (shapes on the meta device, at file_stage's context) and return it: init
-    by `seed`, data order by `data_seed`, the plan at this ratio, weight decay by the tau law (optim.tau_weight_decay),
-    gradients clipped to global norm `max_norm` (inf: measured, not clipped), matrices by `matrix_optimizer`
-    (optim.optimizers), file_stage then REPO_STAGE. Resume checkpoint every `save_every` steps; a model-only snapshot
+def train(*, model: GPT, run: RunPlan, weight_decay: float, seed: int, data_seed: int, save_every: int,
+          snapshot_every: int, tag: str, max_norm: float, matrix_optimizer: Literal["muon", "normuon"]) -> GPT:
+    """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
+    (schedule.plan) and return it: init by `seed`, data order by `data_seed`, decoupled `weight_decay`, gradients clipped
+    to global norm `max_norm` (inf: measured, not clipped), matrices by `matrix_optimizer` (optim.optimizers),
+    FILE_STAGE then REPO_STAGE from run.repo_start. Resume checkpoint every `save_every` steps; a model-only snapshot
     every `snapshot_every` steps and at repo_start (the model before the repo-level stage), the final model being the
     last checkpoint."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
-    run = plan(model=model, ratio=ratio)
     model.to_empty(device=device)
     model.init_weights(seed=seed)
-    opts = optimizers(model, lr=run.lr, matrix_optimizer=matrix_optimizer,
-                      weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,
-                                                    tokens_per_param=run.tokens_per_param))
+    opts = optimizers(model, lr=run.lr, weight_decay=weight_decay, matrix_optimizer=matrix_optimizer)
     path = checkpoint_path(tag, step=None)
     start_step = stage_rows = 0
     if path.exists():  # resume: weights into the optimizers' parameters, then optimizer state
@@ -89,7 +86,7 @@ def train(*, model: GPT, ratio: float, seed: int, data_seed: int, save_every: in
 
     def stage_at(s):
         """Repo-level stage from repo_start on."""
-        return REPO_STAGE if s >= run.repo_start else file_stage
+        return REPO_STAGE if s >= run.repo_start else FILE_STAGE
 
     # A checkpoint holds the context its weights trained in; stage_rows counts that stage's consumed rows
     stage = stage_at(start_step - 1)
@@ -116,7 +113,10 @@ def train(*, model: GPT, ratio: float, seed: int, data_seed: int, save_every: in
     group = opts[0].param_groups[0]
     attempt = metrics.attempt(tag)
     metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "data_seed": data_seed,
-                         "model": asdict(model.config) | {"mlp": type(model.blocks[0].mlp).__name__},
+                         "model": asdict(model.config) | {"mlp": type(model.blocks[0].mlp).__name__,
+                                                          "value_embeds": sorted(map(int, model.value_embeds)),
+                                                          "frozen": [n for n, p in model.named_parameters()
+                                                                     if not p.requires_grad]},
                          "max_norm": None if math.isinf(max_norm) else max_norm, "matrix_optimizer": matrix_optimizer,
                          "lr": group["initial_lr"], "weight_decay": group["weight_decay"],
                          "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
@@ -186,12 +186,14 @@ def main():
     args = parser.parse_args()
     with torch.device("meta"):
         model = GPT(gpt_config(depth=args.depth, stage=FILE_STAGE))
+    run = plan(model=model, ratio=args.target_param_data_ratio)
     # no clipping (docs/h100-pretraining.md Regime): an infinite threshold only measures the norm
-    train(model=model, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
-          save_every=args.save_every, snapshot_every=args.snapshot_every,
+    train(model=model, run=run,
+          weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations, tokens_per_param=run.tokens_per_param),
+          seed=args.seed, data_seed=args.seed, save_every=args.save_every, snapshot_every=args.snapshot_every,
           tag=run_tag(depth=args.depth, ratio=args.target_param_data_ratio, seed=args.seed, data_seed=args.seed,
                       variant={}, code=CODE),
-          max_norm=math.inf, file_stage=FILE_STAGE, matrix_optimizer="muon")
+          max_norm=math.inf, matrix_optimizer="muon")
 
 
 if __name__ == "__main__":

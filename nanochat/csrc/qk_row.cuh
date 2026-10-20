@@ -15,13 +15,10 @@
 typedef __nv_bfloat16 bf16;
 
 constexpr int WARP = 32;                           /* threads per warp (CUDA C++ Programming Guide, warpSize) */
-/* HEAD_DIM: model/gpt.py's n_embd // n_head, an nvcc -DHEAD_DIM= definition (native.cuda_library); register arrays */
+constexpr int HEAD_DIM = 128;                      /* model/gpt.py gpt_config head_dim; compile time: register arrays */
 constexpr int HALF = HEAD_DIM / 2;                 /* rotation pairs per head: dims i and i + HALF */
 constexpr int VEC = sizeof(uint4) / sizeof(bf16);  /* bf16 per 16-byte access */
 constexpr int QK_LANES = HALF / VEC;               /* threads per head row, one rotation pair of vectors each */
-static_assert(HEAD_DIM % (2 * VEC) == 0, "each half head is whole 16-byte vectors");
-static_assert((QK_LANES & (QK_LANES - 1)) == 0 && WARP % QK_LANES == 0,
-              "rows are power-of-two lane groups within a warp (qk_row_mask, qk_row_sum)");
 
 /* VEC bf16 (one 16-byte load) as fp32. */
 static __device__ __forceinline__ void load(const bf16 *p, float *v) {

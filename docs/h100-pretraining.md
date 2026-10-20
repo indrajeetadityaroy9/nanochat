@@ -328,19 +328,15 @@ are near zero; the probe set's results are reported on the production model.
 ## Appendix ablation
 
 The paired comparison above tests this configuration's regime as a whole against the standard regime, and the d24
-check the production batch and lr. The pre-registered architecture and regime ablations (attention windows, head_dim,
-gradient clipping, mixture, MLP activation, depth against width), their designs, decision rules and results are in
+check the production batch and lr. The pre-registered ablations (attention windows, gradient clipping, MLP activation,
+matrix optimizer, peak lr, weight decay, value embeddings, the repository stage, depth against width), each against the
+choice of DeepSeek-Coder and the code models it is compared with, their designs, decision rules and results are in
 `ablations/ablations.md`; only changes they confirm reach production.
 
 Adopted without a study, on published evidence and the pre-launch measurements: linear decay to zero continuing
 through the repository stage, one RoPE base, learned QK-norm gains (Qwen3), the x0 and residual scalars (nanochat LOG
-2026-01-11), and the peak lr of DeepSeek LLM's law (an lr-vs-horizon fit at affordable d24 horizons extrapolates 38× to
-production's tokens with an interval too wide to override it). Not studied, by expected value against GPU cost:
+2026-01-11). Not studied, by expected value against GPU cost:
 
-- **Value embeddings kept.** They cost 4.7% of the d24 step (measured before `60138de` with the removed switch; the
-  timing record was not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20, several
-  times the ~0.0015 that 4.7% more compute buys at production (a loss–compute exponent near 0.05). A two-seed d24 test
-  at 2.6 tokens per parameter (pair noise ~0.007, from the paired comparison) cannot resolve that margin.
 - **Block Attention Residuals not adopted.** +12% d24 step time (about 10 hours of production; measured before
   `60138de`, record not kept) for a published 1.1% loss gain at 194M parameters (arXiv 2603.15031); the equal-time
   margin is below what a few seed pairs detect, and adopting it would need a native decode path.
