@@ -87,7 +87,7 @@ FILTERED_MODE = "spm"
 # The sampled mode (Chen et al., Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem;
 # nucleus sampling at top p 0.95 for all its sampling; §3.3, Fig. 5: T = 0.2 the pass@1 optimum): MultiPL-E's pass@1
 # (Cassano et al., arXiv 2208.08227: T = 0.2, its pass@1 stable from about 20 samples; completions.py --top-p 0.95) and
-# StarCoder2's (arXiv 2402.19173: pass@1 from 20 samples at T = 0.2, following OctoPack)
+# StarCoder2's (arXiv 2402.19173: pass@1 from 20 samples at T = 0.2, following OctoPack, arXiv 2308.07124)
 SAMPLES, SAMPLE_TEMPERATURE, TOP_P = 20, 0.2, 0.95
 
 

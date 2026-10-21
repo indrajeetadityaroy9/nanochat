@@ -154,8 +154,9 @@ static __device__ __forceinline__ unsigned long long choice_key(float score, int
 /* Gumbel noise -log(-log(u)) of token row at generated position i under a request's seed, u uniform on (0, 1) from the
  * counter-based Philox4x32-10 (Salmon et al., SC'11 "Parallel random numbers: as easy as 1, 2, 3"; cuRAND's
  * curand_Philox4x32_10) at counter (row, i), key seed: so the draw depends on (seed, i, row) alone. u = (2r + 1)
- * 2^-DBL_MANT_DIG of DBL_MANT_DIG - 1 random bits r is exact in double and never 0 or 1. argmax over tokens of
- * s / T + noise samples softmax(s / T) (the Gumbel-max trick; Maddison et al., NeurIPS 2014 "A* Sampling", §2). */
+ * 2^-DBL_MANT_DIG of DBL_MANT_DIG - 1 random bits r is exact in double and never 0 or 1. argmax over tokens of s / T +
+ * noise samples softmax(s / T) (the Gumbel-max trick; Maddison et al., NeurIPS 2014 "A* Sampling", arXiv 1411.0030,
+ * §2). */
 static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, int row) {
     const uint4 x = curand_Philox4x32_10(make_uint4((uint32_t)row, (uint32_t)i, 0u, 0u),
                                          make_uint2((uint32_t)seed, (uint32_t)(seed >> 32)));
@@ -168,13 +169,13 @@ static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, i
  * A block is one warp: one MMA_M-row tile of W and one group of GROUP_SLOTS slots, the grid's x the group (fastest, so
  * a row tile's groups run together and read its weights from L2 after the first), y the row tile; a group without an
  * active slot exits. Many small blocks keep every SM loading (flat GEMMs with few rows are parallelism-bound: Hong et
- * al., FlashDecoding++, MLSys 2024, §4). A slot is one column of an n tile, and each output's sum runs over K in a
- * fixed order (K_BLOCK blocks, two k16 MMAs each), so a slot's outputs do not depend on B. In a K_BLOCK block lane
- * (g, t) = (groupID, threadID_in_group) loads k t*VEC.. of rows g, g + 8 and of its column's input (one 16-byte load
- * each); A and B map MMA k to physical k alike, so the product is W . x. The warp keeps DEPTH blocks of weights in
- * flight (a register ring) and copies its group's bf16 inputs to shared memory by cp.async a K chunk at a time,
- * [slots][chunk + VEC] (the VEC pad staggers banks; inactive slots zero; chunk: gemv_chunk), the copy overlapping the
- * ring's first loads. RELU2: out = bf16(relu(s) s) of the fp32 dot product s (QuACK gemm_act relu_sq). ARGMAX: the
+ * al., FlashDecoding++, MLSys 2024, arXiv 2311.01282, §4). A slot is one column of an n tile, and each output's sum
+ * runs over K in a fixed order (K_BLOCK blocks, two k16 MMAs each), so a slot's outputs do not depend on B. In a
+ * K_BLOCK block lane (g, t) = (groupID, threadID_in_group) loads k t*VEC.. of rows g, g + 8 and of its column's input
+ * (one 16-byte load each); A and B map MMA k to physical k alike, so the product is W . x. The warp keeps DEPTH blocks
+ * of weights in flight (a register ring) and copies its group's bf16 inputs to shared memory by cp.async a K chunk at a
+ * time, [slots][chunk + VEC] (the VEC pad staggers banks; inactive slots zero; chunk: gemv_chunk), the copy overlapping
+ * the ring's first loads. RELU2: out = bf16(relu(s) s) of the fp32 dot product s (QuACK gemm_act relu_sq). ARGMAX: the
  * warp's maximum key per slot over its 16 rows (an exact integer maximum, so any order), then one atomicMax. */
 
 typedef struct {
@@ -332,16 +333,16 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
     }
 }
 
-/* A nucleus-sampled slot's choice (top-p sampling: Holtzman et al., ICLR 2020, "The Curious Case of Neural Text
- * Degeneration", §3.1): Gumbel-max at temperature T, as k_gemv's epilogue, over the fewest most likely allowed tokens
- * whose probability under softmax(s / T) reaches top_p; its key to argmax for k_commit. Hugging Face transformers'
- * TopPLogitsWarper, which the code benchmarks' generators run (MultiPL-E automodel.py, bigcode-evaluation-harness),
- * sorts the probabilities ascending and drops every token whose cumulative probability is at most 1 - top_p; here,
- * with e = exp(s / T - max s / T) (0 outside the allowed tokens) and C(x) the sum of e over the tokens with e <= x, the
- * tokens kept are those with e >= e*, the least e with C(e) > (1 - top_p) sum(e), found by bisection on the IEEE bits
- * of x in [0, 1] (C is a step function rising at each e, so the least such bits are an e's). Tokens of exactly equal
- * probability are kept or dropped together. The sums run in a fixed order, so the choice depends on the slot alone. A
- * block per slot; inactive, greedy and top_p 1 slots exit. */
+/* A nucleus-sampled slot's choice (top-p sampling: Holtzman et al., ICLR 2020, arXiv 1904.09751, "The Curious Case of
+ * Neural Text Degeneration", §3.1): Gumbel-max at temperature T, as k_gemv's epilogue, over the fewest most likely
+ * allowed tokens whose probability under softmax(s / T) reaches top_p; its key to argmax for k_commit. Hugging Face
+ * transformers' TopPLogitsWarper, which the code benchmarks' generators run (MultiPL-E automodel.py,
+ * bigcode-evaluation-harness), sorts the probabilities ascending and drops every token whose cumulative probability is
+ * at most 1 - top_p; here, with e = exp(s / T - max s / T) (0 outside the allowed tokens) and C(x) the sum of e over
+ * the tokens with e <= x, the tokens kept are those with e >= e*, the least e with C(e) > (1 - top_p) sum(e), found by
+ * bisection on the IEEE bits of x in [0, 1] (C is a step function rising at each e, so the least such bits are an e's).
+ * Tokens of exactly equal probability are kept or dropped together. The sums run in a fixed order, so the choice
+ * depends on the slot alone. A block per slot; inactive, greedy and top_p 1 slots exit. */
 __global__ void __launch_bounds__(NUCLEUS_THREADS) k_nucleus(Choice c, const unsigned long long *active,
                                                               unsigned long long *argmax, int vocab) {
     __shared__ float scratch[NUCLEUS_THREADS / WARP];

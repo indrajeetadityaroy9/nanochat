@@ -1,6 +1,6 @@
 /*
  * q/k prologue of model/gpt.py, forward and backward, one pass over memory each: qk_row.cuh's row math in Qwen3's
- * norm -> gain -> RoPE order (transformers modeling_qwen3.py Qwen3Attention.forward).
+ * (arXiv 2505.09388) norm -> gain -> RoPE order (transformers modeling_qwen3.py Qwen3Attention.forward).
  *
  * Backward, recomputing n from x: dm = R^T dy (dm1 = dy1 cos - dy2 sin, dm2 = dy1 sin + dy2 cos), dg = sum over rows of
  * dm * n, dn = dm * g, dx = rstd * (dn - n * mean(dn * n)).

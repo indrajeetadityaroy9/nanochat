@@ -34,8 +34,8 @@ VAL_TOKENS = 80 * 2**19
 # Context buckets of a target (its input's position in its piece + 1): positions both stages train (at most the
 # file-level context) and positions only the repo-level stage trains
 CONTEXTS = (FILE_STAGE.seq_len,)
-# The benchmarks with reference solutions (eval/code_eval.py tasks): Python's EvalPlus canonical solutions, C++'s
-# HumanEval-X's (MultiPL-E has none)
+# The benchmarks with reference solutions (eval/code_eval.py tasks): Python's EvalPlus (arXiv 2305.01210) canonical
+# solutions, C++'s HumanEval-X's (arXiv 2303.17568; MultiPL-E, arXiv 2208.08227, has none)
 SOLUTION_BENCHMARKS = ("humaneval_plus", "mbpp_plus", "humaneval_x_cpp")
 
 

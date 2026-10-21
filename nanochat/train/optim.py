@@ -22,8 +22,8 @@ def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float
 
 
 def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tuple[torch.optim.Optimizer, ...]:
-    """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, not 1-D parameters (nanoGPT
-    configure_optimizers)."""
+    """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, not 1-D parameters (karpathy/nanoGPT
+    model.py configure_optimizers)."""
     tables = [model.wte.weight, model.lm_head.weight, *model.value_embeds.parameters()]
     table_ids = {id(p) for p in tables}
     vectors = [p for p in model.parameters() if p.ndim == 1]

@@ -94,10 +94,11 @@ def execute(run: Run) -> None:
 def evaluation(run: Run) -> dict[str, float]:
     """A run's compared measures (bits per byte; tokens per second) from its evaluation and its per-step records: code,
     text and math, the 8K validation bits per byte of each group at production's corpus weights (bpb.val_bits "bpb");
-    solutions, the bits per byte of the HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their prompts,
-    pooled (bpb.solution_bits); repo_32k, the 32K repository bits per byte of the code group, and repo_beyond_8k, the
-    same over the targets beyond the file-level context (bpb.CONTEXTS' last bucket); tok_per_s, the median over the
-    file-level stage's steps of the step's tokens per second."""
+    solutions, the bits per byte of the HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) and HumanEval-X C++
+    (arXiv 2303.17568) reference solutions given their prompts, pooled (bpb.solution_bits); repo_32k, the 32K repository
+    bits per byte of the code group, and repo_beyond_8k, the same over the targets beyond the file-level context
+    (bpb.CONTEXTS' last bucket); tok_per_s, the median over the file-level stage's steps of the step's tokens per
+    second."""
     tag, repo_start = tag_of(run), plan_of(run).repo_start
     result = json.loads(evaluation_path(run).read_text(encoding="utf-8"))
     rates = [r["tok_per_s"] for step, r in metrics.train_steps(tag).items() if step < repo_start]

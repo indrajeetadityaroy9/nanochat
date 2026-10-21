@@ -49,8 +49,8 @@ class Request:
     predicate of the generated ids, true once the sequence is done. temperature 0: the greedy argmax (ties to the lowest
     id); > 0: a sample of softmax(logits / temperature) whose draw at generated position i depends only on (seed, i),
     not on the slot or the batch (decode.cu gumbel), and with top_p < 1 from the fewest most likely tokens holding top_p
-    of that probability (nucleus sampling, Holtzman et al., ICLR 2020, §3.1; decode.cu k_nucleus). constraint: the
-    tokens allowed at each step."""
+    of that probability (nucleus sampling, Holtzman et al., ICLR 2020, arXiv 1904.09751, §3.1; decode.cu k_nucleus).
+    constraint: the tokens allowed at each step."""
     prompt: list[int]
     max_tokens: int
     stop: Callable[[list[int]], bool] | None = None

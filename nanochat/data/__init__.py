@@ -1,7 +1,7 @@
 """
-The pretraining data of nanochat, one module per stage. The tokenizer (tokenizer.py) and its Rust crate bpe/ (the SA-BPE
-trainer, curation's deduplication and repository samples, the packer) are shared by the stages, the loader and
-evaluation.
+The pretraining data of nanochat, one module per stage. The tokenizer (tokenizer.py) and its Rust crate bpe/ (the
+SA-BPE trainer, arXiv 2604.14053; curation's deduplication and repository samples; the packer) are shared by the
+stages, the loader and evaluation.
 
     HF Hub, Software Heritage (pinned)       sources.py: the sources, one mixture component each
         │  prepare.py, the only network step: fetch the code group whole and every other group up to its share of the
@@ -10,10 +10,10 @@ evaluation.
         ▼
     normalized/<source>/                     the Parquet store: one file per raw file
         │  prepare.py, curate: exact and near duplicates dropped across the repository corpora and across the
-        │  document corpora (dedup.py: StarCoder2's MinHash LSH), and the repository files GitHub Linguist (go-enry)
-        │  marks vendored or generated; 1% val by repository / problem / document; a repository source's files
-        │  partitioned by repository (DuckDB) and split into repository samples, the files that import one another
-        │  in dependency order (DeepSeek-Coder §2.2)
+        │  document corpora (dedup.py: StarCoder2's MinHash LSH, arXiv 2402.19173), and the repository files
+        │  GitHub Linguist (go-enry) marks vendored or generated; 1% val by repository / problem / document; a
+        │  repository source's files partitioned by repository (DuckDB) and split into repository samples, the
+        │  files that import one another in dependency order (DeepSeek-Coder, arXiv 2401.14196 §2.2)
         ▼
     curated/<source>/{train,val}/            the training documents
         │  tokenizer.py: SA-BPE trained on a sample of the curated train documents of every source
@@ -22,9 +22,9 @@ evaluation.
         ▼
     <split>.bin tokens, <split>.idx document offsets
         │  pack.py, per sequence length: cut long documents between whole statements (repository samples) or at line
-        │  ends, make train pieces of the repository corpora AST-FIM fill-in-the-middle examples (their sections
-        │  encoded each on its own), BOS-aligned Best-Fit-Decreasing packing (no document cut to fill a row; padding
-        │  instead), as an index of each row's pieces and the examples' tokens
+        │  ends, make train pieces of the repository corpora AST-FIM (arXiv 2506.00204) fill-in-the-middle examples
+        │  (their sections encoded each on its own), BOS-aligned Best-Fit-Decreasing packing (no document cut to fill
+        │  a row; padding instead), as an index of each row's pieces and the examples' tokens
         ▼
     <split>-T<seq_len>.pieces, .rows, .fim
         │  mmap'd in place from local NVMe; each row built on the fly

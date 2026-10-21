@@ -1,29 +1,29 @@
 //! Deduplication of curation (nanochat/data/dedup.py): each document's MinHash signature (sketch), and the documents
 //! that are exact or near duplicates of an earlier one (duplicates).
 //!
-//! A document is the set of its n-grams of words as StarCoder2 near-deduplicates code (bigcode-dataset
-//! near_deduplication/bigcode-v2/intra_dedup.py `ngrams`, min_length = n): the text lowercased and split at every
-//! non-word character (`re.split(r"\W", content.lower())`, so a run of k non-word characters leaves k - 1 empty words;
-//! a word character is alphanumeric or '_', Rust's char::is_alphanumeric, which unlike Python's `\w` also counts the
-//! Unicode Other_Alphabetic marks); none below n words. A word is hashed by rustc-hash's FxHasher (rensa's token hash),
-//! an n-gram by folding its words' hashes through splitmix64.
+//! A document is the set of its n-grams of words as StarCoder2 (arXiv 2402.19173) near-deduplicates code
+//! (bigcode-dataset near_deduplication/bigcode-v2/intra_dedup.py `ngrams`, min_length = n): the text lowercased and
+//! split at every non-word character (`re.split(r"\W", content.lower())`, so a run of k non-word characters leaves
+//! k - 1 empty words; a word character is alphanumeric or '_', Rust's char::is_alphanumeric, which unlike Python's `\w`
+//! also counts the Unicode Other_Alphabetic marks); none below n words. A word is hashed by rustc-hash's FxHasher
+//! (rensa's token hash), an n-gram by folding its words' hashes through splitmix64.
 //!
 //! The signature is rensa's R-MinHash (github.com/beowolx/rensa src/rminhash/bucket.rs, after Fast Similarity
 //! Sketching, Dahlgaard et al. arXiv 1704.04370): in each of its rounds every n-gram is placed in one slot by Lemire's
-//! multiply-shift of the low 32 bits of a splitmix64 mix (without rensa's rejection step for a slot count that is not a
-//! power of two), its rank the round then the mix's top 30 bits; a slot that no round fills takes the minimum over the
-//! n-grams of its own mix, ranked after every round. Each slot's minimum is that of one fixed random function of
-//! (n-gram, slot), so two documents' slots agree with probability their Jaccard similarity. A slot is stored as the
-//! low byte of its minimum (b-bit minwise hashing, Li and König, WWW 2010).
+//! multiply-shift (arXiv 1805.10941) of the low 32 bits of a splitmix64 mix (without rensa's rejection step for a slot
+//! count that is not a power of two), its rank the round then the mix's top 30 bits; a slot that no round fills takes
+//! the minimum over the n-grams of its own mix, ranked after every round. Each slot's minimum is that of one fixed
+//! random function of (n-gram, slot), so two documents' slots agree with probability their Jaccard similarity. A slot
+//! is stored as the low byte of its minimum (b-bit minwise hashing, Li and König, WWW 2010, arXiv 0910.3349).
 //!
-//! Duplicates: documents with the same text are one cluster (exact before near deduplication, as The Stack and
-//! StarCoder2); documents with the same slots in any LSH band are candidates, joined when their Jaccard similarity
-//! estimated from all slots reaches the threshold (The Stack v3 verifies LSH candidates by estimated similarity;
-//! StarCoder2 joins every candidate). Within a band's bucket each document, in document order, joins the first similar
-//! one of the bucket's leaders (the first document of each cluster met in it), else leads. Union-find (petgraph) joins
-//! clusters across bands; each cluster keeps its first document (PUFFER's keep-first order, Zyphra arXiv 2608.28622).
-//! A document without an n-gram is in no band (StarCoder2's all-maximum signature would put every such document in one
-//! bucket), so only its exact copies join it.
+//! Duplicates: documents with the same text are one cluster (exact before near deduplication, as The Stack
+//! (arXiv 2211.15533) and StarCoder2); documents with the same slots in any LSH band are candidates, joined when their
+//! Jaccard similarity estimated from all slots reaches the threshold (The Stack v3 verifies LSH candidates by estimated
+//! similarity; StarCoder2 joins every candidate). Within a band's bucket each document, in document order, joins the
+//! first similar one of the bucket's leaders (the first document of each cluster met in it), else leads. Union-find
+//! (petgraph) joins clusters across bands; each cluster keeps its first document (PUFFER's keep-first order, Zyphra
+//! arXiv 2608.28622). A document without an n-gram is in no band (StarCoder2's all-maximum signature would put every
+//! such document in one bucket), so only its exact copies join it.
 
 use std::fs::File;
 use std::hash::Hasher;
@@ -44,7 +44,7 @@ const ROUNDS: u32 = 3;
 const FRACTION_BITS: u32 = u32::BITS - (ROUNDS + 1).ilog2();
 const FALLBACK: u32 = ROUNDS << FRACTION_BITS;
 
-/// SplitMix64's output function (Steele, Lea and Flood, OOPSLA 2014).
+/// SplitMix64's output function (Steele, Lea and Flood, OOPSLA 2014, "Fast Splittable Pseudorandom Number Generators").
 fn splitmix64(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
