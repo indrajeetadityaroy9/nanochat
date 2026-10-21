@@ -521,10 +521,11 @@ checkpointing, config frameworks.
 
 On real rows (12 micro-batches of 12 rows, `torch.profiler`): 3,741 ms, 315K tok/s, 100% GPU-busy, peak 69.6 GiB;
 GEMM 53%, FA4 25%, Inductor 14%; the repository stage's (12 of 3 rows) 4,016 ms, measured with Inductor's
-coordinate-descent tuning (0.8% faster at the file level; off, Reproducibility). At 3,741 ms the step computes
-539 TFLOP/s by M plus `lm_head` (54.5% of the H100's 989 dense bf16), 369 TFLOP/s (37.3%) counting the weight
-matrices alone, about 700 TFLOP/s (71%) over the GEMMs' own time (1,966–1,977 ms a step): the rest of the step is
-attention and Inductor's kernels. Production's step on 2026-10-21 (two runs): 3,700 / 3,689 ms, GEMM 1,966 ms, FA4
+coordinate-descent tuning (0.8% faster at the file level; off, Reproducibility). At 3,741 ms the step's model FLOPs
+utilization (PaLM, Chowdhery et al., arXiv 2204.02311 App. B: observed tokens per second times the model's FLOPs per
+token, 6N + 12LHQT, over the hardware's peak) is 54.5% of the H100's 989 dense bf16 TFLOP/s (539 TFLOP/s; M plus
+`lm_head`, T each layer's window) and 37.3% without self-attention (369 TFLOP/s, 6N alone, as PaLM also reports it).
+Production's step on 2026-10-21 (two runs): 3,700 / 3,689 ms, GEMM 1,966 ms, FA4
 935 ms, peak 69.6 GiB. The configurations measured (file-level stage unless stated):
 
 | Configuration | Step | Throughput | Notes |
@@ -704,7 +705,7 @@ stated. Relative error against the restatement:
 | FA4 without the document mask | 4.1 | 4.2 |
 | Cross entropy | 1.7e-3 | 1.7e-3 |
 | Whole model (4 × 256, every component perturbed to matter): per-position loss | 5.0e-3 | 5.2e-3 mean, 2.5e-2 max |
-| Restatements each breaking one rule (no x0, σ gate, no value embeddings, RoPE +θ, no document mask) | 5.1e-2–1.5e-1 from the model | the model's deviation projects at most 0.001 onto each (1 would be that rule) |
+| Restatements each breaking one rule (no x0, σ gate, no value embeddings, RoPE +θ, no document mask): per-position loss's mean absolute difference from the model | 5.1e-2–1.5e-1 | 4.4e-2–1.5e-1 |
 | Gradients | 1.7e-2 | 2.1e-2 |
 | Native decoder: greedy tokens the forward's argmax, the rest within | 499 of 512, 0.014 of its maximum logit | 502 of 512, 0.015 |
 

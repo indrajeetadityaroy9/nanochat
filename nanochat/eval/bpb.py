@@ -4,7 +4,8 @@ summed UTF-8 bytes of the targets, targets of 0 bytes (special tokens, padding) 
 bits per UTF-8 byte, Gao et al., arXiv 2101.00027; tokenizer-independent, so models and vocabularies compare).
 - val_bits: each training corpus's held-out val split, the test loss of autoregressive training (Bavarian et al.,
   arXiv 2207.14255 §3: the "AR test loss"), per context bucket (CONTEXTS: Code Llama's loss as a function of context
-  length, arXiv 2308.12950 §3.3, Fig. 4a), pooled by the stage's mixture weights (mixture_bpb).
+  length, arXiv 2308.12950 §3.3, Fig. 4a), per corpus, per group (code, text, math) and overall, pooled by the stage's
+  mixture weights (mixture_bpb), as The Pile reports its BPB per component and over the whole.
 - solution_bits: each benchmark's reference solutions given their prompts: the task loss that predicts pass@1 at
   scales where pass@1 is near zero (Bhagia et al., arXiv 2412.04403 §2; DataDecide, arXiv 2504.11393 §3.3: the correct
   answer's likelihood the best small-scale predictor for HumanEval and MBPP; Heineman et al., arXiv 2508.13144 §5.3:

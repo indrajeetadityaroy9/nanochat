@@ -182,14 +182,12 @@ def filtered(decoder: NativeDecoder, request: Callable[[int], Request], text: Ca
              check: Callable[[int, str], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
              count: int) -> tuple[list[str], dict[str, list]]:
     """The filtered mode of tasks 0..count-1: verify.search over request(i)'s candidates, each checked as check(i, its
-    text(i, ids)) (the (prompt, program, diagnostics) verify.verdicts runs); the text of each task's verify.chosen candidate and the
-    search record per task: candidates tried, whether one was accepted (verify.Candidate), each candidate's diagnostics
-    count and whether it passed its prompt's examples."""
+    text(i, ids)) (the (prompt, program, diagnostics) verify.verdicts runs); the text of each task's verify.chosen
+    candidate and which one it is per task: the candidates tried and whether the last was accepted (else the greedy
+    one is scored)."""
     tried = search(decoder, request, lambda i, ids: check(i, text(i, ids)), language=language, count=count)
     return [text(i, chosen(c).ids) for i, c in enumerate(tried)], {
-        "attempts": [len(c) for c in tried], "accepted": [c[-1].accepted for c in tried],
-        "diagnostics": [[len(x.diagnostics) for x in c] for c in tried],
-        "examples": [[x.examples for x in c] for c in tried]}
+        "attempts": [len(c) for c in tried], "accepted": [c[-1].accepted for c in tried]}
 
 
 def filtered_completions(decoder: NativeDecoder, tokenizer: Tokenizer, items: list[Task], prompts: list[list[int]],
