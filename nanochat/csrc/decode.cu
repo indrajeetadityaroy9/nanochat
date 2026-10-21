@@ -1,7 +1,7 @@
 /*
  * Decoding of a nanochat GPT (nanochat/model/gpt.py) for B independent sequences (slots): each step advances every
- * active slot by one token, chosen greedily or sampled, optionally restricted to a per-slot set of allowed tokens
- * (nanochat/inference/decoder.py).
+ * active slot by one token, chosen greedily or sampled (optionally from its nucleus), optionally restricted to a
+ * per-slot set of allowed tokens (nanochat/inference/decoder.py).
  *
  * A small-batch step is bound by weight reads and kernel launches: each weight is read from DRAM about once (each slot
  * group's GEMV block rereads it from L2), and the step's 7 kernels per layer plus 4 replay as one CUDA graph.
@@ -14,7 +14,7 @@
  * RadixAttention, arXiv 2312.07104, reuses prompt prefixes likewise).
  *
  * The step is captured whole (dec_launch), the greedy argmax for every slot, and as its body, everything before the
- * lm_head GEMV, and a head that chooses by each slot's allowed tokens and temperature (dec_launch_body,
+ * lm_head GEMV, and a head that chooses by each slot's allowed tokens, temperature and top_p (dec_launch_body,
  * dec_launch_head): the host supplies the allowed tokens, which follow from each slot's previous token, while the
  * body runs (decoder.py). The whole step's GEMVs compile without the choice (k_gemv's CHOICE).
  *
@@ -33,7 +33,9 @@
  *   k_norm    hn = norm(x)
  *   k_gemv    the token choice from s = hn W_lm^T over the slot's allowed tokens (all if it has none): argmax s at
  *             temperature 0, else argmax s / T + Gumbel noise (sampling softmax(s / T), gumbel), by atomicMax on a
- *             packed key
+ *             packed key; a nucleus-sampled slot's s are stored instead (head only)
+ *   k_nucleus a nucleus-sampled slot's choice: that argmax over the fewest most likely allowed tokens holding top_p of
+ *             softmax(s / T) (head only)
  *   k_commit  the prompt's next token, or once past the prompt the choice, becomes each active slot's next input
  *
  * Numerics follow the eager forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary table, q/k
@@ -43,8 +45,8 @@
  * choice over fp32 logits.
  *
  * No sum mixes slots and every sum's order is fixed by the shapes and the slot's position (GEMV: MMAs over K in fixed
- * order; attention: split count from the position), and a sample's noise depends only on its request's seed and the
- * generated position, so a sequence's tokens do not depend on the batch or on timing.
+ * order; attention: split count from the position; nucleus: fixed-order block sums), and a sample's noise depends only
+ * on its request's seed and the generated position, so a sequence's tokens do not depend on the batch or on timing.
  *
  * Launch shapes: a GEMV runs a one-warp block per (row tile, slot group); attention runs a thread per head dim in
  * (head, split, slot) blocks, at most a wave of splits per head and slot (k_attn).
@@ -82,6 +84,8 @@ constexpr int GROUP_TILES = 2, GROUP_SLOTS = GROUP_TILES * MMA_N, DEPTH = 8;
 static_assert(MASK_BITS % GROUP_SLOTS == 0, "a slot group lies in one word of the active mask (k_gemv)");
 constexpr int NORM_WARPS = 4;                      /* k_norm: slots (a warp each) per block */
 constexpr int WORD_BITS = CHAR_BIT * sizeof(uint32_t);  /* tokens per word of an allowed-token mask */
+/* k_nucleus: threads per slot, a block each: the most a block holds (CUDA C++ Programming Guide, "Thread Hierarchy") */
+constexpr int NUCLEUS_THREADS = 1024;
 
 enum { NORM, RESID_NORM, EMBED };
 enum { EPI_STORE, EPI_RESID, EPI_RELU2, EPI_ARGMAX };
@@ -114,6 +118,37 @@ static __device__ __forceinline__ float warp_sum(float v) {
 static __device__ __forceinline__ float warp_max(float v) {
     for (int o = WARP / 2; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
     return v;
+}
+
+/* The block's sum of v to every thread, in a fixed order: each warp's butterfly, then the warps' sums in warp order.
+ * scratch: a warp_count floats of shared memory. */
+static __device__ float block_sum(float v, float *scratch) {
+    v = warp_sum(v);
+    __syncthreads();  /* the previous call's reads of scratch are done */
+    if (threadIdx.x % WARP == 0) scratch[threadIdx.x / WARP] = v;
+    __syncthreads();
+    float sum = 0.f;
+    for (int w = 0; w < (int)blockDim.x / WARP; w++) sum = __fadd_rn(sum, scratch[w]);
+    return sum;
+}
+
+/* The block's maximum of v to every thread (an exact maximum, so any order). */
+static __device__ float block_max(float v, float *scratch) {
+    v = warp_max(v);
+    __syncthreads();
+    if (threadIdx.x % WARP == 0) scratch[threadIdx.x / WARP] = v;
+    __syncthreads();
+    float m = -INFINITY;
+    for (int w = 0; w < (int)blockDim.x / WARP; w++) m = fmaxf(m, scratch[w]);
+    return m;
+}
+
+/* A token choice's packed key: the score's IEEE bits mapped to an unsigned order (negatives inverted, positives above
+ * them), then ~row, so the largest key holds the largest score and, among exact ties, the lowest row. */
+static __device__ __forceinline__ unsigned long long choice_key(float score, int row) {
+    const uint32_t bits = __float_as_uint(score);
+    const uint32_t ordered = (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+    return ((unsigned long long)ordered << 32) | (UINT32_MAX - (uint32_t)row);
 }
 
 /* Gumbel noise -log(-log(u)) of token row at generated position i under a request's seed, u uniform on (0, 1) from the
@@ -154,13 +189,17 @@ typedef struct {
     int B;
 } Gemv;
 
-/* The per-slot inputs of a CHOICE ARGMAX, a kernel argument of their own: growing Gemv changes the compiled GEMVs. */
+/* The per-slot inputs of a CHOICE ARGMAX and of k_nucleus, a kernel argument of their own: growing Gemv changes the
+ * compiled GEMVs. */
 typedef struct {
     const uint32_t *allow;           /* [B][rows / WORD_BITS]: a masked slot's allowed rows, bit row % WORD_BITS of
                                       * word row / WORD_BITS */
     const float *temperature;        /* [B]: 0 the logits' argmax, else Gumbel-max sampling at that temperature */
+    const float *top_p;              /* [B]: at temperature > 0, below 1: from the nucleus holding that much (k_nucleus) */
     const unsigned long long *seed;  /* [B] */
     const int32_t *pos, *first;      /* [B]: the input's position and the first generated token's (i = pos - first) */
+    float *logits;                   /* [B][rows]: a nucleus-sampled slot's logits, -inf outside its allowed rows */
+    float *probs;                    /* [B][rows]: k_nucleus's exp(s / T - max) */
 } Choice;
 
 static __device__ __forceinline__ void mma16816(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
@@ -260,21 +299,23 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
                 a.out[at] = __float2bfloat16_rn(y);
             } else if (a.epi == EPI_RESID) {
                 a.out[at] = __float2bfloat16_rn(__bfloat162float(a.res[at]) + y);
-            } else {  /* EPI_ARGMAX: largest score, lowest row among exact ties: the fp32 logit, or with CHOICE over a
-                       * masked slot's allowed rows, at temperature T > 0 logit / T + gumbel; the IEEE bits mapped to
-                       * an unsigned order (negatives inverted, positives above them) */
+            } else {  /* EPI_ARGMAX: largest score, lowest row among exact ties (choice_key): the fp32 logit, or with
+                       * CHOICE over a masked slot's allowed rows, at temperature T > 0 logit / T + gumbel; a
+                       * nucleus-sampled slot's logits go to k_nucleus instead */
                 float score = s;
                 if constexpr (CHOICE) {
-                    if (live(a.active + MASK_WORDS, b) &&
-                        !((c.allow[(size_t)b * (a.rows / WORD_BITS) + row / WORD_BITS] >> (row % WORD_BITS)) & 1u))
+                    const bool allowed = !live(a.active + MASK_WORDS, b) ||
+                        ((c.allow[(size_t)b * (a.rows / WORD_BITS) + row / WORD_BITS] >> (row % WORD_BITS)) & 1u);
+                    if (c.temperature[b] > 0.f && c.top_p[b] < 1.f) {
+                        c.logits[at] = allowed ? s : -INFINITY;
                         continue;
+                    }
+                    if (!allowed) continue;
                     if (c.temperature[b] > 0.f)
                         score = __fadd_rn(__fdiv_rn(s, c.temperature[b]),
                                           gumbel(c.seed[b], c.pos[b] - c.first[b], row));
                 }
-                const uint32_t bits = __float_as_uint(score);
-                const uint32_t ordered = (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-                const unsigned long long key = ((unsigned long long)ordered << 32) | (UINT32_MAX - (uint32_t)row);
+                const unsigned long long key = choice_key(score, row);
                 best[i % 2] = key > best[i % 2] ? key : best[i % 2];
             }
         }
@@ -288,6 +329,64 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
                 for (int p = 0; p < 2; p++)
                     if (best[p]) atomicMax(a.argmax + s0 + n * MMA_N + t * 2 + p, best[p]);
         }
+    }
+}
+
+/* A nucleus-sampled slot's choice (top-p sampling: Holtzman et al., ICLR 2020, "The Curious Case of Neural Text
+ * Degeneration", §3.1): Gumbel-max at temperature T, as k_gemv's epilogue, over the fewest most likely allowed tokens
+ * whose probability under softmax(s / T) reaches top_p; its key to argmax for k_commit. Hugging Face transformers'
+ * TopPLogitsWarper, which the code benchmarks' generators run (MultiPL-E automodel.py, bigcode-evaluation-harness),
+ * sorts the probabilities ascending and drops every token whose cumulative probability is at most 1 - top_p; here,
+ * with e = exp(s / T - max s / T) (0 outside the allowed tokens) and C(x) the sum of e over the tokens with e <= x, the
+ * tokens kept are those with e >= e*, the least e with C(e) > (1 - top_p) sum(e), found by bisection on the IEEE bits
+ * of x in [0, 1] (C is a step function rising at each e, so the least such bits are an e's). Tokens of exactly equal
+ * probability are kept or dropped together. The sums run in a fixed order, so the choice depends on the slot alone. A
+ * block per slot; inactive, greedy and top_p 1 slots exit. */
+__global__ void __launch_bounds__(NUCLEUS_THREADS) k_nucleus(Choice c, const unsigned long long *active,
+                                                              unsigned long long *argmax, int vocab) {
+    __shared__ float scratch[NUCLEUS_THREADS / WARP];
+    __shared__ unsigned long long keys[NUCLEUS_THREADS / WARP];
+    const int b = blockIdx.x;
+    if (!live(active, b) || !(c.temperature[b] > 0.f && c.top_p[b] < 1.f)) return;
+    const float T = c.temperature[b];
+    const float *s = c.logits + (size_t)b * vocab;
+    float *e = c.probs + (size_t)b * vocab;  /* a thread reads back only the rows it wrote */
+    float m = -INFINITY;
+    for (int r = threadIdx.x; r < vocab; r += NUCLEUS_THREADS) m = fmaxf(m, __fdiv_rn(s[r], T));
+    m = block_max(m, scratch);
+    float sum = 0.f;
+    for (int r = threadIdx.x; r < vocab; r += NUCLEUS_THREADS) {
+        e[r] = expf(__fsub_rn(__fdiv_rn(s[r], T), m));  /* exp(-inf) = 0 outside the allowed tokens */
+        sum = __fadd_rn(sum, e[r]);
+    }
+    const float drop = __fmul_rn(__fsub_rn(1.f, c.top_p[b]), block_sum(sum, scratch));
+    /* the least bits u with C(u) > drop: C(1) is the whole sum, so u ends at most at 1's bits */
+    uint32_t lo = 0u, hi = __float_as_uint(1.f);
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        const float x = __uint_as_float(mid);
+        float below = 0.f;
+        for (int r = threadIdx.x; r < vocab; r += NUCLEUS_THREADS)
+            if (e[r] <= x) below = __fadd_rn(below, e[r]);
+        if (block_sum(below, scratch) > drop) hi = mid; else lo = mid + 1;
+    }
+    const float least = __uint_as_float(lo);
+    const int i = c.pos[b] - c.first[b];
+    unsigned long long best = 0ull;
+    for (int r = threadIdx.x; r < vocab; r += NUCLEUS_THREADS) {
+        if (e[r] < least) continue;
+        const unsigned long long key = choice_key(__fadd_rn(__fdiv_rn(s[r], T), gumbel(c.seed[b], i, r)), r);
+        best = key > best ? key : best;
+    }
+    for (int o = WARP / 2; o > 0; o >>= 1) {
+        const unsigned long long other = __shfl_xor_sync(0xffffffffu, best, o);
+        best = other > best ? other : best;
+    }
+    if (threadIdx.x % WARP == 0) keys[threadIdx.x / WARP] = best;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        for (int w = 1; w < NUCLEUS_THREADS / WARP; w++) best = keys[w] > best ? keys[w] : best;
+        argmax[b] = best;
     }
 }
 
@@ -538,7 +637,9 @@ typedef struct {
     int32_t *prompt, *plen;   /* [B][max_len], [B]: each slot's prompt and its length */
     int32_t *first;           /* [B]: the position of each slot's first generated token's input */
     float *temperature;       /* [B] */
+    float *top_p;             /* [B] */
     unsigned long long *seed; /* [B] */
+    float *logits, *probs;    /* [B][vocab]: k_nucleus's inputs (Choice) */
     uint32_t *allow;          /* [B][vocab / WORD_BITS]: each masked slot's allowed tokens */
     uint32_t *host_allow;     /* pinned host, as allow: written by the caller (dec_masks), copied by dec_set_active */
     unsigned long long *active;  /* device [2][MASK_WORDS]: the active slots' mask, then the masked slots' */
@@ -564,7 +665,10 @@ template <class F> static void slot_buffers(Decoder *d, F f) {
     f((void **)&d->argmax, sizeof(unsigned long long));
     f((void **)&d->first, sizeof(int32_t));
     f((void **)&d->temperature, sizeof(float));
+    f((void **)&d->top_p, sizeof(float));
     f((void **)&d->seed, sizeof(unsigned long long));
+    f((void **)&d->logits, d->vocab * sizeof(float));
+    f((void **)&d->probs, d->vocab * sizeof(float));
     f((void **)&d->allow, d->vocab / WORD_BITS * sizeof(uint32_t));
     for (bf16 **b : {&d->x, &d->x0, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
     f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
@@ -589,12 +693,15 @@ static void launch_norm(Decoder *d, int kind, const bf16 *in, const bf16 *in2, f
         kind, in, in2, d->tokens, l1, l2, mixed, out, d->active, d->B, d->C);
 }
 
+static Choice choice(const Decoder *d) {
+    return {d->allow, d->temperature, d->top_p, d->seed, d->pos, d->first, d->logits, d->probs};
+}
+
 /* A one-warp block per (slot group, row tile); groups without an active slot exit at once. */
 template <bool CHOICE> static void launch_gemv(Decoder *d, Gemv g) {
     g.chunk = gemv_chunk(g.cols, d->optin);
-    const Choice c = {d->allow, d->temperature, d->seed, d->pos, d->first};
     const dim3 grid((g.B + GROUP_SLOTS - 1) / GROUP_SLOTS, (g.rows + MMA_M - 1) / MMA_M);
-    k_gemv<CHOICE><<<grid, WARP, gemv_smem(g.chunk), d->stream>>>(g, c);
+    k_gemv<CHOICE><<<grid, WARP, gemv_smem(g.chunk), d->stream>>>(g, choice(d));
 }
 
 /* The step's body on d->stream: every layer of every active slot, up to x before the final norm. */
@@ -626,13 +733,14 @@ static void enqueue_body(Decoder *d) {
     }
 }
 
-/* The step's head on d->stream: the final norm, the token choice in lm_head's epilogue (k_gemv's CHOICE), the commit
- * and the tokens' copy to the host. */
+/* The step's head on d->stream: the final norm, the token choice in lm_head's epilogue (k_gemv's CHOICE) or, for a
+ * nucleus-sampled slot, by k_nucleus, the commit and the tokens' copy to the host. */
 template <bool CHOICE> static void enqueue_head(Decoder *d) {
     launch_norm(d, NORM, d->x, NULL, 0.f, 0.f, NULL, d->hn);
     Gemv g = gemv(d, d->lm_head, d->vocab, d->C, d->hn, EPI_ARGMAX, NULL);
     g.argmax = d->argmax;
     launch_gemv<CHOICE>(d, g);
+    if constexpr (CHOICE) k_nucleus<<<d->B, NUCLEUS_THREADS, 0, d->stream>>>(choice(d), d->active, d->argmax, d->vocab);
     k_commit<<<1, MAX_BATCH, 0, d->stream>>>(d->tokens, d->pos, d->active, d->argmax, d->prompt, d->plen, d->max_len,
                                              d->B);
     cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)d->B * sizeof(int32_t), cudaMemcpyDeviceToHost, d->stream);
@@ -737,10 +845,11 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
 
 /* Start slot b at position start of its prompt tokens[0..n) (n >= 2: BOS and at least one more; positions before start
  * already cached: 0, or n - 1 after dec_load_prompt): its steps run the rest of the prompt, then from the step whose
- * input is the prompt's last token choose tokens at temperature (0: argmax) with noise from seed (gumbel), the first
- * choice at generated position 0. Stream-ordered. */
+ * input is the prompt's last token choose tokens at temperature (0: argmax) with noise from seed (gumbel), from the
+ * nucleus holding top_p of the probability when top_p < 1 (k_nucleus), the first choice at generated position 0.
+ * Stream-ordered. */
 extern "C" void dec_set_prompt(void *handle, int b, const int32_t *tokens, int32_t n, int32_t start, float temperature,
-                               unsigned long long seed) {
+                               float top_p, unsigned long long seed) {
     Decoder *d = (Decoder *)handle;
     const int32_t last = n - 1;
     cudaMemcpyAsync(d->prompt + (size_t)b * d->max_len, tokens, (size_t)n * sizeof(int32_t), cudaMemcpyHostToDevice,
@@ -750,6 +859,7 @@ extern "C" void dec_set_prompt(void *handle, int b, const int32_t *tokens, int32
     cudaMemcpyAsync(d->pos + b, &start, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpyAsync(d->first + b, &last, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpyAsync(d->temperature + b, &temperature, sizeof(float), cudaMemcpyHostToDevice, d->stream);
+    cudaMemcpyAsync(d->top_p + b, &top_p, sizeof(float), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpyAsync(d->seed + b, &seed, sizeof(seed), cudaMemcpyHostToDevice, d->stream);
 }
 

@@ -35,7 +35,8 @@ def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tup
 
 def update(model: torch.nn.Module, opts: tuple[torch.optim.Optimizer, ...]) -> torch.Tensor:
     """One update from the accumulated gradients: their global norm clipped to MAX_NORM before every optimizer, each
-    optimizer stepped, the gradients zeroed. Returns the norm before clipping, on the device (no host synchronization)."""
+    optimizer stepped, the gradients zeroed. Returns the norm before clipping, on the device (no host
+    synchronization)."""
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_NORM)
     for opt in opts:
         opt.step()

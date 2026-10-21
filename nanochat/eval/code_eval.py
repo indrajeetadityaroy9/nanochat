@@ -31,14 +31,17 @@ Benchmarks:
   (`python -m human_eval_infilling.evaluate_functional_correctness`: 3 s timeout, 4 workers); pass@1 by its
   estimate_pass_at_k.
 
-Scores: pass@1 of one completion per problem, by two generation modes: "greedy", plain greedy decoding (the
-literature's pass@1; FIM in PSM and SPM order); "filtered" (FIM in FILTERED_MODE order only), filtered pass@1 (Codex's
-filtered pass@k) over at most verify.ATTEMPTS samples, verify.search: the complete Python 3 syntax constraint
-(inference/syntax_constraint.py; FIM: given the prefix and suffix), left-to-right prompts healed (decoder.heal), the
-greedy candidate then seeded samples until one has no diagnostics (verify.python_diagnostics, solution_diagnostics,
-cpp_diagnostics) and passes its prompt's own examples, scored by the same evaluators. Selection reads only the prompt,
-but the prompts' examples overlap the scored base tests (verify.py), so it favours base over plus pass@1.
-Every evaluator runs as a fresh process (exec), never a fork of this torch/CUDA process.
+Scores: pass@1 by three generation modes, each scored by the benchmark's evaluator. "greedy": one greedy completion per
+problem (the pass@1 of DeepSeek-Coder, arXiv 2401.14196 §4.1, Qwen2.5-Coder, arXiv 2409.12186 §6, and EvalPlus's
+leaderboard; FIM in PSM and SPM order). "sampled" (EvalPlus, MultiPL-E): pass@1 by Chen et al.'s unbiased estimator
+over SAMPLES samples per problem at SAMPLE_TEMPERATURE from the nucleus TOP_P (the protocol of Codex, MultiPL-E and
+StarCoder2), each benchmark's evaluator computing the estimate. "filtered" (FIM in FILTERED_MODE order only): filtered
+pass@1 (Codex's filtered pass@k) over at most verify.ATTEMPTS samples, verify.search: the complete Python 3 syntax
+constraint (inference/syntax_constraint.py; FIM: given the prefix and suffix), left-to-right prompts healed
+(decoder.heal), the greedy candidate then seeded samples until one has no diagnostics (verify.python_diagnostics,
+solution_diagnostics, cpp_diagnostics) and passes its prompt's own examples, scored by the same evaluators. Selection
+reads only the prompt, but the prompts' examples overlap the scored base tests (verify.py), so it favours base over
+plus pass@1. Every evaluator runs as a fresh process (exec), never a fork of this torch/CUDA process.
 """
 
 import codecs
@@ -66,7 +69,7 @@ from human_eval_infilling.data import read_problems
 from human_eval_infilling.evaluation import estimate_pass_at_k
 
 from nanochat.data.tokenizer import Tokenizer
-from nanochat.eval.verify import chosen, search, solution_diagnostics, verdicts
+from nanochat.eval.verify import chosen, search, solution_diagnostics
 from nanochat.inference.decoder import AllOf, NativeDecoder, Request, fim_prompt, heal
 from nanochat.inference.syntax_constraint import SyntaxConstraint
 from nanochat.model.gpt import GPT
@@ -81,6 +84,11 @@ FIM_MODES = ("psm", "spm")  # the two orders the packer trains (Bavarian et al. 
 # the FIM filtered mode's order: at d8 SPM beat PSM on all three benchmarks (greedy pass@1 single-line 0.036 vs 0.003,
 # multi-line 0.013 vs 0.001, random-span 0.008 vs 0)
 FILTERED_MODE = "spm"
+# The sampled mode (Chen et al., Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem;
+# nucleus sampling at top p 0.95 for all its sampling; §3.3, Fig. 5: T = 0.2 the pass@1 optimum): MultiPL-E's pass@1
+# (Cassano et al., arXiv 2208.08227: T = 0.2, its pass@1 stable from about 20 samples; completions.py --top-p 0.95) and
+# StarCoder2's (arXiv 2402.19173: pass@1 from 20 samples at T = 0.2, following OctoPack)
+SAMPLES, SAMPLE_TEMPERATURE, TOP_P = 20, 0.2, 0.95
 
 
 class Task(NamedTuple):
@@ -162,8 +170,8 @@ def completion(tokenizer: Tokenizer, task: Task, ids: list[int], *, special: Lit
     return text[:min([j for j in (text.find(s) for s in task.stops) if j >= 0], default=len(text))]
 
 
-def greedy(decoder: NativeDecoder, requests: list[Request]) -> list[list[int]]:
-    """The generated ids of each (greedy) request, in request order."""
+def in_order(decoder: NativeDecoder, requests: list[Request]) -> list[list[int]]:
+    """The generated ids of each request, in request order."""
     out = [None] * len(requests)
     for i, ids in decoder.run(requests):
         out[i] = ids
@@ -232,13 +240,16 @@ def sanitizers() -> ProcessPoolExecutor:
                                initializer=warnings.filterwarnings, initargs=("ignore", "", SyntaxWarning))
 
 
+def evalplus_solution(task: Task, text: str) -> str:
+    """The solution EvalPlus scores for a completion text: its tabs replaced by four spaces, sanitize(prompt +
+    completion, entry point), computed by a sanitizers process (callers parallelize by threads)."""
+    return sanitizers().submit(sanitize, task.prompt + text.replace("\t", "    "), task.entry).result()
+
+
 def evalplus_check(task: Task, text: str) -> tuple[str, str, list[str]]:
-    """(prompt, solution, verify.solution_diagnostics) of a completion text, the solution the one EvalPlus scores: its
-    tabs replaced by four spaces, sanitize(prompt + completion, entry point), computed by a sanitizers process (callers
-    parallelize by threads)."""
-    source = task.prompt + text.replace("\t", "    ")
-    solution = sanitizers().submit(sanitize, source, task.entry).result()
-    return task.prompt, solution, solution_diagnostics(source, solution, task.entry)
+    """(prompt, solution, verify.solution_diagnostics) of a completion text, the solution evalplus_solution's."""
+    solution = evalplus_solution(task, text)
+    return task.prompt, solution, solution_diagnostics(task.prompt + text.replace("\t", "    "), solution, task.entry)
 
 
 def multipl_e_check(task: Task, text: str) -> tuple[str, str, list[str]]:
@@ -248,46 +259,49 @@ def multipl_e_check(task: Task, text: str) -> tuple[str, str, list[str]]:
     return task.prompt, task.prompt + text + "\n}", []
 
 
-def evalplus(name: str, items: list[Task], completions: list[str]) -> dict:
-    """EvalPlus's evaluation of the sanitized solutions: {"base pass@1", "plus pass@1", "ids", "completions",
-    "base_status", "plus_status"}."""
+def evalplus(name: str, items: list[Task], samples: list[list[str]]) -> dict:
+    """EvalPlus's evaluation of each task's completions (evalplus_solution's solutions, as many per task as it has):
+    {"base pass@1", "plus pass@1" (its estimate_pass_at_k over each task's samples, plus: base and plus tests passed),
+    "ids", "base_status", "plus_status" (per task, per sample)}."""
     dataset = EVALPLUS[name][0]
+    pairs = [(t, s) for t, task_samples in zip(items, samples, strict=True) for s in task_samples]
     with tempfile.TemporaryDirectory() as tmp:
-        samples, scored = Path(tmp, "samples.jsonl"), Path(tmp, "results.json")
-        with samples.open("w", encoding="utf-8") as f, ThreadPoolExecutor(os.cpu_count()) as pool:
-            for t, (_, s, _) in zip(items, pool.map(evalplus_check, items, completions), strict=True):
-                f.write(json.dumps({"task_id": t.id, "solution": s}) + "\n")
-        subprocess.run([sys.executable, "-I", "-m", "evalplus.evaluate", "--dataset", dataset, "--samples", samples,
+        path, scored = Path(tmp, "samples.jsonl"), Path(tmp, "results.json")
+        with path.open("w", encoding="utf-8") as f, ThreadPoolExecutor(os.cpu_count()) as pool:
+            for (t, _), solution in zip(pairs, pool.map(lambda pair: evalplus_solution(*pair), pairs), strict=True):
+                f.write(json.dumps({"task_id": t.id, "solution": solution}) + "\n")
+        subprocess.run([sys.executable, "-I", "-m", "evalplus.evaluate", "--dataset", dataset, "--samples", path,
                         "--output_file", scored], cwd=tmp, check=True)
         result = json.loads(scored.read_text(encoding="utf-8"))
-    verdicts = [result["eval"][t.id][0] for t in items]
+    evaluated = [result["eval"][t.id] for t in items]
     return {"base pass@1": result["pass_at_k"]["base"]["pass@1"], "plus pass@1": result["pass_at_k"]["plus"]["pass@1"],
-            "ids": [t.id for t in items], "completions": completions,
-            "base_status": [v["base_status"] for v in verdicts], "plus_status": [v["plus_status"] for v in verdicts]}
+            "ids": [t.id for t in items], "base_status": [[v["base_status"] for v in vs] for vs in evaluated],
+            "plus_status": [[v["plus_status"] for v in vs] for vs in evaluated]}
 
 
-def multipl_e(items: list[Task], completions: list[str]) -> dict:
-    """MultiPL-E's evaluation of one completion per problem: {"pass@1" (pass_k.py), "ids", "completions", "status"}.
-    Each problem is a completions file as multipl_e/completions.py writes it, judged by its own main.py --file process
-    (--dir runs problems serially), os.cpu_count() at once; the scripts import siblings, so no -I."""
+def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
+    """MultiPL-E's evaluation of each problem's completions: {"pass@1" (pass_k.py: Chen et al.'s estimator over each
+    problem's completions), "ids", "status" (per problem, per completion)}. Each problem is a completions file as
+    multipl_e/completions.py writes it, judged by its own main.py --file process (--dir runs problems serially),
+    os.cpu_count() at once; the scripts import siblings, so no -I."""
     root = Path(os.environ["MULTIPL_E"])
     main = root / "evaluation" / "src" / "main.py"
     with tempfile.TemporaryDirectory() as tmp:
         files = []
-        for t, c in zip(items, completions, strict=True):
+        for t, task_samples in zip(items, samples, strict=True):
             files.append(Path(tmp, f"{t.id}.json"))
             files[-1].write_text(json.dumps({"name": t.id, "language": "cpp", "prompt": t.prompt, "tests": t.entry,
-                                             "completions": [c]}), encoding="utf-8")
+                                             "completions": task_samples}), encoding="utf-8")
         with ThreadPoolExecutor(os.cpu_count()) as pool:
             list(pool.map(lambda file: subprocess.run([sys.executable, main, "--file", file, "--output-dir", tmp],
                                                       cwd=tmp, check=True), files))
-        # pass_k.py's one CSV line: Dataset,Pass@k,Estimate,NumProblems,MinCompletions,MaxCompletions
+        # pass_k.py's pass@1 line (its only line at its default temperature 0.2):
+        # Dataset,Pass@k,Estimate,NumProblems,MinCompletions,MaxCompletions
         pass_at_1 = float(subprocess.run([sys.executable, root / "pass_k.py", "--suppress-header", tmp],
                                          cwd=tmp, capture_output=True, text=True, check=True).stdout.split(",")[2])
-        status = []
-        for t in items:
-            status.append(json.loads(Path(tmp, f"{t.id}.results.json").read_text(encoding="utf-8"))["results"][0]["status"])
-    return {"pass@1": pass_at_1, "ids": [t.id for t in items], "completions": completions, "status": status}
+        status = [[r["status"] for r in json.loads(Path(tmp, f"{t.id}.results.json").read_text(encoding="utf-8"))
+                   ["results"]] for t in items]
+    return {"pass@1": pass_at_1, "ids": [t.id for t in items], "status": status}
 
 
 def infilling(name: str, problems: list[dict], middles: list[str]) -> dict:
@@ -307,9 +321,10 @@ def infilling(name: str, problems: list[dict], middles: list[str]) -> dict:
 
 
 def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]]) -> dict[str, dict[str, dict]]:
-    """{benchmark: {"greedy": official evaluation of greedy completions, each one's diagnostics count and whether it
-    passed its prompt's examples (verify.verdicts of its check), "filtered": that of filtered_completions'
-    completions and their search record}} of the EvalPlus and MultiPL-E benchmarks."""
+    """{benchmark: {"greedy": its evaluator's scores of the greedy completions and the completions, "sampled": of
+    SAMPLES samples per problem (module docstring), "filtered": of filtered_completions' completions, the completions
+    and their search record}} of the EvalPlus and MultiPL-E benchmarks. Sample k of problem i draws with seed
+    SAMPLES i + k."""
     bos = tokenizer.bos_token_id
     runs = {}
     for name in (*EVALPLUS, *MULTIPL_E_BENCHMARKS):
@@ -328,23 +343,28 @@ def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task
     # a token longer, the same length
     max_len = max(len(p) + m - 1 for _, prompts, budgets, *_ in runs.values()
                   for p, m in zip(prompts, budgets, strict=True))
-    # the prompt store: every prompt the greedy and filtered passes run (decode.cu keeps what fits after its slots)
+    # the prompt store: the prompts of the greedy and sampled passes and the healed ones of the filtered pass
+    # (decode.cu keeps what fits after its slots)
     prompt_store = 2 * sum(len(p) for _, prompts, *_ in runs.values() for p in prompts)
     decoder = NativeDecoder(model, bos_token_id=bos, max_len=max_len, prompt_store=prompt_store)
     results = {}
     for name, (items, prompts, budgets, special, check, language, score) in runs.items():
-        generated = greedy(decoder, [Request(prompt=p, max_tokens=m, stop=StopAt(tokenizer, t.stops, healed=b""))
-                                     for t, p, m in zip(items, prompts, budgets, strict=True)])
-        completions = [completion(tokenizer, t, ids, special=special, healed=b"")
-                       for t, ids in zip(items, generated, strict=True)]
+        generated = in_order(decoder, [Request(prompt=p, max_tokens=m, stop=StopAt(tokenizer, t.stops, healed=b""))
+                                       for t, p, m in zip(items, prompts, budgets, strict=True)])
+        greedy = [completion(tokenizer, t, ids, special=special, healed=b"")
+                  for t, ids in zip(items, generated, strict=True)]
+        sampled = in_order(decoder, [Request(prompt=p, max_tokens=m, stop=StopAt(tokenizer, t.stops, healed=b""),
+                                             temperature=SAMPLE_TEMPERATURE, top_p=TOP_P, seed=SAMPLES * i + k)
+                                     for i, (t, p, m) in enumerate(zip(items, prompts, budgets, strict=True))
+                                     for k in range(SAMPLES)])
+        samples = [[completion(tokenizer, t, ids, special=special, healed=b"")
+                    for ids in sampled[SAMPLES * i:SAMPLES * (i + 1)]] for i, t in enumerate(items)]
         chosen_completions, record = filtered_completions(decoder, tokenizer, items, prompts, budgets,
                                                           special=special, check=check, language=language)
-        with ThreadPoolExecutor(os.cpu_count()) as pool:
-            checks = verdicts(list(pool.map(check, items, completions)), language=language)
         results[name] = {
-            "greedy": score(items, completions) | {"diagnostics": [len(d) for d, _ in checks],
-                                                   "examples": [e for _, e in checks]},
-            "filtered": score(items, chosen_completions) | record}
+            "greedy": score(items, [[c] for c in greedy]) | {"completions": greedy},
+            "sampled": score(items, samples) | {"samples": SAMPLES},
+            "filtered": score(items, [[c] for c in chosen_completions]) | {"completions": chosen_completions} | record}
     return results
 
 
@@ -369,7 +389,7 @@ def fim_generation(model: GPT, tokenizer: Tokenizer) -> dict[str, dict[str, dict
     results = {}
     for name, (problems, max_tokens, prompts, lines) in runs.items():
         for mode in FIM_MODES:
-            generated = greedy(decoder, [middle_request(tokenizer, prompt, k, max_tokens=max_tokens)
+            generated = in_order(decoder, [middle_request(tokenizer, prompt, k, max_tokens=max_tokens)
                                          for prompt, k in zip(prompts[mode], lines, strict=True)])
             middles = [fim_lines(tokenizer.enc.decode(ids), k) for ids, k in zip(generated, lines, strict=True)]
             results[f"{name}/{mode}"] = {"greedy": infilling(name, problems, middles)}

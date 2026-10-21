@@ -2,9 +2,9 @@
 The mechanism the ablation experiments (ablations/lr.py, ablations/value_embeds.py) share. An experiment is production
 at each of its settings (depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms differing
 from production only in their Run fields, each on the same seeds. A run trains by scripts/base_train.train and is scored
-by train/metrics.loss_evaluation, the production code paths; its model is ablations/model.py's Candidate (production's
-GPT when every structural field is production's); its plan (batch, steps, peak lr) is the production model's at its
-depth and ratio, so every arm matches in tokens and hyperparameters.
+by eval/suite.py evaluate (its likelihood metrics), the production code paths; its model is ablations/model.py's
+Candidate (production's GPT when every structural field is production's); its plan (batch, steps, peak lr) is the
+production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
@@ -13,7 +13,7 @@ train/metrics.py failure record: a non-finite loss or gradient norm, an outcome 
 al., arXiv 2309.14322); any other failure stops the experiment, and a stopped run resumes from its repo_start checkpoint
 or restarts (train/metrics.py attempts keep both traceable). Then each alternative is compared with production over
 the runs that did not diverge; the experiment writes every tracked metric of every run, RESULTS/<experiment>.jsonl (a
-record per run: train/metrics.py record, setting, fields, the compared measures, efficiency, the step it diverged at)
+record per run: eval/suite.py record, setting, fields, the compared measures, efficiency, the step it diverged at)
 and RESULTS/<experiment>-curves.jsonl (per run, train/metrics.py curves), and RESULTS/<experiment>.json (per setting,
 each alternative's fields, its evaluated runs and, per measure, its difference from production, p and confidence
 interval; null where one run per arm leaves them undefined), the data of the paper's decisions and figures.
@@ -37,7 +37,7 @@ from ablations.model import Candidate
 from nanochat.config import FILE_STAGE, REPO_STAGE, run_tag
 from nanochat.data.loader import mixture_weights
 from nanochat.data.tokenizer import get_tokenizer
-from nanochat.eval.code_eval import tasks
+from nanochat.eval import bpb, suite
 from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import BASE_EVAL, LOGS, RESULTS
 from nanochat.train import metrics
@@ -75,41 +75,37 @@ def tag_of(run: Run) -> str:
 
 
 def evaluation_path(run: Run) -> Path:
-    """BASE_EVAL/<checkpoint_name>.json of the run's final checkpoint, its loss evaluation."""
+    """BASE_EVAL/<checkpoint_name>.json of the run's final checkpoint, its likelihood evaluation."""
     return BASE_EVAL / f"{checkpoint_name(tag_of(run), plan_of(run).num_iterations)}.json"
 
 
 def execute(run: Run) -> None:
-    """Train and evaluate one run: its metrics as production's (train/metrics.py), its evaluation in production's schema
-    (scripts/production.py evaluate) with loss_evaluation only; its final checkpoint only."""
+    """Train and evaluate one run: its metrics as production's (train/metrics.py), its final checkpoint's evaluation
+    as production's (eval/suite.py evaluate) without the generation benchmarks."""
     tag, run_plan = tag_of(run), plan_of(run)
     steps = run_plan.num_iterations
     with torch.device("meta"):
         model = Candidate(gpt_config(depth=run.n_layer, stage=FILE_STAGE), value_embeds=run.value_embeds)
     model = train(model=model, run=run_plan, variant=dataclasses.asdict(run), seed=run.seed,
                   checkpoints=frozenset({steps}), tag=tag)
-    results = metrics.loss_evaluation(model, get_tokenizer(), tasks(), device=torch.device("cuda"))
-    metrics.save_evaluation(checkpoint_name(tag, steps), steps, results | {"codegen": None, "fim": None})
+    suite.evaluate(model, get_tokenizer(), name=checkpoint_name(tag, steps), step=steps, generate="none")
 
 
 def evaluation(run: Run) -> dict[str, float]:
     """A run's compared measures (bits per byte; tokens per second) from its evaluation and its per-step records: code,
-    text and math, the 8K validation bits per byte of each group at production's corpus weights (metrics.val_bits
-    "bpb"); solutions, the bits per byte of the HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their
-    prompts, pooled (metrics.solution_bits); repo_32k, the 32K repository bits per byte of the code group, and
-    repo_beyond_8k, the same over the targets beyond the file-level context (metrics CONTEXTS' last bucket);
-    tok_per_s, the median over the file-level stage's steps of the step's tokens per second."""
+    text and math, the 8K validation bits per byte of each group at production's corpus weights (bpb.val_bits "bpb");
+    solutions, the bits per byte of the HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their prompts,
+    pooled (bpb.solution_bits); repo_32k, the 32K repository bits per byte of the code group, and repo_beyond_8k, the
+    same over the targets beyond the file-level context (bpb.CONTEXTS' last bucket); tok_per_s, the median over the
+    file-level stage's steps of the step's tokens per second."""
     tag, repo_start = tag_of(run), plan_of(run).repo_start
     result = json.loads(evaluation_path(run).read_text(encoding="utf-8"))
-    solution = result["solution"].values()
-    beyond = {c: {"bits": r["bits"][-1:], "bytes": r["bytes"][-1:], "rows": r["rows"]}
-              for c, r in result["32k"]["corpora"].items()}
     rates = [r["tok_per_s"] for step, r in metrics.train_steps(tag).items() if step < repo_start]
     return {"code": result["8k"]["bpb"]["code"],
-            "solutions": metrics.bpb({k: [sum(sum(s[k]) for s in solution)] for k in ("bits", "bytes")}),
+            "solutions": bpb.bpb(*result["solution"].values()),
             "repo_32k": result["32k"]["bpb"]["code"],
-            "repo_beyond_8k": metrics.mixture_bpb(beyond, mixture_weights(REPO_STAGE.mixture, get_tokenizer(),
-                                                                          REPO_STAGE.seq_len)),
+            "repo_beyond_8k": bpb.mixture_bpb(result["32k"]["corpora"], mixture_weights(
+                REPO_STAGE.mixture, get_tokenizer(), REPO_STAGE.seq_len), buckets=slice(-1, None)),
             "text": result["8k"]["bpb"]["text"], "math": result["8k"]["bpb"]["math"],
             "tok_per_s": statistics.median(rates)}
 
@@ -166,15 +162,16 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...]) -> 
             for name, arm in arms.items():
                 for run in arm:
                     tag = tag_of(run)
-                    started = metrics.latest(tag, "run")
+                    started = [r for r in metrics.records(tag) if r["kind"] == "run"][-1]
+                    ended = [r for r in metrics.records(tag) if r["kind"] == "end"]
                     identity = {"experiment": experiment, "arm": name, "tag": tag}
-                    f.write(json.dumps(identity | metrics.record(tag) | {
+                    f.write(json.dumps(identity | suite.record(tag) | {
                         "setting": {"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds)},
                         "fields": dataclasses.asdict(run),
                         "measures": measures[name].get(tag),
                         # model size and cost (train/metrics.py run and end records)
                         "efficiency": ({"params": started["params"], "flops_per_token": started["flops_per_token"],
-                                        "peak_memory_bytes": metrics.latest(tag, "end")["peak_memory_bytes"]}
+                                        "peak_memory_bytes": ended[-1]["peak_memory_bytes"]}
                                        if tag in measures[name] else None),
                         "diverged_at": diverged(tag)}, allow_nan=False) + "\n")
                     curve_lines.write(json.dumps(identity | metrics.curves(tag), allow_nan=False) + "\n")

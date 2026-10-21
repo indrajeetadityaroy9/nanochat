@@ -12,11 +12,11 @@ DATA = ARTIFACTS / "data"                # the data pipeline's stages (nanochat/
 TOKENIZER = ARTIFACTS / "tokenizer"
 CHECKPOINTS = ARTIFACTS / "checkpoints"  # <tag>-step<step>.pt (train/checkpoint.py)
 METRICS = ARTIFACTS / "metrics"          # <tag>.jsonl (train/metrics.py)
-BASE_EVAL = ARTIFACTS / "base_eval"      # <tag>-step<step>.json (train/metrics.py save_evaluation)
+BASE_EVAL = ARTIFACTS / "base_eval"      # <tag>-step<step>.json (eval/suite.py evaluate)
 LOGS = ARTIFACTS / "logs"                # <tag>.log per ablation run (ablations/harness.py), production.log (docs)
 CACHE = ARTIFACTS / "cache"              # compiler and dataset caches (docker/Dockerfile)
 NATIVE = CACHE / "native"                # native libraries and their build directories (native.py)
-RESULTS = ROOT / "results"               # train/metrics.py export, ablations/harness.py (tracked; results/.gitkeep)
+RESULTS = ROOT / "results"               # eval/suite.py export, ablations/harness.py (tracked; results/.gitkeep)
 
 if __name__ == "__main__":
     from huggingface_hub import snapshot_download

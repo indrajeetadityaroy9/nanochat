@@ -1,10 +1,10 @@
 """
 Batched decoding of a GPT (nanochat/model/gpt.py) by csrc/decode.cu: captured CUDA graphs advance every active slot a
-token per step, through its prompt and then its generation (the greedy argmax or a seeded sample, within its
-constraint's allowed tokens) until BOS, the token budget or the caller's stop rule; a freed slot takes the next request
-(continuous batching), so one slot's prompt runs in the same steps as the others' generations. The decoder snapshots
-the model's weights, context, windows and rotary tables at construction (a stage change needs a new decoder).
-fim_prompt builds FIM prompts; heal and AllOf build constraints.
+token per step, through its prompt and then its generation (the greedy argmax or a seeded sample, optionally from its
+nucleus, within its constraint's allowed tokens) until BOS, the token budget or the caller's stop rule; a freed slot
+takes the next request (continuous batching), so one slot's prompt runs in the same steps as the others' generations.
+The decoder snapshots the model's weights, context, windows and rotary tables at construction (a stage change needs a
+new decoder). fim_prompt builds FIM prompts; heal and AllOf build constraints.
 """
 
 import bisect
@@ -48,13 +48,20 @@ class Request:
     """A continuation of prompt (BOS and at least one more token) by at most max_tokens tokens. stop: None or a
     predicate of the generated ids, true once the sequence is done. temperature 0: the greedy argmax (ties to the lowest
     id); > 0: a sample of softmax(logits / temperature) whose draw at generated position i depends only on (seed, i),
-    not on the slot or the batch (decode.cu gumbel). constraint: the tokens allowed at each step."""
+    not on the slot or the batch (decode.cu gumbel), and with top_p < 1 from the fewest most likely tokens holding top_p
+    of that probability (nucleus sampling, Holtzman et al., ICLR 2020, §3.1; decode.cu k_nucleus). constraint: the
+    tokens allowed at each step."""
     prompt: list[int]
     max_tokens: int
     stop: Callable[[list[int]], bool] | None = None
     temperature: float = 0.0
+    top_p: float = 1.0
     seed: int = 0
     constraint: Constraint | None = None
+
+    def __post_init__(self):
+        if not 0.0 < self.top_p <= 1.0:
+            raise ValueError(f"top_p {self.top_p} outside (0, 1]")
 
 
 @functools.cache
@@ -164,7 +171,7 @@ class NativeDecoder:
         lib.dec_create.restype = ctypes.c_void_p
         lib.dec_batch.argtypes = [ctypes.c_void_p]
         lib.dec_set_prompt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32,
-                                       ctypes.c_float, ctypes.c_ulonglong]
+                                       ctypes.c_float, ctypes.c_float, ctypes.c_ulonglong]
         for copy in (lib.dec_save_prompt, lib.dec_load_prompt):
             copy.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
         lib.dec_store.argtypes = [ctypes.c_void_p]
@@ -228,7 +235,7 @@ class NativeDecoder:
                 self.lib.dec_load_prompt(self.handle, b, i * PAGE, page * PAGE, min(PAGE, n - i * PAGE))
         start = 0 if stored is None else n
         self.lib.dec_set_prompt(self.handle, b, prompt.ctypes.data, len(prompt), start, request.temperature,
-                                request.seed)
+                                request.top_p, request.seed)
         return Slot(index, request, prompt_steps=n - start, save=stored is None)
 
     def save(self, b: int, prompt: list[int]) -> None:

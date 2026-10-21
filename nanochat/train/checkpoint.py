@@ -13,7 +13,7 @@ from nanochat.paths import CHECKPOINTS
 
 
 def checkpoint_name(tag: str, step: int) -> str:
-    """<tag>-step<step>; a checkpoint's evaluation (train/metrics.save_evaluation) is named the same."""
+    """<tag>-step<step>; a checkpoint's evaluation (eval/suite.py evaluate) is named the same."""
     return f"{tag}-step{step}"
 
 

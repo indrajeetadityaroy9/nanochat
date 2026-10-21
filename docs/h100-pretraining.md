@@ -325,7 +325,7 @@ multiplier is production's. `value_embeds.py` has not run.
 - **Arms.** An experiment is production and one arm per alternative at each of its settings, each on the same seeds;
   an arm differs from production only in the fields of `harness.Run`. Every run goes through production's code:
   `scripts/base_train.train` (the file-level then the repository stage, the production data order by seed, τ-law
-  weight decay) and `train/metrics.loss_evaluation` (the same held-out rows for every run); its model is
+  weight decay) and `eval/suite.py evaluate`'s likelihood metrics (the same held-out rows for every run); its model is
   `model.Candidate`, which is production's GPT unless `value_embeds` differs. Its plan (batch, steps, peak lr) is the
   production model's at the setting (`harness.plan_of`), so arms match in tokens and hyperparameters, and every run
   completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
@@ -432,10 +432,10 @@ stopped one trains again from its start (its one checkpoint is its final model);
 (`nanochat/train/metrics.py`: every step and attempt, the learning curve and gradient norms included; the run record
 holds the model config, the run's fields as `variant`, parameters, FLOPs per token, the clip threshold, the plan, lr
 and weight decay; the end record the peak memory; a failure record the step a run diverged at),
-`artifacts/base_eval/<tag>-step<steps>.json` (`train/metrics.save_evaluation`, loss evaluation only) and
+`artifacts/base_eval/<tag>-step<steps>.json` (`eval/suite.py evaluate`, likelihood metrics only) and
 `artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment gathers every tracked
 metric of its runs into `results/`, so tables and figures need no rerun and no `artifacts/`: `<experiment>.jsonl`, a
-record per run (arm, tag, setting, fields; `train/metrics.record`: its metrics records but the per-step ones: run,
+record per run (arm, tag, setting, fields; `eval/suite.py record`: its metrics records but the per-step ones: run,
 stage, end, failure; its evaluation verbatim: per corpus and context bucket bits, bytes and rows at 8K and 32K, per
 benchmark solution bits and bytes; the compared measures; efficiency; the step it diverged at, measures and
 efficiency null then); `<experiment>-curves.jsonl`, per run its per-step train records as columns (step, tokens,
@@ -672,13 +672,11 @@ per ablation run) and `cache/`; `results/` (tracked) holds the data the paper's 
 `scripts/production.py` derives the ratio and the tag (`d24-r490.774-s0-<hash>`), trains both stages with a checkpoint
 (the run's full state: weights, optimizer state and data position, ~5.6 GB) at each tenth of the steps and at the
 repository stage's start, then evaluates every checkpoint (`evaluate`: the curve over training, and the final model)
-and exports the run's tracked metrics (`train/metrics.py export`): `results/<tag>.jsonl` (its records and every
+and exports the run's tracked metrics (`eval/suite.py export`): `results/<tag>.jsonl` (its records and every
 evaluation) and `results/<tag>-curves.jsonl` (its per-step records). Training and each evaluation run in a fresh
 process (torch.compile's recompile limit and the CUDA caching allocator's reservations are per process). Rerunning
-continues a stopped run from its newest checkpoint and evaluates every checkpoint again. The evaluation reports
-validation bits and bytes per corpus at 8K and at 32K per context bucket (≤8K, >8K), reference-solution bits and
-bytes, and EvalPlus HumanEval+/MBPP+, MultiPL-E C++ and HumanEval infilling (Benchmarks, below), each scored by its
-official tools.
+continues a stopped run from its newest checkpoint and evaluates every checkpoint again. The evaluation (Evaluation,
+below) reports the likelihood metrics and the benchmarks' pass@1, each scored by its official tools.
 
 **Expected cost:** 76,739 file-level steps at 3.741 s and 4,427 repository-stage steps at about 4.05 s (4,016 ms with
 coordinate-descent tuning, plus its 0.8%), about 85 h, about $365 at $4.29/h.
@@ -743,19 +741,38 @@ documents), the compiled evaluation losses and the native decoder:
 | End to end (2026-10-20, through the `base_train` and `base_eval` command lines `scripts/production.py` has since replaced with direct calls in spawned processes): training with lr scale 2.5 (d8, 74 steps), the evaluation (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
 | Run identity (`60138de`) | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
 
-## Decoding and syntax analysis
+## Evaluation
 
-**Benchmarks** (`eval/code_eval.py`, `scripts/production.py` `evaluate`). Each benchmark is decoded two ways:
+Every metric is a published one, computed as its source computes it. `eval/suite.py evaluate` scores a checkpoint;
+production's checkpoints take everything, the ablation runs the likelihood metrics alone.
+
+**Likelihood metrics** (`eval/bpb.py`), in bits per byte (The Pile, Gao et al., arXiv 2101.00027: summed bits over
+summed UTF-8 bytes, tokenizer-independent):
+
+- *Held-out corpora:* each training corpus's val split at 8K and at 32K, per context bucket (≤ 8K, > 8K: Code Llama's
+  loss by context length, arXiv 2308.12950 §3.3), pooled by the stage's mixture weights: the AR test loss of Bavarian
+  et al. (arXiv 2207.14255 §3).
+- *Reference solutions:* the bits of HumanEval+'s, MBPP+'s and HumanEval-X C++'s reference solutions given their
+  prompts, the decision measure at scales where pass@1 is near zero: the task loss of Bhagia et al. (arXiv 2412.04403
+  §2); the correct answer's likelihood is DataDecide's best small-scale predictor for HumanEval and MBPP (arXiv
+  2504.11393 §3.3); BPB raises the signal-to-noise ratio of most benchmarks (Heineman et al., arXiv 2508.13144 §5.3)
+  and tracks pass@1 across checkpoints where corpus loss does not (Xing et al., arXiv 2604.07769).
+
+**Benchmarks** (`eval/code_eval.py`): EvalPlus HumanEval+ and MBPP+ (base and plus pass@1), MultiPL-E HumanEval and
+MBPP in C++, and HumanEval single-line, multi-line and random-span infilling (PSM and SPM), each scored by its official
+evaluator, by up to three generation modes:
 
 | Mode | Decoding | Score |
 |---|---|---|
-| `greedy` | left-to-right argmax, one completion per problem | pass@1, the literature's greedy setting |
+| `greedy` | left-to-right argmax, one completion per problem | pass@1 as DeepSeek-Coder (arXiv 2401.14196 §4.1), Qwen2.5-Coder and EvalPlus's leaderboard report it |
+| `sampled` (EvalPlus, MultiPL-E) | 20 samples per problem at temperature 0.2 from the nucleus top-p 0.95 (`code_eval.SAMPLES`, `SAMPLE_TEMPERATURE`, `TOP_P`; the decoder's `k_nucleus`) | pass@1 by Chen et al.'s unbiased estimator (Codex, arXiv 2107.03374 §2.1: top p 0.95; T = 0.2 the pass@1 optimum), as MultiPL-E (its pass@1 stable from about 20 samples) and StarCoder2 (20 samples at T = 0.2) report it, computed by each benchmark's evaluator |
 | `filtered` | left-to-right prompts healed (Guidance; Lundberg 2023), Python and FIM middles under the syntax constraint (FIM: given the prefix and suffix, no healing); the greedy candidate, then seeded samples until one has no post-generation diagnostic and passes the prompt's own examples, at most 10 (`verify.ATTEMPTS`); the accepted candidate, else the greedy one | filtered pass@1 (Codex's filtered pass@k, Chen et al. arXiv 2107.03374 §3.5; AlphaCode §4.5): a system measurement, not comparable to pass@1 tables |
 
-- **Comparability.** MultiPL-E pass@1 here is greedy, not MultiPL-E's sampled estimate; HumanEval infilling is
-  greedy, not Bavarian et al.'s (temperature 0.2, 100–200 samples). The prompts' examples overlap the scored base tests
-  (MBPP+: 373 of 378 prompt asserts use a base input; HumanEval+: 55 of 164 tasks share a doctest input), so the
-  filtered mode favours base over plus pass@1.
+- **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E's paper drew 200 and
+  the BigCode leaderboard 50: the same estimate, with more variance per problem. HumanEval infilling is greedy, not
+  Bavarian et al.'s (temperature 0.2, 100–200 samples). The prompts' examples overlap the scored base tests (MBPP+:
+  373 of 378 prompt asserts use a base input; HumanEval+: 55 of 164 tasks share a doctest input), so the filtered mode
+  favours base over plus pass@1.
 - **Infilling** (human-eval-infilling, Bavarian et al.): each middle is cut to the reference middle's line count, a
   single-line middle to its first line (the benchmark's standard post-processing for pass@1: arXiv 2410.03103; arXiv
   2505.18789 Fig. 4), and decoding stops there; random-span middles end at BOS. Both orders, PSM and SPM, are scored
@@ -769,10 +786,12 @@ prompts and generations share steps; a prompt's K and V are kept in a paged prom
 same prompt (each search attempt after the first) starts at its last token. The GEMV runs a one-warp block per 16-row
 weight tile and 16-slot group, weights streamed through a register ring and inputs copied by `cp.async`; every sum's
 order depends on the shapes and the slot's position alone, so a request's tokens do not depend on the batch, the store
-or timing. A `Request` carries the prompt, budget, stop rule, `temperature` (0 = argmax, ties to the lowest id), `seed`
-(the sample at position *i* depends only on seed and *i*) and an optional constraint (`heal()`'s first token, the
-Python syntax constraint, `AllOf()` of both), whose masks each step takes for all constrained slots in one batched call
-(`step_masks`); a prompt whose length plus budget exceeds the context raises `ValueError`.
+or timing. A `Request` carries the prompt, budget, stop rule, `temperature` (0 = argmax, ties to the lowest id), `top_p`
+(below 1: the sample from the nucleus, Holtzman et al., ICLR 2020, §3.1; `decode.cu k_nucleus` keeps the token set
+Hugging Face's `TopPLogitsWarper` keeps), `seed` (the sample at position *i* depends only on seed and *i*) and an
+optional constraint (`heal()`'s first token, the Python syntax constraint, `AllOf()` of both), whose masks each step
+takes for all constrained slots in one batched call (`step_masks`); a prompt whose length plus budget exceeds the
+context raises `ValueError`.
 
 - **KV cache sized to the workload** (greedy, no stop rule, 125,952 tokens per run, under `gpu.lock`, 2026-10-20): d24
   `max_len` 32,768 (the context), 32 slots: 2,379 tok/s; `max_len` 1,158 (longest HumanEval+ prompt 391 + 768 − 1),
@@ -861,10 +880,9 @@ test suite, though they overlap its base tests (Benchmarks). The type checker ru
 - `nanochat/train/`: `optim.py` (optimizers, weight decay, gradient clip), `schedule.py` (plan, each step's stage, lr
   multiplier), `stages.py` (token budget, rows per stage, each stage's micro-batches in the run's order),
   `checkpoint.py`, `metrics.py`.
-- `nanochat/train/metrics.py` also holds the evaluation's metrics: bits and bytes per context bucket, mixture bits per
-  byte, reference-solution bits, the evaluation record and the tracked-metrics export.
-- `nanochat/eval/`: the code benchmarks (`code_eval.py`: EvalPlus, MultiPL-E, HumanEval infilling) and the
-  post-generation checks (`verify.py`).
+- `nanochat/eval/`: the checkpoint's evaluation and the run's export (`suite.py`), the likelihood metrics (`bpb.py`),
+  the code benchmarks (`code_eval.py`: EvalPlus, MultiPL-E, HumanEval infilling) and the post-generation checks
+  (`verify.py`).
 - `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
 - `nanochat/data/`: the data pipeline (Pipeline, above) and `bpe/`, its Rust crate: the SA-BPE trainer, deduplication,
