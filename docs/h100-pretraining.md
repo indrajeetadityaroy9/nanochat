@@ -368,7 +368,7 @@ made. They share one mechanism (`ablations/harness.py`) whose runs train and eva
 | File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
 | `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) × 2.5467, adopted 2026-10-20 (Peak lr) | × 2 and × 4 (× 8 at d8): the law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
-| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, 4 seeds, sa-bpe against sa-bpe-fused (the positive control) and the hybrid; bpe by its documents' statistics alone; every arm's intrinsic record (TokEval's metrics) on the GB10 | SA-BPE (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the hybrid: SA-BPE within cl100k's letter clause, the non-fusing punctuation run and whitespace by type, each run whole (arXiv 2608.18062's companion post; arXiv 2504.00178); the fusing pattern (MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, invisible in code bits per byte, arXiv 2608.18062); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
+| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, one seed per arm: sa-bpe against sa-bpe-fused (also the positive control), the hybrid and bpe, parsing by McNemar's test per problem; every arm's intrinsic record (TokEval's metrics) on the GB10 | SA-BPE (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the hybrid: SA-BPE within cl100k's letter clause, the non-fusing punctuation run and whitespace by type, each run whole (arXiv 2608.18062's companion post; arXiv 2504.00178); the fusing pattern (MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, invisible in code bits per byte, arXiv 2608.18062); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
 
 **Results.** `lr.py` ran on 2026-10-20 at dataset revision `1e711aa` (`results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`;
 Peak lr), on the first tokenizer's data; production carries its optima to other data (Peak lr). `tokenizer.py` has not
@@ -444,10 +444,10 @@ run, nor its vocabularies and data (`python -m ablations.tokenizer vocabularies`
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 **Power.** The paired comparison's six runs (Against the standard regime) give a within-configuration σ of 0.0034
-bits per byte on code (0.0044 on solutions, 0.0036 on 32K repository); the 4-seed settings measure it where they
-run. sa-bpe against each challenger at d16, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an
-effect of 0.008. lr: each vertex rests on the arms' differences within one seed, which varied by 0.0008 across 2 seeds
-at d8 at 20 against a 0.018 effect; at the curvature
+bits per byte on code (0.0044 on solutions, 0.0036 on 32K repository). The tokenizer experiment's challengers at d16,
+one run against one: a bits-per-byte difference resolves at 1.96 √2 σ = 0.0094; parsing, by McNemar's test over the
+problems (The tokenizer experiment). lr: each vertex rests on the arms' differences within one seed, which varied by
+0.0008 across 2 seeds at d8 at 20 against a 0.018 effect; at the curvature
 arXiv 2409.19913's Llama-1 estimate implies (0.027 nats for a 2.5× lr; about 0.026 bits per byte per (ln lr)² at 3.5
 bytes per token [assumed]) and per-run noise σ, a three-point fit places a vertex within about ±14% (one standard
 error, 0.13 in u). The d8 ratio r combines two vertices' errors, about ±20% (0.185 in u); raised to 1.24 for
@@ -499,23 +499,24 @@ extending).
 `ablations/tokenizer.py`: the decision production's tokenizer waits on, as every later step trains on its tokens. Data
 and stages describes the current vocabulary (SA-BPE within the non-fusing pattern), production's until this decides.
 The arms come from TokEval (arXiv 2608.18062, its companion post "Code tokenizer ablations" and its library), SA-BPE
-(arXiv 2604.14053 and its repository), tiktoken's encodings and the code-tokenizer literature; the experiment trains
-only on what they leave open at this scale.
+(arXiv 2604.14053 and its repository), tiktoken's encodings and the code-tokenizer literature. Every candidate
+production keeps or dismisses is trained, one seed each: the literature's evidence is at 1.27B parameters and 128K
+ids, on Python, and a dismissal at this scale, vocabulary and mixture rests on a run of its own.
 
 - **Arms.** Four vocabularies of 32,768 ids, trained on the tokenizer's sample (`data/tokenizer.py` `sample`) by the
   same crate and encoded by tiktoken: sa-bpe, production's (SA-BPE's F·ln R, its §4.1; R counts repositories as in the
   paper, and web hosts and documents, an extension its §6 leaves untested); sa-bpe-fused, the same score within
   cl100k's punctuation clause, which takes the line breaks after a run (the first tokenizer's); the hybrid (below);
-  bpe, frequency alone within production's pattern (SA-BPE's baseline), compiled, not trained on.
+  bpe, frequency alone within production's pattern (SA-BPE's baseline).
 - **The positive control.** The companion post deletes the fusing clause with the tokenizer corpus held fixed and moves
   MBPP pass@1 from 0.086 to 0.230 (three seeds each, ranges disjoint; 1.27B parameters, about 20B math and code
   tokens, vocabularies of about 128K, prompts healed), its failures SyntaxErrors, while code bits per byte does not
   follow (its Table 18: the fusing GPT-4o tokenizer 0.377 and MBPP 0.174, the punctuation-isolating one 0.380 and
-  0.230). sa-bpe-fused tests that the d16 measures detect it; one that does not cannot decide the hybrid.
-- **Not run.** The merge score: SA-BPE's paper puts the two 0.55% apart in compression (3.623 for BPE, 3.643) and
-  reports verified under-trained tokens (640, 72) at 100M parameters, no loss or downstream result (Table 3;
-  Limitations); a bits-per-byte difference that small is below what a few seeds detect [inference], so the score is
-  decided by bpe's documents' statistics. PickyBPE (arXiv 2409.04599) removes tokens during training, which merge-rank
+  0.230). sa-bpe-fused tests that the d16 measures detect it; one that does not cannot decide the others.
+- **The score.** SA-BPE's paper puts the two 0.55% apart in compression (3.623 for BPE, 3.643) and reports verified
+  under-trained tokens (640, 72) at 100M parameters, no loss or downstream result (Table 3; Limitations); a tie in
+  the runs is likely [inference], which the documents' statistics break (Decisions).
+- **Not run.** PickyBPE (arXiv 2409.04599) removes tokens during training, which merge-rank
   encoding cannot express, and its one code result is no better than BPE's (compression 3.61 against 3.62 in
   arXiv 2604.14053 Table 4); BoundlessBPE's supermerges (arXiv 2504.00178) need their own encoder; SuperBPE's superwords
   lose on code (arXiv 2503.13423 Table 1: HumanEval pass@10 15.9 to 13.4 at 8B parameters and 200K ids); UnigramLM is
@@ -583,25 +584,32 @@ spaces, one chunk per kind (1,973). English and math chunk alike under productio
   equal words; arXiv 2608.18062's post did not equalize the text seen); the byte-offset buckets (Evaluation) show what
   the extra bytes of context a better compressor sees are worth (arXiv 2503.13423 §3.1 fixes context in bytes).
 - **Documents.** `python -m ablations.tokenizer data` compiles the same documents for every arm into
-  `artifacts/tokenizer-ablation/compiled/` and packs them for the three trained-on arms: of each code corpus, the
+  `artifacts/tokenizer-ablation/compiled/` and packs them for every arm: of each code corpus, the
   leading curated train documents whose sa-bpe tokens fill what d16 at 20 tokens per scaling parameter draws at the
   file-level stage (rows from production's packs), so the code group binds every arm; of text and math the leading
   files holding 1.25 times their draw, and of each repository corpus the trailing files holding 1.25 times the
   repository stage's draw, so they never bind (sa-bpe takes 9.21% more tokens than the first tokenizer on
   stack_edu_cpp's whole val split, the largest gap measured); of each val split, a systematic sample of documents whose
   sa-bpe tokens fill at most 1/1.25 of the val sample, which every arm scores whole.
-- **Decisions,** pre-registered (`results/tokenizer.json` `decision`). Pattern: a challenger (sa-bpe-fused, the hybrid)
-  qualifies iff its mean unparsed share is not higher than sa-bpe's, its code bits per byte is not higher with the
-  95% interval excluding zero, and one of the two is lower with the interval excluding zero; the qualifier with the
-  lower unparsed share is adopted, else production's pattern; beside it, whether the control is detected (sa-bpe-fused's
-  unparsed share higher with the interval excluding zero). Score: bpe is adopted iff its documents leave fewer
-  vocabulary tokens never read than sa-bpe's (SA-BPE's claimed benefit), carried to the adopted pattern [inference];
-  otherwise SA-BPE.
+- **Decisions,** pre-registered (`results/tokenizer.json` `contrasts`, `decision`), each challenger (sa-bpe-fused, the
+  hybrid, bpe) against sa-bpe. Parsing: the HumanEval+ and MBPP+ problems whose healed greedy completion compiles
+  under only one of the two, McNemar's exact test (the companion post's test of single runs: 104 problems against 4
+  for its MinGram pair), better or worse at p < 0.05. Code bits per byte: better or worse beyond 1.96 √2 σ = 0.0094,
+  σ = 0.0034 the within-configuration spread of Against the standard regime at d8, carried to d16 [inference]. A
+  challenger qualifies iff it is worse on neither and better on one. Pattern: of sa-bpe-fused and the hybrid, the
+  qualifier with the lower unparsed share is adopted, else production's pattern; beside it, whether the control is
+  detected (sa-bpe-fused parses worse). Score: bpe is adopted iff it qualifies, or is equal on both and its documents
+  leave fewer vocabulary tokens never read than sa-bpe's (SA-BPE's claimed benefit), carried to the adopted pattern
+  [inference]; otherwise SA-BPE.
+- **One seed.** McNemar's test covers the sampling of problems, not of training: the post's fusing tokenizer scored
+  MBPP 0.167, 0.072 and 0.018 over three seeds, so one run can miss a real difference [inference], and an undetected
+  one leaves production's pattern and SA-BPE. Raising `SEEDS` pools each seed pair's problems and narrows the
+  bits-per-byte bound by √`SEEDS` (8 runs at 2 seeds).
 - **Where it runs.** The vocabularies, the data and the intrinsic record are CPU work, on the GB10 beside the curated
-  store; the 12 runs and their evaluations on the H100 SXM5 or GH200, in one `runs` call on one host, so every arm
+  store; the 4 runs and their evaluations on the H100 SXM5 or GH200, in one `runs` call on one host, so every arm
   meets the same kernels. TokEval's comparisons hold everything but the tokenizer fixed and condition on no hardware.
-- **Cost** [estimate, from Cost above]: 12 runs of d16 at about 20, about 35 minutes each and the parse measure's
-  generations, ≈ 7.5 h ($32 at $4.29/h); on the GB10, the four vocabularies on one sample load (production's took 6.5
+- **Cost** [estimate, from Cost above]: 4 runs of d16 at about 20, about 35 minutes each and the parse measure's
+  generations, ≈ 2.4 h ($10 at $4.29/h); on the GB10, the four vocabularies on one sample load (production's took 6.5
   minutes) and the data. Not yet run: each waits for approval.
 
 ### Verification of the experiments' code
@@ -614,9 +622,11 @@ spaces, one chunk per kind (1,973). English and math chunk alike under productio
   stack_edu_python, stack_edu_cpp, kaggle_notebooks and codeforces_cots (472 snippets): every leaf, every alignment
   rate, the identifier statistics and the indentation correlation equal. The hybrid's pattern through the crate's
   trainer (3,000 merges) and tiktoken on 2,025 documents of the 11 sources: every document decodes to itself and every
-  chunk end of the `regex` module is a token end. `runs`' decision on four synthetic comparisons: the hybrid adopted
-  when it parses better and its code bits per byte is not worse, production's pattern when nothing is better or the
-  better-parsing arm is worse on code, the lower unparsed share when both qualify. On the first 200 val documents of
+  chunk end of the `regex` module is a token end. `runs`' contrasts and decision on three synthetic single-seed
+  comparisons (542 problems): the hybrid adopted when it parses better (40 problems against 15, p = 0.001) or is equal
+  on parsing and better beyond 0.0094 on code, production's pattern when the better-parsing hybrid is worse beyond it;
+  the control detected at 100 against 5 and not at 8 against 10; bpe adopted on a tie only with fewer tokens never
+  read. On the first 200 val documents of
   each code corpus, production's vocabulary aligns 0.616 of stack_edu_python's leaves and 0.596 of stack_edu_cpp's
   against the first's 0.580 and 0.508, at a lower Rényi efficiency (0.474 against 0.499 over every corpus); its 6
   tokens ending in a line break and indentation are pieces of whitespace-only lines (`\n` and 4 to 24 spaces, `\n\t`),

@@ -3,20 +3,21 @@ The tokenizer: the decision production's tokenizer waits on. Four vocabularies o
 BOS and the 3 FIM sentinels), trained on the same sample (data/tokenizer.py sample) by the same crate and encoded by
 tiktoken, which leaves out what merge-rank encoding cannot run (PickyBPE's token removals, arXiv 2409.04599;
 BoundlessBPE's supermerges, arXiv 2504.00178) and superword tokens, whose code result is a loss (SuperBPE, arXiv
-2503.13423 Table 1: HumanEval pass@10 15.9 to 13.4):
+2503.13423 Table 1: HumanEval pass@10 15.9 to 13.4), each trained on, so that every candidate production keeps or
+dismisses has a run of its own:
 - sa-bpe: production's, SA-BPE's F·ln R (arXiv 2604.14053 §4.1; R the authorship units of data/tokenizer.py sample:
   repositories as in the paper, web hosts and documents an extension it does not test) within SPLIT_PATTERN;
 - sa-bpe-fused: within FUSED_PATTERN, whose runs of punctuation take the line breaks after them (cl100k's clause, the
-  first tokenizer's), the positive control: arXiv 2608.18062's companion post deletes that clause with the tokenizer
-  corpus held fixed and moves MBPP pass@1 from 0.086 to 0.230, 3 seeds each (Appendix F.3, footnote 15: 1.27B
-  parameters, ~20B tokens, vocabularies of about 128K, healed prompts), its failures SyntaxErrors, while code bits per
-  byte does not follow (its Table 18); a measure that misses it at d16 cannot decide the hybrid;
+  first tokenizer's), also the positive control: arXiv 2608.18062's companion post deletes that clause with the
+  tokenizer corpus held fixed and moves MBPP pass@1 from 0.086 to 0.230, 3 seeds each (Appendix F.3, footnote 15:
+  1.27B parameters, ~20B tokens, vocabularies of about 128K, healed prompts), its failures SyntaxErrors, while code
+  bits per byte does not follow (its Table 18); a measure that misses it at d16 cannot decide the others;
 - hybrid: SA-BPE within HYBRID_PATTERN, the components of the others that resolve each other's limitations;
-- bpe: merges by frequency alone (SA-BPE's baseline; the crate's score "frequency") within SPLIT_PATTERN, compiled, not
-  trained on: the paper puts the two scores 0.55% apart in compression (3.623 and 3.643, Table 3), a bits-per-byte
-  difference below what a few seeds detect [inference], so the score is decided by the documents' statistics.
+- bpe: merges by frequency alone (SA-BPE's baseline; the crate's score "frequency") within SPLIT_PATTERN: the paper
+  puts the two scores 0.55% apart in compression (3.623 and 3.643, Table 3), so a tie in the runs is likely
+  [inference], which the documents' statistics break.
 
-Runs: sa-bpe, sa-bpe-fused and hybrid at d16, 4 seeds, at equal bytes: each arm reads the document set once, as
+Runs: every arm at d16, SEEDS seed each, at equal bytes: each arm reads the document set once, as
 production reads its data (train/stages.py max_ratio), so its tokens are the set's bytes over its bytes per token (arXiv
 2402.01035 compares at equal tokens, its Appendix J at equal text); each run's plan is its own (schedule.plan at its
 tokens), its context production's 8,192 and 32,768 tokens (eval/bpb.py's byte-offset buckets show the bytes of context
@@ -37,15 +38,19 @@ alignment, identifier fragmentation and Python indentation consistency (ablation
 TokEval: its multilingual metrics (fertility, Gini, MorphScore), its digit metrics (every arm's pattern splits digit
 runs into pairs alike) and operator isolation (no significant MBPP correlation; smallest adjusted p 0.058).
 
-Decisions, pre-registered (RESULTS/tokenizer.json "decision"):
-- pattern: a challenger (sa-bpe-fused, hybrid) qualifies iff its mean unparsed share (healed greedy HumanEval+ and MBPP+
-  completions that do not compile; ablations/harness.py evaluation) is not higher than sa-bpe's, its code bits per
-  byte is not higher with the 95% interval excluding zero, and one of the two is lower with the interval excluding
-  zero; the qualifier with the lower unparsed share is adopted, else production's pattern; beside it, whether the
-  control is detected: sa-bpe-fused's unparsed share higher with the interval excluding zero;
-- score: bpe is adopted iff its documents leave fewer vocabulary tokens never read than sa-bpe's (SA-BPE's claimed
-  benefit, fewer under-trained tokens: 640 against 72 verified, the paper's Table 3), carried to the adopted pattern
-  [inference]; otherwise SA-BPE.
+Decisions, pre-registered (RESULTS/tokenizer.json "decision"), each challenger (sa-bpe-fused, hybrid, bpe) against
+sa-bpe on the runs of the same seeds:
+- parsing: the HumanEval+ and MBPP+ problems whose healed greedy completion compiles under only one of the two
+  (ablations/harness.py evaluation), McNemar's exact test (the companion post's test of single runs: 104 problems
+  against 4 for its MinGram pair); better or worse at p < 0.05, else equal. One seed estimates no seed spread: the
+  test covers the problems' sampling, not training's [inference];
+- code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal
+  bound, 1.96 √(2 / SEEDS) CODE_SIGMA, else equal;
+- a challenger qualifies iff it is worse on neither and better on one. Pattern: of sa-bpe-fused and the hybrid, the
+  qualifier with the lower unparsed share is adopted, else production's pattern; beside it, whether the control is
+  detected (sa-bpe-fused parses worse). Score: bpe is adopted iff it qualifies, or is equal on both and its documents
+  leave fewer vocabulary tokens never read than sa-bpe's (SA-BPE's claimed benefit, fewer under-trained tokens: 640
+  against 72 verified, the paper's Table 3), carried to the adopted pattern [inference]; otherwise SA-BPE.
 
 python -m ablations.tokenizer vocabularies   (the arms into TOKENIZER_ABLATION/<arm>)
 python -m ablations.tokenizer data           (every arm's document set, its intrinsic record, then the checks)
@@ -60,9 +65,10 @@ import numpy as np
 import pyarrow.parquet as pq
 import regex
 import torch
+from scipy.stats import binomtest, norm
 
 from ablations import intrinsic
-from ablations.harness import main
+from ablations.harness import ALPHA, main
 from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.compile import compile_split
 from nanochat.data.loader import (
@@ -97,12 +103,15 @@ FUSED_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}|
 #   tabs, spaces and other whitespace apart, so an indentation is one chunk and the statement after it starts its own,
 #   the same at every depth ("    " "if" where cl100k's \s+(?!\S) gives "   " " if", and "if" at depth 0).
 HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|[\r\n]+|\t+| +|[^\S\r\n\t ]+"""
-# arm: (pattern, merge score)
+# arm: (pattern, merge score); every arm is trained on, sa-bpe as the harness's production arm
 ARMS = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
         "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
-RUNS = ("sa-bpe", "sa-bpe-fused", "hybrid")  # the arms trained on; sa-bpe is the harness's production arm
-CHALLENGERS = RUNS[1:]
-DEPTH, SEEDS = 16, 4
+CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
+DEPTH, SEEDS = 16, 1
+# The spread of a run's 8K code bits per byte over seeds (pooled within each configuration): the six runs at d8 at 20 of
+# the standard-regime comparison (60138de's baseline and c00d2f6's default, data seeds 0 to 2), carried to d16
+# [inference]
+CODE_SIGMA = 0.0034
 # Text, math and repository-stage rows kept per drawn row: an arm compressing a corpus better than sa-bpe packs it into
 # fewer rows (sa-bpe takes 9.21% more tokens than the first tokenizer, sa-bpe-fused's construction, on stack_edu_cpp's
 # whole val split, the largest gap measured), so only the code group binds
@@ -198,7 +207,7 @@ def describe(tokenizer: Tokenizer, files: dict[str, dict]) -> dict:
 
 def data() -> None:
     """Every arm's compiled document set and RESULTS/tokenizer-data.json (describe, and TokEval's code metrics of every
-    code corpus: ablations/intrinsic.py code); the trained-on arms' packs and their checks: max_ratio, every draw within
+    code corpus: ablations/intrinsic.py code); every arm's packs and their checks: max_ratio, every draw within
     its readable rows, every val split within bpb's sample."""
     chosen = documents()
     tokenizers = [get_tokenizer(arm) for arm in ARMS]
@@ -222,8 +231,8 @@ def data() -> None:
         record[arm]["code"] = {corpus: code[corpus][arm] for corpus in corpora}
     (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
     bpe()  # built once, before the packer's threads call it
-    for arm in RUNS:
-        tokenizer = get_tokenizer(arm)
+    for tokenizer in tokenizers:
+        arm = tokenizer.name
         for corpus, files in chosen.items():
             first, trailing = len(files["train"]), len(files["repo"])
             stages = [(FILE_STAGE, range(first))]
@@ -249,24 +258,41 @@ def data() -> None:
 
 
 def runs() -> None:
-    """sa-bpe against sa-bpe-fused and hybrid at d16, each at its max_ratio (ablations/harness.py main); then
-    RESULTS/tokenizer.json gains the decision (module docstring)."""
-    ratios = {arm: max_ratio(get_tokenizer(arm), depth=DEPTH) for arm in RUNS}
+    """Every arm at d16, each at its max_ratio (ablations/harness.py main); then RESULTS/tokenizer.json gains each
+    challenger's contrast with sa-bpe and the decision (module docstring)."""
+    ratios = {arm: max_ratio(get_tokenizer(arm), depth=DEPTH) for arm in ARMS}
     main(settings=((DEPTH, ratios["sa-bpe"], range(SEEDS),
                     {arm: {"tokenizer": arm, "ratio": ratios[arm]} for arm in CHALLENGERS}),),
          production={"tokenizer": "sa-bpe"})
+    parses = {}  # (arm, seed): per problem, in the benchmarks' order, whether its completion compiles
+    for line in (RESULTS / "tokenizer.jsonl").read_text(encoding="utf-8").splitlines():
+        run = json.loads(line)
+        outcomes = run["evaluations"][-1]["parse"].values()
+        parses[run["arm"], run["fields"]["seed"]] = [o == "parses" for b in outcomes for o in b["outcomes"]]
     summary = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))
     compared = summary["settings"][0]["alternatives"]
-    qualified = [arm for arm, c in compared.items()
-                 if c["difference"]["unparsed"] <= 0 and c["ci_low"]["code"] <= 0
-                 and (c["ci_high"]["unparsed"] < 0 or c["ci_high"]["code"] < 0)]
+    margin = norm.ppf(1 - ALPHA / 2) * math.sqrt(2 / SEEDS) * CODE_SIGMA
+    contrasts = {}
+    for arm in CHALLENGERS:
+        pairs = [(a, b) for seed in range(SEEDS)
+                 for a, b in zip(parses[arm, seed], parses["production", seed], strict=True)]
+        here, there = sum(a and not b for a, b in pairs), sum(b and not a for a, b in pairs)
+        p = binomtest(here, here + there).pvalue if here + there else 1.0
+        code = compared[arm]["difference"]["code"]
+        contrasts[arm] = {"parses_only_here": here, "parses_only_in_sa-bpe": there, "p": p,
+                          "parsing": "equal" if p >= ALPHA else "better" if here > there else "worse",
+                          "code": "better" if code < -margin else "worse" if code > margin else "equal"}
+    verdicts = {arm: (c["parsing"], c["code"]) for arm, c in contrasts.items()}
+    qualified = {arm for arm, v in verdicts.items() if "worse" not in v and "better" in v}
     never = {arm: r["unread_tokens"]["never"]
              for arm, r in json.loads((RESULTS / "tokenizer-data.json").read_text(encoding="utf-8")).items()}
-    decision = {"pattern": min(qualified, key=lambda arm: compared[arm]["difference"]["unparsed"], default="sa-bpe"),
-                "score": "frequency" if never["bpe"] < never["sa-bpe"] else "sa-bpe",
-                "control_detected": compared["sa-bpe-fused"]["ci_low"]["unparsed"] > 0}
-    (RESULTS / "tokenizer.json").write_text(json.dumps(summary | {"decision": decision}, allow_nan=False),
-                                            encoding="utf-8")
+    frequency = "bpe" in qualified or (verdicts["bpe"] == ("equal", "equal") and never["bpe"] < never["sa-bpe"])
+    decision = {"pattern": min(qualified & {"sa-bpe-fused", "hybrid"},
+                               key=lambda arm: compared[arm]["difference"]["unparsed"], default="sa-bpe"),
+                "score": "frequency" if frequency else "sa-bpe",
+                "control_detected": verdicts["sa-bpe-fused"][0] == "worse"}
+    (RESULTS / "tokenizer.json").write_text(
+        json.dumps(summary | {"contrasts": contrasts, "decision": decision}, allow_nan=False), encoding="utf-8")
 
 
 if __name__ == "__main__":
