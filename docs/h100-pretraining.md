@@ -605,17 +605,32 @@ spaces, one chunk per kind (1,973). English and math chunk alike under productio
   MBPP 0.167, 0.072 and 0.018 over three seeds, so one run can miss a real difference [inference], and an undetected
   one leaves production's pattern and SA-BPE. Raising `SEEDS` pools each seed pair's problems and narrows the
   bits-per-byte bound by √`SEEDS` (8 runs at 2 seeds).
-- **Where it runs.** The vocabularies, the data and the intrinsic record are CPU work, on the GB10 beside the curated
-  store; the 4 runs and their evaluations on the H100 SXM5 or GH200, in one `runs` call on one host, so every arm
-  meets the same kernels. TokEval's comparisons hold everything but the tokenizer fixed and condition on no hardware.
-- **Cost** [estimate, from Cost above]: 4 runs of d16 at about 20, about 35 minutes each and the parse measure's
-  generations, ≈ 2.4 h ($10 at $4.29/h); on the GB10, the four vocabularies on one sample load (production's took 6.5
-  minutes) and the data. Not yet run: each waits for approval.
+- **Where it runs.** Every step on the GB10, beside the curated store: the vocabularies, the data and the intrinsic
+  record on its CPU, the 4 runs and their evaluations on its GPU (the image's SM120 kernels), in one `runs` call, so
+  every arm meets the same kernels and nothing moves to another host. Its d16 trains both stages at 68,014 and 68,970
+  tokens per second (2026-10-21, production's data, 204 steps; peak memory 56.4 GiB of its 128 GB), about 1/11 of the
+  H100's 746K. TokEval's comparisons hold everything but the tokenizer fixed and condition on no hardware; `CODE_SIGMA`
+  comes from d8 runs, carried to d16 on the GB10 [inference].
+- **Cost** [estimate]: per run, about 1.34B tokens at 68K tokens per second, 5.5 h, and its evaluation (likelihood and
+  one greedy completion per HumanEval+ and MBPP+ problem), about 1 h: ≈ 26 h for the 4 runs, no rental (on the H100:
+  2.4 h, $10); the four vocabularies on one sample load (production's took 6.5 minutes) and the data. Not yet run: each
+  waits for approval.
 
 ### Verification of the experiments' code
 
 2026-10-20 unless stated:
 
+- *The data the tokenizer experiment builds* (2026-10-21, GB10, into a scratch directory, production's tokenizer for
+  sa-bpe): `documents` chooses each code corpus's leading 1 or 2 files (stack_edu_python: its first file whole and
+  42,001 documents of the second, 217,434 in all) and its trailing file, text and math 1 to 3 leading files, every 1st
+  to 17th val document. `compile_split` of those files equals production's compile document for document (train and
+  val of stack_edu_python, climbmix, codeforces_cots, ultradata_math_l2); `keep_documents` keeps exactly the chosen
+  documents per file; the packs of a whole shard equal production's byte for byte, rows, pieces and FIM tokens
+  (stack_edu_python's 20,747 rows, climbmix's 7,163); the loader's micro-batches start with BOS and decode to the
+  documents. The hybrid's pattern through the crate's packer (tiktoken-rs) with FIM: 30,936 of 61,751 pieces FIM
+  examples, their sentinels present, the loader's rows decoding to C++. `data`'s equal-bytes check holds between
+  production's and the first tokenizer's compiled codeforces_cots and kaggle_notebooks (24,152 and 543,748 train
+  documents).
 - *The tokenizer experiment's measures* (2026-10-21, GB10, real val documents): `leaves.rs` and `intrinsic.py` against
   TokEval's own functions (7d03a61, executed on the same snippets with tree-sitter's Python binding at the crate's
   grammar versions: Python 0.25.0, C++ 0.23.4), production's tokenizer and the first's, 150 ASCII documents of

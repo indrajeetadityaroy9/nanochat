@@ -146,8 +146,9 @@ def keep_documents(corpus: str, split: str, tokenizer: Tokenizer, keep: np.ndarr
 def documents() -> dict[str, dict]:
     """{corpus: {"train": [file-level train files], "kept": their leading documents kept, "repo": [repository-level
     train files], "val_step": every how many val documents one is kept}}: the document set (module docstring), from
-    production's compiled data and packs."""
+    production's compiled data and packs, which count sa-bpe's tokens: sa-bpe is production's vocabulary, retrained."""
     production = get_tokenizer()
+    assert get_tokenizer("sa-bpe").data_key == production.data_key
     run = run_plan(20)
     code = set(next(iter(FILE_STAGE.mixture.values()))[1])
     chosen = {}
@@ -205,9 +206,10 @@ def describe(tokenizer: Tokenizer, files: dict[str, dict]) -> dict:
 
 
 def data() -> None:
-    """Every arm's compiled document set and RESULTS/tokenizer-data.json (describe, and TokEval's code metrics of every
-    code corpus: intrinsic.py code); every arm's packs and their checks: max_ratio, every draw within
-    its readable rows, every val split within bpb's sample."""
+    """Every arm's compiled document set, checked to hold the same bytes per document in every arm, and
+    RESULTS/tokenizer-data.json (describe, and TokEval's code metrics of every code corpus: intrinsic.py code); every
+    arm's packs and their checks: max_ratio, every draw within its readable rows, every val split within bpb's
+    sample."""
     chosen = documents()
     tokenizers = [get_tokenizer(arm) for arm in ARMS]
     for tokenizer in tokenizers:
@@ -223,6 +225,14 @@ def data() -> None:
             # the leading files' first kept documents and every document of the trailing (repository-stage) files
             keep_documents(corpus, "train", tokenizer, (train < files["kept"]) | (train >= bounds[len(files["train"])]))
         print(f"{tokenizer.name}: data key {tokenizer.data_key}")
+    for corpus, split in itertools.product(chosen, ("train", "val")):
+        sizes = []
+        for tokenizer in tokenizers:
+            path = split_path(corpus, split, tokenizer)
+            lengths = np.array([len(b) for b in tokenizer.token_bytes], dtype=np.int64)
+            ends = np.concatenate([[0], np.cumsum(lengths[np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE)])])
+            sizes.append(np.diff(ends[np.fromfile(path.with_suffix(".idx"), dtype=np.int64)]))
+        assert all(np.array_equal(sizes[0], other) for other in sizes[1:]), (corpus, split)
     record = {tokenizer.name: describe(tokenizer, chosen) for tokenizer in tokenizers}
     corpora = FILE_STAGE.mixture["code"][1]
     code = {corpus: intrinsic.code(corpus, tokenizers) for corpus in corpora}
