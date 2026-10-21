@@ -1,10 +1,10 @@
 """
-The mechanism the ablation experiments (ablations/lr.py, ablations/value_embeds.py) share. An experiment is production
-at each of its settings (depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms differing
-from production only in their Run fields, each on the same seeds. A run trains by scripts/base_train.train and is scored
-by eval/suite.py evaluate (its likelihood metrics), the production code paths; its model is ablations/model.py's
-Candidate (production's GPT when every structural field is production's); its plan (batch, steps, peak lr) is the
-production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
+The mechanism the ablation experiments (ablations/lr.py, value_embeds.py, tokenizer.py) share. An experiment is
+production at each of its settings (depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms
+differing from production only in their Run fields, each on the same seeds. A run trains by scripts/base_train.train and
+is scored by eval/suite.py evaluate (its likelihood metrics), the production code paths; its model is
+ablations/model.py's Candidate (production's GPT when every structural field is production's); its plan (batch, steps,
+peak lr) is the production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
@@ -57,6 +57,7 @@ class Run:
     ratio: float         # tokens per scaling parameter
     lr_scale: float      # times the plan's peak lr (schedule.plan)
     value_embeds: str    # "alternating" or "none"
+    tokenizer: str       # data/tokenizer.get_tokenizer's: "production", or "<arm>@<documents>" (ablations/tokenizer.py)
     seed: int            # init and data order
 
 
@@ -81,33 +82,43 @@ def evaluation_path(run: Run) -> Path:
 
 def execute(run: Run) -> None:
     """Train and evaluate one run: its metrics as production's (train/metrics.py), its final checkpoint's evaluation
-    as production's (eval/suite.py evaluate) without the generation benchmarks."""
+    as production's (eval/suite.py evaluate) without the generation benchmarks, with the parse measure."""
     tag, run_plan = tag_of(run), plan_of(run)
     steps = run_plan.num_iterations
     with torch.device("meta"):
         model = Candidate(gpt_config(depth=run.n_layer, stage=FILE_STAGE), value_embeds=run.value_embeds)
-    model = train(model=model, run=run_plan, variant=dataclasses.asdict(run), seed=run.seed,
-                  checkpoints=frozenset({steps}), tag=tag)
-    suite.evaluate(model, get_tokenizer(), name=checkpoint_name(tag, steps), step=steps, generate="none")
+    model = train(model=model, run=run_plan, tokenizer_name=run.tokenizer, variant=dataclasses.asdict(run),
+                  seed=run.seed, checkpoints=frozenset({steps}), tag=tag)
+    suite.evaluate(model, get_tokenizer(run.tokenizer), name=checkpoint_name(tag, steps), step=steps, generate="parse")
 
 
 def evaluation(run: Run) -> dict[str, float]:
-    """A run's compared measures (bits per byte; tokens per second) from its evaluation and its per-step records: code,
-    text and math, the 8K validation bits per byte of each group at production's corpus weights (bpb.val_bits "bpb");
-    solutions, the bits per byte of the HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) and HumanEval-X C++
+    """A run's compared measures (bits per byte; shares; tokens per second) from its evaluation and its per-step
+    records: code, text and math, the 8K validation bits per byte of each group at its corpus weights (bpb.val_bits
+    "bpb"); solutions, the bits per byte of the HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) and HumanEval-X C++
     (arXiv 2303.17568) reference solutions given their prompts, pooled (bpb.solution_bits); repo_32k, the 32K repository
     bits per byte of the code group, and repo_beyond_8k, the same over the targets beyond the file-level context
-    (bpb.CONTEXTS' last bucket); tok_per_s, the median over the file-level stage's steps of the step's tokens per
-    second."""
+    (bpb.CONTEXTS' last bucket); unparsed, indentation and syntax, the shares of HumanEval+ and MBPP+ problems, pooled,
+    whose healed greedy completion does not compile, by an IndentationError and by another SyntaxError
+    (code_eval.parse_generation), and greedy, their base pass@1, pooled; tok_per_s, the median over the file-level
+    stage's steps of the step's tokens per second."""
     tag, repo_start = tag_of(run), plan_of(run).repo_start
     result = json.loads(evaluation_path(run).read_text(encoding="utf-8"))
     rates = [r["tok_per_s"] for step, r in metrics.train_steps(tag).items() if step < repo_start]
+    parsed = result["parse"].values()
+    problems = sum(len(p["outcomes"]) for p in parsed)
+
+    def share(key: str) -> float:
+        return sum(p[key] * len(p["outcomes"]) for p in parsed) / problems
+
     return {"code": result["8k"]["bpb"]["code"],
             "solutions": bpb.bpb(*result["solution"].values()),
             "repo_32k": result["32k"]["bpb"]["code"],
             "repo_beyond_8k": bpb.mixture_bpb(result["32k"]["corpora"], mixture_weights(
-                REPO_STAGE.mixture, get_tokenizer(), REPO_STAGE.seq_len), buckets=slice(-1, None)),
+                REPO_STAGE.mixture, get_tokenizer(run.tokenizer), REPO_STAGE.seq_len), buckets=slice(-1, None)),
             "text": result["8k"]["bpb"]["text"], "math": result["8k"]["bpb"]["math"],
+            "unparsed": 1 - share("parses"), "indentation": share("indentation"), "syntax": share("syntax"),
+            "greedy": share("base pass@1"),
             "tok_per_s": statistics.median(rates)}
 
 
@@ -133,16 +144,18 @@ def diverged(tag: str) -> int | None:
     return failures[-1] if failures else None
 
 
-def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...]) -> None:
+def main(*, settings: tuple[tuple[int, float, range, dict, dict[str, dict]], ...]) -> None:
     """Run the calling experiment (python -m ablations.<experiment>): at each setting (depth, tokens per scaling
-    parameter, seeds, alternatives), production and an arm per alternative {name: Run fields}; then compare each
-    alternative with production at each setting."""
+    parameter, seeds, production fields, alternatives), production and an arm per alternative {name: Run fields};
+    then compare each alternative with production at each setting. The production fields are the Run fields in which
+    the setting's production arm, and so its every arm, departs from production (the tokenizer ablation's: production's
+    vocabulary on the experiment's documents)."""
     experiment = sys.modules["__main__"].__spec__.name.rsplit(".", 1)[1]
     cells = []
-    for depth, ratio, seeds, alternatives in settings:
+    for depth, ratio, seeds, production, alternatives in settings:
         # production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio
-        baseline = [Run(n_layer=depth, ratio=ratio, lr_scale=1.0, value_embeds="alternating", seed=seed)
-                    for seed in seeds]
+        baseline = [dataclasses.replace(Run(n_layer=depth, ratio=ratio, lr_scale=1.0, value_embeds="alternating",
+                                            tokenizer="production", seed=seed), **production) for seed in seeds]
         cells.append({"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
                                                  for name, changes in alternatives.items()})
     for run in (run for arms in cells for arm in arms.values() for run in arm):
@@ -157,7 +170,7 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...]) -> 
     summaries = []
     with ((RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f,
           (RESULTS / f"{experiment}-curves.jsonl").open("w", encoding="utf-8") as curve_lines):
-        for (depth, ratio, seeds, alternatives), arms in zip(settings, cells, strict=True):
+        for (depth, ratio, seeds, _, alternatives), arms in zip(settings, cells, strict=True):
             measures = {name: {tag_of(run): evaluation(run) for run in arm if diverged(tag_of(run)) is None}
                         for name, arm in arms.items()}
             for name, arm in arms.items():

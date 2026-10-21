@@ -10,6 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / "artifacts"
 DATA = ARTIFACTS / "data"                # the data pipeline's stages (nanochat/data/__init__.py)
 TOKENIZER = ARTIFACTS / "tokenizer"
+# the tokenizer ablation (ablations/tokenizer.py): <arm>/tokenizer.*, and <documents>/ every arm's compiled and packed
+# data of one document set
+TOKENIZER_ABLATION = ARTIFACTS / "tokenizer-ablation"
 CHECKPOINTS = ARTIFACTS / "checkpoints"  # <tag>-step<step>.pt (train/checkpoint.py)
 METRICS = ARTIFACTS / "metrics"          # <tag>.jsonl (train/metrics.py)
 BASE_EVAL = ARTIFACTS / "base_eval"      # <tag>-step<step>.json (eval/suite.py evaluate)

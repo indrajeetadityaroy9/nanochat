@@ -27,12 +27,12 @@ from nanochat.data.sources import SOURCES, curated_files, texts
 from nanochat.data.tokenizer import Tokenizer, get_tokenizer
 
 
-def compile_row_group(task: tuple[str, Path, int]) -> tuple[np.ndarray, np.ndarray]:
-    """(tokens, document lengths) of one row group; task = (source, curated shard, row group index). A repository
-    sample's files are consecutive rows of one sample, which a row group holds whole, concatenated in the sample's
-    order. The tokenizer comes from get_tokenizer's per-process cache, not the task: it is too large to send per
-    task."""
-    source, path, row_group = task
+def compile_row_group(task: tuple[str, str, Path, int]) -> tuple[np.ndarray, np.ndarray]:
+    """(tokens, document lengths) of one row group; task = (tokenizer name, source, curated shard, row group index). A
+    repository sample's files are consecutive rows of one sample, which a row group holds whole, concatenated in the
+    sample's order. The tokenizer comes from get_tokenizer's per-process cache, not the task: it is too large to send
+    per task."""
+    name, source, path, row_group = task
     table = pq.ParquetFile(path).read_row_group(row_group)
     documents = texts(source, table)
     if SOURCES[source].schema is REPOSITORY_FILE:
@@ -40,18 +40,17 @@ def compile_row_group(task: tuple[str, Path, int]) -> tuple[np.ndarray, np.ndarr
         documents = ["".join(documents[a:b]) for a, b in itertools.pairwise([*starts, len(documents)])]
     # a special token's text encodes as ordinary text (compiled data hold no special id); uint32, no Python int each.
     # A row group may hold no document: curate.split_file writes each normalized row group's surviving rows.
-    ids = [get_tokenizer().enc.encode_to_numpy(text, disallowed_special=()) for text in documents]
+    ids = [get_tokenizer(name).enc.encode_to_numpy(text, disallowed_special=()) for text in documents]
     lengths = np.array([len(doc) for doc in ids], dtype=np.int64)
     return np.concatenate([np.zeros(0, TOKEN_DTYPE), *ids]).astype(TOKEN_DTYPE), lengths
 
 
-def compile_split(source: str, split: str, tokenizer: Tokenizer) -> None:
-    """Compile a source's curated shards of a split into <split>.bin and <split>.idx, with <split>.json beside them."""
-    files = curated_files(source, split)
+def compile_split(source: str, split: str, tokenizer: Tokenizer, *, row_groups: dict[Path, int]) -> None:
+    """Compile the leading row_groups[file] row groups of curated shards of a source's split, in order (production:
+    every row group of every shard), into <split>.bin and <split>.idx, with <split>.json beside them."""
     path = split_path(source, split, tokenizer)
-    row_groups = {file: pq.read_metadata(file).num_row_groups for file in files}
-    tasks = [(source, file, i) for file, count in row_groups.items() for i in range(count)]
-    print(f"Compiling {len(files)} {split} files ({len(tasks):,} row groups) of '{source}' into {path}.bin")
+    tasks = [(tokenizer.name, source, file, i) for file, count in row_groups.items() for i in range(count)]
+    print(f"Compiling {len(row_groups)} {split} files ({len(tasks):,} row groups) of '{source}' into {path}.bin")
     per_file, offset = [], 0
     with (ProcessPoolExecutor() as pool, open(path.with_suffix(".bin"), "wb") as bin_file,
           open(path.with_suffix(".idx"), "wb") as idx_file):
@@ -74,4 +73,6 @@ if __name__ == "__main__":
         # a new output directory per source and tokenizer: compile does not resume
         split_path(source, "val", tokenizer).parent.mkdir(parents=True)
         for split in ("val", "train"):
-            compile_split(source, split, tokenizer)
+            files = curated_files(source, split)
+            compile_split(source, split, tokenizer,
+                          row_groups={file: pq.read_metadata(file).num_row_groups for file in files})

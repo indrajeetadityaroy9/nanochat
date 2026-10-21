@@ -16,5 +16,5 @@ from nanochat.train.stages import max_ratio
 
 if __name__ == "__main__":
     none = {"no value embeddings": {"value_embeds": "none"}}
-    main(settings=((8, 20, range(4), none), (8, max_ratio(get_tokenizer(), depth=24), range(1), none),
-                   (16, 20, range(4), none)))
+    main(settings=((8, 20, range(4), {}, none), (8, max_ratio(get_tokenizer(), depth=24), range(1), {}, none),
+                   (16, 20, range(4), {}, none)))

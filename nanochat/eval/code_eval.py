@@ -366,6 +366,50 @@ def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task
     return results
 
 
+def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
+    """How a program fails to compile: IndentationError (TabError among them) checked before any other SyntaxError,
+    the classification of TokEval's code-tokenizer post (arXiv 2608.18062 Appendix F.3, footnote 15)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            compile(source, "<completion>", "exec")
+        except IndentationError:
+            return "indentation"
+        except SyntaxError:
+            return "syntax"
+    return "parses"
+
+
+def parse_generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]]) -> dict[str, dict]:
+    """{benchmark: {"parses", "indentation", "syntax" (shares of its problems: how prompt + completion compiles,
+    parse_outcome), "outcomes", "completions"} | EvalPlus's base and plus pass@1 of the completions} of HumanEval+ and
+    MBPP+: one greedy completion per problem, unconstrained, of the healed prompt (decoder.heal), TokEval's protocol
+    (BOS, healing, greedy), so the failures a vocabulary's line-break tokens cause (SyntaxError when punctuation fuses
+    with a line break, IndentationError when a line break fuses with the indentation after it, in arXiv 2608.18062's
+    models) show where pass@1 is near zero."""
+    bos = tokenizer.bos_token_id
+    runs = {name: [[bos, *tokenizer.enc.encode_ordinary(t.prompt)] for t in benchmarks[name]] for name in EVALPLUS}
+    budget = 768 + 1  # EvalPlus's 768 new tokens (evalplus/provider/base.py:13) and the token heal drops
+    max_len = max(len(p) - 1 + budget for prompts in runs.values() for p in prompts)
+    decoder = NativeDecoder(model, bos_token_id=bos, max_len=max_len,
+                            prompt_store=sum(len(p) for prompts in runs.values() for p in prompts))
+    results = {}
+    for name, prompts in runs.items():
+        items = benchmarks[name]
+        healed = [heal(tokenizer, p) for p in prompts]
+        dropped = [tokenizer.token_bytes[p[-1]] for p in prompts]
+        generated = in_order(decoder, [Request(prompt=h, max_tokens=budget, constraint=c,
+                                               stop=StopAt(tokenizer, t.stops, healed=d))
+                                       for t, (h, c), d in zip(items, healed, dropped, strict=True)])
+        completions = [completion(tokenizer, t, ids, special="skip", healed=d)
+                       for t, ids, d in zip(items, generated, dropped, strict=True)]
+        outcomes = [parse_outcome(t.prompt + c) for t, c in zip(items, completions, strict=True)]
+        shares = {kind: outcomes.count(kind) / len(outcomes) for kind in ("parses", "indentation", "syntax")}
+        results[name] = (shares | evalplus(name, items, [[c] for c in completions])
+                         | {"outcomes": outcomes, "completions": completions})
+    return results
+
+
 def fim_generation(model: GPT, tokenizer: Tokenizer) -> dict[str, dict[str, dict]]:
     """{"<benchmark>/<mode>": {"greedy": infilling(...) of greedy middles cut to their lines (fim_lines)}} of the INFILLING benchmarks in each FIM_MODES
     order, the FILTERED_MODE entry also {"filtered": that of filtered_middles' middles and their search record}."""

@@ -18,6 +18,9 @@
 //! so every merge is the argmax of the exact score.
 //!
 //! A merge whose bytes are already a token (made by another pair) is refused, as a vocabulary maps bytes to one id.
+//!
+//! With score "frequency" a merge takes the pair of highest F alone, ties as above: rustbpe's BPE, R never counted (the
+//! frequency-BPE arm of ablations/tokenizer.py).
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -203,14 +206,25 @@ fn count_sources(words: &[Word], of: &[u32], n_sources: usize, min_len: usize) -
         .count_ones(..) as u32
 }
 
-/// SA-BPE's merge priority F·ln(R): 0 for a pair seen in one source.
-fn score(freq: i64, sources: u32) -> f64 {
-    freq as f64 * (sources as f64).ln()
+/// A merge's priority: SA-BPE's F·ln(R), 0 for a pair seen in one source; or BPE's F.
+#[derive(Clone, Copy)]
+enum Score {
+    SourceAttributed,
+    Frequency,
+}
+
+impl Score {
+    fn of(self, freq: i64, sources: u32) -> f64 {
+        match self {
+            Score::SourceAttributed => freq as f64 * (sources as f64).ln(),
+            Score::Frequency => freq as f64,
+        }
+    }
 }
 
 /// The merge loop: pops the lazy heap until its top entry's F and R are exact, then merges that pair in the words that
 /// hold it and queues the pairs the merge creates.
-fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merges: usize) -> Vec<Pair> {
+fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merges: usize, score: Score) -> Vec<Pair> {
     let n_sources = *sources.iter().max().unwrap() as usize + 1;
     let mut words = count_words(texts, sources, pattern);
     let incidences: usize = words.iter().map(|w| w.sources.len()).sum();
@@ -220,7 +234,7 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merge
     let bound = n_sources as u32; // every pair's R is at most the number of sources until counted
     for (pair, (freq, of)) in count_pairs(&words) {
         pair_freqs.insert(pair, freq);
-        heap.push(Job { pair, freq, sources: bound, exact: false, score: score(freq, bound), words: of });
+        heap.push(Job { pair, freq, sources: bound, exact: false, score: score.of(freq, bound), words: of });
     }
     let mut tokens: Vec<Vec<u8>> = (0..=u8::MAX).map(|b| vec![b]).collect(); // every token's bytes, its id the index
     let mut known: FxHashSet<Vec<u8>> = tokens.iter().cloned().collect();
@@ -234,15 +248,17 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merge
         if freq != job.freq {
             job.freq = freq;
             job.exact = false;
-            job.score = score(freq, job.sources);
+            job.score = score.of(freq, job.sources);
             heap.push(job);
             continue;
         }
         if !job.exact {
             job.words = job.words.into_par_iter().filter(|&w| words[w as usize].contains(job.pair)).collect();
-            job.sources = count_sources(&words, &job.words, n_sources, min_len);
+            if let Score::SourceAttributed = score {
+                job.sources = count_sources(&words, &job.words, n_sources, min_len);
+            }
             job.exact = true;
-            let exact = score(freq, job.sources);
+            let exact = score.of(freq, job.sources);
             if exact != job.score {
                 job.score = exact;
                 heap.push(job);
@@ -272,7 +288,8 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merge
         for (pair, of) in created {
             let freq = pair_freqs[&pair];
             if freq > 0 {
-                heap.push(Job { pair, freq, sources: job.sources, exact: false, score: score(freq, job.sources), words: of });
+                let score = score.of(freq, job.sources);
+                heap.push(Job { pair, freq, sources: job.sources, exact: false, score, words: of });
             }
         }
     }
@@ -280,11 +297,17 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merge
 }
 
 /// Trains n_merges merges on the documents texts[d], from source sources[d] (source ids dense from 0), within the chunks
-/// of the regex pattern. Returns the merges (merge i makes token id 256 + i); a merge whose bytes are already a token is
-/// skipped and does not count.
+/// of the regex pattern, by score "sa-bpe" or "frequency". Returns the merges (merge i makes token id 256 + i); a merge
+/// whose bytes are already a token is skipped and does not count.
 #[pyfunction]
-#[pyo3(signature = (texts, sources, *, pattern, n_merges))]
-pub(crate) fn train(py: Python<'_>, texts: Vec<PyBackedStr>, sources: Vec<u32>, pattern: &str, n_merges: usize) -> Vec<Pair> {
+#[pyo3(signature = (texts, sources, *, pattern, n_merges, score))]
+pub(crate) fn train(py: Python<'_>, texts: Vec<PyBackedStr>, sources: Vec<u32>, pattern: &str, n_merges: usize,
+                    score: &str) -> Vec<Pair> {
     let pattern = Regex::new(pattern).unwrap();
-    py.detach(|| train_merges(&texts, &sources, &pattern, n_merges))
+    let score = match score {
+        "sa-bpe" => Score::SourceAttributed,
+        "frequency" => Score::Frequency,
+        _ => panic!("score {score}: sa-bpe or frequency"),
+    };
+    py.detach(|| train_merges(&texts, &sources, &pattern, n_merges, score))
 }
