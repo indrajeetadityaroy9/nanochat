@@ -3,8 +3,9 @@ Publish the packed pretraining data to the Hugging Face dataset config.DATASET, 
 (runs/setup.sh) pulls into ARTIFACTS on the H100: the tokenizer, every corpus's compiled splits and their packs
 (pack.py), DATA/manifest.json (how they were made: the code, the tokenizer, the sources, the mixture and stages, every
 split's documents, tokens and packs, and the derivation of what was packed) and the dataset card ARTIFACTS/README.md
-written from it. Each corpus is uploaded in a commit of its own; each uploaded file's SHA-256 is checked against the
-local file's; then the history is squashed to one commit, the revision config.DATASET_REVISION pins (printed).
+written from it. Each corpus is uploaded in a commit of its own; files on the Hub outside this tree (an earlier
+revision's) are removed; each uploaded file's SHA-256 is checked against the local file's; then the history is squashed
+to one commit, the revision config.DATASET_REVISION pins (printed).
 
 The code is the checkout's HEAD, committed (a modified tracked file stops publishing).
 
@@ -17,7 +18,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from huggingface_hub import HfApi
+from huggingface_hub import CommitOperationDelete, HfApi
 
 from nanochat.config import DATASET, FILE_STAGE, REPO_SHARE, REPO_STAGE
 from nanochat.data import pack
@@ -93,8 +94,9 @@ def card(record: dict, licenses: dict[str, str | None]) -> str:
         "---", "license: other", "pretty_name: nanochat pretraining data", "viewer: false", "---", "",
         "# nanochat pretraining data", "",
         ("Tokenized and packed pretraining rows of nanochat's Python and C++ code model, pulled to the training host by "
-         "`python -m nanochat.paths` at the revision `nanochat/config.py` pins. Made by `nanochat/data/` at commit "
-         f"`{record['code']}` (`data/manifest.json` holds every number below)."), "",
+         "`python -m nanochat.paths` at the revision `nanochat/config.py` pins. Packed by `nanochat/data/pack.py` at "
+         f"commit `{record['code']}`; each earlier step's output checked against that commit's code: "
+         "`docs/h100-pretraining.md`, Data lineage. `data/manifest.json` holds every number below."), "",
         "## Layout", "",
         (f"- `tokenizer/`: `tokenizer.tiktoken`, `tokenizer.pattern` (vocabulary {record['tokenizer']['vocab_size']:,}; "
          f"data key `{record['tokenizer']['data_key'][:12]}…`)."),
@@ -142,8 +144,13 @@ def main() -> None:
     api.upload_folder(repo_id=DATASET, repo_type="dataset", folder_path=ARTIFACTS, allow_patterns=[
         MANIFEST.relative_to(ARTIFACTS).as_posix(), CARD.name], commit_message="Manifest and card")
     local = [path for folder in folders for path in folder.iterdir()] + [MANIFEST, CARD]
+    published = {path.relative_to(ARTIFACTS).as_posix() for path in local}
     remote = {f.path: f for f in api.list_repo_tree(DATASET, repo_type="dataset", recursive=True, expand=True)
               if hasattr(f, "size")}
+    stale = sorted(set(remote) - published - {".gitattributes"})
+    if stale:  # files of an earlier revision (another tokenizer's compiled splits)
+        api.create_commit(DATASET, repo_type="dataset", commit_message="Files not in the published tree",
+                          operations=[CommitOperationDelete(path_in_repo=path) for path in stale])
     with ThreadPoolExecutor() as pool:
         hashes = dict(zip(local, pool.map(sha256, local), strict=True))
     for path in local:
@@ -152,7 +159,7 @@ def main() -> None:
             Path(api.hf_hub_download(DATASET, f.path, repo_type="dataset")).read_bytes()).hexdigest()
         if remote_hash != hashes[path]:
             raise RuntimeError(f"{f.path}: the Hub's SHA-256 differs from the local file's")
-    print(f"{len(local)} files on the Hub equal the local files")
+    print(f"{len(local)} files on the Hub equal the local files; {len(stale)} others removed")
     api.super_squash_history(repo_id=DATASET, repo_type="dataset",
                              commit_message=f"nanochat pretraining data at {record['code'][:7]}")
     print(f"DATASET_REVISION = {api.dataset_info(DATASET).sha}")

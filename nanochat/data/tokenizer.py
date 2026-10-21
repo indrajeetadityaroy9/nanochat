@@ -15,6 +15,7 @@ import base64
 import functools
 import hashlib
 import json
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from types import ModuleType
 from urllib.parse import urlsplit
@@ -96,36 +97,49 @@ def get_tokenizer() -> Tokenizer:
 
 # ---- train the tokenizer on the curated sources
 
+def sample(task: tuple[str, Path, int, int, int]) -> tuple[list[str], list[str]]:
+    """Row group g of a curated train file: the texts (sources.texts) and source keys of its rows at the source's
+    sample step, `start` the source's rows before the group."""
+    source, path, g, start, step = task
+    group = pq.ParquetFile(path).read_row_group(g)
+    batch = group.take(np.arange(-start % step, group.num_rows, step))
+    schema = SOURCES[source].schema
+    if schema is REPOSITORY_FILE:
+        names = ["repo:" + name for name in batch["repo_name"].to_pylist()]
+    elif schema is TEXT:
+        names = [f"host:{urlsplit(url).hostname}" if url else "doc:" + id
+                 for url, id in zip(batch["url"].to_pylist(), batch["id"].to_pylist(), strict=True)]
+    else:
+        names = ["doc:" + id for id in batch["id"].to_pylist()]
+    return texts(source, batch), names
+
+
 def main() -> None:
     """TOKENIZER/tokenizer.tiktoken and tokenizer.pattern: config.VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 SA-BPE merges
     within the chunks of SPLIT_PATTERN (merge i makes token 256 + i), trained on about equal byte shares of every
     source's curated train split: a systematic sample, every step-th row in file order as its text (sources.texts),
     step = the split's content bytes // the smallest split's (the smallest split whole; a share is between 1 and 2
-    times the smallest split's bytes). A repository sample's files are its rows: they split into the chunks of
-    SPLIT_PATTERN the concatenated sample does, as each file's text ends with a line break and the next begins with its
-    path comment. Each row's source key names its authorship unit, whose count is SA-BPE's R: a file's repository (one
-    name across the corpora that hold the repository), a web page's host, else the document itself (a notebook, a text
-    without a URL, a codeforces_cots conversation)."""
+    times the smallest split's bytes); row groups are read in parallel, the sample kept in file order. A repository
+    sample's files are its rows: they split into the chunks of SPLIT_PATTERN the concatenated sample does, as each
+    file's text ends with a line break and the next begins with its path comment. Each row's source key names its
+    authorship unit, whose count is SA-BPE's R: a file's repository (one name across the corpora that hold the
+    repository), a web page's host, else the document itself (a notebook, a text without a URL, a codeforces_cots
+    conversation)."""
     sizes = {source: sum(column_bytes(path, "content") for path in curated_files(source, "train"))
              for source in SOURCES}
-    docs, sources, keys = [], [], {}  # keys: source key -> source id
-    for source, spec in SOURCES.items():
+    tasks = []
+    for source in SOURCES:
         step, at = sizes[source] // min(sizes.values()), 0
         for path in curated_files(source, "train"):
-            shard = pq.ParquetFile(path)
-            for g in range(shard.num_row_groups):
-                group = shard.read_row_group(g)
-                batch = group.take(np.arange(-at % step, group.num_rows, step))
-                at += group.num_rows
-                if spec.schema is REPOSITORY_FILE:
-                    names = ["repo:" + name for name in batch["repo_name"].to_pylist()]
-                elif spec.schema is TEXT:
-                    names = [f"host:{urlsplit(url).hostname}" if url else "doc:" + id
-                             for url, id in zip(batch["url"].to_pylist(), batch["id"].to_pylist(), strict=True)]
-                else:
-                    names = ["doc:" + id for id in batch["id"].to_pylist()]
-                docs += texts(source, batch)
-                sources += [keys.setdefault(name, len(keys)) for name in names]
+            md = pq.read_metadata(path)
+            for g in range(md.num_row_groups):
+                tasks.append((source, path, g, at, step))
+                at += md.row_group(g).num_rows
+    docs, sources, keys = [], [], {}  # keys: source key -> source id
+    with ProcessPoolExecutor() as pool:
+        for batch, names in pool.map(sample, tasks):
+            docs += batch
+            sources += [keys.setdefault(name, len(keys)) for name in names]
     mergeable = [bytes([i]) for i in range(256)]
     for left, right in bpe().train(docs, sources, pattern=SPLIT_PATTERN,
                                    n_merges=VOCAB_SIZE - len(SPECIAL_TOKENS) - 256):
