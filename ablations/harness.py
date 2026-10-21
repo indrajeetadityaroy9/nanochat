@@ -143,12 +143,12 @@ def diverged(tag: str) -> int | None:
 
 
 def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], production: dict) -> None:
-    """Run the calling experiment (python -m ablations.<experiment>): at each setting (depth, tokens per scaling
-    parameter, seeds, alternatives), production and an arm per alternative {name: Run fields}; then compare each
-    alternative with production at each setting. `production`: the Run fields in which the experiment's production arm,
-    and so its every arm, departs from production (the tokenizer ablation's: production's vocabulary on its
-    documents)."""
-    experiment = sys.modules["__main__"].__spec__.name.rsplit(".", 1)[1]
+    """Run the calling experiment (python -m ablations.<experiment>, a module or a package's __main__): at each setting
+    (depth, tokens per scaling parameter, seeds, alternatives), production and an arm per alternative {name: Run
+    fields}; then compare each alternative with production at each setting. `production`: the Run fields in which the
+    experiment's production arm, and so its every arm, departs from production (the tokenizer ablation's:
+    production's vocabulary on its documents)."""
+    experiment = sys.modules["__main__"].__spec__.name.removesuffix(".__main__").rsplit(".", 1)[1]
     cells = []
     for depth, ratio, seeds, alternatives in settings:
         # production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio

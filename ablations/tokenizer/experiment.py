@@ -34,7 +34,7 @@ efficiency; its vocabulary tokens holding a line break (the best single predicto
 companion post, Spearman -0.72 over 58 tokenizers), fusing punctuation with one, and ending in a line break and
 indentation (the post's MinGram pair: MBPP 0.016 against 0.216, 86.4% of the first's completions IndentationErrors);
 the tokens its train documents hold never, under 10 and under 100 times; on the code corpora, TokEval's AST boundary
-alignment, identifier fragmentation and Python indentation consistency (ablations/intrinsic.py). Not taken from
+alignment, identifier fragmentation and Python indentation consistency (intrinsic.py). Not taken from
 TokEval: its multilingual metrics (fertility, Gini, MorphScore), its digit metrics (every arm's pattern splits digit
 runs into pairs alike) and operator isolation (no significant MBPP correlation; smallest adjusted p 0.058).
 
@@ -56,7 +56,6 @@ python -m ablations.tokenizer vocabularies   (the arms into TOKENIZER_ABLATION/<
 python -m ablations.tokenizer data           (every arm's document set, its intrinsic record, then the checks)
 python -m ablations.tokenizer runs           (ablations/harness.py, then the decision)
 """
-import argparse
 import itertools
 import json
 import math
@@ -67,8 +66,8 @@ import regex
 import torch
 from scipy.stats import binomtest, norm
 
-from ablations import intrinsic
 from ablations.harness import ALPHA, main
+from ablations.tokenizer import intrinsic
 from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.compile import compile_split
 from nanochat.data.loader import (
@@ -177,7 +176,7 @@ def documents() -> dict[str, dict]:
 
 def describe(tokenizer: Tokenizer, files: dict[str, dict]) -> dict:
     """An arm's intrinsic record on its document set: bytes per token of each corpus's train and val documents; the
-    Rényi efficiency of each corpus's val documents and of all of them (ablations/intrinsic.py); its vocabulary tokens
+    Rényi efficiency of each corpus's val documents and of all of them (intrinsic.py); its vocabulary tokens
     holding a line break, fusing punctuation with one and ending in a line break and indentation; how many mergeable
     tokens its train documents hold never, under 10 and under 100 times."""
     held = {split: np.zeros(tokenizer.bos_token_id, dtype=np.int64) for split in ("train", "val")}
@@ -207,7 +206,7 @@ def describe(tokenizer: Tokenizer, files: dict[str, dict]) -> dict:
 
 def data() -> None:
     """Every arm's compiled document set and RESULTS/tokenizer-data.json (describe, and TokEval's code metrics of every
-    code corpus: ablations/intrinsic.py code); every arm's packs and their checks: max_ratio, every draw within
+    code corpus: intrinsic.py code); every arm's packs and their checks: max_ratio, every draw within
     its readable rows, every val split within bpb's sample."""
     chosen = documents()
     tokenizers = [get_tokenizer(arm) for arm in ARMS]
@@ -293,9 +292,3 @@ def runs() -> None:
                 "control_detected": verdicts["sa-bpe-fused"][0] == "worse"}
     (RESULTS / "tokenizer.json").write_text(
         json.dumps(summary | {"contrasts": contrasts, "decision": decision}, allow_nan=False), encoding="utf-8")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="The tokenizer ablation: its vocabularies, its data, its runs")
-    parser.add_argument("step", choices=("vocabularies", "data", "runs"))
-    {"vocabularies": vocabularies, "data": data, "runs": runs}[parser.parse_args().step]()

@@ -1,6 +1,6 @@
 //! The leaves of a code snippet's parse tree in TokEval's five categories (arXiv 2608.18062 §3.6; its library
 //! github.com/cimeister/tokenizer-intrinsic-evals at 7d03a61, tokenizer_analysis/metrics/_treesitter_worker.py
-//! classify_node and extract_leaf_spans), for the code metrics of the tokenizer ablation (ablations/intrinsic.py).
+//! classify_node and extract_leaf_spans), for the tokenizer ablation's code metrics (ablations/tokenizer/intrinsic.py).
 //! Parsed with this crate's grammars rather than tree-sitter-language-pack's; Python's str predicates are read as
 //! Rust's char predicates (isalpha as is_alphabetic, isalnum as is_alphanumeric, strip as trim), equal on the texts
 //! they test, a grammar's anonymous tokens and keywords, which are ASCII.

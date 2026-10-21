@@ -6,7 +6,7 @@ regex engine (fancy-regex) the trainer shares.
 Trained on every curated source's train split in about equal byte shares (main), writing
 TOKENIZER/tokenizer.tiktoken and tokenizer.pattern. Equal byte shares minimize the expected compute per byte
 over a uniform prior on mixtures, compute per byte being linear in the byte mixture (our derivation, following
-arXiv 2407.13623, Eq. 5). The tokenizer ablation's arms (ablations/tokenizer.py) train on the same sample (sample,
+arXiv 2407.13623, Eq. 5). The tokenizer ablation's arms (ablations/tokenizer/) train on the same sample (sample,
 merges) into TOKENIZER_ABLATION/<arm>; get_tokenizer loads production's or an arm's.
 
 python -m nanochat.data.tokenizer

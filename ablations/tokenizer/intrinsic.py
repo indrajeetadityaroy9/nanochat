@@ -1,7 +1,7 @@
 """
 TokEval's intrinsic metrics (arXiv 2608.18062 §3; github.com/cimeister/tokenizer-intrinsic-evals at 7d03a61:
 tokenizer_analysis/metrics/code_ast.py and information_theoretic.py), replicated for the tokenizer ablation's arms
-(ablations/tokenizer.py describe) on their compiled val documents. A document's tokens are its compiled ids and their
+(experiment.py describe) on their compiled val documents. A document's tokens are its compiled ids and their
 spans its bytes, so positions are bytes where TokEval's are characters (the same on ASCII; a byte-level token can end
 inside a character, which a character map cannot hold), and a token's leading space before anything but whitespace is
 covered by no token (TokEval's _trim_word_start_space_offsets: " foo" starts at foo).
