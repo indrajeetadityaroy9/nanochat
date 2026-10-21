@@ -82,8 +82,9 @@ attention windows.
 
 ## Data and stages
 
-The data pipeline (`nanochat/data/`) prepares the corpora, trains the tokenizer, compiles the documents and packs them
-into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
+The data pipeline (`nanochat/data/`, one module per step) prepares the corpora, trains the tokenizer, compiles the
+documents and packs them into rows; `publish.py` uploads what a run reads to the Hugging Face dataset
+`iaroy/nanochat-data`, pulled at the revision `config.DATASET_REVISION` pins.
 
 - **Mixture** (`config.MIXTURE`): code:text:math = 87:10:3 (DeepSeek-Coder's code share); code is 8 Python and C++
   corpora, text ClimbMix, math two corpora. Not tested: the code metric falls with the code share by construction, and
@@ -108,18 +109,39 @@ into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
 **Pipeline** (`nanochat/data/__init__.py`; each step `runs/container.sh python -m nanochat.data.<step>`, reading the
 previous step's output under `paths.DATA`):
 
-1. `prepare`: fetches every source (`sources.py`) at its pinned Hub revision, normalizes it into a Parquet store and
-   curates it: the code group whole, text and math up to Qwen2.5-Coder's 7:2:1 shares of its horizon; exact and near
-   duplicates dropped across all corpora and splits (`dedup.py`: StarCoder2's MinHash LSH), and GitHub Linguist's
-   vendored and generated files; 1% of each source's groups (a repository, a codeforces problem, else a document) held
-   out as val; repository files grouped into repository samples, dependencies first (DeepSeek-Coder §2.2).
+1. `prepare`: fetches every source (`sources.py`) at its pinned Hub revision and normalizes it into a Parquet store
+   (`prepare.py`): the code group whole, text and math up to Qwen2.5-Coder's 7:2:1 shares of its horizon; then curates
+   it (`curate.py`): exact and near duplicates dropped across all corpora and splits (`dedup.py`: StarCoder2's MinHash
+   LSH), and GitHub Linguist's vendored and generated files; 1% of each source's groups (a repository, a codeforces
+   problem, else a document) held out as val; repository files grouped into repository samples, dependencies first
+   (DeepSeek-Coder §2.2).
 2. `tokenizer`: SA-BPE merges (arXiv 2604.14053) trained on about equal byte shares of every source's
-   train split, encoded by tiktoken. The vocabulary, 2^15, is not tested: a test retrains the tokenizer and repacks
-   every corpus.
+   train split, encoded by tiktoken, within the chunks of GPT-4's split pattern with digit pairs (karpathy/nanochat's
+   measurement at 32K) whose runs of punctuation take no line break (`tokenizer.SPLIT_PATTERN`): production's
+   vocabulary until the tokenizer experiment (Ablations) decides it. The first tokenizer's pattern let them
+   (`):\n` one chunk): 615 of its 676 tokens holding a line break fused punctuation with it. Over 18 models of 1.27B
+   parameters trained on math and code with vocabularies of about 128K, MBPP pass@1 averaged 0.075 for vocabularies
+   with such a token against 0.226 without (arXiv 2608.18062 Appendix F.3, Mann–Whitney p = 4.5e-4), and deleting the
+   clause alone, the tokenizer corpus fixed, moved it from 0.086 to 0.230 (its companion post, three seeds each);
+   DeepSeek-V3 names their token-boundary bias on prompts that end without a line break (arXiv 2412.19437 §4.1). The
+   retrained vocabulary has none (its 79 tokens holding a line break are whitespace) and shares 31,853 of its 32,508
+   merges with the first; it takes 6.5% more tokens: 3.411 bytes per token against 3.634 on the val splits, by the
+   mixture's group shares (code +3.9 to +9.6% per corpus, text and math +1.2 to +1.9%). The vocabulary, 2^15, is not
+   tested: a test retrains the tokenizer and repacks every corpus.
 3. `compile`: every curated document tokenized once, independent of the sequence length (a repository sample's files
    each after a comment with its path).
 4. `pack --stage file`, `pack --stage repo`: documents that do not fit a row cut between whole statements
-   (tree-sitter), the FIM examples made, and each stage's rows packed Best-Fit-Decreasing, no token discarded.
+   (tree-sitter), the FIM examples made, and each stage's rows packed Best-Fit-Decreasing, no token discarded; only
+   what some run reads (no document read twice). The code group's 10,354,241 8K train rows bound every run's draw of
+   it, so a later group's runs draw at most that × its share / 0.87: text and math keep the leading curated files
+   holding that many rows (ClimbMix 171 of 955 files, 9.74B of its 52.85B tokens; opc-fineweb-math 14 of 37;
+   UltraData-Math 39 of 94), their compiled train splits cut to them; at 32K the repository stage, REPO_SHARE of the
+   steps, draws at most 171,656 rows, so each repository corpus is packed at its last 7 of 99 curated files (177,275
+   rows). The crate packs one curated file per call, its documents in parallel; a call per core runs at once (95% of
+   the GB10's 20 cores busy against 76% one at a time).
+5. `publish`: the tokenizer, the compiled splits and their packs, `data/manifest.json` (code commit, tokenizer,
+   sources, stages, FIM shares, every split's documents, tokens and packs, the derivation of what was packed) and the
+   dataset card; a commit per corpus, every file's SHA-256 checked against the Hub's, then one squashed commit.
 
 ## Regime
 
@@ -171,11 +193,12 @@ Complete^(d)P's SDE rule (arXiv 2512.22382) predicts the optimum's multiplier of
 (below). `ablations/lr.py` measures the multiplier (Ablations): × 1, × 2, × 4 at d24 over 5 tokens per parameter,
 times the optimum's horizon trend measured at d8 (× 1 to × 8 over 5 and over 200), its power-law exponent carried to
 production's horizon range and corrected for production's larger batch growth by the square-root batch rule. Measured
-(`results/lr.json`): optima × 2.0235 (d24 over 5), × 3.4669 and × 3.1565 (d8 over 5 and 200), so a d8 ratio of
-0.9105: relative to the law the optimum barely moves with the horizon (the law's own C^−0.125 carries the trend),
-against both rules. Production's multiplier × 2.5467 = 2.0235 · 0.9105^(ln 98.17 / ln 40.05) · √2 (2.3887e-3, weight
-decay 0.1246) is adopted; the best arm beat the law by 0.0044 to 0.125 bits per byte, no run diverged, and the optima
-agree within 7% with nanochat's hand-tuned Muon lr at the same widths.
+at `1e711aa`, the first tokenizer's data (`results/lr.json`): optima × 2.0235 (d24 over 5), × 3.4669 and × 3.1565 (d8
+over 5 and 200), so a d8 ratio of 0.9105: relative to the law the optimum barely moves with the horizon (the law's own
+C^−0.125 carries the trend), against both rules. That revision's multiplier × 2.5467 = 2.0235 · 0.9105^(ln 98.17 /
+ln 40.05) · √2 (2.3887e-3, weight decay 0.1246) was adopted; the best arm beat the law by 0.0044 to 0.125 bits per
+byte, no run diverged, and the optima agree within 7% with nanochat's hand-tuned Muon lr at the same widths. The
+retrained tokenizer's data is measured again (Ablations, Results) before production.
 
 - *d8 at 20* (`harness.main`, production vs × 2, seeds 0 and 1, 2026-10-20; GPU shared, so throughput is not
   comparable): code bits per byte 0.6323 and 0.6324 at the law's lr, 0.6144 and 0.6137 at × 2 (paired differences
@@ -318,9 +341,13 @@ change production; every other decision states its basis where it is made. They 
 |---|---|---|---|---|
 | `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) × 2.5467, adopted 2026-10-20 (Peak lr) | × 2 and × 4 (× 8 at d8): the law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
 | `value_embeds.py` | d16 at 20 (4 seeds), d8 at 20 (4) and 490.8 (1) | value embeddings (MoVE: −0.016 at d12), absent from every reference model; 302M parameters, 1.55× the scaling parameters | none | −4.7% of the d24 step, 12 vocabulary tables fewer |
+| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 and d8 at about 91 tokens per parameter on one document set (4 seeds), then d24, sa-bpe against a challenger (2) | SA-BPE (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | a 2 × 2 of merge score (SA-BPE, frequency BPE) and pattern (non-fusing, fusing), and cl100k's first 32,764 ranks as a reference. SA-BPE has no downstream test (its Limitations); the fusing clause cost MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, invisible in code bits per byte (arXiv 2608.18062) | equal bytes: a better compressor's run is shorter |
 
-**Results.** `lr.py` ran on 2026-10-20 (`results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`; Peak lr) and its
-multiplier is production's. `value_embeds.py` has not run.
+**Results.** `lr.py` ran on 2026-10-20 at dataset revision `1e711aa` (`results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`;
+Peak lr), on the first tokenizer's data. The retrained tokenizer (Data and stages) changes every token and the plans'
+horizons, so `lr.py` runs again at the pinned revision on the H100 or GH200 before production, and its multiplier
+becomes `LR_SCALE`; until then `LR_SCALE` is `1e711aa`'s. `value_embeds.py` has not run; nor has `tokenizer.py`, or
+its data build (`python -m ablations.tokenizer data`).
 
 ### Method
 
@@ -328,7 +355,9 @@ multiplier is production's. `value_embeds.py` has not run.
   an arm differs from production only in the fields of `harness.Run`. Every run goes through production's code:
   `scripts/base_train.train` (the file-level then the repository stage, the production data order by seed, τ-law
   weight decay) and `eval/suite.py evaluate`'s likelihood metrics (the same held-out rows for every run); its model is
-  `model.Candidate`, which is production's GPT unless `value_embeds` differs. Its plan (batch, steps, peak lr) is the
+  `model.Candidate`, which is production's GPT unless `value_embeds` differs, and its tokenizer and packs production's
+  unless `tokenizer` names an arm of `tokenizer.py`, whose production arm is production's vocabulary on that
+  experiment's documents (`harness.main`'s `production` fields). Its plan (batch, steps, peak lr) is the
   production model's at the setting (`harness.plan_of`), so arms match in tokens and hyperparameters, and every run
   completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
   compared before its decay, where loss curves cross and rankings flip (arXiv 2509.02046; arXiv
@@ -352,18 +381,21 @@ multiplier is production's. `value_embeds.py` has not run.
   data recipes a single proxy 7× below the target picks the target's better of two in about 80% of pairs, best with
   likelihood metrics such as bits per byte (DataDecide, arXiv 2504.11393). No run combines production's width and
   length: the experiments assume the two trends separable (arXiv 2409.19913's size-independent β for the lr; a
-  log-linear trend for value embeddings), which only a d24 run at 490.8 could check.
+  log-linear trend for value embeddings), which only a d24 run at 490.8 could check. `tokenizer.py`'s settings and
+  documents: The tokenizer experiment, below.
 - **Order.** `lr.py` first; its multiplier is production's peak lr (`scripts/production.py` `LR_SCALE`, hashed into
-  production's tag). `value_embeds.py`'s arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each
-  measured optimum: its baseline is under-tuned unless its settings take their own optima (under-tuned baselines
-  inflate gains: arXiv 2307.06440; arXiv 2509.02046). A run's tag hashes its peak lr, so runs at a superseded
-  lr are never reused.
+  production's tag). `value_embeds.py`'s and `tokenizer.py`'s arms train at the law's lr, which `lr.py` puts 2.0 to
+  3.5 times below each measured optimum: a baseline is under-tuned unless its settings take their own optima
+  (under-tuned baselines inflate gains: arXiv 2307.06440; arXiv 2509.02046). A run's tag hashes its peak lr, so runs
+  at a superseded lr are never reused.
 - **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
   production's corpus weights, the decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled (the benchmarks' pass@1 is near zero at this size). *repo_32k*: 32K
   repository rows of the code group; *repo_beyond_8k*: the same rows' positions past 8,192, the context only the
-  repository stage trains. *text*, *math*; tokens per second (median over training steps). Efficiency (from the run's
-  run and end records): parameters, non-embedding FLOPs per token, peak memory.
+  repository stage trains. *text*, *math*. *unparsed*, *indentation*, *syntax*: the shares of HumanEval+ and MBPP+
+  problems whose healed greedy completion does not compile, by an IndentationError, by another SyntaxError (Parse
+  measure, Evaluation); *greedy*: those completions' base pass@1. Tokens per second (median over training steps).
+  Efficiency (from the run's run and end records): parameters, non-embedding FLOPs per token, peak memory.
 - **Analysis** (from `results/<experiment>.jsonl` and `.json`), pre-registered. *lr* (computed by `lr.py` into
   `results/lr.json`'s `analysis`, every number from the runs' records and plans): per setting, while its lowest-code
   run is at an end of the grid (a diverged run counting as worse than any evaluated one) the grid gains the next factor
@@ -394,26 +426,28 @@ multiplier is production's. `value_embeds.py` has not run.
   that prediction is below the compute their removal frees, 0.05 · L · ln r (L production's code, r the alternative's
   tokens per second over production's at d16; arXiv 2001.08361 §1.2: loss ∝ C^−0.050); otherwise they
   stay, their gain and its interval reported. Unpaired although arms share seeds: the six-run comparison's per-pair
-  differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048).
+  differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048). *Tokenizer*: The tokenizer
+  experiment, below.
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 **Power.** The paired comparison's six runs (Against the standard regime) give a within-configuration σ of 0.0034
-bits per byte on code (0.0044 on solutions, 0.0036 on 32K repository); both experiments' 4-seed settings measure it
-where they run. Value embeddings at d16, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an
-effect of 0.008, below the published 0.010 to 0.016. lr: each vertex rests on the arms' differences within one seed,
-which varied by 0.0008 across 2 seeds at d8 at 20 against a 0.018 effect; at the curvature arXiv 2409.19913's Llama-1
-estimate implies (0.027 nats for a 2.5× lr; about 0.026 bits per byte per (ln lr)² at 3.5 bytes per token [assumed])
-and per-run noise σ, a three-point fit places a vertex within about ±14% (one standard error, 0.13 in u). The d8 ratio
-r combines two vertices' errors, about ±20% (0.185 in u); raised to 1.24 for production's horizon range it
-contributes 0.23 in u, and with the d24 vertex production's multiplier is within about ±30% (0.26 in u). The two
-rules' predictions for r differ by 14× (ln 14 = 2.6 in u), far beyond its error. `lr.py` measures the curvatures
-themselves.
+bits per byte on code (0.0044 on solutions, 0.0036 on 32K repository); the 4-seed settings measure it where they
+run. Value embeddings at d16, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an effect of 0.008,
+below the published 0.010 to 0.016. lr: each vertex rests on the arms' differences within one seed, which varied by
+0.0008 across 2 seeds at d8 at 20 against a 0.018 effect; at the curvature
+arXiv 2409.19913's Llama-1 estimate implies (0.027 nats for a 2.5× lr; about 0.026 bits per byte per (ln lr)² at 3.5
+bytes per token [assumed]) and per-run noise σ, a three-point fit places a vertex within about ±14% (one standard
+error, 0.13 in u). The d8 ratio r combines two vertices' errors, about ±20% (0.185 in u); raised to 1.24 for
+production's horizon range it contributes 0.23 in u, and with the d24 vertex production's multiplier is within about
+±30% (0.26 in u). The two rules' predictions for r differ by 14× (ln 14 = 2.6 in u), far beyond its error. `lr.py`
+measures the curvatures themselves.
 
 **Cost** (measured: whole runs, child process, compilation, both stages, loss evaluation). d8 at 5: about 3 minutes
 [estimate]; d8 at 20: 234 s; d8 at 200: about 24 minutes [estimate]; d8 at 490.8: about 54 minutes (52 minutes
 training, 91 s evaluation); d24 at 5: about 65 minutes (52 minutes training at 311K tokens per second, 711 s
 evaluation); d16 at 20: about 35 minutes (30 minutes training at 746K tokens per second, 299 s evaluation). `lr.py`:
 3 × 3 min + 4 × 24 min + 3 × 65 min ≈ 5.0 h; `value_embeds.py`: 18 runs ≈ 7.0 h; ≈ 12.0 h ($51 at $4.29/h).
+`tokenizer.py`: The tokenizer experiment, below.
 
 Where a run's time goes (2026-10-22). Steps (file-level stage, micro-batches of 12 rows, torch.profiler): d8 (one
 micro-batch) 43 ms per 98,304 tokens, GPU 93% busy (GEMM 49%, FA4 18%, cross entropy 12%, Inductor 11%); d16 (two)
@@ -434,7 +468,7 @@ stopped one trains again from its start (its one checkpoint is its final model);
 (`nanochat/train/metrics.py`: every step and attempt, the learning curve and gradient norms included; the run record
 holds the model config, the run's fields as `variant`, parameters, FLOPs per token, the clip threshold, the plan, lr
 and weight decay; the end record the peak memory; a failure record the step a run diverged at),
-`artifacts/base_eval/<tag>-step<steps>.json` (`eval/suite.py evaluate`, likelihood metrics only) and
+`artifacts/base_eval/<tag>-step<steps>.json` (`eval/suite.py evaluate`, likelihood metrics and the parse measure) and
 `artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment gathers every tracked
 metric of its runs into `results/`, so tables and figures need no rerun and no `artifacts/`: `<experiment>.jsonl`, a
 record per run (arm, tag, setting, fields; `eval/suite.py record`: its metrics records but the per-step ones: run,
@@ -447,6 +481,63 @@ runs, and per alternative its fields, evaluated runs and per measure difference,
 one run per arm; `lr.json` adds the Analysis (`analysis`: per setting runs, curvature, vertex and grid extension; m_B,
 m_D, the law's fall, both predictions, the measured d8 ratio, production's multiplier and lr, null while a grid needs
 extending).
+
+### The tokenizer experiment
+
+`ablations/tokenizer.py`: the decision production's tokenizer waits on, as every later step trains on its tokens. Data
+and stages describes the current vocabulary (SA-BPE within the non-fusing pattern), production's until this decides.
+
+- **Arms.** Five vocabularies of 32,768 ids. Four are trained on the tokenizer's sample (`data/tokenizer.py`
+  `sample`), a 2 × 2 of merge score, SA-BPE's F·ln R (arXiv 2604.14053 §4.1, its best monolingual criterion; its
+  multilingual best, F·log R·L over 18 languages, is not used; R counts repositories as in the paper, and web hosts
+  and documents, an extension its §6 leaves untested) or frequency alone (BPE, that paper's baseline), and pattern,
+  production's (a run of punctuation takes no line break) or the fusing one (cl100k's clause, the first tokenizer's).
+  The fifth, cl100k's first 32,764 ranks with its own pattern, is a reference with no decision attached: it differs
+  from sa-bpe in training data, merge score, fusing clause, digit runs of 1 to 3 and `\s++$` at once; its cut is
+  prefix-closed (ranks 0–255 the bytes, every kept token encoding to itself; the data build checks it). What the arms
+  test: SA-BPE's paper reports compression (3.623 for BPE, 3.643) and verified under-trained tokens (640, 72) at 100M
+  parameters, no loss or downstream result (Table 3; Limitations); arXiv 2608.18062's companion post deletes the
+  fusing clause with the tokenizer corpus held fixed and moves MBPP pass@1 from 0.086 to 0.230 (three seeds each,
+  ranges disjoint; 1.27B parameters, about 20B math and code tokens, vocabularies of about 128K, prompts healed),
+  while code bits per byte does not follow (its Table 18: the fusing GPT-4o tokenizer 0.377 and MBPP 0.174, the
+  punctuation-isolating one 0.380 and 0.230).
+- **Equal bytes.** Each arm reads its document set once, as production reads its data (`max_ratio`: no document
+  twice), so its tokens are the set's bytes over its bytes per token and each run's ratio is its `max_ratio` on the
+  set; each plan is its own (`schedule.plan` at its tokens), its context production's 8,192 and 32,768 tokens. At
+  equal tokens a better compressor would read more data (arXiv 2402.01035 compares at equal tokens, its Appendix J at
+  equal words; arXiv 2608.18062's post did not equalize the text seen); the byte-offset buckets (Evaluation) show what
+  the extra bytes of context a better compressor sees are worth (arXiv 2503.13423 §3.1 fixes context in bytes).
+- **Documents.** `python -m ablations.tokenizer data --depth 16` compiles and packs the same documents for each arm
+  into `artifacts/tokenizer-ablation/d16/`: of each code corpus, the leading curated train files whose sa-bpe rows
+  (production's packs' rows of those files) hold what d16 at 20 tokens per scaling parameter draws at the file-level
+  stage, so the code group binds every arm; of text and math 1.25 times that, and of each repository corpus the
+  trailing files holding 1.25 times the repository stage's draw, so they never bind (sa-bpe takes 9.21% more tokens
+  than the first tokenizer on stack_edu_cpp's whole val split, the largest gap measured); of each val split, the
+  leading row groups whose sa-bpe tokens fill at most 1/1.25 of the val sample, which every arm then scores whole.
+  `results/tokenizer-data.json` records each arm's bytes per token per corpus, its tokens holding a line break and
+  fusing punctuation with one, and how many vocabulary tokens its train documents hold never, under 10 and under 100
+  times.
+- **Settings.** d16 on that set (about 20 tokens per scaling parameter for sa-bpe) and d8 on the same documents (about
+  91), whether rankings move with training length (arXiv 2503.13423 §4.3: bits-per-byte rankings change between 20
+  and 80 tokens per parameter), 4 seeds each. Then d24 on its own set (20 for sa-bpe), sa-bpe against one challenger,
+  2 seeds each, before production adopts a tokenizer: arXiv 2608.18062's bits-per-byte rankings agree between d16 and
+  d24 at Kendall τ 0.752 (§E.3: small sweeps are "a screening tool"); its d8 to d24 span 222M to 1.27B parameters,
+  ours 14.7M to 195M scaling parameters.
+- **Decisions,** pre-registered (`harness.evaluation`'s measures, each alternative against sa-bpe per setting).
+  Pattern: the fusing level is adopted iff at d16 its mean unparsed share is not higher than the non-fusing level's
+  and its code is lower with the 95% interval excluding zero; otherwise non-fusing. Score: frequency BPE is adopted iff
+  at d16 its code is lower with the interval excluding zero, or the interval lies within ±0.003 (about one per-run σ,
+  0.0034, and three of arXiv 2608.18062's seed SDs, 0.00109) and its documents leave fewer vocabulary tokens never
+  read; otherwise SA-BPE. Each level from the 2 × 2's 16 runs at d16, 8 against 8, the score within the chosen pattern
+  if the score × pattern interaction is significant. The d24 challenger is the decided arm or, if that is sa-bpe, the
+  arm with the next lowest code at d16. Every other comparison is descriptive, Benjamini–Hochberg within each setting
+  and measure (as arXiv 2608.18062 §C.2); tokens per second is not compared (one vocabulary size, one FLOPs per token).
+- **Power.** A level against a level, 8 runs against 8 at σ = 0.0034: standard error 0.0017, 80% power at about 0.005
+  [estimate: two-sided pooled t-test]. SA-BPE's 0.55% compression gain predicts a smaller difference [inference],
+  which the equivalence margin and the under-trained tie-break then decide.
+- **Cost** [estimate, from Cost above]: 20 runs of d16 (about 35 minutes) and of d8 at about 91 (about 12 minutes),
+  about 16 h, then the d24 pair, 4 runs of about 3.5 h; ≈ 30 h ($129 at $4.29/h). Not yet run: the vocabularies, the
+  data build and the runs each wait for approval.
 
 ### Verification of the experiments' code
 
@@ -667,6 +758,11 @@ HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts
 tmux new -d -s h100 'runs/container.sh python -m scripts.production 2>&1 | tee -a artifacts/logs/production.log'
 ```
 
+At a dataset revision `lr.py` has not measured (the pinned one, so far), it runs first, in the same session:
+`runs/container.sh python -m ablations.lr`, about 4.9 h on the H100 SXM5 (its 2026-10-20 run: 13:09–18:39 UTC, 37
+minutes of it idle); `scripts/production.py` `LR_SCALE` then takes `results/lr.json`'s `production_multiplier`,
+committed with `results/` before the production run.
+
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
 `runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/<tag>-step<step>.pt` (each a run's full state),
 `metrics/<tag>.jsonl`, `base_eval/<tag>-step<step>.json`, `logs/` (`production.log`, the launch's output; `<tag>.log`
@@ -688,6 +784,50 @@ coordinate-descent tuning, plus its 0.8%), about 85 h, about $365 at $4.29/h.
 evaluations) and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
 --local-dir /workspace/nanochat` (the checkout inside the container) restores them where `load_model` and a resumed
 production run read them.
+
+### Hardware: GH200 or H100 SXM5
+
+Lambda's two single-GPU options (their API, 2026-10-21; datasheets: "NVIDIA GH200 Grace Hopper Superchip", "NVIDIA
+H100 Tensor Core GPU"):
+
+| | 1x GH200 (96 GB) | 1x H100 SXM5 (80 GB) |
+|---|---|---|
+| GPU compute | the same H100: 989 dense bf16 TFLOP/s, sm_90 | the same |
+| HBM | 96 GB HBM3, 4.0 TB/s | 80 GB HBM3, 3.35 TB/s |
+| Power | module 450–1000 W (programmable), shared with the CPU | 700 W |
+| CPU | 64 vCPUs, ARM64 Grace (Neoverse V2) | 26 vCPUs, x86 |
+| RAM / SSD | 432 GiB / 4 TiB | 225 GiB / 2.8 TiB |
+| Price | $2.29/h | $4.29/h |
+| Capacity on 2026-10-21 | none | us-southeast-1 |
+
+What the code depends on:
+
+- *Training is GPU-bound, on compute.* The d24 step keeps the GPU 100% busy (The d24 step): GEMM 52.9% and FA4 24.9%
+  are compute-bound and run alike; Inductor 14.3%, other 6.4% and cross entropy 1.5% are bandwidth-bound, which 19%
+  more bandwidth makes about 3–4% of the step faster [estimate], so about 82 h, more if the H100 SXM5 is
+  power-limited at 700 W [unmeasured].
+- *Memory.* `config.MICRO_BATCH_TOKENS` (98,304) was sized to 80 GB: peak 69.6 GiB, 76.7 GiB while QuACK's autotuner
+  runs cold. On 96 GB it stays 98,304: the next whole-row micro-batch, 131,072 (16 × 8K, 4 × 32K), needs about 90 GiB
+  by the measured peak's scaling [estimate] and would change every ablation run's batch rounding (`schedule.plan`
+  rounds to whole micro-batches), under which `lr.py`'s multiplier was measured; production's batch would be the same
+  1,179,648 (9 micro-batches).
+- *Kernels.* Both are sm_90: `native.cuda_library` builds the same `decode.cu` and `qk_prologue.cu`, FA4 and QuACK take
+  their SM90 paths. QuACK's autotuner picks GEMM tiles by timing, per host, so the steps need not be bitwise those
+  measured on the H100 SXM5 [inference].
+- *ARM64.* `docker/Dockerfile` pins its three images by multi-arch index digests (linux/amd64 and linux/arm64 each,
+  checked), and the image builds and runs on the GB10, itself ARM64: the Rust crates, the CuTe DSL kernels and the
+  checks of The model against its specification. The data order (NumPy `RandomState`, the Weyl sequence's IEEE
+  products) does not depend on the CPU [inference].
+- *Evaluation is where the CPU counts.* Its pools are sized by `os.cpu_count()` (EvalPlus's sanitizer, MultiPL-E's
+  judge processes, `verify`'s checks, the syntax constraint's masks; the decoder is CPU-bound in constrained mode), so
+  64 vCPUs shorten each checkpoint's evaluation, up to 2.5× on those parts [inference]. `char` is unsigned on ARM64
+  and signed on x86, so a MultiPL-E C++ program that depends on it can score differently [inference; rare].
+- *Data.* The 290 GB dataset and 11 checkpoints of about 5.6 GB fit either SSD; the loader reads about 2.4 MB/s of
+  tokens, so RAM beyond the page cache it uses adds nothing.
+
+Cost: about $190–195 for the 85 h plan on GH200 against $365 on the H100 SXM5, evaluation shorter as well. A GH200 run
+first repeats, in about an hour, the d24 step's peak memory and time in both stages, The model against its
+specification and a resume, recorded beside the H100's; without GH200 capacity, the H100 SXM5 is the measured option.
 
 ## Pre-launch verification
 
@@ -747,19 +887,34 @@ documents), the compiled evaluation losses and the native decoder:
 ## Evaluation
 
 Every metric is a published one, computed as its source computes it. `eval/suite.py evaluate` scores a checkpoint;
-production's checkpoints take everything, the ablation runs the likelihood metrics alone.
+production's checkpoints take everything, the ablation runs the likelihood metrics and the parse measure.
 
 **Likelihood metrics** (`eval/bpb.py`), in bits per byte (The Pile, arXiv 2101.00027: summed bits over
 summed UTF-8 bytes, tokenizer-independent):
 
 - *Held-out corpora:* each training corpus's val split at 8K and at 32K, per context bucket (≤ 8K, > 8K: Code Llama's
-  loss by context length, arXiv 2308.12950 §3.3), pooled by the stage's mixture weights: the AR test loss of arXiv
-  2207.14255 §3.
+  loss by context length, arXiv 2308.12950 §3.3) and per byte-offset bucket (doublings from 1 KiB to 128 KiB of the
+  piece before a target, so tokenizers compare at the same bytes of context, as arXiv 2503.13423 §3.1 fixes context
+  in bytes), pooled by the stage's mixture weights: the AR test loss of arXiv 2207.14255 §3. A corpus's sample is
+  its rows up to 80 × 2^19 tokens' worth, systematic, the last micro-batch filled with empty rows, so a split within it
+  is scored whole.
 - *Reference solutions:* the bits of HumanEval+'s, MBPP+'s and HumanEval-X C++'s reference solutions given their
   prompts, the decision measure at scales where pass@1 is near zero: the task loss of arXiv 2412.04403
   §2; the correct answer's likelihood is DataDecide's best small-scale predictor for HumanEval and MBPP (arXiv
-  2504.11393 §3.3); BPB raises the signal-to-noise ratio of most benchmarks (arXiv 2508.13144 §5.3)
-  and tracks pass@1 across checkpoints where corpus loss does not (arXiv 2604.07769).
+  2504.11393 §3.4, Fig. 6, between data recipes under one tokenizer); BPB raises the signal-to-noise ratio of most
+  benchmarks (arXiv 2508.13144 §5.3) and tracks pass@1 across checkpoints where corpus loss does not
+  (arXiv 2604.07769). Scoring starts at the token that starts at the prompt's end. EvalPlus's solutions begin with
+  blank lines, which a tokenizer joins to the prompt's last line break: every HumanEval+ and MBPP+ prompt ended inside
+  a token in each vocabulary measured (production's, the first tokenizer, cl100k's cut), leaving 0.83–1.00% of
+  solution bytes unscored and different bytes per tokenizer, so those blank lines count as prompt.
+
+**Parse measure** (`code_eval.parse_generation`): one greedy, unconstrained completion of each HumanEval+ and MBPP+
+prompt, healed at its boundary, as arXiv 2608.18062 generates (BOS, token healing, greedy); the share whose prompt +
+completion compiles, fails with an IndentationError (TabError included) or with another SyntaxError (its companion
+post's classification), and the completions' EvalPlus pass@1. Its post traces a vocabulary's cost on MBPP to these
+failures (Appendix F.3, footnote 15): punctuation fused with a line break fails with SyntaxError (gpt4o-code: 92.4% of
+generations), a line break fused with the indentation after it with IndentationError (86.4%). Whether a model too
+small for pass@1 shows the difference in its parse rate is what the measure tests [inference: it can].
 
 **Benchmarks** (`eval/code_eval.py`): EvalPlus (arXiv 2305.01210) HumanEval+ and MBPP+ (base and plus pass@1), MultiPL-E
 HumanEval and MBPP in C++, and HumanEval single-line, multi-line and random-span infilling (arXiv 2207.14255; PSM and
@@ -951,13 +1106,17 @@ lists (Table 5: 110K each for the educational and package instructions).
   the post-generation checks (`verify.py`).
 - `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
-- `nanochat/data/`: the data pipeline (Pipeline, above) and `bpe/`, its Rust crate: the SA-BPE (arXiv 2604.14053)
-  trainer, deduplication, repository samples and the packer.
+- `nanochat/data/`: the data pipeline (Pipeline, above), one module per step: `sources.py` (the pinned sources, the
+  store's paths, a document's text), `prepare.py` (fetch, normalize), `dedup.py`, `curate.py`, `tokenizer.py`,
+  `compile.py`, `pack.py`, `publish.py`; `loader.py` reads the packs into micro-batches; `bpe/`, its Rust crate: the
+  SA-BPE (arXiv 2604.14053) trainer (and frequency BPE, a tokenizer ablation arm), deduplication, repository samples
+  and the packer.
 - `scripts/`: `production.py` (the production run end to end, a checkpoint's evaluation included), `base_train.py` (the
   training driver: setup, resume, the step loop, checkpoints and records).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
-- `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`) and their mechanism (`harness.py`, `model.py`).
+- `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`, `tokenizer.py`) and their mechanism
+  (`harness.py`, `model.py`).
 - `docker/Dockerfile`: the image.
 
 ## References
@@ -1003,6 +1162,7 @@ Every work the code and this document cite. Papers by arXiv identifier (`arxiv.o
 | 2312.07104 | SGLang: Efficient Execution of Structured Language Model Programs |
 | 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming -- The Rise of Code Intelligence |
+| 2402.01035 | Getting the most out of your tokenizer for pre-training and domain adaptation |
 | 2402.14905 | MobileLLM: Optimizing Sub-billion Parameter Language Models for On-Device Use Cases |
 | 2402.17988 | Constrained Decoding for Fill-in-the-Middle Code Language Models via Efficient Left and Right Quotienting of Context-Sensitive Grammars |
 | 2402.19173 | StarCoder 2 and The Stack v2: The Next Generation |
@@ -1024,9 +1184,11 @@ Every work the code and this document cite. Papers by arXiv identifier (`arxiv.o
 | 2410.23922 | Analyzing & Reducing the Need for Learning Rate Warmup in GPT Training |
 | 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models |
 | 2412.04403 | Establishing Task Scaling Laws via Compute-Efficient Model Ladders |
+| 2412.19437 | DeepSeek-V3 Technical Report |
 | 2502.15938 | Straight to Zero: Why Linearly Decaying the Learning Rate to Zero Works Best for LLMs |
 | 2502.16982 | Muon is Scalable for LLM Training |
 | 2503.04715 | Predictable Scale: Part I, Step Law -- Optimal Hyperparameter Scaling Law in Large Language Model Pretraining |
+| 2503.13423 | SuperBPE: Space Travel for Language Models |
 | 2503.19786 | Gemma 3 Technical Report |
 | 2504.09246 | Type-Constrained Code Generation with Language Models |
 | 2504.11393 | DataDecide: How to Predict Best Pretraining Data with Small Experiments |
@@ -1047,6 +1209,7 @@ Every work the code and this document cite. Papers by arXiv identifier (`arxiv.o
 | 2604.27077 | Learning Rate Transfer in Normalized Transformers |
 | 2606.21619 | The Alignment Problem in Constrained Code Generation |
 | 2607.05147 | DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation |
+| 2608.18062 | TokEval: A Tokenizer Evaluation Suite |
 | 2608.28622 | PUFFER: Incremental Fuzzy Deduplication for Continuously Evolving Corpora |
 
 Without an arXiv identifier:
@@ -1054,10 +1217,13 @@ Without an arXiv identifier:
 | Title | Where cited |
 |---|---|
 | "Parallel Random Numbers: As Easy as 1, 2, 3" (SC '11) | Philox4x32-10, `csrc/decode.cu` gumbel |
+| "NVIDIA GH200 Grace Hopper Superchip" (datasheet) | Hardware: GH200 or H100 SXM5 |
+| "NVIDIA H100 Tensor Core GPU" (datasheet) | Hardware: GH200 or H100 SXM5 |
 | "Efficient BackProp" (Neural Networks: Tricks of the Trade, 1998), §4.6 | the uniform init's std, `model/gpt.py` init_weights |
 | "Fast Splittable Pseudorandom Number Generators" (OOPSLA 2014) | SplitMix64, `data/bpe/dedup.rs` |
 | "The Art of Prompt Design: Prompt Boundaries and Token Healing" (Guidance, 2023) | token healing, `inference/decoder.py` heal |
 | "Statistical Methods for Research Workers" (1925), §20 | the 0.05 significance level, `ablations/harness.py` |
+| "Code tokenizer ablations" (arXiv 2608.18062's companion post, cimeister.github.io, 2026) | The tokenizer experiment; Parse measure |
 
 Repositories, at the commit, file or record cited:
 
