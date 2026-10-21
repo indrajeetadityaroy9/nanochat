@@ -24,7 +24,6 @@ import torch
 
 from nanochat.data.sources import SOURCES
 from nanochat.data.tokenizer import Tokenizer
-from nanochat.paths import DATA
 
 # the Weyl sequence frac(n * GOLDEN) spreads every prefix of itself most evenly over [0, 1) (Knuth, TAOCP Vol. 3 §6.4)
 GOLDEN = (math.sqrt(5) - 1) / 2
@@ -36,8 +35,8 @@ PIECE_COLUMNS = 4
 
 def split_path(dataset: str, split: str, tokenizer: Tokenizer) -> Path:
     """The stem of a compiled split's files (compile.py: .bin tokens, .idx document offsets, .json documents per file),
-    in compiled/<corpus>-<tokenizer data key>/."""
-    return DATA / "compiled" / f"{dataset}-{tokenizer.data_key}" / split
+    in <tokenizer.compiled>/<corpus>-<tokenizer data key>/."""
+    return tokenizer.compiled / f"{dataset}-{tokenizer.data_key}" / split
 
 
 def packed_path(dataset: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Path:

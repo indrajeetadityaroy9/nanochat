@@ -1,10 +1,10 @@
 """
-The mechanism the ablation experiments (ablations/lr.py, ablations/value_embeds.py) share. An experiment is production
-at each of its settings (depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms differing
-from production only in their Run fields, each on the same seeds. A run trains by scripts/base_train.train and is scored
-by eval/suite.py evaluate (its likelihood metrics), the production code paths; its model is ablations/model.py's
-Candidate (production's GPT when every structural field is production's); its plan (batch, steps, peak lr) is the
-production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
+The mechanism the ablation experiments (ablations/lr.py, value_embeds.py, tokenizer.py) share. An experiment is
+production at each of its settings (depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms
+differing from production only in their Run fields, each on the same seeds. A run trains by scripts/base_train.train and
+is scored by eval/suite.py evaluate (its likelihood metrics), the production code paths; its model is
+ablations/model.py's Candidate (production's GPT when every structural field is production's); its plan (batch, steps,
+peak lr) is the production model's at its depth and ratio, so every arm matches in tokens and hyperparameters.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
@@ -57,6 +57,7 @@ class Run:
     ratio: float         # tokens per scaling parameter
     lr_scale: float      # times the plan's peak lr (schedule.plan)
     value_embeds: str    # "alternating" or "none"
+    tokenizer: str       # data/tokenizer.get_tokenizer's: "production" or a tokenizer ablation arm (its own data)
     seed: int            # init and data order
 
 
@@ -86,9 +87,9 @@ def execute(run: Run) -> None:
     steps = run_plan.num_iterations
     with torch.device("meta"):
         model = Candidate(gpt_config(depth=run.n_layer, stage=FILE_STAGE), value_embeds=run.value_embeds)
-    model = train(model=model, run=run_plan, variant=dataclasses.asdict(run), seed=run.seed,
-                  checkpoints=frozenset({steps}), tag=tag)
-    suite.evaluate(model, get_tokenizer(), name=checkpoint_name(tag, steps), step=steps, generate="none")
+    model = train(model=model, run=run_plan, tokenizer_name=run.tokenizer, variant=dataclasses.asdict(run),
+                  seed=run.seed, checkpoints=frozenset({steps}), tag=tag)
+    suite.evaluate(model, get_tokenizer(run.tokenizer), name=checkpoint_name(tag, steps), step=steps, generate="none")
 
 
 def evaluation(run: Run) -> dict[str, float]:
@@ -106,7 +107,7 @@ def evaluation(run: Run) -> dict[str, float]:
             "solutions": bpb.bpb(*result["solution"].values()),
             "repo_32k": result["32k"]["bpb"]["code"],
             "repo_beyond_8k": bpb.mixture_bpb(result["32k"]["corpora"], mixture_weights(
-                REPO_STAGE.mixture, get_tokenizer(), REPO_STAGE.seq_len), buckets=slice(-1, None)),
+                REPO_STAGE.mixture, get_tokenizer(run.tokenizer), REPO_STAGE.seq_len), buckets=slice(-1, None)),
             "text": result["8k"]["bpb"]["text"], "math": result["8k"]["bpb"]["math"],
             "tok_per_s": statistics.median(rates)}
 
@@ -133,16 +134,17 @@ def diverged(tag: str) -> int | None:
     return failures[-1] if failures else None
 
 
-def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...]) -> None:
+def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], production: dict) -> None:
     """Run the calling experiment (python -m ablations.<experiment>): at each setting (depth, tokens per scaling
     parameter, seeds, alternatives), production and an arm per alternative {name: Run fields}; then compare each
-    alternative with production at each setting."""
+    alternative with production at each setting. `production`: the Run fields in which the experiment's production arm,
+    and so every arm, departs from production (the tokenizer ablation's: production's vocabulary on its documents)."""
     experiment = sys.modules["__main__"].__spec__.name.rsplit(".", 1)[1]
     cells = []
     for depth, ratio, seeds, alternatives in settings:
         # production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio
-        baseline = [Run(n_layer=depth, ratio=ratio, lr_scale=1.0, value_embeds="alternating", seed=seed)
-                    for seed in seeds]
+        baseline = [dataclasses.replace(Run(n_layer=depth, ratio=ratio, lr_scale=1.0, value_embeds="alternating",
+                                            tokenizer="production", seed=seed), **production) for seed in seeds]
         cells.append({"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
                                                  for name, changes in alternatives.items()})
     for run in (run for arms in cells for arm in arms.values() for run in arm):

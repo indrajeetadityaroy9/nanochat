@@ -62,7 +62,8 @@ def main() -> None:
     variant = {"lr_scale": LR_SCALE}
     tag = run_tag(depth=DEPTH, ratio=ratio, seed=SEED, variant=variant)
     checkpoints = {round(run.num_iterations * k / TENTHS) for k in range(1, TENTHS + 1)} | {run.repo_start}
-    isolated(train, model=model, run=run, variant=variant, seed=SEED, checkpoints=frozenset(checkpoints), tag=tag)
+    isolated(train, model=model, run=run, tokenizer_name="production", variant=variant, seed=SEED,
+             checkpoints=frozenset(checkpoints), tag=tag)
     for step in sorted(checkpoints):
         isolated(evaluate, tag=tag, step=step)
     suite.export(tag)

@@ -86,7 +86,7 @@ def analysis(lines: list[dict]) -> dict:
     fits = {f"d{depth} at {ratio:g}": fit(setting(depth, ratio)) for depth, ratio in ((8, SHORT), (8, LONG), (24, SHORT))}
     d8_short, d8_long, d24_short = recorded_plan(8, SHORT), recorded_plan(8, LONG), recorded_plan(24, SHORT)
     production = plan_of(Run(n_layer=24, ratio=max_ratio(get_tokenizer(), depth=24), lr_scale=1.0,
-                             value_embeds="alternating", seed=0))
+                             value_embeds="alternating", tokenizer="production", seed=0))
     m_b_production = production.total_batch_size / d24_short["total_batch_size"]
     m_b_d8 = d8_long["total_batch_size"] / d8_short["total_batch_size"]
     m_d_production = production.num_iterations * production.total_batch_size / tokens(d24_short)
@@ -114,7 +114,7 @@ if __name__ == "__main__":
     grids = {(8, SHORT): [1, 2, 4], (8, LONG): [1, 2, 4, 8], (24, SHORT): [1, 2, 4]}
     while True:
         main(settings=tuple((depth, ratio, range(1), {f"lr x{s:g}": {"lr_scale": float(s)} for s in scales if s != 1})
-                            for (depth, ratio), scales in grids.items()))
+                            for (depth, ratio), scales in grids.items()), production={})
         lines = [json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
         extend = {(depth, ratio): fit([line for line in lines if (line["setting"]["depth"],
                                                                    line["setting"]["tokens_per_param"]) == (depth, ratio)])

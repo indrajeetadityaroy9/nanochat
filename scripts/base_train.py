@@ -28,14 +28,16 @@ from nanochat.train.schedule import RunPlan, lr_multiplier
 from nanochat.train.stages import stage_batches
 
 
-def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, checkpoints: frozenset[int], tag: str) -> GPT:
+def train(*, model: GPT, run: RunPlan, tokenizer_name: str, variant: dict, seed: int, checkpoints: frozenset[int],
+          tag: str) -> GPT:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
-    (schedule.plan at the caller's peak lr) and return it: initialization and data order by `seed`, decoupled weight
-    decay by the tau law at the run's lr (optim.tau_weight_decay), each update clipped (optim.update), the stages by
-    run.stage_at; `variant` (config.run_tag's) recorded with the run. A checkpoint after each step count in
-    `checkpoints` (run.num_iterations among them: the final model); a run resumes from its newest."""
+    (schedule.plan at the caller's peak lr) on the packed data of tokenizer `tokenizer_name` (get_tokenizer) and return
+    it: initialization and data order by `seed`, decoupled weight decay by the tau law at the run's lr
+    (optim.tau_weight_decay), each update clipped (optim.update), the stages by run.stage_at; `variant`
+    (config.run_tag's) recorded with the run. A checkpoint after each step count in `checkpoints` (run.num_iterations
+    among them: the final model); a run resumes from its newest."""
     device = torch.device("cuda")
-    tokenizer = get_tokenizer()
+    tokenizer = get_tokenizer(tokenizer_name)
     model.to_empty(device=device)
     model.init_weights(seed=seed)
     opts = optimizers(model, lr=run.lr, weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,

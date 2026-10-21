@@ -29,7 +29,8 @@ from nanochat.data.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT
 
 # Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the
-# whole split if smaller; arms are scored on identical rows, so the subsample's sampling error cancels in differences
+# whole split if smaller; arms are scored on identical rows (the tokenizer ablation's, whose rows differ, on val splits
+# within the sample: identical documents), so the subsample's sampling error cancels in differences
 VAL_TOKENS = 80 * 2**19
 # Context buckets of a target (its input's position in its piece + 1): positions both stages train (at most the
 # file-level context) and positions only the repo-level stage trains
