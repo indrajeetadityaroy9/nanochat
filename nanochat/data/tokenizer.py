@@ -39,10 +39,13 @@ FIM_TOKENS = (FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE)
 SPECIAL_TOKENS = (BOS, *FIM_TOKENS)  # ids after the mergeable tokens, in this order
 
 # The split pattern is GPT-4's (cl100k) with \p{N}{1,2} instead of \p{N}{1,3}, as in karpathy/nanochat (its
-# measurement at a 32K vocabulary: groups of 2 digits beat 1 and 3). A run of punctuation keeps the line breaks that
-# follow it ("):\n" is one chunk), and a run of whitespace up to its last line break is one chunk (trailing spaces and
-# blank lines join the break), so a chunk may span lines.
-SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]"""
+# measurement at a 32K vocabulary: groups of 2 digits beat 1 and 3), and with no line break in a run of punctuation:
+# a vocabulary with tokens fusing punctuation and a following line break ("):\n") scored MBPP pass@1 0.075 on average
+# against 0.226 without (arXiv 2608.18062 §5, 18 models of nanochat's d24 architecture on math and code), and such
+# tokens bias the token boundary of prompts that end without one (DeepSeek-V3, arXiv 2412.19437 §4.1, which splits
+# them at random in training instead). A run of whitespace up to its last line break is one chunk (trailing spaces and
+# blank lines join the break), so a line break joins the whitespace before it, never the indentation after it.
+SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]"""
                  r"""|\s+(?!\S)|\s+""")
 
 

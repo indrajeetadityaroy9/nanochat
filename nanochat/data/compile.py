@@ -38,10 +38,11 @@ def compile_row_group(task: tuple[str, Path, int]) -> tuple[np.ndarray, np.ndarr
     if SOURCES[source].schema is REPOSITORY_FILE:
         starts = np.flatnonzero(np.diff(table["sample"].to_numpy(), prepend=-1)).tolist()
         documents = ["".join(documents[a:b]) for a, b in itertools.pairwise([*starts, len(documents)])]
-    # a special token's text encodes as ordinary text (compiled data hold no special id); uint32, no Python int each
+    # a special token's text encodes as ordinary text (compiled data hold no special id); uint32, no Python int each.
+    # A row group may hold no document: curate.split_file writes each normalized row group's surviving rows.
     ids = [get_tokenizer().enc.encode_to_numpy(text, disallowed_special=()) for text in documents]
     lengths = np.array([len(doc) for doc in ids], dtype=np.int64)
-    return np.concatenate(ids).astype(TOKEN_DTYPE), lengths
+    return np.concatenate([np.zeros(0, TOKEN_DTYPE), *ids]).astype(TOKEN_DTYPE), lengths
 
 
 def compile_split(source: str, split: str, tokenizer: Tokenizer) -> None:
