@@ -873,7 +873,70 @@ test suite, though they overlap its base tests (Benchmarks). The type checker ru
 - *Speculative decoding* (e.g. DSpark, arXiv 2607.05147): lossless by construction (greedy outputs identical), so no
   failure mode to probe; its gains target large-model serving, while this decoder is CPU-bound in constrained mode and
   a drafter would need its own training run.
-- *Self-correction prompting*: a base model without instruction tuning; reasoning and repair come with SFT and RL.
+- *Self-correction prompting*: a base model without instruction tuning; reasoning and repair come with SFT and RL
+  (Post-training).
+
+## Post-training
+
+Not implemented: the repository pretrains and evaluates a base model; it has no supervised fine-tuning (SFT) stage. For
+the primary target, HumanEval-style Python and C++ problem solving, SFT on function-completion exercises after the
+production run is the step with the largest published effect at this scale; more pretraining adds little unseen code,
+as the token budget already reads nearly every code document once (Data and stages).
+
+**Basis** (published, not tested here):
+
+- *Exercises:* fine-tuning on under 180M tokens of function-completion exercises ("a docstring of a function that needs
+  to be completed") raised a 1.3B model's HumanEval pass@1 from 29% to 50.6%; a 350M model trained the same way reached
+  45%, against 20.12% for a 350M model pretrained on the same data without them (arXiv 2306.11644 §2.1, §2.2, Fig. 2.1).
+- *Instruction tuning:* OpenCoder-1.5B from base to two-stage SFT, HumanEval+ 49.4 → 67.7 and MBPP+ 58.7 → 61.9
+  (arXiv 2411.04905 Tables 6 and 7; the base prompted for completion, the instruct model through its chat template, so
+  not a controlled comparison).
+- *Annealing:* annealing on the GSM8k and MATH training sets raised Llama 3 8B's scores on their validation sets by
+  24.0% and 6.4%, negligibly at 405B (arXiv 2407.21783 §3.1.3); OpenCoder anneals on 84% of its pretraining distribution
+  plus algorithmic and synthetic code, and does worse without the latter (arXiv 2411.04905 §2.2, §6.2).
+
+**Format: completion, not chat.** An example is a prompt in the benchmarks' form (Python: signature and docstring; C++:
+MultiPL-E's comment block above the signature), then its solution and BOS (a pretraining document's end), the loss on
+the solution's tokens and BOS alone; `eval/code_eval.py` then scores the fine-tuned model on the prompts it scores the
+base model on. The tokenizer has no chat tokens (`data/tokenizer.py` `SPECIAL_TOKENS`: BOS and the three FIM sentinels);
+a chat format would need them and EvalPlus's instruct prompts.
+
+**Data candidates on the Hub** (pinned revisions, 2026-10-21; rows from the Hub's dataset viewer, languages from its
+column statistics, content from sampled rows):
+
+| Dataset (revision; license) | Config | Rows | Python / C++ rows | Content | Fit for completion SFT |
+|---|---|---|---|---|---|
+| `OpenCoder-LLM/opc-sft-stage2` (`7d28f40`; MIT): OpenCoder's code-specific SFT stage (arXiv 2411.04905 §4.1–4.2) | `educational_instruct` | 118,278 | Python | an instruction, a markdown answer, the bare `code`, its `entry_point` and `testcase` asserts; generated from scored seed code, kept only if teacher-written tests pass (§4.1) | the closest: a signature-and-docstring prompt from the instruction and code, the asserts to re-verify |
+| | `package_instruct` | 170,943 | Python (§4.1) | library-usage tasks from PyDoc API signatures: an instruction holding the function signature, a markdown answer | convertible; HumanEval and MBPP need only the standard library |
+| | `evol_instruct` | 111,183 | not recorded | Evol-Instruct (arXiv 2306.08568; `theblackcat102/evol-codealpaca-v1`), some answers prose only | chat form: weak |
+| | `mceval_instruct` | 35,943 | not recorded | McEval-Instruct (arXiv 2406.07436), many languages | weak |
+| `OpenCoder-LLM/opc-annealing-corpus` (`078e4bc`; ODC-BY): OpenCoder's annealing additions (arXiv 2411.04905 §2.2) | `synthetic_code_snippet` | 3,081,235 | 367,861 / 387,698 | self-contained functions documented with `>>>` examples, kept only if generated tests pass (§2.2); the C++ rows sampled take MultiPL-E's prompt layout (`// >>> call`, `// (result)` above the signature) | completion form already, both languages |
+| | `algorithmic_corpus` | 5,322,920 | 629,183 / 670,561 | "Write a ⟨language⟩ function to …", then a solution: MBPP's prompt form | convertible, both languages |
+| | `synthetic_qa` | 7,168,005 (the viewer's estimate; 3,238,929 converted) | 724,516 / 752,153 of the converted rows | repository files of algorithm solutions (file name and size, LeetCode links) | pretraining-like: annealing, not SFT |
+| `OpenCoder-LLM/opc-sft-stage1` (`1bcab57`; MIT): OpenCoder's first, general SFT stage | `realuser_instruct`, `largescale_diverse_instruct`, `filtered_infinity_instruct` | 4,216,321 | not recorded | general instructions (real-user, generated, filtered Infinity-Instruct) | not a candidate: chat, general domain |
+
+Two `opc-annealing-corpus` configs' names appear exchanged: by sampled content (offsets 0 and 2–3M), `synthetic_qa`
+holds repository files, the paper's Algorithmic Corpus (pretraining files matching "leetcode", "def solution", "class
+solution"), and `algorithmic_corpus` generated problem–solution pairs. `opc-sft-stage2` holds more rows than the paper
+lists (Table 5: 110K each for the educational and package instructions).
+
+**Before any of them trains the model:**
+
+- *Decontamination* against every scored benchmark (HumanEval+ and MBPP+, MultiPL-E's C++ translations of the same
+  problems, HumanEval-X C++, HumanEval infilling) by entry point and by 10-gram overlap, as OpenCoder decontaminated its
+  SFT data (arXiv 2411.04905 §4.4). MBPP states its problems as "Write a function to …" or "Write a python function
+  to …", `algorithmic_corpus`'s form, and `synthetic_code_snippet`'s C++ rows take MultiPL-E's prompt layout: without
+  it a gain cannot be attributed (Evaluation: Contamination).
+- *Infilling:* left-to-right exercises alone may lower FIM [inference, unmeasured]; FIM examples in `pack.py`'s format
+  go into the mix, and infilling is scored on both the base and the fine-tuned checkpoint.
+- *Reporting:* the fine-tuned model is another system. The capability curve over training stays the base checkpoints';
+  the fine-tuned model is reported beside the final base checkpoint, by the same evaluator and modes.
+- *Cost:* phi-1's fine-tuning schedule (6,000 steps of 256 × 2,048 tokens: 3.1B tokens, peak lr 1e-4, weight decay 0.01,
+  the best of the checkpoints saved every 1,000 steps; arXiv 2306.11644 §2.3) takes about 2.8 h at the d24 step's 315K
+  tokens per second [derived; measured at 8K rows], 3% of production's 85 h.
+- *Code to write:* the Hub fetch at the pinned revisions, the conversion to the completion format, decontamination,
+  tokenization (`data/tokenizer.py`), a loss mask over the prompt's tokens and a fine-tuning entry point that starts
+  from the final checkpoint (`train/checkpoint.py`).
 
 ## Layout
 
@@ -927,7 +990,9 @@ Every work the code and this document cite. Papers by arXiv identifier (`arxiv.o
 | 2211.15533 | The Stack: 3 TB of permissively licensed source code |
 | 2303.17568 | CodeGeeX: A Pre-Trained Model for Code Generation with Multilingual Benchmarking on HumanEval-X |
 | 2305.01210 | Is Your Code Generated by ChatGPT Really Correct? Rigorous Evaluation of Large Language Models for Code Generation |
+| 2306.08568 | WizardCoder: Empowering Code Large Language Models with Evol-Instruct |
 | 2306.10763 | Guiding Language Models of Code with Global Context using Monitors |
+| 2306.11644 | Textbooks Are All You Need |
 | 2307.06440 | No Train No Gain: Revisiting Efficient Training Algorithms For Transformer-based Language Models |
 | 2308.04014 | Continual Pre-Training of Large Language Models: How to (re)warm your model? |
 | 2308.07124 | OctoPack: Instruction Tuning Code Large Language Models |
@@ -947,6 +1012,7 @@ Every work the code and this document cite. Papers by arXiv identifier (`arxiv.o
 | 2405.13698 | How to set AdamW's weight decay as you scale model and dataset size |
 | 2405.14591 | Base of RoPE Bounds Context Length |
 | 2405.18392 | Scaling Laws and Compute-Optimal Training Beyond Fixed Training Durations |
+| 2406.07436 | McEval: Massively Multilingual Code Evaluation |
 | 2406.09405 | Why Warmup the Learning Rate? Underlying Mechanisms and Improvements |
 | 2407.13623 | Scaling Laws with Vocabulary: Larger Models Deserve Larger Vocabularies |
 | 2407.21783 | The Llama 3 Herd of Models |
@@ -1001,6 +1067,9 @@ Repositories, at the commit, file or record cited:
 - `evalplus/evalplus`, `nuprl/MultiPL-E` (3025a53), `openai/human-eval-infilling`,
   `bigcode-project/bigcode-evaluation-harness`, the Hugging Face datasets `nuprl/MultiPL-E` and `zai-org/humaneval-x`
   at the revisions `eval/code_eval.py` pins.
+- Post-training candidates (Post-training): the Hugging Face datasets `OpenCoder-LLM/opc-sft-stage2` (7d28f40),
+  `OpenCoder-LLM/opc-annealing-corpus` (078e4bc), `OpenCoder-LLM/opc-sft-stage1` (1bcab57),
+  `theblackcat102/evol-codealpaca-v1`.
 - `huggingface/transformers` (`modeling_qwen3.py`, `TopPLogitsWarper`), `python/cpython` 3.12.3 (`Parser/tokenizer.c`).
 - `bigcode-project/bigcode-dataset` (near-deduplication), `beowolx/rensa` (R-MinHash), `go-enry/go-enry` (Linguist).
 - `eth-sri/type-constrained-code-generation`, `timothytmzhou/chopchop`, `microsoft/monitors4codegen`,
