@@ -56,6 +56,13 @@ def lm_loss_grad(ctx: FunctionCtx, dloss: Tensor, ddx: Tensor, ddw: Tensor) -> t
 lm_loss.register_autograd(lm_loss_grad, setup_context=lm_loss_save)
 
 
+def step_shares(targets: list[Tensor]) -> Tensor:
+    """Each micro-batch's share of a step's valid (non-PAD) targets, fp32: lm_loss's per-micro-batch means weighted by
+    it sum to the mean over every valid target of the step."""
+    valid = torch.stack([(t != PretrainingBatches.PAD).sum() for t in targets]).double()
+    return (valid / valid.sum()).float()
+
+
 @torch.library.custom_op("nanochat::lm_losses", mutates_args=(), device_types="cuda")
 def lm_losses(x: Tensor, weight: Tensor, target: Tensor) -> Tensor:
     """Per-position loss (M,) fp32, 0 at PAD targets; no gradient. QuACK's default tile config (tuned=False)."""

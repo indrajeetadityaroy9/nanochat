@@ -132,7 +132,7 @@ previous step's output under `paths.DATA`):
 | Optimizers | AdamW (fused) on tables and vectors; Muon with `match_rms_adamw` on matrices | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
 | Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.1246 at d24's peak lr: 1/(ηλ) = 3,360 steps, 4.0B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
-| Gradient clipping | global norm 1.0 on the raw gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (`base_train.MAX_NORM`) |
+| Gradient clipping | global norm 1.0 on the raw gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (`train/optim.py` `MAX_NORM`, `update`) |
 | Repository stage | continues the decay: 5.46% of the peak lr at its first step, 0 at the last, over 4,427 steps (5.22B tokens) | DeepSeek-Coder §3.6 |
 
 **Gradient clipping** at 1.0, decided on evidence rather than an experiment. It rescales a step's raw gradient before
@@ -650,8 +650,8 @@ Runs train one at a time. Concurrent d8 training processes, 2026-10-20 (file-lev
   (an ablation run's fields; production's lr scale) and the dataset revision `config.DATASET_REVISION`
   (`python -m nanochat.paths` downloads it), so runs of different settings or data never share artifacts. Each run's
   metrics record its full configuration (model, plan, seed, lr, weight decay, clip threshold) and the dataset revision.
-- **Data order.** Each corpus's rows are permuted once by the run's seed (NumPy `RandomState`), which also seeds its
-  initialization.
+- **Data order.** Each corpus's rows are permuted once by the run's seed (NumPy `RandomState`; `train/stages.py`
+  `stage_batches`), which also seeds its initialization.
 
 ## Reproducing the run
 
@@ -858,7 +858,8 @@ test suite, though they overlap its base tests (Benchmarks). The type checker ru
 - `nanochat/config.py`: vocabulary, head width, mixture, micro-batch, stages, RoPE base, run tag.
 - `nanochat/model/gpt.py`: the model, scaling parameters and FLOPs per token.
 - `nanochat/ops/`, `nanochat/csrc/`: the ops above and the decoder.
-- `nanochat/train/`: `optim.py`, `schedule.py` (plan, lr multiplier), `stages.py` (token budget, rows per stage),
+- `nanochat/train/`: `optim.py` (optimizers, weight decay, gradient clip), `schedule.py` (plan, each step's stage, lr
+  multiplier), `stages.py` (token budget, rows per stage, each stage's micro-batches in the run's order),
   `checkpoint.py`, `metrics.py`.
 - `nanochat/train/metrics.py` also holds the evaluation's metrics: bits and bytes per context bucket, mixture bits per
   byte, reference-solution bits, the evaluation record and the tracked-metrics export.
@@ -869,7 +870,7 @@ test suite, though they overlap its base tests (Benchmarks). The type checker ru
 - `nanochat/data/`: the data pipeline (Pipeline, above) and `bpe/`, its Rust crate: the SA-BPE trainer, deduplication,
   repository samples and the packer.
 - `scripts/`: `production.py` (the production run end to end, a checkpoint's evaluation included), `base_train.py` (the
-  training loop).
+  training driver: setup, resume, the step loop, checkpoints and records).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
 - `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`) and their mechanism (`harness.py`, `model.py`).

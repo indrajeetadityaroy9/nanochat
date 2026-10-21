@@ -2,16 +2,18 @@
 Packed rows each stage reads, no document twice: per repository corpus, the repo-level stage reads the fewest trailing
 curated shards (shuffled by repository, data/prepare.py curate_partition) holding the rows it draws; the file-level stage
 reads the rest. max_ratio: the most tokens per scaling parameter at which no stage draws more rows of a corpus than it
-may read (data/loader.py PretrainingBatches stops at an exhausted corpus).
+may read (data/loader.py PretrainingBatches stops at an exhausted corpus). stage_batches: a stage's training
+micro-batches in the run's data order.
 """
 
 import bisect
+from collections.abc import Iterator
 
 import numpy as np
 import torch
 
 from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE, Stage
-from nanochat.data.loader import mixture_rows, mixture_weights, packed_rows, row_shards
+from nanochat.data.loader import PretrainingBatches, mixture_rows, mixture_weights, packed_rows, row_shards
 from nanochat.data.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT, gpt_config, scaling_params
 from nanochat.train.schedule import RunPlan, plan
@@ -37,6 +39,18 @@ def readable_rows(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan) -> dict[s
         rows[corpus] = np.flatnonzero(shards >= first if stage is REPO_STAGE else shards < first)
     return {corpus: rows[corpus] if corpus in rows else np.arange(packed_rows(corpus, "train", tokenizer, stage.seq_len))
             for corpus in mixture_weights(stage.mixture, tokenizer, stage.seq_len)}
+
+
+def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int, device: torch.device,
+                  start: int) -> tuple[dict[str, float], Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]:
+    """({corpus: weight}, the stage's training micro-batches from run row `start` on): the rows it may read, each
+    corpus's permuted once by `seed` (RandomState's stream is frozen across numpy versions, so a resume sees the same
+    order), FIM pieces read as FIM examples."""
+    mixture = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
+    readable = readable_rows(tokenizer, stage=stage, run=run)
+    orders = {corpus: np.random.RandomState(seed).permutation(readable[corpus]) for corpus in mixture}
+    return mixture, iter(PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=stage.seq_len,
+                                            batch_rows=stage.batch_rows, device=device, reading="fim", start=start))
 
 
 def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:

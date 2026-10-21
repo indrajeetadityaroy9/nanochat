@@ -1,8 +1,11 @@
 """
-The training loop. train() pretrains (or resumes) a run: the file-level stage, then the repo-level stage from
+The training driver. train() pretrains (or resumes) a run: the file-level stage, then the repo-level stage from
 repo_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
-data/pack.py). Each start resumes from the tag's newest checkpoint (weights, optimizer state, data position).
-Callers: scripts/production.py, ablations/harness.py. Metrics: train/metrics.py.
+data/pack.py). Each start resumes from the tag's newest checkpoint (weights, optimizer state, data position). What a
+step computes is the library's: the optimizers, weight decay and gradient clip (train/optim.py), each step's stage and
+lr (train/schedule.py), the stages' micro-batches in the run's data order (train/stages.py), the micro-batches' loss
+weights (ops/cross_entropy.py step_shares). Callers: scripts/production.py, ablations/harness.py. Metrics:
+train/metrics.py.
 """
 
 import gc
@@ -11,34 +14,26 @@ import time
 from dataclasses import asdict
 from functools import partial
 
-import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.config import DATASET_REVISION, FILE_STAGE, REPO_STAGE
-from nanochat.data.loader import PretrainingBatches, mixture_weights
+from nanochat.config import DATASET_REVISION
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, non_embedding_flops_per_token
+from nanochat.ops.cross_entropy import step_shares
 from nanochat.train import metrics
 from nanochat.train.checkpoint import checkpoint_path, save_checkpoint
-from nanochat.train.optim import optimizers, tau_weight_decay
+from nanochat.train.optim import MAX_NORM, optimizers, tau_weight_decay, update
 from nanochat.train.schedule import RunPlan, lr_multiplier
-from nanochat.train.stages import readable_rows
-
-# Global gradient-norm clip, every reference code model's (DeepSeek LLM, arXiv 2401.02954 §2.3): Adam's update is
-# invariant to the gradient's scale (Kingma & Ba, arXiv 1412.6980 §2.1) and Muon's Newton-Schulz divides its input by
-# its norm (torch/optim/_muon.py _zeropower_via_newtonschulz, after KellerJordan/Muon), so under a slowly varying
-# gradient scale the clip damps only spikes
-MAX_NORM = 1.0
+from nanochat.train.stages import stage_batches
 
 
 def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, checkpoints: frozenset[int], tag: str) -> GPT:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
     (schedule.plan at the caller's peak lr) and return it: initialization and data order by `seed`, decoupled weight
-    decay by the tau law at the run's lr (optim.tau_weight_decay), gradients clipped to global norm MAX_NORM,
-    FILE_STAGE then REPO_STAGE from run.repo_start; `variant` (config.run_tag's) recorded with the run. A checkpoint
-    after each step count in `checkpoints` (run.num_iterations among them: the final model); a run resumes from its
-    newest."""
+    decay by the tau law at the run's lr (optim.tau_weight_decay), each update clipped (optim.update), the stages by
+    run.stage_at; `variant` (config.run_tag's) recorded with the run. A checkpoint after each step count in
+    `checkpoints` (run.num_iterations among them: the final model); a run resumes from its newest."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
     model.to_empty(device=device)
@@ -60,38 +55,24 @@ def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, checkpoints: fr
                   for opt in opts]
     step = start_step
 
-    def stage_at(s):
-        """Repo-level stage from repo_start on."""
-        return REPO_STAGE if s >= run.repo_start else FILE_STAGE
-
     # A checkpoint holds the context its weights trained in; stage_rows counts that stage's consumed rows
-    stage = stage_at(start_step - 1)
+    stage = run.stage_at(start_step - 1)
     model.set_stage(stage)
     if start_step == run.num_iterations:  # finished: the final checkpoint's model
         return model
     compiled = torch.compile(model, dynamic=False, fullgraph=True)
-
-    # A stage's packed rows (train/stages.py), each corpus permuted by the seed (RandomState's stream is frozen across
-    # numpy versions, so a resume sees the same order); FIM pieces read as FIM examples
-    def stage_batches(stage, start):
-        mixture = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
-        readable = readable_rows(tokenizer, stage=stage, run=run)
-        orders = {corpus: np.random.RandomState(seed).permutation(readable[corpus]) for corpus in mixture}
-        batches = PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=stage.seq_len,
-                                     batch_rows=stage.batch_rows, device=device, reading="fim", start=start)
-        return mixture, iter(batches)
+    read = partial(stage_batches, tokenizer, run=run, seed=seed, device=device)
 
     # First step's micro-batches: continue from stage_rows if it stays in the checkpoint's stage
-    first = stage_at(start_step)
-    mixture, train_iter = stage_batches(first, stage_rows if first is stage else 0)
+    first = run.stage_at(start_step)
+    mixture, train_iter = read(stage=first, start=stage_rows if first is stage else 0)
     batches = [next(train_iter) for _ in range(run.grad_accum_steps)]
     # the attempt this process is (the run's process starts before it); lr and weight decay as the optimizers hold them
     # (a resumed run's come from its checkpoint)
     attempt = sum(r["kind"] == "run" for r in metrics.records(tag))
-    params = list(model.parameters())
     metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed,
                          "model": asdict(model.config), "variant": variant,
-                         "params": sum(p.numel() for p in params),
+                         "params": sum(p.numel() for p in model.parameters()),
                          "flops_per_token": non_embedding_flops_per_token(model),
                          "max_norm": MAX_NORM, "dataset_revision": DATASET_REVISION,
                          "lr": opts[0].param_groups[0]["initial_lr"],
@@ -110,9 +91,9 @@ def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, checkpoints: fr
             metrics.append(tag, {"kind": "end", "step": step, "peak_memory_bytes": torch.cuda.max_memory_allocated()},
                            attempt=attempt)
             return model
-        if stage_at(step) is not stage:
+        if run.stage_at(step) is not stage:
             # repo-level stage: new context and compiled graph; its batches were read the step before
-            stage, stage_rows = REPO_STAGE, 0
+            stage, stage_rows = run.stage_at(step), 0
             model.set_stage(stage)
             compiled = torch.compile(model, dynamic=False, fullgraph=True)
             metrics.append(tag, {"kind": "stage", "step": step, "stage": asdict(stage) | {"mixture": mixture}},
@@ -123,23 +104,17 @@ def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, checkpoints: fr
         # the next step's micro-batches are read during this step's backward (the repo-level stage's if the next step
         # starts it), none after the last step
         reading = step + 1 < run.num_iterations
-        if reading and stage_at(step + 1) is not stage:
-            mixture, train_iter = stage_batches(REPO_STAGE, 0)
+        if reading and run.stage_at(step + 1) is not stage:
+            mixture, train_iter = read(stage=run.stage_at(step + 1), start=0)
         lr = schedulers[0].get_last_lr()[0]
-        # each micro-batch's mean loss weighted by its share of the step's valid targets: the step loss is their mean
-        valid = torch.stack([(y != PretrainingBatches.PAD).sum() for _, y, _ in batches]).double()
-        shares = (valid / valid.sum()).float()
         losses, upcoming = [], []
-        for (x, y, cu_seqlens), share in zip(batches, shares, strict=True):
+        for (x, y, cu_seqlens), share in zip(batches, step_shares([y for _, y, _ in batches]), strict=True):
             loss = compiled(x, y, cu_seqlens) * share
             losses.append(loss.detach())
             loss.backward()
             if reading:
                 upcoming.append(next(train_iter))
-        grad_norm = torch.nn.utils.clip_grad_norm_(params, MAX_NORM)
-        for opt in opts:
-            opt.step()
-        model.zero_grad()
+        grad_norm = update(model, opts)
         for scheduler in schedulers:
             scheduler.step()
         stage_rows += len(batches) * stage.batch_rows
@@ -161,4 +136,3 @@ def train(*, model: GPT, run: RunPlan, variant: dict, seed: int, checkpoints: fr
             gc.freeze()
             gc.disable()
         step += 1
-

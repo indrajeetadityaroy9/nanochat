@@ -1,11 +1,11 @@
 """
-Run plan (batch, steps, repo-level start, peak lr) from DeepSeek LLM's compute-optimal laws, and the per-step lr
-multiplier: one schedule across both stages (DeepSeek-Coder keeps its final pre-training lr for long context, arXiv
-2401.14196 §3.6).
+Run plan (batch, steps, repo-level start, peak lr) from DeepSeek LLM's compute-optimal laws, each step's stage, and the
+per-step lr multiplier: one schedule across both stages (DeepSeek-Coder keeps its final pre-training lr for long
+context, arXiv 2401.14196 §3.6).
 """
 from dataclasses import dataclass
 
-from nanochat.config import MICRO_BATCH_TOKENS, REPO_SHARE
+from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_SHARE, REPO_STAGE, Stage
 from nanochat.model.gpt import GPT, non_embedding_flops_per_token, scaling_params
 from nanochat.train.optim import BETAS
 
@@ -22,6 +22,11 @@ class RunPlan:
     scaling_params: int      # model.gpt.scaling_params
     tokens_per_param: float  # num_iterations x total_batch_size / scaling_params
     lr: float                # peak lr of every optimizer group
+
+    def stage_at(self, step: int) -> Stage:
+        """The stage step `step` trains in: the repo-level stage from repo_start on (Qwen2.5-Coder, arXiv 2409.12186
+        §3.2)."""
+        return REPO_STAGE if step >= self.repo_start else FILE_STAGE
 
 
 def plan(*, model: GPT, ratio: float) -> RunPlan:
