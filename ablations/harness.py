@@ -1,11 +1,10 @@
 """
-The mechanism the ablation experiments (ablations/lr.py, ablations/value_embeds.py; docs/h100-pretraining.md,
-Ablations) share. An experiment is production at each of its settings (depth, tokens per scaling parameter, seeds)
-and one arm per alternative, the arms differing from production only in their Run fields, each on the same seeds. A
-run trains by scripts/base_train.train and is scored by train/metrics.loss_evaluation, the production code paths;
-its model is ablations/model.py's Candidate (production's GPT when every structural field is production's); its plan
-(batch, steps, peak lr) is the production model's at its depth and ratio, so every arm matches in tokens and
-hyperparameters.
+The mechanism the ablation experiments (ablations/lr.py, ablations/value_embeds.py) share. An experiment is production
+at each of its settings (depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms differing
+from production only in their Run fields, each on the same seeds. A run trains by scripts/base_train.train and is scored
+by train/metrics.loss_evaluation, the production code paths; its model is ablations/model.py's Candidate (production's
+GPT when every structural field is production's); its plan (batch, steps, peak lr) is the production model's at its
+depth and ratio, so every arm matches in tokens and hyperparameters.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
@@ -17,7 +16,7 @@ the runs that did not diverge; the experiment writes every tracked metric of eve
 record per run: train/metrics.py record, setting, fields, the compared measures, efficiency, the step it diverged at)
 and RESULTS/<experiment>-curves.jsonl (per run, train/metrics.py curves), and RESULTS/<experiment>.json (per setting,
 each alternative's fields, its evaluated runs and, per measure, its difference from production, p and confidence
-interval; null where one run per arm leaves them undefined), for the decisions and figures of docs/h100-pretraining.md.
+interval; null where one run per arm leaves them undefined), the data of the paper's decisions and figures.
 
     python -m ablations.<experiment>       (every missing run, each in a child process, then the comparison)
     python -m ablations.harness '<fields>'  (one run: harness.Run's fields as JSON)

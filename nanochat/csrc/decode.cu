@@ -63,7 +63,7 @@
 constexpr int LANE_DIMS = HEAD_DIM / WARP;         /* a lane's dims of a query, key or value */
 constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thread per head dim */
 /* slots: d24's tokens per second still rise from 128 to 256 slots, whose caches for the longest benchmark request
- * take 21.8 GB (docs/h100-pretraining.md, Decoder kernels) */
+ * take 21.8 GB */
 constexpr int MAX_BATCH = 256;
 constexpr int MASK_BITS = CHAR_BIT * sizeof(unsigned long long);  /* slots per word of a slot mask */
 constexpr int MASK_WORDS = MAX_BATCH / MASK_BITS;                 /* words of a slot mask */

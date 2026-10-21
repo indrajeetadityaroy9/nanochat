@@ -18,7 +18,7 @@ HEAD_DIM = 128
 # {group: (share, corpora)}; corpora at their group's natural row share (data.loader.mixture_weights). Code 87% as
 # DeepSeek-Coder (arXiv 2401.14196 §2); math 3% as StarCoder2's OpenWebMath share (arXiv 2402.19173 Table 4); text the
 # rest. Qwen2.5-Coder's 7B mixture ablation (arXiv 2409.12186 Table 3) is not monotone in the code share: 100:0:0
-# scored highest on its coding benchmarks, 70:20:10 next, 85:10:5 lowest (docs/h100-pretraining.md, Data and stages).
+# scored highest on its coding benchmarks, 70:20:10 next, 85:10:5 lowest.
 MIXTURE = {
     "code": (0.87, ["stack_edu_python", "ultradata_code_l2_python", "ultradata_stack_v3_l2_python", "kaggle_notebooks",
                     "codeforces_cots", "stack_edu_cpp", "ultradata_code_l2_cpp", "ultradata_stack_v3_l2_cpp"]),
@@ -26,7 +26,7 @@ MIXTURE = {
     "math": (0.03, ["opc_fineweb_math", "ultradata_math_l2"]),
 }
 # Most whole rows of both contexts (12 x 8K, 3 x 32K) whose d24 step fits 80 GB: peak 69.6 GiB; 131,072 tokens
-# does not fit (docs/h100-pretraining.md, q/k prologue and micro-batch)
+# does not fit
 MICRO_BATCH_TOKENS = 98_304
 
 

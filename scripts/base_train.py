@@ -25,9 +25,10 @@ from nanochat.train.optim import optimizers, tau_weight_decay
 from nanochat.train.schedule import RunPlan, lr_multiplier
 from nanochat.train.stages import readable_rows
 
-# Global gradient-norm clip, every reference code model's (DeepSeek LLM, arXiv 2401.02954 §2.3): Adam's and
-# Newton-Schulz's updates are invariant to a slowly varying gradient scale, so it damps only spikes
-# (docs/h100-pretraining.md Regime)
+# Global gradient-norm clip, every reference code model's (DeepSeek LLM, arXiv 2401.02954 §2.3): Adam's update is
+# invariant to the gradient's scale (Kingma & Ba, arXiv 1412.6980 §2.1) and Muon's Newton-Schulz divides its input by
+# its norm (torch/optim/_muon.py _zeropower_via_newtonschulz, after KellerJordan/Muon), so under a slowly varying
+# gradient scale the clip damps only spikes
 MAX_NORM = 1.0
 
 

@@ -3,7 +3,7 @@ Peak lr. Production: DeepSeek LLM's law eta = 0.3118 C^-0.125 (arXiv 2401.02954 
 peak lr. The law was fit for AdamW over C = 1e17 to 2e19 FLOPs under a multi-step schedule; production applies it to
 Muon (matched to AdamW's update RMS, train/optim.py) as the peak of linear decay to zero at C = 1.5e20, and at a fixed
 model it falls with tokens as D^-0.125. At d8 at 20 tokens per parameter the law's lr times 2 lowers code bits per byte
-by 0.018 on both of 2 seeds (docs/h100-pretraining.md, Peak lr): the law is low at short horizons.
+by 0.018 on both of 2 seeds (0.0179 and 0.0187, 2026-10-20): the law is low at short horizons.
 
 The production lr is measured, not swept at production's length: its optimum at production's width and depth at a short
 horizon, d24 at 5 tokens per parameter (production's model, so no width or depth transfer is assumed: its
@@ -15,18 +15,17 @@ Bjorck et al. (D^-0.32) and the law do; Step-Law (Li et al., arXiv 2503.04715: e
 AdamW models) raises it. Alternatives: the law's lr times 2 and 4, and 8 at d8 at LONG, where Step-Law points; one seed
 per setting.
 
-Analysis (docs/h100-pretraining.md, Ablations: Analysis), written to RESULTS/lr.json's "analysis": per setting, code
-bits per byte fitted as a quadratic in u = ln(multiplier) over its evaluated runs (numpy polyfit), its vertex u* and the
-grid extension the pre-registered rule calls for; the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@5) against the SDE
-rule's and Step-Law's predictions (each over the law's own fall between the two plans); the horizon exponent
-ln r / ln m_D,d8; production's multiplier of the law's lr, exp(u*_d24@5) * r^(ln m_D,prod / ln m_D,d8) *
-sqrt(m_B,prod / m_B,d8): the exponent carried to production's horizon range (every rule in play is a power law in D:
-the SDE rule, Bjorck et al., Step-Law, the law), and d8's smaller batch growth corrected by the square-root batch rule
-(Malladi et al., arXiv 2205.10287; Complete^(d)P's sqrt(m_B)). m_D,prod is production's tokens over d24 at 5's,
-m_D,d8 d8 at LONG's over d8 at 5's. Batches, token counts and the law's lrs are the runs' recorded plans
-(production's: harness.plan_of at max_ratio of d24).
+Analysis, pre-registered, written to RESULTS/lr.json's "analysis": per setting, code bits per byte fitted as a quadratic
+in u = ln(multiplier) over its evaluated runs (numpy polyfit), its vertex u* and the grid extension the pre-registered
+rule calls for; the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@5) against the SDE rule's and Step-Law's predictions
+(each over the law's own fall between the two plans); the horizon exponent ln r / ln m_D,d8; production's multiplier of
+the law's lr, exp(u*_d24@5) * r^(ln m_D,prod / ln m_D,d8) * sqrt(m_B,prod / m_B,d8): the exponent carried to
+production's horizon range (every rule in play is a power law in D: the SDE rule, Bjorck et al., Step-Law, the law), and
+d8's smaller batch growth corrected by the square-root batch rule (Malladi et al., arXiv 2205.10287; Complete^(d)P's
+sqrt(m_B)). m_D,prod is production's tokens over d24 at 5's, m_D,d8 d8 at LONG's over d8 at 5's. Batches, token counts
+and the law's lrs are the runs' recorded plans (production's: harness.plan_of at max_ratio of d24).
 
-    python -m ablations.lr    (ablations/harness.py; docs/h100-pretraining.md, Ablations: Analysis)
+    python -m ablations.lr    (ablations/harness.py)
 """
 import json
 import math
@@ -38,8 +37,7 @@ from nanochat.data.tokenizer import get_tokenizer
 from nanochat.paths import RESULTS
 from nanochat.train.stages import max_ratio
 
-# The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords
-# (docs/h100-pretraining.md, Ablations: Settings)
+# The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords (3,307 steps of 294,912 tokens)
 SHORT = 5
 # d8's long horizon: the shortest at which d8's law batch has grown as production's batch grows in kind, to 2
 # micro-batches (B_opt 1.52 micro-batches at 200, 2.04 at production's 490.8; schedule.plan rounds both to 2), so the
@@ -54,8 +52,9 @@ def fit(lines: list[dict]) -> dict:
     extension by a factor of 2 ("down" or "up") while its lowest-code run is at an end of the grid; else the vertex (as
     a multiplier) of the parabola in u = ln(multiplier) through the lowest-code run and its two neighbours, positive
     curvature by construction (amended 2026-10-20 from one quadratic over every run, whose vertex a curve steeper below
-    its optimum than above pulls low: docs/h100-pretraining.md, Ablations: Analysis), or the lowest-code run itself when
-    the neighbour above it diverged."""
+    its optimum than above pulls low: planted, an optimum x3.0 four times steeper below than above reads x3.95 by one
+    quadratic over x1-8, x3.72 by the bracketing parabola), or the lowest-code run itself when the neighbour above it
+    diverged."""
     runs = sorted(lines, key=lambda line: line["fields"]["lr_scale"])
     u = [math.log(line["fields"]["lr_scale"]) for line in runs]
     code = [math.inf if line["measures"] is None else line["measures"]["code"] for line in runs]
