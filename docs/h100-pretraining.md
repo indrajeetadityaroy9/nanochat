@@ -30,11 +30,14 @@ applies `Attention` and `MLP` to the RMS-normed stream, each added back.
 
 ### Basis
 
-- **Measured here: value embeddings,** the one component whose result would change production. They cost 4.7% of the
-  d24 step (measured before `60138de`, record not kept; at d8 2.287M against 2.383M tokens per second without them,
-  steps 10–29 of a run on real rows, 2026-10-21) and 302M parameters, for MoVE's −0.016 bits per byte at d12 and
-  −0.010 at d20 (arXiv 2601.22887), a gain that shrinks with scale; no reference code model has them.
-  `ablations/value_embeds.py` decides them (Ablations), not yet run.
+- **Decided from the literature: value embeddings,** kept. They cost 4.7% of the d24 step (measured before
+  `60138de`, record not kept; at d8 2.287M against 2.383M tokens per second without them, steps 10–29 of a run on real
+  rows, 2026-10-21) and 302M parameters, for MoVE's −0.016 bits per byte at d12 and −0.010 at d20 (arXiv 2601.22887),
+  a gain that shrinks with scale: log-linear in scaling parameters (33.8M, 119.3M) it reaches −0.0083 at d24's 195.1M
+  [inference], against at most 0.0011 that the compute their removal frees would buy (0.05 · L · ln r: loss ∝
+  C^−0.050, arXiv 2001.08361 §1.2; r = 1/(1 − 0.047), L ≤ 0.44, d24's code bits per byte at 5 tokens per parameter).
+  A run would change the decision only if code's gain were under an eighth of the published one, so none is spent;
+  no reference code model has them.
 - **Published, not tested here:** no reference code model ablates such details, and no affordable run could change
   them.
   - *ReLU² rather than SwiGLU:* nanochat measured SwiGLU worse at d12 and d24 under Muon (LOG 2026-02-05); at matched
@@ -148,7 +151,7 @@ previous step's output under `paths.DATA`):
 | Setting | Value | Source |
 |---|---|---|
 | Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271, C = M·D (`train/schedule.py`) |
-| Peak lr | 2.3887e-3, every group: 2.5467 × the law's 9.3796e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured (`scripts/production.py` `LR_SCALE`; Peak lr, below) |
+| Peak lr | 2.3887e-3, every group: 2.5467 × the law's 9.3796e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured, carried to production's horizon (`scripts/production.py` applies `lr.py`'s `analysis`; Peak lr, below) |
 | Steps | 81,166 (95.75B tokens, 490.77 per scaling parameter); repository stage from step 76,739 | `schedule.plan` |
 | Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (arXiv 1910.04209) |
 | Decay | linear to zero | arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
@@ -197,8 +200,11 @@ at `1e711aa`, the first tokenizer's data (`results/lr.json`): optima × 2.0235 (
 over 5 and 200), so a d8 ratio of 0.9105: relative to the law the optimum barely moves with the horizon (the law's own
 C^−0.125 carries the trend), against both rules. That revision's multiplier × 2.5467 = 2.0235 · 0.9105^(ln 98.17 /
 ln 40.05) · √2 (2.3887e-3, weight decay 0.1246) was adopted; the best arm beat the law by 0.0044 to 0.125 bits per
-byte, no run diverged, and the optima agree within 7% with nanochat's hand-tuned Muon lr at the same widths. The
-retrained tokenizer's data is measured again (Ablations, Results) before production.
+byte, no run diverged, and the optima agree within 7% with nanochat's hand-tuned Muon lr at the same widths. Other data
+carries the optima, not measured again: `scripts/production.py` applies the estimator (`lr.py` `analysis`) at its
+data's horizon, × 2.5423 on the retrained tokenizer's (−0.18%), where the measurement's own uncertainty is about ±30%
+(Power) and a 30% error costs 0.0006 bits per byte at d24 at 5; no source makes the optimum depend on the tokenizer at
+one vocabulary size [inference].
 
 - *d8 at 20* (`harness.main`, production vs × 2, seeds 0 and 1, 2026-10-20; GPU shared, so throughput is not
   comparable): code bits per byte 0.6323 and 0.6324 at the law's lr, 0.6144 and 0.6137 at × 2 (paired differences
@@ -333,31 +339,28 @@ sets its scaling runs' by the same laws).
 
 ## Ablations
 
-Pre-registered experiments, one per decision this document records without a study of its own whose result would
-change production; every other decision states its basis where it is made. They share one mechanism
-(`ablations/harness.py`, `ablations/model.py`) whose runs train and evaluate through the production code.
+Pre-registered experiments, one per decision this document records whose outcome the literature does not settle
+(value embeddings: Basis; the lr optima under other data: Peak lr); every other decision states its basis where it is
+made. They share one mechanism (`ablations/harness.py`) whose runs train and evaluate through the production code.
 
 | File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
 | `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) × 2.5467, adopted 2026-10-20 (Peak lr) | × 2 and × 4 (× 8 at d8): the law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
-| `value_embeds.py` | d16 at 20 (4 seeds), d8 at 20 (4) and 490.8 (1) | value embeddings (MoVE: −0.016 at d12), absent from every reference model; 302M parameters, 1.55× the scaling parameters | none | −4.7% of the d24 step, 12 vocabulary tables fewer |
-| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 and d8 at about 91 tokens per parameter on one document set (4 seeds), then d24, sa-bpe against a challenger (2) | SA-BPE (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | a 2 × 2 of merge score (SA-BPE, frequency BPE) and pattern (non-fusing, fusing), and cl100k's first 32,764 ranks as a reference. SA-BPE has no downstream test (its Limitations); the fusing clause cost MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, invisible in code bits per byte (arXiv 2608.18062) | equal bytes: a better compressor's run is shorter |
+| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, 4 seeds, sa-bpe against sa-bpe-fused; bpe by its documents' statistics alone | SA-BPE (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the fusing pattern (the fusing clause cost MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, invisible in code bits per byte, arXiv 2608.18062); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
 
 **Results.** `lr.py` ran on 2026-10-20 at dataset revision `1e711aa` (`results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`;
-Peak lr), on the first tokenizer's data. The retrained tokenizer (Data and stages) changes every token and the plans'
-horizons, so `lr.py` runs again at the pinned revision on the H100 or GH200 before production, and its multiplier
-becomes `LR_SCALE`; until then `LR_SCALE` is `1e711aa`'s. `value_embeds.py` has not run; nor has `tokenizer.py`, or
-its data build (`python -m ablations.tokenizer data`).
+Peak lr), on the first tokenizer's data; production carries its optima to other data (Peak lr). `tokenizer.py` has not
+run, nor its vocabularies and data (`python -m ablations.tokenizer vocabularies`, `data`).
 
 ### Method
 
 - **Arms.** An experiment is production and one arm per alternative at each of its settings, each on the same seeds;
   an arm differs from production only in the fields of `harness.Run`. Every run goes through production's code:
   `scripts/base_train.train` (the file-level then the repository stage, the production data order by seed, τ-law
-  weight decay) and `eval/suite.py evaluate`'s likelihood metrics (the same held-out rows for every run); its model is
-  `model.Candidate`, which is production's GPT unless `value_embeds` differs, and its tokenizer and packs production's
-  unless `tokenizer` names an arm of `tokenizer.py`, whose production arm is production's vocabulary on that
-  experiment's documents (`harness.main`'s `production` fields). Its plan (batch, steps, peak lr) is the
+  weight decay) and `eval/suite.py evaluate`'s likelihood metrics and parse measure (the same held-out rows for every
+  run); its model is production's GPT, and its tokenizer and packs production's unless `tokenizer` names an arm of
+  `tokenizer.py`, whose production arm is production's vocabulary on that experiment's documents (`harness.main`'s
+  `production` fields). Its plan (batch, steps, peak lr) is the
   production model's at the setting (`harness.plan_of`), so arms match in tokens and hyperparameters, and every run
   completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
   compared before its decay, where loss curves cross and rankings flip (arXiv 2509.02046; arXiv
@@ -373,21 +376,14 @@ its data build (`python -m ablations.tokenizer data`).
   which d8's law batch has grown to 2 micro-batches (B_opt 1.52, against 2.04 at 490.8; both round to 2), so the batch
   correction is the same as at 490.8 at less than half the cost (Analysis); one seed per setting, the cheap settings
   first: at d8 at 20 the arms × 1 and × 2 differed by 0.0179 and 0.0187 bits per byte on seeds 0 and 1 (Peak lr).
-  `value_embeds.py` measures its decision's dependence on training length at d8 and on width at a short length and
-  combines them as separable (log-linear in each): d16 (67.1M scaling parameters, 1/2.9 of d24) at Chinchilla's (arXiv
-  2203.15556) 20, 4 seeds, the decision's setting; d8 at 20, 4 seeds, and at production's ratio, one seed, for the
-  gain's trends in width and length: it shrinks with scale (−0.016 at d12, −0.010 at d20, MoVE), and d8's tables are
-  2.3× its scaling parameters against d24's 1.55×. Architecture rankings can change with scale (arXiv 2207.10551); for
-  data recipes a single proxy 7× below the target picks the target's better of two in about 80% of pairs, best with
-  likelihood metrics such as bits per byte (DataDecide, arXiv 2504.11393). No run combines production's width and
-  length: the experiments assume the two trends separable (arXiv 2409.19913's size-independent β for the lr; a
-  log-linear trend for value embeddings), which only a d24 run at 490.8 could check. `tokenizer.py`'s settings and
-  documents: The tokenizer experiment, below.
-- **Order.** `lr.py` first; its multiplier is production's peak lr (`scripts/production.py` `LR_SCALE`, hashed into
-  production's tag). `value_embeds.py`'s and `tokenizer.py`'s arms train at the law's lr, which `lr.py` puts 2.0 to
-  3.5 times below each measured optimum: a baseline is under-tuned unless its settings take their own optima
-  (under-tuned baselines inflate gains: arXiv 2307.06440; arXiv 2509.02046). A run's tag hashes its peak lr, so runs
-  at a superseded lr are never reused.
+  Architecture rankings can change with scale (arXiv 2207.10551); for data recipes a single proxy 7× below the target
+  picks the target's better of two in about 80% of pairs, best with likelihood metrics such as bits per byte
+  (DataDecide, arXiv 2504.11393). No run combines production's width and length: `lr.py` assumes the two trends
+  separable (arXiv 2409.19913's size-independent β), which only a d24 run at 490.8 could check. `tokenizer.py`'s
+  settings and documents: The tokenizer experiment, below.
+- **Order.** `lr.py` first; its multiplier sets production's peak lr (`scripts/production.py`, hashed into production's
+  tag). `tokenizer.py`'s arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each measured optimum,
+  every arm alike. A run's tag hashes its peak lr, so runs at a superseded lr are never reused.
 - **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
   production's corpus weights, the decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled (the benchmarks' pass@1 is near zero at this size). *repo_32k*: 32K
@@ -418,23 +414,18 @@ its data build (`python -m ablations.tokenizer data`).
   carried by the square-root batch rule (arXiv 2205.10287; Complete^(d)P's √m_B), so √(4 / 2). m_B and
   m_D come from the runs' recorded plans and production's (`harness.plan_of` at `max_ratio` of d24). Weight decay
   follows each run's lr by the τ law (Power Lines' fit for single-epoch pretraining), not Complete^(d)P's
-  λ ∝ √(m_B / m_D). *Value embeddings*: per setting, the alternative's mean code minus production's, the two-sided
-  pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`; pooled with equal arm sizes is
-  robust to unequal variances); their gain g is code without them minus code with them. Production's gain is predicted
-  as g(d16, 20) · g(d8, 490.8) / g(d8, 20) · (g(d16, 20) / g(d8, 20))^0.70 (0.70 = ln(195.1 / 67.1) / ln(67.1 / 14.7),
-  log-linear in scaling parameters), or g(d16, 20) alone if g(d8, 20)'s interval includes zero. They are removed iff
-  that prediction is below the compute their removal frees, 0.05 · L · ln r (L production's code, r the alternative's
-  tokens per second over production's at d16; arXiv 2001.08361 §1.2: loss ∝ C^−0.050); otherwise they
-  stay, their gain and its interval reported. Unpaired although arms share seeds: the six-run comparison's per-pair
+  λ ∝ √(m_B / m_D). *Comparisons* (`harness.compare`): per setting, each alternative's mean minus production's, the
+  two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`; pooled with equal arm
+  sizes is robust to unequal variances); unpaired although arms share seeds: the six-run comparison's per-pair
   differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048). *Tokenizer*: The tokenizer
   experiment, below.
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 **Power.** The paired comparison's six runs (Against the standard regime) give a within-configuration σ of 0.0034
 bits per byte on code (0.0044 on solutions, 0.0036 on 32K repository); the 4-seed settings measure it where they
-run. Value embeddings at d16, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an effect of 0.008,
-below the published 0.010 to 0.016. lr: each vertex rests on the arms' differences within one seed, which varied by
-0.0008 across 2 seeds at d8 at 20 against a 0.018 effect; at the curvature
+run. sa-bpe against sa-bpe-fused at d16, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an effect
+of 0.008. lr: each vertex rests on the arms' differences within one seed, which varied by 0.0008 across 2 seeds at d8
+at 20 against a 0.018 effect; at the curvature
 arXiv 2409.19913's Llama-1 estimate implies (0.027 nats for a 2.5× lr; about 0.026 bits per byte per (ln lr)² at 3.5
 bytes per token [assumed]) and per-run noise σ, a three-point fit places a vertex within about ±14% (one standard
 error, 0.13 in u). The d8 ratio r combines two vertices' errors, about ±20% (0.185 in u); raised to 1.24 for
@@ -446,8 +437,7 @@ measures the curvatures themselves.
 [estimate]; d8 at 20: 234 s; d8 at 200: about 24 minutes [estimate]; d8 at 490.8: about 54 minutes (52 minutes
 training, 91 s evaluation); d24 at 5: about 65 minutes (52 minutes training at 311K tokens per second, 711 s
 evaluation); d16 at 20: about 35 minutes (30 minutes training at 746K tokens per second, 299 s evaluation). `lr.py`:
-3 × 3 min + 4 × 24 min + 3 × 65 min ≈ 5.0 h; `value_embeds.py`: 18 runs ≈ 7.0 h; ≈ 12.0 h ($51 at $4.29/h).
-`tokenizer.py`: The tokenizer experiment, below.
+3 × 3 min + 4 × 24 min + 3 × 65 min ≈ 5.0 h, spent on 2026-10-20. `tokenizer.py`: The tokenizer experiment, below.
 
 Where a run's time goes (2026-10-22). Steps (file-level stage, micro-batches of 12 rows, torch.profiler): d8 (one
 micro-batch) 43 ms per 98,304 tokens, GPU 93% busy (GEMM 49%, FA4 18%, cross entropy 12%, Inductor 11%); d16 (two)
@@ -486,58 +476,48 @@ extending).
 
 `ablations/tokenizer.py`: the decision production's tokenizer waits on, as every later step trains on its tokens. Data
 and stages describes the current vocabulary (SA-BPE within the non-fusing pattern), production's until this decides.
+Of the questions a tokenizer raises, the experiment runs only the one the literature leaves open at this scale.
 
-- **Arms.** Five vocabularies of 32,768 ids. Four are trained on the tokenizer's sample (`data/tokenizer.py`
-  `sample`), a 2 × 2 of merge score, SA-BPE's F·ln R (arXiv 2604.14053 §4.1, its best monolingual criterion; its
-  multilingual best, F·log R·L over 18 languages, is not used; R counts repositories as in the paper, and web hosts
-  and documents, an extension its §6 leaves untested) or frequency alone (BPE, that paper's baseline), and pattern,
-  production's (a run of punctuation takes no line break) or the fusing one (cl100k's clause, the first tokenizer's).
-  The fifth, cl100k's first 32,764 ranks with its own pattern, is a reference with no decision attached: it differs
-  from sa-bpe in training data, merge score, fusing clause, digit runs of 1 to 3 and `\s++$` at once; its cut is
-  prefix-closed (ranks 0–255 the bytes, every kept token encoding to itself; the data build checks it). What the arms
-  test: SA-BPE's paper reports compression (3.623 for BPE, 3.643) and verified under-trained tokens (640, 72) at 100M
-  parameters, no loss or downstream result (Table 3; Limitations); arXiv 2608.18062's companion post deletes the
-  fusing clause with the tokenizer corpus held fixed and moves MBPP pass@1 from 0.086 to 0.230 (three seeds each,
-  ranges disjoint; 1.27B parameters, about 20B math and code tokens, vocabularies of about 128K, prompts healed),
-  while code bits per byte does not follow (its Table 18: the fusing GPT-4o tokenizer 0.377 and MBPP 0.174, the
-  punctuation-isolating one 0.380 and 0.230).
-- **Equal bytes.** Each arm reads its document set once, as production reads its data (`max_ratio`: no document
+- **Arms.** Three vocabularies of 32,768 ids trained on the tokenizer's sample (`data/tokenizer.py` `sample`):
+  sa-bpe, production's (SA-BPE's F·ln R, arXiv 2604.14053 §4.1, its best monolingual criterion; R counts
+  repositories as in the paper, and web hosts and documents, an extension its §6 leaves untested); sa-bpe-fused, the
+  same score within the fusing pattern (cl100k's clause, the first tokenizer's); bpe, frequency alone within
+  production's pattern (that paper's baseline).
+- **Inferred, not run.** The merge score: SA-BPE's paper puts the two 0.55% apart in compression (3.623 for BPE,
+  3.643) and reports verified under-trained tokens (640, 72) at 100M parameters, no loss or downstream result (Table
+  3; Limitations); a bits-per-byte difference that small is below what a few seeds detect [inference], so bpe is
+  compiled, not trained on, and the score is decided by its documents' statistics. cl100k (other training data,
+  digits of 1 to 3, the fusing clause, at once) would attach no decision; longer training and d24 would confirm, not
+  decide.
+- **Run: the pattern.** arXiv 2608.18062's companion post deletes the fusing clause with the tokenizer corpus held
+  fixed and moves MBPP pass@1 from 0.086 to 0.230 (three seeds each, ranges disjoint; 1.27B parameters, about 20B math
+  and code tokens, vocabularies of about 128K, prompts healed), its failures SyntaxErrors, while code bits per byte
+  does not follow (its Table 18: the fusing GPT-4o tokenizer 0.377 and MBPP 0.174, the punctuation-isolating one 0.380
+  and 0.230). sa-bpe against sa-bpe-fused at d16, 4 seeds each, measures the parse measure (Evaluation) and bits per
+  byte at this scale and mixture.
+- **Equal bytes.** Each arm reads the document set once, as production reads its data (`max_ratio`: no document
   twice), so its tokens are the set's bytes over its bytes per token and each run's ratio is its `max_ratio` on the
   set; each plan is its own (`schedule.plan` at its tokens), its context production's 8,192 and 32,768 tokens. At
   equal tokens a better compressor would read more data (arXiv 2402.01035 compares at equal tokens, its Appendix J at
   equal words; arXiv 2608.18062's post did not equalize the text seen); the byte-offset buckets (Evaluation) show what
   the extra bytes of context a better compressor sees are worth (arXiv 2503.13423 §3.1 fixes context in bytes).
-- **Documents.** `python -m ablations.tokenizer data --depth 16` compiles and packs the same documents for each arm
-  into `artifacts/tokenizer-ablation/d16/`: of each code corpus, the leading curated train files whose sa-bpe rows
-  (production's packs' rows of those files) hold what d16 at 20 tokens per scaling parameter draws at the file-level
-  stage, so the code group binds every arm; of text and math 1.25 times that, and of each repository corpus the
-  trailing files holding 1.25 times the repository stage's draw, so they never bind (sa-bpe takes 9.21% more tokens
-  than the first tokenizer on stack_edu_cpp's whole val split, the largest gap measured); of each val split, the
-  leading row groups whose sa-bpe tokens fill at most 1/1.25 of the val sample, which every arm then scores whole.
-  `results/tokenizer-data.json` records each arm's bytes per token per corpus, its tokens holding a line break and
-  fusing punctuation with one, and how many vocabulary tokens its train documents hold never, under 10 and under 100
-  times.
-- **Settings.** d16 on that set (about 20 tokens per scaling parameter for sa-bpe) and d8 on the same documents (about
-  91), whether rankings move with training length (arXiv 2503.13423 §4.3: bits-per-byte rankings change between 20
-  and 80 tokens per parameter), 4 seeds each. Then d24 on its own set (20 for sa-bpe), sa-bpe against one challenger,
-  2 seeds each, before production adopts a tokenizer: arXiv 2608.18062's bits-per-byte rankings agree between d16 and
-  d24 at Kendall τ 0.752 (§E.3: small sweeps are "a screening tool"); its d8 to d24 span 222M to 1.27B parameters,
-  ours 14.7M to 195M scaling parameters.
-- **Decisions,** pre-registered (`harness.evaluation`'s measures, each alternative against sa-bpe per setting).
-  Pattern: the fusing level is adopted iff at d16 its mean unparsed share is not higher than the non-fusing level's
-  and its code is lower with the 95% interval excluding zero; otherwise non-fusing. Score: frequency BPE is adopted iff
-  at d16 its code is lower with the interval excluding zero, or the interval lies within ±0.003 (about one per-run σ,
-  0.0034, and three of arXiv 2608.18062's seed SDs, 0.00109) and its documents leave fewer vocabulary tokens never
-  read; otherwise SA-BPE. Each level from the 2 × 2's 16 runs at d16, 8 against 8, the score within the chosen pattern
-  if the score × pattern interaction is significant. The d24 challenger is the decided arm or, if that is sa-bpe, the
-  arm with the next lowest code at d16. Every other comparison is descriptive, Benjamini–Hochberg within each setting
-  and measure (as arXiv 2608.18062 §C.2); tokens per second is not compared (one vocabulary size, one FLOPs per token).
-- **Power.** A level against a level, 8 runs against 8 at σ = 0.0034: standard error 0.0017, 80% power at about 0.005
-  [estimate: two-sided pooled t-test]. SA-BPE's 0.55% compression gain predicts a smaller difference [inference],
-  which the equivalence margin and the under-trained tie-break then decide.
-- **Cost** [estimate, from Cost above]: 20 runs of d16 (about 35 minutes) and of d8 at about 91 (about 12 minutes),
-  about 16 h, then the d24 pair, 4 runs of about 3.5 h; ≈ 30 h ($129 at $4.29/h). Not yet run: the vocabularies, the
-  data build and the runs each wait for approval.
+- **Documents.** `python -m ablations.tokenizer data` compiles the same documents for every arm into
+  `artifacts/tokenizer-ablation/compiled/` and packs them for sa-bpe and sa-bpe-fused: of each code corpus, the
+  leading curated train documents whose sa-bpe tokens fill what d16 at 20 tokens per scaling parameter draws at the
+  file-level stage (rows from production's packs), so the code group binds every arm; of text and math the leading
+  files holding 1.25 times their draw, and of each repository corpus the trailing files holding 1.25 times the
+  repository stage's draw, so they never bind (sa-bpe takes 9.21% more tokens than the first tokenizer on
+  stack_edu_cpp's whole val split, the largest gap measured); of each val split, a systematic sample of documents whose
+  sa-bpe tokens fill at most 1/1.25 of the val sample, which every arm scores whole. `results/tokenizer-data.json`
+  records each arm's bytes per token per corpus, its tokens holding a line break and fusing punctuation with one, and
+  how many vocabulary tokens its train documents hold never, under 10 and under 100 times.
+- **Decisions,** pre-registered (`results/tokenizer.json` `decision`). Pattern: sa-bpe-fused is adopted iff its mean
+  unparsed share is not higher than sa-bpe's and its code is lower with the 95% interval excluding zero; otherwise the
+  non-fusing pattern. Score, within the non-fusing pattern: bpe is adopted iff its documents leave fewer vocabulary
+  tokens never read than sa-bpe's (SA-BPE's claimed benefit); otherwise SA-BPE.
+- **Cost** [estimate, from Cost above]: 8 runs of d16 at about 20, about 35 minutes each and the parse measure's
+  generations, ≈ 5 h ($21 at $4.29/h); the vocabularies and data, on the curated store's machine. Not yet run: each
+  waits for approval.
 
 ### Verification of the experiments' code
 
@@ -547,12 +527,10 @@ and stages describes the current vocabulary (SA-BPE within the non-fusing patter
   lr 2.4378e-3); d8 at 490.8, 36,656 steps of 196,608 tokens (34,657, 1.8324e-3); d24 at 5, 3,307 steps of 294,912
   tokens (3,127, 1.6641e-3); the τ law sets each arm's weight decay from its lr, keeping the decay's timescale as the
   lr moves. Production's d24 plan unchanged: 81,171 steps, `repo_start` 76,743.
-- *Candidate* (`model.py`, real rows, 2026-10-21): with production's fields `Candidate` equals `GPT` bitwise.
 - *Every arm* (2026-10-22): `lr.py`'s at d8 over 50 and over 490.80456005542607 (`max_ratio` of d24, 20.6 s; × 0.25
-  included) and at d24 over 5, `value_embeds.py`'s at d8 over 20 and 490.8 and at d16 over 20, compiled and trained
-  4 steps through both stages on real rows with finite losses; weight decay at d8 over 490.8: 0.3597 (1.4387 at
-  × 0.25, 0.7194 at × 0.5, 0.1798 at × 2), over 50: 0.3982, d24 over 5: 0.3914; parameters: d8 56,627,216, d24
-  522,252,336, d16 218,124,320 (83,890,208 without value embeddings).
+  included) and at d24 over 5, compiled and trained 4 steps through both stages on real rows with finite losses;
+  weight decay at d8 over 490.8: 0.3597 (1.4387 at × 0.25, 0.7194 at × 0.5, 0.1798 at × 2), over 50: 0.3982, d24 over
+  5: 0.3914; parameters: d8 56,627,216, d24 522,252,336.
 - *lr.py's plans* (`harness.plan_of`, τ-law weight decay at each arm's lr): d8 at 5, 746 steps of 98,304 tokens
   (`repo_start` 705), law lr 3.2509e-3, weight decay 0.8878 / 0.4439 / 0.2219 at × 1 / 2 / 4; d8 at 200, 14,937 steps
   of 196,608 (14,122), 2.0500e-3, 0.4916 / 0.2458 / 0.1229 / 0.0614 at × 1 / 2 / 4 / 8; d24 at 5, 3,307 steps of
@@ -757,11 +735,6 @@ HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts
 # log in again (docker group), then from the checkout:
 tmux new -d -s h100 'runs/container.sh python -m scripts.production 2>&1 | tee -a artifacts/logs/production.log'
 ```
-
-At a dataset revision `lr.py` has not measured (the pinned one, so far), it runs first, in the same session:
-`runs/container.sh python -m ablations.lr`, about 4.9 h on the H100 SXM5 (its 2026-10-20 run: 13:09–18:39 UTC, 37
-minutes of it idle); `scripts/production.py` `LR_SCALE` then takes `results/lr.json`'s `production_multiplier`,
-committed with `results/` before the production run.
 
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
 `runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/<tag>-step<step>.pt` (each a run's full state),
@@ -1115,8 +1088,7 @@ lists (Table 5: 110K each for the educational and package instructions).
   training driver: setup, resume, the step loop, checkpoints and records).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
-- `ablations/`: the ablation experiments (`lr.py`, `value_embeds.py`, `tokenizer.py`) and their mechanism
-  (`harness.py`, `model.py`).
+- `ablations/`: the ablation experiments (`lr.py`, `tokenizer.py`) and their mechanism (`harness.py`).
 - `docker/Dockerfile`: the image.
 
 ## References

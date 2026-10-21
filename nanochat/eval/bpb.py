@@ -90,20 +90,25 @@ def mixture_bpb(corpora: dict, weights: dict[str, float], *, buckets: slice = sl
     return bits / nbytes
 
 
+def sample_rows(stage: Stage) -> int:
+    """The most rows of a corpus's val split val_bits scores at a stage's rows: VAL_TOKENS' worth in whole
+    micro-batches."""
+    return -(-VAL_TOKENS // (stage.batch_rows * stage.seq_len)) * stage.batch_rows
+
+
 def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> dict:
     """Val evaluation of a stage's mixture {group: (share, corpora)} in its rows: {"corpora": {corpus: {"bits", "bytes",
     "rows"}}, "bpb": {group: mixture_bpb, "all": mixture_bpb of every corpus}}, each corpus's packed val split read left
     to right over a systematic sample of its rows, weighted by the stage's mixture weights. cu_seqlens is padded to the
     corpora's most segments: one compiled graph scores all."""
     token_bytes = tokenizer.get_token_bytes(device=device)
-    # the sample: n = min(num_rows, ceil(VAL_TOKENS / (batch_rows x seq_len)) x batch_rows) rows, row
-    # (j x num_rows) // n for j < n (the packer orders each shard's rows longest first, Best-Fit-Decreasing, so a
-    # prefix would over-represent long documents), its last micro-batch filled with empty rows: a split within the
-    # sample is scored whole, every row of it
-    samples = {}
+    # the sample: n = min(num_rows, sample_rows) rows, row (j x num_rows) // n for j < n (the packer orders each shard's
+    # rows longest first, Best-Fit-Decreasing, so a prefix would over-represent long documents), its last micro-batch
+    # filled with empty rows: a split within the sample is scored whole, every row of it
+    sampled, samples = {}, {}
     for name in mixture_corpora(stage.mixture):
         num_rows = packed_rows(name, "val", tokenizer, stage.seq_len)
-        n = min(num_rows, -(-VAL_TOKENS // (stage.batch_rows * stage.seq_len)) * stage.batch_rows)
+        n = sampled[name] = min(num_rows, sample_rows(stage))
         samples[name] = np.concatenate([np.arange(n, dtype=np.int64) * num_rows // n,
                                         np.full(-n % stage.batch_rows, -1, dtype=np.int64)])
     loaders = {name: PretrainingBatches({name: 1.0}, "val", tokenizer, {name: rows}, seq_len=stage.seq_len,
@@ -112,7 +117,7 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     num_segments = max(loader.num_segments for loader in loaders.values())
     corpora = {name: {**sums(losses, loader, token_bytes, steps=len(samples[name]) // stage.batch_rows,
                              num_segments=num_segments),
-                      "rows": int((samples[name] >= 0).sum())} for name, loader in loaders.items()}
+                      "rows": sampled[name]} for name, loader in loaders.items()}
     weights = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
     groups_bpb = {group: mixture_bpb(corpora, {c: weights[c] for c in members})
                   for group, (_, members) in stage.mixture.items()}

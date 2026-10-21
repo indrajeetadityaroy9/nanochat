@@ -47,6 +47,11 @@ LONG = 200
 STEP_LAW_D = 0.307
 
 
+def setting(lines: list[dict], depth: int, ratio: float) -> list[dict]:
+    """The records of a setting's runs."""
+    return [line for line in lines if (line["setting"]["depth"], line["setting"]["tokens_per_param"]) == (depth, ratio)]
+
+
 def fit(lines: list[dict]) -> dict:
     """A setting's optimum from its runs in lr order, a diverged run counting as worse than any evaluated one: the grid
     extension by a factor of 2 ("down" or "up") while its lowest-code run is at an end of the grid; else the vertex (as
@@ -71,22 +76,20 @@ def fit(lines: list[dict]) -> dict:
 def analysis(lines: list[dict]) -> dict:
     """The pre-registered estimator over RESULTS/lr.jsonl's records (module docstring); the derived values are None
     while any setting's grid needs extending."""
-    def setting(depth, ratio):
-        return [line for line in lines if (line["setting"]["depth"], line["setting"]["tokens_per_param"]) == (depth, ratio)]
-
     def recorded_plan(depth, ratio):
         """The setting's plan at the law's lr (every arm's batch and steps are the same)."""
-        line = setting(depth, ratio)[0]
+        line = setting(lines, depth, ratio)[0]
         recorded = next(r for r in line["records"] if r["kind"] == "run")["plan"]
         return recorded | {"lr": recorded["lr"] / line["fields"]["lr_scale"]}
 
     def tokens(p):
         return p["num_iterations"] * p["total_batch_size"]
 
-    fits = {f"d{depth} at {ratio:g}": fit(setting(depth, ratio)) for depth, ratio in ((8, SHORT), (8, LONG), (24, SHORT))}
+    fits = {f"d{depth} at {ratio:g}": fit(setting(lines, depth, ratio))
+            for depth, ratio in ((8, SHORT), (8, LONG), (24, SHORT))}
     d8_short, d8_long, d24_short = recorded_plan(8, SHORT), recorded_plan(8, LONG), recorded_plan(24, SHORT)
     production = plan_of(Run(n_layer=24, ratio=max_ratio(get_tokenizer(), depth=24), lr_scale=1.0,
-                             value_embeds="alternating", tokenizer="production", seed=0))
+                             tokenizer="production", seed=0))
     m_b_production = production.total_batch_size / d24_short["total_batch_size"]
     m_b_d8 = d8_long["total_batch_size"] / d8_short["total_batch_size"]
     m_d_production = production.num_iterations * production.total_batch_size / tokens(d24_short)
@@ -113,13 +116,10 @@ if __name__ == "__main__":
     # (fit) gains the next factor of 2 and the experiment runs again (harness.main skips evaluated runs)
     grids = {(8, SHORT): [1, 2, 4], (8, LONG): [1, 2, 4, 8], (24, SHORT): [1, 2, 4]}
     while True:
-        main(settings=tuple((depth, ratio, range(1), {},
-                             {f"lr x{s:g}": {"lr_scale": float(s)} for s in scales if s != 1})
-                            for (depth, ratio), scales in grids.items()))
+        main(settings=tuple((depth, ratio, range(1), {f"lr x{s:g}": {"lr_scale": float(s)} for s in scales if s != 1})
+                            for (depth, ratio), scales in grids.items()), production={})
         lines = [json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
-        extend = {(depth, ratio): fit([line for line in lines if (line["setting"]["depth"],
-                                                                   line["setting"]["tokens_per_param"]) == (depth, ratio)])
-                  ["extend"] for depth, ratio in grids}
+        extend = {(depth, ratio): fit(setting(lines, depth, ratio))["extend"] for depth, ratio in grids}
         if not any(extend.values()):
             break
         for key, direction in extend.items():
