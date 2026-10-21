@@ -59,14 +59,14 @@ python -m ablations.tokenizer runs           (ablations/harness.py, then the dec
 import itertools
 import json
 import math
+from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
-import pyarrow.parquet as pq
 import regex
-import torch
 from scipy.stats import binomtest, norm
 
-from ablations.harness import ALPHA, main
+from ablations.harness import ALPHA, Setting, main, production_plan
 from ablations.tokenizer import intrinsic
 from nanochat.config import FILE_STAGE, REPO_STAGE
 from nanochat.data.compile import compile_split
@@ -80,11 +80,10 @@ from nanochat.data.loader import (
 )
 from nanochat.data.pack import in_order, pack_split, write
 from nanochat.data.sources import curated_files
-from nanochat.data.tokenizer import SPLIT_PATTERN, Tokenizer, bpe, get_tokenizer, merges, sample, save
+from nanochat.data.tokenizer import SPLIT_PATTERN, Tokenizer, get_tokenizer, merges, sample, save
 from nanochat.eval.bpb import sample_rows
-from nanochat.model.gpt import GPT, gpt_config
+from nanochat.native import data_crate
 from nanochat.paths import RESULTS, TOKENIZER_ABLATION
-from nanochat.train.schedule import RunPlan, plan
 from nanochat.train.stages import drawn_rows, max_ratio, readable_rows
 
 # SPLIT_PATTERN with cl100k's clause for a run of punctuation, which takes the line breaks after it
@@ -117,11 +116,6 @@ CODE_SIGMA = 0.0034
 MARGIN = 1.25
 
 
-def run_plan(ratio: float) -> RunPlan:
-    with torch.device("meta"):
-        return plan(model=GPT(gpt_config(depth=DEPTH, stage=FILE_STAGE)), ratio=ratio)
-
-
 def vocabularies() -> None:
     """Each arm's tokenizer.tiktoken and tokenizer.pattern in TOKENIZER_ABLATION/<arm>, on one load of the sample."""
     docs, sources = sample()
@@ -143,47 +137,59 @@ def keep_documents(corpus: str, split: str, tokenizer: Tokenizer, keep: np.ndarr
                                                                for a, b in itertools.pairwise(bounds)]}))
 
 
-def documents() -> dict[str, dict]:
-    """{corpus: {"train": [file-level train files], "kept": their leading documents kept, "repo": [repository-level
-    train files], "val_step": every how many val documents one is kept}}: the document set (module docstring), from
-    production's compiled data and packs, which count sa-bpe's tokens: sa-bpe is production's vocabulary, retrained."""
+@dataclass(frozen=True, kw_only=True)
+class Documents:
+    """A corpus's part of the document set: its leading curated train files (`train`), of which the first `kept`
+    documents are kept; its trailing train files the repository stage reads (`repo`: a repository corpus's, else none);
+    every `val_step`-th document of its val split."""
+    train: list[Path]
+    kept: int
+    repo: list[Path]
+    val_step: int
+
+
+def documents() -> dict[str, Documents]:
+    """The document set of every corpus (module docstring), from production's compiled data and packs, which count
+    sa-bpe's tokens: sa-bpe is production's vocabulary, retrained."""
     production = get_tokenizer()
     assert get_tokenizer("sa-bpe").data_key == production.data_key
-    run = run_plan(20)
-    code = set(next(iter(FILE_STAGE.mixture.values()))[1])
+    run = production_plan(depth=DEPTH, ratio=20)
+    # the repository stage: the fewest trailing files, as many of every repository corpus, holding MARGIN times its draw
+    repo = drawn_rows(production, stage=REPO_STAGE, run=run)
+    repo_rows = {corpus: np.bincount(row_shards(corpus, "train", production, REPO_STAGE.seq_len)) for corpus in repo}
+    trailing = 1
+    while sum(int(rows[-trailing:].sum()) for rows in repo_rows.values()) < MARGIN * sum(repo.values()):
+        trailing += 1
     chosen = {}
     for corpus, drawn in drawn_rows(production, stage=FILE_STAGE, run=run).items():
+        code = corpus in FILE_STAGE.mixture["code"][1]
         rows = np.bincount(row_shards(corpus, "train", production, FILE_STAGE.seq_len))
         # the fewest leading files whose rows hold the draw (code) or MARGIN times it
-        files = int(np.searchsorted(np.cumsum(rows), math.ceil(drawn if corpus in code else MARGIN * drawn))) + 1
+        files = int(np.searchsorted(np.cumsum(rows), math.ceil(drawn if code else MARGIN * drawn))) + 1
         bounds = shard_documents(corpus, "train", production)
         offsets = np.memmap(split_path(corpus, "train", production).with_suffix(".idx"), dtype=np.int64, mode="r")
         tokens_per_row = offsets[bounds[files]] / rows[:files].sum()
-        kept = int(np.searchsorted(offsets, drawn * tokens_per_row)) if corpus in code else int(bounds[files])
         limit = min(sample_rows(stage) * stage.seq_len / MARGIN for stage in (FILE_STAGE, REPO_STAGE)
                     if corpus in mixture_corpora(stage.mixture))
         val = np.memmap(split_path(corpus, "val", production).with_suffix(".idx"), dtype=np.int64, mode="r")
-        chosen[corpus] = {"train": curated_files(corpus, "train")[:files], "kept": kept, "repo": [],
-                          "val_step": math.ceil(val[-1] / limit)}
-    repo = drawn_rows(production, stage=REPO_STAGE, run=run)
-    rows = {corpus: np.bincount(row_shards(corpus, "train", production, REPO_STAGE.seq_len)) for corpus in repo}
-    trailing = 1
-    while sum(int(r[-trailing:].sum()) for r in rows.values()) < MARGIN * sum(repo.values()):
-        trailing += 1
-    for corpus in repo:
-        chosen[corpus]["repo"] = curated_files(corpus, "train")[-trailing:]
+        train = curated_files(corpus, "train")
+        chosen[corpus] = Documents(
+            train=train[:files],
+            kept=int(np.searchsorted(offsets, drawn * tokens_per_row)) if code else int(bounds[files]),
+            repo=train[-trailing:] if corpus in repo else [],
+            val_step=math.ceil(val[-1] / limit))
     return chosen
 
 
-def describe(tokenizer: Tokenizer, files: dict[str, dict]) -> dict:
+def describe(tokenizer: Tokenizer, chosen: dict[str, Documents]) -> dict:
     """An arm's intrinsic record on its document set: bytes per token of each corpus's train and val documents; the
     Rényi efficiency of each corpus's val documents and of all of them (intrinsic.py); its vocabulary tokens
     holding a line break, fusing punctuation with one and ending in a line break and indentation; how many mergeable
     tokens its train documents hold never, under 10 and under 100 times."""
     held = {split: np.zeros(tokenizer.bos_token_id, dtype=np.int64) for split in ("train", "val")}
-    lengths = np.array([len(b) for b in tokenizer.token_bytes[:tokenizer.bos_token_id]], dtype=np.int64)
+    lengths = tokenizer.token_lengths[:tokenizer.bos_token_id]
     bytes_per_token, renyi = {}, {}
-    for corpus in files:
+    for corpus in chosen:
         bytes_per_token[corpus] = {}
         for split, total in held.items():
             tokens = np.memmap(split_path(corpus, split, tokenizer).with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r")
@@ -213,24 +219,23 @@ def data() -> None:
     chosen = documents()
     tokenizers = [get_tokenizer(arm) for arm in ARMS]
     for tokenizer in tokenizers:
-        for corpus, files in chosen.items():
+        for corpus, part in chosen.items():
             split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
-            for split, curated in (("val", curated_files(corpus, "val")), ("train", files["train"] + files["repo"])):
-                compile_split(corpus, split, tokenizer,
-                              row_groups={file: pq.read_metadata(file).num_row_groups for file in curated})
+            compile_split(corpus, "val", tokenizer, files=curated_files(corpus, "val"))
+            compile_split(corpus, "train", tokenizer, files=part.train + part.repo)
             val = np.arange(int(shard_documents(corpus, "val", tokenizer)[-1]))
-            keep_documents(corpus, "val", tokenizer, val % files["val_step"] == 0)
+            keep_documents(corpus, "val", tokenizer, val % part.val_step == 0)
             bounds = shard_documents(corpus, "train", tokenizer)
             train = np.arange(int(bounds[-1]))
             # the leading files' first kept documents and every document of the trailing (repository-stage) files
-            keep_documents(corpus, "train", tokenizer, (train < files["kept"]) | (train >= bounds[len(files["train"])]))
+            keep_documents(corpus, "train", tokenizer, (train < part.kept) | (train >= bounds[len(part.train)]))
         print(f"{tokenizer.name}: data key {tokenizer.data_key}")
     for corpus, split in itertools.product(chosen, ("train", "val")):
         sizes = []
         for tokenizer in tokenizers:
             path = split_path(corpus, split, tokenizer)
-            lengths = np.array([len(b) for b in tokenizer.token_bytes], dtype=np.int64)
-            ends = np.concatenate([[0], np.cumsum(lengths[np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE)])])
+            tokens = np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE)
+            ends = np.concatenate([[0], np.cumsum(tokenizer.token_lengths[tokens])])
             sizes.append(np.diff(ends[np.fromfile(path.with_suffix(".idx"), dtype=np.int64)]))
         assert all(np.array_equal(sizes[0], other) for other in sizes[1:]), (corpus, split)
     record = {tokenizer.name: describe(tokenizer, chosen) for tokenizer in tokenizers}
@@ -239,11 +244,11 @@ def data() -> None:
     for arm in ARMS:
         record[arm]["code"] = {corpus: code[corpus][arm] for corpus in corpora}
     (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
-    bpe()  # built once, before the packer's threads call it
+    data_crate()  # built once, before the packer's threads call it
     for tokenizer in tokenizers:
         arm = tokenizer.name
-        for corpus, files in chosen.items():
-            first, trailing = len(files["train"]), len(files["repo"])
+        for corpus, part in chosen.items():
+            first, trailing = len(part.train), len(part.repo)
             stages = [(FILE_STAGE, range(first))]
             if trailing:  # a repository corpus
                 stages.append((REPO_STAGE, range(first, first + trailing)))
@@ -253,7 +258,7 @@ def data() -> None:
                                                                   seq_len=stage.seq_len), seq_len=stage.seq_len)
                 print(f"{arm} {corpus} T{stage.seq_len}: {len(shards)} train files, {rows:,} rows")
         ratio = max_ratio(tokenizer, depth=DEPTH)
-        run = run_plan(ratio)
+        run = production_plan(depth=DEPTH, ratio=ratio)
         for stage in (FILE_STAGE, REPO_STAGE):
             readable = readable_rows(tokenizer, stage=stage, run=run)
             slack = {corpus: len(readable[corpus]) - drawn
@@ -270,8 +275,9 @@ def runs() -> None:
     """Every arm at d16, each at its max_ratio (ablations/harness.py main); then RESULTS/tokenizer.json gains each
     challenger's contrast with sa-bpe and the decision (module docstring)."""
     ratios = {arm: max_ratio(get_tokenizer(arm), depth=DEPTH) for arm in ARMS}
-    main(settings=((DEPTH, ratios["sa-bpe"], range(SEEDS),
-                    {arm: {"tokenizer": arm, "ratio": ratios[arm]} for arm in CHALLENGERS}),),
+    main(experiment="tokenizer",
+         settings=[Setting(depth=DEPTH, ratio=ratios["sa-bpe"], seeds=range(SEEDS),
+                           alternatives={arm: {"tokenizer": arm, "ratio": ratios[arm]} for arm in CHALLENGERS})],
          production={"tokenizer": "sa-bpe"})
     parses = {}  # (arm, seed): per problem, in the benchmarks' order, whether its completion compiles
     for line in (RESULTS / "tokenizer.jsonl").read_text(encoding="utf-8").splitlines():

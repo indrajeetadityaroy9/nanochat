@@ -27,26 +27,26 @@ from nanochat.data.tokenizer import Tokenizer
 
 # the Weyl sequence frac(n * GOLDEN) spreads every prefix of itself most evenly over [0, 1) (Knuth, TAOCP Vol. 3 §6.4)
 GOLDEN = (math.sqrt(5) - 1) / 2
-TOKEN_DTYPE = np.uint16  # compiled tokens, as the crate reads them (data/bpe pack: &[u16])
-# a pack index entry of the crate (data/bpe/pack.rs pack_shard): token range [start, end) of the compiled split, then
-# the range of the piece's FIM example in the split's FIM tokens (empty for a piece read left to right)
+TOKEN_DTYPE = np.uint16  # compiled tokens, as the data crate reads them (data/crate pack.rs: &[u16])
+# a pack index entry of the data crate (data/crate pack.rs pack_shard): token range [start, end) of the compiled split,
+# then the range of the piece's FIM example in the split's FIM tokens (empty for a piece read left to right)
 PIECE_COLUMNS = 4
 
 
-def split_path(dataset: str, split: str, tokenizer: Tokenizer) -> Path:
+def split_path(corpus: str, split: str, tokenizer: Tokenizer) -> Path:
     """The stem of a compiled split's files (compile.py: .bin tokens, .idx document offsets, .json documents per file),
     in <tokenizer.compiled>/<corpus>-<tokenizer data key>/."""
-    return tokenizer.compiled / f"{dataset}-{tokenizer.data_key}" / split
+    return tokenizer.compiled / f"{corpus}-{tokenizer.data_key}" / split
 
 
-def packed_path(dataset: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Path:
+def packed_path(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Path:
     """The stem of a packed split's files (pack.py: .pieces, .rows, .fim), the compiled split's at the row length."""
-    return split_path(dataset, split, tokenizer).with_name(f"{split}-T{seq_len}")
+    return split_path(corpus, split, tokenizer).with_name(f"{split}-T{seq_len}")
 
 
-def fim_packed(dataset: str, split: str) -> bool:
+def fim_packed(corpus: str, split: str) -> bool:
     """Whether a split is packed with fill-in-the-middle examples: the train split of a repository corpus (pack.py)."""
-    return SOURCES[dataset].grammar is not None and split == "train"
+    return SOURCES[corpus].grammar is not None and split == "train"
 
 
 class PackedSplit(NamedTuple):
@@ -61,34 +61,34 @@ class PackedSplit(NamedTuple):
     fim: np.memmap | None
 
 
-def packed(dataset: str, split: str, tokenizer: Tokenizer, seq_len: int) -> PackedSplit:
+def packed(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> PackedSplit:
     """The packed split of a corpus at rows of seq_len + 1 tokens (pack.py), memory-mapped in place."""
-    path, packing = split_path(dataset, split, tokenizer), packed_path(dataset, split, tokenizer, seq_len)
+    path, packing = split_path(corpus, split, tokenizer), packed_path(corpus, split, tokenizer, seq_len)
     return PackedSplit(np.memmap(path.with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r"),
                        np.memmap(path.with_suffix(".idx"), dtype=np.int64, mode="r"),
                        np.memmap(packing.with_suffix(".pieces"), dtype=np.int64, mode="r").reshape(-1, PIECE_COLUMNS),
                        np.memmap(packing.with_suffix(".rows"), dtype=np.int64, mode="r"),
                        np.memmap(packing.with_suffix(".fim"), dtype=TOKEN_DTYPE, mode="r")
-                       if fim_packed(dataset, split) else None)
+                       if fim_packed(corpus, split) else None)
 
 
-def packed_rows(dataset: str, split: str, tokenizer: Tokenizer, seq_len: int) -> int:
+def packed_rows(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> int:
     """The number of rows of a packed split."""
-    return len(packed(dataset, split, tokenizer, seq_len).rows) - 1
+    return len(packed(corpus, split, tokenizer, seq_len).rows) - 1
 
 
-def shard_documents(dataset: str, split: str, tokenizer: Tokenizer) -> np.ndarray:
+def shard_documents(corpus: str, split: str, tokenizer: Tokenizer) -> np.ndarray:
     """Each curated shard's first document in a compiled split, then the number of documents (compiled <split>.json:
     each file's documents, in order)."""
-    files = json.loads(split_path(dataset, split, tokenizer).with_suffix(".json").read_text())["files"]
+    files = json.loads(split_path(corpus, split, tokenizer).with_suffix(".json").read_text())["files"]
     return np.cumsum([0] + [file["documents"] for file in files])
 
 
-def row_shards(dataset: str, split: str, tokenizer: Tokenizer, seq_len: int) -> np.ndarray:
+def row_shards(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> np.ndarray:
     """Each row's curated shard of a packed split: the packer packs one shard at a time (pack.py), so a row's pieces
     share the shard of its first piece's first token."""
-    _, offsets, pieces, rows, _ = packed(dataset, split, tokenizer, seq_len)
-    documents = shard_documents(dataset, split, tokenizer)
+    _, offsets, pieces, rows, _ = packed(corpus, split, tokenizer, seq_len)
+    documents = shard_documents(corpus, split, tokenizer)
     return np.searchsorted(offsets[documents[:-1]], pieces[rows[:-1], 0], side="right") - 1
 
 

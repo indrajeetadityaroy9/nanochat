@@ -1,6 +1,6 @@
-//! The data crate, Python module nanochat_bpe (built by nanochat/data/tokenizer.py bpe()): SA-BPE (arXiv 2604.14053)
-//! tokenizer training (train.rs), deduplication (dedup.rs; nanochat/data/dedup.py) and repository samples
-//! (repository.rs; nanochat/data/curate.py) of curation, the packer of training rows (pack.rs;
+//! The data crate, Python module nanochat_crate (built by nanochat/native.py data_crate()): SA-BPE (arXiv 2604.14053)
+//! tokenizer training (train.rs; nanochat/data/tokenizer.py), deduplication (dedup.rs; nanochat/data/dedup.py) and
+//! repository samples (repository.rs; nanochat/data/curate.py) of curation, the packer of training rows (pack.rs;
 //! nanochat/data/pack.py) and the parse-tree leaves of the tokenizer ablation's code metrics (leaves.rs;
 //! ablations/tokenizer/intrinsic.py).
 
@@ -10,6 +10,7 @@ mod pack;
 mod repository;
 mod train;
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use tree_sitter::Language;
@@ -35,16 +36,16 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lang {
     type Error = PyErr;
 
     fn extract(name: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
-        Ok(match &*name.extract::<PyBackedStr>()? {
-            "Python" => Lang::Python,
-            "C++" => Lang::Cpp,
-            _ => unreachable!(),
-        })
+        match &*name.extract::<PyBackedStr>()? {
+            "Python" => Ok(Lang::Python),
+            "C++" => Ok(Lang::Cpp),
+            other => Err(PyValueError::new_err(format!("grammar {other:?}: \"Python\" or \"C++\""))),
+        }
     }
 }
 
 #[pymodule]
-fn nanochat_bpe(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(train::train, m)?)?;
     m.add_function(wrap_pyfunction!(dedup::sketch, m)?)?;
     m.add_function(wrap_pyfunction!(dedup::duplicates, m)?)?;

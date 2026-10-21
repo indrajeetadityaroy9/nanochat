@@ -19,7 +19,7 @@ token of its source's first normalized row group, before deduplication (the pipe
 curated store).
 
 Normalize maps each raw file to its category's schema in parallel, with a local id (the sha1 of the text). A row needs
-text; a repository file's text is kept as its language reads it (line ends, a leading U+FEFF; stage), and a Python
+text; a repository file's text is kept as its language reads it (line ends, a leading U+FEFF; normalize_file), and a
 repository file must then parse as Python 3 (ast.parse drops Python 2 and broken files; it runs after, as ast.parse on
 a str rejects the leading U+FEFF that CPython's source decoding strips). A codeforces_cots document is its
 conversation: the R1 prompt followed by its generation.
@@ -176,7 +176,7 @@ def parses_as_python3(text: str) -> bool:
         return False
 
 
-def stage(task: tuple[str, int, Path]) -> None:
+def normalize_file(task: tuple[str, int, Path]) -> None:
     """Normalize one raw file into its normalized file: rows with text, a repository file's text as its language reads
     it, and a Python repository file only if it parses as Python 3."""
     source, k, path = task
@@ -220,13 +220,13 @@ def prepare() -> None:
                 directory.mkdir(parents=True)  # the Hub paths' directories, where fetch writes
             if horizon is None:
                 with ProcessPoolExecutor(mp_context=SPAWN) as pool:
-                    list(pool.map(stage, [(source, k, fetch(source, file)) for k, file in enumerate(files)]))
+                    list(pool.map(normalize_file, [(source, k, fetch(source, file)) for k, file in enumerate(files)]))
                 count = len(files)
                 held += sum(tokens(source, k) for k in range(count))
             else:
                 count = 0
                 while count < len(files) and held < share * horizon:
-                    stage((source, count, fetch(source, files[count])))
+                    normalize_file((source, count, fetch(source, files[count])))
                     held += tokens(source, count)
                     count += 1
             normalized[source] = count

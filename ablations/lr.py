@@ -15,15 +15,16 @@ arXiv 2409.19913 (D^-0.32) and the law do; Step-Law (arXiv 2503.04715: eta = 1.7
 AdamW models) raises it. Alternatives: the law's lr times 2 and 4, and 8 at d8 at LONG, where Step-Law points; one seed
 per setting.
 
-Analysis, pre-registered, written to RESULTS/lr.json's "analysis": per setting, code bits per byte fitted as a quadratic
-in u = ln(multiplier) over its evaluated runs (numpy polyfit), its vertex u* and the grid extension the pre-registered
-rule calls for; the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@5) against the SDE rule's and Step-Law's predictions
-(each over the law's own fall between the two plans); the horizon exponent ln r / ln m_D,d8; production's multiplier of
-the law's lr, exp(u*_d24@5) * r^(ln m_D,prod / ln m_D,d8) * sqrt(m_B,prod / m_B,d8): the exponent carried to
-production's horizon range (every rule in play is a power law in D: the SDE rule, arXiv 2409.19913, Step-Law, the
-law), and d8's smaller batch growth corrected by the square-root batch rule (arXiv 2205.10287; Complete^(d)P's
-sqrt(m_B)). m_D,prod is production's tokens over d24 at 5's, m_D,d8 d8 at LONG's over d8 at 5's. Batches, token counts
-and the law's lrs are the runs' recorded plans (production's: harness.plan_of at max_ratio of d24).
+Analysis, pre-registered, written to RESULTS/lr.json's "analysis": per setting, code bits per byte fitted as the
+parabola in u = ln(multiplier) through its lowest-code run and that run's two neighbours (fit), its vertex u* and the
+grid extension the pre-registered rule calls for; the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@5) against the SDE
+rule's and Step-Law's predictions (each over the law's own fall between the two plans); the horizon exponent
+ln r / ln m_D,d8; production's multiplier of the law's lr, exp(u*_d24@5) * r^(ln m_D,prod / ln m_D,d8) *
+sqrt(m_B,prod / m_B,d8): the exponent carried to production's horizon range (every rule in play is a power law in D:
+the SDE rule, arXiv 2409.19913, Step-Law, the law), and d8's smaller batch growth corrected by the square-root batch
+rule (arXiv 2205.10287; Complete^(d)P's sqrt(m_B)). m_D,prod is production's tokens over d24 at 5's, m_D,d8 d8 at
+LONG's over d8 at 5's. Batches, token counts and the law's lrs are the runs' recorded plans (production's:
+harness.production_plan at max_ratio of d24).
 
     python -m ablations.lr    (ablations/harness.py)
 """
@@ -32,7 +33,7 @@ import math
 
 import numpy as np
 
-from ablations.harness import Run, main, plan_of
+from ablations.harness import Setting, main, production_plan
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.paths import RESULTS
 from nanochat.train.stages import max_ratio
@@ -88,8 +89,7 @@ def analysis(lines: list[dict]) -> dict:
     fits = {f"d{depth} at {ratio:g}": fit(setting(lines, depth, ratio))
             for depth, ratio in ((8, SHORT), (8, LONG), (24, SHORT))}
     d8_short, d8_long, d24_short = recorded_plan(8, SHORT), recorded_plan(8, LONG), recorded_plan(24, SHORT)
-    production = plan_of(Run(n_layer=24, ratio=max_ratio(get_tokenizer(), depth=24), lr_scale=1.0,
-                             tokenizer="production", seed=0))
+    production = production_plan(depth=24, ratio=max_ratio(get_tokenizer(), depth=24))
     m_b_production = production.total_batch_size / d24_short["total_batch_size"]
     m_b_d8 = d8_long["total_batch_size"] / d8_short["total_batch_size"]
     m_d_production = production.num_iterations * production.total_batch_size / tokens(d24_short)
@@ -116,8 +116,10 @@ if __name__ == "__main__":
     # (fit) gains the next factor of 2 and the experiment runs again (harness.main skips evaluated runs)
     grids = {(8, SHORT): [1, 2, 4], (8, LONG): [1, 2, 4, 8], (24, SHORT): [1, 2, 4]}
     while True:
-        main(settings=tuple((depth, ratio, range(1), {f"lr x{s:g}": {"lr_scale": float(s)} for s in scales if s != 1})
-                            for (depth, ratio), scales in grids.items()), production={})
+        main(experiment="lr", settings=[Setting(depth=depth, ratio=ratio, seeds=range(1),
+                                                alternatives={f"lr x{s:g}": {"lr_scale": float(s)}
+                                                              for s in scales if s != 1})
+                                        for (depth, ratio), scales in grids.items()], production={})
         lines = [json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
         extend = {(depth, ratio): fit(setting(lines, depth, ratio))["extend"] for depth, ratio in grids}
         if not any(extend.values()):

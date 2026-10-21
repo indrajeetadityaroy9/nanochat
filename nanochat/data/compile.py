@@ -45,18 +45,20 @@ def compile_row_group(task: tuple[str, str, Path, int]) -> tuple[np.ndarray, np.
     return np.concatenate([np.zeros(0, TOKEN_DTYPE), *ids]).astype(TOKEN_DTYPE), lengths
 
 
-def compile_split(source: str, split: str, tokenizer: Tokenizer, *, row_groups: dict[Path, int]) -> None:
-    """Compile the leading row_groups[file] row groups of curated shards of a source's split, in order (production:
-    every row group of every shard), into <split>.bin and <split>.idx, with <split>.json beside them."""
+def compile_split(source: str, split: str, tokenizer: Tokenizer, *, files: list[Path]) -> None:
+    """Compile curated files of a source's split, every row group in order, into <split>.bin and <split>.idx, with
+    <split>.json beside them."""
     path = split_path(source, split, tokenizer)
-    tasks = [(tokenizer.name, source, file, i) for file, count in row_groups.items() for i in range(count)]
-    print(f"Compiling {len(row_groups)} {split} files ({len(tasks):,} row groups) of '{source}' into {path}.bin")
+    row_groups = [pq.read_metadata(file).num_row_groups for file in files]
+    tasks = [(tokenizer.name, source, file, g) for file, count in zip(files, row_groups, strict=True)
+             for g in range(count)]
+    print(f"Compiling {len(files)} {split} files ({len(tasks):,} row groups) of '{source}' into {path}.bin")
     per_file, offset = [], 0
     with (ProcessPoolExecutor() as pool, open(path.with_suffix(".bin"), "wb") as bin_file,
           open(path.with_suffix(".idx"), "wb") as idx_file):
         idx_file.write(np.zeros(1, np.int64))
         results = pool.map(compile_row_group, tasks)  # in task order, whichever worker finishes first
-        for count in row_groups.values():
+        for count in row_groups:
             documents_in_file = 0
             for tokens, lengths in itertools.islice(results, count):
                 bin_file.write(tokens)
@@ -73,6 +75,4 @@ if __name__ == "__main__":
         # a new output directory per source and tokenizer: compile does not resume
         split_path(source, "val", tokenizer).parent.mkdir(parents=True)
         for split in ("val", "train"):
-            files = curated_files(source, split)
-            compile_split(source, split, tokenizer,
-                          row_groups={file: pq.read_metadata(file).num_row_groups for file in files})
+            compile_split(source, split, tokenizer, files=curated_files(source, split))

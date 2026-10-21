@@ -1,5 +1,5 @@
 [package]
-name = "nanochat_bpe"
+name = "nanochat_crate"
 edition = "2024"
 
 [lib]

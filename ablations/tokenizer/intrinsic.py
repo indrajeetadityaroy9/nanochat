@@ -5,7 +5,7 @@ tokenizer_analysis/metrics/code_ast.py and information_theoretic.py), replicated
 spans its bytes, so positions are bytes where TokEval's are characters (the same on ASCII; a byte-level token can end
 inside a character, which a character map cannot hold), and a token's leading space before anything but whitespace is
 covered by no token (TokEval's _trim_word_start_space_offsets: " foo" starts at foo).
-- AST boundary alignment, per leaf category (TokEval's five; data/bpe leaves.rs): a leaf is start-aligned when a token
+- AST boundary alignment, per leaf category (TokEval's five; data/crate leaves.rs): a leaf is start-aligned when a token
   starts at its first covered byte, end-aligned when one ends at its last, fully aligned when both;
 - identifier fragmentation: the identifier leaves spanning more than one token, and tokens per identifier;
 - indentation consistency (Python): the Spearman correlation, over the indented lines of a corpus, between a line's
@@ -26,7 +26,8 @@ from scipy.stats import spearmanr
 
 from nanochat.data.loader import TOKEN_DTYPE, split_path
 from nanochat.data.sources import SOURCES
-from nanochat.data.tokenizer import Tokenizer, bpe
+from nanochat.data.tokenizer import Tokenizer
+from nanochat.native import data_crate
 
 CATEGORIES = ("identifier", "keyword", "operator", "literal", "delimiter")
 FENCE = re.compile(rb"```(python|py|cpp|c\+\+)[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -59,7 +60,7 @@ def code(corpus: str, tokenizers: list[Tokenizer]) -> dict[str, dict[str, dict]]
     result = {tokenizer.name: {} for tokenizer in tokenizers}
     for grammar in sorted({g for g, _, _ in snippets}):
         mine = [(start, snippet) for g, start, snippet in snippets if g == grammar]
-        parsed = bpe().leaves([snippet.decode() for _, snippet in mine], grammar=grammar)
+        parsed = data_crate().leaves([snippet.decode() for _, snippet in mine], grammar=grammar)
         leaf_starts = np.concatenate([np.frombuffer(s, dtype=np.uint32) + start
                                       for (start, _), (s, _, _, _) in zip(mine, parsed, strict=True)])
         leaf_ends = np.concatenate([np.frombuffer(e, dtype=np.uint32) + start
@@ -98,7 +99,7 @@ def alignment(tokenizer: Tokenizer, tokens: np.ndarray, leaf_starts: np.ndarray,
               categories: np.ndarray, lines: tuple[np.ndarray, np.ndarray, np.ndarray] | None) -> dict:
     """AST boundary alignment per category and overall, identifier fragmentation and (lines given) indentation
     consistency of a split's tokens against its leaves (byte spans in the split)."""
-    lengths = np.array([len(b) for b in tokenizer.token_bytes], dtype=np.int64)
+    lengths = tokenizer.token_lengths
     # a token's leading space before non-whitespace is covered by no token; a whitespace-only token covers indentation
     trim = np.array([b[:1] == b" " and not b.isspace() for b in tokenizer.token_bytes])[tokens]
     blank = np.array([b.isspace() for b in tokenizer.token_bytes])[tokens]

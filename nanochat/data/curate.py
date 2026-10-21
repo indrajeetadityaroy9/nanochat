@@ -7,8 +7,8 @@ Curate deduplicates every source (dedup.py) and holds out 1% of each source's gr
 name, so it is val in every repository source), a codeforces problem, otherwise a document; deduplication keeps one copy
 of a text across all splits. A source of documents keeps its remaining rows in file order. A repository-file source
 becomes repository samples (DeepSeek-Coder arXiv 2401.14196 §2.2): DuckDB partitions its remaining files by the residue
-of the repository name, then each partition splits each repository into its samples (bpe repository_samples: files that
-import one another, dependencies first).
+of the repository name, then each partition splits each repository into its samples (data crate repository_samples:
+files that import one another, dependencies first).
 
 Run by prepare.py, after the sources are normalized.
 """
@@ -29,7 +29,7 @@ import pyarrow.parquet as pq
 from nanochat.data import dedup
 from nanochat.data.schema import REPOSITORY_FILE, SAMPLE_FILE
 from nanochat.data.sources import SOURCES, curated_dir, normalized_path
-from nanochat.data.tokenizer import bpe
+from nanochat.native import data_crate
 from nanochat.paths import DATA
 
 # Workers start without the parent's threads (DuckDB's, obstore's, go-enry's Go runtime): Go does not support fork
@@ -86,9 +86,9 @@ def curate_partition(task: tuple[str, int]) -> None:
     paths, contents = table["relative_path"], table["content"]
     groups = [np.add(group, a)
               for a, b in itertools.pairwise([0, *pc.run_end_encode(table["repo_name"].chunk(0)).run_ends.to_numpy()])
-              for group in bpe().repository_samples(paths.slice(a, b - a).to_pylist(),
-                                                    contents.slice(a, b - a).to_pylist(),
-                                                    grammar=SOURCES[source].grammar)]
+              for group in data_crate().repository_samples(paths.slice(a, b - a).to_pylist(),
+                                                           contents.slice(a, b - a).to_pylist(),
+                                                           grammar=SOURCES[source].grammar)]
     order = np.concatenate(groups)
     samples = np.repeat(np.arange(len(groups)), [len(group) for group in groups])
     cuts = [0]
@@ -130,7 +130,7 @@ def curate(normalized: dict[str, int]) -> None:
     deduplication over every source (dedup.kept). The crate is built once here, before the workers load it. A
     partition worker holds its partition twice at peak (the table and its sorted copy), so as many partitions run at
     once as fit twice in MEMORY."""
-    bpe()
+    data_crate()
     paths = {source: [normalized_path(source, k) for k in range(normalized[source])] for source in SOURCES}
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
         keep = dedup.kept(paths, pool)

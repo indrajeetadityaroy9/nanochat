@@ -120,11 +120,8 @@ def card(record: dict, licenses: dict[str, str | None]) -> str:
 
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with open(path, "rb") as f:
-        while block := f.read(1 << 26):
-            digest.update(block)
-    return digest.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def main() -> None:

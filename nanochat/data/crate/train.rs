@@ -28,6 +28,7 @@ use std::hash::BuildHasher;
 
 use fancy_regex::Regex;
 use fixedbitset::FixedBitSet;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use rayon::prelude::*;
@@ -206,9 +207,9 @@ fn count_sources(words: &[Word], of: &[u32], n_sources: usize, min_len: usize) -
         .count_ones(..) as u32
 }
 
-/// A merge's priority: SA-BPE's F·ln(R), 0 for a pair seen in one source; or BPE's F.
+/// A merge's priority: SA-BPE's F·ln(R), 0 for a pair seen in one source ("sa-bpe"); or BPE's F ("frequency").
 #[derive(Clone, Copy)]
-enum Score {
+pub(crate) enum Score {
     SourceAttributed,
     Frequency,
 }
@@ -218,6 +219,18 @@ impl Score {
         match self {
             Score::SourceAttributed => freq as f64 * (sources as f64).ln(),
             Score::Frequency => freq as f64,
+        }
+    }
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Score {
+    type Error = PyErr;
+
+    fn extract(name: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        match &*name.extract::<PyBackedStr>()? {
+            "sa-bpe" => Ok(Score::SourceAttributed),
+            "frequency" => Ok(Score::Frequency),
+            other => Err(PyValueError::new_err(format!("score {other:?}: \"sa-bpe\" or \"frequency\""))),
         }
     }
 }
@@ -302,12 +315,7 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merge
 #[pyfunction]
 #[pyo3(signature = (texts, sources, *, pattern, n_merges, score))]
 pub(crate) fn train(py: Python<'_>, texts: Vec<PyBackedStr>, sources: Vec<u32>, pattern: &str, n_merges: usize,
-                    score: &str) -> Vec<Pair> {
+                    score: Score) -> Vec<Pair> {
     let pattern = Regex::new(pattern).unwrap();
-    let score = match score {
-        "sa-bpe" => Score::SourceAttributed,
-        "frequency" => Score::Frequency,
-        _ => panic!("score {score}: sa-bpe or frequency"),
-    };
     py.detach(|| train_merges(&texts, &sources, &pattern, n_merges, score))
 }

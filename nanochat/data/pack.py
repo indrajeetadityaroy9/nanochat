@@ -39,19 +39,18 @@ What is packed is what some run can read, no document being read twice (train/st
   the repository-level stage's (stages.readable_rows), k the fewest such that they hold the most rows a repository
   stage draws (repo_rows), the same k for every corpus so that each fits when the stage does.
 
-The crate (tokenizer.bpe: pack) packs one curated shard per call, its documents in parallel; WINDOW calls run at once
-(it releases the GIL), so the cores stay busy through each call's serial best-fit-decreasing. In
+The data crate (data/crate pack.rs) packs one curated shard per call, its documents in parallel; WINDOW calls run at
+once (it releases the GIL), so the cores stay busy through each call's serial best-fit-decreasing (Executor.map's
+buffersize, Python 3.14, would bound the window as in_order does; the image's Python is 3.12). In
 compiled/<source>-<tokenizer data key>/: <split>-T<seq_len>.pieces holds each piece's loader.PIECE_COLUMNS (int64:
 token range [start, end) of <split>.bin, then the range of its FIM example in <split>-T<seq_len>.fim, empty for a
 piece read left to right) in row order; <split>-T<seq_len>.rows the index of each row's first piece, then the number of
 pieces (int64); <split>-T<seq_len>.fim the FIM examples' tokens (uint16; empty unless the split is packed with FIM,
 loader.fim_packed). Shards are written in file order, so the output does not depend on the number of threads.
 
-python -m nanochat.data.pack --stage file   # every corpus's val and train splits at the file-level stage's rows
-python -m nanochat.data.pack --stage repo   # the repo-level stage's corpora's val and train splits at its rows
+python -m nanochat.data.pack   # the file-level stage (every corpus's val and train splits), then the repo-level stage
 """
 
-import argparse
 import json
 import math
 import os
@@ -73,7 +72,8 @@ from nanochat.data.loader import (
     split_path,
 )
 from nanochat.data.sources import SOURCES
-from nanochat.data.tokenizer import FIM_TOKENS, Tokenizer, bpe, get_tokenizer
+from nanochat.data.tokenizer import FIM_TOKENS, Tokenizer, get_tokenizer
+from nanochat.native import data_crate
 
 # The FIM rate of DeepSeek-Coder (arXiv 2401.14196 §3.1.2: "an FIM rate of 0.5"; its Fig. 3 ablation: a higher rate
 # costs left-to-right completion) and arXiv 2207.14255 (50% FIM "for free"); AST-FIM's middles,
@@ -95,10 +95,10 @@ def pack_shard(source: str, split: str, tokenizer: Tokenizer, i: int, *, seq_len
     fim = (dict(rate=FIM_RATE, random=RANDOM_SHARE, single=SINGLE_NODE_SHARE, line=LINE_SHARE, spm=SPM_SHARE,
                 sentinels=[tokenizer.special_tokens[name] for name in FIM_TOKENS])
            if fim_packed(source, split) else None)
-    pieces, counts, tokens = bpe().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
-                                        (int(bounds[i]), int(bounds[i + 1])), row_len=seq_len + 1,
-                                        token_bytes=tokenizer.token_bytes[:tokenizer.bos_token_id],
-                                        pattern=tokenizer.pattern, grammar=SOURCES[source].grammar, fim=fim)
+    pieces, counts, tokens = data_crate().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
+                                               (int(bounds[i]), int(bounds[i + 1])), row_len=seq_len + 1,
+                                               token_bytes=tokenizer.token_bytes[:tokenizer.bos_token_id],
+                                               pattern=tokenizer.pattern, grammar=SOURCES[source].grammar, fim=fim)
     return (np.frombuffer(pieces, np.int64).reshape(-1, PIECE_COLUMNS), np.frombuffer(counts, np.int64),
             np.frombuffer(tokens, TOKEN_DTYPE))
 
@@ -228,9 +228,7 @@ def repo_stage(tokenizer: Tokenizer) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pack the compiled splits into training rows of a stage")
-    parser.add_argument("--stage", type=str, required=True, choices=("file", "repo"))
-    args = parser.parse_args()
     tokenizer = get_tokenizer()
-    bpe()  # built once, before the threads call it
-    {"file": file_stage, "repo": repo_stage}[args.stage](tokenizer)
+    data_crate()  # built once, before the threads call it
+    file_stage(tokenizer)  # the repo-level stage's draw is bounded by the file-level stage's code rows (repo_rows)
+    repo_stage(tokenizer)

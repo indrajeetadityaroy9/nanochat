@@ -35,9 +35,9 @@ COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH
 WORKDIR /workspace/nanochat
 
-# Rust toolchain for the tokenizer crate (nanochat/data/bpe), built on first use like the CUDA decoder: rustup's minimal
-# profile at a pinned version. Crates fetched on that first build go to CARGO_HOME in artifacts/cache (set below): the
-# container's user cannot write the image's /usr/local.
+# Rust toolchain for the Rust crates (nanochat/data/crate, nanochat/inference/syntax), built on first use like the CUDA
+# kernels: rustup's minimal profile at a pinned version. Crates fetched on that first build go to CARGO_HOME in
+# artifacts/cache (set below): the container's user cannot write the image's /usr/local.
 ENV RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
 RUN curl -sSf https://sh.rustup.rs | CARGO_HOME=/usr/local/cargo sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.99.1
 RUN python3 -m pip uninstall -y flash-attn flash-attn-4

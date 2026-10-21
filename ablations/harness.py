@@ -1,10 +1,10 @@
 """
-The mechanism the ablation experiments (ablations/lr.py, tokenizer.py) share. An experiment is production at each of
-its settings (depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms differing from
-production only in their Run fields, each on the same seeds. A run trains production's GPT by
+The mechanism the ablation experiments (ablations/lr.py, ablations/tokenizer/) share. An experiment is production at
+each of its settings (Setting: depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms
+differing from production only in their Run fields, each on the same seeds. A run trains production's GPT by
 scripts/base_train.train and is scored by eval/suite.py evaluate (its likelihood metrics and parse measure), the
-production code paths; its plan (batch, steps, peak lr) is the production model's at its depth and ratio, so every arm
-matches in tokens and hyperparameters.
+production code paths; its plan (batch, steps, peak lr) is the production model's at its depth and ratio
+(production_plan), so every arm matches in tokens and hyperparameters.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
@@ -18,7 +18,7 @@ and RESULTS/<experiment>-curves.jsonl (per run, train/metrics.py curves), and RE
 each alternative's fields, its evaluated runs and, per measure, its difference from production, p and confidence
 interval; null where one run per arm leaves them undefined), the data of the paper's decisions and figures.
 
-    python -m ablations.<experiment>       (every missing run, each in a child process, then the comparison)
+    python -m ablations.<experiment>       (every missing run, each in a child process, then the comparison: main)
     python -m ablations.harness '<fields>'  (one run: harness.Run's fields as JSON)
 """
 import dataclasses
@@ -59,11 +59,26 @@ class Run:
     seed: int            # init and data order
 
 
-def plan_of(run: Run) -> RunPlan:
-    """The production model's plan at the run's depth and ratio (schedule.plan), at the run's peak lr."""
+@dataclass(frozen=True, kw_only=True)
+class Setting:
+    """An experiment's setting: production's model at `depth` trained at `ratio` tokens per scaling parameter on each
+    of `seeds`, and its alternatives {arm name: the Run fields in which the arm departs from production}."""
+    depth: int
+    ratio: float
+    seeds: range
+    alternatives: dict[str, dict]
+
+
+def production_plan(*, depth: int, ratio: float) -> RunPlan:
+    """The production model's plan at a depth and tokens per scaling parameter (schedule.plan)."""
     with torch.device("meta"):
-        production_plan = plan(model=GPT(gpt_config(depth=run.n_layer, stage=FILE_STAGE)), ratio=run.ratio)
-    return dataclasses.replace(production_plan, lr=run.lr_scale * production_plan.lr)
+        return plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=ratio)
+
+
+def plan_of(run: Run) -> RunPlan:
+    """The production model's plan at the run's depth and ratio, at the run's peak lr."""
+    production = production_plan(depth=run.n_layer, ratio=run.ratio)
+    return dataclasses.replace(production, lr=run.lr_scale * production.lr)
 
 
 def tag_of(run: Run) -> str:
@@ -142,20 +157,18 @@ def diverged(tag: str) -> int | None:
     return failures[-1] if failures else None
 
 
-def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], production: dict) -> None:
-    """Run the calling experiment (python -m ablations.<experiment>, a module or a package's __main__): at each setting
-    (depth, tokens per scaling parameter, seeds, alternatives), production and an arm per alternative {name: Run
-    fields}; then compare each alternative with production at each setting. `production`: the Run fields in which the
-    experiment's production arm, and so its every arm, departs from production (the tokenizer ablation's:
-    production's vocabulary on its documents)."""
-    experiment = sys.modules["__main__"].__spec__.name.removesuffix(".__main__").rsplit(".", 1)[1]
+def main(*, experiment: str, settings: list[Setting], production: dict) -> None:
+    """Run an experiment (its records RESULTS/<experiment>.json, .jsonl and -curves.jsonl): at each setting, production
+    and an arm per alternative; then compare each alternative with production at each setting. `production`: the Run
+    fields in which the experiment's production arm, and so its every arm, departs from production (the tokenizer
+    ablation's: production's vocabulary on its documents)."""
     cells = []
-    for depth, ratio, seeds, alternatives in settings:
+    for setting in settings:
         # production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio
-        baseline = [dataclasses.replace(Run(n_layer=depth, ratio=ratio, lr_scale=1.0, tokenizer="production",
-                                            seed=seed), **production) for seed in seeds]
+        baseline = [dataclasses.replace(Run(n_layer=setting.depth, ratio=setting.ratio, lr_scale=1.0,
+                                            tokenizer="production", seed=seed), **production) for seed in setting.seeds]
         cells.append({"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
-                                                 for name, changes in alternatives.items()})
+                                                 for name, changes in setting.alternatives.items()})
     tags = {run: tag_of(run) for arms in cells for arm in arms.values() for run in arm}
     for run, tag in tags.items():
         if evaluation_path(run).exists() or diverged(tag) is not None:
@@ -168,7 +181,7 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], pro
     summaries = []
     with ((RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f,
           (RESULTS / f"{experiment}-curves.jsonl").open("w", encoding="utf-8") as curve_lines):
-        for (depth, ratio, seeds, alternatives), arms in zip(settings, cells, strict=True):
+        for setting, arms in zip(settings, cells, strict=True):
             measures = {name: {tags[run]: evaluation(run) for run in arm if diverged(tags[run]) is None}
                         for name, arm in arms.items()}
             for name, arm in arms.items():
@@ -178,7 +191,8 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], pro
                     ended = [r for r in records if r["kind"] == "end"]
                     identity = {"experiment": experiment, "arm": name, "tag": tag}
                     f.write(json.dumps(identity | suite.record(tag) | {
-                        "setting": {"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds)},
+                        "setting": {"depth": setting.depth, "tokens_per_param": setting.ratio,
+                                    "seeds": len(setting.seeds)},
                         "fields": dataclasses.asdict(run),
                         "measures": measures[name].get(tag),
                         # model size and cost (train/metrics.py run and end records)
@@ -187,13 +201,13 @@ def main(*, settings: tuple[tuple[int, float, range, dict[str, dict]], ...], pro
                                        if tag in measures[name] else None),
                         "diverged_at": diverged(tag)}, allow_nan=False) + "\n")
                     curve_lines.write(json.dumps(identity | metrics.curves(tag), allow_nan=False) + "\n")
-            summaries.append({"depth": depth, "tokens_per_param": ratio, "seeds": len(seeds),
+            summaries.append({"depth": setting.depth, "tokens_per_param": setting.ratio, "seeds": len(setting.seeds),
                               "production_runs": len(measures["production"]),
                               "alternatives": {name: {"fields": changes, "runs": len(measures[name])}
                                                | (compare([*measures[name].values()],
                                                           [*measures["production"].values()])
                                                   if measures[name] and measures["production"] else {})
-                                               for name, changes in alternatives.items()}})
+                                               for name, changes in setting.alternatives.items()}})
     (RESULTS / f"{experiment}.json").write_text(json.dumps({"settings": summaries}, allow_nan=False),
                                                 encoding="utf-8")
 

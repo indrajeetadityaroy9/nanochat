@@ -133,15 +133,15 @@ previous step's output under `paths.DATA`):
    tested: a test retrains the tokenizer and repacks every corpus.
 3. `compile`: every curated document tokenized once, independent of the sequence length (a repository sample's files
    each after a comment with its path).
-4. `pack --stage file`, `pack --stage repo`: documents that do not fit a row cut between whole statements
-   (tree-sitter), the FIM examples made, and each stage's rows packed Best-Fit-Decreasing, no token discarded; only
-   what some run reads (no document read twice). The code group's 10,354,241 8K train rows bound every run's draw of
-   it, so a later group's runs draw at most that × its share / 0.87: text and math keep the leading curated files
-   holding that many rows (ClimbMix 171 of 955 files, 9.74B of its 52.85B tokens; opc-fineweb-math 14 of 37;
-   UltraData-Math 39 of 94), their compiled train splits cut to them; at 32K the repository stage, REPO_SHARE of the
-   steps, draws at most 171,656 rows, so each repository corpus is packed at its last 7 of 99 curated files (177,275
-   rows). The crate packs one curated file per call, its documents in parallel; a call per core runs at once (95% of
-   the GB10's 20 cores busy against 76% one at a time).
+4. `pack`, the file-level stage, then the repository stage: documents that do not fit a row cut between whole statements
+   (tree-sitter), the FIM examples made, and each stage's rows packed Best-Fit-Decreasing, no token discarded; only what
+   some run reads (no document read twice). The code group's 10,354,241 8K train rows bound every run's draw of it, so a
+   later group's runs draw at most that × its share / 0.87: text and math keep the leading curated files holding that
+   many rows (ClimbMix 171 of 955 files, 9.74B of its 52.85B tokens; opc-fineweb-math 14 of 37; UltraData-Math 39 of
+   94), their compiled train splits cut to them; at 32K the repository stage, REPO_SHARE of the steps, draws at most
+   171,656 rows, so each repository corpus is packed at its last 7 of 99 curated files (177,275 rows). The crate packs
+   one curated file per call, its documents in parallel; a call per core runs at once (95% of the GB10's 20 cores busy
+   against 76% one at a time).
 5. `publish`: the tokenizer, the compiled splits and their packs, `data/manifest.json` (code commit, tokenizer,
    sources, stages, FIM shares, every split's documents, tokens and packs, the derivation of what was packed) and the
    dataset card; a commit per corpus, every file's SHA-256 checked against the Hub's, then one squashed commit.
@@ -376,21 +376,21 @@ run, nor its vocabularies and data (`python -m ablations.tokenizer vocabularies`
 
 ### Method
 
-- **Arms.** An experiment is production and one arm per alternative at each of its settings, each on the same seeds;
-  an arm differs from production only in the fields of `harness.Run`. Every run goes through production's code:
-  `scripts/base_train.train` (the file-level then the repository stage, the production data order by seed, τ-law
-  weight decay) and `eval/suite.py evaluate`'s likelihood metrics and parse measure (the same held-out rows for every
-  run); its model is production's GPT, and its tokenizer and packs production's unless `tokenizer` names an arm of
-  `tokenizer.py`, whose production arm is production's vocabulary on that experiment's documents (`harness.main`'s
-  `production` fields). Its plan (batch, steps, peak lr) is the
-  production model's at the setting (`harness.plan_of`), so arms match in tokens and hyperparameters, and every run
-  completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
-  compared before its decay, where loss curves cross and rankings flip (arXiv 2509.02046; arXiv
-  2405.18392). An lr arm's weight decay follows its lr by the τ law, λ = 1/(η τ T), as production's would: the
-  sweep varies η at the fixed EMA timescale τ that sets the decay's effect (arXiv 2405.13698; Power
-  Lines, arXiv 2505.13738). A run that diverges (a non-finite loss or gradient norm; its failure record) is an outcome
-  of a sweep's high end (arXiv 2309.14322): it is recorded with its step and excluded from the fits
-  and comparisons, and the experiment continues; any other failure stops it.
+- **Arms.** An experiment is production and one arm per alternative at each of its settings, each on the same seeds; an
+  arm differs from production only in the fields of `harness.Run`. Every run goes through production's code:
+  `scripts/base_train.train` (the file-level then the repository stage, the production data order by seed, τ-law weight
+  decay) and `eval/suite.py evaluate`'s likelihood metrics and parse measure (the same held-out rows for every run); its
+  model is production's GPT, and its tokenizer and packs production's unless `tokenizer` names an arm of
+  `ablations/tokenizer/`, whose production arm is production's vocabulary on that experiment's documents
+  (`harness.main`'s `production` fields). Its plan (batch, steps, peak lr) is the production model's at the setting
+  (`harness.production_plan`; `harness.plan_of` at the run's lr), so arms match in tokens and hyperparameters, and every
+  run completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
+  compared before its decay, where loss curves cross and rankings flip (arXiv 2509.02046; arXiv 2405.18392). An lr arm's
+  weight decay follows its lr by the τ law, λ = 1/(η τ T), as production's would: the sweep varies η at the fixed EMA
+  timescale τ that sets the decay's effect (arXiv 2405.13698; Power Lines, arXiv 2505.13738). A run that diverges (a
+  non-finite loss or gradient norm; its failure record) is an outcome of a sweep's high end (arXiv 2309.14322): it is
+  recorded with its step and excluded from the fits and comparisons, and the experiment continues; any other failure
+  stops it.
 - **Settings.** No affordable run reaches production (d24 at 490.8 tokens per scaling parameter). `lr.py` measures the
   optimum on production's model at a short horizon, d24 at 5 (3,307 steps of 294,912 tokens, the longest d24 run a
   sweep affords), and the optimum's horizon trend at d8 between 5 (746 steps of 98,304 tokens; B_opt is 0.46
@@ -401,11 +401,11 @@ run, nor its vocabularies and data (`python -m ablations.tokenizer vocabularies`
   Architecture rankings can change with scale (arXiv 2207.10551); for data recipes a single proxy 7× below the target
   picks the target's better of two in about 80% of pairs, best with likelihood metrics such as bits per byte
   (DataDecide, arXiv 2504.11393). No run combines production's width and length: `lr.py` assumes the two trends
-  separable (arXiv 2409.19913's size-independent β), which only a d24 run at 490.8 could check. `tokenizer.py`'s
-  settings and documents: The tokenizer experiment, below.
+  separable (arXiv 2409.19913's size-independent β), which only a d24 run at 490.8 could check. The tokenizer
+  experiment's settings and documents: The tokenizer experiment, below.
 - **Order.** `lr.py` first; its multiplier sets production's peak lr (`scripts/production.py`, hashed into production's
-  tag). `tokenizer.py`'s arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each measured optimum,
-  every arm alike. A run's tag hashes its peak lr, so runs at a superseded lr are never reused.
+  tag). The tokenizer experiment's arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each measured
+  optimum, every arm alike. A run's tag hashes its peak lr, so runs at a superseded lr are never reused.
 - **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
   production's corpus weights, the decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled (the benchmarks' pass@1 is near zero at this size). *repo_32k*: 32K
@@ -433,10 +433,10 @@ run, nor its vocabularies and data (`python -m ablations.tokenizer vocabularies`
   lr is exp(u*_d24@5) · r^(ln m_D,prod / ln m_D,d8) · √(m_B,prod / m_B,d8): the exponent carried 1.24× further in
   log-horizon, to production's m_D,prod = 98.2 (every rule in play is a power law in D: the SDE rule, arXiv 2409.19913,
   Step-Law, the law), and production's batch growth over its range, 4× (294,912 to 1,179,648), against d8's 2×,
-  carried by the square-root batch rule (arXiv 2205.10287; Complete^(d)P's √m_B), so √(4 / 2). m_B and
-  m_D come from the runs' recorded plans and production's (`harness.plan_of` at `max_ratio` of d24). Weight decay
-  follows each run's lr by the τ law (Power Lines' fit for single-epoch pretraining), not Complete^(d)P's
-  λ ∝ √(m_B / m_D). *Comparisons* (`harness.compare`): per setting, each alternative's mean minus production's, the
+  carried by the square-root batch rule (arXiv 2205.10287; Complete^(d)P's √m_B), so √(4 / 2). m_B and m_D come from the
+  runs' recorded plans and production's (`harness.production_plan` at `max_ratio` of d24). Weight decay follows each
+  run's lr by the τ law (Power Lines' fit for single-epoch pretraining), not Complete^(d)P's λ ∝ √(m_B / m_D).
+  *Comparisons* (`harness.compare`): per setting, each alternative's mean minus production's, the
   two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`; pooled with equal arm
   sizes is robust to unequal variances); unpaired although arms share seeds: the six-run comparison's per-pair
   differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048). *Tokenizer*: The tokenizer
@@ -459,7 +459,7 @@ measures the curvatures themselves.
 [estimate]; d8 at 20: 234 s; d8 at 200: about 24 minutes [estimate]; d8 at 490.8: about 54 minutes (52 minutes
 training, 91 s evaluation); d24 at 5: about 65 minutes (52 minutes training at 311K tokens per second, 711 s
 evaluation); d16 at 20: about 35 minutes (30 minutes training at 746K tokens per second, 299 s evaluation). `lr.py`:
-3 × 3 min + 4 × 24 min + 3 × 65 min ≈ 5.0 h, spent on 2026-10-20. `tokenizer.py`: The tokenizer experiment, below.
+3 × 3 min + 4 × 24 min + 3 × 65 min ≈ 5.0 h, spent on 2026-10-20. The tokenizer experiment: below.
 
 Where a run's time goes (2026-10-22). Steps (file-level stage, micro-batches of 12 rows, torch.profiler): d8 (one
 micro-batch) 43 ms per 98,304 tokens, GPU 93% busy (GEMM 49%, FA4 18%, cross entropy 12%, Inductor 11%); d16 (two)
@@ -631,6 +631,17 @@ spaces, one chunk per kind (1,973). English and math chunk alike under productio
   examples, their sentinels present, the loader's rows decoding to C++. `data`'s equal-bytes check holds between
   production's and the first tokenizer's compiled codeforces_cots and kaggle_notebooks (24,152 and 543,748 train
   documents).
+- *The consolidation of the data and ablation code* (2026-10-21, GB10; the code at `d220182` and after it on the same
+  inputs): the data crate (renamed `bpe/` to `crate/`) returns the same bytes: SA-BPE and frequency merges (1,500 on
+  2,000 val documents of 5 sources), MinHash signatures and the duplicates mask (932 documents, 100 of them planted
+  copies), repository samples and leaves (300 repositories and 300 snippets each of stack_edu_python and
+  stack_edu_cpp), the packs of stack_edu_python's first train file (FIM) and of climbmix's first val file; a grammar or
+  score it does not know raises ValueError. `intrinsic.code` (codeforces_cots, kaggle_notebooks; production's tokenizer
+  and the first's), `documents`, the token lengths bits per byte reads and the data key are equal; `harness.main`
+  launches the same runs with the same fields and tags in the same order (`lr.py`'s 10, a tokenizer setting's 4) and
+  writes the same records. Against production's files: `compile_split` (codeforces_cots and ultradata_math_l2, train
+  and val) and `pack_split` (their val splits at 8K) byte for byte, `prepare.normalize_file` (codeforces_cots file 0,
+  ultradata_stack_v3_l2_python file 0: 508,348 rows) table for table; the loader's rows start with BOS.
 - *The tokenizer experiment's measures* (2026-10-21, GB10, real val documents): `leaves.rs` and `intrinsic.py` against
   TokEval's own functions (7d03a61, executed on the same snippets with tree-sitter's Python binding at the crate's
   grammar versions: Python 0.25.0, C++ 0.23.4), production's tokenizer and the first's, 150 ASCII documents of
@@ -1204,9 +1215,9 @@ lists (Table 5: 110K each for the educational and package instructions).
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
 - `nanochat/data/`: the data pipeline (Pipeline, above), one module per step: `sources.py` (the pinned sources, the
   store's paths, a document's text), `prepare.py` (fetch, normalize), `dedup.py`, `curate.py`, `tokenizer.py`,
-  `compile.py`, `pack.py`, `publish.py`; `loader.py` reads the packs into micro-batches; `bpe/`, its Rust crate: the
-  SA-BPE (arXiv 2604.14053) trainer (and frequency BPE, a tokenizer ablation arm), deduplication, repository samples,
-  the packer and the parse-tree leaves of the tokenizer ablation's code metrics.
+  `compile.py`, `pack.py`, `publish.py`; `loader.py` reads the packs into micro-batches; `crate/`, its Rust crate
+  (`native.data_crate`): the SA-BPE (arXiv 2604.14053) trainer (and frequency BPE, a tokenizer ablation arm),
+  deduplication, repository samples, the packer and the parse-tree leaves of the tokenizer ablation's code metrics.
 - `scripts/`: `production.py` (the production run end to end, a checkpoint's evaluation included), `base_train.py` (the
   training driver: setup, resume, the step loop, checkpoints and records).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
@@ -1320,7 +1331,7 @@ Without an arXiv identifier:
 | "NVIDIA GH200 Grace Hopper Superchip" (datasheet) | Hardware: GH200 or H100 SXM5 |
 | "NVIDIA H100 Tensor Core GPU" (datasheet) | Hardware: GH200 or H100 SXM5 |
 | "Efficient BackProp" (Neural Networks: Tricks of the Trade, 1998), §4.6 | the uniform init's std, `model/gpt.py` init_weights |
-| "Fast Splittable Pseudorandom Number Generators" (OOPSLA 2014) | SplitMix64, `data/bpe/dedup.rs` |
+| "Fast Splittable Pseudorandom Number Generators" (OOPSLA 2014) | SplitMix64, `data/crate/dedup.rs` |
 | "The Art of Prompt Design: Prompt Boundaries and Token Healing" (Guidance, 2023) | token healing, `inference/decoder.py` heal |
 | "Statistical Methods for Research Workers" (1925), §20 | the 0.05 significance level, `ablations/harness.py` |
 | "Code tokenizer ablations" (arXiv 2608.18062's companion post, cimeister.github.io, 2026) | The tokenizer experiment; Parse measure |
@@ -1343,6 +1354,6 @@ Repositories, at the commit, file or record cited:
   `guidance-ai/llguidance` (issue #107).
 - `NVIDIA/Megatron-LM` (PR 5395), `deepspeedai/DeepSpeed` (issue 8439).
 - The tokenizer experiment's sources: `cimeister/tokenizer-intrinsic-evals` (7d03a61; `metrics/code_ast.py`,
-  `metrics/_treesitter_worker.py`, `metrics/information_theoretic.py`), replicated in
-  `ablations/tokenizer/intrinsic.py` and `data/bpe/leaves.rs`; `pchizhov/sa-bpe` (`sabpe/scoring.py`); `openai/tiktoken`
+  `metrics/_treesitter_worker.py`, `metrics/information_theoretic.py`), replicated in `ablations/tokenizer/intrinsic.py`
+  and `data/crate/leaves.rs`; `pchizhov/sa-bpe` (`sabpe/scoring.py`); `openai/tiktoken`
   (`tiktoken_ext/openai_public.py`); `mcognetta/TokenizationNoiselessCounterexamples`.

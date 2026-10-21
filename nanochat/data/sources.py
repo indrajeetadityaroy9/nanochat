@@ -37,10 +37,10 @@ class Source:
 
     @property
     def grammar(self) -> str | None:
-        """The language whose tree-sitter grammar (data/bpe) parses a repository-file source, None for other sources:
-        its files are grouped into repository samples by their imports (curate.py) and cut between statements
-        into fill-in-the-middle examples (pack.py); prepare.py keeps them with canonical line ends (prepare.stage) and
-        keeps Python files only if they parse as Python 3."""
+        """The language whose tree-sitter grammar (the data crate's) parses a repository-file source, None for other
+        sources: its files are grouped into repository samples by their imports (curate.py) and cut between statements
+        into fill-in-the-middle examples (pack.py); prepare.py keeps them with canonical line ends
+        (prepare.normalize_file) and keeps Python files only if they parse as Python 3."""
         return self.language if self.schema is REPOSITORY_FILE else None
 
 
@@ -73,7 +73,7 @@ SOURCES = {
 
 
 def normalized_path(source: str, k: int) -> Path:
-    """DATA/normalized/<source>/<k>.parquet: the source's normalized file k (prepare.stage)."""
+    """DATA/normalized/<source>/<k>.parquet: the source's normalized file k (prepare.normalize_file)."""
     return DATA / "normalized" / source / f"{k}.parquet"
 
 

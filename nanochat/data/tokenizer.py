@@ -1,6 +1,6 @@
 """
 BPE tokenizer in the style of GPT-4: merges trained by source-attributed BPE (SA-BPE, F·ln R; arXiv 2604.14053)
-within the chunks of SPLIT_PATTERN in the Rust crate nanochat/data/bpe, encoding by OpenAI's tiktoken, whose
+within the chunks of SPLIT_PATTERN by the data crate (data/crate train.rs), encoding by OpenAI's tiktoken, whose
 regex engine (fancy-regex) the trainer shares.
 
 Trained on every curated source's train split in about equal byte shares (main), writing
@@ -18,19 +18,17 @@ import hashlib
 import json
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from types import ModuleType
 from typing import Literal
 from urllib.parse import urlsplit
 
 import numpy as np
 import pyarrow.parquet as pq
 import tiktoken
-import torch
 
 from nanochat.config import VOCAB_SIZE
 from nanochat.data.schema import REPOSITORY_FILE, TEXT
 from nanochat.data.sources import SOURCES, column_bytes, curated_files, texts
-from nanochat.native import crate_module
+from nanochat.native import data_crate
 from nanochat.paths import DATA, TOKENIZER, TOKENIZER_ABLATION
 
 BOS = "<|bos|>"  # starts every piece of a packed row (data/loader.py); as a target it ends a document or a FIM middle
@@ -53,12 +51,6 @@ SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}|
                  r"""|\s+(?!\S)|\s+""")
 
 
-def bpe() -> ModuleType:
-    """The data crate's Python module (train: the tokenizer trainer; sketch, duplicates: data/dedup.py;
-    repository_samples: data/curate.py; pack: data/pack.py; native.crate_module)."""
-    return crate_module(Path(__file__).parent / "bpe")
-
-
 def tiktoken_file(mergeable: list[bytes]) -> str:
     """tiktoken's file format: each mergeable token in base64 and its rank."""
     return "".join(f"{base64.b64encode(token).decode()} {rank}\n" for rank, token in enumerate(mergeable))
@@ -74,8 +66,10 @@ class Tokenizer:
         self.pattern = pattern
         self.bos_token_id = len(mergeable)
         self.special_tokens = {token: len(mergeable) + i for i, token in enumerate(SPECIAL_TOKENS)}
-        # every id's bytes, a special token's as its text (as tiktoken decodes it)
+        # every id's bytes, a special token's as its text (as tiktoken decodes it), and its byte length in the
+        # documents (a special token stands for no text: 0), for bits per byte
         self.token_bytes = [*mergeable, *(token.encode() for token in SPECIAL_TOKENS)]
+        self.token_lengths = np.array([len(b) for b in mergeable] + [0] * len(SPECIAL_TOKENS), dtype=np.int64)
         self.vocab_size = len(self.token_bytes)
         # identity of the documents' tokens, keying compiled and packed data (loader.split_path): SHA-256 of the split
         # pattern, BOS (its id) and the tiktoken file; the special tokens after BOS do not enter it, though packs hold
@@ -84,13 +78,6 @@ class Tokenizer:
         self.data_key = hashlib.sha256(identity.encode()).hexdigest()
         self.enc = tiktoken.Encoding(self.data_key, pat_str=pattern, special_tokens=self.special_tokens,
                                      mergeable_ranks={token: rank for rank, token in enumerate(mergeable)})
-
-    def get_token_bytes(self, *, device: torch.device | str) -> torch.Tensor:
-        """Byte length of every token id, as an int32 tensor of shape (vocab_size,), used for vocab-size-invariant bits
-        per byte. Special tokens count 0 bytes."""
-        lengths = torch.tensor([len(b) for b in self.token_bytes], dtype=torch.int32)
-        lengths[self.bos_token_id:] = 0
-        return lengths.to(device)
 
 
 def save(directory: Path, mergeable: list[bytes], pattern: str) -> None:
@@ -163,8 +150,8 @@ def merges(docs: list[str], sources: list[int], *, pattern: str, score: Literal[
     merges trained on the sample within the chunks of `pattern` (merge i makes token 256 + i), by SA-BPE's F·ln R or
     by frequency alone (the crate's train)."""
     mergeable = [bytes([i]) for i in range(256)]
-    for left, right in bpe().train(docs, sources, pattern=pattern, n_merges=VOCAB_SIZE - len(SPECIAL_TOKENS) - 256,
-                                   score=score):
+    for left, right in data_crate().train(docs, sources, pattern=pattern,
+                                          n_merges=VOCAB_SIZE - len(SPECIAL_TOKENS) - 256, score=score):
         mergeable.append(mergeable[left] + mergeable[right])
     return mergeable
 

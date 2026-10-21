@@ -101,7 +101,7 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     "rows"}}, "bpb": {group: mixture_bpb, "all": mixture_bpb of every corpus}}, each corpus's packed val split read left
     to right over a systematic sample of its rows, weighted by the stage's mixture weights. cu_seqlens is padded to the
     corpora's most segments: one compiled graph scores all."""
-    token_bytes = tokenizer.get_token_bytes(device=device)
+    token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
     # the sample: n = min(num_rows, sample_rows) rows, row (j x num_rows) // n for j < n (the packer orders each shard's
     # rows longest first, Best-Fit-Decreasing, so a prefix would over-represent long documents), its last micro-batch
     # filled with empty rows: a split within the sample is scored whole, every row of it
@@ -133,7 +133,8 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
     begin with them, and a tokenizer joins them to the prompt's last line break, so the prompt would end inside a token
     (every HumanEval+ and MBPP+ prompt, in each tokenizer measured) and tokenizers would score different bytes."""
     batch_rows, seq_len = FILE_STAGE.batch_rows, FILE_STAGE.seq_len
-    bos, token_bytes = tokenizer.bos_token_id, tokenizer.get_token_bytes(device=device)
+    bos = tokenizer.bos_token_id
+    token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
     cu_seqlens = torch.arange(0, batch_rows * seq_len + 1, seq_len, dtype=torch.int32, device=device)
     results = {}
     for name in SOLUTION_BENCHMARKS:

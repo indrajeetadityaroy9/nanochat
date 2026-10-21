@@ -27,7 +27,7 @@ Benchmarks:
   of a k-line reference; random-span unchanged), decoding stopping there (LinesStop), the standard post-processing of
   this benchmark's pass@1 (arXiv 2410.03103, arXiv 2505.18789 Fig. 4). FIM prompts are not
   healed: they end with a sentinel (PSM) or with the prefix encoded on its own (SPM), the training format, whose
-  character-level spans train mid-token boundaries (data/bpe/pack.rs random_span). Scored by the package's entry point
+  character-level spans train mid-token boundaries (data/crate/pack.rs random_span). Scored by the package's entry point
   (`python -m human_eval_infilling.evaluate_functional_correctness`: 3 s timeout, 4 workers); pass@1 by its
   estimate_pass_at_k.
 

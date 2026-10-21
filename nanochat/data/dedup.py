@@ -11,7 +11,7 @@ Documents are ordered by source (SOURCES), normalized file and row, and a cluste
 ranks copies by stars and forks, which these sources lack). A repository file GitHub Linguist marks vendored or
 generated (go-enry is_vendor / is_generated, as The Stack v2: arXiv 2402.19173 §2.1) takes no part and is dropped.
 
-Signatures and clusters are the crate's (data/bpe dedup.rs): StarCoder2's n-grams of words, rensa's R-MinHash in
+Signatures and clusters are the data crate's (data/crate dedup.rs): StarCoder2's n-grams of words, rensa's R-MinHash in
 SLOTS one-byte slots, exact duplicates by the text's id (its sha1), LSH candidates verified by estimated Jaccard
 similarity at THRESHOLD; a document without an n-gram (fewer than NGRAM words) is deduplicated exactly only.
 """
@@ -29,7 +29,7 @@ from scipy.integrate import quad
 
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
-from nanochat.data.tokenizer import bpe
+from nanochat.native import data_crate
 from nanochat.paths import DATA
 
 # StarCoder2's near-deduplication (bigcode-dataset near_deduplication/bigcode-v2: intra_dedup.py defaults ngram_size,
@@ -59,7 +59,7 @@ def scan(task: tuple[str, Path]) -> list[bytes]:
     for g in range(pf.num_row_groups):
         table = pf.read_row_group(g, columns=["id", "content", "relative_path"] if repository else ["id", "content"])
         texts = table["content"].cast(pa.large_binary()).to_pylist()
-        s, h = bpe().sketch(texts, n=NGRAM, slots=SLOTS)
+        s, h = data_crate().sketch(texts, n=NGRAM, slots=SLOTS)
         signatures.append(s)
         shingled.append(h)
         ids.append(bytes.fromhex("".join(table["id"].to_pylist())))
@@ -86,7 +86,7 @@ def kept(files: dict[str, list[Path]], pool: Executor) -> dict[str, list[np.ndar
             for parts in pool.map(scan, [(source, path) for source in sources for path in files[source]]):
                 for output, part in zip(outputs, parts, strict=True):
                     output.write(part)
-        mask = np.frombuffer(bpe().duplicates(*map(str, paths), rows=r, threshold=THRESHOLD), np.bool_)
+        mask = np.frombuffer(data_crate().duplicates(*map(str, paths), rows=r, threshold=THRESHOLD), np.bool_)
         counts = [pq.read_metadata(path).num_rows for source in sources for path in files[source]]
         masks = iter(np.split(mask, np.cumsum(counts)[:-1]))
         keep |= {source: [next(masks) for _ in files[source]] for source in sources}
