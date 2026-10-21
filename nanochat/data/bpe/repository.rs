@@ -1,4 +1,4 @@
-//! A repository's files as training samples by their dependencies (DeepSeek-Coder, Guo et al. 2024, arXiv 2401.14196
+//! A repository's files as training samples by their dependencies (DeepSeek-Coder, arXiv 2401.14196
 //! §2.2 "Repository Level Data": the dependencies between a repository's files are parsed, the files ordered so that the
 //! context each file relies on precedes it, and each connected set of files is one training sample).
 //!

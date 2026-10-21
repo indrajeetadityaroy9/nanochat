@@ -1,12 +1,12 @@
 """
-BPE tokenizer in the style of GPT-4: merges trained by source-attributed BPE (SA-BPE, F·ln R; Chizhov et al. 2026, arXiv
-2604.14053) within the chunks of SPLIT_PATTERN in the Rust crate nanochat/data/bpe, encoding by OpenAI's tiktoken, whose
+BPE tokenizer in the style of GPT-4: merges trained by source-attributed BPE (SA-BPE, F·ln R; arXiv 2604.14053)
+within the chunks of SPLIT_PATTERN in the Rust crate nanochat/data/bpe, encoding by OpenAI's tiktoken, whose
 regex engine (fancy-regex) the trainer shares.
 
 Trained on every curated source's train split in about equal byte shares (main), writing
 TOKENIZER/tokenizer.tiktoken and tokenizer.pattern. Equal byte shares minimize the expected compute per byte
-over a uniform prior on mixtures, compute per byte being linear in the byte mixture (our derivation, following Tao et
-al. 2024, arXiv 2407.13623, Eq. 5).
+over a uniform prior on mixtures, compute per byte being linear in the byte mixture (our derivation, following
+arXiv 2407.13623, Eq. 5).
 
 python -m nanochat.data.tokenizer
 """
@@ -31,7 +31,7 @@ from nanochat.native import crate_module
 from nanochat.paths import TOKENIZER
 
 BOS = "<|bos|>"  # starts every piece of a packed row (data/loader.py); as a target it ends a document or a FIM middle
-# Fill-in-the-middle sentinels (StarCoder's names; Bavarian et al. arXiv 2207.14255 §3): a FIM example is
+# Fill-in-the-middle sentinels (StarCoder's names; arXiv 2207.14255 §3): a FIM example is
 # <fim_prefix> prefix <fim_suffix> suffix <fim_middle> middle (PSM) or <fim_prefix> <fim_suffix> suffix <fim_middle>
 # prefix middle (SPM), its middle ended by BOS (data/loader.py)
 FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE = "<fim_prefix>", "<fim_suffix>", "<fim_middle>"

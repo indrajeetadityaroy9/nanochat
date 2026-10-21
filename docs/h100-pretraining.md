@@ -21,7 +21,7 @@ applies `Attention` and `MLP` to the RMS-normed stream, each added back.
 | MLP | ReLU², hidden 4C |
 | Residual | `x = resid_lambda·x + x0_lambda·x0` per layer; value embeddings on alternating layers (12 of 24) behind a per-head `2·sigmoid` gate of the normed stream, zero init (gate 1) |
 | Head | untied `lm_head`, zero init, plain cross entropy; no logit softcap or z-loss (QK norm bounds the attention logits) |
-| Vocabulary | 2^15 ids (SA-BPE, BOS + 3 FIM sentinels) |
+| Vocabulary | 2^15 ids (SA-BPE, arXiv 2604.14053; BOS + 3 FIM sentinels, arXiv 2207.14255) |
 | Parameters | 195,096,576 scaling parameters (blocks 169,930,752 + `lm_head` 25,165,824), what the token budget counts; plus the token table (25,165,824) and 12 value-embedding tables (301,989,888, 1.55× the scaling parameters), lookups without FLOPs: 522,252,336 in all |
 | FLOPs per token | 1.557 GFLOP non-embedding: DeepSeek LLM's M (Eq. 2): 6 per block matrix weight (72·n_layer·d² and the value-embedding gates' 0.0003) + 12·n_layer·d·l_seq, l_seq each layer's window at 8K: 1.020 matrices + 0.538 attention; plus 0.151 for `lm_head` |
 | Init | stream-reading matrices and tables uniform with std C^-½; `c_o`, `c_proj`, `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
@@ -55,7 +55,7 @@ applies `Attention` and `MLP` to the RMS-normed stream, each added back.
 - **Not adopted:** Block Attention Residuals (+12% d24 step time, measured before `60138de`, record not kept, for a
   published 1.1% loss gain at 194M parameters, arXiv 2603.15031) and the partial key offset (a speedrun result,
   modded-nanogpt record #49, 124M), either of which would need a native decode path; multi-token prediction, reported
-  to hurt models of this size on code benchmarks (Gloeckle et al., arXiv 2404.19737).
+  to hurt models of this size on code benchmarks (arXiv 2404.19737).
 
 ### Against the reference code models
 
@@ -89,16 +89,16 @@ into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
   corpora, text ClimbMix, math two corpora. Not tested: the code metric falls with the code share by construction, and
   the coding gain Qwen2.5-Coder reports for 70:20:10 (Table 3, 7B on 5.5T tokens; non-monotone: 100:0:0 best, 85:10:5
   worst) is a capability no small run shows.
-- **Objective:** next token, with the packs' fill-in-the-middle pieces read as FIM examples (DeepSeek-Coder §3.1): half
-  the pieces of the repository corpora's train splits, in PSM or SPM order; a middle is a random character span (10%)
-  or AST-FIM's syntactic unit (Gong et al., arXiv 2506.00204), half of those widened to whole lines, the boundaries of
-  line-level infilling (`data/pack.py`). Not tested: DeepSeek-Coder's ablation (Fig. 3) finds a 50% rate balances
-  infilling and left-to-right completion, Bavarian et al. (arXiv 2207.14255) FIM nearly free for left-to-right; a test
+- **Objective:** next token, with the packs' fill-in-the-middle pieces read as FIM examples (arXiv 2207.14255;
+  DeepSeek-Coder §3.1): half the pieces of the repository corpora's train splits, in PSM or SPM order; a middle is a
+  random character span (10%) or AST-FIM's syntactic unit (arXiv 2506.00204), half of those widened to whole lines, the
+  boundaries of line-level infilling (`data/pack.py`). Not tested: DeepSeek-Coder's ablation (Fig. 3) finds a 50% rate
+  balances infilling and left-to-right completion, arXiv 2207.14255 FIM nearly free for left-to-right; a test
   repacks every corpus.
 - **Stages** (`config.FILE_STAGE`, `config.REPO_STAGE`; Qwen2.5-Coder §3.2): 8,192-token rows of every corpus, then the
   last 300/5,500 of the steps on 32,768-token rows of the repository corpora; a model never trained at 32K is worse at
-  32K by construction (Qwen2.5-Coder §3.2). One RoPE base, 10^6 (`config.ROPE_BASE`), from the first step: it meets Men
-  et al.'s lower bound for a 32K context (arXiv 2405.14591), as Llama 3 trains at 5 × 10^5 from the start (arXiv
+  32K by construction (Qwen2.5-Coder §3.2). One RoPE base, 10^6 (`config.ROPE_BASE`), from the first step: it meets the
+  lower bound of arXiv 2405.14591 for a 32K context, as Llama 3 trains at 5 × 10^5 from the start (arXiv
   2407.21783 §3.2), and is Qwen2.5-Coder's repository-stage base; Code Llama's ablation (Appendix G.4) shows the base
   must be raised for long context, which production's already is. Staging (10^4 at 8K, as Code Llama and
   Qwen2.5-Coder) would add a base change for the repository stage to adapt to, with no published gain at 8K.
@@ -113,7 +113,7 @@ previous step's output under `paths.DATA`):
    duplicates dropped across all corpora and splits (`dedup.py`: StarCoder2's MinHash LSH), and GitHub Linguist's
    vendored and generated files; 1% of each source's groups (a repository, a codeforces problem, else a document) held
    out as val; repository files grouped into repository samples, dependencies first (DeepSeek-Coder §2.2).
-2. `tokenizer`: SA-BPE merges (Chizhov et al., arXiv 2604.14053) trained on about equal byte shares of every source's
+2. `tokenizer`: SA-BPE merges (arXiv 2604.14053) trained on about equal byte shares of every source's
    train split, encoded by tiktoken. The vocabulary, 2^15, is not tested: a test retrains the tokenizer and repacks
    every corpus.
 3. `compile`: every curated document tokenized once, independent of the sequence length (a repository sample's files
@@ -128,8 +128,8 @@ previous step's output under `paths.DATA`):
 | Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271, C = M·D (`train/schedule.py`) |
 | Peak lr | 2.3887e-3, every group: 2.5467 × the law's 9.3796e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured (`scripts/production.py` `LR_SCALE`; Peak lr, below) |
 | Steps | 81,166 (95.75B tokens, 490.77 per scaling parameter); repository stage from step 76,739 | `schedule.plan` |
-| Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (Ma & Yarats, arXiv 1910.04209) |
-| Decay | linear to zero | Bergsma et al., arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
+| Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (arXiv 1910.04209) |
+| Decay | linear to zero | arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
 | Optimizers | AdamW (fused) on tables and vectors; Muon with `match_rms_adamw` on matrices | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
 | Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.1246 at d24's peak lr: 1/(ηλ) = 3,360 steps, 4.0B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
@@ -141,7 +141,7 @@ Muon's momentum and AdamW's moments; both updates are invariant to a gradient sc
 Newton–Schulz orthogonalization), so clipping changes training only where the norm jumps, by down-weighting that
 step's gradient. That makes a fixed threshold's scale-dependence harmless (at 1.0 the clipped fraction of steps ranged
 from 0.2% to 97% across the configurations of an earlier d8 screen), including the norm's late rise under a decaying
-lr and weight decay (Defazio, arXiv 2506.02285; the norms below). Its direct measurements, single-seed d8 pairs, have
+lr and weight decay (arXiv 2506.02285; the norms below). Its direct measurements, single-seed d8 pairs, have
 it lower: by 0.003 bits per byte on average and on all 11 corpora in the previous regime (below), by 0.0034 on code in
 this one (production's arm, Ablations), under the paired comparison's spread of per-pair differences (sd 0.0065 on 8K
 code) and below what an affordable experiment resolves (about 0.008, Power). At the production batch and the law's lr
@@ -194,8 +194,8 @@ agree within 7% with nanochat's hand-tuned Muon lr at the same widths.
   92d63d4 `optim.py:393`) is the AdamW-matched 0.1/√C, 3.61e-3 at width 768 and 6.25e-3 at 256, against the measured
   optima 3.37e-3 (d24 at 5) and 6.47e-3 (d8 at 200); d8's optimal lr falls to 0.574 over 40× the tokens with its batch
   doubled (exponent 0.150, 0.244 net of √2 for the batch), against DeepSeek LLM's 0.125 under the same batch
-  co-scaling and Bjorck et al.'s 0.32 at fixed batch and weight decay, where the τ law moves the weight decay instead
-  (Wang & Aitchison, arXiv 2405.13698); the SDE rule's exponent 1/2 is too large, as arXiv 2604.27077 also finds. At
+  co-scaling and arXiv 2409.19913's 0.32 at fixed batch and weight decay, where the τ law moves the weight decay instead
+  (arXiv 2405.13698); the SDE rule's exponent 1/2 is too large, as arXiv 2604.27077 also finds. At
   d24 at 5's curvature (0.0089 per (ln lr)²) a 30% lr error costs 0.0006. Wall time 13:09–18:39 UTC, 37 minutes of it
   the GPU idle between the two `lr.py` invocations (a waiting script matched its own tmux session).
 
@@ -204,11 +204,11 @@ agree within 7% with nanochat's hand-tuned Muon lr at the same widths.
 - *Weight decay:* the τ law (Power Lines) is the regime's documented choice, tested with the regime as a whole by the
   paired comparison below.
 - *Warmup:* 2/(1 − β₂) = 40 steps: 0.11% of d8's run at 490.8, 0.05% of production. Warmup's benefit is a larger
-  stable peak lr (Kalra & Barkeshli, arXiv 2406.09405) by bounding early update size, which normalized matrix updates
-  such as Muon's already bound (Kosson et al., arXiv 2410.23922); `lr.py`'s × 2 arm probes that margin, its per-step
+  stable peak lr (arXiv 2406.09405) by bounding early update size, which normalized matrix updates
+  such as Muon's already bound (arXiv 2410.23922); `lr.py`'s × 2 arm probes that margin, its per-step
   loss and gradient norms showing any early instability.
 - *The repository stage's schedule:* the linear decay continues through it, as DeepSeek-Coder (§3.6) and Qwen2.5-Coder
-  continue theirs; re-warming (Gupta et al., arXiv 2308.04014) is measured for continued pretraining after a finished
+  continue theirs; re-warming (arXiv 2308.04014) is measured for continued pretraining after a finished
   schedule.
 - *NorMuon:* its reported gain (arXiv 2510.05491: 6% efficiency at 124M) is about 0.002 bits per byte, below the
   experiments' resolution.
@@ -240,7 +240,8 @@ lower on every seed), none significantly higher; general text is significantly h
 higher at p = 0.07. Training: no non-finite loss or gradient in either arm; maximum gradient norm 4.39 / 5.43 / 5.13
 without clipping against 7.85 / 10.00 / 6.16 (measured before the standard regime's clip); training loss over the last
 5% of steps (repository stage) 1.702 / 1.654 / 1.710 against 1.739 / 1.729 / 1.736. pass@1 at d8 is about 0 (seed 0:
-HumanEval+ 0, MBPP+ base 0.0026, single-line infilling SPM 0.036), so the comparison rests on bits per byte.
+HumanEval+ 0, MBPP+ base 0.0026, single-line infilling, arXiv 2207.14255, SPM 0.036), so the comparison rests on bits
+per byte.
 
 An earlier unpaired comparison agrees: seed 0 of the baseline (2,987 steps of 98,304 tokens, peak lr 2.73e-3;
 `d8-r20-s0-d0-d69671850bea`) against the previous regime's runs (WSD, RoPE base 10^4 → 10^6 at the repository stage;
@@ -330,11 +331,11 @@ multiplier is production's. `value_embeds.py` has not run.
   `model.Candidate`, which is production's GPT unless `value_embeds` differs. Its plan (batch, steps, peak lr) is the
   production model's at the setting (`harness.plan_of`), so arms match in tokens and hyperparameters, and every run
   completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
-  compared before its decay, where loss curves cross and rankings flip (Wen et al., arXiv 2509.02046; Hägele et al.,
-  arXiv 2405.18392). An lr arm's weight decay follows its lr by the τ law, λ = 1/(η τ T), as production's would: the
-  sweep varies η at the fixed EMA timescale τ that sets the decay's effect (Wang & Aitchison, arXiv 2405.13698; Power
+  compared before its decay, where loss curves cross and rankings flip (arXiv 2509.02046; arXiv
+  2405.18392). An lr arm's weight decay follows its lr by the τ law, λ = 1/(η τ T), as production's would: the
+  sweep varies η at the fixed EMA timescale τ that sets the decay's effect (arXiv 2405.13698; Power
   Lines, arXiv 2505.13738). A run that diverges (a non-finite loss or gradient norm; its failure record) is an outcome
-  of a sweep's high end (Wortsman et al., arXiv 2309.14322): it is recorded with its step and excluded from the fits
+  of a sweep's high end (arXiv 2309.14322): it is recorded with its step and excluded from the fits
   and comparisons, and the experiment continues; any other failure stops it.
 - **Settings.** No affordable run reaches production (d24 at 490.8 tokens per scaling parameter). `lr.py` measures the
   optimum on production's model at a short horizon, d24 at 5 (3,307 steps of 294,912 tokens, the longest d24 run a
@@ -344,18 +345,18 @@ multiplier is production's. `value_embeds.py` has not run.
   correction is the same as at 490.8 at less than half the cost (Analysis); one seed per setting, the cheap settings
   first: at d8 at 20 the arms × 1 and × 2 differed by 0.0179 and 0.0187 bits per byte on seeds 0 and 1 (Peak lr).
   `value_embeds.py` measures its decision's dependence on training length at d8 and on width at a short length and
-  combines them as separable (log-linear in each): d16 (67.1M scaling parameters, 1/2.9 of d24) at Chinchilla's 20, 4
-  seeds, the decision's setting; d8 at 20, 4 seeds, and at production's ratio, one seed, for the gain's trends in width
-  and length: it shrinks with scale (−0.016 at d12, −0.010 at d20, MoVE), and d8's tables are 2.3× its scaling
-  parameters against d24's 1.55×. Architecture rankings can change with scale (Tay et al., arXiv 2207.10551); for data
-  recipes a single proxy 7× below the target picks the target's better of two in about 80% of pairs, best with
+  combines them as separable (log-linear in each): d16 (67.1M scaling parameters, 1/2.9 of d24) at Chinchilla's (arXiv
+  2203.15556) 20, 4 seeds, the decision's setting; d8 at 20, 4 seeds, and at production's ratio, one seed, for the
+  gain's trends in width and length: it shrinks with scale (−0.016 at d12, −0.010 at d20, MoVE), and d8's tables are
+  2.3× its scaling parameters against d24's 1.55×. Architecture rankings can change with scale (arXiv 2207.10551); for
+  data recipes a single proxy 7× below the target picks the target's better of two in about 80% of pairs, best with
   likelihood metrics such as bits per byte (DataDecide, arXiv 2504.11393). No run combines production's width and
-  length: the experiments assume the two trends separable (Bjorck et al.'s size-independent β for the lr; a log-linear
-  trend for value embeddings), which only a d24 run at 490.8 could check.
+  length: the experiments assume the two trends separable (arXiv 2409.19913's size-independent β for the lr; a
+  log-linear trend for value embeddings), which only a d24 run at 490.8 could check.
 - **Order.** `lr.py` first; its multiplier is production's peak lr (`scripts/production.py` `LR_SCALE`, hashed into
   production's tag). `value_embeds.py`'s arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each
   measured optimum: its baseline is under-tuned unless its settings take their own optima (under-tuned baselines
-  inflate gains: Kaddour et al., arXiv 2307.06440; Wen et al.). A run's tag hashes its peak lr, so runs at a superseded
+  inflate gains: arXiv 2307.06440; arXiv 2509.02046). A run's tag hashes its peak lr, so runs at a superseded
   lr are never reused.
 - **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
   production's corpus weights, the decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
@@ -373,16 +374,16 @@ multiplier is production's. `value_embeds.py` has not run.
   all runs placing the vertex inside (× 3.33): that quadratic's vertex is pulled by the far arms of an asymmetric curve
   (planted below: an optimum × 3.0 four times steeper below than above, read × 3.95 by one quadratic over × 1–8, × 3.72
   by the bracketing parabola). The measured d8 ratio r = exp(u*_d8@200 − u*_d8@5) is the optimum's change over a token
-  ratio m_D,d8 = 40.0, assumed width-independent (Bjorck et al.'s size-independent horizon exponent, arXiv
+  ratio m_D,d8 = 40.0, assumed width-independent (the size-independent horizon exponent of arXiv
   2409.19913), and the test of the transfer rules, which disagree on its direction: Complete^(d)P's AdamW SDE rule,
-  η ∝ √(m_B / m_D) (Mlodozeniec et al., arXiv 2512.22382, Table 1), over the law's own fall predicts
+  η ∝ √(m_B / m_D) (arXiv 2512.22382, Table 1), over the law's own fall predicts
   √(2 / 40.0) / 0.631 = 0.354 (d8's batch goes from 1 to 2 micro-batches, the law's lr falls to 0.631 of itself);
-  Step-Law (Li et al., arXiv 2503.04715, η = 1.79 N^−0.713 D^0.307) predicts 40.0^0.307 / 0.631 = 4.92; both are
+  Step-Law (arXiv 2503.04715, η = 1.79 N^−0.713 D^0.307) predicts 40.0^0.307 / 0.631 = 4.92; both are
   reported against the measurement, with the horizon exponent ln r / ln m_D,d8. Production's multiplier of the law's
   lr is exp(u*_d24@5) · r^(ln m_D,prod / ln m_D,d8) · √(m_B,prod / m_B,d8): the exponent carried 1.24× further in
-  log-horizon, to production's m_D,prod = 98.2 (every rule in play is a power law in D: the SDE rule, Bjorck et al.,
+  log-horizon, to production's m_D,prod = 98.2 (every rule in play is a power law in D: the SDE rule, arXiv 2409.19913,
   Step-Law, the law), and production's batch growth over its range, 4× (294,912 to 1,179,648), against d8's 2×,
-  carried by the square-root batch rule (Malladi et al., arXiv 2205.10287; Complete^(d)P's √m_B), so √(4 / 2). m_B and
+  carried by the square-root batch rule (arXiv 2205.10287; Complete^(d)P's √m_B), so √(4 / 2). m_B and
   m_D come from the runs' recorded plans and production's (`harness.plan_of` at `max_ratio` of d24). Weight decay
   follows each run's lr by the τ law (Power Lines' fit for single-epoch pretraining), not Complete^(d)P's
   λ ∝ √(m_B / m_D). *Value embeddings*: per setting, the alternative's mean code minus production's, the two-sided
@@ -391,7 +392,7 @@ multiplier is production's. `value_embeds.py` has not run.
   as g(d16, 20) · g(d8, 490.8) / g(d8, 20) · (g(d16, 20) / g(d8, 20))^0.70 (0.70 = ln(195.1 / 67.1) / ln(67.1 / 14.7),
   log-linear in scaling parameters), or g(d16, 20) alone if g(d8, 20)'s interval includes zero. They are removed iff
   that prediction is below the compute their removal frees, 0.05 · L · ln r (L production's code, r the alternative's
-  tokens per second over production's at d16; Kaplan et al., arXiv 2001.08361 §1.2: loss ∝ C^−0.050); otherwise they
+  tokens per second over production's at d16; arXiv 2001.08361 §1.2: loss ∝ C^−0.050); otherwise they
   stay, their gain and its interval reported. Unpaired although arms share seeds: the six-run comparison's per-pair
   differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048).
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
@@ -400,7 +401,7 @@ multiplier is production's. `value_embeds.py` has not run.
 bits per byte on code (0.0044 on solutions, 0.0036 on 32K repository); both experiments' 4-seed settings measure it
 where they run. Value embeddings at d16, 4 runs against 4 (6 df): standard error 0.71σ = 0.0024, 80% power at an
 effect of 0.008, below the published 0.010 to 0.016. lr: each vertex rests on the arms' differences within one seed,
-which varied by 0.0008 across 2 seeds at d8 at 20 against a 0.018 effect; at the curvature Bjorck et al.'s Llama-1
+which varied by 0.0008 across 2 seeds at d8 at 20 against a 0.018 effect; at the curvature arXiv 2409.19913's Llama-1
 estimate implies (0.027 nats for a 2.5× lr; about 0.026 bits per byte per (ln lr)² at 3.5 bytes per token [assumed])
 and per-run noise σ, a three-point fit places a vertex within about ±14% (one standard error, 0.13 in u). The d8 ratio
 r combines two vertices' errors, about ±20% (0.185 in u); raised to 1.24 for production's horizon range it
@@ -494,9 +495,9 @@ extending).
 - *Real data* (screen run 0, `d8-r20-s0-d0-2449fca0cf29`): the data on disk is the pinned Hub revision
   (`6744e406…`, the download's recorded commit); the run record's mixture is the 11 production corpora at their
   weights; the first training micro-batch, rebuilt as `train` reads it (data seed 0), decodes to real C++ files and
-  a FIM example; the loss evaluation reads the held-out val splits (stack_edu_python's first document: a word2vec
-  module) and the benchmarks' reference solutions (HumanEval+ 164, MBPP+ 378, HumanEval-X C++ 164). The trained
-  model's loss on that batch is 1.869 nats against 11.705 on uniformly random tokens (ln V = 10.397).
+  a FIM example (arXiv 2207.14255); the loss evaluation reads the held-out val splits (stack_edu_python's first
+  document: a word2vec module) and the benchmarks' reference solutions (HumanEval+ 164, MBPP+ 378, HumanEval-X C++ 164).
+  The trained model's loss on that batch is 1.869 nats against 11.705 on uniformly random tokens (ln V = 10.397).
 
 ## H100 implementation
 
@@ -523,7 +524,7 @@ checkpointing, config frameworks.
 On real rows (12 micro-batches of 12 rows, `torch.profiler`): 3,741 ms, 315K tok/s, 100% GPU-busy, peak 69.6 GiB;
 GEMM 53%, FA4 25%, Inductor 14%; the repository stage's (12 of 3 rows) 4,016 ms, measured with Inductor's
 coordinate-descent tuning (0.8% faster at the file level; off, Reproducibility). At 3,741 ms the step's model FLOPs
-utilization (PaLM, Chowdhery et al., arXiv 2204.02311 App. B: observed tokens per second times the model's FLOPs per
+utilization (PaLM, arXiv 2204.02311 App. B: observed tokens per second times the model's FLOPs per
 token, 6N + 12LHQT, over the hardware's peak) is 54.5% of the H100's 989 dense bf16 TFLOP/s (539 TFLOP/s; M plus
 `lm_head`, T each layer's window) and 37.3% without self-attention (369 TFLOP/s, 6N alone, as PaLM also reports it).
 Production's step on 2026-10-21 (two runs): 3,700 / 3,689 ms, GEMM 1,966 ms, FA4
@@ -740,7 +741,7 @@ documents), the compiled evaluation losses and the native decoder:
 |---|---|
 | Resume (the H100, `60138de`, packed rows): d8 at 20 tokens per parameter (`d8-r20-s0-d0-d69671850bea`), killed with `docker kill` at step 991 and relaunched | continued from its step-900 checkpoint, switched to the 32K stage at step 2,824 (`repo_start`), finished at step 2,987; the step-2,824 checkpoint kept |
 | Checkpoints and lineage (2026-10-20, NVIDIA GB10; the image of this `uv.lock`; `train` on synthetic token rows, d8, 74 steps, checkpoints at 20, 40, 70 and 74) | a run killed after its step-40 checkpoint resumed there (attempt 1), switched to the 32K stage at step 70 and ended at 74; the final checkpoint reloaded reproduces the live model's loss bitwise; against the code of `results/lr.json` (`8caecb9`) the lr is bitwise equal at every step and the loss bitwise through step 5, then within 5.1e-6 relative, as an uninterrupted and a resumed run of the same code differ (4.8e-6: the backward's atomics) |
-| End to end (2026-10-20, through the `base_train` and `base_eval` command lines `scripts/production.py` has since replaced with direct calls in spawned processes): training with lr scale 2.5 (d8, 74 steps), the evaluation (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
+| End to end (2026-10-20, through the `base_train` and `base_eval` command lines `scripts/production.py` has since replaced with direct calls in spawned processes): training with lr scale 2.5 (d8, 74 steps), the evaluation (loss, reference solutions, EvalPlus (arXiv 2305.01210), MultiPL-E, infilling (arXiv 2207.14255); greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
 | Run identity (`60138de`) | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
 
 ## Evaluation
@@ -748,34 +749,34 @@ documents), the compiled evaluation losses and the native decoder:
 Every metric is a published one, computed as its source computes it. `eval/suite.py evaluate` scores a checkpoint;
 production's checkpoints take everything, the ablation runs the likelihood metrics alone.
 
-**Likelihood metrics** (`eval/bpb.py`), in bits per byte (The Pile, Gao et al., arXiv 2101.00027: summed bits over
+**Likelihood metrics** (`eval/bpb.py`), in bits per byte (The Pile, arXiv 2101.00027: summed bits over
 summed UTF-8 bytes, tokenizer-independent):
 
 - *Held-out corpora:* each training corpus's val split at 8K and at 32K, per context bucket (≤ 8K, > 8K: Code Llama's
-  loss by context length, arXiv 2308.12950 §3.3), pooled by the stage's mixture weights: the AR test loss of Bavarian
-  et al. (arXiv 2207.14255 §3).
+  loss by context length, arXiv 2308.12950 §3.3), pooled by the stage's mixture weights: the AR test loss of arXiv
+  2207.14255 §3.
 - *Reference solutions:* the bits of HumanEval+'s, MBPP+'s and HumanEval-X C++'s reference solutions given their
-  prompts, the decision measure at scales where pass@1 is near zero: the task loss of Bhagia et al. (arXiv 2412.04403
-  §2); the correct answer's likelihood is DataDecide's best small-scale predictor for HumanEval and MBPP (arXiv
-  2504.11393 §3.3); BPB raises the signal-to-noise ratio of most benchmarks (Heineman et al., arXiv 2508.13144 §5.3)
-  and tracks pass@1 across checkpoints where corpus loss does not (Xing et al., arXiv 2604.07769).
+  prompts, the decision measure at scales where pass@1 is near zero: the task loss of arXiv 2412.04403
+  §2; the correct answer's likelihood is DataDecide's best small-scale predictor for HumanEval and MBPP (arXiv
+  2504.11393 §3.3); BPB raises the signal-to-noise ratio of most benchmarks (arXiv 2508.13144 §5.3)
+  and tracks pass@1 across checkpoints where corpus loss does not (arXiv 2604.07769).
 
-**Benchmarks** (`eval/code_eval.py`): EvalPlus HumanEval+ and MBPP+ (base and plus pass@1), MultiPL-E HumanEval and
-MBPP in C++, and HumanEval single-line, multi-line and random-span infilling (PSM and SPM), each scored by its official
-evaluator, by up to three generation modes:
+**Benchmarks** (`eval/code_eval.py`): EvalPlus (arXiv 2305.01210) HumanEval+ and MBPP+ (base and plus pass@1), MultiPL-E
+HumanEval and MBPP in C++, and HumanEval single-line, multi-line and random-span infilling (arXiv 2207.14255; PSM and
+SPM), each scored by its official evaluator, by up to three generation modes:
 
 | Mode | Decoding | Score |
 |---|---|---|
 | `greedy` | left-to-right argmax, one completion per problem | pass@1 as DeepSeek-Coder (arXiv 2401.14196 §4.1), Qwen2.5-Coder and EvalPlus's leaderboard report it |
-| `sampled` (EvalPlus, MultiPL-E) | 20 samples per problem at temperature 0.2 from the nucleus top-p 0.95 (`code_eval.SAMPLES`, `SAMPLE_TEMPERATURE`, `TOP_P`; the decoder's `k_nucleus`) | pass@1 by Chen et al.'s unbiased estimator (Codex, arXiv 2107.03374 §2.1: top p 0.95; T = 0.2 the pass@1 optimum), as MultiPL-E (its pass@1 stable from about 20 samples) and StarCoder2 (20 samples at T = 0.2) report it, computed by each benchmark's evaluator |
-| `filtered` | left-to-right prompts healed (Guidance; Lundberg 2023), Python and FIM middles under the syntax constraint (FIM: given the prefix and suffix, no healing); the greedy candidate, then seeded samples until one has no post-generation diagnostic and passes the prompt's own examples, at most 10 (`verify.ATTEMPTS`); the accepted candidate, else the greedy one | filtered pass@1 (Codex's filtered pass@k, Chen et al. arXiv 2107.03374 §3.5; AlphaCode §4.5): a system measurement, not comparable to pass@1 tables |
+| `sampled` (EvalPlus, MultiPL-E) | 20 samples per problem at temperature 0.2 from the nucleus (arXiv 1904.09751) top-p 0.95 (`code_eval.SAMPLES`, `SAMPLE_TEMPERATURE`, `TOP_P`; the decoder's `k_nucleus`) | pass@1 by Codex's unbiased estimator (arXiv 2107.03374 §2.1: top p 0.95; T = 0.2 the pass@1 optimum), as MultiPL-E (its pass@1 stable from about 20 samples) and StarCoder2 (20 samples at T = 0.2) report it, computed by each benchmark's evaluator |
+| `filtered` | left-to-right prompts healed ("The Art of Prompt Design: Prompt Boundaries and Token Healing", Guidance, 2023), Python and FIM middles under the syntax constraint (FIM: given the prefix and suffix, no healing); the greedy candidate, then seeded samples until one has no post-generation diagnostic and passes the prompt's own examples, at most 10 (`verify.ATTEMPTS`); the accepted candidate, else the greedy one | filtered pass@1 (Codex's filtered pass@k, arXiv 2107.03374 §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
 
 - **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E's paper drew 200 and
   the BigCode leaderboard 50: the same estimate, with more variance per problem. HumanEval infilling is greedy, not
-  Bavarian et al.'s (temperature 0.2, 100–200 samples). The prompts' examples overlap the scored base tests (MBPP+:
+  arXiv 2207.14255's (temperature 0.2, 100–200 samples). The prompts' examples overlap the scored base tests (MBPP+:
   373 of 378 prompt asserts use a base input; HumanEval+: 55 of 164 tasks share a doctest input), so the filtered mode
   favours base over plus pass@1.
-- **Infilling** (human-eval-infilling, Bavarian et al.): each middle is cut to the reference middle's line count, a
+- **Infilling** (human-eval-infilling, arXiv 2207.14255): each middle is cut to the reference middle's line count, a
   single-line middle to its first line (the benchmark's standard post-processing for pass@1: arXiv 2410.03103; arXiv
   2505.18789 Fig. 4), and decoding stops there; random-span middles end at BOS. Both orders, PSM and SPM, are scored
   greedy; the filtered mode runs SPM.
@@ -789,7 +790,7 @@ same prompt (each search attempt after the first) starts at its last token. The 
 weight tile and 16-slot group, weights streamed through a register ring and inputs copied by `cp.async`; every sum's
 order depends on the shapes and the slot's position alone, so a request's tokens do not depend on the batch, the store
 or timing. A `Request` carries the prompt, budget, stop rule, `temperature` (0 = argmax, ties to the lowest id), `top_p`
-(below 1: the sample from the nucleus, Holtzman et al., ICLR 2020, §3.1; `decode.cu k_nucleus` keeps the token set
+(below 1: the sample from the nucleus, arXiv 1904.09751 §3.1; `decode.cu k_nucleus` keeps the token set
 Hugging Face's `TopPLogitsWarper` keeps), `seed` (the sample at position *i* depends only on seed and *i*) and an
 optional constraint (`heal()`'s first token, the Python syntax constraint, `AllOf()` of both), whose masks each step
 takes for all constrained slots in one batched call (`step_masks`); a prompt whose length plus budget exceeds the
@@ -817,18 +818,18 @@ context raises `ValueError`.
   prompts × 3 rounds (128 tokens each), 2026-10-20: rounds after the first 0.39–0.40 s without the store, 0.26 s with
   it (−35%); tokens identical with and without it, and to the requests decoded alone.
 
-**Constrained decoding: syntax, not types.** Type-constrained decoding (Mündler et al., PLDI 2025, arXiv 2504.09246)
+**Constrained decoding: syntax, not types.** Type-constrained decoding (arXiv 2504.09246)
 cut TypeScript compilation errors by 75.3% (HumanEval) and 52.1% (MBPP). Its artifact
 (`eth-sri/type-constrained-code-generation`) implements TypeScript only (`typesafe_llm/parser/parser_ts.py`), as do its
-10 forks (9 identical, the tenth at upstream's last commit); ChopChop (Nagy et al., POPL 2026, arXiv 2509.00360,
+10 forks (9 identical, the tenth at upstream's last commit); ChopChop (arXiv 2509.00360,
 `timothytmzhou/chopchop`) ships TypeScript and e-graph constrainers; Monitor-Guided Decoding (arXiv 2306.10763,
-`microsoft/monitors4codegen`) constrains member access and was evaluated on Java, C# and Rust. Biagiola et al. (arXiv
-2606.21619) re-ran the TypeScript setup over 6 models and 10 seeds: unconstrained decoding was significantly more
+`microsoft/monitors4codegen`) constrains member access and was evaluated on Java, C# and Rust. arXiv
+2606.21619 re-ran the TypeScript setup over 6 models and 10 seeds: unconstrained decoding was significantly more
 functionally correct (Gemma-2 2B HumanEval 35.7% vs 32.0%; Qwen-2.5 32B 82.3% vs 72.3%), because the incomplete
 constrainer pushes the model into low-probability text; a complete (syntax) constrainer instead gained 53% exact match
 at 2B and 2.5% at 32B. A type constrainer for dynamically typed Python is incomplete by construction; Python 3 syntax
 can be constrained completely, and the training data holds only files that parse as Python 3 (`prepare.py:201-208`),
-so the model's distribution lies inside the constrainer's language (the alignment Biagiola et al. restore by
+so the model's distribution lies inside the constrainer's language (the alignment arXiv 2606.21619 restores by
 fine-tuning). Types are checked after generation instead.
 
 **`PythonSyntax`** (`inference/syntax_constraint.py`, the Rust crate `inference/syntax/`):
@@ -843,8 +844,8 @@ mode: no conflicts) and read by the crate (`parser.rs`), the soft keywords `matc
 one fails; per lexer state, the vocabulary's events over its byte trie, computed once and shared by threads
 (`vocab.rs`). Where it is looser than CPython (targets parsed as expressions, argument order, escapes and nesting
 limits unchecked), it accepts rather than rejects. Rejected alternatives: SynCode (one-regex f-strings reject valid 3.12
-code; pins `transformers`, needs a Hugging Face tokenizer), llguidance (no INDENT/DEDENT, issue #107), Melcer et al.
-(arXiv 2402.17988, no released library).
+code; pins `transformers`, needs a Hugging Face tokenizer), llguidance (no INDENT/DEDENT, issue #107), arXiv
+2402.17988 (no released library).
 
 | PythonSyntax check | Result |
 |---|---|
@@ -883,12 +884,12 @@ test suite, though they overlap its base tests (Benchmarks). The type checker ru
   multiplier), `stages.py` (token budget, rows per stage, each stage's micro-batches in the run's order),
   `checkpoint.py`, `metrics.py`.
 - `nanochat/eval/`: the checkpoint's evaluation and the run's export (`suite.py`), the likelihood metrics (`bpb.py`),
-  the code benchmarks (`code_eval.py`: EvalPlus, MultiPL-E, HumanEval infilling) and the post-generation checks
-  (`verify.py`).
+  the code benchmarks (`code_eval.py`: EvalPlus, arXiv 2305.01210; MultiPL-E; HumanEval infilling, arXiv 2207.14255) and
+  the post-generation checks (`verify.py`).
 - `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
-- `nanochat/data/`: the data pipeline (Pipeline, above) and `bpe/`, its Rust crate: the SA-BPE trainer, deduplication,
-  repository samples and the packer.
+- `nanochat/data/`: the data pipeline (Pipeline, above) and `bpe/`, its Rust crate: the SA-BPE (arXiv 2604.14053)
+  trainer, deduplication, repository samples and the packer.
 - `scripts/`: `production.py` (the production run end to end, a checkpoint's evaluation included), `base_train.py` (the
   training driver: setup, resume, the step loop, checkpoints and records).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
@@ -898,99 +899,99 @@ test suite, though they overlap its base tests (Benchmarks). The type checker ru
 
 ## References
 
-Every work the code and this document cite. Papers by arXiv identifier (`arxiv.org/abs/<id>`) and title, with the name
-the text cites them by:
+Every work the code and this document cite. Papers by arXiv identifier (`arxiv.org/abs/<id>`) and title:
 
-| arXiv | Title | Cited as |
-|---|---|---|
-| 0910.3349 | b-Bit Minwise Hashing | b-bit minwise hashing (Li and König) |
-| 1211.5063 | On the difficulty of training Recurrent Neural Networks | Pascanu et al. |
-| 1411.0030 | A* Sampling | A* Sampling (Maddison et al.) |
-| 1412.6980 | Adam: A Method for Stochastic Optimization | Adam (Kingma & Ba) |
-| 1704.04370 | Fast Similarity Sketching | Fast Similarity Sketching (Dahlgaard et al.) |
-| 1805.10941 | Fast Random Integer Generation in an Interval | Lemire's multiply-shift |
-| 1904.09751 | The Curious Case of Neural Text Degeneration | nucleus sampling (Holtzman et al.) |
-| 1910.04209 | On the adequacy of untuned warmup for adaptive optimization | Ma & Yarats |
-| 2001.08361 | Scaling Laws for Neural Language Models | Kaplan et al. |
-| 2101.00027 | The Pile: An 800GB Dataset of Diverse Text for Language Modeling | The Pile |
-| 2107.03374 | Evaluating Large Language Models Trained on Code | Codex (Chen et al.) |
-| 2203.07814 | Competition-Level Code Generation with AlphaCode | AlphaCode |
-| 2203.15556 | Training Compute-Optimal Large Language Models | Chinchilla |
-| 2204.02311 | PaLM: Scaling Language Modeling with Pathways | PaLM |
-| 2204.05999 | InCoder: A Generative Model for Code Infilling and Synthesis | InCoder (Fried et al.) |
-| 2205.10287 | On the SDEs and Scaling Rules for Adaptive Gradient Algorithms | square-root batch rule (Malladi et al.) |
-| 2205.10487 | Scaling Laws and Interpretability of Learning from Repeated Data | Hernandez et al. |
-| 2205.14135 | FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness | FlashAttention |
-| 2207.10551 | Scaling Laws vs Model Architectures: How does Inductive Bias Influence Scaling? | Tay et al. |
-| 2207.14255 | Efficient Training of Language Models to Fill in the Middle | FIM, HumanEval infilling (Bavarian et al.) |
-| 2208.08227 | MultiPL-E: A Scalable and Extensible Approach to Benchmarking Neural Code Generation | MultiPL-E |
-| 2211.15533 | The Stack: 3 TB of permissively licensed source code | The Stack |
-| 2303.17568 | CodeGeeX: A Pre-Trained Model for Code Generation with Multilingual Benchmarking on HumanEval-X | HumanEval-X |
-| 2305.01210 | Is Your Code Generated by ChatGPT Really Correct? Rigorous Evaluation of Large Language Models for Code Generation | EvalPlus |
-| 2306.10763 | Guiding Language Models of Code with Global Context using Monitors | Monitor-Guided Decoding |
-| 2307.06440 | No Train No Gain: Revisiting Efficient Training Algorithms For Transformer-based Language Models | Kaddour et al. |
-| 2308.04014 | Continual Pre-Training of Large Language Models: How to (re)warm your model? | Gupta et al. |
-| 2308.07124 | OctoPack: Instruction Tuning Code Large Language Models | OctoPack |
-| 2308.12950 | Code Llama: Open Foundation Models for Code | Code Llama |
-| 2309.06180 | Efficient Memory Management for Large Language Model Serving with PagedAttention | PagedAttention (vLLM) |
-| 2309.14322 | Small-scale proxies for large-scale Transformer training instabilities | Wortsman et al. |
-| 2311.01282 | FlashDecoding++: Faster Large Language Model Inference on GPUs | FlashDecoding++ |
-| 2312.07104 | SGLang: Efficient Execution of Structured Language Model Programs | SGLang |
-| 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism | DeepSeek LLM |
-| 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming -- The Rise of Code Intelligence | DeepSeek-Coder |
-| 2402.14905 | MobileLLM: Optimizing Sub-billion Parameter Language Models for On-Device Use Cases | MobileLLM |
-| 2402.17988 | Constrained Decoding for Fill-in-the-Middle Code Language Models via Efficient Left and Right Quotienting of Context-Sensitive Grammars | Melcer et al. |
-| 2402.19173 | StarCoder 2 and The Stack v2: The Next Generation | StarCoder2, The Stack v2 |
-| 2403.01632 | SynCode: LLM Generation with Grammar Augmentation | SynCode |
-| 2404.10830 | Fewer Truncations Improve Language Modeling | Ding et al. (Best-Fit packing) |
-| 2404.19737 | Better & Faster Large Language Models via Multi-token Prediction | multi-token prediction (Gloeckle et al.) |
-| 2405.13698 | How to set AdamW's weight decay as you scale model and dataset size | Wang & Aitchison |
-| 2405.14591 | Base of RoPE Bounds Context Length | Men et al. |
-| 2405.18392 | Scaling Laws and Compute-Optimal Training Beyond Fixed Training Durations | Hägele et al. |
-| 2406.09405 | Why Warmup the Learning Rate? Underlying Mechanisms and Improvements | Kalra & Barkeshli |
-| 2407.13623 | Scaling Laws with Vocabulary: Larger Models Deserve Larger Vocabularies | Tao et al. |
-| 2407.21783 | The Llama 3 Herd of Models | Llama 3 |
-| 2409.12186 | Qwen2.5-Coder Technical Report | Qwen2.5-Coder |
-| 2409.19913 | Scaling Optimal LR Across Token Horizons | Bjorck et al. |
-| 2410.02660 | How to Train Long-Context Language Models (Effectively) | ProLong (Gao et al.) |
-| 2410.03103 | Planning-Aware Code Infilling via Horizon-Length Prediction | infilling post-processing |
-| 2410.17897 | Value Residual Learning | ResFormer |
-| 2410.23922 | Analyzing & Reducing the Need for Learning Rate Warmup in GPT Training | Kosson et al. |
-| 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models | OpenCoder |
-| 2412.04403 | Establishing Task Scaling Laws via Compute-Efficient Model Ladders | Bhagia et al. |
-| 2502.15938 | Straight to Zero: Why Linearly Decaying the Learning Rate to Zero Works Best for LLMs | Bergsma et al. |
-| 2502.16982 | Muon is Scalable for LLM Training | Moonlight |
-| 2503.04715 | Predictable Scale: Part I, Step Law -- Optimal Hyperparameter Scaling Law in Large Language Model Pretraining | Step-Law |
-| 2503.19786 | Gemma 3 Technical Report | Gemma 3 |
-| 2504.09246 | Type-Constrained Code Generation with Language Models | type-constrained decoding (Mündler et al.) |
-| 2504.11393 | DataDecide: How to Predict Best Pretraining Data with Small Experiments | DataDecide |
-| 2505.09388 | Qwen3 Technical Report | Qwen3 |
-| 2505.13738 | Power Lines: Scaling Laws for Weight Decay and Batch Size in LLM Pre-training | Power Lines |
-| 2505.18789 | From Output to Evaluation: Does Raw Instruction-Tuned Code LLMs Output Suffice for Fill-in-the-Middle Code Generation? | FIM post-processing |
-| 2506.00204 | Structure-Aware Fill-in-the-Middle Pretraining for Code | AST-FIM (Gong et al.) |
-| 2506.02285 | Why Gradients Rapidly Increase Near the End of Training | Defazio |
-| 2508.13144 | Signal and Noise: A Framework for Reducing Uncertainty in Language Model Evaluation | Heineman et al. |
-| 2509.00360 | ChopChop: a Programmable Framework for Semantically Constraining the Output of Language Models | ChopChop |
-| 2509.02046 | Fantastic Pretraining Optimizers and Where to Find Them | Wen et al. |
-| 2510.05491 | NorMuon: Making Muon more efficient and scalable | NorMuon |
-| 2512.22382 | Completed Hyperparameter Transfer across Modules, Width, Depth, Batch and Duration | Complete^(d)P |
-| 2601.22887 | MoVE: Mixture of Value Embeddings -- A New Axis for Scaling Parametric Memory in Autoregressive Models | MoVE |
-| 2603.15031 | Attention Residuals | Block Attention Residuals |
-| 2604.07769 | An Empirical Study on Influence-Based Pretraining Data Selection for Code Large Language Models | Xing et al. |
-| 2604.14053 | From Where Words Come: Efficient Regularization of Code Tokenizers Through Source Attribution | SA-BPE (Chizhov et al.) |
-| 2604.27077 | Learning Rate Transfer in Normalized Transformers | LR transfer in normalized Transformers |
-| 2606.21619 | The Alignment Problem in Constrained Code Generation | Biagiola et al. |
-| 2607.05147 | DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation | DSpark |
-| 2608.28622 | PUFFER: Incremental Fuzzy Deduplication for Continuously Evolving Corpora | PUFFER |
+| arXiv | Title |
+|---|---|
+| 0910.3349 | b-Bit Minwise Hashing |
+| 1211.5063 | On the difficulty of training Recurrent Neural Networks |
+| 1411.0030 | A* Sampling |
+| 1412.6980 | Adam: A Method for Stochastic Optimization |
+| 1704.04370 | Fast Similarity Sketching |
+| 1805.10941 | Fast Random Integer Generation in an Interval |
+| 1904.09751 | The Curious Case of Neural Text Degeneration |
+| 1910.04209 | On the adequacy of untuned warmup for adaptive optimization |
+| 2001.08361 | Scaling Laws for Neural Language Models |
+| 2101.00027 | The Pile: An 800GB Dataset of Diverse Text for Language Modeling |
+| 2107.03374 | Evaluating Large Language Models Trained on Code |
+| 2203.07814 | Competition-Level Code Generation with AlphaCode |
+| 2203.15556 | Training Compute-Optimal Large Language Models |
+| 2204.02311 | PaLM: Scaling Language Modeling with Pathways |
+| 2204.05999 | InCoder: A Generative Model for Code Infilling and Synthesis |
+| 2205.10287 | On the SDEs and Scaling Rules for Adaptive Gradient Algorithms |
+| 2205.10487 | Scaling Laws and Interpretability of Learning from Repeated Data |
+| 2205.14135 | FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness |
+| 2207.10551 | Scaling Laws vs Model Architectures: How does Inductive Bias Influence Scaling? |
+| 2207.14255 | Efficient Training of Language Models to Fill in the Middle |
+| 2208.08227 | MultiPL-E: A Scalable and Extensible Approach to Benchmarking Neural Code Generation |
+| 2211.15533 | The Stack: 3 TB of permissively licensed source code |
+| 2303.17568 | CodeGeeX: A Pre-Trained Model for Code Generation with Multilingual Benchmarking on HumanEval-X |
+| 2305.01210 | Is Your Code Generated by ChatGPT Really Correct? Rigorous Evaluation of Large Language Models for Code Generation |
+| 2306.10763 | Guiding Language Models of Code with Global Context using Monitors |
+| 2307.06440 | No Train No Gain: Revisiting Efficient Training Algorithms For Transformer-based Language Models |
+| 2308.04014 | Continual Pre-Training of Large Language Models: How to (re)warm your model? |
+| 2308.07124 | OctoPack: Instruction Tuning Code Large Language Models |
+| 2308.12950 | Code Llama: Open Foundation Models for Code |
+| 2309.06180 | Efficient Memory Management for Large Language Model Serving with PagedAttention |
+| 2309.14322 | Small-scale proxies for large-scale Transformer training instabilities |
+| 2311.01282 | FlashDecoding++: Faster Large Language Model Inference on GPUs |
+| 2312.07104 | SGLang: Efficient Execution of Structured Language Model Programs |
+| 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism |
+| 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming -- The Rise of Code Intelligence |
+| 2402.14905 | MobileLLM: Optimizing Sub-billion Parameter Language Models for On-Device Use Cases |
+| 2402.17988 | Constrained Decoding for Fill-in-the-Middle Code Language Models via Efficient Left and Right Quotienting of Context-Sensitive Grammars |
+| 2402.19173 | StarCoder 2 and The Stack v2: The Next Generation |
+| 2403.01632 | SynCode: LLM Generation with Grammar Augmentation |
+| 2404.10830 | Fewer Truncations Improve Language Modeling |
+| 2404.19737 | Better & Faster Large Language Models via Multi-token Prediction |
+| 2405.13698 | How to set AdamW's weight decay as you scale model and dataset size |
+| 2405.14591 | Base of RoPE Bounds Context Length |
+| 2405.18392 | Scaling Laws and Compute-Optimal Training Beyond Fixed Training Durations |
+| 2406.09405 | Why Warmup the Learning Rate? Underlying Mechanisms and Improvements |
+| 2407.13623 | Scaling Laws with Vocabulary: Larger Models Deserve Larger Vocabularies |
+| 2407.21783 | The Llama 3 Herd of Models |
+| 2409.12186 | Qwen2.5-Coder Technical Report |
+| 2409.19913 | Scaling Optimal LR Across Token Horizons |
+| 2410.02660 | How to Train Long-Context Language Models (Effectively) |
+| 2410.03103 | Planning-Aware Code Infilling via Horizon-Length Prediction |
+| 2410.17897 | Value Residual Learning |
+| 2410.23922 | Analyzing & Reducing the Need for Learning Rate Warmup in GPT Training |
+| 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models |
+| 2412.04403 | Establishing Task Scaling Laws via Compute-Efficient Model Ladders |
+| 2502.15938 | Straight to Zero: Why Linearly Decaying the Learning Rate to Zero Works Best for LLMs |
+| 2502.16982 | Muon is Scalable for LLM Training |
+| 2503.04715 | Predictable Scale: Part I, Step Law -- Optimal Hyperparameter Scaling Law in Large Language Model Pretraining |
+| 2503.19786 | Gemma 3 Technical Report |
+| 2504.09246 | Type-Constrained Code Generation with Language Models |
+| 2504.11393 | DataDecide: How to Predict Best Pretraining Data with Small Experiments |
+| 2505.09388 | Qwen3 Technical Report |
+| 2505.13738 | Power Lines: Scaling Laws for Weight Decay and Batch Size in LLM Pre-training |
+| 2505.18789 | From Output to Evaluation: Does Raw Instruction-Tuned Code LLMs Output Suffice for Fill-in-the-Middle Code Generation? |
+| 2506.00204 | Structure-Aware Fill-in-the-Middle Pretraining for Code |
+| 2506.02285 | Why Gradients Rapidly Increase Near the End of Training |
+| 2508.13144 | Signal and Noise: A Framework for Reducing Uncertainty in Language Model Evaluation |
+| 2509.00360 | ChopChop: a Programmable Framework for Semantically Constraining the Output of Language Models |
+| 2509.02046 | Fantastic Pretraining Optimizers and Where to Find Them |
+| 2510.05491 | NorMuon: Making Muon more efficient and scalable |
+| 2512.22382 | Completed Hyperparameter Transfer across Modules, Width, Depth, Batch and Duration |
+| 2601.22887 | MoVE: Mixture of Value Embeddings -- A New Axis for Scaling Parametric Memory in Autoregressive Models |
+| 2603.15031 | Attention Residuals |
+| 2604.07769 | An Empirical Study on Influence-Based Pretraining Data Selection for Code Large Language Models |
+| 2604.14053 | From Where Words Come: Efficient Regularization of Code Tokenizers Through Source Attribution |
+| 2604.27077 | Learning Rate Transfer in Normalized Transformers |
+| 2606.21619 | The Alignment Problem in Constrained Code Generation |
+| 2607.05147 | DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation |
+| 2608.28622 | PUFFER: Incremental Fuzzy Deduplication for Continuously Evolving Corpora |
 
 Without an arXiv identifier:
 
-| Work | Cited as |
+| Title | Where cited |
 |---|---|
-| Parallel Random Numbers: As Easy as 1, 2, 3 (SC '11) | Philox4x32-10 (Salmon et al.; `csrc/decode.cu` gumbel) |
-| Fast Splittable Pseudorandom Number Generators (OOPSLA 2014) | SplitMix64 (Steele, Lea and Flood; `data/bpe/dedup.rs`) |
-| The Art of Prompt Design: Prompt Boundaries and Token Healing (2023, Guidance) | token healing (Lundberg; `inference/decoder.py` heal) |
-| Statistical Methods for Research Workers (1925), §20 | the 0.05 significance level (Fisher; `ablations/harness.py`) |
+| "Parallel Random Numbers: As Easy as 1, 2, 3" (SC '11) | Philox4x32-10, `csrc/decode.cu` gumbel |
+| "Efficient BackProp" (Neural Networks: Tricks of the Trade, 1998), §4.6 | the uniform init's std, `model/gpt.py` init_weights |
+| "Fast Splittable Pseudorandom Number Generators" (OOPSLA 2014) | SplitMix64, `data/bpe/dedup.rs` |
+| "The Art of Prompt Design: Prompt Boundaries and Token Healing" (Guidance, 2023) | token healing, `inference/decoder.py` heal |
+| "Statistical Methods for Research Workers" (1925), §20 | the 0.05 significance level, `ablations/harness.py` |
 
 Repositories, at the commit, file or record cited:
 

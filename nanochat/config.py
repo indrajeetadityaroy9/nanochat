@@ -48,8 +48,8 @@ REPO_STAGE = Stage(seq_len=32_768,
                    mixture={"code": (1.0, [c for c in MIXTURE["code"][1] if SOURCES[c].schema is REPOSITORY_FILE])})
 # Repo-level share of tokens: Qwen2.5-Coder's 300B of 5.2T + 300B (§3.2.1-2)
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
-# One RoPE base for both stages: Qwen2.5-Coder's repo-level 10^6 (§3.2.2), above Men et al.'s lower bound for a 32K
-# context (arXiv 2405.14591); Llama 3 trains at a large base (5 x 10^5) from the start (arXiv 2407.21783 §3.2)
+# One RoPE base for both stages: Qwen2.5-Coder's repo-level 10^6 (§3.2.2), above the lower bound of arXiv 2405.14591
+# for a 32K context; Llama 3 trains at a large base (5 x 10^5) from the start (arXiv 2407.21783 §3.2)
 ROPE_BASE = 1_000_000
 
 

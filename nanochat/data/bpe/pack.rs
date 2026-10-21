@@ -1,7 +1,7 @@
 //! The packer (nanochat/data/pack.py): one curated shard of a compiled split at a time, its documents cut into pieces
 //! that fit a training row, the pieces of a train split of a repository corpus drawn fill-in-the-middle examples
-//! (context-level FIM: per piece, after cutting; Bavarian et al. arXiv 2207.14255 §3.2) whose middles AST-FIM chooses
-//! (Gong et al. arXiv 2506.00204v1 §3.3, §5.1), half of them widened to whole lines (line-level infilling), and the
+//! (context-level FIM: per piece, after cutting; arXiv 2207.14255 §3.2) whose middles AST-FIM chooses
+//! (arXiv 2506.00204v1 §3.3, §5.1), half of them widened to whole lines (line-level infilling), and the
 //! pieces placed in rows by Best-Fit-Decreasing.
 
 use std::cell::OnceCell;
@@ -144,7 +144,7 @@ fn fim_draw(fim: &Fim, document: usize, piece: usize) -> Option<ChaCha8Rng> {
     rng.random_bool(fim.rate).then_some(rng)
 }
 
-/// Two character boundaries of text drawn uniformly and independently, in order (Bavarian et al. §3: a character-level
+/// Two character boundaries of text drawn uniformly and independently, in order (arXiv 2207.14255 §3: a character-level
 /// split at uniform positions).
 fn random_span(text: &str, rng: &mut ChaCha8Rng) -> (usize, usize) {
     let bounds: Vec<usize> = text.char_indices().map(|(at, _)| at).chain([text.len()]).collect();
@@ -160,7 +160,7 @@ fn random_span(text: &str, rng: &mut ChaCha8Rng) -> (usize, usize) {
 /// named node holding it, and the run of that node's named children of the largest character intersection over union
 /// with the span (the node itself when it has no named child or none of them meets the span). Then, with probability
 /// line (the last draw, so the syntactic choice is AST-FIM's), the middle widened to the line boundaries of line-level
-/// infilling (the single- and multi-line infilling of HumanEval, Fried et al. arXiv 2204.05999, Bavarian et al.: the
+/// infilling (the single- and multi-line infilling of HumanEval, arXiv 2204.05999, arXiv 2207.14255: the
 /// prefix ends with a line break, the middle runs from its first line's indentation through its last line break): a
 /// moves to the start of its line when only spaces and tabs precede it there; b moves after the line break ending its
 /// line when only spaces and tabs follow it there (b stays when it already follows a line break, its line holds more
@@ -218,8 +218,8 @@ fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) ->
 
 /// The FIM example of a piece's text: its middle a random character span (random_span) with probability random, else
 /// AST-FIM's (ast_middle; a random span where it has none); prefix, suffix and middle each encoded on its own by
-/// tiktoken's encoder (Bavarian et al. §3), in SPM order with probability spm (Bavarian et al. App. D, variant 2), else
-/// PSM:
+/// tiktoken's encoder (arXiv 2207.14255 §3), in SPM order with probability spm (arXiv 2207.14255 App. D, variant 2),
+/// else PSM:
 ///   PSM: <fim_prefix> prefix <fim_suffix> suffix <fim_middle> middle
 ///   SPM: <fim_prefix> <fim_suffix> suffix <fim_middle> prefix middle
 /// The BOS before the example and its target BOS after the middle are the loader's (data/loader.py).
@@ -249,7 +249,7 @@ struct Split<'a> {
 }
 
 impl Split<'_> {
-    /// The text of tokens [start, end): context-level FIM decodes a piece back to characters (Bavarian et al. App. C).
+    /// The text of tokens [start, end): context-level FIM decodes a piece back to characters (arXiv 2207.14255 App. C).
     fn text(&self, start: usize, end: usize) -> String {
         String::from_utf8(self.tokens[start..end].iter().flat_map(|&id| self.token_bytes[id as usize].iter().copied()).collect()).unwrap()
     }
@@ -308,7 +308,7 @@ impl Split<'_> {
 }
 
 /// Rows of pieces of at most row_len tokens by Best-Fit-Decreasing ("Fewer Truncations Improve Language Modeling",
-/// Ding et al. 2024, arXiv 2404.10830 §3.1): longest first (a stable sort: equal lengths keep document order), each piece
+/// arXiv 2404.10830 §3.1): longest first (a stable sort: equal lengths keep document order), each piece
 /// into the row with the fewest free slots that holds it, else a new row, so no piece is cut; rows of one kind with equal
 /// room wait last-in first-out, and at equal free slots a row of targeted pieces only is taken before a row with a cut
 /// piece. A row whose pieces all have the BOS after them as their target (targeted) keeps one slot for the BOS after its

@@ -8,10 +8,10 @@ by 0.018 on both of 2 seeds (0.0179 and 0.0187, 2026-10-20): the law is low at s
 The production lr is measured, not swept at production's length: its optimum at production's width and depth at a short
 horizon, d24 at 5 tokens per parameter (production's model, so no width or depth transfer is assumed: its
 parameterisation is standard, not muP), times the optimum's horizon trend measured at d8 between 5 and LONG tokens per
-parameter, assumed width-independent (Bjorck et al.'s size-independent horizon exponent, arXiv 2409.19913). The
+parameter, assumed width-independent (arXiv 2409.19913's size-independent horizon exponent). The
 published transfer rules disagree on that trend's direction: Complete^(d)P's AdamW SDE rule, eta ∝ sqrt(m_B / m_D) for
-batch ratio m_B and token ratio m_D (Mlodozeniec et al., arXiv 2512.22382, Table 1), lowers the lr with the horizon, as
-Bjorck et al. (D^-0.32) and the law do; Step-Law (Li et al., arXiv 2503.04715: eta = 1.79 N^-0.713 D^0.307, 3,700
+batch ratio m_B and token ratio m_D (arXiv 2512.22382, Table 1), lowers the lr with the horizon, as
+arXiv 2409.19913 (D^-0.32) and the law do; Step-Law (arXiv 2503.04715: eta = 1.79 N^-0.713 D^0.307, 3,700
 AdamW models) raises it. Alternatives: the law's lr times 2 and 4, and 8 at d8 at LONG, where Step-Law points; one seed
 per setting.
 
@@ -20,8 +20,8 @@ in u = ln(multiplier) over its evaluated runs (numpy polyfit), its vertex u* and
 rule calls for; the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@5) against the SDE rule's and Step-Law's predictions
 (each over the law's own fall between the two plans); the horizon exponent ln r / ln m_D,d8; production's multiplier of
 the law's lr, exp(u*_d24@5) * r^(ln m_D,prod / ln m_D,d8) * sqrt(m_B,prod / m_B,d8): the exponent carried to
-production's horizon range (every rule in play is a power law in D: the SDE rule, Bjorck et al., Step-Law, the law), and
-d8's smaller batch growth corrected by the square-root batch rule (Malladi et al., arXiv 2205.10287; Complete^(d)P's
+production's horizon range (every rule in play is a power law in D: the SDE rule, arXiv 2409.19913, Step-Law, the
+law), and d8's smaller batch growth corrected by the square-root batch rule (arXiv 2205.10287; Complete^(d)P's
 sqrt(m_B)). m_D,prod is production's tokens over d24 at 5's, m_D,d8 d8 at LONG's over d8 at 5's. Batches, token counts
 and the law's lrs are the runs' recorded plans (production's: harness.plan_of at max_ratio of d24).
 
@@ -43,7 +43,7 @@ SHORT = 5
 # micro-batches (B_opt 1.52 micro-batches at 200, 2.04 at production's 490.8; schedule.plan rounds both to 2), so the
 # batch correction is the same sqrt(m_B,prod / m_B,d8) as at 490.8 at less than half its cost; m_D,d8 about 40
 LONG = 200
-# Step-Law's token exponent of the optimal lr (Li et al., arXiv 2503.04715, eta = 1.79 N^-0.713 D^0.307)
+# Step-Law's token exponent of the optimal lr (arXiv 2503.04715, eta = 1.79 N^-0.713 D^0.307)
 STEP_LAW_D = 0.307
 
 

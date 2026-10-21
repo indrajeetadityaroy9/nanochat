@@ -9,8 +9,8 @@ production model's at its depth and ratio, so every arm matches in tokens and hy
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
 rerun experiment resumes: a run whose evaluation exists is not trained again, nor is one that diverged (its
-train/metrics.py failure record: a non-finite loss or gradient norm, an outcome of a lr sweep's high end, Wortsman et
-al., arXiv 2309.14322); any other failure stops the experiment, and a stopped run resumes from its repo_start checkpoint
+train/metrics.py failure record: a non-finite loss or gradient norm, an outcome of a lr sweep's high end,
+arXiv 2309.14322); any other failure stops the experiment, and a stopped run resumes from its repo_start checkpoint
 or restarts (train/metrics.py attempts keep both traceable). Then each alternative is compared with production over
 the runs that did not diverge; the experiment writes every tracked metric of every run, RESULTS/<experiment>.jsonl (a
 record per run: eval/suite.py record, setting, fields, the compared measures, efficiency, the step it diverged at)
@@ -45,7 +45,7 @@ from nanochat.train.checkpoint import checkpoint_name
 from nanochat.train.schedule import RunPlan, plan
 from scripts.base_train import train
 
-# The conventional significance level (Fisher, Statistical Methods for Research Workers, 1925, §20): the confidence
+# The conventional significance level ("Statistical Methods for Research Workers" (1925), §20): the confidence
 # intervals' 1 - ALPHA
 ALPHA = 0.05
 

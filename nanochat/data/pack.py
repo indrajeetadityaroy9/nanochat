@@ -1,21 +1,21 @@
 """
 Pack a compiled split (compile.py) into training rows of seq_len + 1 tokens (loader.py), seq_len a training stage's
 (config.Stage): an index over its tokens, which are not copied, and the tokens of its fill-in-the-middle examples; the
-loader builds each row on the fly (Ding et al. 2024, "Fewer Truncations Improve Language Modeling", arXiv 2404.10830,
-App. C.1: chunk indices offline, sequences online).
+loader builds each row on the fly ("Fewer Truncations Improve Language Modeling", arXiv 2404.10830, App. C.1: chunk
+indices offline, sequences online).
 
 Each document of the split is
 - one piece, or, when it does not fit a row, pieces cut between two whole statements or declarations (repository
   samples, by their tree-sitter grammar, Source.grammar; the cut follows the statement before, so comments stay with
   the code after them), else after a line end, else between two characters; every piece enters its row after a BOS;
 - in the train split of a repository corpus, made a fill-in-the-middle example per piece after cutting (context-level
-  FIM, Bavarian et al. arXiv 2207.14255 §3.2) as AST-FIM trains it (Gong et al. arXiv 2506.00204v1 §5.1): with
+  FIM, arXiv 2207.14255 §3.2) as AST-FIM trains it (arXiv 2506.00204v1 §5.1): with
   probability FIM_RATE; its middle a random character span with probability RANDOM_SHARE (§7: without random spans
   the model fails at random-span infilling), else a whole syntactic unit by Single-Node masking with probability
   SINGLE_NODE_SHARE, else by Aligned-Span masking (§3.3; a piece that does not parse takes a random span, §5.1), an
   AST middle widened to whole lines with probability LINE_SHARE (from its line's indentation through its last line
   break where only blanks lie beyond it: the middles of line-level infilling, which AST node spans rarely are); in SPM
-  order with probability SPM_SHARE else PSM; prefix, suffix and middle encoded each on its own (Bavarian et al. §3, as
+  order with probability SPM_SHARE else PSM; prefix, suffix and middle encoded each on its own (arXiv 2207.14255 §3, as
   inference.decoder.fim_prompt encodes a prompt). Each piece draws from a generator keyed by its document and its
   index, so the packs are one deterministic function of the compiled data. Val splits stay left to right;
 - packed by Best-Fit-Decreasing with the other pieces of its curated shard: no piece is cut and no token discarded.
@@ -50,11 +50,11 @@ from nanochat.data.sources import SOURCES
 from nanochat.data.tokenizer import FIM_TOKENS, Tokenizer, bpe, get_tokenizer
 
 # The FIM rate of DeepSeek-Coder (arXiv 2401.14196 §3.1.2: "an FIM rate of 0.5"; its Fig. 3 ablation: a higher rate
-# costs left-to-right completion) and Bavarian et al. (arXiv 2207.14255, 50% FIM "for free"); AST-FIM's middles,
+# costs left-to-right completion) and arXiv 2207.14255 (50% FIM "for free"); AST-FIM's middles,
 # arXiv 2506.00204v1 §5.1: of FIM, 90% AST-FIM and 10% random character spans, 50% PSM and 50% SPM; §3.3: "an equal mix"
 # of Single-Node and Aligned-Span masking. LINE_SHARE: half the AST middles keep AST-FIM's node spans, half take the line
-# boundaries of line-level infilling (HumanEval single- and multi-line infilling, Fried et al. arXiv 2204.05999 and
-# Bavarian et al.: the prefix ends with a line break, the middle runs from the indentation through a line break)
+# boundaries of line-level infilling (HumanEval single- and multi-line infilling, arXiv 2204.05999 and
+# arXiv 2207.14255: the prefix ends with a line break, the middle runs from the indentation through a line break)
 FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, LINE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5, 0.5, 0.5
 
 

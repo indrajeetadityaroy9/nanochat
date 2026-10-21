@@ -10,7 +10,7 @@
  * token, a step's next input is the prompt's next token (k_commit), so prompts and generations run through the same
  * kernels, every slot's prompt advancing in the same steps as the other slots' generations; inactive slots are skipped
  * by every kernel. A prompt's K and V depend on its tokens alone, so the prompt store keeps them for a later request
- * with the same prompt, which starts at its last token (dec_save_prompt, dec_load_prompt; Zheng et al., SGLang's
+ * with the same prompt, which starts at its last token (dec_save_prompt, dec_load_prompt; SGLang's
  * RadixAttention, arXiv 2312.07104, reuses prompt prefixes likewise).
  *
  * The step is captured whole (dec_launch), the greedy argmax for every slot, and as its body, everything before the
@@ -152,10 +152,10 @@ static __device__ __forceinline__ unsigned long long choice_key(float score, int
 }
 
 /* Gumbel noise -log(-log(u)) of token row at generated position i under a request's seed, u uniform on (0, 1) from the
- * counter-based Philox4x32-10 (Salmon et al., SC'11 "Parallel random numbers: as easy as 1, 2, 3"; cuRAND's
+ * counter-based Philox4x32-10 ("Parallel Random Numbers: As Easy as 1, 2, 3", SC '11; cuRAND's
  * curand_Philox4x32_10) at counter (row, i), key seed: so the draw depends on (seed, i, row) alone. u = (2r + 1)
  * 2^-DBL_MANT_DIG of DBL_MANT_DIG - 1 random bits r is exact in double and never 0 or 1. argmax over tokens of s / T +
- * noise samples softmax(s / T) (the Gumbel-max trick; Maddison et al., NeurIPS 2014 "A* Sampling", arXiv 1411.0030,
+ * noise samples softmax(s / T) (the Gumbel-max trick; "A* Sampling", arXiv 1411.0030,
  * §2). */
 static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, int row) {
     const uint4 x = curand_Philox4x32_10(make_uint4((uint32_t)row, (uint32_t)i, 0u, 0u),
@@ -168,8 +168,8 @@ static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, i
 /* GEMV of B slots on the tensor cores: out[b][r] = W[r] . x[b] by mma.sync m16n8k16 (bf16 operands, fp32 accumulators).
  * A block is one warp: one MMA_M-row tile of W and one group of GROUP_SLOTS slots, the grid's x the group (fastest, so
  * a row tile's groups run together and read its weights from L2 after the first), y the row tile; a group without an
- * active slot exits. Many small blocks keep every SM loading (flat GEMMs with few rows are parallelism-bound: Hong et
- * al., FlashDecoding++, MLSys 2024, arXiv 2311.01282, §4). A slot is one column of an n tile, and each output's sum
+ * active slot exits. Many small blocks keep every SM loading (flat GEMMs with few rows are parallelism-bound:
+ * FlashDecoding++, arXiv 2311.01282, §4). A slot is one column of an n tile, and each output's sum
  * runs over K in a fixed order (K_BLOCK blocks, two k16 MMAs each), so a slot's outputs do not depend on B. In a
  * K_BLOCK block lane (g, t) = (groupID, threadID_in_group) loads k t*VEC.. of rows g, g + 8 and of its column's input
  * (one 16-byte load each); A and B map MMA k to physical k alike, so the product is W . x. The warp keeps DEPTH blocks
@@ -333,7 +333,7 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
     }
 }
 
-/* A nucleus-sampled slot's choice (top-p sampling: Holtzman et al., ICLR 2020, arXiv 1904.09751, "The Curious Case of
+/* A nucleus-sampled slot's choice (top-p sampling: arXiv 1904.09751, "The Curious Case of
  * Neural Text Degeneration", §3.1): Gumbel-max at temperature T, as k_gemv's epilogue, over the fewest most likely
  * allowed tokens whose probability under softmax(s / T) reaches top_p; its key to argmax for k_commit. Hugging Face
  * transformers' TopPLogitsWarper, which the code benchmarks' generators run (MultiPL-E automodel.py,

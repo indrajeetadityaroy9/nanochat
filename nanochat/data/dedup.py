@@ -1,8 +1,8 @@
 """
 Deduplication of the normalized sources (prepare.curate): a document is dropped when its cluster of exact and near
-duplicates holds an earlier document, as StarCoder and StarCoder2 deduplicate their data (The Stack, Kocetkov et al.
-arXiv 2211.15533 §3; The Stack v2, Lozhkov et al. arXiv 2402.19173 §3.1) and DeepSeek-Coder its data (arXiv
-2401.14196 §2.3); repeated text wastes compute and capacity (Hernandez et al. arXiv 2205.10487).
+duplicates holds an earlier document, as StarCoder and StarCoder2 deduplicate their data (The Stack, arXiv 2211.15533
+§3; The Stack v2, arXiv 2402.19173 §3.1) and DeepSeek-Coder its data (arXiv 2401.14196 §2.3); repeated text wastes
+compute and capacity (arXiv 2205.10487).
 
 The unit is StarCoder2's: a repository source's file, before files are grouped into repository samples (DeepSeek-Coder
 deduplicates whole repository samples instead), and any other source's document. The repository files of all

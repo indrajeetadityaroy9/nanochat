@@ -2,7 +2,7 @@
 Code generation of a base model, scored by the benchmarks' official evaluators.
 
 Benchmarks:
-- humaneval_plus (164) and mbpp_plus (378): EvalPlus (Liu et al., arXiv 2305.01210; the evalplus package pinned in
+- humaneval_plus (164) and mbpp_plus (378): EvalPlus (arXiv 2305.01210; the evalplus package pinned in
   pyproject.toml, data releases HumanEvalPlus v0.1.10 / MbppPlus v0.2.0). Prompt, budget, stop sequences and
   post-processing as EvalPlus's codegen for a base (direct-completion) model: prompt.strip() + "\\n"
   (evalplus/codegen.py:71), at most 768 new tokens (provider/base.py:13), stops EOS +
@@ -10,15 +10,15 @@ Benchmarks:
   (provider/hf.py:96 skip_special_tokens), the completion cut at its first stop and its tabs replaced by four spaces
   (provider/hf.py:104-105, vllm.py:76), solution sanitize(prompt + completion, entry point) (codegen.py:79-82); scored
   by `python -m evalplus.evaluate` (base and plus pass@1, its estimate_pass_at_k).
-- humaneval_cpp (161) and mbpp_cpp (397): MultiPL-E (Cassano et al., arXiv 2208.08227), each row's prompt, tests and
+- humaneval_cpp (161) and mbpp_cpp (397): MultiPL-E (arXiv 2208.08227), each row's prompt, tests and
   stop_tokens. Generation as MultiPL-E's Hugging Face generator (automodel.py @3025a53): from prompt.strip() (:119), at
   most 1024 tokens of prompt and completion (:56, 67 generate(max_length=...)), the completion ending at the first
   special token (:99-101) and at its first stop token (multipl_e/completions.py:216 stop_at_stop_token); judged by the
   evaluator of nuprl/MultiPL-E @3025a53 (its checkout at $MULTIPL_E, docker/Dockerfile): evaluation/src/main.py
   (program = prompt + completion + "\\n" + tests, main.py:34; g++ -std=c++17 then the binary, 15 s each,
   eval_cpp.py:9-36, safe_subprocess/__init__.py:33), pass@1 by its pass_k.py (status "OK" and exit code 0).
-- humaneval_x_cpp (164; HumanEval-X, Zheng et al., arXiv 2303.17568): C++ reference solutions, which MultiPL-E lacks.
-- fill-in-the-middle: openai/human-eval-infilling (Bavarian et al., arXiv 2207.14255; installed in the image,
+- humaneval_x_cpp (164; HumanEval-X, arXiv 2303.17568): C++ reference solutions, which MultiPL-E lacks.
+- fill-in-the-middle: openai/human-eval-infilling (arXiv 2207.14255; installed in the image,
   docker/Dockerfile), single-line, multi-line and random-span infilling of the 164 HumanEval solutions. Each problem's
   prefix and suffix form a PSM or SPM prompt (inference.decoder.fim_prompt); the model writes the middle until BOS (its
   end-of-middle target in training), at most the benchmark's longest reference middle in tokens. The references'
@@ -33,7 +33,7 @@ Benchmarks:
 
 Scores: pass@1 by three generation modes, each scored by the benchmark's evaluator. "greedy": one greedy completion per
 problem (the pass@1 of DeepSeek-Coder, arXiv 2401.14196 §4.1, Qwen2.5-Coder, arXiv 2409.12186 §6, and EvalPlus's
-leaderboard; FIM in PSM and SPM order). "sampled" (EvalPlus, MultiPL-E): pass@1 by Chen et al.'s unbiased estimator
+leaderboard; FIM in PSM and SPM order). "sampled" (EvalPlus, MultiPL-E): pass@1 by Codex's unbiased estimator
 over SAMPLES samples per problem at SAMPLE_TEMPERATURE from the nucleus TOP_P (the protocol of Codex, MultiPL-E and
 StarCoder2), each benchmark's evaluator computing the estimate. "filtered" (FIM in FILTERED_MODE order only): filtered
 pass@1 (Codex's filtered pass@k) over at most verify.ATTEMPTS samples, verify.search: the complete Python 3 syntax
@@ -80,13 +80,13 @@ HUMANEVAL_X = {"repo_id": "zai-org/humaneval-x", "revision": "62c78627f3072a1454
 EVALPLUS = {"humaneval_plus": ("humaneval", get_human_eval_plus), "mbpp_plus": ("mbpp", get_mbpp_plus)}
 MULTIPL_E_BENCHMARKS = ("humaneval_cpp", "mbpp_cpp")
 INFILLING = ("single-line", "multi-line", "random-span")
-FIM_MODES = ("psm", "spm")  # the two orders the packer trains (Bavarian et al. App. D)
+FIM_MODES = ("psm", "spm")  # the two orders the packer trains (arXiv 2207.14255 App. D)
 # the FIM filtered mode's order: at d8 SPM beat PSM on all three benchmarks (greedy pass@1 single-line 0.036 vs 0.003,
 # multi-line 0.013 vs 0.001, random-span 0.008 vs 0)
 FILTERED_MODE = "spm"
-# The sampled mode (Chen et al., Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem;
+# The sampled mode (Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem;
 # nucleus sampling at top p 0.95 for all its sampling; §3.3, Fig. 5: T = 0.2 the pass@1 optimum): MultiPL-E's pass@1
-# (Cassano et al., arXiv 2208.08227: T = 0.2, its pass@1 stable from about 20 samples; completions.py --top-p 0.95) and
+# (arXiv 2208.08227: T = 0.2, its pass@1 stable from about 20 samples; completions.py --top-p 0.95) and
 # StarCoder2's (arXiv 2402.19173: pass@1 from 20 samples at T = 0.2, following OctoPack, arXiv 2308.07124)
 SAMPLES, SAMPLE_TEMPERATURE, TOP_P = 20, 0.2, 0.95
 
@@ -278,7 +278,7 @@ def evalplus(name: str, items: list[Task], samples: list[list[str]]) -> dict:
 
 
 def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
-    """MultiPL-E's evaluation of each problem's completions: {"pass@1" (pass_k.py: Chen et al.'s estimator over each
+    """MultiPL-E's evaluation of each problem's completions: {"pass@1" (pass_k.py: Codex's estimator over each
     problem's completions), "ids", "status" (per problem, per completion)}. Each problem is a completions file as
     multipl_e/completions.py writes it, judged by its own main.py --file process (--dir runs problems serially),
     os.cpu_count() at once; the scripts import siblings, so no -I."""

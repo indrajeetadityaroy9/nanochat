@@ -29,7 +29,7 @@ type Constraint = FirstToken | AllOf | syntax_constraint.SyntaxConstraint
 
 def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm"]) -> list[int]:
     """The token ids of a fill-in-the-middle prompt for the text between prefix and suffix (strings, each encoded on its
-    own), in the layout the packer trains (nanochat/data/pack.py, loader.py; Bavarian et al. arXiv 2207.14255 §3, App. D):
+    own), in the layout the packer trains (nanochat/data/pack.py, loader.py; arXiv 2207.14255 §3, App. D):
         psm: BOS <fim_prefix> prefix <fim_suffix> suffix <fim_middle>
         spm: BOS <fim_prefix> <fim_suffix> suffix <fim_middle> prefix
     The model continues with the middle and ends it with BOS (NativeDecoder.run stops there)."""
@@ -49,7 +49,7 @@ class Request:
     predicate of the generated ids, true once the sequence is done. temperature 0: the greedy argmax (ties to the lowest
     id); > 0: a sample of softmax(logits / temperature) whose draw at generated position i depends only on (seed, i),
     not on the slot or the batch (decode.cu gumbel), and with top_p < 1 from the fewest most likely tokens holding top_p
-    of that probability (nucleus sampling, Holtzman et al., ICLR 2020, arXiv 1904.09751, §3.1; decode.cu k_nucleus).
+    of that probability (nucleus sampling, arXiv 1904.09751, §3.1; decode.cu k_nucleus).
     constraint: the tokens allowed at each step."""
     prompt: list[int]
     max_tokens: int
@@ -86,7 +86,7 @@ class FirstToken:
 
 
 def heal(tokenizer, prompt: list[int]) -> tuple[list[int], FirstToken]:
-    """Token healing (Lundberg, "The Art of Prompt Design: Prompt Boundaries and Token Healing", 2023; Guidance): the
+    """Token healing ("The Art of Prompt Design: Prompt Boundaries and Token Healing", Guidance, 2023): the
     prompt without its last token, and a constraint whose first token's bytes start with that token's bytes (BOS
     excluded), so the model picks the token across the prompt's boundary; the text of the healed prompt and the
     generated ids extends the prompt's text. prompt: BOS and at least two more tokens."""
@@ -125,7 +125,7 @@ def step_masks(constraints: list[Constraint]) -> list[np.ndarray | None]:
 
 
 # the prompt store's page in positions: a stored prompt takes whole pages anywhere in the store (vLLM's PagedAttention,
-# Kwon et al. arXiv 2309.06180, pages a KV cache likewise, 16 tokens a page by default; 64 keeps a code prompt to a
+# arXiv 2309.06180, pages a KV cache likewise, 16 tokens a page by default; 64 keeps a code prompt to a
 # few copies, at most 63 positions unused)
 PAGE = 64
 

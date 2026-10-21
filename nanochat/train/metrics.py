@@ -14,11 +14,11 @@ run (each process start): step (the first step it trains), plan (schedule.RunPla
 stage (switch to the repo-level stage): step, stage.
 train (each optimizer step, 0-based): step; tokens (row positions after it, padding included); loss (mean next-token
     loss in nats over the step's valid targets, fp64); lr (LambdaLR's at the step); grad_norm (global L2 norm of the
-    gradient before clipping, the norm global-norm clipping thresholds: Pascanu et al., arXiv 1211.5063 §3.2);
+    gradient before clipping, the norm global-norm clipping thresholds: arXiv 1211.5063 §3.2);
     tok_per_s (row positions per second between the step's two CUDA synchronizations: the observed throughput of
     PaLM's model FLOPs utilization, arXiv 2204.02311 App. B).
 end (the last step trained): step; peak_memory_bytes (torch.cuda.max_memory_allocated of the process: the memory
-    footprint FlashAttention reports, Dao et al., arXiv 2205.14135).
+    footprint FlashAttention reports, arXiv 2205.14135).
 failure (a non-finite loss or gradient norm; the run stops): step, loss and grad_norm (null).
 """
 import json

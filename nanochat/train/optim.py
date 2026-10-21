@@ -9,7 +9,7 @@ import torch
 # DeepSeek LLM §2.3 (arXiv 2401.02954)
 BETAS = (0.9, 0.95)
 # Global gradient-norm clip, every reference code model's (DeepSeek LLM, arXiv 2401.02954 §2.3): Adam's update is
-# invariant to the gradient's scale (Kingma & Ba, arXiv 1412.6980 §2.1) and Muon's Newton-Schulz divides its input by
+# invariant to the gradient's scale (arXiv 1412.6980 §2.1) and Muon's Newton-Schulz divides its input by
 # its norm (torch/optim/_muon.py _zeropower_via_newtonschulz, after KellerJordan/Muon), so under a slowly varying
 # gradient scale the clip damps only spikes
 MAX_NORM = 1.0
@@ -17,7 +17,7 @@ MAX_NORM = 1.0
 
 def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float:
     """Weight decay whose EMA timescale 1 / (lr wd) is tau* = 1.084 TPP^-0.527 of the run's steps (Power Lines,
-    arXiv 2505.13738 Finding 3; Wang & Aitchison, arXiv 2405.13698)."""
+    arXiv 2505.13738 Finding 3; arXiv 2405.13698)."""
     return 1 / (lr * 1.084 * tokens_per_param ** -0.527 * steps)
 
 

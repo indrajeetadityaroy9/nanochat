@@ -12,8 +12,8 @@ eval/code_eval.py: filtered pass@1, one candidate selected by these checks among
   scored base tests (MBPP+: 373 of 378 prompt asserts use a base input; HumanEval+: 55 of 164 tasks share a doctest
   input with the base tests), so it favours base over plus pass@1;
 - search: per task a greedy candidate, then seeded samples, until one has no diagnostics and passes its prompt's
-  examples (Codex, Chen et al., arXiv 2107.03374 §3.5: "evaluating the first sample which passes the 3 public unit
-  tests"; AlphaCode's filtering by the problem's example tests, Li et al., arXiv 2203.07814 §4.5).
+  examples (Codex, arXiv 2107.03374 §3.5: "evaluating the first sample which passes the 3 public unit
+  tests"; AlphaCode's filtering by the problem's example tests, arXiv 2203.07814 §4.5).
 """
 
 import ast

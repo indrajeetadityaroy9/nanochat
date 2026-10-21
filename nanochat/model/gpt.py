@@ -139,7 +139,7 @@ class GPT(nn.Module):
 
     @torch.no_grad()
     def init_weights(self, *, seed: int) -> None:
-        """Stream-reading matrices and tables: uniform, std C^-0.5 (LeCun et al., "Efficient BackProp" §4.6).
+        """Stream-reading matrices and tables: uniform, std C^-0.5 ("Efficient BackProp" §4.6).
         Zero: c_o, c_proj, lm_head (blocks start as identity, modded-nanogpt record #5), VE gates (gate 1), x0_lambdas.
         One: resid_lambdas, gains (LOG 2026-01-11). Each random tensor draws from a generator seeded by `seed` and its
         name."""

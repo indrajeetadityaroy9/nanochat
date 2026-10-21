@@ -28,7 +28,7 @@ DEPTH, SEED = 24, 0
 # Production's multiplier of the plan's (DeepSeek LLM law's, arXiv 2401.02954 §3.1) peak lr: ablations/lr.py's
 # pre-registered estimator, results/lr.json "analysis" "production_multiplier" (d24 at 5's optimum x2.0235, carried over
 # production's horizon by the d8 ratio 0.9105 measured over 5 -> 200 tokens per parameter and the square-root batch
-# rule, Malladi et al., arXiv 2205.10287)
+# rule, arXiv 2205.10287)
 LR_SCALE = 2.546731698195362
 # Checkpoints at each tenth of the run (the capability curve over training; the tenth tenth is the final model) and at
 # the repository stage's start (the model before it); each is a resume point and an evaluated model

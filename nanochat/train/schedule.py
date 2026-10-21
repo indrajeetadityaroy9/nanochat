@@ -9,7 +9,7 @@ from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_SHARE, REPO_STA
 from nanochat.model.gpt import GPT, non_embedding_flops_per_token, scaling_params
 from nanochat.train.optim import BETAS
 
-# Linear warmup over 2 / (1 - beta2) steps (Ma & Yarats, arXiv 1910.04209): 40 at beta2 = 0.95
+# Linear warmup over 2 / (1 - beta2) steps (arXiv 1910.04209): 40 at beta2 = 0.95
 WARMUP = round(2 / (1 - BETAS[1]))
 
 
@@ -50,7 +50,7 @@ def plan(*, model: GPT, ratio: float) -> RunPlan:
 
 def lr_multiplier(it: int, *, steps: int) -> float:
     """LambdaLR multiplier at step `it`: linear warmup over WARMUP steps, then linear decay to 0 through the repo-level
-    stage (Bergsma et al., arXiv 2502.15938: beats WSD and cosine, more so at more tokens per parameter)."""
+    stage (arXiv 2502.15938: beats WSD and cosine, more so at more tokens per parameter)."""
     if it < WARMUP:
         return (it + 1) / WARMUP
     return (steps - it) / (steps - WARMUP)

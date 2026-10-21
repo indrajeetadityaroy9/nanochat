@@ -1,5 +1,5 @@
-//! nanochat's tokenizer trainer: byte-level BPE merges by source-attributed BPE (SA-BPE; Chizhov et al. 2026, arXiv
-//! 2604.14053). Each merge takes the pair of highest F·ln(R), F = the pair's frequency, R = the number of distinct
+//! nanochat's tokenizer trainer: byte-level BPE merges by source-attributed BPE (SA-BPE; arXiv 2604.14053). Each
+//! merge takes the pair of highest F·ln(R), F = the pair's frequency, R = the number of distinct
 //! sources (authorship units: a repository, a web host, a document) whose documents hold the pair in the current
 //! segmentation. A pair seen in one source scores 0: it merges only after every pair seen in several. Ties go to the
 //! higher F, then the smaller pair (rustbpe's order). Text is split by fancy-regex, the regex engine of OpenAI's
