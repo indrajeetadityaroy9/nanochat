@@ -9,7 +9,7 @@ stages, the loader and evaluation.
         │  (schema.py: repository file, notebook, text) with a local id, keeping Python 3 repository files
         ▼
     normalized/<source>/                     the Parquet store: one file per raw file
-        │  prepare.py, curate: exact and near duplicates dropped across the repository corpora and across the
+        │  curate.py: exact and near duplicates dropped across the repository corpora and across the
         │  document corpora (dedup.py: StarCoder2's MinHash LSH, arXiv 2402.19173), and the repository files
         │  GitHub Linguist (go-enry) marks vendored or generated; 1% val by repository / problem / document; a
         │  repository source's files partitioned by repository (DuckDB) and split into repository samples, the

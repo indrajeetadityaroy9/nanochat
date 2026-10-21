@@ -6,7 +6,7 @@ curated file (<split>.json; pack.py packs each file's documents together). The d
 length: pack.py groups the documents into training rows of one.
 
 A document is a repository sample (its files' texts, sources.texts: each after a comment with its path, in dependency
-order; prepare.curate) or the content of a notebook or text (a codeforces_cots conversation included). Row groups are
+order; curate.py) or the content of a notebook or text (a codeforces_cots conversation included). Row groups are
 the unit of parallel work; the parent writes their tokens in task order, so the output does not depend on the number
 of workers.
 

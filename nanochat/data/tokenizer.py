@@ -48,7 +48,7 @@ SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}|
 
 def bpe() -> ModuleType:
     """The data crate's Python module (train: the tokenizer trainer; sketch, duplicates: data/dedup.py;
-    repository_samples: data/prepare.py curate; pack: data/pack.py; native.crate_module)."""
+    repository_samples: data/curate.py; pack: data/pack.py; native.crate_module)."""
     return crate_module(Path(__file__).parent / "bpe")
 
 

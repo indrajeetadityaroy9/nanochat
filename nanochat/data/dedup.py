@@ -1,5 +1,5 @@
 """
-Deduplication of the normalized sources (prepare.curate): a document is dropped when its cluster of exact and near
+Deduplication of the normalized sources (curate.py): a document is dropped when its cluster of exact and near
 duplicates holds an earlier document, as StarCoder and StarCoder2 deduplicate their data (The Stack, arXiv 2211.15533
 §3; The Stack v2, arXiv 2402.19173 §3.1) and DeepSeek-Coder its data (arXiv 2401.14196 §2.3); repeated text wastes
 compute and capacity (arXiv 2205.10487).

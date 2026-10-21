@@ -828,7 +828,7 @@ cut TypeScript compilation errors by 75.3% (HumanEval) and 52.1% (MBPP). Its art
 functionally correct (Gemma-2 2B HumanEval 35.7% vs 32.0%; Qwen-2.5 32B 82.3% vs 72.3%), because the incomplete
 constrainer pushes the model into low-probability text; a complete (syntax) constrainer instead gained 53% exact match
 at 2B and 2.5% at 32B. A type constrainer for dynamically typed Python is incomplete by construction; Python 3 syntax
-can be constrained completely, and the training data holds only files that parse as Python 3 (`prepare.py:201-208`),
+can be constrained completely, and the training data holds only files that parse as Python 3 (`prepare.py` `stage`),
 so the model's distribution lies inside the constrainer's language (the alignment arXiv 2606.21619 restores by
 fine-tuning). Types are checked after generation instead.
 

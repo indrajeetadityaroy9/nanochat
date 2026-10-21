@@ -9,7 +9,7 @@ REPOSITORY_FILE: a source file of a code repository, with its path in the reposi
 the publisher's selection scores.
 NOTEBOOK: a notebook as one document, with its language.
 TEXT: a web or math document, or a codeforces_cots conversation (its R1 prompt and generation).
-SAMPLE_FILE: a curated repository file and its repository sample (prepare.curate): the files of a sample are
+SAMPLE_FILE: a curated repository file and its repository sample (curate.py): the files of a sample are
 consecutive rows, in the sample's order.
 """
 

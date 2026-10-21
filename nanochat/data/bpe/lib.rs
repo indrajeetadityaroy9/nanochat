@@ -1,6 +1,6 @@
 //! The data crate, Python module nanochat_bpe (built by nanochat/data/tokenizer.py bpe()): SA-BPE (arXiv 2604.14053)
 //! tokenizer training (train.rs), deduplication (dedup.rs; nanochat/data/dedup.py) and repository samples
-//! (repository.rs; nanochat/data/prepare.py) of curation, and the packer of training rows (pack.rs;
+//! (repository.rs; nanochat/data/curate.py) of curation, and the packer of training rows (pack.rs;
 //! nanochat/data/pack.py).
 
 mod dedup;

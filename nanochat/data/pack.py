@@ -56,7 +56,7 @@ import json
 import math
 import os
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -85,43 +85,39 @@ FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, LINE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5
 # Pack calls in flight: one per core, so a core finishing its share of one shard's documents takes up another's
 WINDOW = os.cpu_count()
 
-# A packed shard: its pieces (PIECE_COLUMNS int64 each, the FIM range within the shard's FIM tokens), the pieces of
-# each row, the shard's FIM tokens
-Shard = tuple[np.ndarray, np.ndarray, np.ndarray]
 
-
-def shard_packer(source: str, split: str, tokenizer: Tokenizer, *, seq_len: int) -> Callable[[int], Shard]:
-    """pack(i): curated shard i of a compiled split packed into rows of seq_len + 1 tokens."""
+def pack_shard(source: str, split: str, tokenizer: Tokenizer, i: int, *, seq_len: int
+               ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Curated shard i of a compiled split packed into rows of seq_len + 1 tokens: its pieces (PIECE_COLUMNS int64
+    each, the FIM range within the shard's FIM tokens), the pieces of each row, the shard's FIM tokens."""
     compiled = split_path(source, split, tokenizer)
-    bounds = shard_documents(source, split, tokenizer).tolist()
+    bounds = shard_documents(source, split, tokenizer)
     fim = (dict(rate=FIM_RATE, random=RANDOM_SHARE, single=SINGLE_NODE_SHARE, line=LINE_SHARE, spm=SPM_SHARE,
                 sentinels=[tokenizer.special_tokens[name] for name in FIM_TOKENS])
            if fim_packed(source, split) else None)
-    mergeable = tokenizer.token_bytes[:tokenizer.bos_token_id]
-
-    def pack(i: int) -> Shard:
-        pieces, counts, tokens = bpe().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
-                                            (bounds[i], bounds[i + 1]), row_len=seq_len + 1, token_bytes=mergeable,
-                                            pattern=tokenizer.pattern, grammar=SOURCES[source].grammar, fim=fim)
-        return (np.frombuffer(pieces, np.int64).reshape(-1, PIECE_COLUMNS), np.frombuffer(counts, np.int64),
-                np.frombuffer(tokens, TOKEN_DTYPE))
-
-    return pack
+    pieces, counts, tokens = bpe().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
+                                        (int(bounds[i]), int(bounds[i + 1])), row_len=seq_len + 1,
+                                        token_bytes=tokenizer.token_bytes[:tokenizer.bos_token_id],
+                                        pattern=tokenizer.pattern, grammar=SOURCES[source].grammar, fim=fim)
+    return (np.frombuffer(pieces, np.int64).reshape(-1, PIECE_COLUMNS), np.frombuffer(counts, np.int64),
+            np.frombuffer(tokens, TOKEN_DTYPE))
 
 
-def in_order(pack: Callable[[int], Shard], shards: Iterable[int]) -> Iterator[Shard]:
-    """pack of each shard, WINDOW in flight, in order."""
+def in_order(source: str, split: str, tokenizer: Tokenizer, shards: Iterable[int], *, seq_len: int
+             ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """pack_shard of each shard, WINDOW in flight, in order."""
     with ThreadPoolExecutor(WINDOW) as pool:
         pending = deque()
         for i in shards:
-            pending.append(pool.submit(pack, i))
+            pending.append(pool.submit(pack_shard, source, split, tokenizer, i, seq_len=seq_len))
             if len(pending) == WINDOW:
                 yield pending.popleft().result()
         while pending:
             yield pending.popleft().result()
 
 
-def write(source: str, split: str, tokenizer: Tokenizer, shards: Iterable[Shard], *, seq_len: int) -> int:
+def write(source: str, split: str, tokenizer: Tokenizer, shards: Iterable[tuple[np.ndarray, np.ndarray, np.ndarray]],
+          *, seq_len: int) -> int:
     """Packed shards, in order, as <split>-T<seq_len>.pieces, .rows and .fim; returns the rows written."""
     path = packed_path(source, split, tokenizer, seq_len)
     placed, fim_tokens, rows = 0, 0, 0
@@ -141,8 +137,8 @@ def write(source: str, split: str, tokenizer: Tokenizer, shards: Iterable[Shard]
 def pack_split(source: str, split: str, tokenizer: Tokenizer, *, seq_len: int) -> None:
     """Pack a compiled split whole."""
     shards = len(shard_documents(source, split, tokenizer)) - 1
-    rows = write(source, split, tokenizer, in_order(shard_packer(source, split, tokenizer, seq_len=seq_len),
-                                                    range(shards)), seq_len=seq_len)
+    rows = write(source, split, tokenizer, in_order(source, split, tokenizer, range(shards), seq_len=seq_len),
+                 seq_len=seq_len)
     print(f"{source} {split} T{seq_len}: {shards} files, {rows:,} rows")
 
 
@@ -196,9 +192,9 @@ def file_stage(tokenizer: Tokenizer) -> None:
         total = sum(tokens(source, "train", tokenizer) for source in corpora)
         for source in corpora:
             part = math.ceil(need * tokens(source, "train", tokenizer) / total)
+            files = len(shard_documents(source, "train", tokenizer)) - 1
             kept, held = [], 0
-            shards = in_order(shard_packer(source, "train", tokenizer, seq_len=seq_len),
-                              range(len(shard_documents(source, "train", tokenizer)) - 1))
+            shards = in_order(source, "train", tokenizer, range(files), seq_len=seq_len)
             for shard in shards:
                 kept.append(shard)
                 held += len(shard[1])
@@ -206,8 +202,8 @@ def file_stage(tokenizer: Tokenizer) -> None:
                     break
             shards.close()
             write(source, "train", tokenizer, kept, seq_len=seq_len)
-            print(f"{source} train T{seq_len}: {len(kept)} of {len(shard_documents(source, 'train', tokenizer)) - 1} "
-                  f"files, {held:,} rows (its part of {group}'s {need:,})")
+            print(f"{source} train T{seq_len}: {len(kept)} of {files} files, {held:,} rows (its part of {group}'s "
+                  f"{need:,})")
             cut(source, "train", tokenizer, files=len(kept))
 
 
@@ -216,13 +212,13 @@ def repo_stage(tokenizer: Tokenizer) -> None:
     corpora = mixture_corpora(REPO_STAGE.mixture)
     for source in corpora:
         pack_split(source, "val", tokenizer, seq_len=seq_len)
-    packers = {source: shard_packer(source, "train", tokenizer, seq_len=seq_len) for source in corpora}
     files = {source: len(shard_documents(source, "train", tokenizer)) - 1 for source in corpora}
     need, held, rows = repo_rows(tokenizer), {source: [] for source in corpora}, 0
     with ThreadPoolExecutor(len(corpora)) as pool:
         while rows < need:
             k = len(held[corpora[0]]) + 1
-            for source, shard in zip(corpora, pool.map(lambda s, k=k: packers[s](files[s] - k), corpora), strict=True):
+            shards = pool.map(lambda s, k=k: pack_shard(s, "train", tokenizer, files[s] - k, seq_len=seq_len), corpora)
+            for source, shard in zip(corpora, shards, strict=True):
                 held[source].insert(0, shard)
                 rows += len(shard[1])
     for source in corpora:

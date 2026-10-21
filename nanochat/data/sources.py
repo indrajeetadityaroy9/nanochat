@@ -38,7 +38,7 @@ class Source:
     @property
     def grammar(self) -> str | None:
         """The language whose tree-sitter grammar (data/bpe) parses a repository-file source, None for other sources:
-        its files are grouped into repository samples by their imports (prepare.curate) and cut between statements
+        its files are grouped into repository samples by their imports (curate.py) and cut between statements
         into fill-in-the-middle examples (pack.py); prepare.py keeps them with canonical line ends (prepare.stage) and
         keeps Python files only if they parse as Python 3."""
         return self.language if self.schema is REPOSITORY_FILE else None
@@ -72,14 +72,19 @@ SOURCES = {
 }
 
 
+def normalized_path(source: str, k: int) -> Path:
+    """DATA/normalized/<source>/<k>.parquet: the source's normalized file k (prepare.stage)."""
+    return DATA / "normalized" / source / f"{k}.parquet"
+
+
 def curated_dir(source: str, split: str) -> Path:
-    """DATA/curated/<source>/<split>: the source's curated shards of a split (prepare.curate)."""
+    """DATA/curated/<source>/<split>: the source's curated shards of a split (curate.py)."""
     return DATA / "curated" / source / split
 
 
 def curated_files(source: str, split: str) -> list[Path]:
     """Local paths of the source's curated shards of a split in the order of their number k (<k>.parquet: a
-    repository-file source's partition, any other source's normalized file; prepare.curate)."""
+    repository-file source's partition, any other source's normalized file; curate.py)."""
     return sorted(curated_dir(source, split).iterdir(), key=lambda path: int(path.stem))
 
 
