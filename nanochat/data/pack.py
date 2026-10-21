@@ -27,25 +27,51 @@ Each document of the split is
   after as an input only (loader.PretrainingBatches.assemble). The end of a row that no piece fits is padding, neither
   context nor target.
 
-The crate (tokenizer.bpe: pack) packs one curated shard at a time, its documents in parallel. In
+What is packed is what some run can read, no document being read twice (train/stages.py):
+- file stage: every val split, and the train split of every corpus of the stage's first group (code), whole; their
+  rows bound every run's draw of that group (bound). A later group's runs draw at most bound · its share / the first
+  group's share rows (group_rows), so its corpora keep, in proportion to their compiled train tokens, the fewest
+  leading curated shards that hold that many: the rest of their compiled train split is cut (cut), as the corpora are
+  read in file order (ClimbMix a shuffled crawl). A group's corpora keep about the same fraction, so its mixture
+  weights (loader.mixture_weights: packed rows) stay about its natural composition and each corpus fits when the group
+  does.
+- repo stage: every val split whole; the train split of each of the stage's corpora at its last k curated shards,
+  the repository-level stage's (stages.readable_rows), k the fewest such that they hold the most rows a repository
+  stage draws (repo_rows), the same k for every corpus so that each fits when the stage does.
+
+The crate (tokenizer.bpe: pack) packs one curated shard per call, its documents in parallel; WINDOW calls run at once
+(it releases the GIL), so the cores stay busy through each call's serial best-fit-decreasing. In
 compiled/<source>-<tokenizer data key>/: <split>-T<seq_len>.pieces holds each piece's loader.PIECE_COLUMNS (int64:
 token range [start, end) of <split>.bin, then the range of its FIM example in <split>-T<seq_len>.fim, empty for a
 piece read left to right) in row order; <split>-T<seq_len>.rows the index of each row's first piece, then the number of
 pieces (int64); <split>-T<seq_len>.fim the FIM examples' tokens (uint16; empty unless the split is packed with FIM,
-loader.fim_packed). Shards are packed and written in file order, so the output does not depend on the number of
-threads.
+loader.fim_packed). Shards are written in file order, so the output does not depend on the number of threads.
 
 python -m nanochat.data.pack --stage file   # every corpus's val and train splits at the file-level stage's rows
 python -m nanochat.data.pack --stage repo   # the repo-level stage's corpora's val and train splits at its rows
 """
 
 import argparse
-import itertools
+import json
+import math
+import os
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from nanochat.config import FILE_STAGE, REPO_STAGE
-from nanochat.data.loader import TOKEN_DTYPE, fim_packed, mixture_corpora, packed_path, shard_documents, split_path
+from nanochat.config import FILE_STAGE, REPO_SHARE, REPO_STAGE
+from nanochat.data.loader import (
+    PIECE_COLUMNS,
+    TOKEN_DTYPE,
+    fim_packed,
+    mixture_corpora,
+    packed_path,
+    packed_rows,
+    shard_documents,
+    split_path,
+)
 from nanochat.data.sources import SOURCES
 from nanochat.data.tokenizer import FIM_TOKENS, Tokenizer, bpe, get_tokenizer
 
@@ -56,34 +82,153 @@ from nanochat.data.tokenizer import FIM_TOKENS, Tokenizer, bpe, get_tokenizer
 # boundaries of line-level infilling (HumanEval single- and multi-line infilling, arXiv 2204.05999 and
 # arXiv 2207.14255: the prefix ends with a line break, the middle runs from the indentation through a line break)
 FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, LINE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5, 0.5, 0.5
+# Pack calls in flight: one per core, so a core finishing its share of one shard's documents takes up another's
+WINDOW = os.cpu_count()
+
+# A packed shard: its pieces (PIECE_COLUMNS int64 each, the FIM range within the shard's FIM tokens), the pieces of
+# each row, the shard's FIM tokens
+Shard = tuple[np.ndarray, np.ndarray, np.ndarray]
 
 
-def pack_split(source: str, split: str, tokenizer: Tokenizer, *, seq_len: int) -> None:
-    """Pack a compiled split into <split>-T<seq_len>.pieces, .rows and .fim."""
+def shard_packer(source: str, split: str, tokenizer: Tokenizer, *, seq_len: int) -> Callable[[int], Shard]:
+    """pack(i): curated shard i of a compiled split packed into rows of seq_len + 1 tokens."""
     compiled = split_path(source, split, tokenizer)
     bounds = shard_documents(source, split, tokenizer).tolist()
-    path = packed_path(source, split, tokenizer, seq_len)
     fim = (dict(rate=FIM_RATE, random=RANDOM_SHARE, single=SINGLE_NODE_SHARE, line=LINE_SHARE, spm=SPM_SHARE,
                 sentinels=[tokenizer.special_tokens[name] for name in FIM_TOKENS])
            if fim_packed(source, split) else None)
-    print(f"Packing {len(bounds) - 1} {split} files of '{source}' into rows of {seq_len + 1} tokens"
-          f"{' with FIM' if fim else ''}: {path}")
     mergeable = tokenizer.token_bytes[:tokenizer.bos_token_id]
-    placed, fim_tokens = 0, 0
+
+    def pack(i: int) -> Shard:
+        pieces, counts, tokens = bpe().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
+                                            (bounds[i], bounds[i + 1]), row_len=seq_len + 1, token_bytes=mergeable,
+                                            pattern=tokenizer.pattern, grammar=SOURCES[source].grammar, fim=fim)
+        return (np.frombuffer(pieces, np.int64).reshape(-1, PIECE_COLUMNS), np.frombuffer(counts, np.int64),
+                np.frombuffer(tokens, TOKEN_DTYPE))
+
+    return pack
+
+
+def in_order(pack: Callable[[int], Shard], shards: Iterable[int]) -> Iterator[Shard]:
+    """pack of each shard, WINDOW in flight, in order."""
+    with ThreadPoolExecutor(WINDOW) as pool:
+        pending = deque()
+        for i in shards:
+            pending.append(pool.submit(pack, i))
+            if len(pending) == WINDOW:
+                yield pending.popleft().result()
+        while pending:
+            yield pending.popleft().result()
+
+
+def write(source: str, split: str, tokenizer: Tokenizer, shards: Iterable[Shard], *, seq_len: int) -> int:
+    """Packed shards, in order, as <split>-T<seq_len>.pieces, .rows and .fim; returns the rows written."""
+    path = packed_path(source, split, tokenizer, seq_len)
+    placed, fim_tokens, rows = 0, 0, 0
     with (open(path.with_suffix(".pieces"), "wb") as pieces_file, open(path.with_suffix(".rows"), "wb") as rows_file,
           open(path.with_suffix(".fim"), "wb") as fim_file):
-        for shard in itertools.pairwise(bounds):
-            pieces, counts, tokens = bpe().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
-                                                shard, row_len=seq_len + 1, token_bytes=mergeable,
-                                                pattern=tokenizer.pattern, grammar=SOURCES[source].grammar, fim=fim,
-                                                fim_base=fim_tokens)
-            counts = np.frombuffer(counts, dtype=np.int64)
-            pieces_file.write(pieces)
+        for pieces, counts, tokens in shards:
+            located = pieces.copy()
+            located[:, 2:] += fim_tokens  # the FIM range within the split's FIM tokens
+            pieces_file.write(located)
             rows_file.write(placed + np.cumsum(counts) - counts)  # each row's first piece
             fim_file.write(tokens)
-            placed += int(counts.sum())
-            fim_tokens += len(tokens) // np.dtype(TOKEN_DTYPE).itemsize
+            placed, fim_tokens, rows = placed + len(pieces), fim_tokens + len(tokens), rows + len(counts)
         rows_file.write(np.array([placed], dtype=np.int64))
+    return rows
+
+
+def pack_split(source: str, split: str, tokenizer: Tokenizer, *, seq_len: int) -> None:
+    """Pack a compiled split whole."""
+    shards = len(shard_documents(source, split, tokenizer)) - 1
+    rows = write(source, split, tokenizer, in_order(shard_packer(source, split, tokenizer, seq_len=seq_len),
+                                                    range(shards)), seq_len=seq_len)
+    print(f"{source} {split} T{seq_len}: {shards} files, {rows:,} rows")
+
+
+def bound(tokenizer: Tokenizer) -> int:
+    """The file-level stage's first group's train rows: the most rows of that group a run reads."""
+    _, corpora = next(iter(FILE_STAGE.mixture.values()))
+    return sum(packed_rows(corpus, "train", tokenizer, FILE_STAGE.seq_len) for corpus in corpora)
+
+
+def group_rows(tokenizer: Tokenizer) -> dict[str, int]:
+    """{group: the most file-level rows a run draws of it} for the stage's groups after the first (mixture_rows draws
+    each group in proportion to its share)."""
+    (_, (share, _)), *later = FILE_STAGE.mixture.items()
+    return {group: math.ceil(bound(tokenizer) * group_share / share) for group, (group_share, _) in later}
+
+
+def repo_rows(tokenizer: Tokenizer) -> int:
+    """The most rows a repository-level stage draws: REPO_SHARE of a run's steps (schedule.plan) at REPO_STAGE's rows
+    per micro-batch, against a file-level stage whose first group draws at most bound rows."""
+    share, _ = next(iter(FILE_STAGE.mixture.values()))
+    return math.ceil(bound(tokenizer) / share * REPO_SHARE / (1 - REPO_SHARE) * REPO_STAGE.batch_rows
+                     / FILE_STAGE.batch_rows)
+
+
+def tokens(source: str, split: str, tokenizer: Tokenizer) -> int:
+    """The tokens of a compiled split (its .idx's total)."""
+    return int(np.memmap(split_path(source, split, tokenizer).with_suffix(".idx"), dtype=np.int64, mode="r")[-1])
+
+
+def cut(source: str, split: str, tokenizer: Tokenizer, *, files: int) -> None:
+    """A compiled split cut to its first `files` curated files: .bin and .idx end with their last document, .json
+    lists those files."""
+    path = split_path(source, split, tokenizer)
+    documents = int(shard_documents(source, split, tokenizer)[files])
+    end = int(np.memmap(path.with_suffix(".idx"), dtype=np.int64, mode="r")[documents])
+    os.truncate(path.with_suffix(".bin"), end * np.dtype(TOKEN_DTYPE).itemsize)
+    os.truncate(path.with_suffix(".idx"), (documents + 1) * np.dtype(np.int64).itemsize)
+    listing = json.loads(path.with_suffix(".json").read_text())
+    path.with_suffix(".json").write_text(json.dumps({"files": listing["files"][:files]}))
+
+
+def file_stage(tokenizer: Tokenizer) -> None:
+    seq_len = FILE_STAGE.seq_len
+    for source in mixture_corpora(FILE_STAGE.mixture):
+        pack_split(source, "val", tokenizer, seq_len=seq_len)
+    _, first = next(iter(FILE_STAGE.mixture.values()))
+    for source in first:
+        pack_split(source, "train", tokenizer, seq_len=seq_len)
+    for group, need in group_rows(tokenizer).items():
+        corpora = FILE_STAGE.mixture[group][1]
+        total = sum(tokens(source, "train", tokenizer) for source in corpora)
+        for source in corpora:
+            part = math.ceil(need * tokens(source, "train", tokenizer) / total)
+            kept, held = [], 0
+            shards = in_order(shard_packer(source, "train", tokenizer, seq_len=seq_len),
+                              range(len(shard_documents(source, "train", tokenizer)) - 1))
+            for shard in shards:
+                kept.append(shard)
+                held += len(shard[1])
+                if held >= part:
+                    break
+            shards.close()
+            write(source, "train", tokenizer, kept, seq_len=seq_len)
+            print(f"{source} train T{seq_len}: {len(kept)} of {len(shard_documents(source, 'train', tokenizer)) - 1} "
+                  f"files, {held:,} rows (its part of {group}'s {need:,})")
+            cut(source, "train", tokenizer, files=len(kept))
+
+
+def repo_stage(tokenizer: Tokenizer) -> None:
+    seq_len = REPO_STAGE.seq_len
+    corpora = mixture_corpora(REPO_STAGE.mixture)
+    for source in corpora:
+        pack_split(source, "val", tokenizer, seq_len=seq_len)
+    packers = {source: shard_packer(source, "train", tokenizer, seq_len=seq_len) for source in corpora}
+    files = {source: len(shard_documents(source, "train", tokenizer)) - 1 for source in corpora}
+    need, held, rows = repo_rows(tokenizer), {source: [] for source in corpora}, 0
+    with ThreadPoolExecutor(len(corpora)) as pool:
+        while rows < need:
+            k = len(held[corpora[0]]) + 1
+            for source, shard in zip(corpora, pool.map(lambda s, k=k: packers[s](files[s] - k), corpora), strict=True):
+                held[source].insert(0, shard)
+                rows += len(shard[1])
+    for source in corpora:
+        write(source, "train", tokenizer, held[source], seq_len=seq_len)
+    print(f"repo train T{seq_len}: the last {len(held[corpora[0]])} files of each corpus, {rows:,} rows "
+          f"(a repository stage draws at most {need:,})")
 
 
 if __name__ == "__main__":
@@ -91,8 +236,5 @@ if __name__ == "__main__":
     parser.add_argument("--stage", type=str, required=True, choices=("file", "repo"))
     args = parser.parse_args()
     tokenizer = get_tokenizer()
-    sources, stage = (list(SOURCES), FILE_STAGE) if args.stage == "file" else (mixture_corpora(REPO_STAGE.mixture),
-                                                                               REPO_STAGE)
-    for source in sources:
-        for split in ("val", "train"):
-            pack_split(source, split, tokenizer, seq_len=stage.seq_len)
+    bpe()  # built once, before the threads call it
+    {"file": file_stage, "repo": repo_stage}[args.stage](tokenizer)

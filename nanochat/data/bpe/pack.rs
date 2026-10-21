@@ -350,14 +350,14 @@ fn best_fit_decreasing(lengths: &[usize], targeted: &[bool], row_len: usize) -> 
 }
 
 /// One curated shard's documents first..last packed: the pack index entry of every piece in row order (token range
-/// [start, end) of the split, then the range of its FIM example in the split's FIM tokens, empty for a piece read left
-/// to right; data/loader.py PIECE_COLUMNS), the pieces per row, and the FIM examples' tokens in row order (from
-/// fim_base on in the split's). A piece's BOS is followed by its tokens: a FIM example's when the loader reads "fim",
-/// else (reading "left_to_right", and every piece read left to right) its range; it takes the longer of the two in its
-/// row. A piece has the BOS after it as its target when it ends its document or is a FIM example (the end of its
+/// [start, end) of the split, then the range of its FIM example in the shard's FIM tokens, empty for a piece read left
+/// to right; data/loader.py PIECE_COLUMNS, pack.py offsets the FIM range into the split's), the pieces per row, and the
+/// FIM examples' tokens in row order. A piece's BOS is followed by its tokens: a FIM example's when the loader reads
+/// "fim", else (reading "left_to_right", and every piece read left to right) its range; it takes the longer of the two
+/// in its row. A piece has the BOS after it as its target when it ends its document or is a FIM example (the end of its
 /// middle); such pieces come first in their row and the pieces cut from their document left to right last, so the BOS
 /// after a piece is its target.
-fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize), fim_base: usize) -> (Vec<[i64; 4]>, Vec<i64>, Vec<u16>) {
+fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize)) -> (Vec<[i64; 4]>, Vec<i64>, Vec<u16>) {
     let documents: Vec<Vec<Piece>> = (first..last).into_par_iter().map(|d| split.pieces(d, offsets[d] as usize, offsets[d + 1] as usize)).collect();
     let (mut pieces, mut targeted) = (Vec::new(), Vec::new());
     for document in documents {
@@ -372,9 +372,9 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize), fim
     let (mut index, mut fim_tokens) = (Vec::with_capacity(pieces.len()), Vec::new());
     for &p in rows.iter().flat_map(|row| row.iter().filter(|&&p| targeted[p]).chain(row.iter().filter(|&&p| !targeted[p]))) {
         let ([s, e], example) = &pieces[p];
-        let at = fim_base + fim_tokens.len();
+        let at = fim_tokens.len();
         fim_tokens.extend_from_slice(example.as_deref().unwrap_or_default());
-        index.push([*s as i64, *e as i64, at as i64, (fim_base + fim_tokens.len()) as i64]);
+        index.push([*s as i64, *e as i64, at as i64, fim_tokens.len() as i64]);
     }
     (index, rows.iter().map(|row| row.len() as i64).collect(), fim_tokens)
 }
@@ -386,11 +386,12 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize), fim
 /// documents); fim: AST-FIM's shares and sentinel ids for its train split (Fim). Returns the pack index entries
 /// (native-endian int64, 4 per piece), the pieces per row (int64) and the FIM tokens (uint16).
 #[pyfunction]
-#[pyo3(signature = (tokens_path, offsets_path, shard, *, row_len, token_bytes, pattern, grammar, fim, fim_base))]
+#[pyo3(signature = (tokens_path, offsets_path, shard, *, row_len, token_bytes, pattern, grammar, fim))]
 pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, shard: (usize, usize), row_len: usize, token_bytes: Vec<Vec<u8>>,
-                        pattern: &str, grammar: Option<Lang>, fim: Option<Fim>, fim_base: usize)
+                        pattern: &str, grammar: Option<Lang>, fim: Option<Fim>)
                         -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>) {
-    let tokens = unsafe { Mmap::map(&File::open(tokens_path).unwrap()).unwrap() }; // compiled files are written once and never modified
+    // pack.py cuts a compiled split only after its last pack call returns, so the files are not modified while mapped
+    let tokens = unsafe { Mmap::map(&File::open(tokens_path).unwrap()).unwrap() };
     let offsets = unsafe { Mmap::map(&File::open(offsets_path).unwrap()).unwrap() };
     let ends_line: Vec<bool> = token_bytes.iter().map(|token| token.last() == Some(&b'\n')).collect();
     // a token starts a character unless its first byte is a UTF-8 continuation byte 10xxxxxx (RFC 3629 §3)
@@ -400,7 +401,7 @@ pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, 
     let (index, counts, fim_tokens) = py.detach(|| {
         let split = Split { tokens: bytemuck::cast_slice(&tokens), token_bytes: &token_bytes, ends_line: &ends_line, starts_char: &starts_char, row_len,
                             grammar: grammar.as_ref(), fim: fim.as_ref().zip(bpe.as_ref()) };
-        pack_shard(&split, bytemuck::cast_slice(&offsets), shard, fim_base)
+        pack_shard(&split, bytemuck::cast_slice(&offsets), shard)
     });
     (PyBytes::new(py, bytemuck::cast_slice(&index)), PyBytes::new(py, bytemuck::cast_slice(&counts)), PyBytes::new(py, bytemuck::cast_slice(&fim_tokens)))
 }

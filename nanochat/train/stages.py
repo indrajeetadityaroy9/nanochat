@@ -1,9 +1,9 @@
 """
 Packed rows each stage reads, no document twice: per repository corpus, the repo-level stage reads the fewest trailing
-curated shards (shuffled by repository, data/prepare.py curate_partition) holding the rows it draws; the file-level stage
-reads the rest. max_ratio: the most tokens per scaling parameter at which no stage draws more rows of a corpus than it
-may read (data/loader.py PretrainingBatches stops at an exhausted corpus). stage_batches: a stage's training
-micro-batches in the run's data order.
+curated shards (shuffled by repository, data/prepare.py curate_partition) holding the rows it draws, among the trailing
+shards data/pack.py packs at its rows; the file-level stage reads the rest. max_ratio: the most tokens per scaling
+parameter at which no stage draws more rows of a corpus than it may read (data/loader.py PretrainingBatches stops at an
+exhausted corpus). stage_batches: a stage's training micro-batches in the run's data order.
 """
 
 import bisect

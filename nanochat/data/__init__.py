@@ -24,9 +24,12 @@ stages, the loader and evaluation.
         │  pack.py, per sequence length: cut long documents between whole statements (repository samples) or at line
         │  ends, make train pieces of the repository corpora AST-FIM (arXiv 2506.00204) fill-in-the-middle examples
         │  (their sections encoded each on its own), BOS-aligned Best-Fit-Decreasing packing (no document cut to fill
-        │  a row; padding instead), as an index of each row's pieces and the examples' tokens
+        │  a row; padding instead), as an index of each row's pieces and the examples' tokens; only what some run
+        │  can read: text and math cut to the rows the mixture draws of them, the repository stage's trailing shards
         ▼
     <split>-T<seq_len>.pieces, .rows, .fim
+        │  publish.py: to the Hub dataset config.DATASET with a manifest and card, one squashed commit; on the
+        │  training host `python -m nanochat.paths` pulls it at config.DATASET_REVISION
         │  mmap'd in place from local NVMe; each row built on the fly
         ▼
     mixture batches, resumable              loader.py
@@ -39,6 +42,7 @@ stages, the loader and evaluation.
     python -m nanochat.data.compile
     python -m nanochat.data.pack --stage file
     python -m nanochat.data.pack --stage repo
+    python -m nanochat.data.publish
 
 Everything is stored under paths.DATA:
     raw/<source>/                          fetched files at their Hub paths (Stack-Edu: metadata with Software
@@ -49,7 +53,8 @@ Everything is stored under paths.DATA:
     curated/<source>/{train,val}/          <k>.parquet training documents (a repository source: its files in sample
                                            order, one file per partition)
     compiled/<source>-<tok>/               {train,val}.bin tokens, .idx document offsets, .json documents per curated
-                                           file (compile.py); {train,val}-T<seq_len>.pieces, .rows, .fim: the packed
-                                           rows (pack.py)
+                                           file (compile.py; text and math train splits cut by pack.py);
+                                           {train,val}-T<seq_len>.pieces, .rows, .fim: the packed rows (pack.py)
+    manifest.json                          how the published data was made (publish.py)
     huggingface/                           the Hugging Face cache (Stack-Edu metadata, the evaluation benchmarks' files)
 """
