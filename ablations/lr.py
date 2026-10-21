@@ -113,8 +113,9 @@ if __name__ == "__main__":
     # (fit) gains the next factor of 2 and the experiment runs again (harness.main skips evaluated runs)
     grids = {(8, SHORT): [1, 2, 4], (8, LONG): [1, 2, 4, 8], (24, SHORT): [1, 2, 4]}
     while True:
-        main(settings=tuple((depth, ratio, range(1), {f"lr x{s:g}": {"lr_scale": float(s)} for s in scales if s != 1})
-                            for (depth, ratio), scales in grids.items()), production={})
+        main(settings=tuple((depth, ratio, range(1), {},
+                             {f"lr x{s:g}": {"lr_scale": float(s)} for s in scales if s != 1})
+                            for (depth, ratio), scales in grids.items()))
         lines = [json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
         extend = {(depth, ratio): fit([line for line in lines if (line["setting"]["depth"],
                                                                    line["setting"]["tokens_per_param"]) == (depth, ratio)])

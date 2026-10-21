@@ -2,9 +2,10 @@
 A checkpoint's evaluation and a run's tracked metrics.
 
 evaluate: BASE_EVAL/<name>.json (name: train/checkpoint.checkpoint_name), one JSON object: run (the name), step, the
-likelihood metrics (eval/bpb.py likelihood: "8k", "32k", "solution") and, with generate "benchmarks", the generation
-benchmarks (eval/code_eval.py: "codegen", "fim"; null with generate "none", the ablation runs' likelihood-only
-evaluation). NaN and infinities are not JSON and raise.
+likelihood metrics (eval/bpb.py likelihood: "8k", "32k", "solution"), how healed greedy completions parse
+(eval/code_eval.py parse_generation: "parse") and, with generate "benchmarks", the generation benchmarks
+(eval/code_eval.py: "codegen", "fim"; null with generate "parse", the ablation runs' evaluation). NaN and infinities
+are not JSON and raise.
 
 export: RESULTS/<tag>.jsonl, one record (record): the run's records but the per-step ones (train/metrics.py: run,
 stage, end, failure) and the evaluations of its checkpoints verbatim, in step order; RESULTS/<tag>-curves.jsonl, its
@@ -17,21 +18,22 @@ import torch
 
 from nanochat.data.tokenizer import Tokenizer
 from nanochat.eval.bpb import likelihood
-from nanochat.eval.code_eval import fim_generation, generation, tasks
+from nanochat.eval.code_eval import fim_generation, generation, parse_generation, tasks
 from nanochat.model.gpt import GPT
 from nanochat.paths import BASE_EVAL, RESULTS
 from nanochat.train import metrics
 
 
 def evaluate(model: GPT, tokenizer: Tokenizer, *, name: str, step: int,
-             generate: Literal["benchmarks", "none"]) -> None:
+             generate: Literal["benchmarks", "parse"]) -> None:
     """BASE_EVAL/<name>.json of `model` (on the GPU), the checkpoint after `step` steps."""
     benchmarks = tasks()
     results = likelihood(model, tokenizer, benchmarks, device=torch.device("cuda"))
+    results |= {"parse": parse_generation(model, tokenizer, benchmarks)}
     match generate:
         case "benchmarks":
             results |= {"codegen": generation(model, tokenizer, benchmarks), "fim": fim_generation(model, tokenizer)}
-        case "none":
+        case "parse":
             results |= {"codegen": None, "fim": None}
     (BASE_EVAL / f"{name}.json").write_text(json.dumps({"run": name, "step": step} | results, allow_nan=False),
                                             encoding="utf-8")

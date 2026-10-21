@@ -121,8 +121,9 @@ def mixture_rows(weights: np.ndarray, *, start: int, count: int) -> np.ndarray:
 
 class PretrainingBatches:
     """Re-iterable micro-batches (inputs, targets, cu_seqlens) of a mixture {corpus: weight} of packed corpora.
-    orders: {corpus: row ids in read order}; start: the run rows already consumed (resume), whose rows of each corpus
-    (mixture_rows) are skipped; iteration stops when a corpus's order is exhausted, without the partial micro-batch.
+    orders: {corpus: row ids in read order, -1 an empty row (all padding: eval/bpb.py fills a last micro-batch with
+    them)}; start: the run rows already consumed (resume), whose rows of each corpus (mixture_rows) are skipped;
+    iteration stops when a corpus's order is exhausted, without the partial micro-batch.
     reading: "fim" reads the packed fill-in-the-middle examples in place of their pieces' tokens, "left_to_right" every
     piece left to right (assemble).
     - inputs (int32), targets (int64): on the device
@@ -183,7 +184,7 @@ class PretrainingBatches:
                 row = next(orders[c], None)
                 if row is None:  # a corpus's order read whole
                     return
-                starts = self.assemble(batch[r], self.names[c], row)
+                starts = self.assemble(batch[r], self.names[c], row) if row >= 0 else [0]
                 # the pieces, then the padding if the inputs hold any
                 bounds += [r * self.seq_len + start for start in starts if start < self.seq_len]
             # page-locked, so the copy is asynchronous

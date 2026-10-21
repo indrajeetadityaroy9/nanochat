@@ -102,9 +102,13 @@ def save(directory: Path, mergeable: list[bytes], pattern: str) -> None:
 @functools.cache
 def get_tokenizer(name: str = "production") -> Tokenizer:
     """A trained tokenizer, loaded once per process: production's (TOKENIZER, its data in DATA/compiled) or a tokenizer
-    ablation arm's (TOKENIZER_ABLATION/<name>; every arm's data in TOKENIZER_ABLATION/compiled)."""
-    directory, compiled = ((TOKENIZER, DATA / "compiled") if name == "production"
-                           else (TOKENIZER_ABLATION / name, TOKENIZER_ABLATION / "compiled"))
+    ablation arm's on one of that experiment's document sets, "<arm>@<documents>" (TOKENIZER_ABLATION/<arm>, its data
+    in TOKENIZER_ABLATION/<documents>)."""
+    if name == "production":
+        directory, compiled = TOKENIZER, DATA / "compiled"
+    else:
+        arm, documents = name.split("@")
+        directory, compiled = TOKENIZER_ABLATION / arm, TOKENIZER_ABLATION / documents
     with open(directory / "tokenizer.tiktoken", "rb") as f:
         mergeable = [base64.b64decode(line.split()[0]) for line in f]  # line i: token i, base64, and its rank i
     with open(directory / "tokenizer.pattern", newline="") as f:
