@@ -6,10 +6,11 @@ LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z 
 nanochat::lm_loss (training): a GEMM writes bf16 z; QuACK's cross_entropy_fwd_out (quack/cross_entropy.py, dx = z as
 with inplace_backward) writes each row's loss and overwrites z with softmax(z) - onehot(t); dx = (1/n) z W on QuACK
 (bf16), dW = (1/n) z^T x on cuBLAS in fp32 (as ops/linear.py's weight gradients). QuACK's fused linear-cross-entropy
-is not faster at d8 (ablations/ablations.md).
+is not faster at d8 (docs/h100-pretraining.md, LM head and evaluation losses).
 
 nanochat::lm_losses (evaluation): QuACK's lse_target_epi GEMM epilogue (quack/epilogue/library.py) reduces each row's
-logsumexp and gathers the target logit from the fp32 accumulators without storing z (ablations/ablations.md).
+logsumexp and gathers the target logit from the fp32 accumulators without storing z
+(docs/h100-pretraining.md, LM head and evaluation losses).
 """
 
 import torch
@@ -58,7 +59,7 @@ lm_loss.register_autograd(lm_loss_grad, setup_context=lm_loss_save)
 @torch.library.custom_op("nanochat::lm_losses", mutates_args=(), device_types="cuda")
 def lm_losses(x: Tensor, weight: Tensor, target: Tensor) -> Tensor:
     """Per-position loss (M,) fp32, 0 at PAD targets; no gradient. QuACK's default tile config (tuned=False), the
-    kernel measured in ablations/ablations.md."""
+    kernel measured in docs/h100-pretraining.md (LM head and evaluation losses)."""
     res = lse_target_epi(x, weight.to(x.dtype).t(), store_d=False, target=target, tuned=False)
     return torch.where(target != PretrainingBatches.PAD, res["lse"] - res["target_logit"], 0.0)
 

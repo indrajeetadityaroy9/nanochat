@@ -28,7 +28,8 @@ from scripts.base_train import train
 DEPTH, SEED = 24, 0
 # Production's multiplier of the plan's (DeepSeek LLM law's) peak lr: ablations/lr.py's pre-registered estimator,
 # results/lr.json "analysis" "production_multiplier" (d24 at 5's optimum x2.0235, carried over production's horizon by
-# the d8 ratio 0.9105 measured over 5 -> 200 tokens per parameter and the square-root batch rule; ablations.md)
+# the d8 ratio 0.9105 measured over 5 -> 200 tokens per parameter and the square-root batch rule;
+# docs/h100-pretraining.md, Peak lr)
 LR_SCALE = 2.546731698195362
 # Checkpoints at each tenth of the run (the capability curve over training; the tenth tenth is the final model) and at
 # the repository stage's start (the model before it); each is a resume point and an evaluated model

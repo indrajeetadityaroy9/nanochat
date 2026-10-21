@@ -8,7 +8,7 @@
 # --ipc=host --ulimit memlock=-1 --ulimit stack=67108864: the NGC PyTorch container's documented run flags; stack hard
 # limit unlimited (:-1) for evalplus's reliability_guard (evalplus/eval/utils.py setrlimit RLIMIT_STACK).
 # Inductor's coordinate-descent tuning stays off: it picks kernel configurations by timing, so compiled losses differ
-# between processes, for 0.8% of the d24 step (ablations/ablations.md).
+# between processes, for 0.8% of the d24 step (docs/h100-pretraining.md, Reproducibility).
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 exec docker run --rm --device nvidia.com/gpu=all --ipc=host --init --ulimit memlock=-1 --ulimit stack=67108864:-1 \
   --user "$(id -u):$(id -g)" -e HOME=/tmp \

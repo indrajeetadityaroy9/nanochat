@@ -13,7 +13,7 @@ Qwen3's QK norm with learnable gains (arXiv 2505.09388 §2).
 Not taken from 92d63d4: its smear, backout and logit softcap, its QK order (RoPE, norm, x 1.2) and its init
 (init_weights states this model's).
 fp32 parameters, bf16 activations; the ops round weights to bf16. Gradient reductions use the fastest kernels, not a
-fixed order (FA4's and the embedding backward's atomics: ~1% faster per step, ablations/ablations.md).
+fixed order (FA4's and the embedding backward's atomics: ~1% faster per step, docs/h100-pretraining.md, Attention).
 """
 
 import zlib
@@ -86,7 +86,8 @@ class Attention(nn.Module):
         B, T, C = n.size()
         q, k, v = (linear(n, w).view(B, T, -1, HEAD_DIM) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once. Broadcast-sum gate
-        # fused by Inductor: 0.88 vs 1.20 ms per layer and micro-batch for fp32 GEMMs (ablations/ablations.md)
+        # fused by Inductor: 0.88 vs 1.20 ms per layer and micro-batch for fp32 GEMMs
+        # (docs/h100-pretraining.md, Value-embedding gate)
         if ve is not None:
             gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))
             v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
