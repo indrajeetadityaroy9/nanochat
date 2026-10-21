@@ -1,10 +1,11 @@
 # Pretraining a code model on one H100
 
 A Python and C++ code-generation base model pretrained on one NVIDIA H100 80 GB SXM5 (sm_90) at the most tokens its data
-holds without any stage reading a document twice. The code is the specification; each section names the file that
-defines a setting. Measurements and ablations, with the code that runs them, are in `ablations/` (`ablations.md`). The
-pre-launch runs' numbers are stated here and in `ablations.md` (their raw records were not kept); the experiments'
-results are in `results/`.
+holds without any stage reading a document twice. The code is the specification: each section states its decisions,
+the basis of each (a measurement here, a cited result, or the law it is derived from) and the file that defines it.
+Measurements, with the code that runs them, are in `ablations/` (`ablations.md`; the pre-launch runs' raw records were
+not kept, so their numbers are stated there and here); the experiments' results are in `results/`. Pre-launch
+verification checks the code against this document.
 
 ## Model
 
@@ -25,6 +26,17 @@ applies `Attention` and `MLP` to the RMS-normed stream, each added back.
 | Init | stream-reading matrices and tables uniform with std C^-½; `c_o`, `c_proj`, `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
 | Precision | fp32 parameters, gradients and optimizer state; bf16 activations and GEMM inputs |
 | Lineage | From nanochat 92d63d4: the block layout, value-embedding layers, MLP and window pattern. Not taken: its smear, backout and logit softcap, QK order (RoPE → norm → ×1.2), short window (a quarter of the context), RoPE base (10^5) and init (`wte` N(0, 0.8), `lm_head` N(0, 0.001), `c_fc` at 0.4×, ramped lambdas). The gate is nanochat e85db6b's (2·sigmoid, zero init) read over the full width rather than its first 32 channels; 92d63d4 has 3·sigmoid of 12 channels, U(0, 0.02) init. The full-width read is not ablated |
+
+**Basis.** Every component rests on published evidence, not a study here (`ablations/ablations.md` §1, Not tested):
+ReLU² (nanochat LOG 2026-02-05), learned QK-norm gains (Qwen3), the x0 and residual scalars (nanochat LOG 2026-01-11),
+SSSL windows (Gemma 3's near-lossless local windows). Value embeddings are the one whose result would change
+production: they cost 4.7% of the d24 step (measured before `60138de`, record not kept) for MoVE's −0.016 bits per
+byte at d12 and −0.010 at d20 (arXiv 2601.22887), a gain that shrinks with scale; their ablation,
+`ablations/value_embeds.py` (none, at d16), is pre-registered and not yet run. Not adopted: Block Attention Residuals
+(+12% d24 step time, measured before `60138de`, record not kept, for a published 1.1% loss gain at 194M parameters,
+arXiv 2603.15031) and the partial key offset (a speedrun result, modded-nanogpt record #49, 124M), either of which
+would need a native decode path; multi-token prediction, reported to hurt models of this size on code benchmarks
+(Gloeckle et al., arXiv 2404.19737).
 
 ## Data and stages
 
@@ -49,7 +61,7 @@ into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
 | Setting | Value | Source |
 |---|---|---|
 | Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271, C = M·D (`train/schedule.py`) |
-| Peak lr | 2.3887e-3, every group: 2.5467 × the law's 9.3796e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured (`scripts/production.py` `LR_SCALE`; Appendix ablation) |
+| Peak lr | 2.3887e-3, every group: 2.5467 × the law's 9.3796e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured (`scripts/production.py` `LR_SCALE`; Peak lr, below) |
 | Steps | 81,166 (95.75B tokens, 490.77 per scaling parameter); repository stage from step 76,739 | `schedule.plan` |
 | Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (Ma & Yarats, arXiv 1910.04209) |
 | Decay | linear to zero | Bergsma et al., arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
@@ -59,26 +71,95 @@ into rows; its output is the Hugging Face dataset `iaroy/nanochat-data`.
 | Gradient clipping | global norm 1.0 on the raw gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (`base_train.MAX_NORM`) |
 | Repository stage | continues the decay: 5.46% of the peak lr at its first step, 0 at the last, over 4,427 steps (5.22B tokens) | DeepSeek-Coder §3.6 |
 
-Clipping at 1.0, decided on evidence rather than an experiment (`ablations/ablations.md` §1, Not tested). It rescales
-a step's raw gradient before Muon's momentum and AdamW's moments; both updates are invariant to a gradient scale that
-varies slowly (Adam's m/√v, Newton–Schulz orthogonalization), so clipping changes training only where the norm jumps,
-by down-weighting that step's gradient. That makes a fixed threshold's scale-dependence harmless (at 1.0 the clipped
-fraction of steps ranged from 0.2% to 97% across the configurations of an earlier d8 screen), including the norm's
-late rise under a decaying lr and weight decay (Defazio, arXiv 2506.02285; d8 here: medians 0.46, 1.09 and 1.52 over
-the run's thirds, §3). The one direct measurement, a single-seed d8 A/B in the previous regime (`ablations/ablations.md`
-§3), had clipping lower on all 11 corpora by 0.003 bits per byte on average, under the paired comparison's spread of
-per-pair differences (sd 0.0065 on 8K code); at the production batch and lr the norm stays below 1.9 after warmup (d24
-check below), so outside spikes a clip scales the gradient by at least 0.53. nanochat deleted its clipping because its
-norms never reached 1.0, leaving it inactive (karpathy/nanochat LOG 2026-01-08); its cost there was the norm's
-all-reduce, here one device's norm the log computes anyway. Clipping the orthogonalized update instead, as Megatron-LM
-and DeepSpeed have done for Muon, rescales the step itself (Megatron-LM PR 5395, DeepSpeed issue 8439); it is not
-done here.
+**Gradient clipping** at 1.0, decided on evidence rather than an experiment (`ablations/ablations.md` §1, Not tested).
+It rescales a step's raw gradient before Muon's momentum and AdamW's moments; both updates are invariant to a gradient
+scale that varies slowly (Adam's m/√v, Newton–Schulz orthogonalization), so clipping changes training only where the
+norm jumps, by down-weighting that step's gradient. That makes a fixed threshold's scale-dependence harmless (at 1.0
+the clipped fraction of steps ranged from 0.2% to 97% across the configurations of an earlier d8 screen), including
+the norm's late rise under a decaying lr and weight decay (Defazio, arXiv 2506.02285; d8 here: medians 0.46, 1.09 and
+1.52 over the run's thirds, `ablations.md` §3). The one direct measurement, a single-seed d8 A/B in the previous regime
+(`ablations.md` §3), had clipping lower on all 11 corpora by 0.003 bits per byte on average, under the paired
+comparison's spread of per-pair differences (sd 0.0065 on 8K code); at the production batch and the law's lr the norm
+stays below 1.9 after warmup (the d24 run below), so outside spikes a clip scales the gradient by at least 0.53.
+nanochat deleted its clipping because its norms never reached 1.0, leaving it inactive (karpathy/nanochat LOG
+2026-01-08); its cost there was the norm's all-reduce, here one device's norm the log computes anyway. Clipping the
+orthogonalized update instead, as Megatron-LM and DeepSpeed have done for Muon, rescales the step itself (Megatron-LM
+PR 5395, DeepSpeed issue 8439); it is not done here.
+
+**Peak lr.** DeepSeek LLM's law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and
+the transfer rules disagree on how the optimum moves with the horizon: from d8 over 5 to over 200 tokens per parameter,
+Complete^(d)P's SDE rule (arXiv 2512.22382) predicts the optimum's multiplier of the law changes × 0.354, Step-Law
+(arXiv 2503.04715) × 4.92. `ablations/lr.py` measures it: × 1, × 2, × 4 at d24 over 5 tokens per parameter, times
+the optimum's horizon trend measured at d8 (× 1 to × 8 over 5 and over 200), its power-law exponent carried to
+production's horizon range and corrected for production's larger batch growth by the square-root batch rule. Measured
+(`results/lr.json`): optima × 2.0235 (d24 over 5), × 3.4669 and × 3.1565 (d8 over 5 and 200), so a d8 ratio of
+0.9105: relative to the law the optimum barely moves with the horizon (the law's own C^−0.125 carries the trend),
+against both rules. Production's multiplier × 2.5467 = 2.0235 · 0.9105^(ln 98.17 / ln 40.05) · √2 (2.3887e-3) is
+adopted; the best arm beat the law by 0.0044 to 0.125 bits per byte, no run diverged, and the optima agree within 7%
+with nanochat's hand-tuned Muon lr at the same widths (`ablations.md` §3).
+
+### Against the standard regime
+
+Paired comparison, d8 at 20 tokens per parameter, three seed pairs (seed = data seed ∈ {0, 1, 2}; same initialization
+and data order within a pair). This configuration's arm is `60138de`'s baseline: linear decay to zero, τ-law weight
+decay, one RoPE base and no clipping, which production has since added
+(`d8-r20-s{0,1,2}-d{0,1,2}-{d69671850bea, ca426bc7cec9, ccd433c30eb2}`, tags reproduced from `60138de`'s `run_tag`).
+The standard regime is commit `c00d2f6`'s default (WSD, weight decay 0.1, clip 1.0, RoPE base 10^4 → 10^6), trained in
+its own worktree (`d8-r20-s{0,1,2}`). Both arms are evaluated by `60138de`'s `loss_evaluation` on the same held-out
+rows (`artifacts/evals/<tag>.json`; training records `artifacts/metrics/<tag>.jsonl`). Held-out bits per byte, new
+minus standard (paired t-test, df = 2; 95% CI from the t distribution):
+
+| Metric | new s0 | std s0 | new s1 | std s1 | new s2 | std s2 | Mean difference | 95% CI | p |
+|---|---|---|---|---|---|---|---|---|---|
+| 8K code | 0.63539 | 0.63839 | 0.63003 | 0.64245 | 0.63796 | 0.63782 | −0.00509 | [−0.02133, +0.01115] | 0.31 |
+| 8K text | 1.36145 | 1.35218 | 1.35838 | 1.35141 | 1.36027 | 1.35338 | +0.00771 | [+0.00436, +0.01107] | 0.010 |
+| 8K math | 1.34961 | 1.34378 | 1.34382 | 1.34143 | 1.34818 | 1.34086 | +0.00518 | [−0.00110, +0.01146] | 0.071 |
+| 8K all | 0.74078 | 0.74210 | 0.73566 | 0.74540 | 0.74280 | 0.74166 | −0.00331 | [−0.01748, +0.01086] | 0.42 |
+| 32K repository | 0.62002 | 0.62182 | 0.61461 | 0.62665 | 0.62284 | 0.62128 | −0.00410 | [−0.02169, +0.01350] | 0.42 |
+| HumanEval+ solutions | 0.66348 | 0.66029 | 0.64647 | 0.66510 | 0.66011 | 0.66790 | −0.00775 | [−0.03486, +0.01937] | 0.34 |
+| MBPP+ solutions | 0.77777 | 0.79011 | 0.78449 | 0.79356 | 0.78620 | 0.80870 | −0.01464 | [−0.03204, +0.00277] | 0.069 |
+| HumanEval-X C++ solutions | 0.62815 | 0.63128 | 0.62961 | 0.64343 | 0.62856 | 0.63893 | −0.00911 | [−0.02265, +0.00443] | 0.10 |
+
+Code and the benchmarks' reference solutions are equal or lower under this configuration (MBPP+ and C++ solutions
+lower on every seed), none significantly higher; general text is significantly higher (+0.0077, 0.6% relative), math
+higher at p = 0.07. Training: no non-finite loss or gradient in either arm; maximum gradient norm 4.39 / 5.43 / 5.13
+without clipping against 7.85 / 10.00 / 6.16 (measured before the standard regime's clip); training loss over the last
+5% of steps (repository stage) 1.702 / 1.654 / 1.710 against 1.739 / 1.729 / 1.736. pass@1 at d8 is about 0 (seed 0:
+HumanEval+ 0, MBPP+ base 0.0026, single-line infilling SPM 0.036), so the comparison rests on bits per byte. An earlier
+unpaired comparison of seed 0 with the previous regime's seed-42 runs, clipped and not, agrees (`ablations.md` §3):
+lower on every code corpus, higher on text and math by 0.010 to 0.015.
+
+### Production's batch at d24
+
+`d24-r490.805-s0-d0-c7c5fbbe4b31` (`60138de`, unclipped): the production run's batch (1,179,648 tokens) at the law's
+peak lr (9.3795e-4, before the × 2.5467 above), cut to 0.5B tokens (423 steps), file-level stage; weight decay 3.814,
+the τ law at this 423-step horizon (production's at this lr: 0.317). Per tenth of the run:
+
+| Steps | Mean loss | Gradient norm, median | Gradient norm, max | lr at the end | tok/s |
+|---|---|---|---|---|---|
+| 0–42 | 8.269 | 1.864 | 4.717 | 9.331e-4 | 316,018 |
+| 43–85 | 5.704 | 1.010 | 1.820 | 8.277e-4 | 315,689 |
+| 86–128 | 4.936 | 1.096 | 1.265 | 7.224e-4 | 315,894 |
+| 129–170 | 4.384 | 1.188 | 1.472 | 6.196e-4 | 315,041 |
+| 171–212 | 3.898 | 1.204 | 1.403 | 5.167e-4 | 315,497 |
+| 213–254 | 3.279 | 1.345 | 1.684 | 4.139e-4 | 315,811 |
+| 255–296 | 2.785 | 1.203 | 1.381 | 3.110e-4 | 315,217 |
+| 297–338 | 2.514 | 0.961 | 1.346 | 2.082e-4 | 315,058 |
+| 339–380 | 2.368 | 0.650 | 0.882 | 1.053e-4 | 314,567 |
+| 381–422 | 2.287 | 0.282 | 0.384 | 2.449e-6 | 314,405 |
+
+No non-finite loss or gradient; the gradient norm exceeds 1.9 only during warmup. Held-out bits per byte at 8K
+(`artifacts/evals/<tag>.json`): code 0.7485, text 1.4555, math 1.4454, all 0.8512: worse than the d8 run of 2,987
+steps (code 0.6354), a model 13× smaller on fewer tokens. Per optimizer step d24 is lower at every step after the
+first (2.274 vs 3.332 over steps 400–420); per token it is higher (3.508 vs 2.024 over 250–270M tokens, both in the
+file-level stage): at the production batch 0.5B tokens is 423 optimizer steps. A proxy cut from the production plan
+measures early optimization speed, so `schedule.plan` sets every run's batch and lr at its own compute (DeepSeek LLM
+sets its scaling runs' by the same laws).
 
 ## H100 implementation
 
 Ops in `nanochat/ops/`, CUDA sources in `nanochat/csrc/` (built on first use by `native.cuda_library`). Each is a
-`torch.library` op, so `torch.compile(fullgraph=True)` traces one graph per stage. Inductor's coordinate-descent tuning
-is off (`runs/container.sh`).
+`torch.library` op, so `torch.compile(fullgraph=True)` traces one graph per stage.
 
 | Op | Implementation |
 |---|---|
@@ -90,17 +171,29 @@ is off (`runs/container.sh`).
 | Embeddings | `F.embedding`, bf16 cast fused by Inductor; backward adds rows with atomics |
 | Decoding | `csrc/decode.cu` (`inference/decoder.py`): batched native decoder for the code benchmarks |
 
-The d24 step on real rows (12 micro-batches of 12 rows, `torch.profiler`): 3,741 ms, 315K tok/s, 100% GPU-busy, peak
-69.6 GiB; GEMM 53%, FA4 25%, Inductor 14%; the repository stage's (12 of 3 rows) 4,016 ms with coordinate-descent
-tuning (0.8% faster at the file level; not used, `ablations/ablations.md` §2). A fused q/k/v GEMM measured 3,729 ms
-against 3,712 ms and was not adopted. At 3,741 ms the step computes 539 TFLOP/s by M plus `lm_head` (54.5% of the
-H100's 989 dense bf16), 369 TFLOP/s (37.3%) counting the weight matrices alone.
+Each choice against its alternative (`ablations/ablations.md` §2):
+
+- **FlashAttention-4** rather than cuDNN attention: faster forward and backward in every measured window/segment case.
+- **CUDA q/k prologue** rather than Inductor's fusion: 298.2K → 305.8K tok/s.
+- **Value-embedding gate as an fp32 broadcast-sum** rather than fp32 GEMMs: 0.88 vs 1.20 ms per layer, same error.
+- **Split q/k/v GEMMs** rather than one fused GEMM: 3,712 vs 3,729 ms per d24 step.
+- **Micro-batch 98,304** rather than 65,536: 1% faster per token, peak 69.6 GiB of 80 GB.
+- **Runs one at a time:** one d8 run saturates the GPU (2.60M tok/s); two concurrent runs total 2.34M, four 2.57M.
+
+**The d24 step** on real rows (12 micro-batches of 12 rows, `torch.profiler`): 3,741 ms, 315K tok/s, 100% GPU-busy,
+peak 69.6 GiB; GEMM 53%, FA4 25%, Inductor 14%; the repository stage's (12 of 3 rows) 4,016 ms, measured with
+Inductor's coordinate-descent tuning (0.8% faster at the file level; off, Reproducibility). At 3,741 ms the step
+computes 539 TFLOP/s by M plus `lm_head` (54.5% of the H100's 989 dense bf16), 369 TFLOP/s (37.3%) counting the weight
+matrices alone, about 700 TFLOP/s (71%) over the GEMMs' own time (1,966–1,977 ms a step): the rest of the step is
+attention and Inductor's kernels.
 
 ## Reproducibility
 
 - **Fastest kernels.** FA4's and the embedding backward reduce with atomics, so repeated steps differ in the last bits;
   FA4's deterministic backward costs 1–3% of a d24 micro-batch's forward and backward. The forward is deterministic:
-  with Inductor's coordinate-descent tuning off, a compiled loss evaluation is bitwise equal across processes.
+  Inductor's coordinate-descent tuning, which picks kernels by timing so that two processes compile different ones, is
+  off (`runs/container.sh`), for 0.8% of the d24 step, and a compiled loss evaluation is bitwise equal across
+  processes.
 - **Resume.** A relaunched run continues from its newest checkpoint (weights, optimizer state, data position), written
   to a temporary file and renamed, so a kill mid-save leaves the previous one; checkpoints at each tenth of the run
   bound a failure's loss to a tenth.
@@ -150,107 +243,58 @@ production run read them.
 
 ## Pre-launch verification
 
-Commit `60138de` on the H100, on the packed rows; records under `artifacts/` by tag.
+### The model against its specification
+
+Each op and the whole model against fp64 restatements written from the Model table, forward and backward (2026-10-20):
+on NVIDIA GB10 (sm_121, where FA4 runs its SM120 kernels) and on a fresh H100 at `7faf11f` (this image's SM90
+kernels). d24's shapes, parameter counts, value-embedding layers, windows and FLOPs and d8's init are exactly as
+stated. Relative error against the restatement:
+
+| Check | GB10 | H100 |
+|---|---|---|
+| GEMMs and ReLU² (fp32 weight gradients) | 3.7e-3 (4.4e-6) | 3.7e-3 (4.4e-6) |
+| q/k prologue (gain gradients) | 1.7e-3 (1.5e-7) | 1.7e-3 (2.0e-7, bitwise repeatable) |
+| FA4 output and gradients | 3.6e-3 | 3.6e-3 |
+| FA4 window boundary: worst row, against either off-by-one (keys 512 back attended, 513 not) | 2.7e-3 against 1.0–2.3 | 2.7e-3 against 1.06–2.20 |
+| FA4 without the document mask | 4.1 | 4.2 |
+| Cross entropy | 1.7e-3 | 1.7e-3 |
+| Whole model (4 × 256, every component perturbed to matter): per-position loss | 5.0e-3 | 5.2e-3 mean, 2.5e-2 max |
+| Restatements each breaking one rule (no x0, σ gate, no value embeddings, RoPE +θ, no document mask) | 5.1e-2–1.5e-1 from the model | the model's deviation projects at most 0.001 onto each (1 would be that rule) |
+| Gradients | 1.7e-2 | 2.1e-2 |
+| Native decoder: greedy tokens the forward's argmax, the rest within | 499 of 512, 0.014 of its maximum logit | 502 of 512, 0.015 |
+
+### The custom kernels in use
+
+2026-10-20, a fresh Lambda `gpu_1x_h100_sxm5`, `7faf11f` cloned, this image; `torch.profiler` over `train` at
+production's d24 plan (10 steps of 12 micro-batches, the 32K stage from step 5, synthetic rows of ~950-token
+documents), the compiled evaluation losses and the native decoder:
+
+- **Built:** `native.cuda_library` compiles `qk_prologue.cu` and `decode.cu` as sm_90 SASS, every kernel present and
+  none spilling; Inductor's generated forward and backward call every `nanochat::` op.
+- **Training,** per step at both contexts, the counts the architecture implies: QuACK GEMMs 2,892 (121 a micro-batch
+  forward, 120 dX), cuBLAS fp32 weight gradients 1,728 and the head's 24, and 288 (12 micro-batches × 24 layers) each
+  of `k_forward`, `k_backward`, `k_gain_sum`, FA4 SM90 forward and backward, `gemm_act` and `gemm_dact`; QuACK cross
+  entropy 12. Of the step's 3.41 s of GPU time these take 81%, Inductor's Triton 16.5%, the optimizers and gradient
+  accumulation 2.4%.
+- **Throughput is not a production estimate:** the GEMMs take 1,983 ms a step, as on real rows, but FA4 570 ms against
+  real rows' 935: equal-length documents carry less attention than real files of the same mean length, and far less
+  than the repository stage's (342K tok/s at 8K and 341K at 32K, against 318K and 294K on real rows). Peak 76.5 GiB,
+  QuACK's autotuner copying operands on a cold cache (`ablations.md` §2: 76.7 GiB; 69.6 GiB warm).
+- **Evaluation:** per layer one each of `k_forward`, FA4 forward and `gemm_act` and five QuACK GEMMs, then one
+  `lse_target_epi`.
+- **Decoding:** every kernel `decode.cu`'s (GEMVs 69%, `k_attn` 25%, `k_norm` 6%); per step 24 `k_attn`, 50 `k_norm`
+  (embedding, two per layer, final) and 97 GEMVs, the choice head on sampled and constrained steps. Healed,
+  syntax-constrained requests among greedy and sampled ones keep their first token within the healing mask (5/5, fresh
+  and from the prompt store).
+
+### Operations
 
 | Check | Result |
 |---|---|
-| Resume: d8, 20 tokens per parameter (`d8-r20-s0-d0-d69671850bea`), killed with `docker kill` at step 991 and relaunched | continued from its step-900 checkpoint, switched to the 32K stage at step 2,824 (`repo_start`), finished at step 2,987; the step-2,824 checkpoint kept |
-| Production path (2026-10-20, through the `base_train` command line `scripts/production.py` has since replaced with direct calls in spawned processes): `base_train` with lr scale 2.5 (d8, 74 steps), `base_eval` (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
-| Run identity | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
-| Checkpoints and lineage (2026-10-20, NVIDIA GB10, sm_121; the image of this `uv.lock`; `train` on synthetic token rows, d8, 74 steps, checkpoints at 20, 40, 70 and 74) | a run killed after its step-40 checkpoint resumed there (attempt 1), switched to the 32K stage at step 70 and ended at 74; the final checkpoint reloaded reproduces the live model's loss bitwise; against the code of `results/lr.json` (`8caecb9`) the lr is bitwise equal at every step and the loss bitwise through step 5, then within 5.1e-6 relative, as an uninterrupted and a resumed run of the same code differ (4.8e-6: the backward's atomics) |
-| Model against this document's Model table (2026-10-20, NVIDIA GB10; each op and the whole model against fp64 restatements written from the table, forward and backward) | d24's shapes, parameter counts, value-embedding layers, windows and FLOPs and d8's init exactly as stated. Ops: GEMMs and ReLU² within 3.7e-3 relative (fp32 weight gradients 4.4e-6); q/k prologue 1.7e-3 (gain gradients 1.5e-7); FA4 within 3.6e-3, its window boundary exact (keys 512 back attended, 513 not: worst row 2.7e-3 against 1.0–2.3 for either off-by-one) and document masking held (4.1 without); cross entropy 1.7e-3. Whole model (4 × 256, every component perturbed to matter): per-position loss within 5.0e-3 of the restatement, against 5.1e-2–1.5e-1 for restatements each breaking one rule (no x0, σ gate, no value embeddings, RoPE +θ, no document mask); gradients within 1.7e-2. Native decoder: 499 of 512 greedy tokens the forward's argmax, the rest within 0.014 of its maximum logit |
-| Custom kernels in use (2026-10-20, a fresh Lambda `gpu_1x_h100_sxm5`, `7faf11f` cloned, this image; `train` at production's d24 plan, 12 micro-batches a step, 10 steps with the 32K stage from step 5, on synthetic rows cut into ~950-token documents as the file stage's real micro-batches; then the compiled evaluation losses and the native decoder; kernels from torch.profiler traces) | `native.cuda_library` built `qk_prologue.cu` and `decode.cu` as sm_90 SASS, every kernel present and none spilling; Inductor's generated forward and backward call every `nanochat::` op. Per training step, at both contexts, kernel counts exactly as the architecture implies: QuACK GEMMs 2,892 (121 a micro-batch forward, 120 dX), cuBLAS fp32 weight gradients 1,728 and the head's 24, and 288 each of `k_forward`, `k_backward`, `k_gain_sum`, FA4 SM90 forward and backward, `gemm_act` and `gemm_dact`; QuACK cross entropy 12. Of the step's 3.41 s of GPU time these take 81%, Inductor's Triton 16.5%, the optimizers and gradient accumulation 2.4%. Unprofiled steps 342–371K tokens/s at 8K, 341–342K at 32K; peak 76.5 GiB with QuACK's cold-cache autotuning. Evaluation: per layer one each of `k_forward`, FA4 forward and `gemm_act`, five QuACK GEMMs, then one `lse_target_epi`. Decoding: every kernel `decode.cu`'s (k_gemv 67%, k_attn 25%, k_norm 6%), per step 24 `k_attn`, 50 `k_norm` (embedding, two per layer, final) and 97 GEMVs; the choice head on sampled and constrained steps. Healed, syntax-constrained requests among greedy and sampled ones keep their first token within the healing mask (5/5, fresh and from the prompt store). The fp64 audit on these SM90 kernels: every op within 3.7e-3 (gain gradients 2.0e-7, bitwise repeatable), FA4's window boundary and document masking exact; the whole model's deviation from the restatement projects at most 0.001 onto each rule-breaking restatement's (1 would be that rule); 502 of 512 decoder tokens the forward's argmax, the rest within 0.015 of its maximum logit |
-
-**Training record**, d8 at 20 tokens per parameter (2,987 steps of 98,304 tokens, peak lr 2.73e-3): mean training loss
-per window of steps, one record per step (a resumed run's repeated steps counted once), against runs of the previous
-regime (WSD, RoPE base 10^4 → 10^6 at the repository stage; weight decay 0.1 as recorded by `d8-r20-s42`, whose clip
-was 1.0; the `-g1`/`-ginf` records predate the weight-decay field). Seeds differ (0 vs 42), so data order differs.
-
-| Run | 0–40 | 40–250 | 250–500 | 500–1000 | 1000–1500 | 1500–2000 | 2000–2500 | 2500–2824 | 2824–2987 (32K) |
-|---|---|---|---|---|---|---|---|---|---|
-| This configuration (seed 0) | 8.742 | 5.485 | 3.660 | 2.652 | 2.347 | 2.207 | 2.094 | 2.025 | 1.701 |
-| Previous regime, clip 1.0 (`d8-r20-s42`) | 8.733 | 5.362 | 3.634 | 2.703 | 2.352 | 2.217 | 2.136 | 2.032 | 1.785 |
-| Previous regime, clip 1.0 (`d8-r20-s42-g1`) | 8.738 | 5.347 | 3.553 | 2.623 | 2.332 | 2.209 | 2.130 | 2.026 | 1.808 |
-| Previous regime, no clip (`d8-r20-s42-ginf`) | 8.740 | 5.455 | 3.726 | 2.671 | 2.351 | 2.220 | 2.140 | 2.035 | 1.803 |
-
-No non-finite loss or gradient; median gradient norm over steps 1,000–2,824 1.49 (0.77–0.86 for the previous runs,
-whose weight decay is 0.1 against this configuration's 0.548 at this scale); throughput 2.3M tokens/s.
-
-**Held-out bits per byte** of the same runs (`artifacts/base_eval/<tag>.json`; the `-g1`/`-ginf` files in the earlier
-evaluator's format), unpaired:
-
-| Validation split (8K rows) | This configuration (seed 0) | Previous, clip 1.0 (`-g1`) | Previous, no clip (`-ginf`) |
-|---|---|---|---|
-| stack_edu_python | 0.7355 | 0.7421 | 0.7450 |
-| ultradata_code_l2_python | 0.5551 | 0.5581 | 0.5611 |
-| ultradata_stack_v3_l2_python | 0.5818 | 0.5858 | 0.5885 |
-| kaggle_notebooks | 0.7773 | 0.7793 | 0.7824 |
-| codeforces_cots | 0.9246 | 0.9261 | 0.9277 |
-| stack_edu_cpp | 0.6729 | 0.6799 | 0.6832 |
-| ultradata_code_l2_cpp | 0.6954 | 0.7011 | 0.7040 |
-| ultradata_stack_v3_l2_cpp | 0.6551 | 0.6633 | 0.6662 |
-| climbmix (text) | 1.3615 | 1.3468 | 1.3503 |
-| opc_fineweb_math | 1.3966 | 1.3848 | 1.3884 |
-| ultradata_math_l2 | 1.3013 | 1.2915 | 1.2963 |
-| **Reference solutions given the prompt** | | | |
-| HumanEval+ | 0.6635 | 0.6604 | 0.6726 |
-| MBPP+ | 0.7778 | 0.7798 | 0.7740 |
-| HumanEval-X C++ | 0.6281 | 0.6368 | 0.6441 |
-
-Lower on every code corpus, higher on text and math (+0.010 to +0.015); on the benchmarks' reference solutions within
-the spread of the two previous runs (0.012 apart on HumanEval+ from clipping alone) except HumanEval-X C++, lower.
-This configuration's mixtures: 8K code 0.6354, all 0.7408; 32K repository 0.6200. pass@1 at this scale is about 0
-(HumanEval+ 0, MBPP+ base 0.0026, single-line infilling SPM 0.036): the check is that the evaluation runs.
-
-**Paired comparison against the standard regime**, d8 at 20 tokens per parameter, three seed pairs (seed = data seed
-∈ {0, 1, 2}; same initialization and data order within a pair). This configuration's arm is `60138de`'s baseline
-(`d8-r20-s{0,1,2}-d{0,1,2}-{d69671850bea, ca426bc7cec9, ccd433c30eb2}`, tags reproduced from `60138de`'s `run_tag`);
-the standard regime is commit `c00d2f6`'s default (WSD, weight decay 0.1, clip 1.0, RoPE base 10^4 → 10^6), trained in
-its own worktree (`d8-r20-s{0,1,2}`). Both arms are evaluated by `60138de`'s `loss_evaluation` on the same held-out
-rows (`artifacts/evals/<tag>.json`; training records `artifacts/metrics/<tag>.jsonl`). Held-out bits per byte, new
-minus standard (paired t-test, df = 2; 95% CI from the t distribution):
-
-| Metric | new s0 | std s0 | new s1 | std s1 | new s2 | std s2 | Mean difference | 95% CI | p |
-|---|---|---|---|---|---|---|---|---|---|
-| 8K code | 0.63539 | 0.63839 | 0.63003 | 0.64245 | 0.63796 | 0.63782 | −0.00509 | [−0.02133, +0.01115] | 0.31 |
-| 8K text | 1.36145 | 1.35218 | 1.35838 | 1.35141 | 1.36027 | 1.35338 | +0.00771 | [+0.00436, +0.01107] | 0.010 |
-| 8K math | 1.34961 | 1.34378 | 1.34382 | 1.34143 | 1.34818 | 1.34086 | +0.00518 | [−0.00110, +0.01146] | 0.071 |
-| 8K all | 0.74078 | 0.74210 | 0.73566 | 0.74540 | 0.74280 | 0.74166 | −0.00331 | [−0.01748, +0.01086] | 0.42 |
-| 32K repository | 0.62002 | 0.62182 | 0.61461 | 0.62665 | 0.62284 | 0.62128 | −0.00410 | [−0.02169, +0.01350] | 0.42 |
-| HumanEval+ solutions | 0.66348 | 0.66029 | 0.64647 | 0.66510 | 0.66011 | 0.66790 | −0.00775 | [−0.03486, +0.01937] | 0.34 |
-| MBPP+ solutions | 0.77777 | 0.79011 | 0.78449 | 0.79356 | 0.78620 | 0.80870 | −0.01464 | [−0.03204, +0.00277] | 0.069 |
-| HumanEval-X C++ solutions | 0.62815 | 0.63128 | 0.62961 | 0.64343 | 0.62856 | 0.63893 | −0.00911 | [−0.02265, +0.00443] | 0.10 |
-
-Code and the benchmarks' reference solutions are equal or lower under this configuration (MBPP+ and C++ solutions
-lower on every seed), none significantly higher; general text is significantly higher (+0.0077, 0.6% relative), math
-higher at p = 0.07. Training: no non-finite loss or gradient in either arm; maximum gradient norm 4.39 / 5.43 / 5.13
-without clipping against 7.85 / 10.00 / 6.16 (measured before the standard regime's clip); training loss over the last
-5% of steps (repository stage) 1.702 / 1.654 / 1.710 against 1.739 / 1.729 / 1.736.
-
-**Production settings at d24** (`d24-r490.805-s0-d0-c7c5fbbe4b31`, `60138de`): the production run's batch (1,179,648
-tokens) and peak lr (9.3795e-4), cut to 0.5B tokens (423 steps), file-level stage; weight decay 3.814, the τ law at
-this 423-step horizon (production: 0.317). Per tenth of the run:
-
-| Steps | Mean loss | Gradient norm, median | Gradient norm, max | lr at the end | tok/s |
-|---|---|---|---|---|---|
-| 0–42 | 8.269 | 1.864 | 4.717 | 9.331e-4 | 316,018 |
-| 43–85 | 5.704 | 1.010 | 1.820 | 8.277e-4 | 315,689 |
-| 86–128 | 4.936 | 1.096 | 1.265 | 7.224e-4 | 315,894 |
-| 129–170 | 4.384 | 1.188 | 1.472 | 6.196e-4 | 315,041 |
-| 171–212 | 3.898 | 1.204 | 1.403 | 5.167e-4 | 315,497 |
-| 213–254 | 3.279 | 1.345 | 1.684 | 4.139e-4 | 315,811 |
-| 255–296 | 2.785 | 1.203 | 1.381 | 3.110e-4 | 315,217 |
-| 297–338 | 2.514 | 0.961 | 1.346 | 2.082e-4 | 315,058 |
-| 339–380 | 2.368 | 0.650 | 0.882 | 1.053e-4 | 314,567 |
-| 381–422 | 2.287 | 0.282 | 0.384 | 2.449e-6 | 314,405 |
-
-No non-finite loss or gradient; the gradient norm exceeds 1.9 only during warmup. Held-out bits per byte at 8K
-(`artifacts/evals/<tag>.json`): code 0.7485, text 1.4555, math 1.4454, all 0.8512: worse than the d8 run of 2,987
-steps (code 0.6354), a model 13× smaller on fewer tokens. Per optimizer step d24 is lower at every step after the
-first (2.274 vs 3.332 over steps 400–420); per token it is higher (3.508 vs 2.024 over 250–270M tokens, both in the
-file-level stage): at the production batch 0.5B tokens is 423 optimizer steps. A proxy cut from the production plan
-measures early optimization speed, so `schedule.plan` sets every run's batch and lr at its own compute (DeepSeek LLM
-sets its scaling runs' by the same laws).
+| Resume (the H100, `60138de`, packed rows): d8 at 20 tokens per parameter (`d8-r20-s0-d0-d69671850bea`), killed with `docker kill` at step 991 and relaunched | continued from its step-900 checkpoint, switched to the 32K stage at step 2,824 (`repo_start`), finished at step 2,987; the step-2,824 checkpoint kept |
+| Checkpoints and lineage (2026-10-20, NVIDIA GB10; the image of this `uv.lock`; `train` on synthetic token rows, d8, 74 steps, checkpoints at 20, 40, 70 and 74) | a run killed after its step-40 checkpoint resumed there (attempt 1), switched to the 32K stage at step 70 and ended at 74; the final checkpoint reloaded reproduces the live model's loss bitwise; against the code of `results/lr.json` (`8caecb9`) the lr is bitwise equal at every step and the loss bitwise through step 5, then within 5.1e-6 relative, as an uninterrupted and a resumed run of the same code differ (4.8e-6: the backward's atomics) |
+| End to end (2026-10-20, through the `base_train` and `base_eval` command lines `scripts/production.py` has since replaced with direct calls in spawned processes): training with lr scale 2.5 (d8, 74 steps), the evaluation (loss, reference solutions, EvalPlus, MultiPL-E, infilling; greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
+| Run identity (`60138de`) | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
 
 ## Decoding and syntax analysis
 
@@ -336,49 +380,7 @@ test suite, though they overlap its base tests (Benchmarks).
 - *Speculative decoding* (e.g. DSpark, arXiv 2607.05147): lossless by construction (greedy outputs identical), so no
   failure mode to probe; its gains target large-model serving, while this decoder is CPU-bound in constrained mode and
   a drafter would need its own training run.
-- *Multi-token prediction*: reported to hurt models of this size on code benchmarks (Gloeckle et al., arXiv
-  2404.19737).
 - *Self-correction prompting*: a base model without instruction tuning; reasoning and repair come with SFT and RL.
-
-## Appendix ablation
-
-The paired comparison above tests this configuration's regime as a whole against the standard regime, and the d24
-check the production batch and lr. Each decision below was taken without a study of its own, on published evidence and
-the pre-launch measurements. The two whose result would change production have a pre-registered ablation,
-`ablations/<file>.py` (method, power, decision criterion and results in `ablations/ablations.md`):
-
-- **The peak lr of DeepSeek LLM's law** (`lr.py`: × 1, × 2, × 4 at d24 over 5 tokens per parameter, times the
-  optimum's horizon trend measured at d8, × 1 to × 8 over 5 and over 200, its power-law exponent carried to
-  production's horizon range and corrected for production's larger batch growth by the square-root batch rule). The
-  transfer rules disagreed on that trend: over d8's range Complete^(d)P's SDE rule (arXiv 2512.22382) predicts × 0.354,
-  Step-Law (arXiv 2503.04715) × 4.92. Measured (`results/lr.json`): optima × 2.0235 (d24 over 5), × 3.4669 and
-  × 3.1565 (d8 over 5 and 200), so a d8 ratio of 0.9105: the optimum relative to the law barely moves with the horizon
-  (the law's own C^−0.125 carries the trend), against both rules. Production's multiplier × 2.5467 (2.3887e-3) is
-  adopted; the best arm beat the law by 0.0044 to 0.125 bits per byte, no run diverged, and the optima agree within 7%
-  with nanochat's hand-tuned Muon lr at the same widths (`ablations/ablations.md` §3).
-- **Value embeddings kept** (`value_embeds.py`: none, at d16). They cost 4.7% of the d24 step (measured before
-  `60138de`, record not kept); MoVE (arXiv 2601.22887) measures −0.016 bits per byte at d12 and −0.010 at d20.
-
-The others rest on their evidence alone (`ablations/ablations.md` §1, Not tested): gradient clipping at 1.0 (Regime);
-one RoPE base; ReLU² (nanochat LOG 2026-02-05); linear decay to zero continuing through the repository stage, as
-Qwen2.5-Coder and DeepSeek-Coder; learned QK-norm gains (Qwen3) and the x0 and residual scalars (nanochat LOG
-2026-01-11); SSSL windows (Gemma 3's near-lossless local windows); Block Attention Residuals not adopted (+12% d24 step
-time, measured before `60138de`, record not kept, for a published 1.1% loss gain at 194M parameters, arXiv
-2603.15031); the partial key offset not adopted (a speedrun result, modded-nanogpt record #49, 124M); either of the
-last two would need a native decode path.
-
-## Measured design decisions
-
-Each in `ablations/ablations.md` §2:
-
-- **Micro-batch 98,304** rather than 65,536: 1% faster per token, peak 69.6 GiB of 80 GB.
-- **FlashAttention-4** rather than cuDNN attention: faster forward and backward in every measured window/segment case.
-- **CUDA q/k prologue** rather than Inductor's fusion: 298.2K → 305.8K tok/s.
-- **Value-embedding gate as an fp32 broadcast-sum** rather than fp32 GEMMs: 0.88 vs 1.20 ms per layer, same error.
-- **No Inductor coordinate-descent tuning:** it chooses kernels by timing, so two processes' compiled losses differ;
-  off, losses are bitwise equal across processes, for 0.8% of the d24 step.
-- **Split q/k/v GEMMs** rather than one fused GEMM: 3,712 vs 3,729 ms per d24 step.
-- **Runs one at a time:** one d8 run saturates the GPU (2.60M tok/s); two concurrent runs total 2.34M, four 2.57M.
 
 ## Layout
 

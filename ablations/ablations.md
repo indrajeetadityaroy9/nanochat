@@ -390,6 +390,43 @@ the GPU (its 280–440 W power draw understates SM occupancy): runs train one at
   | no clip | 0.88119 | 0.74504 | 0.68317 | 1.35029 | 1.89841 | 179 | 9.83 |
 
   Clipping is lower on all 11 corpora.
+- **`60138de`'s baseline against the previous regime, unpaired**: d8 at 20 tokens per parameter (2,987 steps of
+  98,304 tokens, peak lr 2.73e-3), the baseline unclipped (seed 0, `d8-r20-s0-d0-d69671850bea`), against runs of the
+  previous regime (WSD, RoPE base 10^4 → 10^6 at the repository stage; weight decay 0.1 as recorded by `d8-r20-s42`,
+  whose clip was 1.0; the `-g1`/`-ginf` records predate the weight-decay field). Seeds differ (0 vs 42), so data order
+  differs. Mean training loss per window of steps, one record per step (a resumed run's repeated steps counted once):
+
+  | Run | 0–40 | 40–250 | 250–500 | 500–1000 | 1000–1500 | 1500–2000 | 2000–2500 | 2500–2824 | 2824–2987 (32K) |
+  |---|---|---|---|---|---|---|---|---|---|
+  | `60138de` (seed 0) | 8.742 | 5.485 | 3.660 | 2.652 | 2.347 | 2.207 | 2.094 | 2.025 | 1.701 |
+  | Previous regime, clip 1.0 (`d8-r20-s42`) | 8.733 | 5.362 | 3.634 | 2.703 | 2.352 | 2.217 | 2.136 | 2.032 | 1.785 |
+  | Previous regime, clip 1.0 (`d8-r20-s42-g1`) | 8.738 | 5.347 | 3.553 | 2.623 | 2.332 | 2.209 | 2.130 | 2.026 | 1.808 |
+  | Previous regime, no clip (`d8-r20-s42-ginf`) | 8.740 | 5.455 | 3.726 | 2.671 | 2.351 | 2.220 | 2.140 | 2.035 | 1.803 |
+
+  No non-finite loss or gradient; median gradient norm over steps 1,000–2,824 1.49 (0.77–0.86 for the previous runs,
+  whose weight decay is 0.1 against the baseline's 0.548 at this scale); throughput 2.3M tokens/s. Held-out bits
+  per byte (`artifacts/base_eval/<tag>.json`; the `-g1`/`-ginf` files in the earlier evaluator's format):
+
+  | Validation split (8K rows) | `60138de` (seed 0) | Previous, clip 1.0 (`-g1`) | Previous, no clip (`-ginf`) |
+  |---|---|---|---|
+  | stack_edu_python | 0.7355 | 0.7421 | 0.7450 |
+  | ultradata_code_l2_python | 0.5551 | 0.5581 | 0.5611 |
+  | ultradata_stack_v3_l2_python | 0.5818 | 0.5858 | 0.5885 |
+  | kaggle_notebooks | 0.7773 | 0.7793 | 0.7824 |
+  | codeforces_cots | 0.9246 | 0.9261 | 0.9277 |
+  | stack_edu_cpp | 0.6729 | 0.6799 | 0.6832 |
+  | ultradata_code_l2_cpp | 0.6954 | 0.7011 | 0.7040 |
+  | ultradata_stack_v3_l2_cpp | 0.6551 | 0.6633 | 0.6662 |
+  | climbmix (text) | 1.3615 | 1.3468 | 1.3503 |
+  | opc_fineweb_math | 1.3966 | 1.3848 | 1.3884 |
+  | ultradata_math_l2 | 1.3013 | 1.2915 | 1.2963 |
+  | **Reference solutions given the prompt** | | | |
+  | HumanEval+ | 0.6635 | 0.6604 | 0.6726 |
+  | MBPP+ | 0.7778 | 0.7798 | 0.7740 |
+  | HumanEval-X C++ | 0.6281 | 0.6368 | 0.6441 |
+
+  Lower on every code corpus, higher on text and math (+0.010 to +0.015); on the benchmarks' reference solutions within
+  the spread of the two previous runs (0.012 apart on HumanEval+ from clipping alone) except HumanEval-X C++, lower.
 - **Peak lr at d8 at 20** (`harness.main`, production vs × 2, seeds 0 and 1, 2026-10-20; GPU shared, so throughput
   is not comparable): code bits per byte 0.6323 and 0.6324 at the law's lr, 0.6144 and 0.6137 at × 2 (paired
   differences −0.0179, −0.0187); solutions −0.014, 32K repository −0.018, text −0.030, math −0.033. The law's lr is
