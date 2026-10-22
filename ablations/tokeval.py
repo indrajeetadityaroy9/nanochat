@@ -84,17 +84,18 @@ def operator_isolation(tokens: dict[str, np.ndarray], docs: list[bytes], tokeniz
     starts, stops, kinds = np.array(starts, dtype=np.int64), np.array(stops, dtype=np.int64), np.array(kinds)
     # non-whitespace bytes before each position of the documents' bytes
     marks = np.concatenate([[0], np.cumsum(~WHITESPACE[np.frombuffer(b"".join(docs), dtype=np.uint8)])])
+    masks = {name: kinds == name for name in OPERATOR_CATEGORIES}
+    compound = stops - starts > 1
     result = {}
     for tokenizer in tokenizers:
-        ends = np.cumsum(tokenizer.token_lengths[tokens[tokenizer.name]])
-        begins = ends - tokenizer.token_lengths[tokens[tokenizer.name]]
+        sizes = tokenizer.token_lengths[tokens[tokenizer.name]]
+        ends = np.cumsum(sizes)
+        begins = ends - sizes
         first = np.searchsorted(ends, starts, side="right")
         last = np.searchsorted(ends, stops - 1, side="right")
         isolated = (marks[starts] == marks[begins[first]]) & (marks[ends[last]] == marks[stops])
-        compound = stops - starts > 1
         result[tokenizer.name] = {
-            **{name: {"isolated": int(isolated[kinds == name].sum()), "total": int((kinds == name).sum())}
-               for name in OPERATOR_CATEGORIES},
+            **{name: {"isolated": int(isolated[mask].sum()), "total": int(mask.sum())} for name, mask in masks.items()},
             "compound": {"preserved": int((compound & (first == last)).sum()), "total": int(compound.sum())}}
     return result
 
@@ -150,12 +151,12 @@ def alignment(tokenizer: Tokenizer, tokens: np.ndarray, leaf_starts: np.ndarray,
               categories: np.ndarray, lines: tuple[np.ndarray, np.ndarray, np.ndarray] | None) -> dict:
     """AST boundary alignment per category and overall, identifier fragmentation and (lines given) indentation
     consistency of a split's tokens against its leaves (byte spans in the split)."""
-    lengths = tokenizer.token_lengths
     # a token's leading space before non-whitespace is covered by no token; a whitespace-only token covers indentation
     trim = np.array([b[:1] == b" " and not b.isspace() for b in tokenizer.token_bytes])[tokens]
     blank = np.array([b.isspace() for b in tokenizer.token_bytes])[tokens]
-    ends = np.cumsum(lengths[tokens])
-    begins = ends - lengths[tokens] + trim
+    sizes = tokenizer.token_lengths[tokens]
+    ends = np.cumsum(sizes)
+    begins = ends - sizes + trim
     first = np.searchsorted(ends, leaf_starts, side="right")
     covered_first = leaf_starts + (leaf_starts < begins[first])
     last_byte = leaf_ends - 1

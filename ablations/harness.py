@@ -178,15 +178,17 @@ def main(*, experiment: str, settings: list[Setting], production: dict) -> None:
                                    stdout=log, stderr=subprocess.STDOUT)
         if child.returncode and diverged(tag) is None:
             raise RuntimeError(f"run {tag} failed: {LOGS / f'{tag}.log'}")
+    stopped = {tag: diverged(tag) for tag in tags.values()}
     summaries = []
     with ((RESULTS / f"{experiment}.jsonl").open("w", encoding="utf-8") as f,
           (RESULTS / f"{experiment}-curves.jsonl").open("w", encoding="utf-8") as curve_lines):
         for setting, arms in zip(settings, cells, strict=True):
-            measures = {name: {tags[run]: evaluation(run) for run in arm if diverged(tags[run]) is None}
+            measures = {name: {tags[run]: evaluation(run) for run in arm if stopped[tags[run]] is None}
                         for name, arm in arms.items()}
             for name, arm in arms.items():
                 for run in arm:
-                    tag, records = tags[run], metrics.records(tags[run])
+                    tag = tags[run]
+                    records = metrics.records(tag)
                     started = [r for r in records if r["kind"] == "run"][-1]
                     ended = [r for r in records if r["kind"] == "end"]
                     identity = {"experiment": experiment, "arm": name, "tag": tag}
@@ -199,7 +201,7 @@ def main(*, experiment: str, settings: list[Setting], production: dict) -> None:
                         "efficiency": ({"params": started["params"], "flops_per_token": started["flops_per_token"],
                                         "peak_memory_bytes": ended[-1]["peak_memory_bytes"]}
                                        if tag in measures[name] else None),
-                        "diverged_at": diverged(tag)}, allow_nan=False) + "\n")
+                        "diverged_at": stopped[tag]}, allow_nan=False) + "\n")
                     curve_lines.write(json.dumps(identity | metrics.curves(tag), allow_nan=False) + "\n")
             summaries.append({"depth": setting.depth, "tokens_per_param": setting.ratio, "seeds": len(setting.seeds),
                               "production_runs": len(measures["production"]),

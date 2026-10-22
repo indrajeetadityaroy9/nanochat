@@ -128,9 +128,10 @@ def sample() -> tuple[list[str], list[int]]:
     itself (a notebook, a text without a URL, a codeforces_cots conversation)."""
     sizes = {source: sum(column_bytes(path, "content") for path in curated_files(source, "train"))
              for source in SOURCES}
+    smallest = min(sizes.values())
     tasks = []
     for source in SOURCES:
-        step, at = sizes[source] // min(sizes.values()), 0
+        step, at = sizes[source] // smallest, 0
         for path in curated_files(source, "train"):
             md = pq.read_metadata(path)
             for g in range(md.num_row_groups):

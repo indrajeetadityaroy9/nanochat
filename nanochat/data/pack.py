@@ -189,9 +189,10 @@ def file_stage(tokenizer: Tokenizer) -> None:
         pack_split(source, "train", tokenizer, seq_len=seq_len)
     for group, need in group_rows(tokenizer).items():
         corpora = FILE_STAGE.mixture[group][1]
-        total = sum(tokens(source, "train", tokenizer) for source in corpora)
+        sizes = {source: tokens(source, "train", tokenizer) for source in corpora}
+        total = sum(sizes.values())
         for source in corpora:
-            part = math.ceil(need * tokens(source, "train", tokenizer) / total)
+            part = math.ceil(need * sizes[source] / total)
             files = len(shard_documents(source, "train", tokenizer)) - 1
             kept, held = [], 0
             shards = in_order(source, "train", tokenizer, range(files), seq_len=seq_len)

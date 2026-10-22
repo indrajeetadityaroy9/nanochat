@@ -73,9 +73,9 @@ def compiled_record(source: str, split: str, tokenizer: Tokenizer) -> dict:
 
 
 def manifest(tokenizer: Tokenizer) -> dict:
-    corpora = mixture_corpora(FILE_STAGE.mixture)
-    repo = mixture_corpora(REPO_STAGE.mixture)
-    first, last = compiled_record(repo[0], "train", tokenizer)["packs"][f"T{REPO_STAGE.seq_len}"]["files"]
+    compiled = {source: {split: compiled_record(source, split, tokenizer) for split in ("train", "val")}
+                for source in mixture_corpora(FILE_STAGE.mixture)}
+    first, last = compiled[mixture_corpora(REPO_STAGE.mixture)[0]]["train"]["packs"][f"T{REPO_STAGE.seq_len}"]["files"]
     return {
         "code": commit(),
         "tokenizer": {"data_key": tokenizer.data_key, "vocab_size": tokenizer.vocab_size, "pattern": tokenizer.pattern},
@@ -88,8 +88,7 @@ def manifest(tokenizer: Tokenizer) -> dict:
                 "line": pack.LINE_SHARE, "spm": pack.SPM_SHARE},
         "packed": {"bound": pack.bound(tokenizer), "group_rows": pack.group_rows(tokenizer),
                    "repo_rows": pack.repo_rows(tokenizer), "repo_files": last - first},
-        "compiled": {source: {split: compiled_record(source, split, tokenizer) for split in ("train", "val")}
-                     for source in corpora},
+        "compiled": compiled,
     }
 
 
