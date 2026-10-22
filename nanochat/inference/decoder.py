@@ -24,7 +24,7 @@ from nanochat.inference import syntax_constraint
 from nanochat.model.gpt import GPT
 from nanochat.native import cuda_library
 
-type Constraint = FirstToken | AllOf | syntax_constraint.SyntaxConstraint
+type Constraint = Reemit | AllOf | syntax_constraint.SyntaxConstraint
 
 
 def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm"]) -> list[int]:
@@ -67,43 +67,54 @@ class Request:
 @functools.cache
 def prefix_index(tokenizer) -> tuple[list[bytes], np.ndarray]:
     """The mergeable tokens' bytes sorted, and their ids in that order: the tokens whose bytes start with a given string
-    are one contiguous run of it (heal)."""
+    are one contiguous run of it (Reemit)."""
     ids = np.array(sorted(range(tokenizer.bos_token_id), key=tokenizer.token_bytes.__getitem__))
     return [tokenizer.token_bytes[i] for i in ids], ids
 
 
-class FirstToken:
-    """heal's constraint: the first token within a mask, then no restriction."""
+class Reemit:
+    """heal's constraint: while bytes of the dropped token are owed, each token's bytes are a non-empty proper prefix of
+    them or start with them (BOS excluded); once they are re-emitted, no restriction."""
 
-    def __init__(self, first: np.ndarray):
-        self.first = first
+    def __init__(self, tokenizer, owed: bytes):
+        self.tokenizer, self.owed = tokenizer, owed
 
     def mask(self) -> np.ndarray | None:
-        return self.first
+        if not self.owed:
+            return None
+        keys, ids = prefix_index(self.tokenizer)
+        lo = bisect.bisect_left(keys, self.owed)
+        hi = bisect.bisect_right(keys, self.owed, lo=lo, key=lambda k: k[:len(self.owed)])
+        allowed = np.zeros(self.tokenizer.vocab_size, dtype=bool)
+        allowed[ids[lo:hi]] = True
+        for k in range(1, len(self.owed)):  # the owed bytes' proper prefixes that are tokens
+            i = bisect.bisect_left(keys, self.owed[:k])
+            if i < len(keys) and keys[i] == self.owed[:k]:
+                allowed[ids[i]] = True
+        # the decoder's mask layout: bit t % 32 of word t // 32 set iff token t is allowed
+        return np.packbits(allowed, bitorder="little").view("<u4")
 
     def push(self, token: int) -> None:
-        self.first = None
+        b = self.tokenizer.token_bytes[token]
+        self.owed = b"" if b.startswith(self.owed) else self.owed[len(b):]
 
 
-def heal(tokenizer, prompt: list[int]) -> tuple[list[int], FirstToken]:
-    """Token healing ("The Art of Prompt Design: Prompt Boundaries and Token Healing", Guidance, 2023): the
-    prompt without its last token, and a constraint whose first token's bytes start with that token's bytes (BOS
-    excluded), so the model picks the token across the prompt's boundary; the text of the healed prompt and the
-    generated ids extends the prompt's text. prompt: BOS and at least two more tokens."""
-    keys, ids = prefix_index(tokenizer)
+def heal(tokenizer, prompt: list[int]) -> tuple[list[int], Reemit, bytes]:
+    """Token healing ("The Art of Prompt Design: Prompt Boundaries and Token Healing", Guidance, 2023), constrained
+    until the dropped token's bytes are re-emitted (TokEval, arXiv 2608.18062 App. C: "the decoder drops the affected
+    trailing prompt token(s) and constrains generation until their content is re-emitted"; Guidance constrains one
+    token, which forbids a tokenization splitting those bytes over two tokens): the prompt without its last token, the
+    constraint (Reemit), and the dropped token's bytes, so the model picks the tokens across the prompt's boundary; the
+    text of the healed prompt and the generated ids extends the prompt's text. prompt: BOS and at least two more
+    tokens."""
     dropped = tokenizer.token_bytes[prompt[-1]]
-    lo = bisect.bisect_left(keys, dropped)
-    hi = bisect.bisect_right(keys, dropped, lo=lo, key=lambda k: k[:len(dropped)])
-    allowed = np.zeros(tokenizer.vocab_size, dtype=bool)
-    allowed[ids[lo:hi]] = True
-    # the decoder's mask layout: bit t % 32 of word t // 32 set iff token t is allowed
-    return prompt[:-1], FirstToken(np.packbits(allowed, bitorder="little").view("<u4"))
+    return prompt[:-1], Reemit(tokenizer, dropped), dropped
 
 
 class AllOf:
     """The intersection of constraints: each step allows the tokens every constraint allows (step_masks)."""
 
-    def __init__(self, *constraints: FirstToken | syntax_constraint.SyntaxConstraint):
+    def __init__(self, *constraints: Reemit | syntax_constraint.SyntaxConstraint):
         self.constraints = constraints
 
     def push(self, token: int) -> None:

@@ -23,7 +23,7 @@ applies `Attention` and `MLP` to the RMS-normed stream, each added back.
 | Head | untied `lm_head`, zero init, plain cross entropy; no logit softcap or z-loss (QK norm bounds the attention logits) |
 | Vocabulary | 2^15 ids (SA-BPE, arXiv 2604.14053; BOS + 3 FIM sentinels, arXiv 2207.14255) |
 | Parameters | 195,096,576 scaling parameters (blocks 169,930,752 + `lm_head` 25,165,824), what the token budget counts; plus the token table (25,165,824) and 12 value-embedding tables (301,989,888, 1.55× the scaling parameters), lookups without FLOPs: 522,252,336 in all |
-| FLOPs per token | 1.557 GFLOP non-embedding: DeepSeek LLM's M (Eq. 2): 6 per block matrix weight (72·n_layer·d² and the value-embedding gates' 0.0003) + 12·n_layer·d·l_seq, l_seq each layer's window at 8K: 1.020 matrices + 0.538 attention; plus 0.151 for `lm_head` |
+| FLOPs per token | 1.557 GFLOP non-embedding: DeepSeek LLM's M (§3.2 Eq. 2): 6 per block matrix weight (72·n_layer·d² and the value-embedding gates' 0.0003) + 12·n_layer·d·l_seq, l_seq each layer's window at 8K: 1.020 matrices + 0.538 attention; plus 0.151 for `lm_head` |
 | Init | stream-reading matrices and tables uniform with std C^-½; `c_o`, `c_proj`, `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
 | Precision | fp32 parameters, gradients and optimizer state; bf16 activations and GEMM inputs |
 | Lineage | From nanochat 92d63d4: the block layout, value-embedding layers, MLP and window pattern. Not taken: its smear, backout and logit softcap, QK order (RoPE → norm → ×1.2), short window (a quarter of the context), RoPE base (10^5) and init (`wte` N(0, 0.8), `lm_head` N(0, 0.001), `c_fc` at 0.4×, ramped lambdas). The gate is nanochat e85db6b's (2·sigmoid, zero init) read over the full width rather than its first 32 channels; 92d63d4 has 3·sigmoid of 12 channels, U(0, 0.02) init. The full-width read is not ablated |
@@ -70,8 +70,8 @@ Where production departs from the code models it is measured against:
 | MLP | ReLU², hidden 4C | SwiGLU (DeepSeek-Coder, Qwen2.5-Coder, Code Llama); StarCoder2 GELU |
 | Value embeddings | alternating layers, gated (nanochat) | none |
 | Optimizer | Muon on matrices, AdamW on tables and vectors | AdamW, β = (0.9, 0.95) (DeepSeek-Coder §3.4, Code Llama) |
-| Peak lr | DeepSeek LLM's law × 2.5423 (`lr.py`, at production's horizon), as the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
-| Weight decay | τ law (d8: 0.55, d24: 0.1219 at its peak lr) | 0.1 (DeepSeek LLM §2.3) |
+| Peak lr | DeepSeek LLM's law × 2.3218 (`lr.py`, at production's horizon), as the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
+| Weight decay | τ law (d8: 0.55, d24: 0.1334 at its peak lr) | 0.1 (DeepSeek LLM §2.3) |
 | Gradient clipping | 1.0 | 1.0 (DeepSeek LLM §2.3) |
 | Context stages | 8K file level, then the last 5.45% of steps at 32K on repositories | Qwen2.5-Coder: the same 8K → 32K repository stage; DeepSeek-Coder: 16K repository-ordered files; Code Llama: a 16K long-context stage |
 | Data | code:text:math 87:10:3 | DeepSeek-Coder 87% code, 10% code-related English, 3% Chinese; Qwen2.5-Coder code:text:math 70:20:10 |
@@ -179,13 +179,13 @@ Each step's output against the code that produced it (2026-10-21; local copy of 
 | Setting | Value | Source |
 |---|---|---|
 | Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271, C = M·D (`train/schedule.py`) |
-| Peak lr | 2.3640e-3, every group: 2.5423 × the law's 9.2989e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured, carried to production's horizon (`scripts/production.py` applies `lr.py`'s `analysis`; Peak lr, below) |
+| Peak lr | 2.1590e-3, every group: 2.3218 × the law's 9.2989e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured, carried to production's horizon (`scripts/production.py` applies `lr.py`'s `analysis`; Peak lr, below) |
 | Steps | 86,975 (102.60B tokens, 525.89 per scaling parameter); repository stage from step 82,231 | `schedule.plan` |
 | Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (arXiv 1910.04209) |
-| Decay | linear to zero | arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
+| Decay | linear to zero | arXiv 2502.15938 (its gain over 10× decay grows with tokens per parameter; it beat WSD at 610M and 80 tokens per parameter, and cosine at 20) |
 | Optimizers | AdamW (fused) on tables and vectors; Muon with `match_rms_adamw` on matrices | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
-| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0399, λ = 0.1219 at d24's peak lr: 1/(ηλ) = 3,471 steps, 4.1B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
+| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0399, λ = 0.1334 at d24's peak lr: 1/(ηλ) = 3,471 steps, 4.1B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
 | Gradient clipping | global norm 1.0 on the raw gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (`train/optim.py` `MAX_NORM`, `update`) |
 | Repository stage | continues the decay: 5.46% of the peak lr at its first step, 0 at the last, over 4,744 steps (5.60B tokens) | DeepSeek-Coder §3.6 |
 
@@ -217,22 +217,26 @@ itself (Megatron-LM PR 5395, DeepSpeed issue 8439); it is not done here.
   steps above 1), 298–1,493 1.093 (57%), 1,493–2,987 1.522 (100%); the d24 run below, steps 0–42 1.866 (86%), 42–211
   1.145 (83%), 211–423 0.969 (47%).
 
-**Peak lr.** DeepSeek LLM's law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and
+**Peak lr.** DeepSeek LLM's law was fit for AdamW under a multi-step schedule, 8.0× below production's compute, and
 the transfer rules disagree on how the optimum moves with the horizon: from d8 over 5 to over 200 tokens per parameter,
 Complete^(d)P's SDE rule (arXiv 2512.22382) predicts the optimum's multiplier of the law changes × 0.354, Step-Law
 (arXiv 2503.04715) × 4.92. At d8 at 20 the law's lr is low: × 2 lowered code bits per byte by 0.018 on both of 2 seeds
 (below). `ablations/lr.py` measures the multiplier (Ablations): × 1, × 2, × 4 at d24 over 5 tokens per parameter,
-times the optimum's horizon trend measured at d8 (× 1 to × 8 over 5 and over 200), its power-law exponent carried to
-production's horizon range and corrected for production's larger batch growth by the square-root batch rule. Measured
-at `1e711aa`, the first tokenizer's data (`results/lr.json`): optima × 2.0235 (d24 over 5), × 3.4669 and × 3.1565 (d8
-over 5 and 200), so a d8 ratio of 0.9105: relative to the law the optimum barely moves with the horizon (the law's own
-C^−0.125 carries the trend), against both rules. That revision's multiplier × 2.5467 = 2.0235 · 0.9105^(ln 98.17 /
-ln 40.05) · √2 (2.3887e-3, weight decay 0.1246) was adopted; the best arm beat the law by 0.0044 to 0.125 bits per
-byte, no run diverged, and the optima agree within 7% with nanochat's hand-tuned Muon lr at the same widths. Other data
-carries the optima, not measured again: `scripts/production.py` applies the estimator (`lr.py` `analysis`) at its
-data's horizon: × 2.5423 on the retrained tokenizer's at `7a210ed` (−0.18%; 2.3640e-3, weight decay 0.1219), where the
-measurement's own uncertainty is about ±30% (Power) and a 30% error costs 0.0006 bits per byte at d24 at 5; no source
-makes the optimum depend on the tokenizer at one vocabulary size [inference].
+times the optimum's horizon trend measured at d8 (× 1 to × 8 over 5 and over 200), net of d8's batch growth by the
+square-root batch rule, its power-law exponent carried to production's horizon range, and production's own batch
+growth by the same rule. Measured at `1e711aa`, the first tokenizer's data (`results/lr.json`): optima × 2.0235 (d24
+over 5), × 3.4669 and × 3.1565 (d8 over 5 and 200), so a d8 ratio of 0.9105: relative to the law the optimum barely
+moves with the horizon (the law's own C^−0.125 carries the trend), against both rules. The best arm beat the law by
+0.0044 to 0.125 bits per byte, no run diverged, and the optima agree within 7% with nanochat's hand-tuned Muon lr at
+the same widths. The multiplier adopted on 2026-10-20, × 2.5467 = 2.0235 · 0.9105^(ln 98.17 / ln 40.05) · √2
+(2.3887e-3), came from the pre-registered estimator, which raised d8's batch growth (inside r) with its horizon trend
+and then corrected for production's batch growth again, counting d8's 2^((L − 1)/2) too often, L = ln m_D,prod /
+ln m_D,d8 (amended 2026-10-22 from the same measurements, Analysis): 2.0235 · (0.9105/√2)^(ln 98.17 / ln 40.05) · 2
+= × 2.3410 at `1e711aa`. Other data carries the optima, not measured again: `scripts/production.py` applies the
+estimator (`lr.py` `analysis`) at its data's horizon, × 2.3218 on the retrained tokenizer's at `7a210ed` (2.1590e-3,
+weight decay 0.1334; the unamended estimator's × 2.5423 is 9.5% higher), where the measurement's own uncertainty is
+about ±33% (Power) and a 30% error costs 0.0006 bits per byte at d24 at 5; no source makes the optimum depend on the
+tokenizer at one vocabulary size [inference].
 
 - *d8 at 20* (`harness.main`, production vs × 2, seeds 0 and 1, 2026-10-20; GPU shared, so throughput is not
   comparable): code bits per byte 0.6323 and 0.6324 at the law's lr, 0.6144 and 0.6137 at × 2 (paired differences
@@ -248,9 +252,10 @@ makes the optimum depend on the tokenizer at one vocabulary size [inference].
   setting); seeds and evaluation rows are identical within a setting; the last-5% train loss ranks each setting's arms
   as code does; `torch.optim.Muon` decays by the unscaled lr and steps by lr · 0.2√max(A, B) (Moonlight's form).
   Against references: nanochat's hand-tuned Muon lr 0.02 under its √max(1, rows/cols) scaling (karpathy/nanochat
-  92d63d4 `optim.py:393`) is the AdamW-matched 0.1/√C, 3.61e-3 at width 768 and 6.25e-3 at 256, against the measured
-  optima 3.37e-3 (d24 at 5) and 6.47e-3 (d8 at 200); d8's optimal lr falls to 0.574 over 40× the tokens with its batch
-  doubled (exponent 0.150, 0.244 net of √2 for the batch), against DeepSeek LLM's 0.125 under the same batch
+  92d63d4 `optim.py:392`, its 0.02 `gpt.py:414`) is the AdamW-matched 0.1/√C, 3.61e-3 at width 768 and 6.25e-3 at
+  256, against the measured optima 3.37e-3 (d24 at 5) and 6.47e-3 (d8 at 200); d8's optimal lr falls to 0.574 over
+  40× the tokens with its batch doubled (exponent 0.150, 0.244 net of √2 for the batch), against DeepSeek LLM's
+  0.125 under the same batch
   co-scaling and arXiv 2409.19913's 0.32 at fixed batch and weight decay, where the τ law moves the weight decay instead
   (arXiv 2405.13698); the SDE rule's exponent 1/2 is too large, as arXiv 2604.27077 also finds. At
   d24 at 5's curvature (0.0089 per (ln lr)²) a 30% lr error costs 0.0006. Wall time 13:09–18:39 UTC, 37 minutes of it
@@ -373,8 +378,8 @@ made. They share one mechanism (`ablations/harness.py`) whose runs train and eva
 
 | File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
-| `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) × 2.5467, adopted 2026-10-20 (Peak lr) | × 2 and × 4 (× 8 at d8): the law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
-| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, two seeds per arm: sa-bpe against sa-bpe-fused (also the positive control), the hybrid and bpe, parsing by McNemar's test per problem; every arm's intrinsic record (TokEval's metrics) on the GH200, and sa-bpe-mixture's (the sample at the training mixture's shares: described, not trained) | SA-BPE's F·log R (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the hybrid: SA-BPE within cl100k's letter clause, the non-fusing punctuation run and whitespace by type, each run whole (arXiv 2608.18062's companion post); the fusing pattern (MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, while code bits per byte shows no association with MBPP across the post's tokenizers); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
+| `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) × 2.3218 at production's horizon (adopted 2026-10-20 as × 2.5467; estimator amended 2026-10-22; Peak lr) | × 2 and × 4 (× 8 at d8): the law was fit for AdamW under a multi-step schedule, 8.0× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
+| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, two seeds per arm: sa-bpe against sa-bpe-fused (also the positive control), the hybrid and bpe, parsing by an exact sign test over the problems; every arm's intrinsic record (TokEval's metrics) on the GH200, and sa-bpe-mixture's (the sample at the training mixture's shares: described, not trained) | SA-BPE's F·log R (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the hybrid: SA-BPE within cl100k's letter clause, the non-fusing punctuation run and whitespace by type, each run whole (arXiv 2608.18062's companion post); the fusing pattern (MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, while code bits per byte shows no association with MBPP across the post's tokenizers); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
 
 **Results.** `lr.py` ran on 2026-10-20 at dataset revision `1e711aa` (`results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`;
 Peak lr), on the first tokenizer's data; production carries its optima to other data (Peak lr). The tokenizer
@@ -389,7 +394,8 @@ experiment has not run, nor its vocabularies and data (`python -m ablations.toke
   model is production's GPT, and its tokenizer and packs production's unless `tokenizer` names an arm of
   `ablations/tokenizer.py`, whose production arm is production's vocabulary on that experiment's documents
   (`harness.main`'s `production` fields). Its plan (batch, steps, peak lr) is the production model's at the setting
-  (`harness.production_plan`; `harness.plan_of` at the run's lr), so arms match in tokens and hyperparameters, and every
+  (`harness.production_plan`; `harness.plan_of` at the run's lr), so arms match in hyperparameters and, unless an arm
+  sets its own `ratio` (the tokenizer experiment's equal bytes), in tokens, and every
   run completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
   compared before its decay, where loss curves cross and rankings flip (arXiv 2509.02046; arXiv 2405.18392). An lr arm's
   weight decay follows its lr by the τ law, λ = 1/(η τ T), as production's would: the sweep varies η at the fixed EMA
@@ -405,20 +411,23 @@ experiment has not run, nor its vocabularies and data (`python -m ablations.toke
   correction is the same as at 525.9 at less than half the cost (Analysis); one seed per setting, the cheap settings
   first: at d8 at 20 the arms × 1 and × 2 differed by 0.0179 and 0.0187 bits per byte on seeds 0 and 1 (Peak lr).
   Architecture rankings can change with scale (arXiv 2207.10551); for data recipes a single proxy 7× below the target
-  picks the target's better of two in about 80% of pairs, best with likelihood metrics such as bits per byte
-  (DataDecide, arXiv 2504.11393). No run combines production's width and length: `lr.py` assumes the two trends
-  separable (arXiv 2409.19913's size-independent β), which only a d24 run at 525.9 could check. The tokenizer
-  experiment's settings and documents: The tokenizer experiment, below.
+  picks the target's better of two in about 80% of pairs, and a continuous likelihood proxy (its character-normalized
+  correct-answer probability) makes code benchmarks predictable where accuracy is not (DataDecide, arXiv 2504.11393
+  §3.4, Fig. 6). No run combines production's width and length: `lr.py` assumes the two trends separable, the horizon
+  exponent width-independent, our assumption (arXiv 2409.19913 §4 finds it size-independent only from 760M parameters,
+  larger at 50M and 125M), which only a d24 run at 525.9 could check. The tokenizer experiment's settings and
+  documents: The tokenizer experiment, below.
 - **Order.** `lr.py` first; its multiplier sets production's peak lr (`scripts/production.py`, hashed into production's
   tag). The tokenizer experiment's arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each measured
   optimum, every arm alike. A run's tag hashes its peak lr, so runs at a superseded lr are never reused.
-- **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group at
-  production's corpus weights, the decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
+- **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group, its
+  corpora weighted by the run's packed train rows (about their train bytes, whatever the tokenizer), the decision
+  measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled (the benchmarks' pass@1 is near zero at this size). *repo_32k*: 32K
   repository rows of the code group; *repo_beyond_8k*: the same rows' positions past 8,192, the context only the
   repository stage trains. *text*, *math*. *unparsed*, *indentation*, *syntax*: the shares of HumanEval+ and MBPP+
   problems whose healed greedy completion does not compile, by an IndentationError, by another SyntaxError (Parse
-  measure, Evaluation); *greedy*: those completions' base pass@1. Tokens per second (median over training steps).
+  measure, Evaluation); *greedy*: those completions' base pass@1. Tokens per second (median over file-level steps).
   Efficiency (from the run's run and end records): parameters, non-embedding FLOPs per token, peak memory.
 - **Analysis** (from `results/<experiment>.jsonl` and `.json`), pre-registered. *lr* (computed by `lr.py` into
   `results/lr.json`'s `analysis`, every number from the runs' records and plans): per setting, while its lowest-code
@@ -430,36 +439,43 @@ experiment has not run, nor its vocabularies and data (`python -m ablations.toke
   all runs placing the vertex inside (× 3.33): that quadratic's vertex is pulled by the far arms of an asymmetric curve
   (planted below: an optimum × 3.0 four times steeper below than above, read × 3.95 by one quadratic over × 1–8, × 3.72
   by the bracketing parabola). The measured d8 ratio r = exp(u*_d8@200 − u*_d8@5) is the optimum's change over a token
-  ratio m_D,d8 = 40.0, assumed width-independent (the size-independent horizon exponent of arXiv 2409.19913), and the
-  test of the transfer rules, which disagree on its direction: Complete^(d)P's AdamW SDE rule,
-  η ∝ √(m_B / m_D) (arXiv 2512.22382, Table 1), over the law's own fall predicts
+  ratio m_D,d8 = 40.0, assumed width-independent (our assumption; arXiv 2409.19913 §4 finds the horizon exponent
+  size-independent only from 760M parameters), and the test of the transfer rules, which disagree on its direction:
+  Complete^(d)P's AdamW SDE rule, η ∝ √(m_B / m_D) (arXiv 2512.22382, Table 1, its lr column; it also rescales β, ε
+  and weight decay), over the law's own fall predicts
   √(2 / 40.0) / 0.631 = 0.354 (d8's batch goes from 1 to 2 micro-batches, the law's lr falls to 0.631 of itself);
   Step-Law (arXiv 2503.04715, η = 1.79 N^−0.713 D^0.307) predicts 40.0^0.307 / 0.631 = 4.92; both are
   reported against the measurement, with the horizon exponent ln r / ln m_D,d8. Production's multiplier of the law's
-  lr is exp(u*_d24@5) · r^(ln m_D,prod / ln m_D,d8) · √(m_B,prod / m_B,d8): the exponent carried 1.24× further in
-  log-horizon, to production's m_D,prod = 98.2 (every rule in play is a power law in D: the SDE rule, arXiv 2409.19913,
-  Step-Law, the law), and production's batch growth over its range, 4× (294,912 to 1,179,648), against d8's 2×,
-  carried by the square-root batch rule (arXiv 2205.10287; Complete^(d)P's √m_B), so √(4 / 2). m_B and m_D come from the
+  lr is exp(u*_d24@5) · (r / √m_B,d8)^(ln m_D,prod / ln m_D,d8) · √m_B,prod: d8's trend net of its batch growth, 2×
+  (1 to 2 micro-batches), its exponent (−0.119, `horizon_exponent_net`) carried 1.26× further in log-horizon, to
+  production's m_D,prod = 105.2 (98.2 at `1e711aa`; every rule in play is a power law in D: the SDE rule,
+  arXiv 2409.19913, Step-Law, the law), and production's batch growth over its range, 4× (294,912 to 1,179,648), both
+  by the square-root batch rule (arXiv 2205.10287 Def. 5.2, its lr factor only; it also rescales β and ε;
+  Complete^(d)P's √m_B). Amended 2026-10-22 from r^(ln m_D,prod / ln m_D,d8) · √(m_B,prod / m_B,d8), which raised
+  d8's batch growth with its trend (+9.5% at 105.2); the measurements and the rest of the analysis are unchanged, and
+  `results/lr.json`'s `analysis` is the amended one at `7a210ed`. m_B and m_D come from the
   runs' recorded plans and production's (`harness.production_plan` at `max_ratio` of d24). Weight decay follows each
   run's lr by the τ law (Power Lines' fit for single-epoch pretraining), not Complete^(d)P's λ ∝ √(m_B / m_D).
   *Comparisons* (`harness.compare`): per setting, each alternative's mean minus production's, the
-  two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`; pooled with equal arm
-  sizes is robust to unequal variances); unpaired although arms share seeds: the six-run comparison's per-pair
+  two-sided pooled t-test's p and the difference's 95% confidence interval (scipy `ttest_ind`; at equal arm sizes the
+  pooled and Welch statistics coincide); unpaired although arms share seeds: the six-run comparison's per-pair
   differences (sd 0.0065) show no gain from pairing over independent runs (√2 σ = 0.0048). *Tokenizer*: The tokenizer
   experiment, below.
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 **Power.** The paired comparison's six runs (Against the standard regime) give a within-configuration σ of 0.0034
 bits per byte on code (0.0044 on solutions, 0.0036 on 32K repository). The tokenizer experiment's challengers at d16,
-one run against one: a bits-per-byte difference resolves at 1.96 √2 σ = 0.0094; parsing, by McNemar's test over the
-problems (The tokenizer experiment). lr: each vertex rests on the arms' differences within one seed, which varied by
-0.0008 across 2 seeds at d8 at 20 against a 0.018 effect; at the curvature
-arXiv 2409.19913's Llama-1 estimate implies (0.027 nats for a 2.5× lr; about 0.026 bits per byte per (ln lr)² at 3.5
-bytes per token [assumed]) and per-run noise σ, a three-point fit places a vertex within about ±14% (one standard
-error, 0.13 in u). The d8 ratio r combines two vertices' errors, about ±20% (0.185 in u); raised to 1.24 for
-production's horizon range it contributes 0.23 in u, and with the d24 vertex production's multiplier is within about
-±30% (0.26 in u). The two rules' predictions for r differ by 14× (ln 14 = 2.6 in u), far beyond its error. `lr.py`
-measures the curvatures themselves.
+two runs against two: a bits-per-byte difference resolves at 1.96 √(2 / 2) σ = 0.0067; parsing, by an exact sign test
+over the problems (The tokenizer experiment). lr: each vertex rests on the arms' differences within one seed, which
+varied by 0.0008 across 2 seeds at d8 at 20 against a 0.018 effect. At the curvature arXiv 2409.19913's Llama-1
+estimate implies (§4.1: 0.027 in loss for a 2.6× lr at 100B tokens, an upper bound; a coefficient of about 0.013 bits
+per byte per (ln lr)², second derivative 0.026, at 3.5 bytes per token [assumed]) and per-run noise σ, a three-point
+fit places a vertex within about ±14% (one standard error, 0.13 in u); the d8 ratio r combines two vertices' errors,
+about ±20% (0.185 in u); raised to 1.26 for production's horizon range it contributes 0.23 in u, and with the d24
+vertex production's multiplier is within about ±30% (0.26 in u). At the curvatures `lr.py` measured
+(`results/lr.json`) the vertices' standard errors are 0.024 (d8 at 5), 0.167 (d8 at 200) and 0.194 (d24 at 5) in u,
+r's 0.169, and production's multiplier is within about ±33% (0.29 in u). The two rules' predictions for r differ by
+14× (ln 14 = 2.6 in u), far beyond its error.
 
 **Cost** (measured: whole runs, child process, compilation, both stages, loss evaluation). d8 at 5: about 3 minutes
 [estimate]; d8 at 20: 234 s; d8 at 200: about 24 minutes [estimate]; d8 at 490.8: about 54 minutes (52 minutes
@@ -497,14 +513,14 @@ loss, lr, gradient norm before clipping, tokens per second, attempt, time; 2,987
 runs about 48 MB); and `<experiment>.json`, per setting depth, tokens per parameter, seeds, production's evaluated
 runs, and per alternative its fields, evaluated runs and per measure difference, p and confidence interval, null for
 one run per arm; `lr.json` adds the Analysis (`analysis`: per setting runs, curvature, vertex and grid extension; m_B,
-m_D, the law's fall, both predictions, the measured d8 ratio, production's multiplier and lr, null while a grid needs
-extending).
+m_D, the law's fall, both predictions, the measured d8 ratio, the horizon exponent and its net of d8's batch growth,
+production's multiplier and lr, null while a grid needs extending).
 
 ### The tokenizer experiment
 
 `ablations/tokenizer.py`: the decision production's tokenizer waits on, as every later step trains on its tokens. Data
 and stages describes the current vocabulary (SA-BPE within the non-fusing pattern), production's until this decides.
-The arms come from TokEval (arXiv 2608.18062, its companion post "Code tokenizer ablations" and its library), SA-BPE
+The arms come from TokEval (arXiv 2608.18062, its companion post "Tokenizer Code Ablations" and its library), SA-BPE
 (arXiv 2604.14053 and its repository), tiktoken's encodings and the code-tokenizer literature; every claim below was
 checked against its source on 2026-10-21 (the papers' full text, the post, the repositories at the commits cited).
 Every candidate production keeps or dismisses is trained, two seeds each: the literature's evidence is at 1.27B
@@ -542,39 +558,43 @@ own. The sample's composition, whose effect is below what the runs resolve, is d
 - **The score.** SA-BPE's §4.1 lists five priority criteria over F (the pair's frequency), R (the repositories holding
   it in the current segmentation) and L (the languages holding it). sa-bpe takes F·log R, under which a pair of one
   repository scores 0 (Table 3: compression 3.643 and 72 of 646 tested tokens verified under-trained, against BPE's
-  3.623 and 640; one 100M-parameter model each, no seeds, and no loss or downstream result, its Limitations calling the
-  models too small for downstream code benchmarks). R counts repositories as in the paper, and web hosts and documents,
-  which §6 suggests for natural language ("documents, books, or document collections") and the Limitations leave
-  untested. The paper's default, F·log R·L (Table 4), is not taken:
-  - L serves "language-universal merges" among 18 programming languages of natural shares, with "better parity and
-    support for lower-resource languages" (§6, App. G); this sample holds two, both well represented;
+  3.623 and 640; one 100M-parameter model each, no seeds or repeats reported, and no loss or downstream result, its
+  Limitations calling the models too small for downstream code benchmarks). R counts repositories as in the paper, and
+  web hosts and documents, which §6 suggests for natural language ("documents, books, or document collections") and
+  the Limitations leave untested. The log's base is unstated; the paper's repository takes the natural log
+  (`scoring.py`), and no base changes a merge. The paper's best model and recommended default, F·log R·L (Table 4: "our
+  best model"; §6: "a good default choice"), is not taken:
+  - L serves "language-universal merges" (§4.1) among 18 programming languages, with "better parity and support for
+    lower-resource languages" (§6, App. G); this sample holds two, both well represented;
   - on Python and C++ it compresses less (App. G Table 10: 3.651 against 3.652, 3.239 against 3.240) and uses more of
     the vocabulary (Table 12: 16,663 against 16,289 tokens, 16,625 against 16,314); its under-trained tokens are 44
     against 72 (Table 3);
   - §6: "the language aspect must be avoided" for natural language, a third of this sample's sources, and
     codeforces_cots' curated rows carry no programming language;
-  - on production's val documents (1.58B tokens), 31,604 of its 32,508 merged tokens occur in the Python, the C++ and
-    the English corpora alike (774 in two, 127 in one, most among the last merges): counted by presence, as the paper
-    counts it, L would be 3 for all but the vocabulary's tail [inference: val presence standing for the sample's].
+  - on production's val documents (1.59B tokens), 31,604 of its 32,508 merged tokens occur in the Python repository
+    corpora, the C++ repository corpora and the English and math ones (climbmix, opc_fineweb_math, ultradata_math_l2)
+    alike (774 in two, 127 in one, most among the last merges): counted by presence, as the paper counts it, L would be
+    3 for all but the vocabulary's tail [inference: val presence standing for the sample's].
 
   bpe sits 0.55% from F·log R in compression, so a tie in the runs is likely [inference], which the documents'
   statistics break (Decisions).
 - **The positive control.** The companion post deletes the trailing `[\r\n/]*` of GPT-4o's punctuation clause (its
-  gpt4onl) with the tokenizer corpus held fixed and moves MBPP pass@1 from 0.086 to 0.230 (seeds 0.167, 0.072, 0.018
-  against 0.224, 0.246, 0.220; 1.27B parameters, about 20B math and code tokens, about 128K ids, prompts healed: the
-  paper's §4.1–4.3), while across its tokenizers code bits per byte shows no association with MBPP (Spearman +0.07,
-  −0.12, −0.04, every p above 0.5). sa-bpe-fused differs from sa-bpe by the same clause in cl100k's form (`[\r\n]*`);
-  it tests that the d16 measures detect the difference, and one that does not cannot decide the others.
+  gpt4onl) with the tokenizer corpus held fixed and moves MBPP pass@1 from 0.086 to 0.230 (seeds 0.167, the mean of two
+  seed-42 runs, 0.072 and 0.018 against 0.224, 0.246, 0.220; 1.27B parameters, about 20B math and code tokens, about
+  128K ids, prompts healed: the paper's §4.1–4.3), and across its tokenizers code bits per byte shows no association
+  with MBPP (the post: Spearman +0.07, −0.12, −0.04, every p above 0.5). sa-bpe-fused differs from sa-bpe by the same
+  clause in cl100k's form (`[\r\n]*`); it tests that the d16 parse measure detects the difference, and when it does
+  not (sa-bpe-fused not parsing worse), the decision keeps production's pattern and score (Decisions).
 - **Not run.** tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (its encoder
   replays merges and removals in training order, arXiv 2409.04599 Alg. 2; its code compression 3.61 against BPE's
   3.62 in arXiv 2604.14053 Table 4), BoundlessBPE's supermerges (rule dictionaries of their own, arXiv 2504.00178
   §3.2) or UnigramLM (whose MBPP in TokEval is 0.000 with the GPT-4o and RightAlign patterns, 0.222 with the Claude
-  one). SuperBPE's one code result is lower, not significantly (arXiv 2503.13423 Table 1: HumanEval pass@10 15.9 to
-  13.4 at 8B parameters and 200K ids). Vocabulary size: 1.5B models fine-tuned with GPT-4-regex vocabularies of 32K to
-  256K score HumanEval pass@1 20.54 to 20.84, correlation −0.13 (p = 0.87; arXiv 2402.01035 §3.2, Table 3). Digit
-  grouping and case-split identifiers have no code measurement; DeepSeek-V3's random splitting of its punctuation and
-  line-break tokens (arXiv 2412.19437 §4.1) serves only a fusing pattern. Longer training and d24 would confirm, not
-  decide.
+  one). SuperBPE's two code results move apart, neither significantly (arXiv 2503.13423 Table 1, McNemar: HumanEval
+  pass@10 15.9 to 13.4, MBPP pass@10 27.5 to 28.3, at 8B parameters and 200K ids). Vocabulary size: 1.5B models
+  fine-tuned with GPT-4-regex vocabularies of 32K to 256K score HumanEval pass@1 20.52 to 20.84, Pearson r −0.13
+  (p = 0.87; arXiv 2402.01035 §3.2, Table 3). Digit grouping and case-split identifiers have no code measurement;
+  DeepSeek-V3's random splitting of its punctuation and line-break tokens (arXiv 2412.19437 §4.1) serves only a fusing
+  pattern. Longer training and d24 would confirm, not decide.
 
 **The hybrid.** SA-BPE's score within `HYBRID_PATTERN`. A pattern cuts a text into chunks, its matches from left to
 right, and tiktoken applies merges within each chunk, so every chunk end is a token end under every vocabulary trained
@@ -586,22 +606,28 @@ concatenation of chunk sequences, the hybrid's clauses give:
 | Property | The hybrid's clause and its source | Production's pattern | Limitation resolved |
 |---|---|---|---|
 | (1) A line break shares a chunk only with line breaks of its kind | `\n+`, `\r+`: the post's Claude-approximate `[\n]+`, `[\r]+`, the forced break at line breaks of its MinGram cb_nl; no other clause matches one | `\s*[\r\n]` takes the spaces before a break and a whitespace-only line (`"\n    \n"`) | no token of punctuation and line break (sa-bpe-fused's `"):\n"`: a prompt ending `):` ends inside the token training saw, the token-boundary bias of arXiv 2412.19437 §4.1), and none of a line break and indentation (the post's MinGram cb: 187 such entries, 86.4% of its completions IndentationError or TabError, MBPP 0.016 against cb_nl's 0.216) |
-| (2) chunks(ι s) = (ι) · chunks(s) | ` +`, `\t+`: the Claude-approximate `[ ]+`, `[\t]+`; a letter run takes no tab or line break before it | `\s+(?!\S)` gives ι's last space to s: chunks(ι s) = (d − 1 spaces, ␣w, …) for s = w…, (d − 1 spaces, ␣, …) before a digit; a tab joins the word (`\tif`) | one indentation chunk per depth, and a statement cut alike at every depth (`if`, where production cuts `if` at depth 0 and ` if` below it); the Claude-approximate pattern scored MBPP 0.250, 0.234, 0.240 (gpt4onl 0.224, 0.246, 0.220; Welch's t-test p = 0.31), 0.3% of its completions IndentationErrors |
+| (2) chunks(ι s) = (ι) · chunks(s) | ` +`, `\t+`: the Claude-approximate `[ ]+`, `[\t]+`; a letter run takes no tab or line break before it | `\s+(?!\S)` gives ι's last space to s: chunks(ι s) = (d − 1 spaces, ␣w, …) for s = w…, (d − 1 spaces, ␣, …) before a digit; a tab joins the word (`\tif`) | one indentation chunk per depth, and a statement cut alike at every depth (`if`, where production cuts `if` at depth 0 and ` if` below it); the Claude-approximate pattern scored MBPP 0.250, 0.234, 0.240 (gpt4onl 0.224, 0.246, 0.220; Welch's t-test p = 0.31, our computation from the post's seeds), 0.3% of its completions IndentationErrors |
 | (3) No run of letters is cut | no contraction clause: arXiv 2402.01035's Punct drops cl100k's (App. E), o200k folds contractions into the letter run | `'(?i:[sdmt]\|ll\|ve\|re)` cuts a run when the apostrophe starts a chunk (`'s` `elf` for a line's `'self'`, `'d` `type`) | identifiers whole; English contractions chunk as before (`doesn` `'t`) |
 
-Kept from cl100k: one leading punctuation character or space on a letter run (`.append`, `(self`, ` foo`), which Punct
-drops (arXiv 2402.01035 Table 1, code: 0.81 against Punct's 0.86 tokens per Llama token at 32K, "an additional 5%
-compression", its App. E; pass@1 higher for Punct at 1.5B and 32K, HumanEval 21.1 against 20.5, lower at 7B and 80K,
-30.40 against 30.82, untested for significance). From production: digit pairs (karpathy/nanochat: "2 is the sweet spot
-for vocab size of 32K") and punctuation runs without line breaks. `[^\S\r\n\t ]+` takes every other whitespace
-character, so every character falls in a chunk (tiktoken drops what no clause matches). The Claude-approximate
-pattern's full regex is unpublished (the post calls it an early reconstruction); the hybrid takes its whitespace
-clauses, and is tested because no source measures this combination, at 32K ids or on C++.
+Kept from cl100k: one leading punctuation character on a letter run (`.append`, `(self`), which Punct drops
+(arXiv 2402.01035 App. E: it prevents "\t or . to be encoded at the start of a letter-only token", keeping the
+optional leading space, ` ?\p{L}+`, Fig. 3, and the trailing line breaks of its punctuation clause; Table 1, code: 0.81
+against Punct's 0.86 tokens per Llama token at 32K, "an additional 5% compression", its App. E; pass@1 higher for
+Punct at 1.5B and 32K, HumanEval 21.1 against 20.5, lower at 7B and 80K, 30.40 against 30.82, untested for
+significance), and the optional leading space all three share (` foo`). From production: digit pairs
+(karpathy/nanochat: "2 is the sweet spot for vocab size of 32K") and punctuation runs without line breaks.
+`[^\S\r\n\t ]+` takes every other whitespace character, so every character falls in a chunk (tiktoken drops what no
+clause matches). The Claude-approximate pattern's full regex is unpublished (the post calls it an early
+reconstruction); the hybrid takes its whitespace clauses, and is tested because no source measures this combination,
+at 32K ids or on C++.
 
 **Pretokenization on the data** (2026-10-21, GB10: the first 1,000 rows of each source's first curated val file, all
 of a shorter file; the Python `regex` module, whose chunk ends were token ends of production's tokenizer on every
 document and of a 3,000-merge hybrid vocabulary trained by the crate on 2,025 of them). Chunks per kB bound a
-pattern's tokens; an indentation is whole when its leading whitespace is one chunk.
+pattern's tokens; an indentation is whole when its leading whitespace is one chunk. The `regex` module's Unicode tables
+are newer than the fancy-regex 0.19 tiktoken and the crate use (17,144 more code points are letters, 336 more numbers);
+on these documents both chunk alike, and properties (1)–(3) hold under fancy-regex on 2,006 curated val documents and
+on every code point placed in four contexts (2026-10-22).
 
 | Source | Chunks per kB: production, hybrid | Indentation whole: production, hybrid | sa-bpe-fused's punctuation-break chunks | Words led by a tab or line break (production) | Letter runs cut (production) |
 |---|---|---|---|---|---|
@@ -629,26 +655,29 @@ per kind (1,973). English and math chunk alike under production's pattern and th
 - **Intrinsic record** (`python -m ablations.tokenizer data`, `results/tokenizer-data.json`; `ablations/tokeval.py`).
   Per vocabulary, per corpus: bytes per token and the Rényi efficiency of order 2 (TokEval's Table 2 reports order 2 of
   the 1, 2, 2.5 and 3 its library computes), descriptive only, as two inference-time BPE variants raise it (order 3)
-  while lowering BLEU ("Two Counterexamples to Tokenization and the Noiseless Channel", LREC-COLING 2024, Tables 3 and
-  4: 0.474 and 33.74 to 0.500 and 33.39, and to 0.594 and 32.37); the vocabulary's tokens holding a line break (the
-  count correlating most strongly with MBPP in the post, Spearman −0.719 over 58 tokenizers), fusing punctuation with
-  one, and ending in a line break and indentation (MinGram cb's entries); the tokens the train documents hold never,
-  under 10 and under 100 times. On every code corpus (each document of a repository corpus; each fenced Python or C++
-  block of kaggle_notebooks and codeforces_cots), TokEval's AST boundary alignment per leaf category, identifier
-  fragmentation and Python indentation consistency, replicated from its library (7d03a61) over bytes, with leaves from
-  the data crate's grammars (`leaves.rs`); on every code and math corpus, its operator isolation (`metrics/math.py`:
-  24 operators in 6 categories, one isolated when no token covering it holds a non-whitespace character outside it;
-  the paper reports it on math, §3.5; its MBPP correlation over 20 tokenizers, ρ 0.28 to 0.52, is significant without
-  the two UnigramLM models, and +0.54 over the post's 27 families). Not taken: its multilingual metrics (fertility,
-  Gini, MorphScore) and its digit metrics (every arm's pattern cuts a digit run into the same chunks of at most two
-  digits). TokEval found AST boundary alignment's MBPP correlation (ρ 0.65) to be line-break handling (partial ρ 0.26
-  once it is controlled, its §F.3); they describe, the runs decide.
-- **Equal bytes.** Each arm reads the document set once, as production reads its data (`max_ratio`: no document
-  twice), so its tokens are the set's bytes over its bytes per token and each run's ratio is its `max_ratio` on the
-  set; each plan is its own (`schedule.plan` at its tokens), its context production's 8,192 and 32,768 tokens. At
-  equal tokens a better compressor would read more data (arXiv 2402.01035 compares at equal tokens, its Appendix J at
-  equal characters); the byte-offset buckets (Evaluation) show what
-  the extra bytes of context a better compressor sees are worth (arXiv 2503.13423 §3.1 fixes context in bytes).
+  while lowering BLEU ("Two Counterexamples to Tokenization and the Noiseless Channel", LREC-COLING 2024, Tables 1 and
+  2: 0.474 and 33.74 to 0.500 and 33.39, and to 0.594 and 32.37); its vocabulary entries holding a line break, as the
+  post counts them (the count correlating most strongly with MBPP, Spearman −0.719 over 58 tokenizers), fusing
+  punctuation with one, and ending in a line break and indentation (MinGram cb's entries); its merged tokens the train
+  documents hold never, under 10 and under 100 times (a proxy for SA-BPE's verified under-trained tokens). On every
+  code corpus (each document of a repository corpus; each fenced Python or C++ block of kaggle_notebooks and
+  codeforces_cots, whose prompt template `<your code here>` is a block of no leaves and one parse error), TokEval's AST
+  boundary alignment per leaf category, identifier fragmentation and Python indentation consistency, replicated from
+  its library (7d03a61) over bytes, with leaves from the data crate's grammars (`leaves.rs`); on every code and math
+  corpus, its operator isolation (`metrics/math.py`: 24 operators in 6 categories, one isolated when no token covering
+  it holds a non-whitespace character outside it; the paper reports it on math, §3.5; its MBPP correlation over 20
+  tokenizers, ρ 0.28 to 0.52, is significant without the two UnigramLM models; +0.54 over the post's 27 families,
+  measured on its prose corpus). Not taken: its multilingual metrics (fertility, Gini, MorphScore) and its digit
+  metrics (every arm's pattern cuts a digit run into the same chunks of at most two digits). TokEval attributes AST
+  boundary alignment's MBPP correlation (ρ 0.65, n = 20) to line-break handling (partial ρ 0.26, n = 18, once the count
+  of tokens holding a line break is controlled; §5, §F.3); they describe, the runs decide.
+- **Equal bytes.** Each arm reads the code documents once, as production reads its data (`max_ratio`: no document
+  twice), so its tokens are their bytes over its bytes per token and each run's ratio is its `max_ratio` on the set;
+  text and math are drawn by rows, so their bytes vary with an arm's compression there (about 0.2% of the total
+  [inference]). Each plan is its own (`schedule.plan` at its tokens), its context production's 8,192 and 32,768
+  tokens. At equal tokens a better compressor would read more data (arXiv 2402.01035 compares at equal tokens, its
+  Appendix J at equal characters); the byte-offset buckets (Evaluation) show what the extra bytes of context a better
+  compressor sees are worth (arXiv 2503.13423 §3.1 fixes context in bytes).
 - **Documents.** `python -m ablations.tokenizer data` compiles the same documents for every arm into
   `artifacts/tokenizer-ablation/compiled/` and packs them for every arm: of each code corpus, the
   leading curated train documents whose sa-bpe tokens fill what d16 at 20 tokens per scaling parameter draws at the
@@ -656,22 +685,26 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   files holding 1.25 times their draw, and of each repository corpus the trailing files holding 1.25 times the
   repository stage's draw, so they never bind (sa-bpe takes 9.21% more tokens than the first tokenizer on
   stack_edu_cpp's whole val split, the largest gap measured); of each val split, a systematic sample of documents whose
-  sa-bpe tokens fill at most 1/1.25 of the val sample, which every arm scores whole.
+  sa-bpe tokens fill at most 1/1.25 of the val sample, which every arm scores whole. Every arm's slack and val fill are
+  asserted.
 - **Decisions,** pre-registered (`results/tokenizer.json` `contrasts`, `decision`), each challenger (sa-bpe-fused, the
-  hybrid, bpe) against sa-bpe. Parsing: the HumanEval+ and MBPP+ problems whose healed greedy completion compiles
-  under only one of the two, McNemar's exact test (the companion post's test of single runs: 104 problems against 4
-  for its MinGram pair), better or worse at p < 0.05. Code bits per byte: better or worse beyond 1.96 √2 σ = 0.0094,
-  σ = 0.0034 the within-configuration spread of Against the standard regime at d8, carried to d16 [inference]. A
-  challenger qualifies iff it is worse on neither and better on one. Pattern: of sa-bpe-fused and the hybrid, the
-  qualifier with the lower unparsed share is adopted, else production's pattern; beside it, whether the control is
-  detected (sa-bpe-fused parses worse). Score: bpe is adopted iff it qualifies, or is equal on both and its documents
-  leave fewer vocabulary tokens never read than sa-bpe's (SA-BPE's claimed benefit), carried to the adopted pattern
-  [inference]; otherwise SA-BPE.
-- **Two seeds** (`SEEDS`). The seed is the measures' largest noise: the post's fusing tokenizer scored MBPP 0.167,
-  0.072 and 0.018 over three seeds, so one run can miss a real difference [inference], and an undetected one leaves
-  production's pattern and SA-BPE. The parse test pools both seeds' problems, each seed's pair of runs compared
-  problem by problem; the bits-per-byte bound is 1.96 σ = 0.0067. McNemar's test covers the sampling of problems,
-  the seeds training's only in part [inference].
+  hybrid, bpe) against sa-bpe, on the seeds where both have an evaluation (a diverged run is excluded with its pair).
+  Parsing: problems are the units; per HumanEval+ and MBPP+ problem, the seeds whose healed greedy completion compiles
+  under the challenger minus those under sa-bpe, and an exact sign test over the problems where they differ (McNemar's
+  test at one seed, the companion post's test of single runs: 104 problems against 4 for its MinGram pair), better or
+  worse at p < 0.05. Code bits per byte: the difference of the arms' means over those n seeds, better or worse beyond
+  1.96 σ √(2/n), 0.0067 at two seeds, σ = 0.0034 the within-configuration spread of Against the standard regime at d8,
+  carried to d16 [inference]. A challenger qualifies iff it is worse on neither and better on one. The control gates the
+  decision: unless sa-bpe-fused parses worse, production's pattern and score are kept. Pattern: of sa-bpe-fused and the
+  hybrid, the qualifier with the lower unparsed share is adopted, else production's pattern. Score: bpe is adopted iff
+  it qualifies, or is equal on both and its documents leave fewer merged tokens never read than sa-bpe's (the proxy of
+  SA-BPE's claimed benefit, 640 verified under-trained tokens for F against 72, its Table 3), carried to the adopted
+  pattern [inference]; otherwise SA-BPE.
+- **Two seeds** (`SEEDS`). The seed is the measures' largest noise: the post's fusing tokenizer scored MBPP 0.167 (two
+  seed-42 runs), 0.072 and 0.018 over three seeds, so one run can miss a real difference [inference], and an
+  undetected one leaves production's pattern and SA-BPE. Pooling the seeds' problem pairs in one McNemar test would
+  count each problem once per seed, pairs that are not independent; the sign test counts each problem once, its seeds
+  in its difference. It covers the sampling of problems, the seeds training's only in part [inference].
 - **Where it runs.** Every step on the GH200 that then trains production (Hardware: GH200 or H100 SXM5), from the
   curated store and production's tokenizer pulled at the published revision: `compile` and `pack` of production's
   data (whose packs size the document set, checked against `data/compiled.sha256`), the vocabularies, the arms' data
@@ -727,33 +760,47 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   stack_edu_python, stack_edu_cpp, kaggle_notebooks and codeforces_cots (472 snippets): every leaf, every alignment
   rate, the identifier statistics and the indentation correlation equal. The hybrid's pattern through the crate's
   trainer (3,000 merges) and tiktoken on 2,025 documents of the 11 sources: every document decodes to itself and every
-  chunk end of the `regex` module is a token end. `runs`' contrasts and decision on three synthetic single-seed
-  comparisons (542 problems): the hybrid adopted when it parses better (40 problems against 15, p = 0.001) or is equal
-  on parsing and better beyond 0.0094 on code, production's pattern when the better-parsing hybrid is worse beyond it;
-  the control detected at 100 against 5 and not at 8 against 10; bpe adopted on a tie only with fewer tokens never
-  read. On the first 200 val documents of
+  chunk end of the `regex` module is a token end. `runs`' contrasts and decision on synthetic results (2026-10-22, two
+  seeds, 542 problems): with the control detected, the hybrid's pattern and the frequency score when both qualify;
+  undetected, production's pattern and score although both qualify; a diverged hybrid seed leaves its contrast seed 0
+  alone (bound 0.0094); the sign test's counts at one seed equal McNemar's, and a problem parsing at one seed under
+  each arm counts 0. On the first 200 val documents of
   each code corpus, production's vocabulary aligns 0.616 of stack_edu_python's leaves and 0.596 of stack_edu_cpp's
-  against the first's 0.580 and 0.508, at a lower Rényi efficiency (0.474 against 0.499 over every corpus); its 6
-  tokens ending in a line break and indentation are pieces of whitespace-only lines (`\n` and 4 to 24 spaces, `\n\t`),
-  the chunks `\s*[\r\n]` takes whole.
-- *Arms* share production's plan at their setting: d8 at 50, 7,468 steps of 98,304 tokens (`repo_start` 7,061, peak
-  lr 2.4378e-3); d8 at 490.8, 36,656 steps of 196,608 tokens (34,657, 1.8324e-3); d24 at 5, 3,307 steps of 294,912
-  tokens (3,127, 1.6641e-3); the τ law sets each arm's weight decay from its lr, keeping the decay's timescale as the
-  lr moves. Production's d24 plan unchanged: 81,171 steps, `repo_start` 76,743.
-- *Every arm* (2026-10-22): `lr.py`'s at d8 over 50 and over 490.80456005542607 (`max_ratio` of d24, 20.6 s; × 0.25
-  included) and at d24 over 5, compiled and trained 4 steps through both stages on real rows with finite losses;
-  weight decay at d8 over 490.8: 0.3597 (1.4387 at × 0.25, 0.7194 at × 0.5, 0.1798 at × 2), over 50: 0.3982, d24 over
-  5: 0.3914; parameters: d8 56,627,216, d24 522,252,336.
+  against the first's 0.580 and 0.508, at a lower Rényi efficiency (0.474 against 0.499 over the first 200 val
+  documents of every corpus; 0.497 over every whole val split); its 6 tokens ending in a line break and indentation
+  are pieces of whitespace-only lines (`\n` and 4 to 24 spaces, `\n\t`), the chunks `\s*[\r\n]` takes whole.
+- *The audit against the literature and libraries* (2026-10-22, GB10): every citation of `ablations/`,
+  `data/tokenizer.py`, the crate's trainer and leaves, and `eval/` read again in its source. The crate's SA-BPE equals
+  pchizhov/sa-bpe (9fff32d, `scoring.py`) through merge 613 of 1,500 on 831 val documents, first parting at an exact
+  tie (F 406, R 35; the paper leaves ties unspecified), with the same 1,500-token set; its frequency BPE equals rustbpe
+  (karpathy/nanochat's trainer) over all 32,508 merges on 88.9M characters; replaying the merges equals tiktoken's
+  encoding on all 445,282 distinct chunks; merges are identical at 1, 3 and 20 threads. HF tokenizers' `BpeTrainer`
+  and tiktoken's educational trainer part at ties (merges 272 and 79), and the official SA-BPE's per-source
+  dictionaries would not scale to the 13.4 GB sample [inference], so the crate stays. `tokeval.py` against TokEval's
+  library (7d03a61) on 2,000 production val documents (806 non-ASCII): operator isolation equal on 531,044 operators,
+  Rényi efficiency within 5.7e-15, alignment, fragmentation and indentation equal in 7 of 9 corpus-grammar cells, the
+  other two differing only where a token boundary splits an emoji's bytes (byte against character positions, at most
+  4.6e-4 of a rate); `leaves.rs` equals the library's leaves on 12,404 Python snippets and on every C++ snippet that
+  parses, 10 of 9,312 erroneous C++ snippets recovering differently between the tree-sitter runtimes (Rust 0.27.1,
+  Python 0.26.0). The library would take about 77 minutes per vocabulary against 2 [inference], scores characters and
+  re-encodes snippets alone, so `tokeval.py` stays. `bpb.py`'s sums equal a recomputation from the pack index on all
+  11 corpora (every val token scored once, no BOS or padding); `code_eval.evalplus` equals EvalPlus's own `codegen` and
+  `evaluate` on 542 tasks × 4 variants. Healing until re-emission reaches the reference tokenization of every
+  HumanEval+ and MBPP+ prompt under production's vocabulary and cl100k (single-step healing: 85 of 164 HumanEval+
+  under cl100k), and its first-step masks equal the single step's on production's 542 prompts; `parse_outcome` scores
+  a parser overflow (`compile` of 12,288 dashes: MemoryError) as a SyntaxError. `lr.analysis` on `results/lr.jsonl`
+  is unchanged, and `harness.compare` equals the textbook pooled t-test.
 - *lr.py's plans* (`harness.plan_of`, τ-law weight decay at each arm's lr): d8 at 5, 746 steps of 98,304 tokens
   (`repo_start` 705), law lr 3.2509e-3, weight decay 0.8878 / 0.4439 / 0.2219 at × 1 / 2 / 4; d8 at 200, 14,937 steps
   of 196,608 (14,122), 2.0500e-3, 0.4916 / 0.2458 / 0.1229 / 0.0614 at × 1 / 2 / 4 / 8; d24 at 5, 3,307 steps of
   294,912 (3,127), 1.6641e-3, 0.3914 / 0.1957 / 0.0979. From the plans: m_B 4 (production) and 2 (d8), m_D 98.18
-  (production) and 40.05 (d8), the law's fall 0.6306; predictions for the d8 ratio × 0.3544 (SDE rule) and × 4.9231
-  (Step-Law).
+  (production at `1e711aa`; 105.20 at `7a210ed`) and 40.05 (d8), the law's fall 0.6306; predictions for the d8 ratio
+  × 0.3544 (SDE rule) and × 4.9231 (Step-Law).
 - *Analysis* (planted code, `lr.py` through `harness.main` over planted records, optima × 2.4 and × 3.0 at d8 over 5
   and 200, × 1.8 at d24 over 5; before the 2026-10-20 amendment): a quadratic in u is recovered exactly (vertices
   × 2.4000, 3.0000, 1.8000; r × 1.2500, horizon exponent 0.060472, production's multiplier × 3.359307 = 1.8 ·
-  1.25^(ln 98.18 / ln 40.05) · √2, lr 3.1509e-3), also with d8 over 200's × 8 diverged (its 3 other runs); an optimum
+  1.25^(ln 98.18 / ln 40.05) · √2, lr 3.1509e-3; the estimator as amended 2026-10-22 gives 1.8 · (1.25 /
+  √2)^(ln 98.18 / ln 40.05) · 2 = × 3.088), also with d8 over 200's × 8 diverged (its 3 other runs); an optimum
   outside its grid (× 8 at d8 over 5) is reported as extend "up" with the derived values null; a curve steeper above
   its optimum (0.02 (e^d − 1 − d), d = u − u*) biases each vertex low, × 2.240, 2.554, 1.679 (r × 1.140, multiplier
   × 2.795 against 3.359). The amended fit (synthetic records): an optimum × 2.4 on a symmetric curve read × 2.4000
@@ -932,9 +979,10 @@ Runs train one at a time. Concurrent d8 training processes, 2026-10-20 (file-lev
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
 - **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seed plus a hash of those, its variant
-  (an ablation run's fields; production's lr scale) and the dataset revision `config.DATASET_REVISION`
-  (`python -m nanochat.paths` downloads it), so runs of different settings or data never share artifacts. Each run's
-  metrics record its full configuration (model, plan, seed, lr, weight decay, clip threshold) and the dataset revision.
+  (an ablation run's fields, its ratio and lr scale as floats, its tokenizer's data key and its peak lr; production's
+  lr scale) and the dataset revision `config.DATASET_REVISION` (`python -m nanochat.paths` downloads it), so runs of
+  different settings or data never share artifacts. Each run's metrics record its full configuration (model, plan,
+  seed, lr, weight decay, clip threshold) and the dataset revision.
 - **Data order.** Each corpus's rows are permuted once by the run's seed (NumPy `RandomState`; `train/stages.py`
   `stage_batches`), which also seeds its initialization.
 
@@ -1085,28 +1133,37 @@ production's checkpoints take everything, the ablation runs the likelihood metri
 summed UTF-8 bytes, tokenizer-independent):
 
 - *Held-out corpora:* each training corpus's val split at 8K and at 32K, per context bucket (≤ 8K, > 8K: Code Llama's
-  loss by context length, arXiv 2308.12950 §3.3) and per byte-offset bucket (doublings from 1 KiB to 128 KiB of the
-  piece before a target, so tokenizers compare at the same bytes of context, as arXiv 2503.13423 §3.1 fixes context
-  in bytes), pooled by the stage's mixture weights: the AR test loss of arXiv 2207.14255 §3. A corpus's sample is
-  its rows up to 80 × 2^19 tokens' worth, systematic, the last micro-batch filled with empty rows, so a split within it
-  is scored whole.
+  perplexity by context length, arXiv 2308.12950 §3.3, Fig. 4a) and per byte-offset bucket (doublings from 1 KiB to
+  128 KiB of the piece before a target, so tokenizers compare at the same bytes of context, as arXiv 2503.13423 §3.1
+  fixes context in bytes, its App. B.1 plotting bits per byte by bytes of context), pooled by the stage's mixture
+  weights: the AR loss of arXiv 2207.14255 (§2, "AR test loss" §1.1). Targets of no bytes (BOS, padding, sentinels)
+  are not scored, as karpathy/nanochat's `evaluate_bpb`. A corpus's sample is its rows up to 80 × 2^19 tokens' worth,
+  systematic, the last micro-batch filled with empty rows, so a split within it is scored whole.
 - *Reference solutions:* the bits of HumanEval+'s, MBPP+'s and HumanEval-X C++'s reference solutions given their
-  prompts, the decision measure at scales where pass@1 is near zero: the task loss of arXiv 2412.04403
-  §2; the correct answer's likelihood is DataDecide's best small-scale predictor for HumanEval and MBPP
-  (arXiv 2504.11393 §3.4, Fig. 6, between data recipes under one tokenizer); BPB raises the signal-to-noise ratio of
-  most benchmarks (arXiv 2508.13144 §5.3) and tracks pass@1 across checkpoints where corpus loss does not
-  (arXiv 2604.07769). Scoring starts at the token that starts at the prompt's end. EvalPlus's solutions begin with blank
-  lines, which a tokenizer joins to the prompt's last line break: every HumanEval+ and MBPP+ prompt ended inside a token
-  in each vocabulary measured (production's, the first tokenizer, cl100k's cut), leaving 0.83–1.00% of solution bytes
-  unscored and different bytes per tokenizer, so those blank lines count as prompt.
+  prompts, the decision measure at scales where pass@1 is near zero: the task loss of arXiv 2412.04403 §2.2 (the
+  correct answer's negative log-likelihood per byte, there on multiple-choice tasks); a continuous correct-answer
+  likelihood makes HumanEval and MBPP decisions predictable where accuracy is trivial (DataDecide, arXiv 2504.11393
+  §3.4, Fig. 6, between data recipes under one tokenizer); BPB raises the signal-to-noise ratio of most benchmarks
+  (arXiv 2508.13144 §5.3); the loss on a benchmark's problems and reference solutions tracks pass@1 across checkpoints
+  where held-out loss does not (arXiv 2604.07769 §3.3.1, its "valid-loss"). Scoring starts at the token that starts at
+  the prompt's end. EvalPlus's solutions begin with blank lines, which a tokenizer joins to the prompt's last line
+  break: every HumanEval+ and MBPP+ prompt ended inside a token in each vocabulary measured (production's, the first
+  tokenizer, cl100k's cut), leaving 0.83–1.00% of solution bytes unscored and different bytes per tokenizer, so those
+  blank lines count as prompt (no straddle remains, checked on production's and cl100k's).
 
 **Parse measure** (`code_eval.parse_generation`): one greedy, unconstrained completion of each HumanEval+ and MBPP+
-prompt, healed at its boundary, as arXiv 2608.18062 generates (BOS, token healing, greedy); the share whose prompt +
-completion compiles, fails with an IndentationError (TabError included) or with another SyntaxError (its companion
-post's classification), and the completions' EvalPlus pass@1. Its post traces a vocabulary's cost on MBPP to these
-failures (Appendix F.3, footnote 15): punctuation fused with a line break fails with SyntaxError (gpt4o-code: 92.4% of
-generations), a line break fused with the indentation after it with IndentationError (86.4%). Whether a model too
-small for pass@1 shows the difference in its parse rate is what the measure tests [inference: it can].
+prompt with BOS and the prompt healed at its boundary, as arXiv 2608.18062 generates (§4.3; App. C: the trailing
+prompt token dropped and generation constrained until its bytes are re-emitted); the share whose prompt + completion
+compiles, fails with an IndentationError (TabError included) or with another SyntaxError (the companion post's
+classification, "How the failing generations fail"; a parser overflow counts as a SyntaxError), and the completions'
+EvalPlus pass@1. It departs from TokEval's protocol in its prompts, EvalPlus's 0-shot base prompts (TokEval:
+lm-eval-harness v0.4.11, MBPP 3-shot over its 500 test problems), its budget and stops, EvalPlus's 768 tokens and stop
+strings (the post: 256 tokens, the end-of-document token only), and compiles the raw completion, so a tab-indented
+HumanEval+ completion is a TabError although EvalPlus, which replaces tabs, may pass it. The post traces a
+vocabulary's cost on MBPP to these failures (linked from arXiv 2608.18062 App. F.3, footnote 15): punctuation fused
+with a line break fails with SyntaxError (gpt4o-code: 92.4% of generations), a line break fused with the indentation
+after it with IndentationError (86.4%). Whether a model too small for pass@1 shows the difference in its parse rate is
+what the measure tests [inference: it can].
 
 **Benchmarks** (`eval/code_eval.py`): EvalPlus (arXiv 2305.01210) HumanEval+ and MBPP+ (base and plus pass@1), MultiPL-E
 HumanEval and MBPP in C++, and HumanEval single-line, multi-line and random-span infilling (arXiv 2207.14255; PSM and
@@ -1114,19 +1171,23 @@ SPM), each scored by its official evaluator, by up to three generation modes:
 
 | Mode | Decoding | Score |
 |---|---|---|
-| `greedy` | left-to-right argmax, one completion per problem | pass@1 as DeepSeek-Coder (arXiv 2401.14196 §4.1), Qwen2.5-Coder and EvalPlus's leaderboard report it |
-| `sampled` (EvalPlus, MultiPL-E) | 20 samples per problem at temperature 0.2 from the nucleus (arXiv 1904.09751) top-p 0.95 (`code_eval.SAMPLES`, `SAMPLE_TEMPERATURE`, `TOP_P`; the decoder's `k_nucleus`) | pass@1 by Codex's unbiased estimator (arXiv 2107.03374 §2.1: top p 0.95; T = 0.2 the pass@1 optimum), as MultiPL-E (its pass@1 stable from about 20 samples) and StarCoder2 (20 samples at T = 0.2) report it, computed by each benchmark's evaluator |
-| `filtered` | left-to-right prompts healed ("The Art of Prompt Design: Prompt Boundaries and Token Healing", Guidance, 2023), Python and FIM middles under the syntax constraint (FIM: given the prefix and suffix, no healing); the greedy candidate, then seeded samples until one has no post-generation diagnostic and passes the prompt's own examples, at most 10 (`verify.ATTEMPTS`); the accepted candidate, else the greedy one | filtered pass@1 (Codex's filtered pass@k, arXiv 2107.03374 §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
+| `greedy` | left-to-right argmax, one completion per problem | pass@1 as DeepSeek-Coder (arXiv 2401.14196 §4.1), StarCoder2 (arXiv 2402.19173 §7.1.1) and EvalPlus's leaderboard report it |
+| `sampled` (EvalPlus, MultiPL-E) | 20 samples per problem at temperature 0.2 from the nucleus (arXiv 1904.09751) top-p 0.95 (`code_eval.SAMPLES`, `SAMPLE_TEMPERATURE`, `TOP_P`; the decoder's `k_nucleus`) | pass@1 by Codex's unbiased estimator (arXiv 2107.03374 §2.1; top p 0.95, §3.2; T = 0.2 the pass@1 optimum, §3.3), as MultiPL-E reports it (its pass@1 stable from about 20 samples; StarCoder2 draws 50 at T = 0.2, top-p 0.95, §7.1.2), computed by each benchmark's evaluator |
+| `filtered` | left-to-right prompts healed (until the dropped token's bytes are re-emitted, arXiv 2608.18062 App. C; token healing: "The Art of Prompt Design: Prompt Boundaries and Token Healing", Guidance, 2023, which steps back one token), Python and FIM middles under the syntax constraint (FIM: given the prefix and suffix, no healing); the greedy candidate, then seeded samples until one has no post-generation diagnostic and passes the prompt's own examples, at most 10 (`verify.ATTEMPTS`); the accepted candidate, else the greedy one | filtered pass@1 (Codex's filtered pass@k, arXiv 2107.03374 §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
 
 - **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E's paper drew 200 and
   the BigCode leaderboard 50: the same estimate, with more variance per problem. HumanEval infilling is greedy, not
   arXiv 2207.14255's (temperature 0.2, 100–200 samples). The prompts' examples overlap the scored base tests (MBPP+:
-  373 of 378 prompt asserts use a base input; HumanEval+: 55 of 164 tasks share a doctest input), so the filtered mode
-  favours base over plus pass@1.
+  377 of 378 prompt asserts call the entry function on a base input, tuples compared as lists; HumanEval+: 55 of 164
+  tasks share a doctest input), so the filtered mode favours base over plus pass@1. Its diagnostics flag 5 of the 542
+  reference solutions (HumanEval/10, /17, /20 by basedpyright's reportReturnType, Mbpp/130 by reportCallIssue, Mbpp/630
+  after EvalPlus's `sanitize` drops its helper), and the prompt examples of HumanEval/47 and /116 contradict their
+  references, so no candidate passes them. EvalPlus's verdicts are timed (its limit per test max(4 s, 4× the ground
+  truth's time), at most 60 s per task, half the CPUs as workers), so heavy CPU load can fail a slow correct solution.
 - **Infilling** (human-eval-infilling, arXiv 2207.14255): each middle is cut to the reference middle's line count, a
-  single-line middle to its first line (the benchmark's standard post-processing for pass@1: arXiv 2410.03103;
-  arXiv 2505.18789 Fig. 4), and decoding stops there; random-span middles end at BOS. Both orders, PSM and SPM, are
-  scored greedy; the filtered mode runs SPM.
+  single-line middle to its first line (arXiv 2505.18789 Table 1, Fig. 4), and decoding stops there; random-span
+  middles end at BOS, uncut, where that Table 1 truncates their overlap with the prefix and suffix. Both orders, PSM
+  and SPM, are scored greedy; the filtered mode runs SPM.
 - **Contamination.** The training corpora were not decontaminated against the benchmarks: a benchmark problem in the
   training data (HumanEval and MBPP are public on GitHub) inflates its score.
 
@@ -1139,9 +1200,9 @@ order depends on the shapes and the slot's position alone, so a request's tokens
 or timing. A `Request` carries the prompt, budget, stop rule, `temperature` (0 = argmax, ties to the lowest id), `top_p`
 (below 1: the sample from the nucleus, arXiv 1904.09751 §3.1; `decode.cu k_nucleus` keeps the token set
 Hugging Face's `TopPLogitsWarper` keeps), `seed` (the sample at position *i* depends only on seed and *i*) and an
-optional constraint (`heal()`'s first token, the Python syntax constraint, `AllOf()` of both), whose masks each step
-takes for all constrained slots in one batched call (`step_masks`); a prompt whose length plus budget exceeds the
-context raises `ValueError`.
+optional constraint (`heal()`'s re-emission of the dropped token's bytes, the Python syntax constraint, `AllOf()` of
+both), whose masks each step takes for all constrained slots in one batched call (`step_masks`); a prompt whose length
+plus budget exceeds the context raises `ValueError`.
 
 - **KV cache sized to the workload** (greedy, no stop rule, 125,952 tokens per run, under `gpu.lock`, 2026-10-20): d24
   `max_len` 32,768 (the context), 32 slots: 2,379 tok/s; `max_len` 1,158 (longest HumanEval+ prompt 391 + 768 − 1),
@@ -1173,7 +1234,8 @@ cut TypeScript compilation errors by 75.3% (HumanEval) and 52.1% (MBPP). Its art
 `microsoft/monitors4codegen`) constrains member access and was evaluated on Java, C# and Rust. arXiv 2606.21619 re-ran
 the TypeScript setup over 6 models and 10 seeds: unconstrained decoding was significantly more functionally correct
 (Gemma-2 2B HumanEval 35.7% vs 32.0%; Qwen-2.5 32B 82.3% vs 72.3%), because the incomplete constrainer pushes the model
-into low-probability text; a complete (syntax) constrainer instead gained 53% exact match at 2B and 2.5% at 32B. A type
+into low-probability text; a complete syntax constrainer instead gained 53% exact match at 2B and 2.5% at 32B (its TOML
+experiment, §5.3). A type
 constrainer for dynamically typed Python is incomplete by construction; Python 3 syntax can be constrained completely,
 and the training data holds only files that parse as Python 3 (`prepare.py` `normalize_file`), so the model's
 distribution lies inside the constrainer's language (the alignment arXiv 2606.21619 restores by fine-tuning). Types are
@@ -1419,7 +1481,7 @@ Without an arXiv identifier:
 | "Fast Splittable Pseudorandom Number Generators" (OOPSLA 2014) | SplitMix64, `data/crate/dedup.rs` |
 | "The Art of Prompt Design: Prompt Boundaries and Token Healing" (Guidance, 2023) | token healing, `inference/decoder.py` heal |
 | "Statistical Methods for Research Workers" (1925), §20 | the 0.05 significance level, `ablations/harness.py` |
-| "Code tokenizer ablations" (arXiv 2608.18062's companion post, cimeister.github.io, 2026) | The tokenizer experiment; Parse measure |
+| "Tokenizer Code Ablations" (arXiv 2608.18062's companion post, cimeister.github.io, 2026) | The tokenizer experiment; Parse measure |
 | "Two Counterexamples to Tokenization and the Noiseless Channel" (LREC-COLING 2024) | The tokenizer experiment, `ablations/tokeval.py` |
 
 Repositories, at the commit, file or record cited:

@@ -1,16 +1,18 @@
 """
 Likelihood metrics of a checkpoint in bits per byte (BPB): summed next-token loss in bits (nats / ln 2) over the
-summed UTF-8 bytes of the targets, targets of 0 bytes (special tokens, padding) excluded from both (The Pile's
-bits per UTF-8 byte, arXiv 2101.00027; tokenizer-independent, so models and vocabularies compare).
+summed UTF-8 bytes of the targets (The Pile's bits per UTF-8 byte, arXiv 2101.00027 §3.1; tokenizer-independent, so
+models and vocabularies compare), targets of 0 bytes (special tokens, padding) excluded from both (karpathy/nanochat
+evaluate_bpb, nanochat/loss_eval.py).
 - val_bits: each training corpus's held-out val split, the test loss of autoregressive training (arXiv 2207.14255
-  §3: the "AR test loss"), per context bucket (CONTEXTS: Code Llama's loss as a function of context
+  §2: its "AR loss"; "AR test loss", §1.1), per context bucket (CONTEXTS: Code Llama's loss as a function of context
   length, arXiv 2308.12950 §3.3, Fig. 4a), per corpus, per group (code, text, math) and overall, pooled by the stage's
   mixture weights (mixture_bpb), as The Pile reports its BPB per component and over the whole.
-- solution_bits: each benchmark's reference solutions given their prompts: the task loss that predicts pass@1 at
-  scales where pass@1 is near zero (arXiv 2412.04403 §2; DataDecide, arXiv 2504.11393 §3.3: the correct
-  answer's likelihood the best small-scale predictor for HumanEval and MBPP; arXiv 2508.13144 §5.3:
-  BPB raises the signal-to-noise ratio of most benchmarks; arXiv 2604.07769: it tracks pass@1 across
-  checkpoints where corpus loss does not).
+- solution_bits: each benchmark's reference solutions given their prompts, the task loss of arXiv 2412.04403 §2.2
+  (the correct answer's bits per byte; its tasks multiple-choice, without pass@1), a predictor of pass@1 at scales
+  where pass@1 is near zero (DataDecide, arXiv 2504.11393 §3.4, Fig. 6: the correct answer's probability makes
+  HumanEval and MBPP decisions predictable where accuracy is trivial; arXiv 2508.13144 §5.3: BPB raises the
+  signal-to-noise ratio of most benchmarks; arXiv 2604.07769 §3.3.1, Table 2: the loss on a benchmark's problems and
+  reference solutions, its "valid-loss", tracks pass@1 where held-out corpus loss does not).
 Each returns the bits and bytes sums per context bucket, so corpora, buckets and benchmarks pool exactly (bpb,
 mixture_bpb). Sums are fp64 on the device, reduced in a fixed order.
 """
@@ -36,8 +38,9 @@ VAL_TOKENS = 80 * 2**19
 # file-level context) and positions only the repo-level stage trains
 CONTEXTS = (FILE_STAGE.seq_len,)
 # Byte-offset buckets of a target (the bytes of its piece before it), doublings from 1 KiB to 128 KiB (beyond a 32K
-# row's span at 3.4 bytes per token): loss by context on a log axis, as arXiv 2308.12950 Fig. 4a plots it, in bytes so
-# that tokenizers compare at the same context (arXiv 2503.13423 §3.1 fixes context in bytes for this reason)
+# row's span at 3.4 bytes per token): loss at doubling context lengths, as arXiv 2308.12950 Fig. 4a samples perplexity,
+# in bytes so that tokenizers compare at the same context (arXiv 2503.13423 §3.1 fixes context in bytes for this
+# reason; App. B.1, Fig. 6: BPB by bytes of context)
 OFFSETS = tuple(2**k for k in range(10, 18))
 # The benchmarks with reference solutions (eval/code_eval.py tasks): Python's EvalPlus (arXiv 2305.01210) canonical
 # solutions, C++'s HumanEval-X's (arXiv 2303.17568; MultiPL-E, arXiv 2208.08227, has none)
@@ -98,9 +101,10 @@ def sample_rows(stage: Stage) -> int:
 
 def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> dict:
     """Val evaluation of a stage's mixture {group: (share, corpora)} in its rows: {"corpora": {corpus: {"bits", "bytes",
-    "rows"}}, "bpb": {group: mixture_bpb, "all": mixture_bpb of every corpus}}, each corpus's packed val split read left
-    to right over a systematic sample of its rows, weighted by the stage's mixture weights. cu_seqlens is padded to the
-    corpora's most segments: one compiled graph scores all."""
+    "rows"}}, "bpb": {group: mixture_bpb, "all": mixture_bpb of every corpus}, "weights": the stage's mixture weights
+    {corpus: weight} mixture_bpb pools by}, each corpus's packed val split read left to right over a systematic sample
+    of its rows, weighted by the stage's mixture weights. cu_seqlens is padded to the corpora's most segments: one
+    compiled graph scores all."""
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
     # the sample: n = min(num_rows, sample_rows) rows, row (j x num_rows) // n for j < n (the packer orders each shard's
     # rows longest first, Best-Fit-Decreasing, so a prefix would over-represent long documents), its last micro-batch
@@ -121,7 +125,7 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     weights = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
     groups_bpb = {group: mixture_bpb(corpora, {c: weights[c] for c in members})
                   for group, (_, members) in stage.mixture.items()}
-    return {"corpora": corpora, "bpb": groups_bpb | {"all": mixture_bpb(corpora, weights)}}
+    return {"corpora": corpora, "bpb": groups_bpb | {"all": mixture_bpb(corpora, weights)}, "weights": weights}
 
 
 def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, device: torch.device

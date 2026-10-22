@@ -56,9 +56,10 @@ def main() -> None:
     with torch.device("meta"):
         model = GPT(gpt_config(depth=DEPTH, stage=FILE_STAGE))
     law = plan(model=model, ratio=ratio)
-    # the multiplier of the law's (DeepSeek LLM, arXiv 2401.02954 §3.1) peak lr: lr.py's pre-registered estimator at
-    # this data's horizon, the optima it measured at dataset revision 1e711aa carried, not measured again (d24 at 5's
-    # x2.0235, the d8 ratio 0.9105 over 5 -> 200 tokens per parameter, the square-root batch rule, arXiv 2205.10287)
+    # the multiplier of the law's (DeepSeek LLM, arXiv 2401.02954 §3.1) peak lr: lr.py's estimator (amended 2026-10-22:
+    # d8's horizon trend net of its batch growth) at this data's horizon, the optima it measured at dataset revision
+    # 1e711aa carried, not measured again (d24 at 5's x2.0235, the d8 ratio 0.9105 over 5 -> 200 tokens per parameter,
+    # the square-root batch rule, arXiv 2205.10287)
     lr_scale = analysis([json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
                         )["production_multiplier"]
     run = replace(law, lr=lr_scale * law.lr)

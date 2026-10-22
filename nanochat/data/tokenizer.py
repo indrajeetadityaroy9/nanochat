@@ -1,14 +1,19 @@
 """
-BPE tokenizer in the style of GPT-4: merges trained by source-attributed BPE (SA-BPE, F·ln R; arXiv 2604.14053)
-within the chunks of SPLIT_PATTERN by the data crate (data/crate train.rs), encoding by OpenAI's tiktoken, whose
-regex engine (fancy-regex) the trainer shares.
+BPE tokenizer in the style of GPT-4: merges trained by source-attributed BPE (SA-BPE, F·ln R; arXiv 2604.14053 §4.1,
+whose log base is unstated: ln as in its repository's scoring.py; the base changes no argmax) within the chunks of
+SPLIT_PATTERN by the data crate (data/crate train.rs), encoding by OpenAI's tiktoken, whose regex engine (fancy-regex)
+the trainer shares.
 
 Trained on every curated source's train split in about equal byte shares (main, SAMPLE_SHARES), writing
-TOKENIZER/tokenizer.tiktoken and tokenizer.pattern. Equal byte shares minimize the expected compute per byte
-over a uniform prior on mixtures, compute per byte being linear in the byte mixture (our derivation, following
-arXiv 2407.13623, Eq. 5). The tokenizer ablation's arms (ablations/tokenizer.py) train on the same sample (sample,
-merges) into TOKENIZER_ABLATION/<arm>, beside one vocabulary on the sample at the training mixture's shares;
-get_tokenizer loads production's or an arm's.
+TOKENIZER/tokenizer.tiktoken and tokenizer.pattern. Our argument for equal byte shares: tokens per byte are linear in
+the byte mixture, so their expectation over any exchangeable prior on mixtures equals their value at the equal mixture,
+which a tokenizer trained on the equal mixture minimizes on the assumption that a tokenizer trained on a mixture
+compresses that mixture best (arXiv 2402.01035 §2.3, qualitatively); compute is proportional to tokens
+(arXiv 2407.13623 Eq. 5, its only part in the argument). arXiv 2610.12144 §7 recommends proportional
+tokenizer-training weights instead, an open decision for production (ablations/tokenizer.py COMPOSITION). The
+tokenizer ablation's arms (ablations/tokenizer.py) train on the same sample (sample, merges) into
+TOKENIZER_ABLATION/<arm>, beside one vocabulary on the sample at the training mixture's shares; get_tokenizer loads
+production's or an arm's.
 
 python -m nanochat.data.tokenizer
 """
@@ -130,8 +135,9 @@ def sample(*, shares: Literal["equal", "mixture"]) -> tuple[list[str], list[int]
     file order. A repository sample's files are its rows: they split into the chunks of SPLIT_PATTERN the concatenated
     sample does, as each file's text ends with a line break and the next begins with its path comment. Each row's
     source id names its authorship unit, whose count is SA-BPE's R: a file's repository (one name across the corpora
-    that hold the repository), a web page's host, else the document itself (a notebook, a text without a URL, a
-    codeforces_cots conversation)."""
+    that hold the repository), a web page's host (urlsplit().hostname: lower-cased, without its port; a www. host and
+    its bare host are distinct), else the document itself (a notebook, a text without a URL, a codeforces_cots
+    conversation)."""
     sizes = {source: sum(column_bytes(path, "content") for path in curated_files(source, "train"))
              for source in SOURCES}
     smallest = min(sizes.values())

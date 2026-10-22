@@ -198,7 +198,7 @@ def scaling_params(model: GPT) -> int:
 
 
 def non_embedding_flops_per_token(model: GPT) -> int:
-    """DeepSeek LLM's M (arXiv 2401.02954 §3.1 Eq. 2): 6 per block matrix weight + 12 C l_seq per layer, l_seq the
+    """DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2): 6 per block matrix weight + 12 C l_seq per layer, l_seq the
     layer's window (92d63d4 gpt.py:319-339)."""
     matrices = sum(p.numel() for p in model.blocks.parameters() if p.ndim == 2)
     return 6 * matrices + sum(12 * model.config.n_embd * w for w in model.window_sizes)

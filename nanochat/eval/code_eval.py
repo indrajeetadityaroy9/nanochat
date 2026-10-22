@@ -5,16 +5,17 @@ Benchmarks:
 - humaneval_plus (164) and mbpp_plus (378): EvalPlus (arXiv 2305.01210; the evalplus package pinned in
   pyproject.toml, data releases HumanEvalPlus v0.1.10 / MbppPlus v0.2.0). Prompt, budget, stop sequences and
   post-processing as EvalPlus's codegen for a base (direct-completion) model: prompt.strip() + "\\n"
-  (evalplus/codegen.py:71), at most 768 new tokens (provider/base.py:13), stops EOS +
+  (evalplus/codegen.py:71), at most EVALPLUS_MAX_NEW_TOKENS new tokens (provider/base.py:13), stops EOS +
   extra_eos_for_direct_completion(dataset) (provider/vllm.py:41-42), special tokens skipped in decoding
   (provider/hf.py:96 skip_special_tokens), the completion cut at its first stop and its tabs replaced by four spaces
   (provider/hf.py:104-105, vllm.py:76), solution sanitize(prompt + completion, entry point) (codegen.py:79-82); scored
   by `python -m evalplus.evaluate` (base and plus pass@1, its estimate_pass_at_k).
 - humaneval_cpp (161) and mbpp_cpp (397): MultiPL-E (arXiv 2208.08227), each row's prompt, tests and
   stop_tokens. Generation as MultiPL-E's Hugging Face generator (automodel.py @3025a53): from prompt.strip() (:119), at
-  most 1024 tokens of prompt and completion (:56, 67 generate(max_length=...)), the completion ending at the first
-  special token (:99-101) and at its first stop token (multipl_e/completions.py:216 stop_at_stop_token); judged by the
-  evaluator of nuprl/MultiPL-E @3025a53 (its checkout at $MULTIPL_E, docker/Dockerfile): evaluation/src/main.py
+  most 1024 tokens of prompt and completion (:67 generate(max_length=...); :56 truncates the prompt), the completion
+  ending at the first special token (:99-101) and at its first stop token (multipl_e/completions.py:216
+  stop_at_stop_token); judged by the evaluator of nuprl/MultiPL-E @3025a53 (its checkout at $MULTIPL_E,
+  docker/Dockerfile): evaluation/src/main.py
   (program = prompt + completion + "\\n" + tests, main.py:34; g++ -std=c++17 then the binary, 15 s each,
   eval_cpp.py:9-36, safe_subprocess/__init__.py:33), pass@1 by its pass_k.py (status "OK" and exit code 0).
 - humaneval_x_cpp (164; HumanEval-X, arXiv 2303.17568): C++ reference solutions, which MultiPL-E lacks.
@@ -24,18 +25,19 @@ Benchmarks:
   end-of-middle target in training), at most the benchmark's longest reference middle in tokens. The references'
   middles are whole lines, the model's (trained on character-level and AST spans) rarely end at a line end, so
   single-line and multi-line middles are cut to the reference's lines (fim_lines: the first line, the first k lines
-  of a k-line reference; random-span unchanged), decoding stopping there (LinesStop), the standard post-processing of
-  this benchmark's pass@1 (arXiv 2410.03103, arXiv 2505.18789 Fig. 4). FIM prompts are not
+  of a k-line reference; random-span unchanged), decoding stopping there (LinesStop), the post-processing of
+  arXiv 2505.18789 (Table 1, Fig. 4: single-line one line, multi-line the reference's line count; its Table 1 also
+  truncates a random-span middle's overlap with the prefix and suffix, which is not done here). FIM prompts are not
   healed: they end with a sentinel (PSM) or with the prefix encoded on its own (SPM), the training format, whose
   character-level spans train mid-token boundaries (data/crate/pack.rs random_span). Scored by the package's entry point
   (`python -m human_eval_infilling.evaluate_functional_correctness`: 3 s timeout, 4 workers); pass@1 by its
   estimate_pass_at_k.
 
 Scores: pass@1 by three generation modes, each scored by the benchmark's evaluator. "greedy": one greedy completion per
-problem (the pass@1 of DeepSeek-Coder, arXiv 2401.14196 §4.1, Qwen2.5-Coder, arXiv 2409.12186 §6, and EvalPlus's
-leaderboard; FIM in PSM and SPM order). "sampled" (EvalPlus, MultiPL-E): pass@1 by Codex's unbiased estimator
-over SAMPLES samples per problem at SAMPLE_TEMPERATURE from the nucleus TOP_P (the protocol of Codex, MultiPL-E and
-StarCoder2), each benchmark's evaluator computing the estimate. "filtered" (FIM in FILTERED_MODE order only): filtered
+problem (the pass@1 of DeepSeek-Coder, arXiv 2401.14196 §4.1, and EvalPlus's leaderboard; FIM in PSM and SPM order).
+"sampled" (EvalPlus, MultiPL-E): pass@1 by Codex's unbiased estimator over SAMPLES samples per problem at
+SAMPLE_TEMPERATURE from the nucleus TOP_P (the temperature and nucleus of Codex and MultiPL-E), each benchmark's
+evaluator computing the estimate. "filtered" (FIM in FILTERED_MODE order only): filtered
 pass@1 (Codex's filtered pass@k) over at most verify.ATTEMPTS samples, verify.search: the complete Python 3 syntax
 constraint (inference/syntax_constraint.py; FIM: given the prefix and suffix), left-to-right prompts healed
 (decoder.heal), the greedy candidate then seeded samples until one has no diagnostics (verify.python_diagnostics,
@@ -84,11 +86,13 @@ FIM_MODES = ("psm", "spm")  # the two orders the packer trains (arXiv 2207.14255
 # the FIM filtered mode's order: at d8 SPM beat PSM on all three benchmarks (greedy pass@1 single-line 0.036 vs 0.003,
 # multi-line 0.013 vs 0.001, random-span 0.008 vs 0)
 FILTERED_MODE = "spm"
-# The sampled mode (Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem;
-# nucleus sampling at top p 0.95 for all its sampling; §3.3, Fig. 5: T = 0.2 the pass@1 optimum): MultiPL-E's pass@1
-# (arXiv 2208.08227: T = 0.2, its pass@1 stable from about 20 samples; completions.py --top-p 0.95) and
-# StarCoder2's (arXiv 2402.19173: pass@1 from 20 samples at T = 0.2, following OctoPack, arXiv 2308.07124)
+# The sampled mode (Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem; §3.2: nucleus
+# sampling at top p 0.95 for all its sampling; §3.3, Fig. 5: T = 0.2 the pass@1 optimum): MultiPL-E's pass@1
+# (arXiv 2208.08227: T = 0.2, its pass@1 stable from about 20 samples; completions.py --top-p 0.95). StarCoder2
+# (arXiv 2402.19173 §7.1.2) samples MultiPL-E at T = 0.2, top-p 0.95 with 50 samples per prompt.
 SAMPLES, SAMPLE_TEMPERATURE, TOP_P = 20, 0.2, 0.95
+# EvalPlus's most new tokens of a completion (evalplus/provider/base.py:13 max_new_tokens)
+EVALPLUS_MAX_NEW_TOKENS = 768
 
 
 class Task(NamedTuple):
@@ -120,17 +124,19 @@ def tasks() -> dict[str, list[Task]]:
 class StopAt:
     """NativeDecoder.run's stop rule: true once the generated text holds a stop sequence (incremental UTF-8 decoding;
     search starts where a stop sequence could still begin). healed: the bytes of the prompt token that decoder.heal
-    dropped (b"" for an unhealed prompt), which the generation's first token begins with; they belong to the prompt and
-    are not searched."""
+    dropped (b"" for an unhealed prompt), which the generation's first tokens re-emit (decoder.Reemit, possibly over
+    several tokens); they belong to the prompt and are not searched."""
 
     def __init__(self, tokenizer: Tokenizer, stops: list[str], *, healed: bytes):
         self.token_bytes, self.stops, self.longest = tokenizer.token_bytes, stops, max(map(len, stops))
         self.utf8, self.text, self.n, self.searched = codecs.getincrementaldecoder("utf-8")("replace"), "", 0, 0
-        self.healed = len(healed)
+        self.skip = len(healed)  # the healed bytes not yet generated
 
     def __call__(self, ids: list[int]) -> bool:
         data = b"".join(self.token_bytes[t] for t in ids[self.n:])
-        self.text += self.utf8.decode(data[self.healed:] if self.n == 0 else data)
+        cut = min(self.skip, len(data))
+        self.skip -= cut
+        self.text += self.utf8.decode(data[cut:])
         self.n, start, self.searched = len(ids), max(0, self.searched - self.longest + 1), len(self.text)
         return any(s in self.text[start:] for s in self.stops)
 
@@ -194,19 +200,21 @@ def filtered_completions(decoder: NativeDecoder, tokenizer: Tokenizer, items: li
                          budgets: list[int], *, special: Literal["skip", "stop"],
                          check: Callable[[Task, str], tuple[str, str, list[str]]],
                          language: Literal["python", "cpp"]) -> tuple[list[str], dict[str, list]]:
-    """filtered of left-to-right prompts (BOS and the prompt's tokens): candidates of the healed prompt (decoder.heal; one
-    more token of budget, the dropped token regenerated), Python tasks also under the syntax constraint of the healed
-    prompt's text; each candidate checked as check(task, completion): the program its evaluator scores."""
-    healed = [tokenizer.token_bytes[p[-1]] for p in prompts]
+    """filtered of left-to-right prompts (BOS and the prompt's tokens): candidates of the healed prompt
+    (decoder.heal; one more token of budget, the dropped token's bytes re-emitted), Python tasks also under the syntax
+    constraint of the healed prompt's text; each candidate checked as check(task, completion): the program its
+    evaluator scores."""
+    dropped = [heal(tokenizer, p)[2] for p in prompts]
 
     def request(i: int) -> Request:
-        prompt, constraint = heal(tokenizer, prompts[i])
+        prompt, constraint, _ = heal(tokenizer, prompts[i])  # a fresh constraint per candidate
         if language == "python":
             constraint = AllOf(constraint, SyntaxConstraint(tokenizer.enc.decode(prompt[1:]), suffix=""))
         return Request(prompt=prompt, max_tokens=budgets[i] + 1, constraint=constraint,
-                       stop=StopAt(tokenizer, items[i].stops, healed=healed[i]))
+                       stop=StopAt(tokenizer, items[i].stops, healed=dropped[i]))
 
-    return filtered(decoder, request, lambda i, ids: completion(tokenizer, items[i], ids, special=special, healed=healed[i]),
+    return filtered(decoder, request,
+                    lambda i, ids: completion(tokenizer, items[i], ids, special=special, healed=dropped[i]),
                     lambda i, text: check(items[i], text), language=language, count=len(items))
 
 
@@ -293,7 +301,7 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
         with ThreadPoolExecutor(os.cpu_count()) as pool:
             list(pool.map(lambda file: subprocess.run([sys.executable, main, "--file", file, "--output-dir", tmp],
                                                       cwd=tmp, check=True), files))
-        # pass_k.py's pass@1 line (its only line at its default temperature 0.2):
+        # pass_k.py's pass@1 line (one line: pass_k.py takes temperature 0.2 when a file has none, as ours):
         # Dataset,Pass@k,Estimate,NumProblems,MinCompletions,MaxCompletions
         pass_at_1 = float(subprocess.run([sys.executable, root / "pass_k.py", "--suppress-header", tmp],
                                          cwd=tmp, capture_output=True, text=True, check=True).stdout.split(",")[2])
@@ -329,7 +337,7 @@ def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task
         items = benchmarks[name]
         if name in EVALPLUS:
             prompts = [[bos, *tokenizer.enc.encode_ordinary(t.prompt)] for t in items]
-            budgets = [768] * len(items)  # EvalPlus: at most 768 new tokens (evalplus/provider/base.py:13)
+            budgets = [EVALPLUS_MAX_NEW_TOKENS] * len(items)
             runs[name] = items, prompts, budgets, "skip", evalplus_check, "python", functools.partial(evalplus, name)
         else:
             prompts = [[bos, *tokenizer.enc.encode_ordinary(t.prompt.strip())] for t in items]
@@ -368,14 +376,16 @@ def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task
 
 def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
     """How a program fails to compile: IndentationError (TabError among them) checked before any other SyntaxError,
-    the classification of TokEval's code-tokenizer post (arXiv 2608.18062 Appendix F.3, footnote 15)."""
+    the classification of TokEval's companion post (cimeister.github.io/blog/code_tokenizer_ablations, "How the failing
+    generations fail"; linked from arXiv 2608.18062 App. F.3, footnote 15); the parser's overflow (MemoryError,
+    RecursionError) is a SyntaxError, as verify.syntax_error counts it."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
             compile(source, "<completion>", "exec")
         except IndentationError:
             return "indentation"
-        except SyntaxError:
+        except (SyntaxError, MemoryError, RecursionError):
             return "syntax"
     return "parses"
 
@@ -389,7 +399,7 @@ def parse_generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, lis
     models) show where pass@1 is near zero."""
     bos = tokenizer.bos_token_id
     runs = {name: [[bos, *tokenizer.enc.encode_ordinary(t.prompt)] for t in benchmarks[name]] for name in EVALPLUS}
-    budget = 768 + 1  # EvalPlus's 768 new tokens (evalplus/provider/base.py:13) and the token heal drops
+    budget = EVALPLUS_MAX_NEW_TOKENS + 1  # and a token for the bytes heal drops
     max_len = max(len(p) - 1 + budget for prompts in runs.values() for p in prompts)
     decoder = NativeDecoder(model, bos_token_id=bos, max_len=max_len,
                             prompt_store=sum(len(p) for prompts in runs.values() for p in prompts))
@@ -397,12 +407,11 @@ def parse_generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, lis
     for name, prompts in runs.items():
         items = benchmarks[name]
         healed = [heal(tokenizer, p) for p in prompts]
-        dropped = [tokenizer.token_bytes[p[-1]] for p in prompts]
         generated = in_order(decoder, [Request(prompt=h, max_tokens=budget, constraint=c,
                                                stop=StopAt(tokenizer, t.stops, healed=d))
-                                       for t, (h, c), d in zip(items, healed, dropped, strict=True)])
+                                       for t, (h, c, d) in zip(items, healed, strict=True)])
         completions = [completion(tokenizer, t, ids, special="skip", healed=d)
-                       for t, ids, d in zip(items, generated, dropped, strict=True)]
+                       for t, ids, (_, _, d) in zip(items, generated, healed, strict=True)]
         outcomes = [parse_outcome(t.prompt + c) for t, c in zip(items, completions, strict=True)]
         shares = {kind: outcomes.count(kind) / len(outcomes) for kind in ("parses", "indentation", "syntax")}
         results[name] = (shares | evalplus(name, items, [[c] for c in completions])

@@ -18,10 +18,11 @@ end inside a character, which a character map cannot hold).
 - Rényi efficiency of order 2 (TokEval's Table 2, which reports order 2 of its 1, 2, 2.5 and 3): H_2 of the documents'
   token distribution over log2 of the vocabulary size, descriptive only: two inference-time BPE variants raise it (at
   order 3) while lowering BLEU ("Two Counterexamples to Tokenization and the Noiseless Channel", LREC-COLING 2024,
-  Tables 3 and 4).
+  Tables 1 and 2).
 The code of a corpus is each document of a repository corpus, parsed by its source's grammar, and each fenced Python or
-C++ block of the other code corpora (kaggle_notebooks' notebooks, codeforces_cots' solutions); operators are counted in
-whole documents, as TokEval counts them in its code and math corpora.
+C++ block of the other code corpora (kaggle_notebooks' notebooks, codeforces_cots' prompts and solutions: each
+prompt's template `<your code here>` is a snippet of no leaves and one parse error); operators are counted in whole
+documents, as TokEval counts them in its code and math corpora.
 """
 import itertools
 import math
@@ -59,7 +60,7 @@ def val_split(corpus: str, tokenizers: list[Tokenizer]) -> tuple[dict[str, np.nd
     tokens, docs = {}, None
     for tokenizer in tokenizers:
         path = split_path(corpus, "val", tokenizer)
-        tokens[tokenizer.name] = np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE).astype(np.int64)
+        tokens[tokenizer.name] = np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE)
         offsets = np.fromfile(path.with_suffix(".idx"), dtype=np.int64)
         mine = [tokenizer.enc.decode_bytes(tokens[tokenizer.name][a:b].tolist())
                 for a, b in itertools.pairwise(offsets)]
@@ -122,8 +123,7 @@ def code(corpus: str, tokens: dict[str, np.ndarray], docs: list[bytes], tokenize
         for tokenizer in tokenizers:
             result[tokenizer.name][grammar] = {
                 "snippets": len(mine), "parse_error_spans": sum(errors for *_, errors in parsed),
-                **alignment(tokenizer, tokens[tokenizer.name], leaf_starts.astype(np.int64),
-                            leaf_ends.astype(np.int64), categories, lines)}
+                **alignment(tokenizer, tokens[tokenizer.name], leaf_starts, leaf_ends, categories, lines)}
     return result
 
 

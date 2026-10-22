@@ -4,19 +4,21 @@ each of its settings (Setting: depth, tokens per scaling parameter, seeds) and o
 differing from production only in their Run fields, each on the same seeds. A run trains production's GPT by
 train/loop.py train and is scored by eval/suite.py evaluate (its likelihood metrics and parse measure), the
 production code paths; its plan (batch, steps, peak lr) is the production model's at its depth and ratio
-(production_plan), so every arm matches in tokens and hyperparameters.
+(production_plan), so arms match in hyperparameters and, unless an arm sets ratio (the tokenizer experiment's equal
+bytes), in tokens.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
 rerun experiment resumes: a run whose evaluation exists is not trained again, nor is one that diverged (its
 train/metrics.py failure record: a non-finite loss or gradient norm, an outcome of a lr sweep's high end,
-arXiv 2309.14322); any other failure stops the experiment, and a stopped run resumes from its repo_start checkpoint
-or restarts (train/metrics.py attempts keep both traceable). Then each alternative is compared with production over
-the runs that did not diverge; the experiment writes every tracked metric of every run, RESULTS/<experiment>.jsonl (a
-record per run: eval/suite.py record, setting, fields, the compared measures, efficiency, the step it diverged at)
-and RESULTS/<experiment>-curves.jsonl (per run, train/metrics.py curves), and RESULTS/<experiment>.json (per setting,
-each alternative's fields, its evaluated runs and, per measure, its difference from production, p and confidence
-interval; null where one run per arm leaves them undefined), the data of the paper's decisions and figures.
+arXiv 2309.14322); any other failure stops the experiment, and a stopped run trains again from its start (its one
+checkpoint is its final model; train/metrics.py attempts keep both traceable). Then each alternative is compared with
+production over the runs that did not diverge; the experiment writes every tracked metric of every run,
+RESULTS/<experiment>.jsonl (a record per run: eval/suite.py record, setting, fields, the compared measures,
+efficiency, the step it diverged at) and RESULTS/<experiment>-curves.jsonl (per run, train/metrics.py curves), and
+RESULTS/<experiment>.json (per setting, each alternative's fields, its evaluated runs and, per measure, its difference
+from production, p and confidence interval; null where one run per arm leaves them undefined), the data of the paper's
+decisions and figures.
 
     python -m ablations.<experiment>       (every missing run, each in a child process, then the comparison: main)
     python -m ablations.harness '<fields>'  (one run: harness.Run's fields as JSON)
@@ -33,8 +35,7 @@ from pathlib import Path
 import torch
 from scipy.stats import ttest_ind
 
-from nanochat.config import FILE_STAGE, REPO_STAGE, run_tag
-from nanochat.data.loader import mixture_weights
+from nanochat.config import FILE_STAGE, run_tag
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.eval import bpb, suite
 from nanochat.model.gpt import GPT, gpt_config
@@ -82,10 +83,13 @@ def plan_of(run: Run) -> RunPlan:
 
 
 def tag_of(run: Run) -> str:
-    """config.run_tag over the run's fields and its peak lr (so a change of the plan's lr, an adopted lr.py result, is
-    a new run)."""
+    """config.run_tag over the run's fields (its ratio and lr_scale as floats, so equal Runs share a tag), its
+    tokenizer's data key (so a rebuilt vocabulary is a new run) and its peak lr (so a change of the plan's lr, an
+    adopted lr.py result, is a new run)."""
     return run_tag(depth=run.n_layer, ratio=run.ratio, seed=run.seed,
-                   variant=dataclasses.asdict(run) | {"lr": plan_of(run).lr})
+                   variant=dataclasses.asdict(run) | {"ratio": float(run.ratio), "lr_scale": float(run.lr_scale),
+                                                      "lr": plan_of(run).lr,
+                                                      "tokenizer_data": get_tokenizer(run.tokenizer).data_key})
 
 
 def evaluation_path(run: Run) -> Path:
@@ -111,10 +115,10 @@ def evaluation(run: Run) -> dict[str, float]:
     "bpb"); solutions, the bits per byte of the HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) and HumanEval-X C++
     (arXiv 2303.17568) reference solutions given their prompts, pooled (bpb.solution_bits); repo_32k, the 32K repository
     bits per byte of the code group, and repo_beyond_8k, the same over the targets beyond the file-level context
-    (bpb.CONTEXTS' last bucket); unparsed, indentation and syntax, the shares of HumanEval+ and MBPP+ problems, pooled,
-    whose healed greedy completion does not compile, by an IndentationError and by another SyntaxError
-    (code_eval.parse_generation), and greedy, their base pass@1, pooled; tok_per_s, the median over the file-level
-    stage's steps of the step's tokens per second."""
+    (bpb.CONTEXTS' last bucket) at the evaluation's corpus weights (bpb.val_bits "weights"); unparsed, indentation and
+    syntax, the shares of HumanEval+ and MBPP+ problems, pooled, whose healed greedy completion does not compile, by an
+    IndentationError and by another SyntaxError (code_eval.parse_generation), and greedy, their base pass@1, pooled;
+    tok_per_s, the median over the file-level stage's steps of the step's tokens per second."""
     tag, repo_start = tag_of(run), plan_of(run).repo_start
     result = json.loads(evaluation_path(run).read_text(encoding="utf-8"))
     rates = [r["tok_per_s"] for step, r in metrics.train_steps(tag).items() if step < repo_start]
@@ -127,8 +131,8 @@ def evaluation(run: Run) -> dict[str, float]:
     return {"code": result["8k"]["bpb"]["code"],
             "solutions": bpb.bpb(*result["solution"].values()),
             "repo_32k": result["32k"]["bpb"]["code"],
-            "repo_beyond_8k": bpb.mixture_bpb(result["32k"]["corpora"], mixture_weights(
-                REPO_STAGE.mixture, get_tokenizer(run.tokenizer), REPO_STAGE.seq_len), buckets=slice(-1, None)),
+            "repo_beyond_8k": bpb.mixture_bpb(result["32k"]["corpora"], result["32k"]["weights"],
+                                              buckets=slice(-1, None)),
             "text": result["8k"]["bpb"]["text"], "math": result["8k"]["bpb"]["math"],
             "unparsed": 1 - share("parses"), "indentation": share("indentation"), "syntax": share("syntax"),
             "greedy": share("base pass@1"),

@@ -54,18 +54,20 @@ def cuda_library(name: str) -> ctypes.CDLL:
 @functools.cache
 def crate_module(crate: Path) -> ModuleType:
     """The Python module nanochat_<crate.name> of the Rust crate in directory crate (pyo3), built by cargo in its target
-    directory NATIVE/<crate.name>-target, keyed by the cargo command, imported once per process."""
+    directory NATIVE/<crate.name>-target, keyed by the cargo command and the rustc version, imported once per
+    process."""
     name = f"nanochat_{crate.name}"
     target = NATIVE / f"{crate.name}-target"
     command = ["cargo", "build", "--release", "--locked", "--manifest-path", str(crate / "Cargo.toml"),
                "--target-dir", str(target)]
+    version = subprocess.run(["rustc", "-vV"], capture_output=True, check=True).stdout
 
     def build(path: Path) -> None:
         subprocess.run(command, check=True)
         shutil.copyfile(target / "release" / f"lib{name}.so", path)
 
     sources = [*sorted(crate.glob("*.rs")), crate / "Cargo.toml", crate / "Cargo.lock"]
-    path = native_library(crate.name, sources, build, settings=" ".join(command).encode())
+    path = native_library(crate.name, sources, build, settings=" ".join(command).encode() + version)
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
