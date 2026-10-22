@@ -6,11 +6,11 @@ LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z 
 nanochat::lm_loss (training): a GEMM writes bf16 z; QuACK's cross_entropy_fwd_out (quack/cross_entropy.py, dx = z as
 with inplace_backward) writes each row's loss and overwrites z with softmax(z) - onehot(t); dx = (1/n) z W on QuACK
 (bf16), dW = (1/n) z^T x on cuBLAS in fp32 (as ops/linear.py's weight gradients). QuACK's fused linear-cross-entropy
-is not faster at d8 (29.2 ms against 31.4-45.0 ms over chunk sizes 4,096-32,768).
+is not faster at any chunk size.
 
 nanochat::lm_losses (evaluation): QuACK's lse_target_epi GEMM epilogue (quack/epilogue/library.py) reduces each row's
-logsumexp and gathers the target logit from the fp32 accumulators without storing z (d8: 14.9 against 16.2 ms for bf16
-logits and cross entropy, relative error 5.0e-8 against 8e-4).
+logsumexp and gathers the target logit from the fp32 accumulators without storing z: faster and more accurate than
+bf16 logits and cross entropy.
 """
 
 import torch

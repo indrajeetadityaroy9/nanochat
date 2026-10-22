@@ -136,8 +136,7 @@ def step_masks(constraints: list[Constraint]) -> list[np.ndarray | None]:
 
 
 # the prompt store's page in positions: a stored prompt takes whole pages anywhere in the store (vLLM's PagedAttention,
-# arXiv 2309.06180, pages a KV cache likewise, 16 tokens a page by default; 64 keeps a code prompt to a
-# few copies, at most 63 positions unused)
+# arXiv 2309.06180, pages a KV cache likewise; 64 keeps a code prompt to a few copies, at most 63 positions unused)
 PAGE = 64
 
 

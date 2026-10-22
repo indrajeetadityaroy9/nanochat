@@ -132,7 +132,7 @@ def train(*, model: GPT, run: RunPlan, tokenizer_name: str, variant: dict, seed:
                              "loss": loss_value, "lr": lr, "grad_norm": grad_norm_value,
                              "tok_per_s": run.total_batch_size / dt}, attempt=attempt)
         if step == start_step:
-            # no cyclic garbage per step: keep the collector off after setup (scans cost ~500 ms) except after saves
+            # no cyclic garbage per step: keep the collector off after setup (its scans are slow) except after saves
             gc.collect()
             gc.freeze()
             gc.disable()

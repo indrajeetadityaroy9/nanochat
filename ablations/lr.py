@@ -1,18 +1,18 @@
 """
 Peak lr. Production: DeepSeek LLM's law eta = 0.3118 C^-0.125 (arXiv 2401.02954 §3.1; train/schedule.py plan) as the
-peak lr. The law was fit for AdamW over C = 1e17 to 2e19 FLOPs under a multi-step schedule; production applies it to
+peak lr. The law was fit for AdamW at compute below production's under a multi-step schedule; production applies it to
 Muon (matched to AdamW's update RMS, train/optim.py) as the peak of linear decay to zero at C = 1.6e20, and at a fixed
 model it falls with tokens as D^-0.125. At d8 at 20 tokens per parameter the law's lr times 2 lowers code bits per byte
-by 0.018 on both of 2 seeds (0.0179 and 0.0187, 2026-10-20): the law is low at short horizons.
+on every seed: the law is low at short horizons.
 
 The production lr is measured, not swept at production's length: its optimum at production's width and depth at a short
 horizon, d24 at 5 tokens per parameter (production's model, so no width or depth transfer is assumed: its
 parameterisation is standard, not muP), times the optimum's horizon trend measured at d8 between 5 and LONG tokens per
 parameter, assumed width-independent (our assumption: arXiv 2409.19913 §4 finds its horizon exponent size-independent
-only for models of 760M parameters or more, larger at 50M and 125M). The published transfer rules disagree on that
+only for its larger models, larger for small ones). The published transfer rules disagree on that
 trend's direction: Complete^(d)P's AdamW SDE rule, eta ∝ sqrt(m_B / m_D) for batch ratio m_B and token ratio m_D
-(arXiv 2512.22382, Table 1), lowers the lr with the horizon, as arXiv 2409.19913 (D^-0.32) and the law do; Step-Law
-(arXiv 2503.04715: eta = 1.79 N^-0.713 D^0.307, 3,700 AdamW models) raises it. Alternatives: the law's lr times 2 and
+(arXiv 2512.22382, Table 1), lowers the lr with the horizon, as arXiv 2409.19913 and the law do; Step-Law
+(arXiv 2503.04715: eta = 1.79 N^-0.713 D^0.307, fit over AdamW models) raises it. Alternatives: the law's lr times 2 and
 4, and 8 at d8 at LONG, where Step-Law points; one seed per setting.
 
 Analysis, pre-registered, written to RESULTS/lr.json's "analysis": per setting, code bits per byte fitted as the
@@ -25,7 +25,7 @@ Def. 5.2, its lr factor; Complete^(d)P's sqrt(m_B)), its exponent (horizon_expon
 horizon range (every rule in play is a power law in D: the SDE rule, arXiv 2409.19913, Step-Law, the law), and
 production's batch growth by the same rule. Amended 2026-10-22, from the measurements unchanged: the pre-registered
 r^(ln m_D,prod / ln m_D,d8) * sqrt(m_B,prod / m_B,d8) raised d8's batch growth with its horizon trend, counting it
-2^((ln m_D,prod / ln m_D,d8 - 1) / 2) too often (x1.095 at production's 105.2). m_D,prod is production's tokens over
+2^((ln m_D,prod / ln m_D,d8 - 1) / 2) too often. m_D,prod is production's tokens over
 d24 at 5's, m_D,d8 d8 at LONG's over d8 at 5's. Batches, token counts and the law's lrs are the runs' recorded plans
 (production's: harness.production_plan at max_ratio of d24).
 
@@ -43,9 +43,9 @@ from nanochat.train.stages import max_ratio
 
 # The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords (3,307 steps of 294,912 tokens)
 SHORT = 5
-# d8's long horizon: the shortest at which d8's law batch has grown, as production's grows, to 2 micro-batches (B_opt
-# 1.52 micro-batches at 200, 2.09 at production's 525.9; schedule.plan rounds both to 2), so the trend is measured
-# under batch co-scaling as production trains, its batch growth netted out by the square-root rule; m_D,d8 about 40
+# d8's long horizon: the shortest at which d8's law batch has grown, as production's grows, to 2 micro-batches
+# (schedule.plan's rounding), so the trend is measured under batch co-scaling as production trains, its batch growth
+# netted out by the square-root rule
 LONG = 200
 # Step-Law's token exponent of the optimal lr (arXiv 2503.04715, eta = 1.79 N^-0.713 D^0.307)
 STEP_LAW_D = 0.307
@@ -61,8 +61,8 @@ def fit(lines: list[dict]) -> dict:
     extension by a factor of 2 ("down" or "up") while its lowest-code run is at an end of the grid; else the vertex (as
     a multiplier) of the parabola in u = ln(multiplier) through the lowest-code run and its two neighbours, positive
     curvature by construction (amended 2026-10-20 from one quadratic over every run, whose vertex a curve steeper below
-    its optimum than above pulls high: planted, an optimum x3.0 four times steeper below than above reads x3.95 by one
-    quadratic over x1-8, x3.72 by the bracketing parabola), or the lowest-code run itself when the neighbour above it
+    its optimum than above pulls high, as a planted optimum showed; the bracketing parabola is pulled less), or the
+    lowest-code run itself when the neighbour above it
     diverged."""
     runs = sorted(lines, key=lambda line: line["fields"]["lr_scale"])
     assert len({line["fields"]["lr_scale"] for line in runs}) == len(runs), "one run per lr_scale"

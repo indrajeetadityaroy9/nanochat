@@ -64,8 +64,7 @@
 
 constexpr int LANE_DIMS = HEAD_DIM / WARP;         /* a lane's dims of a query, key or value */
 constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thread per head dim */
-/* slots: d24's tokens per second still rise from 128 to 256 slots, whose caches for the longest benchmark request
- * take 21.8 GB */
+/* slots: d24's tokens per second still rise up to 256 slots */
 constexpr int MAX_BATCH = 256;
 constexpr int MASK_BITS = CHAR_BIT * sizeof(unsigned long long);  /* slots per word of a slot mask */
 constexpr int MASK_WORDS = MAX_BATCH / MASK_BITS;                 /* words of a slot mask */
@@ -222,7 +221,7 @@ static __device__ __forceinline__ void copies_done() { asm volatile("cp.async.wa
 
 /* CHOICE: ARGMAX honours each slot's allowed tokens and temperature (c; the head graph); without it, the logits' argmax
  * (the whole-step graph). A compile-time argument: code added to the kernel changes the compiled loops of every GEMV
- * (measured: +0.45 ms of a 3.5 ms d8 step at 64 slots), so greedy steps run the kernel compiled without it. */
+ * (measurably slower), so greedy steps run the kernel compiled without it. */
 template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
     extern __shared__ __align__(16) unsigned char gemv_buf[];
     bf16 *xs = reinterpret_cast<bf16 *>(gemv_buf);  /* [GROUP_SLOTS][ks] */

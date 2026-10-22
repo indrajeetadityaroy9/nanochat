@@ -116,7 +116,8 @@ previous step's output under `paths.DATA`):
 
 1. `prepare`: fetches every source (`sources.py`) at its pinned Hub revision and normalizes it into a Parquet store
    (`prepare.py`): the code group whole, text and math up to Qwen2.5-Coder's 7:2:1 shares of its horizon; then curates
-   it (`curate.py`): exact and near duplicates dropped across all corpora and splits (`dedup.py`: StarCoder2's MinHash
+   it (`curate.py`, DuckDB at half the machine's memory, the lower end of the 50–60% its out-of-memory guide
+   recommends): exact and near duplicates dropped across all corpora and splits (`dedup.py`: StarCoder2's MinHash
    LSH), and GitHub Linguist's vendored and generated files; 1% of each source's groups (a repository, a codeforces
    problem, else a document) held out as val; repository files grouped into repository samples, dependencies first
    (DeepSeek-Coder §2.2).
@@ -217,16 +218,17 @@ itself (Megatron-LM PR 5395, DeepSpeed issue 8439); it is not done here.
   steps above 1), 298–1,493 1.093 (57%), 1,493–2,987 1.522 (100%); the d24 run below, steps 0–42 1.866 (86%), 42–211
   1.145 (83%), 211–423 0.969 (47%).
 
-**Peak lr.** DeepSeek LLM's law was fit for AdamW under a multi-step schedule, 8.0× below production's compute, and
-the transfer rules disagree on how the optimum moves with the horizon: from d8 over 5 to over 200 tokens per parameter,
-Complete^(d)P's SDE rule (arXiv 2512.22382) predicts the optimum's multiplier of the law changes × 0.354, Step-Law
-(arXiv 2503.04715) × 4.92. At d8 at 20 the law's lr is low: × 2 lowered code bits per byte by 0.018 on both of 2 seeds
-(below). `ablations/lr.py` measures the multiplier (Ablations): × 1, × 2, × 4 at d24 over 5 tokens per parameter,
-times the optimum's horizon trend measured at d8 (× 1 to × 8 over 5 and over 200), net of d8's batch growth by the
-square-root batch rule, its power-law exponent carried to production's horizon range, and production's own batch
-growth by the same rule. Measured at `1e711aa`, the first tokenizer's data (`results/lr.json`): optima × 2.0235 (d24
-over 5), × 3.4669 and × 3.1565 (d8 over 5 and 200), so a d8 ratio of 0.9105: relative to the law the optimum barely
-moves with the horizon (the law's own C^−0.125 carries the trend), against both rules. The best arm beat the law by
+**Peak lr.** DeepSeek LLM's law was fit for AdamW over 1e17 to 2e19 FLOPs under a multi-step schedule (§3.1), 8.0×
+below production's compute, and the transfer rules disagree on how the optimum moves with the horizon: from d8 over 5
+to over 200 tokens per parameter, Complete^(d)P's SDE rule (arXiv 2512.22382) predicts the optimum's multiplier of the
+law changes × 0.354, Step-Law (arXiv 2503.04715, fit on 3,700 AdamW models) × 4.92. At d8 at 20 the law's lr is low:
+× 2 lowered code bits per byte by 0.018 on both of 2 seeds (below). `ablations/lr.py` measures the multiplier
+(Ablations): × 1, × 2, × 4 at d24 over 5 tokens per parameter, times the optimum's horizon trend measured at d8 (× 1
+to × 8 over 5 and over 200), net of d8's batch growth by the square-root batch rule, its power-law exponent carried to
+production's horizon range, and production's own batch growth by the same rule. Measured at `1e711aa`, the first
+tokenizer's data (`results/lr.json`): optima × 2.0235 (d24 over 5), × 3.4669 and × 3.1565 (d8 over 5 and 200), so a
+d8 ratio of 0.9105: relative to the law the optimum barely moves with the horizon (the law's own C^−0.125 carries the
+trend), against both rules. The best arm beat the law by
 0.0044 to 0.125 bits per byte, no run diverged, and the optima agree within 7% with nanochat's hand-tuned Muon lr at
 the same widths. The multiplier adopted on 2026-10-20, × 2.5467 = 2.0235 · 0.9105^(ln 98.17 / ln 40.05) · √2
 (2.3887e-3), came from the pre-registered estimator, which raised d8's batch growth (inside r) with its horizon trend
@@ -580,17 +582,19 @@ own. The sample's composition, whose effect is below what the runs resolve, is d
   statistics break (Decisions).
 - **The positive control.** The companion post deletes the trailing `[\r\n/]*` of GPT-4o's punctuation clause (its
   gpt4onl) with the tokenizer corpus held fixed and moves MBPP pass@1 from 0.086 to 0.230 (seeds 0.167, the mean of two
-  seed-42 runs, 0.072 and 0.018 against 0.224, 0.246, 0.220; 1.27B parameters, about 20B math and code tokens, about
-  128K ids, prompts healed: the paper's §4.1–4.3), and across its tokenizers code bits per byte shows no association
-  with MBPP (the post: Spearman +0.07, −0.12, −0.04, every p above 0.5). sa-bpe-fused differs from sa-bpe by the same
-  clause in cl100k's form (`[\r\n]*`); it tests that the d16 parse measure detects the difference, and when it does
-  not (sa-bpe-fused not parsing worse), the decision keeps production's pattern and score (Decisions).
+  seed-42 runs of 0.174 and 0.160, 0.072 and 0.018 against 0.224, 0.246, 0.220; 1.27B parameters, about 20B math and
+  code tokens, about 128K ids, prompts healed: the paper's §4.1–4.3), and across its tokenizers code bits per byte
+  shows no association with MBPP (the post: Spearman +0.07, −0.12, −0.04, every p above 0.5). sa-bpe-fused differs
+  from sa-bpe by the same clause in cl100k's form (`[\r\n]*`); it tests that the d16 parse measure detects the
+  difference, and when it does not (sa-bpe-fused not parsing worse), the decision keeps production's pattern and score
+  (Decisions).
 - **Not run.** tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (its encoder
   replays merges and removals in training order, arXiv 2409.04599 Alg. 2; its code compression 3.61 against BPE's
   3.62 in arXiv 2604.14053 Table 4), BoundlessBPE's supermerges (rule dictionaries of their own, arXiv 2504.00178
   §3.2) or UnigramLM (whose MBPP in TokEval is 0.000 with the GPT-4o and RightAlign patterns, 0.222 with the Claude
   one). SuperBPE's two code results move apart, neither significantly (arXiv 2503.13423 Table 1, McNemar: HumanEval
-  pass@10 15.9 to 13.4, MBPP pass@10 27.5 to 28.3, at 8B parameters and 200K ids). Vocabulary size: 1.5B models
+  pass@10 15.9 to 13.4, MBPP pass@10 27.5 to 28.3, at 8B parameters, 200K ids and transition point t = 180k).
+  Vocabulary size: 1.5B models
   fine-tuned with GPT-4-regex vocabularies of 32K to 256K score HumanEval pass@1 20.52 to 20.84, Pearson r −0.13
   (p = 0.87; arXiv 2402.01035 §3.2, Table 3). Digit grouping and case-split identifiers have no code measurement;
   DeepSeek-V3's random splitting of its punctuation and line-break tokens (arXiv 2412.19437 §4.1) serves only a fusing
@@ -615,11 +619,11 @@ optional leading space, ` ?\p{L}+`, Fig. 3, and the trailing line breaks of its 
 against Punct's 0.86 tokens per Llama token at 32K, "an additional 5% compression", its App. E; pass@1 higher for
 Punct at 1.5B and 32K, HumanEval 21.1 against 20.5, lower at 7B and 80K, 30.40 against 30.82, untested for
 significance), and the optional leading space all three share (` foo`). From production: digit pairs
-(karpathy/nanochat: "2 is the sweet spot for vocab size of 32K") and punctuation runs without line breaks.
-`[^\S\r\n\t ]+` takes every other whitespace character, so every character falls in a chunk (tiktoken drops what no
-clause matches). The Claude-approximate pattern's full regex is unpublished (the post calls it an early
-reconstruction); the hybrid takes its whitespace clauses, and is tested because no source measures this combination,
-at 32K ids or on C++.
+(karpathy/nanochat at 32K: "2 is the sweet spot for vocab size of 32K. 1 is a bit worse, 3 was worse still") and
+punctuation runs without line breaks. `[^\S\r\n\t ]+` takes every other whitespace character, so every character
+falls in a chunk (tiktoken drops what no clause matches). The Claude-approximate pattern's full regex is unpublished
+(the post calls it an early reconstruction); the hybrid takes its whitespace clauses, and is tested because no source
+measures this combination, at 32K ids or on C++.
 
 **Pretokenization on the data** (2026-10-21, GB10: the first 1,000 rows of each source's first curated val file, all
 of a shorter file; the Python `regex` module, whose chunk ends were token ends of production's tokenizer on every
@@ -680,7 +684,8 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   compressor sees are worth (arXiv 2503.13423 §3.1 fixes context in bytes).
 - **Documents.** `python -m ablations.tokenizer data` compiles the same documents for every arm into
   `artifacts/tokenizer-ablation/compiled/` and packs them for every arm: of each code corpus, the
-  leading curated train documents whose sa-bpe tokens fill what d16 at 20 tokens per scaling parameter draws at the
+  leading curated train documents whose sa-bpe tokens fill what d16 at 20 tokens per scaling parameter (Chinchilla,
+  arXiv 2203.15556 Table 3: 20.2B tokens for 1B parameters) draws at the
   file-level stage (rows from production's packs), so the code group binds every arm; of text and math the leading
   files holding 1.25 times their draw, and of each repository corpus the trailing files holding 1.25 times the
   repository stage's draw, so they never bind (sa-bpe takes 9.21% more tokens than the first tokenizer on
@@ -912,7 +917,7 @@ running d8 study (absolute times vary by tens of percent between runs; pairs int
 `causal=True` with `window_size_left = T` (FA4 resolves it to its local kernel) vs `None` (its causal kernel): outputs
 and dq/dk/dv bitwise equal (file stage; repository stage 3 × 32768: o, dk, dv equal, dq max |diff| 2.4e-4, atomic
 order); forward + backward 3.358–3.412 vs 3.301–3.386 ms (file), 12.38–12.49 vs 12.17–12.34 ms (repository, 2 of 3
-rounds; the third disturbed) → `ops/flash_attn.py` passes `None`.
+rounds; the third disturbed), the causal kernel 1–2% faster → `ops/flash_attn.py` passes `None`.
 
 ### Value-embedding gate
 
@@ -964,7 +969,9 @@ Runs train one at a time. Concurrent d8 training processes, 2026-10-20 (file-lev
 ## Reproducibility
 
 - **Fastest kernels.** FA4's and the embedding backward reduce with atomics, so repeated steps differ in the last bits;
-  FA4's deterministic backward costs 1–3% of a d24 micro-batch's forward and backward (Attention). The forward is
+  fixed-order reductions would cost about 1% of a step, FA4's deterministic backward 1–3% of a d24 micro-batch's
+  forward and backward (Attention). Python's garbage collector stays off after setup and collects only after a
+  checkpoint save (`train/loop.py`): the steps make no cyclic garbage, and a scan took about 500 ms. The forward is
   deterministic: Inductor's coordinate-descent tuning is off (`runs/container.sh`), and a compiled loss evaluation is
   bitwise equal across processes. On, it picks kernel configurations by timing, so two processes of the same code
   compile different kernels: d8 compiled loss differs by 6.7e-6 and per-token losses by up to 3.5e-2 between two
@@ -1181,13 +1188,15 @@ SPM), each scored by its official evaluator, by up to three generation modes:
   377 of 378 prompt asserts call the entry function on a base input, tuples compared as lists; HumanEval+: 55 of 164
   tasks share a doctest input), so the filtered mode favours base over plus pass@1. Its diagnostics flag 5 of the 542
   reference solutions (HumanEval/10, /17, /20 by basedpyright's reportReturnType, Mbpp/130 by reportCallIssue, Mbpp/630
-  after EvalPlus's `sanitize` drops its helper), and the prompt examples of HumanEval/47 and /116 contradict their
+  after EvalPlus's `sanitize` drops its helper; reportArgumentType is not among its rules, as basedpyright 1.40.2
+  rejects HumanEval/130's canonical solution by it), and the prompt examples of HumanEval/47 and /116 contradict their
   references, so no candidate passes them. EvalPlus's verdicts are timed (its limit per test max(4 s, 4× the ground
   truth's time), at most 60 s per task, half the CPUs as workers), so heavy CPU load can fail a slow correct solution.
 - **Infilling** (human-eval-infilling, arXiv 2207.14255): each middle is cut to the reference middle's line count, a
   single-line middle to its first line (arXiv 2505.18789 Table 1, Fig. 4), and decoding stops there; random-span
   middles end at BOS, uncut, where that Table 1 truncates their overlap with the prefix and suffix. Both orders, PSM
-  and SPM, are scored greedy; the filtered mode runs SPM.
+  and SPM, are scored greedy; the filtered mode runs SPM, the better order at d8 (greedy pass@1, SPM against PSM:
+  single-line 0.036 against 0.003, multi-line 0.013 against 0.001, random span 0.008 against 0).
 - **Contamination.** The training corpora were not decontaminated against the benchmarks: a benchmark problem in the
   training data (HumanEval and MBPP are public on GitHub) inflates its score.
 
@@ -1219,12 +1228,15 @@ plus budget exceeds the context raises `ValueError`.
   | before | 0.98 | 3.42 | — | 6.78 | 18.05 | — |
   | after | 0.36 | 0.57 | 1.02 | 2.78 | 3.84 | 9.94 |
 
-  d8 checkpoint: 64 greedy HumanEval+ tasks 2.7 → 0.5 s; 144 healed, syntax-constrained, sampled requests 2.1 → 0.8 s;
+  `k_gemv` takes the slots' choice (allowed tokens, temperature) as a compile-time argument: compiled in, its code
+  slowed every GEMV, 0.45 ms of a 3.5 ms d8 step at 64 slots, so greedy steps run the kernel compiled without it. d8
+  checkpoint: 64 greedy HumanEval+ tasks 2.7 → 0.5 s; 144 healed, syntax-constrained, sampled requests 2.1 → 0.8 s;
   tokens identical to the 64-slot build on both and under reversed submission order. d24's tokens per second still
   rise from 128 to 256 slots, whose caches for the longest benchmark request take 21.8 GB.
-- **Prompt store** (`inference/decoder.py` `prompt_store`), d8 checkpoint, 48 healed, syntax-constrained HumanEval+
-  prompts × 3 rounds (128 tokens each), 2026-10-20: rounds after the first 0.39–0.40 s without the store, 0.26 s with
-  it (−35%); tokens identical with and without it, and to the requests decoded alone.
+- **Prompt store** (`inference/decoder.py` `prompt_store`, pages of 64 positions; vLLM's default is 16 tokens,
+  arXiv 2309.06180 §7.2), d8 checkpoint, 48 healed, syntax-constrained HumanEval+ prompts × 3 rounds (128 tokens
+  each), 2026-10-20: rounds after the first 0.39–0.40 s without the store, 0.26 s with it (−35%); tokens identical
+  with and without it, and to the requests decoded alone.
 
 **Constrained decoding: syntax, not types.** Type-constrained decoding (arXiv 2504.09246)
 cut TypeScript compilation errors by 75.3% (HumanEval) and 52.1% (MBPP). Its artifact

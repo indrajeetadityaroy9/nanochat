@@ -36,7 +36,7 @@ from nanochat.paths import DATA
 # without exec, and a forked child's calls into Go block.
 SPAWN = multiprocessing.get_context("spawn")
 SPLIT = 100  # a group is val when its residue is 0: the experiment's 1% of each source's groups
-# Half the machine's memory: the lower end of DuckDB's 50-60% of system memory, as some operations bypass the buffer
+# Half the machine's memory: the lower end of DuckDB's guidance, as some operations bypass the buffer
 # manager's limit (duckdb.org/docs/lts/guides/troubleshooting/oom_errors) and other jobs share the unified memory.
 MEMORY = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2
 

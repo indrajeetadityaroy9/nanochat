@@ -1,7 +1,6 @@
 """The block's GEMMs as torch.library ops (traceable by fullgraph torch.compile): forward and dX on QuACK's autotuned
 SM90 kernels (quack.gemm_interface, tuned=True), fp32 master weight W rounded to x's dtype; dW in fp32 on cuBLAS
-(torch.mm), whose split over K = M tokens beats QuACK's tiles on these small outputs in time and accuracy (d24 c_q dW
-0.19 vs 0.54 ms, rel. error 1.8e-5 vs 2.3e-4).
+(torch.mm), whose split over K = M tokens beats QuACK's tiles on these small outputs in time and accuracy.
 
 nanochat::linear (c_q, c_k, c_v, c_o): y = x W^T; backward dX = dY W, dW = dY^T X.
 

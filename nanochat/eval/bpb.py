@@ -38,7 +38,7 @@ VAL_TOKENS = 80 * 2**19
 # file-level context) and positions only the repo-level stage trains
 CONTEXTS = (FILE_STAGE.seq_len,)
 # Byte-offset buckets of a target (the bytes of its piece before it), doublings from 1 KiB to 128 KiB (beyond a 32K
-# row's span at 3.4 bytes per token): loss at doubling context lengths, as arXiv 2308.12950 Fig. 4a samples perplexity,
+# row's span in bytes): loss at doubling context lengths, as arXiv 2308.12950 Fig. 4a samples perplexity,
 # in bytes so that tokenizers compare at the same context (arXiv 2503.13423 §3.1 fixes context in bytes for this
 # reason; App. B.1, Fig. 6: BPB by bytes of context)
 OFFSETS = tuple(2**k for k in range(10, 18))

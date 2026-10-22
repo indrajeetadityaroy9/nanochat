@@ -25,8 +25,7 @@ MIXTURE = {
     "text": (0.10, ["climbmix"]),
     "math": (0.03, ["opc_fineweb_math", "ultradata_math_l2"]),
 }
-# Most whole rows of both contexts (12 x 8K, 3 x 32K) whose d24 step fits 80 GB: peak 69.6 GiB; 131,072 tokens
-# does not fit
+# Most whole rows of both contexts (12 x 8K, 3 x 32K) whose d24 step fits 80 GB
 MICRO_BATCH_TOKENS = 98_304
 
 
@@ -49,7 +48,7 @@ REPO_STAGE = Stage(seq_len=32_768,
 # Repo-level share of tokens: Qwen2.5-Coder's 300B of 5.2T + 300B (§3.2.1-2)
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
 # One RoPE base for both stages: Qwen2.5-Coder's repo-level 10^6 (§3.2.2), above the lower bound of arXiv 2405.14591
-# for a 32K context; Llama 3 trains at a large base (5 x 10^5) from the start (arXiv 2407.21783 §3.2)
+# for a 32K context; Llama 3 trains at a large base from the start (arXiv 2407.21783 §3.2)
 ROPE_BASE = 1_000_000
 
 

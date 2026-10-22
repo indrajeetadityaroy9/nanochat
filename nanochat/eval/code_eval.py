@@ -83,13 +83,12 @@ EVALPLUS = {"humaneval_plus": ("humaneval", get_human_eval_plus), "mbpp_plus": (
 MULTIPL_E_BENCHMARKS = ("humaneval_cpp", "mbpp_cpp")
 INFILLING = ("single-line", "multi-line", "random-span")
 FIM_MODES = ("psm", "spm")  # the two orders the packer trains (arXiv 2207.14255 App. D)
-# the FIM filtered mode's order: at d8 SPM beat PSM on all three benchmarks (greedy pass@1 single-line 0.036 vs 0.003,
-# multi-line 0.013 vs 0.001, random-span 0.008 vs 0)
+# the FIM filtered mode's order: at d8 SPM beat PSM on all three benchmarks (greedy pass@1)
 FILTERED_MODE = "spm"
 # The sampled mode (Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem; §3.2: nucleus
 # sampling at top p 0.95 for all its sampling; §3.3, Fig. 5: T = 0.2 the pass@1 optimum): MultiPL-E's pass@1
 # (arXiv 2208.08227: T = 0.2, its pass@1 stable from about 20 samples; completions.py --top-p 0.95). StarCoder2
-# (arXiv 2402.19173 §7.1.2) samples MultiPL-E at T = 0.2, top-p 0.95 with 50 samples per prompt.
+# (arXiv 2402.19173 §7.1.2) samples MultiPL-E at T = 0.2, top-p 0.95.
 SAMPLES, SAMPLE_TEMPERATURE, TOP_P = 20, 0.2, 0.95
 # EvalPlus's most new tokens of a completion (evalplus/provider/base.py:13 max_new_tokens)
 EVALPLUS_MAX_NEW_TOKENS = 768

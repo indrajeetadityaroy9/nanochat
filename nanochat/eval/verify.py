@@ -9,11 +9,11 @@ eval/code_eval.py: filtered pass@1, one candidate selected by these checks among
 - cpp_diagnostics: g++ -std=c++17 -fsyntax-only's failure (its error lines), the MultiPL-E judge's compiler and
   standard (evaluation/src/eval_cpp.py) without code generation;
 - examples_pass: the prompt's own examples. Selection reads only the prompt, but the prompts' examples overlap the
-  scored base tests (MBPP+: 377 of 378 prompt asserts call the entry function on a base input, tuples compared as
-  lists; HumanEval+: 55 of 164 tasks share a doctest input with the base tests), so it favours base over plus pass@1;
+  scored base tests (MBPP+: nearly every prompt assert calls the entry function on a base input, tuples compared as
+  lists; HumanEval+: many tasks share a doctest input with the base tests), so it favours base over plus pass@1;
 - search: per task a greedy candidate, then seeded samples, until one has no diagnostics and passes its prompt's
-  examples (Codex, arXiv 2107.03374 §3.5: "evaluating the first sample which passes the 3 public unit
-  tests"; AlphaCode's filtering by the problem's example tests, arXiv 2203.07814 §4.5).
+  examples (Codex, arXiv 2107.03374 §3.5: filtering by the first sample which passes the public unit tests; AlphaCode's
+  filtering by the problem's example tests, arXiv 2203.07814 §4.5).
 """
 
 import ast
@@ -41,7 +41,7 @@ from nanochat.inference.syntax_constraint import syntax_error
 # their arguments (arity and keyword TypeErrors), return types against the declared return annotation. Every other rule
 # is off (typeCheckingMode "off"): style, unknown types, possibly-unbound or optional-member findings that a correct
 # program may legitimately trigger, and argument types (reportArgumentType), which pyright also judges against types it
-# inferred itself (basedpyright 1.40.2 rejects the canonical solution of HumanEval/130).
+# inferred itself (basedpyright rejects the canonical solution of HumanEval/130).
 PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue", "reportReturnType")
 # the MultiPL-E judge's per-step timeout (safe_subprocess/__init__.py:33, eval_cpp.py: 15 s compile, 15 s run)
 CPP_TIMEOUT = 15

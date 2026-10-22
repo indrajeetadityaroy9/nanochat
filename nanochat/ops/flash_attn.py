@@ -13,8 +13,9 @@ from torch.autograd.function import FunctionCtx
 
 
 def fa4_window_left(window_left: int, T: int) -> int | None:
-    """None (FA4's causal kernel) when the window spans T, else the local window: bitwise equal and 1-2% faster at d8;
-    FA4 does not make this switch (interface.py _resolve_causal_local_window)."""
+    """None (FA4's causal kernel) when the window spans T, else the local window: at a full window the causal kernel
+    gives the local kernel's outputs and is faster; FA4 does not make this switch (interface.py
+    _resolve_causal_local_window)."""
     return None if window_left >= T else window_left
 
 
@@ -37,7 +38,7 @@ def flash_attn_fake(q: Tensor, k: Tensor, v: Tensor, window_left: int, cu_seqlen
 @torch.library.custom_op("nanochat::flash_attn_bwd", mutates_args=(), device_types="cuda")
 def flash_attn_bwd(dout: Tensor, q: Tensor, k: Tensor, v: Tensor, out: Tensor, lse: Tensor, window_left: int,
                    cu_seqlens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """(dq, dk, dv); FA4's backward with atomic dq accumulation, its fastest (deterministic=True: 1-3% slower, d24)."""
+    """(dq, dk, dv); FA4's backward with atomic dq accumulation, its fastest (deterministic=True is slower)."""
     T = q.size(1)
     grads = _flash_attn_bwd(q.flatten(0, 1), k.flatten(0, 1), v.flatten(0, 1), out.flatten(0, 1), dout.flatten(0, 1),
                             lse, causal=True, window_size_left=fa4_window_left(window_left, T), cu_seqlens_q=cu_seqlens,

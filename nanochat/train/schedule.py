@@ -51,8 +51,8 @@ def plan(*, model: GPT, ratio: float) -> RunPlan:
 
 def lr_multiplier(it: int, *, steps: int) -> float:
     """LambdaLR multiplier at step `it`: linear warmup over WARMUP steps, then linear decay to 0 through the repo-level
-    stage (arXiv 2502.15938 §4: its gain over 10x decay grows with tokens per parameter; linear decay to zero beat WSD
-    at 610M and 80 tokens per parameter, and cosine at 20)."""
+    stage (arXiv 2502.15938 §4: its gain over a partial decay grows with tokens per parameter; linear decay to zero
+    beat WSD and cosine)."""
     if it < WARMUP:
         return (it + 1) / WARMUP
     return (steps - it) / (steps - WARMUP)
