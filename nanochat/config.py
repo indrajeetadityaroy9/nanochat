@@ -8,7 +8,7 @@ from nanochat.data.sources import SOURCES
 
 # The published data (the curated store and the tokenizer, data/publish.py) at its Hub revision: `python -m
 # nanochat.paths` downloads it, and every run records it (train/metrics.py)
-DATASET, DATASET_REVISION = "iaroy/nanochat-data", "1e711aa7b84062d026839af0224e22280cdf89de"
+DATASET, DATASET_REVISION = "iaroy/nanochat-data", "7a210ed3eb204cea61e7c7d473970f4075d148fb"
 
 # Ids including special tokens: nanochat's 2^15 (karpathy/nanochat 92d63d4 scripts/tok_train.py:19)
 VOCAB_SIZE = 2**15

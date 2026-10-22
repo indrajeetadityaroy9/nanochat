@@ -41,8 +41,8 @@ from nanochat.train.stages import max_ratio
 # The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords (3,307 steps of 294,912 tokens)
 SHORT = 5
 # d8's long horizon: the shortest at which d8's law batch has grown as production's batch grows in kind, to 2
-# micro-batches (B_opt 1.52 micro-batches at 200, 2.04 at production's 490.8; schedule.plan rounds both to 2), so the
-# batch correction is the same sqrt(m_B,prod / m_B,d8) as at 490.8 at less than half its cost; m_D,d8 about 40
+# micro-batches (B_opt 1.52 micro-batches at 200, 2.09 at production's 525.9; schedule.plan rounds both to 2), so the
+# batch correction is the same sqrt(m_B,prod / m_B,d8) as at 525.9 at less than half its cost; m_D,d8 about 40
 LONG = 200
 # Step-Law's token exponent of the optimal lr (arXiv 2503.04715, eta = 1.79 N^-0.713 D^0.307)
 STEP_LAW_D = 0.307

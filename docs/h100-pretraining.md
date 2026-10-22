@@ -70,8 +70,8 @@ Where production departs from the code models it is measured against:
 | MLP | ReLU², hidden 4C | SwiGLU (DeepSeek-Coder, Qwen2.5-Coder, Code Llama); StarCoder2 GELU |
 | Value embeddings | alternating layers, gated (nanochat) | none |
 | Optimizer | Muon on matrices, AdamW on tables and vectors | AdamW, β = (0.9, 0.95) (DeepSeek-Coder §3.4, Code Llama) |
-| Peak lr | DeepSeek LLM's law × 2.5467 (`lr.py`), as the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
-| Weight decay | τ law (d8: 0.55, d24: 0.1246 at its peak lr) | 0.1 (DeepSeek LLM §2.3) |
+| Peak lr | DeepSeek LLM's law × 2.5423 (`lr.py`, at production's horizon), as the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
+| Weight decay | τ law (d8: 0.55, d24: 0.1219 at its peak lr) | 0.1 (DeepSeek LLM §2.3) |
 | Gradient clipping | 1.0 | 1.0 (DeepSeek LLM §2.3) |
 | Context stages | 8K file level, then the last 5.45% of steps at 32K on repositories | Qwen2.5-Coder: the same 8K → 32K repository stage; DeepSeek-Coder: 16K repository-ordered files; Code Llama: a 16K long-context stage |
 | Data | code:text:math 87:10:3 | DeepSeek-Coder 87% code, 10% code-related English, 3% Chinese; Qwen2.5-Coder code:text:math 70:20:10 |
@@ -108,7 +108,8 @@ and packs them into rows itself, for whichever tokenizer it trains with.
   raised for long context, which production's already is. Staging (10^4 at 8K, as Code Llama and Qwen2.5-Coder) would
   add a base change for the repository stage to adapt to, with no published gain at 8K.
 - **Token budget** (`train/stages.py max_ratio`): the most tokens per scaling parameter at which no stage reads a
-  document twice: 490.77 at d24, 95.75B tokens (dataset revision `1e711aa`).
+  document twice: 525.90 at d24, 102.60B tokens (production's tokenizer at dataset revision `7a210ed`; 490.77, 95.75B,
+  on the first tokenizer's data at `1e711aa`).
 
 **Pipeline** (`nanochat/data/__init__.py`; each step `runs/container.sh python -m nanochat.data.<step>`, reading the
 previous step's output under `paths.DATA`):
@@ -178,15 +179,15 @@ Each step's output against the code that produced it (2026-10-21; local copy of 
 | Setting | Value | Source |
 |---|---|---|
 | Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271, C = M·D (`train/schedule.py`) |
-| Peak lr | 2.3887e-3, every group: 2.5467 × the law's 9.3796e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured, carried to production's horizon (`scripts/production.py` applies `lr.py`'s `analysis`; Peak lr, below) |
-| Steps | 81,166 (95.75B tokens, 490.77 per scaling parameter); repository stage from step 76,739 | `schedule.plan` |
+| Peak lr | 2.3640e-3, every group: 2.5423 × the law's 9.2989e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured, carried to production's horizon (`scripts/production.py` applies `lr.py`'s `analysis`; Peak lr, below) |
+| Steps | 86,975 (102.60B tokens, 525.89 per scaling parameter); repository stage from step 82,231 | `schedule.plan` |
 | Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (arXiv 1910.04209) |
 | Decay | linear to zero | arXiv 2502.15938 (the gain over WSD grows with tokens per parameter) |
 | Optimizers | AdamW (fused) on tables and vectors; Muon with `match_rms_adamw` on matrices | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
-| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0414, λ = 0.1246 at d24's peak lr: 1/(ηλ) = 3,360 steps, 4.0B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
+| Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (τ = 0.0399, λ = 0.1219 at d24's peak lr: 1/(ηλ) = 3,471 steps, 4.1B tokens), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 (DeepSeek LLM: 0.1, §2.3) |
 | Gradient clipping | global norm 1.0 on the raw gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (`train/optim.py` `MAX_NORM`, `update`) |
-| Repository stage | continues the decay: 5.46% of the peak lr at its first step, 0 at the last, over 4,427 steps (5.22B tokens) | DeepSeek-Coder §3.6 |
+| Repository stage | continues the decay: 5.46% of the peak lr at its first step, 0 at the last, over 4,744 steps (5.60B tokens) | DeepSeek-Coder §3.6 |
 
 **Gradient clipping** at 1.0, decided on evidence rather than an experiment. It rescales a step's raw gradient before
 Muon's momentum and AdamW's moments; both updates are invariant to a gradient scale that varies slowly (Adam's m/√v,
@@ -229,9 +230,9 @@ C^−0.125 carries the trend), against both rules. That revision's multiplier ×
 ln 40.05) · √2 (2.3887e-3, weight decay 0.1246) was adopted; the best arm beat the law by 0.0044 to 0.125 bits per
 byte, no run diverged, and the optima agree within 7% with nanochat's hand-tuned Muon lr at the same widths. Other data
 carries the optima, not measured again: `scripts/production.py` applies the estimator (`lr.py` `analysis`) at its
-data's horizon, × 2.5423 on the retrained tokenizer's (−0.18%), where the measurement's own uncertainty is about ±30%
-(Power) and a 30% error costs 0.0006 bits per byte at d24 at 5; no source makes the optimum depend on the tokenizer at
-one vocabulary size [inference].
+data's horizon: × 2.5423 on the retrained tokenizer's at `7a210ed` (−0.18%; 2.3640e-3, weight decay 0.1219), where the
+measurement's own uncertainty is about ±30% (Power) and a 30% error costs 0.0006 bits per byte at d24 at 5; no source
+makes the optimum depend on the tokenizer at one vocabulary size [inference].
 
 - *d8 at 20* (`harness.main`, production vs × 2, seeds 0 and 1, 2026-10-20; GPU shared, so throughput is not
   comparable): code bits per byte 0.6323 and 0.6324 at the law's lr, 0.6144 and 0.6137 at × 2 (paired differences
@@ -396,17 +397,17 @@ experiment has not run, nor its vocabularies and data (`python -m ablations.toke
   non-finite loss or gradient norm; its failure record) is an outcome of a sweep's high end (arXiv 2309.14322): it is
   recorded with its step and excluded from the fits and comparisons, and the experiment continues; any other failure
   stops it.
-- **Settings.** No affordable run reaches production (d24 at 490.8 tokens per scaling parameter). `lr.py` measures the
+- **Settings.** No affordable run reaches production (d24 at 525.9 tokens per scaling parameter). `lr.py` measures the
   optimum on production's model at a short horizon, d24 at 5 (3,307 steps of 294,912 tokens, the longest d24 run a
   sweep affords), and the optimum's horizon trend at d8 between 5 (746 steps of 98,304 tokens; B_opt is 0.46
   micro-batches there, so the plan's floor of one) and 200 (14,937 steps of 196,608): 200 is the shortest horizon at
-  which d8's law batch has grown to 2 micro-batches (B_opt 1.52, against 2.04 at 490.8; both round to 2), so the batch
-  correction is the same as at 490.8 at less than half the cost (Analysis); one seed per setting, the cheap settings
+  which d8's law batch has grown to 2 micro-batches (B_opt 1.52, against 2.09 at 525.9; both round to 2), so the batch
+  correction is the same as at 525.9 at less than half the cost (Analysis); one seed per setting, the cheap settings
   first: at d8 at 20 the arms × 1 and × 2 differed by 0.0179 and 0.0187 bits per byte on seeds 0 and 1 (Peak lr).
   Architecture rankings can change with scale (arXiv 2207.10551); for data recipes a single proxy 7× below the target
   picks the target's better of two in about 80% of pairs, best with likelihood metrics such as bits per byte
   (DataDecide, arXiv 2504.11393). No run combines production's width and length: `lr.py` assumes the two trends
-  separable (arXiv 2409.19913's size-independent β), which only a d24 run at 490.8 could check. The tokenizer
+  separable (arXiv 2409.19913's size-independent β), which only a d24 run at 525.9 could check. The tokenizer
   experiment's settings and documents: The tokenizer experiment, below.
 - **Order.** `lr.py` first; its multiplier sets production's peak lr (`scripts/production.py`, hashed into production's
   tag). The tokenizer experiment's arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each measured
@@ -932,7 +933,7 @@ Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `a
 `metrics/<tag>.jsonl`, `base_eval/<tag>-step<step>.json`, `logs/` (`production.log`, the launch's output; `<tag>.log`
 per ablation run) and `cache/`; `results/` (tracked) holds the data the paper's tables and figures are drawn from.
 
-`scripts/production.py` derives the ratio and the tag (`d24-r490.774-s0-<hash>`), trains both stages with a checkpoint
+`scripts/production.py` derives the ratio and the tag (`d24-r525.898-s0-<hash>`), trains both stages with a checkpoint
 (the run's full state: weights, optimizer state and data position, ~5.6 GB) at each tenth of the steps and at the
 repository stage's start, then evaluates every checkpoint (`evaluate`: the curve over training, and the final model)
 and exports the run's tracked metrics (`eval/suite.py export`): `results/<tag>.jsonl` (its records and every
@@ -941,9 +942,9 @@ process (torch.compile's recompile limit and the CUDA caching allocator's reserv
 continues a stopped run from its newest checkpoint and evaluates every checkpoint again. The evaluation (Evaluation,
 below) reports the likelihood metrics and the benchmarks' pass@1, each scored by its official tools.
 
-**Expected cost:** 76,739 file-level steps at 3.741 s and 4,427 repository-stage steps at about 4.05 s (4,016 ms with
-coordinate-descent tuning, plus its 0.8%) on the H100 SXM5, about 85 h: about $190–195 on the GH200 at $2.29/h
-(Hardware: GH200 or H100 SXM5), $365 on the H100 SXM5 at $4.29/h.
+**Expected cost:** 82,231 file-level steps at 3.741 s and 4,744 repository-stage steps at about 4.05 s (4,016 ms with
+coordinate-descent tuning, plus its 0.8%) on the H100 SXM5, about 91 h: about $200–210 on the GH200 at $2.29/h
+(Hardware: GH200 or H100 SXM5), $390 on the H100 SXM5 at $4.29/h.
 
 `runs/release.sh <tag> <repo>` uploads the checkpoints, the run records under `artifacts/` (metrics and
 evaluations) and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
@@ -969,7 +970,7 @@ What the code depends on:
 
 - *Training is GPU-bound, on compute.* The d24 step keeps the GPU 100% busy (The d24 step): GEMM 52.9% and FA4 24.9%
   are compute-bound and run alike; Inductor 14.3%, other 6.4% and cross entropy 1.5% are bandwidth-bound, which 19%
-  more bandwidth makes about 3–4% of the step faster [estimate], so about 82 h, more if the H100 SXM5 is
+  more bandwidth makes about 3–4% of the step faster [estimate], so about 88 h, more if the H100 SXM5 is
   power-limited at 700 W [unmeasured].
 - *Memory.* `config.MICRO_BATCH_TOKENS` (98,304) was sized to 80 GB: peak 69.6 GiB, 76.7 GiB while QuACK's autotuner
   runs cold. On 96 GB it stays 98,304: the next whole-row micro-batch, 131,072 (16 × 8K, 4 × 32K), needs about 90 GiB
@@ -991,7 +992,7 @@ What the code depends on:
   tokenizer experiment and 11 checkpoints of about 5.6 GB fit either SSD; the loader reads about 2.4 MB/s of tokens,
   so RAM beyond the page cache it uses adds nothing.
 
-Cost: about $190–195 for the 85 h plan on GH200 against $365 on the H100 SXM5, evaluation shorter as well. The GH200 is
+Cost: about $200–210 for the 91 h plan on GH200 against $390 on the H100 SXM5, evaluation shorter as well. The GH200 is
 the decided host for the tokenizer experiment and the production run; before them it repeats, in about an hour, the
 d24 step's peak memory and time in both stages, The model against its specification and a resume, recorded beside the
 H100's; without GH200 capacity, the H100 SXM5 is the measured option.
@@ -1255,7 +1256,7 @@ lists (Table 5: 110K each for the educational and package instructions).
   the fine-tuned model is reported beside the final base checkpoint, by the same evaluator and modes.
 - *Cost:* phi-1's fine-tuning schedule (6,000 steps of 256 × 2,048 tokens: 3.1B tokens, peak lr 1e-4, weight decay 0.01,
   the best of the checkpoints saved every 1,000 steps; arXiv 2306.11644 §2.3) takes about 2.8 h at the d24 step's 315K
-  tokens per second [derived; measured at 8K rows], 3% of production's 85 h.
+  tokens per second [derived; measured at 8K rows], 3% of production's 91 h.
 - *Code to write:* the Hub fetch at the pinned revisions, the conversion to the completion format, decontamination,
   tokenization (`data/tokenizer.py`), a loss mask over the prompt's tokens and a fine-tuning entry point that starts
   from the final checkpoint (`train/checkpoint.py`).
