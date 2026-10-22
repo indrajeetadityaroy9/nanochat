@@ -3,11 +3,12 @@ BPE tokenizer in the style of GPT-4: merges trained by source-attributed BPE (SA
 within the chunks of SPLIT_PATTERN by the data crate (data/crate train.rs), encoding by OpenAI's tiktoken, whose
 regex engine (fancy-regex) the trainer shares.
 
-Trained on every curated source's train split in about equal byte shares (main), writing
+Trained on every curated source's train split in about equal byte shares (main, SAMPLE_SHARES), writing
 TOKENIZER/tokenizer.tiktoken and tokenizer.pattern. Equal byte shares minimize the expected compute per byte
 over a uniform prior on mixtures, compute per byte being linear in the byte mixture (our derivation, following
 arXiv 2407.13623, Eq. 5). The tokenizer ablation's arms (ablations/tokenizer.py) train on the same sample (sample,
-merges) into TOKENIZER_ABLATION/<arm>; get_tokenizer loads production's or an arm's.
+merges) into TOKENIZER_ABLATION/<arm>, beside one vocabulary on the sample at the training mixture's shares;
+get_tokenizer loads production's or an arm's.
 
 python -m nanochat.data.tokenizer
 """
@@ -25,7 +26,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import tiktoken
 
-from nanochat.config import VOCAB_SIZE
+from nanochat.config import MIXTURE, VOCAB_SIZE
 from nanochat.data.schema import REPOSITORY_FILE, TEXT
 from nanochat.data.sources import SOURCES, column_bytes, curated_files, texts
 from nanochat.native import data_crate
@@ -49,6 +50,8 @@ SPECIAL_TOKENS = (BOS, *FIM_TOKENS)  # ids after the mergeable tokens, in this o
 # it.
 SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]"""
                  r"""|\s+(?!\S)|\s+""")
+# The byte shares of production's tokenizer's sample (sample)
+SAMPLE_SHARES: Literal["equal", "mixture"] = "equal"
 
 
 def tiktoken_file(mergeable: list[bytes]) -> str:
@@ -117,21 +120,30 @@ def sample_row_group(task: tuple[str, Path, int, int, int]) -> tuple[list[str], 
     return texts(source, batch), names
 
 
-def sample() -> tuple[list[str], list[int]]:
-    """The training sample (texts, source ids): about equal byte shares of every source's curated train split, a
-    systematic sample, every step-th row in file order as its text (sources.texts), step = the split's content bytes //
-    the smallest split's (the smallest split whole; a share is between 1 and 2 times the smallest split's bytes); row
-    groups are read in parallel, the sample kept in file order. A repository sample's files are its rows: they split
-    into the chunks of SPLIT_PATTERN the concatenated sample does, as each file's text ends with a line break and the
-    next begins with its path comment. Each row's source id names its authorship unit, whose count is SA-BPE's R: a
-    file's repository (one name across the corpora that hold the repository), a web page's host, else the document
-    itself (a notebook, a text without a URL, a codeforces_cots conversation)."""
+def sample(*, shares: Literal["equal", "mixture"]) -> tuple[list[str], list[int]]:
+    """The training sample (texts, source ids): of every source's curated train split, about equal byte shares
+    ("equal") or config.MIXTURE's group shares of the same bytes, each group's sources at their natural shares
+    ("mixture": the training mixture's shares of rows, taken as bytes); a systematic sample, every step-th row in file
+    order as its text (sources.texts), step = the split's content bytes // the smallest split's ("equal": the smallest
+    split whole; a share is between 1 and 2 times the smallest split's bytes) or one step per group, its content bytes
+    over its share of len(SOURCES) smallest splits ("mixture"); row groups are read in parallel, the sample kept in
+    file order. A repository sample's files are its rows: they split into the chunks of SPLIT_PATTERN the concatenated
+    sample does, as each file's text ends with a line break and the next begins with its path comment. Each row's
+    source id names its authorship unit, whose count is SA-BPE's R: a file's repository (one name across the corpora
+    that hold the repository), a web page's host, else the document itself (a notebook, a text without a URL, a
+    codeforces_cots conversation)."""
     sizes = {source: sum(column_bytes(path, "content") for path in curated_files(source, "train"))
              for source in SOURCES}
     smallest = min(sizes.values())
+    if shares == "equal":
+        steps = {source: sizes[source] // smallest for source in SOURCES}
+    else:
+        steps = {}
+        for share, corpora in MIXTURE.values():
+            steps |= dict.fromkeys(corpora, int(sum(sizes[c] for c in corpora) / (share * len(SOURCES) * smallest)))
     tasks = []
     for source in SOURCES:
-        step, at = sizes[source] // smallest, 0
+        step, at = steps[source], 0
         for path in curated_files(source, "train"):
             md = pq.read_metadata(path)
             for g in range(md.num_row_groups):
@@ -159,8 +171,8 @@ def merges(docs: list[str], sources: list[int], *, pattern: str, score: Literal[
 
 def main() -> None:
     """TOKENIZER/tokenizer.tiktoken and tokenizer.pattern: SA-BPE merges within the chunks of SPLIT_PATTERN, trained on
-    the sample."""
-    docs, sources = sample()
+    the sample at SAMPLE_SHARES."""
+    docs, sources = sample(shares=SAMPLE_SHARES)
     save(TOKENIZER, merges(docs, sources, pattern=SPLIT_PATTERN, score="sa-bpe"), SPLIT_PATTERN)
     print(f"Tokenizer data key: {get_tokenizer().data_key}")
 
