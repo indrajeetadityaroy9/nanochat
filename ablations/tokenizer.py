@@ -28,16 +28,20 @@ tiktoken, each trained on, so that every candidate production keeps or dismisses
   statistics break.
 Described, not trained on: sa-bpe-mixture (COMPOSITION), sa-bpe on the sample at the training mixture's shares
 (data/tokenizer.py sample "mixture"; the arms' sample is production's, SAMPLE_SHARES "equal"): of its bytes code 87.3%
-against the equal sample's 72.9%, math 2.9% against 18.2%, the Python corpora 60.0% against 36.3%. The literature
-trains a tokenizer on the mix its model sees, on compression and under-trained tokens: more code in a tokenizer's
-data compresses code better, by 5 to 6 points of normalized sequence length across arXiv 2402.01035's mixes (§2.3,
-Fig. 2), and a tokenizer "trained on similar data as the model" leaves the fewest under-trained tokens
-(arXiv 2405.05417 §5, across released models). Downstream no effect is measured: the companion post's tokenizer
-corpora of 0, 5, 30 and 50% code (by documents), one run each within the fusing and the non-fusing pattern, leave
-MBPP unordered (rank correlation -0.40 in each, p 0.60) and lower math and code bits per byte by about 0.005 from 0
-to 50%; 72.9 against 87.3% code, both above any share it tested, would move code bits per byte by less than the runs
-resolve (1.96 √(2 / SEEDS) CODE_SIGMA = 0.0067) [inference]. Its intrinsic record holds the measures that literature
-names: bytes per token and the tokens the documents hold rarely.
+against the equal sample's 72.9%, math 2.9% against 18.2%, the Python corpora 60.0% against 36.3%. The evidence is on
+compression and language modelling, none on code accuracy. More code in a tokenizer's data compresses code better
+(arXiv 2402.01035 §2.3: "tokenizers should be trained on the data mix that they are expected to see"; the NSL of a
+subset "only varies by 5 to 6 percentage points" over its mixes); a tokenizer "trained on similar data as the model"
+leaves the fewest under-trained tokens (arXiv 2405.05417 §5, across released models); at nanochat's d24 (1.27B, about
+128K ids) equal tokenizer-training weights over 30 languages raised the model's mean FLORES+ bits per byte above
+weights proportional to its training data in all 5 pairs (+0.0015 to +0.0107, 4 beyond run-to-run variation), most in
+the languages of the smallest training shares, and the authors recommend "proportional tokenizer-training weights as
+the default" (arXiv 2610.12144 Table 6, §7). On code, the companion post's tokenizer corpora of 0, 5, 30 and 50% code
+(by documents, one run each, at a fixed token budget) leave MBPP unordered (rank correlation -0.40, p 0.60) with math
+and code bits per byte about 0.005 lower at 50%; code holding most of the training data, as the largest languages
+there, the contrast would move code bits per byte by less than the runs resolve (1.96 √(2 / SEEDS) CODE_SIGMA =
+0.0067) [inference]. Its intrinsic record holds the measures that literature names: bytes per token and the tokens the
+documents hold rarely.
 Not run: tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (its encoder replays
 merges and removals in training order, arXiv 2409.04599 Alg. 2; its code compression 3.61 against BPE's 3.62 in
 arXiv 2604.14053 Table 4), BoundlessBPE's supermerges (rule dictionaries of their own, arXiv 2504.00178 §3.2) or

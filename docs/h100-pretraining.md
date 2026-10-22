@@ -518,17 +518,27 @@ own. The sample's composition, whose effect is below what the runs resolve, is d
 - **The sample's composition,** described, not trained: sa-bpe-mixture, sa-bpe on the sample at the training
   mixture's shares (`sample` "mixture": `config.MIXTURE`'s group shares of the equal sample's bytes, each group's
   sources at their natural shares). Of its bytes code is 87.3% against the equal sample's 72.9%, math 2.9% against
-  18.2%, the Python corpora 60.0% against 36.3%. The literature trains a tokenizer on the mix its model sees, on
-  compression and under-trained tokens: more code in a tokenizer's data compresses code better, by 5 to 6 points of
-  normalized sequence length across the mixes of arXiv 2402.01035 (§2.3, Fig. 2), and a tokenizer "trained on
-  similar data as the model" leaves the fewest under-trained tokens (Magikarp, arXiv 2405.05417 §5, across released
-  models). Downstream no effect is measured: the companion post's tokenizer corpora of 0, 5, 30 and 50% code (by
-  documents; one run each, within the fusing and the non-fusing pattern) leave MBPP unordered (ρ −0.40 in each,
-  p 0.60), beside the fusing pattern's up to 0.156; math and code bits per byte fall about 0.005 from 0 to 50% and
-  HumanEval rises 0.024 (endpoints, single runs). 72.9 against 87.3% code, both above any share it tested, would move
-  code bits per byte by less than the runs resolve (0.0067 at two seeds, Decisions) [inference], so a trained arm would
-  read equal; its intrinsic record holds the measures that literature names (bytes per token, the tokens the
-  documents hold rarely or never) beside the arms'.
+  18.2%, the Python corpora 60.0% against 36.3%. The evidence is on compression and language modelling, none on code
+  accuracy:
+  - more code in a tokenizer's data compresses code better: "tokenizers should be trained on the data mix that they
+    are expected to see during training/inference", the normalized sequence length of a subset varying "only … by 5
+    to 6 percentage points" over the mixes (arXiv 2402.01035 §2.3, Fig. 2; compression only);
+  - a tokenizer "trained on similar data as the model" leaves the fewest under-trained tokens (Magikarp,
+    arXiv 2405.05417 §5; observed across released models);
+  - at nanochat's d24 (1.27B parameters, about 128K ids, 30 languages), equal tokenizer-training weights raised the
+    model's 31-language mean FLORES+ bits per byte above weights proportional to its training data in all 5 pairs
+    (+0.0015 to +0.0107; 4 beyond run-to-run variation, a seed sd of 0.0012), most in the languages of the smallest
+    training shares (ρ −0.61 between a language's change and its share); the authors recommend "proportional
+    tokenizer-training weights as the default to start from" (arXiv 2610.12144 Table 6, §7);
+  - on code, the companion post's tokenizer corpora of 0, 5, 30 and 50% code (by documents; one run each, within the
+    fusing and the non-fusing pattern, at a fixed token budget) leave MBPP unordered (ρ −0.40 in each, p 0.60), beside
+    the fusing pattern's up to 0.156; math and code bits per byte fall about 0.005 from 0 to 50% and HumanEval rises
+    0.024 (endpoints, single runs).
+
+  Code holds most of the training data, as the largest languages of arXiv 2610.12144, whose change was the smallest,
+  so 72.9 against 87.3% code would move code bits per byte by less than the runs resolve (0.0067 at two seeds,
+  Decisions) [inference] and a trained arm would read equal; its intrinsic record holds the measures that literature
+  names (bytes per token, the tokens the documents hold rarely or never) beside the arms'.
 - **The score.** SA-BPE's §4.1 lists five priority criteria over F (the pair's frequency), R (the repositories holding
   it in the current segmentation) and L (the languages holding it). sa-bpe takes F·log R, under which a pair of one
   repository scores 0 (Table 3: compression 3.643 and 72 of 646 tested tokens verified under-trained, against BPE's
@@ -1396,6 +1406,7 @@ Every work the code and this document cite. Papers by arXiv identifier (`arxiv.o
 | 2607.05147 | DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation |
 | 2608.18062 | TokEval: A Tokenizer Evaluation Suite |
 | 2608.28622 | PUFFER: Incremental Fuzzy Deduplication for Continuously Evolving Corpora |
+| 2610.12144 | Language-Specific Effects of Tokenizer Choice in Multilingual LMs |
 
 Without an arXiv identifier:
 
