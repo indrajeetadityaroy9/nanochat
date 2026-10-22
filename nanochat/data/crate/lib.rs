@@ -2,7 +2,7 @@
 //! tokenizer training (train.rs; nanochat/data/tokenizer.py), deduplication (dedup.rs; nanochat/data/dedup.py) and
 //! repository samples (repository.rs; nanochat/data/curate.py) of curation, the packer of training rows (pack.rs;
 //! nanochat/data/pack.py) and the parse-tree leaves of the tokenizer ablation's code metrics (leaves.rs;
-//! ablations/tokenizer/intrinsic.py).
+//! ablations/tokeval.py).
 
 mod dedup;
 mod leaves;

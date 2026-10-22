@@ -1,5 +1,5 @@
 """
-The mechanism the ablation experiments (ablations/lr.py, ablations/tokenizer/) share. An experiment is production at
+The mechanism the ablation experiments (ablations/lr.py, ablations/tokenizer.py) share. An experiment is production at
 each of its settings (Setting: depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms
 differing from production only in their Run fields, each on the same seeds. A run trains production's GPT by
 scripts/base_train.train and is scored by eval/suite.py evaluate (its likelihood metrics and parse measure), the
