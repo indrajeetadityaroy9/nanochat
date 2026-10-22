@@ -17,6 +17,9 @@ the tokenizer ablation's parse-tree leaves) are shared by the stages, the loader
         ▼
     curated/<source>/{train,val}/            the training documents
         │  tokenizer.py: SA-BPE trained on a sample of the curated train documents of every source
+        │  publish.py: the curated store and the tokenizer to the Hub dataset config.DATASET with a manifest,
+        │  checksums and card, one squashed commit; the training host (the GH200) pulls them at
+        │  config.DATASET_REVISION (`python -m nanochat.paths`) and runs the steps below itself
         │  compile.py: tokenize every document once (a repository sample: its files after their path comments),
         │  unpadded and without BOS (any sequence length)
         ▼
@@ -28,8 +31,6 @@ the tokenizer ablation's parse-tree leaves) are shared by the stages, the loader
         │  can read: text and math cut to the rows the mixture draws of them, the repository stage's trailing shards
         ▼
     <split>-T<seq_len>.pieces, .rows, .fim
-        │  publish.py: to the Hub dataset config.DATASET with a manifest and card, one squashed commit; on the
-        │  training host `python -m nanochat.paths` pulls it at config.DATASET_REVISION
         │  mmap'd in place from local NVMe; each row built on the fly
         ▼
     mixture batches, resumable              loader.py
@@ -37,11 +38,12 @@ the tokenizer ablation's parse-tree leaves) are shared by the stages, the loader
         ▼
     GPU
 
-    python -m nanochat.data.prepare
+    python -m nanochat.data.prepare           (the data host)
     python -m nanochat.data.tokenizer
-    python -m nanochat.data.compile
+    python -m nanochat.data.compile           (and pack: what compiled.sha256 records)
     python -m nanochat.data.pack
     python -m nanochat.data.publish
+    python -m nanochat.paths                  (the training host, then compile and pack, sha256sum -c)
 
 Everything is stored under paths.DATA:
     raw/<source>/                          fetched files at their Hub paths (Stack-Edu: metadata with Software
@@ -54,6 +56,8 @@ Everything is stored under paths.DATA:
     compiled/<source>-<tok>/               {train,val}.bin tokens, .idx document offsets, .json documents per curated
                                            file (compile.py; text and math train splits cut by pack.py);
                                            {train,val}-T<seq_len>.pieces, .rows, .fim: the packed rows (pack.py)
-    manifest.json                          how the published data was made (publish.py)
+    manifest.json, curated.sha256,         how the published data was made, and the SHA-256 of every curated file and
+    compiled.sha256                        of every file compile.py and pack.py make of it with its tokenizer
+                                           (publish.py)
     huggingface/                           the Hugging Face cache (Stack-Edu metadata, the evaluation benchmarks' files)
 """

@@ -32,7 +32,8 @@ arXiv 2604.14053 Table 4), BoundlessBPE's supermerges (rule dictionaries of thei
 UnigramLM; SuperBPE's one code result is lower, not significantly (arXiv 2503.13423 Table 1: HumanEval pass@10 15.9
 to 13.4 at 8B parameters and 200K ids).
 
-Runs: every arm at d16, SEEDS seed each, at equal bytes: each arm reads the document set once, as production reads its
+Runs: every arm at d16, SEEDS seeds each (the seed's spread is the measures' largest: the post's fusing tokenizer
+scored MBPP 0.167, 0.072, 0.018), at equal bytes: each arm reads the document set once, as production reads its
 data (train/stages.py max_ratio), so its tokens are the set's bytes over its bytes per token (arXiv 2402.01035 compares
 at equal tokens, its Appendix J at equal characters); each run's plan is its own (schedule.plan at its tokens), its
 context production's 8,192 and 32,768 tokens (eval/bpb.py's byte-offset buckets show the bytes of context a better
@@ -57,9 +58,9 @@ digit metrics (every arm's pattern cuts a digit run into the same chunks of at m
 Decisions, pre-registered (RESULTS/tokenizer.json "decision"), each challenger (sa-bpe-fused, hybrid, bpe) against
 sa-bpe on the runs of the same seeds:
 - parsing: the HumanEval+ and MBPP+ problems whose healed greedy completion compiles under only one of the two
-  (ablations/harness.py evaluation), McNemar's exact test (the companion post's test of single runs: 104 problems
-  against 4 for its MinGram pair); better or worse at p < 0.05, else equal. One seed estimates no seed spread: the
-  test covers the problems' sampling, not training's [inference];
+  (ablations/harness.py evaluation), the problems of every seed pooled, McNemar's exact test (the companion post's
+  test of single runs: 104 problems against 4 for its MinGram pair); better or worse at p < 0.05, else equal. The test
+  covers the problems' sampling; the seeds, training's only in part [inference];
 - code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal
   bound, 1.96 √(2 / SEEDS) CODE_SIGMA, else equal;
 - a challenger qualifies iff it is worse on neither and better on one. Pattern: of sa-bpe-fused and the hybrid, the
@@ -145,7 +146,7 @@ HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]+
 ARMS = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
         "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
-DEPTH, SEEDS = 16, 1
+DEPTH, SEEDS = 16, 2
 # The spread of a run's 8K code bits per byte over seeds (pooled within each configuration): the six runs at d8 at 20 of
 # the standard-regime comparison (60138de's baseline and c00d2f6's default, data seeds 0 to 2), carried to d16
 # [inference]

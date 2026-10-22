@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
 
-# The prepared data (tokenizer, compiled and packed rows) at its Hub revision: `python -m nanochat.paths` downloads it,
-# and every run records it (train/metrics.py)
+# The published data (the curated store and the tokenizer, data/publish.py) at its Hub revision: `python -m
+# nanochat.paths` downloads it, and every run records it (train/metrics.py)
 DATASET, DATASET_REVISION = "iaroy/nanochat-data", "1e711aa7b84062d026839af0224e22280cdf89de"
 
 # Ids including special tokens: nanochat's 2^15 (karpathy/nanochat 92d63d4 scripts/tok_train.py:19)

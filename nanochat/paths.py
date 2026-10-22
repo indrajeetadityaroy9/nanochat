@@ -1,8 +1,9 @@
 """
 Every location the code reads or writes: ROOT, the repository (located from this file), and ARTIFACTS = ROOT/artifacts
-(gitignored), whose directories `python -m nanochat.paths` (runs/setup.sh) creates once, with the tokenizer and the
-compiled and packed data at the dataset revision config.py pins; code never creates them, so a missing one fails at
-first use. RESULTS, the data the paper's tables and figures are drawn from, is tracked.
+(gitignored), whose directories `python -m nanochat.paths` (runs/setup.sh) creates once, with the curated store and
+the tokenizer at the dataset revision config.py pins (data/publish.py; compile.py and pack.py then build the compiled
+and packed data on the host); code never creates them, so a missing one fails at first use. RESULTS, the data the
+paper's tables and figures are drawn from, is tracked.
 """
 from pathlib import Path
 

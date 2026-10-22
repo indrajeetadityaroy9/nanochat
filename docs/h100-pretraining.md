@@ -85,9 +85,10 @@ attention windows.
 
 ## Data and stages
 
-The data pipeline (`nanochat/data/`, one module per step) prepares the corpora, trains the tokenizer, compiles the
-documents and packs them into rows; `publish.py` uploads what a run reads to the Hugging Face dataset
-`iaroy/nanochat-data`, pulled at the revision `config.DATASET_REVISION` pins.
+The data pipeline (`nanochat/data/`, one module per step) prepares the corpora and trains the tokenizer on the data
+host; `publish.py` uploads the curated store and the tokenizer to the Hugging Face dataset `iaroy/nanochat-data`,
+pulled at the revision `config.DATASET_REVISION` pins by the training host (the GH200), which compiles the documents
+and packs them into rows itself, for whichever tokenizer it trains with.
 
 - **Mixture** (`config.MIXTURE`): code:text:math = 87:10:3 (DeepSeek-Coder's code share); code is 8 Python and C++
   corpora, text ClimbMix, math two corpora. Not tested: the code metric falls with the code share by construction, and
@@ -143,9 +144,12 @@ previous step's output under `paths.DATA`):
    171,656 rows, so each repository corpus is packed at its last 7 of 99 curated files (177,275 rows). The crate packs
    one curated file per call, its documents in parallel; a call per core runs at once (95% of the GB10's 20 cores busy
    against 76% one at a time).
-5. `publish`: the tokenizer, the compiled splits and their packs, `data/manifest.json` (code commit, tokenizer,
-   sources, stages, FIM shares, every split's documents, tokens and packs, the derivation of what was packed) and the
-   dataset card; a commit per corpus, every file's SHA-256 checked against the Hub's, then one squashed commit.
+5. `publish`: the curated store (248 GB, 2,812 files), the tokenizer, `data/manifest.json` (code commit, tokenizer,
+   sources, every curated split's files, rows and bytes, and what `compile` and `pack` make of them with this
+   tokenizer: every split's documents, tokens and packs, the derivation of what was packed), `data/curated.sha256` and
+   `data/compiled.sha256` (every curated file's SHA-256 and every compiled and packed file's, for `sha256sum -c` on
+   the training host) and the dataset card; a commit per curated split, every file's SHA-256 checked against the
+   Hub's, then one squashed commit. The training host then runs `compile` and `pack` (Reproducing the run).
 
 ### Data lineage
 
@@ -369,7 +373,7 @@ made. They share one mechanism (`ablations/harness.py`) whose runs train and eva
 | File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
 | `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) × 2.5467, adopted 2026-10-20 (Peak lr) | × 2 and × 4 (× 8 at d8): the law was fit for AdamW under a multi-step schedule, 7.5× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
-| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, one seed per arm: sa-bpe against sa-bpe-fused (also the positive control), the hybrid and bpe, parsing by McNemar's test per problem; every arm's intrinsic record (TokEval's metrics) on the GB10 | SA-BPE's F·log R (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the hybrid: SA-BPE within cl100k's letter clause, the non-fusing punctuation run and whitespace by type, each run whole (arXiv 2608.18062's companion post); the fusing pattern (MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, while code bits per byte shows no association with MBPP across the post's tokenizers); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
+| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, two seeds per arm: sa-bpe against sa-bpe-fused (also the positive control), the hybrid and bpe, parsing by McNemar's test per problem; every arm's intrinsic record (TokEval's metrics) on the GH200 | SA-BPE's F·log R (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the hybrid: SA-BPE within cl100k's letter clause, the non-fusing punctuation run and whitespace by type, each run whole (arXiv 2608.18062's companion post); the fusing pattern (MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, while code bits per byte shows no association with MBPP across the post's tokenizers); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
 
 **Results.** `lr.py` ran on 2026-10-20 at dataset revision `1e711aa` (`results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`;
 Peak lr), on the first tokenizer's data; production carries its optima to other data (Peak lr). The tokenizer
@@ -502,7 +506,7 @@ and stages describes the current vocabulary (SA-BPE within the non-fusing patter
 The arms come from TokEval (arXiv 2608.18062, its companion post "Code tokenizer ablations" and its library), SA-BPE
 (arXiv 2604.14053 and its repository), tiktoken's encodings and the code-tokenizer literature; every claim below was
 checked against its source on 2026-10-21 (the papers' full text, the post, the repositories at the commits cited).
-Every candidate production keeps or dismisses is trained, one seed each: the literature's evidence is at 1.27B
+Every candidate production keeps or dismisses is trained, two seeds each: the literature's evidence is at 1.27B
 parameters and about 128K ids, on Python, and a dismissal at this scale, vocabulary and mixture rests on a run of its
 own.
 
@@ -638,20 +642,23 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   detected (sa-bpe-fused parses worse). Score: bpe is adopted iff it qualifies, or is equal on both and its documents
   leave fewer vocabulary tokens never read than sa-bpe's (SA-BPE's claimed benefit), carried to the adopted pattern
   [inference]; otherwise SA-BPE.
-- **One seed.** McNemar's test covers the sampling of problems, not of training: the post's fusing tokenizer scored
-  MBPP 0.167, 0.072 and 0.018 over three seeds, so one run can miss a real difference [inference], and an undetected
-  one leaves production's pattern and SA-BPE. Raising `SEEDS` pools each seed pair's problems and narrows the
-  bits-per-byte bound by √`SEEDS` (8 runs at 2 seeds).
-- **Where it runs.** Every step on the GB10, beside the curated store: the vocabularies, the data and the intrinsic
-  record on its CPU, the 4 runs and their evaluations on its GPU (the image's SM120 kernels), in one `runs` call, so
-  every arm meets the same kernels and nothing moves to another host. Its d16 trains both stages at 68,014 and 68,970
-  tokens per second (2026-10-21, production's data, 204 steps; peak memory 56.4 GiB of its 128 GB), about 1/11 of the
-  H100's 746K. TokEval's comparisons hold everything but the tokenizer fixed and condition on no hardware; `CODE_SIGMA`
-  comes from d8 runs, carried to d16 on the GB10 [inference].
-- **Cost** [estimate]: per run, about 1.34B tokens at 68K tokens per second, 5.5 h, and its evaluation (likelihood and
-  one greedy completion per HumanEval+ and MBPP+ problem), about 1 h: ≈ 26 h for the 4 runs, no rental (on the H100:
-  2.4 h, $10); the four vocabularies on one sample load (production's took 6.5 minutes) and the data. Not yet run: each
-  waits for approval.
+- **Two seeds** (`SEEDS`). The seed is the measures' largest noise: the post's fusing tokenizer scored MBPP 0.167,
+  0.072 and 0.018 over three seeds, so one run can miss a real difference [inference], and an undetected one leaves
+  production's pattern and SA-BPE. The parse test pools both seeds' problems, each seed's pair of runs compared
+  problem by problem; the bits-per-byte bound is 1.96 σ = 0.0067. McNemar's test covers the sampling of problems,
+  the seeds training's only in part [inference].
+- **Where it runs.** Every step on the GH200 that then trains production (Hardware: GH200 or H100 SXM5), from the
+  curated store and production's tokenizer pulled at the published revision: `compile` and `pack` of production's
+  data (whose packs size the document set, checked against `data/compiled.sha256`), the vocabularies, the arms' data
+  and intrinsic record on its 64 vCPUs, the 8 runs and their evaluations on its GPU, in one `runs` call, so every arm
+  meets the same kernels and the decided tokenizer's data is built where production trains. TokEval's comparisons hold
+  everything but the tokenizer fixed and condition on no hardware; `CODE_SIGMA` comes from H100 runs at d8, carried to
+  d16 [inference].
+- **Cost** [estimate]: per run about 35 minutes, as d16 at 20 on the H100 SXM5 (30 minutes training at 746K tokens per
+  second, 299 s evaluation), so about 4.7 h for the 8 runs; production's `compile` and `pack` took 32 and 51 minutes on
+  the GB10's 20 cores, the four vocabularies about 6.5 minutes each there, and the arms' data less, on the GH200's 64
+  vCPUs likely shorter: about 7–8 h in all, about $17 at $2.29/h. If the decision changes the tokenizer, production's
+  `compile` and `pack` run again with it before the production run. Not yet run: each step waits for approval.
 
 ### Verification of the experiments' code
 
@@ -908,13 +915,16 @@ Runs train one at a time. Concurrent d8 training processes, 2026-10-20 (file-lev
 
 ## Reproducing the run
 
-On a fresh Lambda `gpu_1x_h100_sxm5` (Ubuntu with Docker and the NVIDIA driver):
+On a fresh Lambda `gpu_1x_gh200` (Ubuntu with Docker and the NVIDIA driver; the H100 SXM5 is the measured fallback):
 
 ```bash
 git clone https://github.com/indrajeetadityaroy9/nanochat nanochat && cd nanochat
-HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts/, tokenizer + data (nanochat/paths.py)
-# log in again (docker group), then from the checkout:
-tmux new -d -s h100 'runs/container.sh python -m scripts.production 2>&1 | tee -a artifacts/logs/production.log'
+HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts/, curated store + tokenizer
+# log in again (docker group), then from the checkout: the training rows, and the download and the rows checked
+runs/container.sh python -m nanochat.data.compile && runs/container.sh python -m nanochat.data.pack
+(cd artifacts && sha256sum --quiet -c data/curated.sha256 data/compiled.sha256)
+# the tokenizer experiment (The tokenizer experiment), then, if it changes the tokenizer, compile and pack again
+tmux new -d -s run 'runs/container.sh python -m scripts.production 2>&1 | tee -a artifacts/logs/production.log'
 ```
 
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
@@ -932,7 +942,8 @@ continues a stopped run from its newest checkpoint and evaluates every checkpoin
 below) reports the likelihood metrics and the benchmarks' pass@1, each scored by its official tools.
 
 **Expected cost:** 76,739 file-level steps at 3.741 s and 4,427 repository-stage steps at about 4.05 s (4,016 ms with
-coordinate-descent tuning, plus its 0.8%), about 85 h, about $365 at $4.29/h.
+coordinate-descent tuning, plus its 0.8%) on the H100 SXM5, about 85 h: about $190–195 on the GH200 at $2.29/h
+(Hardware: GH200 or H100 SXM5), $365 on the H100 SXM5 at $4.29/h.
 
 `runs/release.sh <tag> <repo>` uploads the checkpoints, the run records under `artifacts/` (metrics and
 evaluations) and `results/` to a Hugging Face model repository; `runs/container.sh hf download <repo>
@@ -976,12 +987,14 @@ What the code depends on:
   judge processes, `verify`'s checks, the syntax constraint's masks; the decoder is CPU-bound in constrained mode), so
   64 vCPUs shorten each checkpoint's evaluation, up to 2.5× on those parts [inference]. `char` is unsigned on ARM64
   and signed on x86, so a MultiPL-E C++ program that depends on it can score differently [inference; rare].
-- *Data.* The 290 GB dataset and 11 checkpoints of about 5.6 GB fit either SSD; the loader reads about 2.4 MB/s of
-  tokens, so RAM beyond the page cache it uses adds nothing.
+- *Data.* The 248 GB curated store, the 295 GB of compiled and packed data built from it, an arm's data for the
+  tokenizer experiment and 11 checkpoints of about 5.6 GB fit either SSD; the loader reads about 2.4 MB/s of tokens,
+  so RAM beyond the page cache it uses adds nothing.
 
-Cost: about $190–195 for the 85 h plan on GH200 against $365 on the H100 SXM5, evaluation shorter as well. A GH200 run
-first repeats, in about an hour, the d24 step's peak memory and time in both stages, The model against its
-specification and a resume, recorded beside the H100's; without GH200 capacity, the H100 SXM5 is the measured option.
+Cost: about $190–195 for the 85 h plan on GH200 against $365 on the H100 SXM5, evaluation shorter as well. The GH200 is
+the decided host for the tokenizer experiment and the production run; before them it repeats, in about an hour, the
+d24 step's peak memory and time in both stages, The model against its specification and a resume, recorded beside the
+H100's; without GH200 capacity, the H100 SXM5 is the measured option.
 
 ## Pre-launch verification
 
