@@ -1,11 +1,10 @@
 """
-The training driver. train() pretrains (or resumes) a run: the file-level stage, then the repo-level stage from
+The training loop. train() pretrains (or resumes) a run: the file-level stage, then the repo-level stage from
 repo_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
 data/pack.py). Each start resumes from the tag's newest checkpoint (weights, optimizer state, data position). What a
-step computes is the library's: the optimizers, weight decay and gradient clip (train/optim.py), each step's stage and
-lr (train/schedule.py), the stages' micro-batches in the run's data order (train/stages.py), the micro-batches' loss
-weights (ops/cross_entropy.py step_shares). Callers: scripts/production.py, ablations/harness.py. Metrics:
-train/metrics.py.
+step computes is this package's: the optimizers, weight decay and gradient clip (optim.py), each step's stage and lr
+(schedule.py), the stages' micro-batches in the run's data order (stages.py), the micro-batches' loss weights
+(ops/cross_entropy.py step_shares). Callers: scripts/production.py, ablations/harness.py. Metrics: metrics.py.
 """
 
 import gc

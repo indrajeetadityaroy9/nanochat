@@ -383,7 +383,7 @@ experiment has not run, nor its vocabularies and data (`python -m ablations.toke
 
 - **Arms.** An experiment is production and one arm per alternative at each of its settings, each on the same seeds; an
   arm differs from production only in the fields of `harness.Run`. Every run goes through production's code:
-  `scripts/base_train.train` (the file-level then the repository stage, the production data order by seed, τ-law weight
+  `train/loop.py train` (the file-level then the repository stage, the production data order by seed, τ-law weight
   decay) and `eval/suite.py evaluate`'s likelihood metrics and parse measure (the same held-out rows for every run); its
   model is production's GPT, and its tokenizer and packs production's unless `tokenizer` names an arm of
   `ablations/tokenizer.py`, whose production arm is production's vocabulary on that experiment's documents
@@ -1265,9 +1265,9 @@ lists (Table 5: 110K each for the educational and package instructions).
 - `nanochat/config.py`: vocabulary, head width, mixture, micro-batch, stages, RoPE base, run tag.
 - `nanochat/model/gpt.py`: the model, scaling parameters and FLOPs per token.
 - `nanochat/ops/`, `nanochat/csrc/`: the ops above and the decoder.
-- `nanochat/train/`: `optim.py` (optimizers, weight decay, gradient clip), `schedule.py` (plan, each step's stage, lr
-  multiplier), `stages.py` (token budget, rows per stage, each stage's micro-batches in the run's order),
-  `checkpoint.py`, `metrics.py`.
+- `nanochat/train/`: `loop.py` (the training loop: setup, resume, the steps, checkpoints and records), `optim.py`
+  (optimizers, weight decay, gradient clip), `schedule.py` (plan, each step's stage, lr multiplier), `stages.py` (token
+  budget, rows per stage, each stage's micro-batches in the run's order), `checkpoint.py`, `metrics.py`.
 - `nanochat/eval/`: the checkpoint's evaluation and the run's export (`suite.py`), the likelihood metrics (`bpb.py`),
   the code benchmarks (`code_eval.py`: EvalPlus, arXiv 2305.01210; MultiPL-E; HumanEval infilling, arXiv 2207.14255) and
   the post-generation checks (`verify.py`).
@@ -1278,8 +1278,7 @@ lists (Table 5: 110K each for the educational and package instructions).
   `compile.py`, `pack.py`, `publish.py`; `loader.py` reads the packs into micro-batches; `crate/`, its Rust crate
   (`native.data_crate`): the SA-BPE (arXiv 2604.14053) trainer (and frequency BPE, a tokenizer ablation arm),
   deduplication, repository samples, the packer and the parse-tree leaves of the tokenizer ablation's code metrics.
-- `scripts/`: `production.py` (the production run end to end, a checkpoint's evaluation included), `base_train.py` (the
-  training driver: setup, resume, the step loop, checkpoints and records).
+- `scripts/`: `production.py` (the production run end to end, a checkpoint's evaluation included).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
 - `ablations/`: the ablation experiments and their mechanism (`harness.py`): `lr.py`; `tokenizer.py`, the tokenizer

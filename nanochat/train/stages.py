@@ -13,7 +13,14 @@ import numpy as np
 import torch
 
 from nanochat.config import FILE_STAGE, MICRO_BATCH_TOKENS, REPO_STAGE, Stage
-from nanochat.data.loader import PretrainingBatches, mixture_rows, mixture_weights, packed_rows, row_shards
+from nanochat.data.loader import (
+    PretrainingBatches,
+    mixture_corpora,
+    mixture_rows,
+    mixture_weights,
+    packed_rows,
+    row_shards,
+)
 from nanochat.data.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT, gpt_config, scaling_params
 from nanochat.train.schedule import RunPlan, plan
@@ -33,12 +40,13 @@ def readable_rows(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan) -> dict[s
     """{corpus: rows the stage may read}."""
     rows = {}
     for corpus, need in drawn_rows(tokenizer, stage=REPO_STAGE, run=run).items():
-        per_shard = np.bincount(row_shards(corpus, "train", tokenizer, REPO_STAGE.seq_len))
+        repo_shards = row_shards(corpus, "train", tokenizer, REPO_STAGE.seq_len)
+        per_shard = np.bincount(repo_shards)
         first = len(per_shard) - 1 - int(np.searchsorted(np.cumsum(per_shard[::-1]), need))
-        shards = row_shards(corpus, "train", tokenizer, stage.seq_len)
-        rows[corpus] = np.flatnonzero(shards >= first if stage is REPO_STAGE else shards < first)
+        rows[corpus] = (np.flatnonzero(repo_shards >= first) if stage is REPO_STAGE
+                        else np.flatnonzero(row_shards(corpus, "train", tokenizer, stage.seq_len) < first))
     return {corpus: rows[corpus] if corpus in rows else np.arange(packed_rows(corpus, "train", tokenizer, stage.seq_len))
-            for corpus in mixture_weights(stage.mixture, tokenizer, stage.seq_len)}
+            for corpus in mixture_corpora(stage.mixture)}
 
 
 def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int, device: torch.device,
@@ -59,8 +67,7 @@ def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:
     with torch.device("meta"):
         model = GPT(gpt_config(depth=depth, stage=FILE_STAGE))
     params = scaling_params(model)
-    rows = sum(packed_rows(c, "train", tokenizer, FILE_STAGE.seq_len)
-               for c in mixture_weights(FILE_STAGE.mixture, tokenizer, FILE_STAGE.seq_len))
+    rows = sum(packed_rows(c, "train", tokenizer, FILE_STAGE.seq_len) for c in mixture_corpora(FILE_STAGE.mixture))
 
     def ratio(n):
         return n * MICRO_BATCH_TOKENS / params

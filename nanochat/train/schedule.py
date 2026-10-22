@@ -36,9 +36,10 @@ def plan(*, model: GPT, ratio: float) -> RunPlan:
     LLM, arXiv 2401.02954 §3.1 Eq. 1). Every run, proxy or production, uses its own compute's batch and lr for both
     stages."""
     params = scaling_params(model)
-    compute = non_embedding_flops_per_token(model) * int(ratio * params)
+    tokens = int(ratio * params)
+    compute = non_embedding_flops_per_token(model) * tokens
     total_batch_size = max(1, round(0.2920 * compute ** 0.3271 / MICRO_BATCH_TOKENS)) * MICRO_BATCH_TOKENS
-    num_iterations = int(ratio * params) // total_batch_size
+    num_iterations = tokens // total_batch_size
     return RunPlan(
         total_batch_size=total_batch_size, grad_accum_steps=total_batch_size // MICRO_BATCH_TOKENS,
         num_iterations=num_iterations,

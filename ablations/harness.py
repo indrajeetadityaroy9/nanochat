@@ -2,7 +2,7 @@
 The mechanism the ablation experiments (ablations/lr.py, ablations/tokenizer.py) share. An experiment is production at
 each of its settings (Setting: depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms
 differing from production only in their Run fields, each on the same seeds. A run trains production's GPT by
-scripts/base_train.train and is scored by eval/suite.py evaluate (its likelihood metrics and parse measure), the
+train/loop.py train and is scored by eval/suite.py evaluate (its likelihood metrics and parse measure), the
 production code paths; its plan (batch, steps, peak lr) is the production model's at its depth and ratio
 (production_plan), so every arm matches in tokens and hyperparameters.
 
@@ -41,8 +41,8 @@ from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import BASE_EVAL, LOGS, RESULTS
 from nanochat.train import metrics
 from nanochat.train.checkpoint import checkpoint_name
+from nanochat.train.loop import train
 from nanochat.train.schedule import RunPlan, plan
-from scripts.base_train import train
 
 # The conventional significance level ("Statistical Methods for Research Workers" (1925), §20): the confidence
 # intervals' 1 - ALPHA
@@ -164,7 +164,7 @@ def main(*, experiment: str, settings: list[Setting], production: dict) -> None:
     ablation's: production's vocabulary on its documents)."""
     cells = []
     for setting in settings:
-        # production's settings (scripts/base_train.py main, nanochat/model/gpt.py) at this depth and ratio
+        # production's settings (nanochat/train/loop.py, nanochat/model/gpt.py) at this depth and ratio
         baseline = [dataclasses.replace(Run(n_layer=setting.depth, ratio=setting.ratio, lr_scale=1.0,
                                             tokenizer="production", seed=seed), **production) for seed in setting.seeds]
         cells.append({"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]

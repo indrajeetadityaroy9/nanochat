@@ -1,7 +1,7 @@
 """
 The production run end to end: d24 at the most tokens per scaling parameter its data holds without rereading a
 document (train/stages.py max_ratio), seed 0, the peak lr ablations/lr.py's multiplier times the plan's, both stages, a
-checkpoint at each tenth of the run and at the repository stage's start (scripts/base_train.py); then every
+checkpoint at each tenth of the run and at the repository stage's start (train/loop.py); then every
 checkpoint's evaluation (evaluate) and the run's tracked metrics (eval/suite.py export: results/<tag>.jsonl,
 <tag>-curves.jsonl). Training and each evaluation run in a fresh process of their own. Rerunning resumes training from
 its newest checkpoint and evaluates every checkpoint again.
@@ -23,9 +23,9 @@ from nanochat.eval import suite
 from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import RESULTS
 from nanochat.train.checkpoint import checkpoint_name, load_model
+from nanochat.train.loop import train
 from nanochat.train.schedule import plan
 from nanochat.train.stages import max_ratio
-from scripts.base_train import train
 
 DEPTH, SEED = 24, 0
 # Checkpoints at each tenth of the run (the capability curve over training; the tenth tenth is the final model) and at
