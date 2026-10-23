@@ -226,6 +226,19 @@ Measured (R4) over every raw UltraData-Stack-v3-L2 Python row, 24,671,724 rows a
 | after 2to3 | 873,799 | 3.54% | 4.06 |
 | never: dropped | 373,247 | 1.51% | |
 
+Measured on the first Hub file of the other two Python corpora, fetched through `prepare.fetch`:
+
+| Parses | Stack-Edu Python (5,057,177 rows) | UltraData-Code L2 Python (612,143 rows) |
+|---|---|---|
+| as is | 88.81% | 96.19% |
+| after the placeholders | 0.00% | 0.00% |
+| after the tabs | 0.23% | 0.07% |
+| after 2to3 | 9.00% | 2.83% |
+| never: dropped | 1.95% | 0.90% |
+
+Stack-Edu's text comes from Software Heritage without Stack v3's placeholders, and its Python 2 files are the largest
+share: repair keeps 98.05% of its rows against 88.81%.
+
 - **By failure class,** repair recovers:
   - 774,851 of 782,378 print statements (99.0%);
   - 576,690 of 859,542 other syntax errors (67.1%);
