@@ -26,7 +26,7 @@ Evidence:
 | Filters | every Python file parses as Python 3, after repair; no generated, vendored or C++ syntax filter | 4.1, 4.2 |
 | Deduplication | exact copies only, across every source read, first occurrence kept | 4.3 |
 | Split | production's: 1% of groups (repository, problem or document) held out; repository names case-insensitive | 4.4 |
-| Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, synthetic code 10% (UltraData-Code L3's exercises, Nemotron's rewritten Python and Python transpiled into C++), Kaggle notebooks and CodeXGLUE's Python functions whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
+| Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, synthetic code 30% of code (UltraData-Code L3's exercises, Nemotron's rewritten Python and Python transpiled into C++), Kaggle notebooks and CodeXGLUE's Python functions whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
 | FIM | rate 0.5, joint PSM/SPM, context level, AST-FIM's middles with 10% random spans, repository files only; production's line widening dropped | 6 |
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) across sources | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
@@ -209,7 +209,7 @@ Failing tests were rerun one assert at a time.
 **L3 in pretraining is this design's choice, not the publisher's.** The report says "L3 provides task-oriented data for
 mid-training or SFT" (§2), and all of its evidence is continued pretraining: "start from the same 1B checkpoint,
 obtained after approximately 1.3T tokens of pre-training" (§3.1). The from-scratch evidence is To Code's 10% synthetic
-code (§5.2).
+code and the rephrased-data ratio of Kang et al. (§5.2).
 
 ### 3.2 Codeforces-CoTs
 
@@ -463,8 +463,8 @@ The token budget is 102.6B tokens, as production:
 
 | File-stage group | Sources | Share | Tokens | Supply (production's tokenizer) | Read |
 |---|---|---|---|---|---|
-| Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈75.5% | ≈73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
-| Synthetic code | UltraData-Code L3 (Python, C++), Nemotron's rewriting (Python) and transpilation (C++) | 10% | 9.7B | 143.41B (Parquet footers at production's bytes per token): L3 14.14B and 15.42B (3.826, 3.593), rewriting 82.55B (3.909), transpilation 31.31B (3.651); the UltraData report's Table 17 gives L3 34.24B in an unstated tokenizer | 6.76%, from their extents (§1); weighted by tokens: L3 9.9% and 10.8%, rewriting 57.6%, transpilation 21.8% |
+| Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈59.4% | ≈57.6B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
+| Synthetic code | UltraData-Code L3 (Python, C++), Nemotron's rewriting (Python) and transpilation (C++) | 30% of code: 26.1% | 25.3B | 143.41B (Parquet footers at production's bytes per token): L3 14.14B and 15.42B (3.826, 3.593), rewriting 82.55B (3.909), transpilation 31.31B (3.651); the UltraData report's Table 17 gives L3 34.24B in an unstated tokenizer | 17.65%, from their extents (§1); weighted by tokens: L3 9.9% and 10.8%, rewriting 57.6%, transpilation 21.8% |
 | Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
 | Functions | CodeXGLUE code-to-text, Python train | its supply: ≈0.057% | ≈55M | 55.4M measured (4.028 bytes per token, §3.4) | once, whole |
 | General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, from its extent |
@@ -535,10 +535,22 @@ The token budget is 102.6B tokens, as production:
   HumanEval+ tasks). With one seed per arm, the parse difference is the only evidence on generation, so the split
   stays at 87 : 10 : 3.
 
-**Synthetic code 10%: UltraData-Code L3, Nemotron's rewriting and transpilation, weighted by their tokens.**
-- At 470M, "despite a small weighting of 10%, the inclusion of synthetic data leads to relative improvements of 9% on
-  natural language reasoning, and 44.9% on code benchmarks compared to the baseline of web-code-only"
-  (arXiv 2408.10914 §3.4), "from the perspective of training from scratch". That measurement sets the share.
+**Synthetic code 30% of code (26.1% of the file stage): UltraData-Code L3, Nemotron's rewriting and transpilation,
+weighted by their tokens.** No paper sweeps the share of synthetic code from scratch, so the share is the rephrased-data
+ratio measured from scratch on web text, carried over to code [inference]; repository code keeps 70% of code.
+- Kang et al. (arXiv 2510.01631, more than 1,000 models trained from scratch): "pre-training on rephrased synthetic data
+  alone is not faster than pre-training on natural web texts; while pre-training on 1/3 rephrased synthetic data mixed
+  with 2/3 natural web texts can speed up 5-10x (to reach the same validation loss) at larger data budgets", and "'Good'
+  ratios of synthetic data in training data mixtures depend on the model size and data budget, empirically converging
+  to ~30% for rephrased synthetic data".
+- At 470M from scratch, To Code tried one share: "despite a small weighting of 10%, the inclusion of synthetic data
+  leads to relative improvements of 9% on natural language reasoning, and 44.9% on code benchmarks compared to the
+  baseline of web-code-only", and "a key future lever of improvement is increasing the proportion of such high-quality
+  code data sources" (arXiv 2408.10914 §3.4).
+- Nemotron's rewritten Python alone, annealed for 10B tokens into a 3B model pretrained on 12T tokens: HumanEval 48.2
+  and MBPP 64.0, against SwallowCode's 43.9 and 43.4 (arXiv 2606.10087 Table 6). Real code keeps MBPP: in 100B-token
+  anneals, "Mix1 with no raw code achieves only 38.6, while Mix3 with 20% raw code recovers to 52.9, approaching the
+  raw-only baseline of 58.7" (RQ3), and another rewritten corpus alone fell to 5.6 (RQ1).
 - The report's L2 plus L3 at 1:1 reached EvalPlus 57.06 against L2's 46.95 (Table 6), "replacing half of L2 with L3".
   That is continued pretraining on a 1.3T-token base, so it does not set a from-scratch share.
 - Rewritten code: continual pretraining of Llama-3.1-8B for 50B tokens on SwallowCode (SGCR and SCOR rewriting)
@@ -609,7 +621,7 @@ Comparable models:
 line widening):
 - **Rate 0.5, at the context level.** Each piece of a cut document draws its own FIM decision as it is cut; a FIM
   piece's window leaves room for its three sentinels. Measured on production's packs: 49.96–50.02% of repository pieces
-  and tokens are FIM examples, in both stages. With repository code at 75.5% of the file stage, FIM examples are 37.8%
+  and tokens are FIM examples, in both stages. With repository code at 59.4% of the file stage, FIM examples are 29.7%
   of its tokens [arithmetic].
 - **Order:** SPM with probability 0.5 (Bavarian App. D, "SPM variant 2"), otherwise PSM. Prefix, suffix and middle are
   encoded separately, and the BOS ends the middle.
@@ -755,7 +767,7 @@ Production's tokenizer (`nanochat/data/tokenizer.py`):
 - Measured: production's sample is 72.75 / 8.98 / 18.27% code, text and mathematics by bytes.
   - 18.27% comes from OPC FineWeb Math and UltraData-Math L2, which this design does not read.
   - None comes from the synthetic code (UltraData-Code L3, Nemotron's rewriting and transpilation) or UltraData-Math
-    L3, 13% of the file stage. Production's tokenizer reads them at 3.59–3.91 and 2.92–3.46 bytes per token, against
+    L3, 29.1% of the file stage. Production's tokenizer reads them at 3.59–3.91 and 2.92–3.46 bytes per token, against
     4.13 for OPC FineWeb Math and 3.70 for UltraData-Math L2 (measured).
 - Leaving data out costs it: "Leaving a language out of tokenizer training raises its BPB in every language we
   study", and "both equal weighting and an allocation inverting the shares with respect to the language model training
@@ -824,6 +836,7 @@ tree and history; `publish.pull` fetches a revision where the tokenizer is train
 | Every text normalized (LF, no leading BOM); minimal Python repair; case-insensitive repositories; escaped path comments; atomic, resumable raw files | `corpus/prepare.py`, `corpus/curate.py`, `corpus/sources.py`, `corpus/compile.py` | done (be961a4, af2a7fb) |
 | Nemotron-Pretraining-Code-v2's rewriting and transpilation in the synthetic group; SYNTHETIC_FILE | `corpus/sources.py`, `corpus/schema.py`, `corpus/mixture.py`, `corpus/prepare.py`, `corpus/curate.py` | done (2d6bcc0) |
 | CodeXGLUE code-to-text's Python train split as a supply group; FUNCTION; the stages' supply sources from the mixture | `corpus/sources.py`, `corpus/schema.py`, `corpus/mixture.py`, `corpus/prepare.py`, `corpus/curate.py`, `corpus/pack.py`, `corpus/compile.py` | done (6e11acf) |
+| Synthetic code at 30% of code (26.1% of the file stage), from 10%; its four sources re-prepared at the larger extent | `corpus/mixture.py` | done |
 | Every read source prepared and curated on the GB10; the curated shards published | `prepare`, `curate`, `publish` | running |
 | The tokenizer decided and trained, the corpus compiled and packed, after the pull | `tokenizer`, `compile`, `pack` | after the pull |
 | Training reads the corpus (`config.py`, `train/`, `eval/`, `inference/`); the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |

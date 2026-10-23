@@ -29,14 +29,16 @@ REPOSITORY_SOURCES = ["stack_edu_python", "ultradata_stack_v3_l2_python", "ultra
                       "stack_edu_cpp", "ultradata_stack_v3_l2_cpp", "ultradata_code_l2_cpp"]
 MATH_SOURCES = ["ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultradata_math_l3_multi_style",
                 "ultradata_math_l3_textbook_exercise"]
-# Synthetic code: UltraData-Code L3's exercises and Nemotron's rewritten Python and Python transpiled into C++
+# Synthetic code: UltraData-Code L3's exercises and Nemotron's rewritten Python and Python transpiled into C++, 30% of
+# code: the share of rephrased data that good mixtures converge to from scratch (Kang et al., arXiv 2510.01631)
 SYNTHETIC_SOURCES = ["ultradata_code_l3_python", "ultradata_code_l3_cpp", "nemotron_rewriting_python",
                      "nemotron_transpilation_cpp"]
+SYNTHETIC_SHARE = 0.30 * CODE_SHARE
 
 Share = float | Literal["supply", "rest"]
 FILE_STAGE: dict[str, tuple[Share, list[str]]] = {
     "repository": ("rest", REPOSITORY_SOURCES),
-    "synthetic": (0.10, SYNTHETIC_SOURCES),
+    "synthetic": (SYNTHETIC_SHARE, SYNTHETIC_SOURCES),
     "notebooks": ("supply", ["kaggle_notebooks"]),
     "functions": ("supply", ["codexglue_python"]),
     "text": (0.10, ["climbmix"]),
