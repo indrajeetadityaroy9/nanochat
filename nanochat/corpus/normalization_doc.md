@@ -1,353 +1,453 @@
-# Pretraining corpus: schema, normalization and mixture
+# Pretraining corpus for Python and C++ code generation: specification
 
-Objective: pretraining from scratch for code generation in Python and C++, with the 19 sources of
-`nanochat/corpus/sources.py`. The reference run is production's d24: 195.1M scaling parameters, 102.6B tokens, an 8K
-file-level stage followed by a 32K repository stage, and a linear decay of the learning rate to zero.
+This document specifies `nanochat/corpus` and the parts of `nanochat/data` it replaces: pretraining from scratch for
+code generation in Python and C++, from the 18 sources of `nanochat/corpus/sources.py`. Every rule is a decision; none
+is optional.
 
-## 1. Schema
+The reference run is production's d24:
+- 195.1M scaling parameters, 102.6B tokens, 86,975 steps;
+- an 8K file stage, then a 32K repository stage over the last 5.45% of tokens (steps 82,231–86,975);
+- a linear decay of the learning rate to zero after 40 warmup steps, and document masking.
 
-| Table     | Purpose                                        | Fields                                                 |
-| --------- | ---------------------------------------------- | ------------------------------------------------------ |
-| `samples` | Every pretraining document                     | `id`, `source_id`, `text`, `group_key`, `relative_path` |
-| `sources` | Dataset identification and sampling categories | `source_id`, `name`, `domain`                          |
+Evidence:
+- **Papers** are read as markdown with `hf papers read <arXiv id>`; where that markdown drops a table's body, the
+  source is named. The UltraData-Code report (arXiv 2610.23960, absent from Hugging Face Papers) is read from
+  `tech_report/UltraData_Code_Tech_Report.pdf` in `openbmb/UltraData-Code`.
+- **Measured** figures come from runs on the GB10 over `nanochat/data`'s copies of the sources (R1–R6, E1) and over
+  `nanochat/corpus`'s UltraData-Code L3. Each is described where it is used.
+- `[inference]` marks a conclusion no source states; `[estimate]` a figure that was not counted.
 
-There are eight named columns across two tables. Each sample has five, two of them nullable.
-
-```sql
-CREATE TABLE sources (
-    source_id SMALLINT PRIMARY KEY,
-    name VARCHAR NOT NULL,
-    domain VARCHAR NOT NULL
-);
-
-CREATE TABLE samples (
-    id VARCHAR NOT NULL,      -- hex SHA-1 of text's UTF-8 bytes
-    source_id SMALLINT NOT NULL,
-    text VARCHAR NOT NULL,
-    group_key VARCHAR,        -- the unit a train/validation split must not divide
-    relative_path VARCHAR     -- set only for repository source files
-);
-```
-
-- **`id` is the content hash, not a sequence.** A `nextval()` id depends on the order of ingestion, so it changes
-  between rebuilds. A SHA-1 of the text is the same in every rebuild and gives exact deduplication across sources for
-  free. `nanochat/corpus` already computes it.
-- **`group_key` replaces `repo_name`.** Splits must keep together more than repositories:
-  - repository files and GitHub issues: the repository, `owner/name`;
-  - Codeforces-CoTs: the problem. A problem has up to three rows across the two subsets (one Python generation, the
-    shortest and the longest C++ one), so splitting by sample would put it on both sides. The key is the smallest of
-    the problem's `id` and its `aliases`, because Div. 1 and Div. 2 rounds republish the same problem under two ids;
-  - everything else: NULL, meaning each sample is its own group.
-
-  Repository-level packing (the 32K stage) groups rows that have a `relative_path` by `group_key`.
-- **No index or foreign key on `samples`.** At about 966M rows, constraints only slow bulk loading, and training reads
-  the table sequentially.
-- **Storage.** The text is about 3.6 TB uncompressed [estimate]. One Parquet directory per source, read by DuckDB as
-  `samples`, keeps rebuilds per source and is what the tokenizer and packer already read. A single DuckDB file of that
-  size gains nothing.
-
-### Why reasoning is not a separate domain
-
-Reasoning is not exclusive of the other domains. Codeforces-CoTs is code with reasoning; UltraData-Math L3 is
-mathematics with reasoning. The model should read the whole sequence, steps and answer together, so reasoning stays
-inside `text`. The source identifies which samples are synthetic or reasoning traces, and the mixture (§7) weights
-those sources separately.
-
-## 2. Domains
-
-| Domain             | Contents                                                     | DeepSeek-Coder's category (arXiv 2401.14196 §2)         |
-| ------------------ | ------------------------------------------------------------ | ------------------------------------------------------- |
-| `code`             | repository source files, synthetic exercises, solution traces | source code                                            |
-| `engineering_text` | GitHub issues, Kaggle notebooks                              | English code-related natural language (Markdown, StackExchange) |
-| `mathematics`      | mathematical web text and synthetic mathematics              | none                                                    |
-| `language`         | general English web text                                     | code-unrelated natural language                          |
-
-## 3. Normalization for every source
-
-| Source                                       | `text`                                                                  | `group_key`               | `relative_path`               |
-| -------------------------------------------- | ----------------------------------------------------------------------- | ------------------------- | ----------------------------- |
-| Stack-Edu Python / C++                       | the blob fetched from Software Heritage, decoded with its `src_encoding` | `repo_name`               | `path` without its leading "/" |
-| UltraData-Stack-v3-L2 Python / C++           | `content`                                                               | `repo_name`               | `relative_path`               |
-| UltraData-Code L2 Python / C++               | `content`                                                               | `repo_name`               | `relative_path`               |
-| UltraData-Code L3 Python / C++               | `content` (the task and its solution)                                   | NULL                      | NULL                          |
-| UltraData-Math L1                            | `content`                                                               | NULL                      | NULL                          |
-| UltraData-Math L3 (four formats)             | `content`                                                               | NULL                      | NULL                          |
-| Codeforces-CoTs Python / C++                 | `prompt` followed by `generation`                                       | the canonical problem id  | NULL                          |
-| GitHub issues                                | `text`                                                                  | `repo_name`               | NULL                          |
-| Kaggle notebooks                             | `text`                                                                  | NULL                      | NULL                          |
-| ClimbMix                                     | `text`                                                                  | NULL                      | NULL                          |
-| OPC FineWeb Math                             | `text`                                                                  | NULL                      | NULL                          |
-
-Rules for every source:
-
-- A row without text is dropped. That includes a Stack-Edu blob the bucket does not hold or that does not decode.
-- Repository source files are kept as their language reads them: CR LF and a lone CR become LF, and a leading U+FEFF
-  is dropped (Python Language Reference §2.1.2 and §2.1.4; C++23 [lex.phases] phases 1 and 2). The catalogued
-  Stack-Edu C++ sample, for example, carries CR LF.
-- Every other text is kept verbatim.
-
-### UltraData-Code L3: the publisher's `content`
-
-Use `content`, the publisher's serialization of the task and its solution: the task as a code comment, as unfenced
-text or as Markdown, in 50 / 25 / 25 proportions (UltraData-Code report, App. C.3).
-
-- **This is the format the evidence supports.** In the report's 10B-token runs, L2 plus task-and-solution L3 scored
-  39.84 EvalPlus / 28.45 MultiPL-E. L2 plus all four fields (task, analysis, solution, tests) scored 37.49 / 25.28,
-  because task and solution "concentrates more tokens on the task-solution relationship" (UltraData-Code report).
-- **Task, analysis and solution without tests is untested.** It is the natural ablation arm. The DuckDB expression
-  for it:
-
-```sql
-concat_ws(E'\n\n',
-          '### Task' || E'\n' || task,
-          CASE WHEN analysis IS NOT NULL AND trim(analysis) <> '' THEN '### Analysis' || E'\n' || analysis END,
-          '### Solution' || E'\n' || solution) AS text
-```
-
-- **Tests stay out of both formats.** They are LLM-written candidates, and the four-field format that includes them
-  scored lower.
-- **Not stored:** `raw_content` (the seed file the exercise was written from), `full_content` and the format fields.
-
-### Codeforces-CoTs
-
-- **Text.** `prompt || generation`: the prompt already ends with a line break, and this reproduces `nanochat/data`'s
-  documents row for row. Keep `<think>` and the final code; never split reasoning and code into columns.
-- **Keep only `finish_reason = 'stop'`.** Truncated traces stop before their code: 4.6–7.3% of rows, measured on
-  `nanochat/data`'s copy.
-- **The traces are not verified.** "We did not filter the traces for correctness, but found that around 84% of the
-  Python ones pass the public tests" (card). They show code-associated reasoning; they are not correct solutions.
-- **Length.** 73% of these documents exceed 8,192 tokens (measured on `nanochat/data`'s copy). At 8K, most traces are
-  cut before their code, which argues for the 32K stage or the low-learning-rate tail (§7).
-
-## 4. Source registry
-
-```sql
-INSERT INTO sources VALUES
-(1,  'stack_edu_python',                    'code'),
-(2,  'stack_edu_cpp',                       'code'),
-(3,  'ultradata_stack_v3_l2_python',        'code'),
-(4,  'ultradata_stack_v3_l2_cpp',           'code'),
-(5,  'ultradata_code_l2_python',            'code'),
-(6,  'ultradata_code_l2_cpp',               'code'),
-(7,  'ultradata_code_l3_python',            'code'),
-(8,  'ultradata_code_l3_cpp',               'code'),
-(9,  'ultradata_math_l1',                   'mathematics'),
-(10, 'ultradata_math_l3_qa',                'mathematics'),
-(11, 'ultradata_math_l3_conversation',      'mathematics'),
-(12, 'ultradata_math_l3_multi_style',       'mathematics'),
-(13, 'ultradata_math_l3_textbook_exercise', 'mathematics'),
-(14, 'codeforces_cots_python',              'code'),
-(15, 'codeforces_cots_cpp',                 'code'),
-(16, 'github_issues',                       'engineering_text'),
-(17, 'kaggle_notebooks',                    'engineering_text'),
-(18, 'climbmix',                            'language'),
-(19, 'opc_fineweb_math',                    'mathematics');
-```
-
-`codeforces_cots_python` is the `solutions_py_decontaminated` subset and `codeforces_cots_cpp` is
-`solutions_short_and_long_decontaminated`. `nanochat/corpus/sources.py` currently reads both subsets as one source.
-
-Every mixture weight is per `source_id` (§7). The weights are configuration in the experiment's manifest, not a
-column.
-
-## 5. Deduplication and decontamination
-
-- **Exact duplicates:** one row per `id`, across all sources.
-  - UltraData-Code L2 Python: 34.8% of its rows are exact copies of another row.
-  - UltraData-Math L2-preview: 59.7% (both measured on `nanochat/data`'s copies).
-- **Near duplicates:** MinHash at the file level across every code source. OpenCoder found file-level deduplication
-  "better than … repository level deduplication a lot" (arXiv 2411.04905 §6.1).
-  - Code is where most of the volume goes: `nanochat/data`'s curation kept 25.7M of UltraData-Code L2 Python's 70.1M
-    normalized rows.
-  - The mixture's code supply (§7.4) is counted after this step.
-- **Decontamination:** DeepSeek-Coder's rule (arXiv 2401.14196 §2). Drop a file that shares any 10-gram with the test
-  data. For test strings shorter than 10-grams but at least 3-grams, use exact match. The benchmarks are HumanEval,
-  MBPP, GSM8K and MATH, plus the evaluation suite's MultiPL-E, HumanEval+ and MBPP+.
-  - Codeforces-CoTs' own decontamination covers AIME, GPQA, MATH-500 and LiveCodeBench only (card).
-  - `nanochat/data`'s acquisition analysis found HumanEval task text in UltraData-Stack-v3-L2's Python files.
-
-## 6. What is not stored
-
-| Fields                                        | Decision                                                                 |
-| --------------------------------------------- | ------------------------------------------------------------------------ |
-| Publisher ids, UUIDs, blob ids                | Discard after retrieval (the blob id fetches Stack-Edu's text)           |
-| Codeforces problem ids                        | Keep only the canonical id, as `group_key`                               |
-| Licensing metadata                            | Exclude from the training tables; record in the manifest                 |
-| Timestamps, file sizes, line counts           | Discard                                                                  |
-| Quality and relevance scores                  | Discard after any source-level filtering                                 |
-| API token counts, `finish_reason`             | Discard after the `finish_reason = 'stop'` filter                        |
-| Serialized duplicates (`full_content`, `raw_content`, `messages`) | Discard                                                 |
-| Codeforces statements' fields and tests       | Discard after decontamination                                            |
-| UltraData-Code L3 tests and analysis          | Not in `text` (`content` omits them)                                     |
-| Programming language per sample               | Do not store; the source distinguishes Python from C++                   |
-| Per-sample token counts                       | Do not store; tokenization is downstream                                 |
-| Content hash                                  | Stored as `id` and used for exact deduplication                          |
-
-The experiment's manifest, outside the tables, records:
-
-- each source's Hub revision. `nanochat/corpus/prepare.py` reads every dataset at its latest revision and so far
-  only prints it;
-- the preprocessing rules, the deduplication and decontamination parameters, the mixture weights and the tokenizer;
-- the license records. UltraData-Code, for example, names obligations owed to the source repositories.
-
-## 7. Mixture
-
-### 7.1 DeepSeek-Coder (arXiv 2401.14196)
-
-DeepSeek-Coder (1.3B to 33B, 2T tokens from scratch) trains on "87% source code, 10% English code-related natural
-language corpus, and 3% code-unrelated Chinese natural language corpus".
-
-- **The 10%** is "GitHub's Markdown and StackExchange", used "to enhance the model's understanding of code-related
-  concepts and improve its ability to handle tasks like library usage and bug fixing".
-- **The code** is 798 GB in 603M files over 87 languages. It is filtered with StarCoder's rules, ordered by
-  file dependencies within a repository, deduplicated at the repository level, screened by a compiler and a quality
-  model, and decontaminated (§5).
-- **FIM.** It is applied at the document level before packing, at a rate of 0.5 in PSM mode. In the FIM ablation, a
-  100% FIM rate gave the best infilling and the weakest completion; 50% PSM beat MSP (§3.1).
-- **No mixture ablation.** The paper does not vary these shares.
-- **Its v1.5 is the one comparison.** DeepSeek-Coder-v1.5 continues DeepSeek-LLM-7B on 70% code, 10% Markdown and
-  StackExchange, 7% code-related language, 7% mathematical language and 6% bilingual language (Table 9). It shows "a
-  slight decrease in coding performance" for gains in mathematics and language (§5).
-
-**Mapping onto this corpus.** DeepSeek-Coder's 10% is code-related English, which is this corpus's `engineering_text`.
-Its 3% is general language, and it has no mathematics. Production's `config.MIXTURE` reads 87:10:3 as code : ClimbMix :
-math instead, which matches neither the 10% nor the 3%.
-
-### 7.2 Evidence from comparable models
-
-| Model (arXiv) | Size | Tokens | Code | Code-related language | Math | General language | Mixture evidence |
-|---|---|---|---|---|---|---|---|
-| DeepSeek-Coder (2401.14196) | 1.3–33B | 2T, scratch | 87% | 10% | 0 | 3% | none (design choice) |
-| StarCoder2-3B (2402.19173) | 3B | 3.1T, 4.98 epochs | ≈86% | ≈12%: PRs, issues, notebooks, StackOverflow, docs | ≈0 (exercise sets ≈2%) | 0 | none; OpenWebMath, Wikipedia and arXiv excluded at 3B (§4) [inference: shares from Table 4] |
-| Code Llama (2308.12950) | 7–70B | +500B on Llama 2 | 85% | 8% | 0 | 7% | language "improves the performance of our models on MBPP" (§2.2, no numbers) |
-| OpenCoder (2411.04905) | 1.5B, 8B | 2T (4 epochs) + 100B anneal | ≈90% | ≈10% code-related web | 0 | 0 | the anneal without its algorithmic and synthetic data "drops a lot" (§6.2) |
-| Arctic-SnowCoder (2409.02326) | 1.3B | 500B + 50B + 5B | 100% | 0 | 0 | 0 | HumanEval+ 14.0 → 21.3 → 28.0 over its raw, high-quality and synthetic phases (Table 2) |
-| CodeGemma (2406.11409) | 2B; 7B | +0.5–1T on Gemma | 100%; 80% | in the 20% | in the 20% | in the 20% | none |
-| Granite Code (2405.04324) | 3–34B | 4T code, then 500B | 100%, then 80% | issues within code | in the 20% | in the 20% | none; math and StackExchange added in the second phase |
-| Qwen2.5-Coder (2409.12186) | 0.5–32B | 5.5T on Qwen2.5 | 70% | within code | 10% | 20% | 7B, coding Common / BigCodeBench: 100:0:0 49.8 / 40.3; 70:20:10 48.3 / 38.3; 85:15:5 43.3 / 36.2 (Table 3) |
-| DeepSeek-Coder-V2 (2406.11931) | 16B, 236B MoE | +6T on DeepSeek-V2 | 60%, with Markdown and issues | within code | 10% | 30% | none |
-| To Code, or Not To Code? (2408.10914) | 470M | 200B | 0–100% | 15% replacing code | — | rest | below |
-| UltraData-Code report (2610.23960) | 1.3B | +10B, +100B | L2 and L3, 1:1 | — | — | — | below |
-| UltraData-Math (2602.09003) | 1.2B | 120B, scratch | 17% | — | 8% | 75% | tiered (L1 → L3) beats mixed |
-
-### 7.3 What the evidence settles
-
-1. **Code at about 87%.** Code-first models trained from scratch or specialized for code use 85–90% code; the
-   smallest completion models use 100%.
-   - In a controlled sweep at 470M, code benchmarks rise linearly with the code share up to 100% code, 2.6 times the
-     25% model (arXiv 2408.10914 §3.3).
-   - At 7B, all code scored highest on coding (Qwen2.5-Coder Table 3).
-   - The 60–70% shares of Qwen2.5-Coder, DeepSeek-Coder-V2 and DeepSeek-Coder-v1.5 buy mathematics and general
-     language at some cost to code (v1.5's "slight decrease in coding performance").
-2. **About 10% code-related language, from issues and notebooks.** This is DeepSeek-Coder's 10%, StarCoder2-3B's ≈12%
-   and Code Llama's 8%.
-   - The one controlled measurement is negative for Python. Replacing 15% of a 470M code-only model's data with
-     issues, StackExchange and notebooks (5% each) lowered its code score by 9.4% (arXiv 2408.10914 §3.4).
-   - Ling-Coder-Lite reports that notebooks "significantly enhance" a 1B model's code ability (arXiv 2503.17793
-     §2.3.3, no numbers).
-   - So notebooks, which are code-dense, are read whole and issues fill the rest of the 10%.
-3. **About 3% general language.** This is DeepSeek-Coder's 3% and Code Llama's 7% ("improves … MBPP"). At 100% code,
-   language reasoning drops sharply, by 18.3% relative (arXiv 2408.10914 §3.3). HumanEval and MBPP prompts are prose.
-4. **Mathematics only in the low-learning-rate tail, and little of it.**
-   - No code-first model trained from scratch above includes web mathematics. Code Llama, which has none, loses GSM8K
-     to Llama 2.
-   - Where mathematics was measured for code, the comparison is between kinds of mathematics, not against none. As
-     the 30% verification slice of a decay, UltraData-Math L3 gave MBPP 49.27 / HumanEval 32.93, against L1's 44.71 /
-     29.88 (arXiv 2602.09003 Table 6).
-   - Granite adds mathematics only in its second, annealing-like phase. Hence UltraData-Math L3, in the tail only.
-5. **Synthetic exercises in both phases, concentrated in the tail.**
-   - In a 470M code model, 10% synthetic code (3.2B tokens) raised code benchmarks by 44.9% (arXiv 2408.10914 §3.4).
-   - L2 plus L3 at 1:1 gave EvalPlus 57.06 against L2's 46.95 after 100B tokens (UltraData-Code report Table 6).
-   - Late placement wins:
-     - OpenCoder's anneal on 84% of its pretraining distribution plus algorithmic and synthetic data;
-     - Arctic-SnowCoder's final 5B synthetic tokens;
-     - at 1.2B from scratch, quality tiers ordered L1 → L3 beat mixing them: MBPP 16.34 against 12.06
-       (arXiv 2602.09003 Table 7).
-   - Against staging at small scale: SmolLM2's 135M and 360M models did better with "a single-stage training approach
-     with consistently high-quality data" (arXiv 2502.02737 §6). So L3 enters from the start at a moderate share and
-     rises in the tail.
-6. **Reasoning traces only in the tail.** No paper measures R1 traces in pretraining. Seed-Coder uses
-   `open-r1/codeforces-cots` in its post-training long-chain-of-thought warmup (arXiv 2506.03524 §3.2.2). The source
-   is 0.34B tokens, so it is read once, in the tail.
-7. **Repetition up to about 4 epochs costs little.**
-   - "Training with up to 4 epochs of repeated data yields negligible changes to loss compared to having unique data"
-     (arXiv 2305.16264).
-   - StarCoder2-3B reads its data 4.98 times; OpenCoder-1.5B 4 times.
-   - Arctic-SnowCoder's top 12.5B code tokens read 4 times beat 50B read once on HumanEval(+) and EvoEval, not on
-     MBPP (Table 6).
-   - Production's rule that no document is read twice is stricter than needed. The mixture below needs no second
-     pass except possibly for issues.
-8. **FIM stays at DeepSeek-Coder's 0.5**, half PSM and half SPM as production, on repository source files only
-   (`relative_path IS NOT NULL`). Code Llama's 0.9 cost its 7B model 0.6 points on HumanEval and MBPP (Table 5).
-   Seed-Coder lowers FIM to 0.1 in continued pretraining.
-
-### 7.4 The mixture
-
-The phases follow production's plan:
-
-- **Main:** the file-level stage's first 90% of tokens.
-- **Tail:** the file-level stage's last 10%, where the linear decay puts the learning rate below about 15% of its
-  peak.
-- **Repository:** the 32K stage, unchanged. It reads repository source files only, at `REPO_SHARE` (5.45% of tokens).
-
-Within a group, sources are weighted by their deduplicated tokens (production's `mixture_weights`).
-
-| Group (sources) | Main | Tail | Repository | Tokens of 102.6B | Share |
-|---|---|---|---|---|---|
-| Repository code (1–6) | 79% | 50% | 100% | 79.4B | 77.4% |
-| Synthetic exercises (7, 8) | 8% | 30% | — | 9.9B | 9.6% |
-| Reasoning traces (14, 15) | — | 3% | — | 0.3B | 0.3% |
-| Code-related language (16, 17) | 10% | 7% | — | 9.4B | 9.2% |
-| General language (18) | 3% | 3% | — | 2.9B | 2.8% |
-| Mathematics (10–13) | — | 7% | — | 0.7B | 0.7% |
-| **Tokens** | 87.3B | 9.7B | 5.6B | 102.6B | |
-
-Over the run that is 87.3% code, 9.2% code-related language and 3.5% other: DeepSeek-Coder's 87 : 10 : 3, read
-with its own categories.
-
-The supply, in production's tokenizer:
-
-| Group | Supply | Read |
+| Area | Decision | § |
 |---|---|---|
-| Repository code | 88.8B after `nanochat/data`'s curation of these 6 corpora | 89%, once |
-| Synthetic exercises | 34.2B of task-and-solution text: Python 16.24B, C++ 18.00B (UltraData-Code report Table 15, its tokenizer) | 29% |
-| Reasoning traces | 0.34B | one pass of the `stop` rows |
-| Code-related language | ≈10.1B: issues ≈8.7B [estimate], notebooks 1.42B | ≈93%; issues may need a partial second pass after deduplication |
-| General language | ≈382B [estimate] | 0.8%: about 50 of ClimbMix's 6,543 files |
-| Mathematics (L3) | ≈64B [estimate] | 1% |
+| Sources | each read at its latest Hub revision, resolved once per build and recorded; only the columns standardization reads are fetched | 1 |
+| Schema | one Parquet schema per document category; `id` is the SHA-1 of the document's text | 2 |
+| Text | repository files as their language reads them; UltraData-Code L3 the publisher's `content`; Codeforces-CoTs finished traces only; everything else verbatim | 3 |
+| Filters | go-enry's generated and vendored files dropped; every Python file parses as Python 3, after repair | 4.1, 4.2 |
+| Deduplication | exact copies only, across all sources, first occurrence kept | 4.3 |
+| Split | 1% of groups (repository, problem or document) held out | 4.4 |
+| Mixture | 8K: repository code 75.5%, L3 exercises 10%, Kaggle notebooks 1.5%, ClimbMix 10%, UltraData-Math L3 3%; 32K: whole repositories and Codeforces-CoTs | 5 |
+| FIM | unchanged: rate 0.5, joint PSM/SPM, context level, AST spans with 10% random spans; repository files only | 6 |
+| Sequences | Best-Fit-Decreasing packing and document masking; 32K documents per (repository, language) across sources | 7 |
+| Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
 
-Not read: UltraData-Math L1 (367 GB on the Hub), OPC FineWeb Math, and all but about 50 ClimbMix files. Fetching only
-what the mixture reads cuts the download by about 1 TB.
+## 1. Sources
 
-### 7.5 What the literature leaves open at 195M
+| Source (`sources.py`) | Category (§2) | Text | Read |
+|---|---|---|---|
+| `stack_edu_python`, `stack_edu_cpp` | REPOSITORY_FILE | the Software Heritage blob | yes |
+| `ultradata_stack_v3_l2_python`, `ultradata_stack_v3_l2_cpp` | REPOSITORY_FILE | `content` | yes |
+| `ultradata_code_l2_python`, `ultradata_code_l2_cpp` | REPOSITORY_FILE | `content` | yes |
+| `ultradata_code_l3_python`, `ultradata_code_l3_cpp` | EXERCISE | `content` | in part (§5.1) |
+| `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | TEXT | `content` | in part |
+| `codeforces_cots`: `solutions_py_decontaminated`, `solutions_short_and_long_decontaminated` | CONVERSATION | `prompt`, then `generation` | yes, at 32K |
+| `kaggle_notebooks` | NOTEBOOK | `text` | yes |
+| `climbmix` | TEXT | `text` | in part |
+| `ultradata_math_l1`, `opc_fineweb_math` | TEXT | `content`, `text` | no (§5.2) |
+| `github_issues` | ISSUE | `text` | no (§5.2) |
 
-- **Placement of the synthetic exercises.** The evidence splits between staging at 1.2B (arXiv 2602.09003) and a
-  single stage at 135M and 360M (arXiv 2502.02737). The ablation is L3 at 8% throughout against the staged 8% / 30%
-  above, at equal tokens.
-- **Code-related language against code.** 10% of issues and notebooks against the same tokens of repository code,
-  measured on Python and C++ pass@1. The one controlled result (arXiv 2408.10914 §3.4) evaluated Python only.
+- **Revision.** Each source is read at its latest revision. `prepare` resolves `dataset_info(repo).sha` once per
+  source, so the listing and every file come from one snapshot, and the manifest records it.
+- **Fetch.** `prepare.fetch` reads a Hub Parquet file by ranged reads and keeps only the columns its standardizer
+  reads, 8 files at once. The link bounds the fetch, not a connection. For UltraData-Code L3 that is `content`: 50.1
+  of the release's 340.7 GB (Parquet footers). Stack-Edu's metadata is fetched whole, and its text by blob id from
+  Software Heritage's public S3 bucket.
 
-## 8. Training representation
+## 2. Schema
 
-| Sample type                          | Representation                                                        |
-| ------------------------------------ | --------------------------------------------------------------------- |
-| Repository Python / C++ source files | causal and FIM (rate 0.5); repository-level packing in the 32K stage  |
-| UltraData-Code L3                    | causal: task, then solution                                           |
-| Codeforces-CoTs                      | causal: prompt, reasoning, code                                       |
-| UltraData-Math L3                    | causal mathematical text                                              |
-| Kaggle notebooks                     | causal Markdown and code                                              |
-| GitHub issues                        | causal engineering discussion                                         |
-| ClimbMix                             | causal natural language                                               |
+There is one standardized Parquet file per Hub file, `CORPUS/standardized/<source>/<k>.parquet`, in its category's
+schema (`schema.py`):
 
-- **FIM eligibility is `relative_path IS NOT NULL`**, never `domain = 'code'`. The domain also holds exercises and
-  traces, whose order (task before solution) FIM would break.
-- **Downstream of DuckDB:** document boundaries (the tokenizer's document token between samples), FIM, tokenization
-  and packing.
-- **Explanations are not verified.** Pretraining on explanations next to code lets the model learn how prose relates
-  to implementations. It is neither an alignment objective nor a guarantee that the explanations are correct.
+| Category | Fields | Split group (§4.4) |
+|---|---|---|
+| REPOSITORY_FILE | `id`, `repo_name`, `relative_path`, `content`, `language` | `repo_name` |
+| EXERCISE | `id`, `content`, `language` | `id` |
+| CONVERSATION | `id`, `problem_id`, `content` | `problem_id` |
+| ISSUE | `id`, `repo_name`, `content` | `repo_name` |
+| NOTEBOOK | `id`, `content`, `language` | `id` |
+| TEXT | `id`, `content` | `id` |
 
-Decision: two tables, eight columns (with `group_key` and a content-hash `id`), four domains, no reasoning schema and
-no publisher metadata. Two sources need their text constructed: Codeforces-CoTs (`prompt || generation`, finished
-traces only) and UltraData-Code L3 (the publisher's `content`). The mixture is DeepSeek-Coder's 87 : 10 : 3 with its
-own categories, plus UltraData-Code L3 from the start and synthetic exercises, traces and mathematics concentrated in
-the low-learning-rate tail.
+- **`id` is the hex SHA-1 of `content`'s UTF-8 bytes,** the final text. It is the same in every rebuild and makes
+  exact deduplication a `GROUP BY id`.
+- **`problem_id` is the problem's canonical id,** the smallest of its `id` and `aliases`: Div. 1 and Div. 2 rounds
+  republish one problem under two ids. A problem has up to three rows: one Python generation, and the shortest and
+  longest C++ ones.
+- **`language` is the source's,** a Linguist name for code.
+- **Not stored:**
+  - publisher and blob ids;
+  - quality and relevance scores;
+  - timestamps, sizes, line counts and token counts;
+  - serialized duplicates (`full_content`, `raw_content`, `messages`);
+  - L3's `task`, `analysis`, `solution`, `test` and format fields;
+  - Codeforces-CoTs' statement fields, tests and `finish_reason` (read by the filter, §3.2).
+- **The manifest** records each source's revision, the mixture and stage boundaries, and the tokenizer.
+
+## 3. Standardization
+
+- **Rows without text are dropped,** including a Stack-Edu blob that the bucket does not hold or that does not decode
+  with its `src_encoding`.
+- **Repository source files are kept as their language reads them.** CR LF and a lone CR become LF, and a leading
+  U+FEFF is dropped (Python Language Reference §2.1.2 and §2.1.4; C++23 [lex.phases] phases 1 and 2). Stack-Edu's
+  `relative_path` is its `path` without the leading "/".
+- **Every other text is verbatim.** Kaggle notebooks are the publisher's Markdown: the title, a description of the
+  datasets read, and the code as a script in code blocks.
+
+### 3.1 UltraData-Code L3: the publisher's `content`
+
+**`content` is the task followed by its solution,** with the task as a code comment, as unfenced text or as Markdown.
+- **The format proportions are 50 / 25 / 25,** as the report trains: "code comment, no fence, and Markdown formats with
+  proportions of 50%, 25%, and 25%" (App. C.3). Measured on the first file of each language: Python 0.50 / 0.25 /
+  0.25, C++ 0.499 / 0.248 / 0.252.
+- **It is the variant the report measured best.** In 10B-token runs, L2 plus task-and-solution L3 scored 39.84
+  EvalPlus and 28.45 MultiPL-E, against 37.49 and 25.28 with task, analysis, solution and tests (§3.2.2).
+
+**Natural language is already dense in it.** Measured: the bytes of comments and docstrings were counted with Python's
+`tokenize` (comments, and string-only statements) and with a C++ lexer for `//` and `/* */` outside literals. Natural
+code is 5,000 random files from the first shard of each corpus; L3 is the 800 Python and 480 C++ exercises of the
+execution sample below.
+
+| Text | Python | C++ |
+|---|---|---|
+| Natural repository files (Stack-Edu, Stack-v3-L2, UltraData-Code L2) | 21.7–25.3% | 15.9–20.8% |
+| Files with any comment or docstring | 76.7–90.5% | 63.7–77.2% |
+| L3 solutions alone | 41.4% | 26.7% |
+| L3 `content` (task and solution) | 61.2% | 54.1% |
+| L3 with its analysis added | 75.2% | 72.8% |
+
+- Natural code mixes code with comments and docstrings, and L3 does too, at two to three times the density. Its
+  solutions alone already comment more than natural code does.
+- Adding the analysis would move L3 further from natural code, toward three quarters prose. Together with the report's
+  ablation, this settles `content` without the analysis.
+- At 10% of the file stage, L3 adds about 5.8% natural-language bytes on top of ClimbMix's 10% [estimate].
+
+**No execution filter.** Measured: 4 files per language were sampled, one row group each, giving 800 Python and 480 C++
+exercises. Each solution was run against its own `test`:
+- Python 3.12, solution then test in one file;
+- g++ 13 at C++20, solution and test in one translation unit, because tests often call the function undeclared
+  ("assume the function is defined above");
+- no network, with CPU and memory limits.
+
+Failing tests were rerun one assert at a time.
+
+| Outcome | Python | C++ |
+|---|---|---|
+| Every assert passes | 378 (47.3%) | 231 (48.1%) |
+| Fails, but passes at least half of its asserts | 343 (42.9%) | 151 (31.5%) |
+| Passes fewer than half of its asserts | 57 (7.1%) | 9 (1.9%) |
+| The test does not parse / the program does not compile | 10 (1.3%) | 80 (16.7%), at least 10 for a missing Eigen or `solution.h` |
+| Other: the solution does not run or parse, a timeout, a crash, no asserts | 12 (1.5%) | 9 (1.9%) |
+
+- A failing exercise misses few asserts: the median one passes 80% (Python) and 82% (C++) of its 10 asserts. Per-file
+  pass rates are 41.5–51.0% (Python) and 43.3–53.3% (C++).
+- The test can be the side that is wrong. `count_prefix_suffix_pairs(["ab", "ba", "aba", "bab"]) == 1` asserts what
+  the stated task makes 0, and 10 Python tests do not parse.
+- The release's tests therefore do not tell right solutions from wrong ones. Filtering on them would drop about half of
+  L3, correct solutions included, and the report's gains were measured on the unfiltered release.
+
+**L3 in pretraining is this design's choice, not the publisher's.** The report says "L3 provides task-oriented data for
+mid-training or SFT" (§2), and all of its evidence is continued pretraining from "the same 1B checkpoint, obtained
+after approximately 1.3T tokens" (§3.1). The from-scratch evidence is To Code's 10% synthetic code (§5.2).
+
+### 3.2 Codeforces-CoTs
+
+- **Text:** `prompt` followed by `generation`. The prompt ends with a line break, and `<think>`, the reasoning and the
+  final code stay one sequence.
+- **Finished traces only: `finish_reason = 'stop'`.** Truncated generations are 4.6% (Python) and 7.3% (C++) of rows
+  (measured), "often without `</think>` or code".
+- **Correctness is the card's:** "We did not filter the traces for correctness, but found that around 84% of the
+  Python ones pass the public tests". That covers only the Python rows.
+- **Length:** 72.95% of documents, holding 90.4% of the tokens, exceed 8,192 tokens (measured). At 8K, every piece
+  after the first would lose the problem statement, so the traces are read whole in the 32K stage (§5.1, §7.3).
+
+## 4. Curation
+
+The steps run in order: generated and vendored files, the Python 3 check with repair, exact deduplication, split.
+
+### 4.1 Generated and vendored files
+
+Repository files that go-enry marks vendored (`is_vendor`, on the path) or generated (`is_generated`, on path and text)
+are dropped, as in The Stack v2 (arXiv 2402.19173 §2.1) and `nanochat/data`. Measured share of rows (R1):
+
+| | Stack-Edu | UltraData-Stack-v3-L2 | UltraData-Code L2 |
+|---|---|---|---|
+| Python | 0.13% | 0.28% | 2.63% |
+| C++ | 0.35% | 1.06% | 1.91% |
+
+### 4.2 Python 3 check, with repair
+
+Every Python repository file must parse with `ast.parse` (Python 3.12). Python 2 files are real code, so a file that
+fails is repaired before it is dropped. The steps are applied cumulatively until the file parses, and the kept text is
+the repaired one:
+1. Stack v3's placeholders `<EMAIL>`, `<KEY>`, `<NAME>` and `<PASSWORD>` become identifiers (`<NAME>` → `NAME`).
+2. Leading-indentation tabs are expanded to 8 columns, Python 2's tab rule (Python 2 Language Reference §2.1.8).
+3. 2to3's fixers are applied: every fixer of `fissix.fixes`. fissix is the maintained fork of lib2to3, which Python
+   3.12 lacks.
+
+Measured (R4) over every raw UltraData-Stack-v3-L2 Python row, 24,671,724 rows and 114.0 GB:
+
+| Parses | Rows | Share | GB |
+|---|---|---|---|
+| as is | 22,902,492 | 92.83% | |
+| after the placeholders | 496,271 | 2.01% | 5.36 |
+| after the tabs | 25,915 | 0.11% | 0.13 |
+| after 2to3 | 873,799 | 3.54% | 4.06 |
+| never: dropped | 373,247 | 1.51% | |
+
+- **By failure class,** repair recovers:
+  - 774,851 of 782,378 print statements (99.0%);
+  - 576,690 of 859,542 other syntax errors (67.1%);
+  - 44,444 of 127,305 indentation or tab errors (34.9%).
+
+  Of the dropped rows, 356,237 are rejected by 2to3's Python 2 grammar.
+- **Repair leaves artefacts.** Of 128 sampled 2to3 repairs, 3 gained `print((a, b))` (2to3 keeps Python 2's tuple
+  print) and 3 `list(d.keys())`. Substitution applies to the whole file, so placeholders inside strings and comments
+  change too. R4 used prefixed identifiers; any identifier parses alike.
+- **Without repair,** `nanochat/data`'s check drops 11.3% of Stack-Edu Python, 7.2% of UltraData-Stack-v3-L2 and 3.8%
+  of UltraData-Code L2 (measured).
+- **Why a check at all.** AST-FIM spans need a parse (§6). DeepSeek-Coder screens out "code with syntax errors" with a
+  compiler (§2.4), and StarCoder2 drops notebooks "with syntax errors" (§2.4.2). No paper ablates the check.
+- **C++ has no check.**
+
+### 4.3 Exact deduplication only
+
+**One row per `id` across all sources and both splits.** The first occurrence in `sources.py` order is kept (keep-first,
+as in `nanochat/data`), so Stack-Edu keeps its files before UltraData-Stack-v3-L2 and UltraData-Code L2.
+
+Exact copies add no text, and the heavy tail repeats vendored files hundreds of thousands of times. Measured (R5) over
+the six repository corpora after `nanochat/data`'s normalization: 172,953,953 rows hold 122,801,135 distinct texts, so
+29.0% of rows are copies.
+
+| Copies of a text | Rows | Bytes |
+|---|---|---|
+| 1 | 59.74% | 52.57% |
+| 2 | 18.02% | 13.93% |
+| 3–4 | 4.87% | 5.30% |
+| 5–16 | 4.69% | 8.12% |
+| 17–256 | 5.68% | 8.48% |
+| 257–4,096 | 3.78% | 7.83% |
+| more than 4,096 (216 texts) | 3.24% | 3.77% |
+
+- **The most-copied texts are vendored:** pip's `_structures.py` (350,881 copies), `intranges.py` (182,110), and a
+  `utils.cpp` (158,584). Of the texts with exactly two copies, 85% span corpora.
+- **Texts with more than 16 copies** hold 26.9% of UltraData-Code L2 Python's rows (38.1% of its bytes) and 12.7% of
+  its C++ rows (24.6%). In UltraData-Stack-v3-L2 they hold 0.2–0.3% of rows, and in Stack-Edu 0.02%.
+- **Within each corpus,** exact copies are 0.09% (Stack-Edu Python), 0.06% (C++), 12.57% / 12.18%
+  (UltraData-Stack-v3-L2) and 32.26% / 16.48% (UltraData-Code L2) of rows (R1). They are 0.03% of Codeforces-CoTs and
+  0.61% of ClimbMix.
+- **Repetition is what exact deduplication prevents:** "performance of an 800M parameter model can be degraded to that
+  of a 2x smaller model (400M params) by repeating 0.1% of the data 100 times" (arXiv 2205.10487).
+
+**No near deduplication.** Near duplicates differ in their code, and they stay as training text.
+- What near deduplication would have removed beyond exact copies (R1):
+  - within each corpus: 0.54% / 0.53% (Stack-Edu), 2.09% / 3.67% (UltraData-Stack-v3-L2) and 9.49% / 12.76%
+    (UltraData-Code L2) of rows, Python / C++;
+  - across corpora: 2.9% / 3.7% (UltraData-Stack-v3-L2) and 12.9% / 12.3% (UltraData-Code L2).
+- The evidence set aside: on top of exact deduplication, near deduplication raised The Stack's 350M model from 27.21%
+  to 37.00% HumanEval pass@100 (arXiv 2211.15533 §4), and SantaCoder's by 1–3% (§6.1).
+- Near duplicates can sit on both sides of the split; validation loss counts them.
+
+### 4.4 Split
+
+A group goes to validation when `md5_number(group) % 100 = 0` (`nanochat/data/curate.SPLIT`). The group is the one
+listed in §2's table. Deduplication runs over both splits first, so no validation text has an exact copy in training.
+
+## 5. Mixture
+
+### 5.1 Stages and shares
+
+The token budget is 102.6B tokens, as production:
+
+| Stage | Tokens | Context | Steps | Learning rate (share of peak) |
+|---|---|---|---|---|
+| File | 97.0B | 8K | 0–82,231 | 1.0 → 0.055 |
+| Repository | 5.6B (5.45%, Qwen2.5-Coder's 300B of 5.5T) | 32K | 82,231–86,975 | 0.055 → 0 |
+
+| File-stage group | Sources | Share | Tokens | Supply (production's tokenizer) | Read |
+|---|---|---|---|---|---|
+| Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | 75.5% | 73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's 5.3B |
+| Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 34.2B (report Table 17, in its 73,448-token tokenizer) | ≈28% |
+| Notebooks | Kaggle notebooks | 1.5% | 1.5B | ≈1.50B [estimate]: 1.42B measured after near deduplication, which removed 5.33% | once |
+| General text | ClimbMix | 10% | 9.7B | ≈382B [estimate] | ≈2.5%, about 166 of 6,543 files |
+| Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | ≈64B [estimate; the paper gives 88B in its tokenizer] | ≈4.5% |
+
+- **Code, notebooks included, is 87% of the file stage,** text 10% and mathematics 3%: production's 87 : 10 : 3, with
+  synthetic exercises and step-by-step mathematics in place of production's web mathematics.
+- **The repository stage** holds whole repositories (§7.2), about 94%, and Codeforces-CoTs' finished traces, about 6%:
+  ≈0.3B tokens [estimate: 0.34B measured, less the truncated rows], read once.
+- **Within a group,** sources are weighted by their tokens after curation (production's `mixture_weights`). Within
+  repository code, the 32K stage takes a hash partition of repositories and the file stage the rest.
+- **A group read in part** reads its rows in `id` order, which is a uniform sample because `id` is a hash.
+
+### 5.2 Why these shares
+
+**Code 87%, text 10%, mathematics 3%.**
+- DeepSeek-Coder: "87% source code, 10% English code-related natural language corpus, and 3% code-unrelated Chinese
+  natural language corpus" (arXiv 2401.14196 §2). The shares are not ablated.
+- To Code, or Not To Code? (arXiv 2408.10914 §3.3), a 470M sweep: "100% code leads to a 2.6x increase in the code
+  benchmarks compared to the 25% code model", while language reasoning drops "18.3%" against no code.
+- Qwen2.5-Coder 7B (arXiv 2409.12186 Table 3; the body is in the arXiv HTML, not the hf markdown), Coding Common and
+  BigCodeBench:
+  - 100:0:0 scored 49.8 / 40.3;
+  - 70:20:10 scored 48.3 / 38.3;
+  - 85:15:5 scored 43.3 / 36.2.
+
+  The text calls the last arm "85:10:5" and says 7:2:1 "outperformed the others", which holds for the Average
+  column only.
+- Code Llama: "adding batches sampled from our natural language dataset improves the performance of our models on
+  MBPP" (arXiv 2308.12950 §2.2).
+- E1 (measured) compared production's 87 : 10 : 3 against 97 : 3 : 0. It ran d8 (14.7M scaling parameters, 0.73B
+  tokens), one run per arm at seed 0:
+
+| Metric | 87 : 10 : 3 | 97 : 3 : 0 | Change |
+|---|---|---|---|
+| Code bits per byte, 8K | 0.5686 | 0.5618 | −1.2% |
+| Code bits per byte, 32K | 0.5541 | 0.5469 | −1.3% |
+| Solution bits per byte (HumanEval+, MBPP+, HumanEval-X C++) | 0.6210 | 0.6055 | −2.5% |
+| Text bits per byte | 1.2745 | 1.3974 | +9.6% |
+| Mathematics bits per byte | 1.2563 | 1.3996 | +11.4% |
+| Greedy completions that parse (HumanEval+ / MBPP+) | 78.7% / 24.1% | 70.7% / 17.5% | −7.0 points pooled |
+
+  Ten more points of code bought 1.2–2.5% in code and solution bits per byte. Removing text and mathematics cost
+  10–11% in their bits per byte and 7 points of parse rate. Both arms' pass@1 is at the floor (at most 5 of 164
+  HumanEval+ tasks). With one seed per arm, the parse difference is the only evidence on generation, so the split
+  stays at 87 : 10 : 3.
+
+**Synthetic exercises 10%.**
+- At 470M, "despite a small weighting of 10%, the inclusion of synthetic data leads to relative improvements of 9% on
+  natural language reasoning, and 44.9% on code benchmarks compared to the baseline of web-code-only" (arXiv
+  2408.10914). That is the from-scratch measurement, and it sets the share.
+- L2 plus L3 at 1:1 reached EvalPlus 57.06 against L2's 46.95 after 100B tokens (report Table 6). That run is
+  continued pretraining on a 1.3T-token base, so it does not set a from-scratch share [inference].
+
+**Mathematics: UltraData-Math L3, step by step.**
+- Worked solutions carry stepwise reasoning, and the one code-relevant measurement favours the synthetic tier. As the
+  30% slice of a ~105B-token decay on a 1.3T-token base, UltraData-Math L3 gave MBPP 49.27 and HumanEval 32.93,
+  against L1's 44.71 and 29.88 (arXiv 2602.09003 Table 6).
+- Precedents: Qwen2.5-Coder keeps 10% mathematics; Granite adds web mathematics in phase 2 (arXiv 2405.04324 §2.4,
+  §4.1).
+- Web mathematics (UltraData-Math L1, OPC FineWeb Math) is not read.
+
+**Codeforces-CoTs in the 32K stage.**
+- Its traces pair a problem with stepwise reasoning and then code, the pairing that code generation needs.
+- No paper measures them in pretraining. Seed-Coder trains its distilled reasoning model on them (arXiv 2506.03524
+  §3.2.1), not its base model.
+- At ≈0.3B tokens, one whole pass costs about 6% of the 32K stage.
+
+**Kaggle notebooks 1.5%, GitHub issues none.**
+- Notebooks are scripts with prose around them; StarCoder2 trains on Kaggle notebooks (arXiv 2402.19173 §2.4).
+- Issues are discussion. In a 470M code-only model, replacing 15% of code with issues, StackExchange and notebooks
+  (5% each) caused a "9.4% drop in code evaluation", measured in Python (arXiv 2408.10914 §3.4).
+- Notebooks read once are a tenth of that 15% [inference: a share that small costs little].
+
+**One file-stage mixture, no late phase.**
+- SmolLM2's 135M and 360M models "benefited from a single-stage training approach with consistently high-quality data"
+  (arXiv 2502.02737 §6).
+- The one comparison of placement, quality tiers in consecutive thirds against mixed, scored near the floor: HumanEval
+  3.05 against 2.44 (arXiv 2602.09003 Table 7, 1.2B).
+- Under a linear decay to zero, a late phase over the file stage's last 10% would carry 1.9% of the learning-rate
+  integral.
+
+Comparable models:
+
+| Model (arXiv) | Size; tokens | Code | Code-related language | Mathematics | General language |
+|---|---|---|---|---|---|
+| DeepSeek-Coder (2401.14196) | 1.3–33B; 2T from scratch | 87% | 10%: Markdown, StackExchange | 0 | 3% Chinese |
+| StarCoder2-3B (2402.19173) | 3B; 3.1T, 4.98 epochs | 84.5–85.8% | ≈12%: PRs, issues, notebooks, StackOverflow, docs | ≈0.9% exercises, with GSM8K | 0 |
+| Code Llama (2308.12950) | 7–34B; +500B on Llama 2 | 85% | 8% "discussions about code" | 0 | 7% |
+| Qwen2.5-Coder (2409.12186) | 0.5–32B; 5.2T + ≈300B repository-level | 70% | Text-Code Grounding | 10% | 20% |
+| To Code (2408.10914) | 470M; 200B | 0–100% sweep | 15% replacing code: −9.4% | — | the rest |
+| UltraData-Code report (2610.23960) | 1.3B; +10B and +100B on 1.3T | L2 + L3, 1:1 | — | — | — |
+
+## 6. Fill-in-the-middle (unchanged)
+
+`nanochat/data/pack.py` and `crate/pack.rs` keep their mechanism:
+- **Rate 0.5, at the context level:** FIM applies per packed piece after cutting.
+- **Order:** SPM with probability 0.5 (Bavarian App. D variant 2), otherwise PSM. Prefix, suffix and middle are
+  encoded separately, and the BOS ends the middle.
+- **Middle:**
+  - a random character span with probability 0.1;
+  - otherwise an AST span: a single syntactic node (0.5) or an aligned span of sibling nodes, widened to whole lines
+    with probability 0.5. The line widening is the project's own addition.
+  - A piece that does not parse takes a random span.
+- **Determinism:** the draw is keyed by document and piece, so it is the same in every run and seed.
+- **Eligibility:** repository source files, train split, both stages. Validation is left to right. L3, Codeforces-CoTs,
+  notebooks and text are not eligible: FIM would put a solution before its task [inference; no source measures FIM on
+  exercises].
+- **Measured:**
+  - ≈42.7% of the file stage's training targets and ≈50% of the 32K stage's are FIM examples (production's mixture);
+  - C++ pieces fall back to random spans 4.6–11.9% of the time, so C++'s random share is 14–21%;
+  - 0–5.7% of PSM middles cross a file boundary inside a repository sample.
+
+| Source (scale) | Finding |
+|---|---|
+| Bavarian et al. (2207.14255), 50M–6.9B from scratch | at 50% FIM "the left-to-right test loss is unaffected" (§4.1); up to 90% no degradation (§4.2); joint PSM+SPM (§4.3); "Context-level FIM yields a consistent and significant improvement over document-level FIM" (§4.4); "always including some character-level random spans" (§8.1) |
+| AST-FIM (2506.00204), 1B and 8B | "90% use our AST-FIM, and 10% use Rand-FIM", 50% PSM and 50% SPM (§5.1); Rand-FIM loses on HumanEval+ and MBPP+, AST-FIM stays near the left-to-right baseline (§6.1) |
+| SantaCoder (2301.03988), 1.1B | random spans at 0.5: pass@100 "2-4% lower on HumanEval and 1% lower on MBPP" than no FIM (§6.1) |
+| Code Llama (2308.12950), 7B continued | rate 0.9: "loses 0.6 percentage points on average across HumanEval and MBPP pass@1, pass@10 and pass@100" (§3.2) |
+| DeepSeek-Coder (2401.14196), 1.3B, Python | PSM only; 100% FIM gave the best infilling and "the weakest code completion"; 0.5 chosen (§3.1.2) |
+
+The left-to-right cost expected at 195M is small: none at 50M–6.9B (Bavarian), and none with AST spans at 1B (AST-FIM)
+[inference].
+
+## 7. Sequence construction
+
+### 7.1 Packing and masking (unchanged)
+
+- **Packing: Best-Fit-Decreasing per curated shard,** no token discarded; fill is 99.74–99.99% at 8K (measured).
+  Against concatenate-and-split, best-fit packing raised a 7B code model's HumanEval pass@1 from 17.54% to 18.32% and
+  pass@100 from 35.28% to 40.57% (arXiv 2404.10830 Table 9).
+- **Masking: every piece is its own attention segment.** Intra-document masking lowered GitHub perplexity by 1.3 at
+  2K and 2.0 at 8K: "code pre-training is more adversely affected by the distraction of unrelated context" (arXiv
+  2402.13991 §3.2, 1.3B).
+- **Cuts:** long documents are cut at statement boundaries, else at line ends. This is the project's own rule. A cut
+  piece starts after a BOS, without its document's beginning: ≈16% of file-stage tokens (measured).
+
+### 7.2 Repository documents for the 32K stage
+
+**One document per (`repo_name`, `language`) across the six repository sources,** after deduplication.
+- Files come in dependency order, then the rest by path.
+- Each file is preceded by a comment line in its language holding its `relative_path` (`# path`, `// path`).
+  DeepSeek-Coder does the same: "a comment indicating the file's path is added at the beginning of each file"
+  (arXiv 2401.14196 §2.2).
+
+Measured (R3) against the current samples, which are import-connected components within one corpus:
+
+| 32K stage | Current | Per (repository, language) |
+|---|---|---|
+| Targets with more than 8K tokens of context | 14.7% | 39.0% |
+| Tokens in multi-file documents | 33.5% | 88.6% |
+
+- Documents longer than 32K hold 35.6% of the tokens; they are cut as in §7.1.
+- 19.7% of repositories appear in more than one corpus, which grouping across sources reunites.
+
+Evidence:
+- "Group by language and repo" beat "Group by repo": HumanEval(+) 17.1 (15.9) against 12.8 (10.4), and MBPP(+) 33.9
+  (27.8) against 30.7 (25.9) (Arctic-SnowCoder, arXiv 2409.02326 Table 3, 1.3B).
+- DeepSeek-Coder's dependency order helped cross-file completion in Java, TypeScript and C#, not Python (§4.3).
+
+### 7.3 Long traces
+
+Codeforces-CoTs is read at 32K, whole up to 32K tokens. Code Llama applies FIM only "to documents that are not cut
+across multiple model contexts" (§2.3), for the same reason: a piece without its problem is a solution to nothing.
+
+## 8. Training dynamics
+
+- **Schedule: linear decay to zero.** It is "around 0.84% better than the optimal WSD" at 610M and 80 tokens per
+  parameter (arXiv 2502.15938 §4.2).
+- **One switch, at 94.55% of tokens and 5.5% of peak learning rate.** Context, rows per micro-batch and mixture change
+  together. Crystal's 5% → 63% code switch cost "about 70% of Phase 2 to restore" HellaSwag (arXiv 2411.04156 §5.1,
+  7B); this switch is far smaller [inference]. Per-source loss is logged over the first few hundred steps after it.
+- **Budget: 102.6B tokens, no document read twice.** Each group's draw is below its supply (§5.1), so production's
+  `max_ratio` rule holds without epochs.
+
+## 9. Changes to the code
+
+| Change | Where | Status |
+|---|---|---|
+| Fetch only the columns standardization reads; EXERCISE holds `id`, `content`, `language` | `corpus/prepare.py`, `corpus/schema.py` | done (3f9f335) |
+| Codeforces-CoTs: `finish_reason = 'stop'` rows only; `problem_id` the smallest of `id` and `aliases` | `corpus/prepare.py` | to do |
+| Record each source's revision in the manifest | `corpus/prepare.py` | to do |
+| go-enry filter; Python 3 check with repair, fissix in the image | new `corpus` curation step; `docker/Dockerfile` | to do |
+| Exact deduplication by `id`, keep-first across sources; no near deduplication | new `corpus` curation step | to do |
+| Mixture of §5.1; Codeforces-CoTs and whole repositories in the 32K stage | `config.py`, `data/loader.py`, `train/stages.py` | to do |
+| Repository documents per (repository, language) across sources, with path comments | `data/curate.py`, `crate/repository.rs`, compile, 32K pack | to do |
+| FIM, packing, masking, schedule | — | unchanged |
