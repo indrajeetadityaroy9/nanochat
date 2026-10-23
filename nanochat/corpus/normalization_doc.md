@@ -345,7 +345,7 @@ The token budget is 102.6B tokens, as production:
 | Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 29.56B measured: Python 14.14B (3.826 bytes per token), C++ 15.42B (3.593), on a 100,000-row sample each; the report's Table 17 gives 34.24B in an unstated tokenizer | ≈33% |
 | Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
 | General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, ≈180 files |
-| Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | QA alone 22.8B: 66.5 GB of text (Parquet footers) at 2.92 bytes per token (20,000-row sample) | under 14% of QA's, with the 32K stage's |
+| Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | 82.5B measured: QA 22.8B, Conversation 18.3B, Multi-Style 17.4B, Textbook-Exercise 24.0B; 260.5 GB of text (Parquet footers) at 2.92–3.46 bytes per token (20,000-row samples); the paper gives 88B in an unstated tokenizer | 3.7% with the 32K stage's |
 
 | Repository-stage group | Sources | Share | Tokens |
 |---|---|---|---|
@@ -589,7 +589,9 @@ Production's tokenizer (`nanochat/data/tokenizer.py`):
 **Retrain it on this corpus's sources, at the training mixture's shares.**
 - Measured: production's sample is 72.75 / 8.98 / 18.27% code, text and mathematics by bytes.
   - 18.27% comes from OPC FineWeb Math and UltraData-Math L2, which this design does not read.
-  - None comes from UltraData-Code L3 or UltraData-Math L3, 13% of the file stage.
+  - None comes from UltraData-Code L3 or UltraData-Math L3, 13% of the file stage. Production's tokenizer reads them
+    at 3.59–3.83 and 2.92–3.46 bytes per token, against 4.13 for OPC FineWeb Math and 3.70 for UltraData-Math L2
+    (measured).
 - Leaving data out costs it: "Leaving a language out of tokenizer training raises its BPB in every language we
   study", and "both equal weighting and an allocation inverting the shares with respect to the language model training
   data increase their BPB" (arXiv 2610.12144, abstract; natural languages).
