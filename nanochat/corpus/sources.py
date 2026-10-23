@@ -11,7 +11,8 @@ language. UltraData-Math (arXiv 2602.09003) releases L1, Common Crawl's math pag
 per crawl snapshot, and L3, documents synthesized in four formats, a source each. Codeforces-CoTs holds DeepSeek-R1's
 reasoning traces and solutions to Codeforces problems: of its decontaminated subsets, the Python solutions and the C++
 solutions (short and long). issues-kaggle-notebooks holds StarCoder2's GitHub issues and Kaggle notebooks
-(arXiv 2402.19173) reformatted as text, a source each.
+(arXiv 2402.19173) reformatted as text, a source each. opc-fineweb-math-corpus holds the math pages OpenCoder's
+fastText classifiers recalled from FineWeb (arXiv 2411.04905).
 """
 
 from dataclasses import dataclass
@@ -72,6 +73,8 @@ SOURCES = {
     "github_issues": Source(ISSUE, *ISSUES_KAGGLE, {"English": "issues/*.parquet"}, "text"),
     "kaggle_notebooks": Source(NOTEBOOK, *ISSUES_KAGGLE, {"Python": "kaggle/*.parquet"}, "text"),
     "climbmix": Source(TEXT, *CLIMBMIX, {"English": "shard_*.parquet"}, "text"),
+    "opc_fineweb_math": Source(TEXT, "OpenCoder-LLM/opc-fineweb-math-corpus",
+                               "858b10c748e6c95e0cbc5ebd38543b1c4699857b", {"English": "data/train-*.parquet"}, "text"),
 }
 
 

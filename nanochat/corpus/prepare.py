@@ -141,7 +141,7 @@ STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
                "ultradata_math_l1": text, "ultradata_math_l3_qa": text, "ultradata_math_l3_conversation": text,
                "ultradata_math_l3_multi_style": text, "ultradata_math_l3_textbook_exercise": text,
                "codeforces_cots": conversation, "github_issues": issue, "kaggle_notebooks": notebook,
-               "climbmix": text}
+               "climbmix": text, "opc_fineweb_math": text}
 
 
 def standardize_file(task: tuple[str, int, Path]) -> None:
