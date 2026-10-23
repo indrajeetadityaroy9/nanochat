@@ -173,11 +173,12 @@ def main() -> None:
     part_sources = list(mixture.PART)
     file_whole = {s: [i for i, p in enumerate(sorted(int(f.stem) for f in curated_dir(s, "train").iterdir()))
                       if p not in trailing] for s in mixture.REPOSITORY_SOURCES}
-    file_whole["kaggle_notebooks"] = list(range(shard_count("kaggle_notebooks", "train")))
+    file_whole |= {s: list(range(shard_count(s, "train"))) for s in mixture.supply(mixture.FILE_STAGE)}
     file_weights, taken = stage(mixture.FILE_STAGE, seq_len=mixture.FILE_SEQ, n_rows=mixture.FILE_ROWS,
                                 whole=file_whole,
                                 part={s: list(range(shard_count(s, "train"))) for s in part_sources})
-    repo_whole = {c: list(range(shard_count(c, "train"))) for c in [*mixture.REPOSITORIES.values(), "codeforces_cots"]}
+    repo_whole = {c: list(range(shard_count(c, "train")))
+                  for c in [*mixture.REPOSITORIES.values(), *mixture.supply(mixture.REPO_STAGE)]}
     repo_weights, _ = stage(mixture.REPO_STAGE, seq_len=mixture.REPO_SEQ, n_rows=mixture.REPO_ROWS,
                             whole=repo_whole,
                             part={s: list(range(taken[s], shard_count(s, "train")))

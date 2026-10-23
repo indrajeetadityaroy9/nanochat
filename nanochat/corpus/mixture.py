@@ -38,6 +38,7 @@ FILE_STAGE: dict[str, tuple[Share, list[str]]] = {
     "repository": ("rest", REPOSITORY_SOURCES),
     "synthetic": (0.10, SYNTHETIC_SOURCES),
     "notebooks": ("supply", ["kaggle_notebooks"]),
+    "functions": ("supply", ["codexglue_python"]),
     "text": (0.10, ["climbmix"]),
     "math": (0.03, MATH_SOURCES),
 }
@@ -61,7 +62,7 @@ BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.
                    "ultradata_code_l2_python": 3.709, "stack_edu_cpp": 3.065, "ultradata_stack_v3_l2_cpp": 3.015,
                    "ultradata_code_l2_cpp": 2.935, "kaggle_notebooks": 3.459, "codeforces_cots": 3.536,
                    "ultradata_code_l3_python": 3.826, "ultradata_code_l3_cpp": 3.593, "climbmix": 4.275,
-                   "nemotron_rewriting_python": 3.909, "nemotron_transpilation_cpp": 3.651,
+                   "nemotron_rewriting_python": 3.909, "nemotron_transpilation_cpp": 3.651, "codexglue_python": 4.028,
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
 # How much better a retrained tokenizer may compress a source than production's: "the NSL on any given subset only
@@ -76,6 +77,11 @@ def draw(group: str) -> float:
     """The tokens both stages draw of a group read in part (its share is a fraction in each stage that has it)."""
     return sum(cast(float, stage[group][0]) * tokens
                for stage, tokens in ((FILE_STAGE, FILE_TOKENS), (REPO_STAGE, REPO_TOKENS)) if group in stage)
+
+
+def supply(stage: dict[str, tuple[Share, list[str]]]) -> list[str]:
+    """The sources of a stage's "supply" groups, each read whole."""
+    return [s for share, sources in stage.values() if share == "supply" for s in sources]
 
 
 def source_shares(stage: dict[str, tuple[Share, list[str]]], stage_tokens: int, tokens: Mapping[str, float]

@@ -2,7 +2,7 @@
 Curate the sources the mixture reads (mixture.READ) from their standardized files (prepare.py), in the steps of the
 design document (normalization_doc.md §4):
 
-1. check: every Python file, a repository's or a synthetic one, must parse with ast.parse (this image's Python 3.12).
+1. check: every Python file, a repository's, a synthetic one or a function, must parse with ast.parse (Python 3.12).
    A file that does not is repaired by the smallest set of steps that makes it parse (repaired): Stack v3's
    placeholders <EMAIL>, <KEY>, <NAME> and <PASSWORD> become the bare word; leading-indentation tabs are expanded to 8
    columns, Python 2's rule (Python 2 Language Reference §2.1.8); every 2to3 fixer of fissix (the maintained fork of
@@ -41,7 +41,7 @@ import pyarrow.parquet as pq
 
 from nanochat.corpus import mixture
 from nanochat.corpus.prepare import COMPRESSION, sha1
-from nanochat.corpus.schema import CONVERSATION, ISSUE, REPOSITORY_FILE, SAMPLE_FILE, SPLIT, SYNTHETIC_FILE
+from nanochat.corpus.schema import CONVERSATION, FUNCTION, ISSUE, REPOSITORY_FILE, SAMPLE_FILE, SPLIT, SYNTHETIC_FILE
 from nanochat.corpus.sources import SOURCES, checked_path, curated_dir, standardized_path
 from nanochat.native import data_crate
 from nanochat.paths import CORPUS
@@ -243,7 +243,8 @@ def shard_documents(source: str, paths: list[Path], drops: pa.Table) -> None:
     """A document source's rows without the dropped ones: val rows in one shard, train rows in id order over SPLIT
     shards."""
     spec = SOURCES[source]
-    group = {CONVERSATION: "n.problem_id", ISSUE: "lower(n.repo_name)"}.get(spec.schema, "n.id")
+    group = {CONVERSATION: "n.problem_id", ISSUE: "lower(n.repo_name)", FUNCTION: "lower(n.repo_name)"}.get(
+        spec.schema, "n.id")
     columns = ", ".join(f"n.{name}" for name in spec.schema.names)
     with database() as con:
         con.register("drops", drops)
@@ -264,8 +265,8 @@ def curate() -> None:
     """Every read source's curated shards, from its standardized files (the Python repository sources' checked ones)."""
     data_crate()  # built once here, before the workers load it
     files = {source: len(list(standardized_path(source, 0).parent.iterdir())) for source in mixture.READ}
-    python = [s for s in mixture.READ
-              if SOURCES[s].schema in (REPOSITORY_FILE, SYNTHETIC_FILE) and SOURCES[s].language == "Python"]
+    python = [s for s in mixture.READ if SOURCES[s].schema in (REPOSITORY_FILE, SYNTHETIC_FILE, FUNCTION)
+              and SOURCES[s].language == "Python"]
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
         for source in python:
             check(source, files[source], pool)

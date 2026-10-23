@@ -224,11 +224,19 @@ def notebook(t: pa.Table, spec: Source) -> pa.Table:
                     schema=NOTEBOOK)
 
 
+def function(t: pa.Table, spec: Source) -> pa.Table:
+    """A CodeSearchNet function: its code, which holds its docstring, and its repository."""
+    content = lines(t["code"])
+    return pa.table({"id": sha1(content), "repo_name": t["repo"], "content": content,
+                     "language": pa.repeat(spec.language, t.num_rows)}, schema=spec.schema)
+
+
 STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
                "ultradata_stack_v3_l2_python": repository_file, "ultradata_stack_v3_l2_cpp": repository_file,
                "ultradata_code_l2_python": repository_file, "ultradata_code_l2_cpp": repository_file,
                "ultradata_code_l3_python": synthetic, "ultradata_code_l3_cpp": synthetic,
                "nemotron_rewriting_python": synthetic, "nemotron_transpilation_cpp": synthetic,
+               "codexglue_python": function,
                "ultradata_math_l1": text, "ultradata_math_l3_qa": text, "ultradata_math_l3_conversation": text,
                "ultradata_math_l3_multi_style": text, "ultradata_math_l3_textbook_exercise": text,
                "codeforces_cots": conversation, "github_issues": issue, "kaggle_notebooks": notebook,
@@ -240,7 +248,7 @@ def columns(source: str) -> list[str]:
     spec = SOURCES[source]
     return {repository_file: ["repo_name", "relative_path", "content"], synthetic: ["content"], text: [spec.text],
             conversation: ["id", "prompt", "generation", "finish_reason"], issue: ["repo_name", "text"],
-            notebook: ["text"]}[STANDARDIZE[source]]
+            notebook: ["text"], function: ["repo", "code"]}[STANDARDIZE[source]]
 
 
 def standardize_file(task: tuple[str, int, Path]) -> None:

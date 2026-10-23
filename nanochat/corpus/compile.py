@@ -128,9 +128,11 @@ def train_parts() -> list[int]:
 
 def stage_parts() -> list[int]:
     """The fewest trailing train partitions whose repository documents (both languages, after the path rule) hold the
-    32K stage's draw of repository code: the code share of its tokens less Codeforces-CoTs', which it reads whole. A
-    partition at a time, from the last: each task holds a partition of its language's sources twice at peak."""
-    need = mixture.CODE_SHARE * mixture.REPO_TOKENS - shard_tokens("codeforces_cots", "train").sum()
+    32K stage's draw of repository code: the code share of its tokens less its supply sources' (Codeforces-CoTs), which
+    it reads whole. A partition at a time, from the last: each task holds a partition of its language's sources twice
+    at peak."""
+    need = mixture.CODE_SHARE * mixture.REPO_TOKENS - sum(shard_tokens(s, "train").sum()
+                                                         for s in mixture.supply(mixture.REPO_STAGE))
     parts = train_parts()
     with ProcessPoolExecutor(len(mixture.REPOSITORIES)) as pool:
         tokens = (sum(len(ids) for ids, _ in pool.map(repository_documents, [(language, "train", part)

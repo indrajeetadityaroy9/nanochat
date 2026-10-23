@@ -20,8 +20,7 @@ import pyarrow.parquet as pq
 
 from nanochat.config import VOCAB_SIZE
 from nanochat.corpus import mixture
-from nanochat.corpus.schema import REPOSITORY_FILE
-from nanochat.corpus.sources import SOURCES, curated_dir, texts
+from nanochat.corpus.sources import curated_dir, texts
 from nanochat.data import tokenizer as production
 from nanochat.native import data_crate
 from nanochat.paths import CORPUS
@@ -55,13 +54,13 @@ def content_bytes(path: Path) -> int:
 def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str], list[str]]:
     """Row group g of a curated train shard: the texts (sources.texts) and authorship units of its rows that the
     source's systematic sample takes, `start` the source's rows before the group: row i when floor((i + 1) * fraction)
-    exceeds floor(i * fraction). A repository file's unit is its repository (one name across the sources that hold it);
-    any other document's is itself."""
+    exceeds floor(i * fraction). A row naming its repository (a repository file, a function) has that repository as its
+    unit, its name lowercased (one unit across the sources that hold it); any other document is its own."""
     source, path, g, start, fraction = task
     group = pq.ParquetFile(path).read_row_group(g)
     rows = np.arange(start, start + group.num_rows)
     batch = group.take(np.flatnonzero(np.floor((rows + 1) * fraction) > np.floor(rows * fraction)))
-    if SOURCES[source].schema is REPOSITORY_FILE:
+    if "repo_name" in batch.column_names:
         units = ["repo:" + name.lower() for name in batch["repo_name"].to_pylist()]
     else:
         units = ["doc:" + id for id in batch["id"].to_pylist()]

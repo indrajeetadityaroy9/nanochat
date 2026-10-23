@@ -8,6 +8,8 @@ EXERCISE: a synthetic programming exercise as the publisher serializes its task 
 code comment, unfenced text or Markdown, then the solution), with its language.
 SYNTHETIC_FILE: a source file an LLM wrote from a repository file (rewritten in its language, or transpiled into
 another), with its language; no repository or path.
+FUNCTION: a function of a repository file with its docstring, as the publisher extracted it (CodeSearchNet), with its
+repository and language.
 CONVERSATION: a codeforces_cots record as one document, the R1 prompt (the problem and its instructions) followed by
 its generation (a reasoning trace and a solution), with its problem's id (problem_id), which every generation of the
 problem shares.
@@ -19,8 +21,8 @@ TEXT: a web document.
 SAMPLE_FILE: a curated repository file and its import-connected sample (curate.py): the files of a sample are
 consecutive rows, in the sample's dependency order.
 
-The split (curate.py): a document's group is val when md5_number(group) % SPLIT is 0. The group is the repository
-(REPOSITORY_FILE, ISSUE), the problem (CONVERSATION), else the document.
+The split (curate.py): a document's group is val when md5_number(group) % SPLIT is 0. The group is the repository, its
+name lowercased (REPOSITORY_FILE, FUNCTION, ISSUE), the problem (CONVERSATION), else the document.
 """
 
 import pyarrow as pa
@@ -43,6 +45,13 @@ EXERCISE = pa.schema([
 
 SYNTHETIC_FILE = pa.schema([
     pa.field("id", pa.string(), nullable=False),
+    pa.field("content", pa.string(), nullable=False),
+    pa.field("language", pa.string(), nullable=False),
+])
+
+FUNCTION = pa.schema([
+    pa.field("id", pa.string(), nullable=False),
+    pa.field("repo_name", pa.string(), nullable=False),
     pa.field("content", pa.string(), nullable=False),
     pa.field("language", pa.string(), nullable=False),
 ])

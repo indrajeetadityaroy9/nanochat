@@ -14,7 +14,9 @@ solutions (short and long). issues-kaggle-notebooks holds StarCoder2's GitHub is
 (arXiv 2402.19173) reformatted as text, a source each. opc-fineweb-math-corpus holds the math pages OpenCoder's
 fastText classifiers recalled from FineWeb (arXiv 2411.04905). Nemotron-Pretraining-Code-v2 (arXiv 2512.20848 §2.2)
 holds, of its synthetic code, every Python file of NVIDIA's GitHub corpus rewritten by Qwen3-32B (SGCR and SCOR prompts,
-arXiv 2505.02881, and NVIDIA's own) and Python files transpiled into C++, a source each.
+arXiv 2505.02881, and NVIDIA's own) and Python files transpiled into C++, a source each. CodeXGLUE's code-to-text
+(arXiv 2102.04664) holds CodeSearchNet's GitHub functions with their docstrings (arXiv 1909.09436); its Python train
+split is read, not the benchmark's validation and test splits.
 """
 
 from dataclasses import dataclass
@@ -22,7 +24,16 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE, SYNTHETIC_FILE, TEXT
+from nanochat.corpus.schema import (
+    CONVERSATION,
+    EXERCISE,
+    FUNCTION,
+    ISSUE,
+    NOTEBOOK,
+    REPOSITORY_FILE,
+    SYNTHETIC_FILE,
+    TEXT,
+)
 from nanochat.paths import CORPUS
 
 # The line comment of each repository-file language: Python Language Reference §2.1.3 "Comments", C++23 [lex.comment]
@@ -48,6 +59,7 @@ CODE = "openbmb/UltraData-Code"
 MATH = "openbmb/UltraData-Math"
 ISSUES_KAGGLE = "HuggingFaceTB/issues-kaggle-notebooks"
 NEMOTRON = "nvidia/Nemotron-Pretraining-Code-v2"
+CODEXGLUE = "google/code_x_glue_ct_code_to_text"
 
 SOURCES = {
     "stack_edu_python": Source(REPOSITORY_FILE, EDU, {"Python": "Python/*.parquet"}, "text"),
@@ -65,6 +77,7 @@ SOURCES = {
                                         {"Python": "Synthetic-Code/synthetic-rewriting/*.parquet"}, "content"),
     "nemotron_transpilation_cpp": Source(SYNTHETIC_FILE, NEMOTRON,
                                          {"C++": "Synthetic-Code/synthetic-transpilation/*.parquet"}, "content"),
+    "codexglue_python": Source(FUNCTION, CODEXGLUE, {"Python": "python/train-*.parquet"}, "code"),
     "ultradata_math_l1": Source(TEXT, MATH, {"English": "data/UltraData-Math-L1/*/*.parquet"}, "content"),
     "ultradata_math_l3_qa": Source(TEXT, MATH, {"English": "data/UltraData-Math-L3/QA-Synthetic/*.parquet"},
                                    "content"),
