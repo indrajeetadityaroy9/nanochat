@@ -59,8 +59,8 @@ Evidence:
 | `stack_edu_python`, `stack_edu_cpp` | HuggingFaceTB/stack-edu @ `eeec5caa` | 5 of 5, 4 of 4 | 25,285,896, 16,246,723 (of 25,286,019 and 16,246,746: the 146 others' blobs are not in Software Heritage's bucket, `404 NoSuchKey`) |
 | `ultradata_stack_v3_l2_python`, `_cpp` | openbmb/UltraData-Stack-v3-L2 @ `62077439` | 45 of 45, 30 of 30 | 24,671,724, 17,990,102 |
 | `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 119 of 119, 31 of 31 | 72,844,227, 23,290,266 |
-| `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 11 of 147, 13 of 167 | 1,552,729, 1,759,348 |
-| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 5 of 64, 5 of 64 (7.81% of 99,900,825 and 29,401,922 rows) | 7,804,758, 2,297,005 |
+| `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 28 of 147, 32 of 167 | 3,952,421, 4,330,659 |
+| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 13 of 64, 13 of 64 (20.31% of 99,900,825 and 29,401,922 rows) | 20,292,444, 5,972,251 |
 | `codexglue_python` | google/code_x_glue_ct_code_to_text @ `2678080e` | 2 of 2 (train; the card's 251,820 examples) | 251,820 |
 | `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | openbmb/UltraData-Math @ `fe10db8e` | 2, 2, 3 and 2 of 50 | 1,084,548, 675,242, 686,726, 1,040,216 |
 | `codeforces_cots` | open-r1/codeforces-cots @ `39ac85c1` | 9 of 9 | 22,914 (of 24,399: the 1,485 `finish_reason` "length" traces dropped) |
@@ -97,12 +97,12 @@ Evidence:
 
   | Group | Files | Text | Held over the draw |
   |---|---|---|---|
-  | Synthetic code | UltraData-Code L3: 11 of 147 (Python), 13 of 167 (C++); Nemotron: 5 of 64 (rewriting), 5 of 64 (transpilation) | 42.50 GB | 1.150 |
+  | Synthetic code | UltraData-Code L3: 28 of 147 (Python), 32 of 167 (C++); Nemotron: 13 of 64 (rewriting), 13 of 64 (transpilation) | 109.67 GB | 1.136 |
   | ClimbMix | 187 of 6,543 | 47.13 GB | 1.075 |
   | UltraData-Math L3 | 2, 2, 3 and 2 of 50 per format | 11.57 GB | 1.185 |
 
   A source's few files make its sample random at the granularity of files: one Nemotron file is 1.56% of its subset,
-  which is why the synthetic group holds 15% more than its draw.
+  so the synthetic group holds 13.6% more than its draw, where the widening and the split ask 7.1% [arithmetic].
 
 ## 2. Schema
 
@@ -464,7 +464,7 @@ The token budget is 102.6B tokens, as production:
 | File-stage group | Sources | Share | Tokens | Supply (production's tokenizer) | Read |
 |---|---|---|---|---|---|
 | Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈59.4% | ≈57.6B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
-| Synthetic code | UltraData-Code L3 (Python, C++), Nemotron's rewriting (Python) and transpilation (C++) | 30% of code: 26.1% | 25.3B | 143.41B (Parquet footers at production's bytes per token): L3 14.14B and 15.42B (3.826, 3.593), rewriting 82.55B (3.909), transpilation 31.31B (3.651); the UltraData report's Table 17 gives L3 34.24B in an unstated tokenizer | 17.65%, from their extents (§1); weighted by tokens: L3 9.9% and 10.8%, rewriting 57.6%, transpilation 21.8% |
+| Synthetic code | UltraData-Code L3 (Python, C++), Nemotron's rewriting (Python) and transpilation (C++) | 30% of code: 26.1% | 25.3B | 143.41B (Parquet footers at production's bytes per token): L3 14.14B and 15.42B (3.826, 3.593), rewriting 82.55B (3.909), transpilation 31.31B (3.651); the UltraData report's Table 17 gives L3 34.24B in an unstated tokenizer | 17.65%, from their extents (§1); weighted by the tokens held: L3 9.4% and 10.3%, rewriting 58.3%, transpilation 22.1% |
 | Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
 | Functions | CodeXGLUE code-to-text, Python train | its supply: ≈0.057% | ≈55M | 55.4M measured (4.028 bytes per token, §3.4) | once, whole |
 | General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, from its extent |
