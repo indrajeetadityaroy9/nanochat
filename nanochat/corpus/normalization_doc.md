@@ -56,7 +56,7 @@ Evidence:
 
 | Source | Hub dataset @ revision | Files read | Standardized rows |
 |---|---|---|---|
-| `stack_edu_python`, `stack_edu_cpp` | HuggingFaceTB/stack-edu @ `eeec5caa` | 5 of 5, 4 of 4 | preparing |
+| `stack_edu_python`, `stack_edu_cpp` | HuggingFaceTB/stack-edu @ `eeec5caa` | 5 of 5, 4 of 4 | 25,285,896, 16,246,723 (of 25,286,019 and 16,246,746 metadata rows; the rest without a blob or decodable text) |
 | `ultradata_stack_v3_l2_python`, `_cpp` | openbmb/UltraData-Stack-v3-L2 @ `62077439` | 45 of 45, 30 of 30 | preparing |
 | `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 119 of 119, 31 of 31 | 72,844,227; preparing |
 | `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 11 of 147, 13 of 167 | 1,552,729, 1,759,348 |
