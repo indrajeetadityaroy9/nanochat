@@ -52,7 +52,7 @@ Evidence:
 | Nemotron-Pretraining-Code-v2's GitHub metadata, code-review, student-teacher and question-answering subsets | — | — | no (§3.3) |
 | CodeXGLUE code-to-text's Python validation and test splits, the benchmark's | — | — | no (§3.4) |
 
-**The dataset** (`CORPUS/manifest.json`; Parquet footers for the files still being prepared):
+**The dataset** (`CORPUS/manifest.json`):
 
 | Source | Hub dataset @ revision | Files read | Standardized rows |
 |---|---|---|---|
@@ -60,7 +60,7 @@ Evidence:
 | `ultradata_stack_v3_l2_python`, `_cpp` | openbmb/UltraData-Stack-v3-L2 @ `62077439` | 45 of 45, 30 of 30 | 24,671,724, 17,990,102 |
 | `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 119 of 119, 31 of 31 | 72,844,227, 23,290,266 |
 | `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 11 of 147, 13 of 167 | 1,552,729, 1,759,348 |
-| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 5 of 64, 5 of 64 | 7,804,758; preparing |
+| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 5 of 64, 5 of 64 | 7,804,758, 2,297,005 |
 | `codexglue_python` | google/code_x_glue_ct_code_to_text @ `2678080e` | 2 of 2 (train) | 251,820 |
 | `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | openbmb/UltraData-Math @ `fe10db8e` | 2, 2, 3 and 2 of 50 | 1,084,548, 675,242, 686,726, 1,040,216 |
 | `codeforces_cots` | open-r1/codeforces-cots @ `39ac85c1` | 9 of 9 | 22,914 |
@@ -88,12 +88,11 @@ Evidence:
   Nemotron's rewriting and transpilation) and UltraData-Math L3 enter a sample that held none of them, so the bound is
   borrowed [inference]. `tokenizer.main` reports each group's train tokens under the retrained tokenizer over its
   draw, and `pack.fit` names a source that runs short.
-  Measured on the files fetched (text bytes at production's bytes per token, before the val split; standardized text,
-  or Parquet footers where noted):
+  Measured on the files fetched (standardized text bytes at production's bytes per token, before the val split):
 
   | Group | Files | Text | Held over the draw |
   |---|---|---|---|
-  | Synthetic code (footers) | UltraData-Code L3: 11 of 147 (Python), 13 of 167 (C++); Nemotron: 5 of 64 (rewriting), 5 of 64 (transpilation) | 42.50 GB | 1.150 |
+  | Synthetic code | UltraData-Code L3: 11 of 147 (Python), 13 of 167 (C++); Nemotron: 5 of 64 (rewriting), 5 of 64 (transpilation) | 42.50 GB | 1.150 |
   | ClimbMix | 187 of 6,543 | 47.13 GB | 1.075 |
   | UltraData-Math L3 | 2, 2, 3 and 2 of 50 per format | 11.57 GB | 1.185 |
 
