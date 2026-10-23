@@ -21,10 +21,10 @@ Evidence:
 |---|---|---|
 | Sources | each read at its latest Hub revision, resolved once per build and recorded; only the columns standardization reads are fetched | 1 |
 | Schema | one Parquet schema per document category; `id` is the SHA-1 of the document's text | 2 |
-| Text | repository files as their language reads them; UltraData-Code L3 the publisher's `content`; Codeforces-CoTs finished traces only; everything else verbatim | 3 |
+| Text | every text with LF line ends and no leading byte-order mark; repository files as their language reads them; UltraData-Code L3 the publisher's `content`; Codeforces-CoTs finished traces only; otherwise verbatim | 3 |
 | Filters | every Python file parses as Python 3, after repair; no generated, vendored or C++ syntax filter | 4.1, 4.2 |
 | Deduplication | exact copies only, across every source read, first occurrence kept | 4.3 |
-| Split | production's: 1% of groups (repository, problem or document) held out | 4.4 |
+| Split | production's: 1% of groups (repository, problem or document) held out; repository names case-insensitive | 4.4 |
 | Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, L3 exercises 10%, Kaggle notebooks whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
 | FIM | rate 0.5, joint PSM/SPM, context level, AST-FIM's middles with 10% random spans, repository files only; production's line widening dropped | 6 |
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) across sources | 7 |
@@ -107,11 +107,16 @@ schema (`schema.py`):
 
 - **Rows without text are dropped:** a null at standardization, including a Stack-Edu blob that the bucket does not
   hold or that does not decode with its `src_encoding`; an empty text at deduplication (§4.3).
-- **Repository source files are kept as their language reads them.** CR LF and a lone CR become LF, and a leading
-  U+FEFF is dropped (Python Language Reference §2.1.2 and §2.1.4; C++ [lex.phases] phases 1 and 2). Stack-Edu's
-  `relative_path` is its `path` without the leading "/".
-- **Every other text is verbatim.** Kaggle notebooks are the publisher's Markdown: "we start with the notebook title,
-  dataset description when available and put the notebook (converted to a Python script) in a code block" (card).
+- **Every text has LF line ends and no leading U+FEFF** (`prepare.lines`). For a repository file that is how its
+  language reads it: CR LF and a lone CR are line ends, and a leading U+FEFF is not text (Python Language Reference
+  §2.1.2 and §2.1.4; C++ [lex.phases] phases 1 and 2). For any other text the CR and the mark come from its platform
+  and encoding. Measured on the raw files: 152,139 CR LF files and 2,157 leading marks in Stack-Edu Python's first
+  file, 866 of Kaggle's 580,195 notebooks with a CR (863 CR LF), 80 of 847,872 ClimbMix rows in 10 files, 7 of
+  UltraData-Code L3's 2.76M rows and 7 of UltraData-Math L3's; Kaggle's carry Python into the code group.
+- Stack-Edu's `relative_path` is its `path` without the leading "/".
+- **Otherwise every text is verbatim.** Kaggle notebooks are the publisher's Markdown: "we start with the notebook
+  title, dataset description when available and put the notebook (converted to a Python script) in a code block"
+  (card).
 
 ### 3.1 UltraData-Code L3: the publisher's `content`
 
@@ -231,8 +236,8 @@ a prose paragraph written as one Markdown line (823 of 912 sampled).
 ### 4.2 Python 3 check, with repair
 
 Every Python repository file must parse with `ast.parse` (Python 3.12). Python 2 files are real code, so a file that
-fails is repaired before it is dropped. The steps are applied cumulatively until the file parses, and the kept text is
-the repaired one:
+fails is repaired before it is dropped, by the smallest set of the steps below that makes it parse (`curate.repaired`:
+of the steps that change the file, every subset by size, then in step order), and the kept text is the repaired one:
 1. Stack v3's placeholders `<EMAIL>`, `<KEY>`, `<NAME>` and `<PASSWORD>` become the bare word (`<NAME>` → `NAME`).
 2. Leading-indentation tabs are expanded to 8 columns, Python 2's rule: "tabs are replaced (from left to right) by one
    to eight spaces such that the total number of characters up to and including the replacement is a multiple of
@@ -240,7 +245,8 @@ the repaired one:
 3. 2to3's fixers are applied: every fixer of `fissix.fixes`. fissix is the maintained fork of lib2to3, which Python
    3.12 lacks.
 
-Measured (R4) over every raw UltraData-Stack-v3-L2 Python row, 24,671,724 rows and 114.0 GB:
+Measured (R4) over every raw UltraData-Stack-v3-L2 Python row, 24,671,724 rows and 114.0 GB, with the steps applied
+cumulatively in this order:
 
 | Parses | Rows | Share | GB |
 |---|---|---|---|
@@ -262,6 +268,12 @@ Measured on the first Hub file of the other two Python corpora, fetched through 
 
 Stack-Edu's text comes from Software Heritage without Stack v3's placeholders, and its Python 2 files are the largest
 share: repair keeps 98.05% of its rows against 88.81%.
+
+The cumulative order rewrote more than a file needed: of the files 2to3 repaired, in 15,000 rows each of
+UltraData-Stack-v3-L2 and UltraData-Code L2 Python, 103 of 539 and 93 of 424 also had their leading tabs expanded,
+including tabs inside triple-quoted strings, and 94 and 25 their placeholders rewritten, while 514 and 397 parse after
+2to3 alone (measured). The smallest set keeps those tabs and placeholders, and repairs at least the files the
+cumulative order did.
 
 - **By failure class (R4),** repair recovers:
   - 774,851 of 782,378 print statements (99.0%);
@@ -344,9 +356,11 @@ the removal of the vendored filter; vendored copies are counted.
 ### 4.4 Split
 
 A group goes to validation when `md5_number(group) % 100 = 0` (`schema.SPLIT`, as `nanochat/data/curate.SPLIT`), the
-group being the one in §2's table. This is production's split; no paper sets its size, and keeping it keeps validation
-comparable with production's runs (E1, §5.2). Deduplication runs over both splits first, so no validation text has an
-exact copy in training.
+group being the one in §2's table. A repository's group is its lowercased name: GitHub's names are case-insensitive,
+and of 4,146,969 names shared by UltraData-Stack-v3-L2 Python and C++ and UltraData-Code L2 Python, 63 differ only in
+case, 2 of them on both sides of production's case-sensitive split (measured). Otherwise this is production's split;
+no paper sets its size. Deduplication runs over both splits first, so no validation text has an exact copy in
+training.
 
 ## 5. Mixture
 
@@ -554,15 +568,21 @@ line widening):
 
 ### 7.2 Repository documents for the 32K stage
 
-**One document per (`repo_name`, `language`) across the six repository sources,** after deduplication, a corpus per
-language (`repositories_python`, `repositories_cpp`), as a pack call parses one grammar.
+**One document per (repository, `language`) across the six repository sources,** the repository its lowercased name
+(§4.4), after deduplication, a corpus per language (`repositories_python`, `repositories_cpp`), as a pack call parses
+one grammar.
 - A repository's files, in path order, are cut into import-connected components (`repository_samples`), each in
   dependency order, DeepSeek-Coder's topological sort (§2.2), a cycle in path order; the components follow one another
   in the order of their first file.
 - Of a path that several sources hold in one repository, the first source's file is kept (`sources.py` order,
   deduplication's); of a path one source holds twice, its first row.
 - Each file is preceded by a comment line holding its path, `# path` or `// path` (`corpus/sources.texts`): "a comment
-  indicating the file's path is added at the beginning of each file" (DeepSeek-Coder §2.2).
+  indicating the file's path is added at the beginning of each file" (DeepSeek-Coder §2.2). A line break in a path is
+  written `\n` or `\r`, so the comment stays one line: 495 of UltraData-Code L2 Python's 72.8M paths hold one, 125 of
+  UltraData-Stack-v3-L2 Python's 24.7M and 370 of its C++ 18.0M (measured). A file without a final line end gets one
+  (21.9% of 915,104 UltraData-Code L2 Python files), so the next file's comment starts a line; a C++
+  file whose last line ends in a backslash gets an empty line too, as phase 2 would splice the next file's comment
+  onto it (20 of 1,799,017 UltraData-Stack-v3-L2 C++ files, measured).
 - The stage reads the fewest trailing partitions whose documents hold its draw, counted after the path rule
   (`compile.stage_parts`).
 

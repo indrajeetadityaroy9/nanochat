@@ -73,16 +73,19 @@ def repository_documents(task: tuple[str, str, int]) -> tuple[np.ndarray, np.nda
     for rank, source in enumerate(sources):
         table = pq.read_table(curated_dir(source, split) / f"{part}.parquet", columns=schema.names).cast(schema)
         tables.append(table.append_column("rank", pa.array(np.full(table.num_rows, rank))))
-    # sorted so a repository is a zero-copy slice (large_string: 64-bit offsets hold a partition beyond 2 GiB) and the
-    # first source's file of each (repository, path) comes first; the rest of each path's files are dropped
-    table = pa.concat_tables(tables).sort_by([("repo_name", "ascending"), ("relative_path", "ascending"),
-                                              ("rank", "ascending")]).combine_chunks()
-    keys = pc.binary_join_element_wise(table["repo_name"], table["relative_path"], "\0").chunk(0)
+    # sorted so a repository (its lowercased name) is a zero-copy slice (large_string: 64-bit offsets hold a partition
+    # beyond 2 GiB) and the first source's file of each (repository, path) comes first; the rest of each path's files
+    # are dropped
+    table = pa.concat_tables(tables)
+    table = table.append_column("repository", pc.utf8_lower(table["repo_name"]))
+    table = table.sort_by([("repository", "ascending"), ("relative_path", "ascending"),
+                           ("rank", "ascending")]).combine_chunks()
+    keys = pc.binary_join_element_wise(table["repository"], table["relative_path"], "\0").chunk(0)
     table = table.filter(np.concatenate([[True], pc.not_equal(keys[1:], keys[:-1]).to_numpy(zero_copy_only=False)]))
     table = table.combine_chunks()
     paths, contents, files = table["relative_path"], table["content"], texts(sources[0], table)
     documents = []
-    for a, b in itertools.pairwise([0, *pc.run_end_encode(table["repo_name"].chunk(0)).run_ends.to_numpy()]):
+    for a, b in itertools.pairwise([0, *pc.run_end_encode(table["repository"].chunk(0)).run_ends.to_numpy()]):
         components = data_crate().repository_samples(paths.slice(a, b - a).to_pylist(),
                                                      contents.slice(a, b - a).to_pylist(), grammar=language)
         documents.append("".join(files[a + i] for component in components for i in component))

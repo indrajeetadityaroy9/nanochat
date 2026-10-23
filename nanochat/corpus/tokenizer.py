@@ -62,7 +62,7 @@ def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str]
     rows = np.arange(start, start + group.num_rows)
     batch = group.take(np.flatnonzero(np.floor((rows + 1) * fraction) > np.floor(rows * fraction)))
     if SOURCES[source].schema is REPOSITORY_FILE:
-        units = ["repo:" + name for name in batch["repo_name"].to_pylist()]
+        units = ["repo:" + name.lower() for name in batch["repo_name"].to_pylist()]
     else:
         units = ["doc:" + id for id in batch["id"].to_pylist()]
     return texts(source, batch), units

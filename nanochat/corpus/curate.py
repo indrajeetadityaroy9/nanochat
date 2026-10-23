@@ -3,17 +3,17 @@ Curate the sources the mixture reads (mixture.READ) from their standardized file
 design document (normalization_doc.md §4):
 
 1. check: every Python repository file must parse with ast.parse (this image's Python 3.12). A file that does not is
-   repaired by steps applied cumulatively until it parses: Stack v3's placeholders <EMAIL>, <KEY>, <NAME> and
-   <PASSWORD> become the bare word; leading-indentation tabs are expanded to 8 columns, Python 2's rule (Python 2
+   repaired by the smallest set of steps that makes it parse (repaired): Stack v3's placeholders <EMAIL>, <KEY>, <NAME>
+   and <PASSWORD> become the bare word; leading-indentation tabs are expanded to 8 columns, Python 2's rule (Python 2
    Language Reference §2.1.8); every 2to3 fixer of fissix (the maintained fork of lib2to3, which Python 3.12 lacks) is
    applied. The repaired text is kept and its id recomputed; a file that never parses is dropped (checked_path).
 2. dedup: one row per id over every source and both splits, the first in mixture.READ's order, then file and row; an
    empty text is dropped.
-3. split: a group is val when md5_number(group) % SPLIT = 0 (schema.py).
-4. shards (curated_dir): a repository source's files as the partitions of the residue of md5_number(repo_name)
-   (partition 0 val, 1..SPLIT-1 train), each sorted by (repository, path, id) and cut into import-connected samples by
-   the data crate's repository_samples (SAMPLE_FILE); any other source's train rows in id order, a uniform order as id
-   is a hash, over SPLIT shards (1% of the source each, as a repository partition), and its val rows in one shard.
+3. split: a group is val when md5_number(group) % SPLIT = 0 (schema.py); a repository's group is its lowercased name.
+4. shards (curated_dir): a repository source's files as the partitions of that residue (partition 0 val, 1..SPLIT-1
+   train), each sorted by (repository, path, id) and cut into import-connected samples by the data crate's
+   repository_samples (SAMPLE_FILE); any other source's train rows in id order, a uniform order as id is a hash, over
+   SPLIT shards (1% of the source each, as a repository partition), and its val rows in one shard.
 
 python -m nanochat.corpus.curate
 """
@@ -116,16 +116,21 @@ def expanded_tabs(text: str) -> str:
 
 
 def repaired(text: str) -> str | None:
-    """text if it parses, else its first cumulative repair that parses, else None."""
+    """text if it parses, else its smallest repair that parses, else None: of the steps that change it (placeholders,
+    tabs, 2to3, in that order), every subset by size and then in step order, its steps applied in step order; so a file
+    that 2to3 alone repairs keeps its tabs and placeholders."""
     if parses(text):
         return text
-    for step in (bare_placeholders, expanded_tabs, two_to_three):
-        result = step(text)
-        if result is None:
-            return None
-        text = result
-        if parses(text):
-            return text
+    steps = [step for step in (bare_placeholders, expanded_tabs) if step(text) != text] + [two_to_three]
+    for size in range(1, len(steps) + 1):
+        for subset in itertools.combinations(steps, size):
+            result: str | None = text
+            for step in subset:
+                result = step(result)
+                if result is None:  # 2to3's grammar rejects it
+                    break
+            if result is not None and parses(result):
+                return result
     return None
 
 
@@ -183,12 +188,13 @@ def shuffle_dir(source: str) -> Path:
 
 def shuffle(source: str, paths: list[Path], drops: pa.Table) -> None:
     """A repository source's rows without the duplicates, as Hive partitions shuffle/<source>/part=<p>/ by the residue
-    of the repository name (DuckDB COPY ... PARTITION_BY, which creates the partition directories, not their parent)."""
+    of the repository (its name lowercased: GitHub's names are case-insensitive) (DuckDB COPY ... PARTITION_BY, which
+    creates the partition directories, not their parent)."""
     shuffle_dir(source).parent.mkdir(exist_ok=True)
     with database() as con:
         con.register("drops", drops)
-        con.execute(f"COPY (SELECT n.repo_name, n.relative_path, n.content, n.id, {residue('n.repo_name')} AS part "
-                    f"FROM read_parquet({[str(p) for p in paths]}, file_row_number = true) AS n "
+        con.execute(f"COPY (SELECT n.repo_name, n.relative_path, n.content, n.id, {residue('lower(n.repo_name)')} AS "
+                    f"part FROM read_parquet({[str(p) for p in paths]}, file_row_number = true) AS n "
                     f"ANTI JOIN drops AS d ON d.file = n.file_index AND d.row = n.file_row_number) "
                     f"TO '{shuffle_dir(source)}' (FORMAT parquet, COMPRESSION {COMPRESSION}, PARTITION_BY (part))")
 
@@ -201,17 +207,19 @@ def partition_row_groups(source: str, part: int) -> list[pq.RowGroupMetaData]:
 
 def curate_partition(task: tuple[str, int]) -> None:
     """One partition as a curated shard (partition 0 is val), as nanochat/data/curate.py makes it: its files sorted by
-    (repository, path, id) into one chunk, so a repository is a zero-copy slice (large_string: 64-bit offsets hold a
-    partition beyond 2 GiB), cut into samples (repository_samples) and written in sample order, in row groups of whole
-    samples, each but the last at least as long as the partition's longest row group."""
+    (repository, path, id) into one chunk, the repository its lowercased name, so a repository is a zero-copy slice
+    (large_string: 64-bit offsets hold a partition beyond 2 GiB), cut into samples (repository_samples) and written in
+    sample order, one row group per write of whole samples, each but the last at least as long as the partition's
+    longest row group."""
     source, part = task
     length = max(row_group.num_rows for row_group in partition_row_groups(source, part))
     table = pq.read_table(shuffle_dir(source) / f"part={part}",
                           schema=pa.schema([("repo_name", pa.string()), ("relative_path", pa.string()),
                                             ("content", pa.large_string()), ("id", pa.string())]))
-    table = table.sort_by([(key, "ascending") for key in ("repo_name", "relative_path", "id")]).combine_chunks()
+    table = table.append_column("repository", pc.utf8_lower(table["repo_name"]))
+    table = table.sort_by([(key, "ascending") for key in ("repository", "relative_path", "id")]).combine_chunks()
     paths, contents = table["relative_path"], table["content"]
-    runs = [0, *pc.run_end_encode(table["repo_name"].chunk(0)).run_ends.to_numpy()]
+    runs = [0, *pc.run_end_encode(table["repository"].chunk(0)).run_ends.to_numpy()]
     groups = [np.add(group, a) for a, b in itertools.pairwise(runs)
               for group in data_crate().repository_samples(paths.slice(a, b - a).to_pylist(),
                                                            contents.slice(a, b - a).to_pylist(),
@@ -227,18 +235,18 @@ def curate_partition(task: tuple[str, int]) -> None:
                           compression=COMPRESSION) as writer:
         for a, b in itertools.pairwise([*cuts, len(order)]):
             sample = columns.take(order[a:b]).append_column("sample", pa.array(samples[a:b]))
-            writer.write_table(sample.cast(SAMPLE_FILE))
+            writer.write_table(sample.cast(SAMPLE_FILE), row_group_size=b - a)
 
 
 def shard_documents(source: str, paths: list[Path], drops: pa.Table) -> None:
     """A document source's rows without the dropped ones: val rows in one shard, train rows in id order over SPLIT
     shards."""
     spec = SOURCES[source]
-    group = {CONVERSATION: "problem_id", ISSUE: "repo_name"}.get(spec.schema, "id")
+    group = {CONVERSATION: "n.problem_id", ISSUE: "lower(n.repo_name)"}.get(spec.schema, "n.id")
     columns = ", ".join(f"n.{name}" for name in spec.schema.names)
     with database() as con:
         con.register("drops", drops)
-        con.execute(f"CREATE TABLE kept AS SELECT {columns}, {residue('n.' + group)} = 0 AS val "
+        con.execute(f"CREATE TABLE kept AS SELECT {columns}, {residue(group)} = 0 AS val "
                     f"FROM read_parquet({[str(p) for p in paths]}, file_row_number = true) AS n "
                     f"ANTI JOIN drops AS d ON d.file = n.file_index AND d.row = n.file_row_number")
         names = ", ".join(spec.schema.names)

@@ -163,42 +163,55 @@ def sha1(texts: pa.ChunkedArray) -> pa.Array:
     return pa.array([hashlib.sha1(b).hexdigest() for b in texts.cast(pa.large_binary()).to_pylist()], pa.string())
 
 
+def lines(texts: pa.ChunkedArray) -> pa.ChunkedArray:
+    """texts with CR LF and a lone CR as LF and a leading U+FEFF dropped: a source file as Python and C++ read it
+    (Python Language Reference §2.1.2 "Physical lines" and §2.1.4 "Encoding declarations"; C++23 [lex.phases] phases 1
+    and 2), and any other text, whose CR and leading byte-order mark come from its platform and encoding."""
+    texts = pc.replace_substring_regex(texts, "^\ufeff", "")
+    return pc.replace_substring(pc.replace_substring(texts, "\r\n", "\n"), "\r", "\n")
+
+
 def repository_file(t: pa.Table, spec: Source) -> pa.Table:
-    return pa.table({"id": sha1(t["content"]), "repo_name": t["repo_name"], "relative_path": t["relative_path"],
-                     "content": t["content"], "language": pa.repeat(spec.language, t.num_rows)},
-                    schema=REPOSITORY_FILE)
+    content = lines(t["content"])
+    return pa.table({"id": sha1(content), "repo_name": t["repo_name"], "relative_path": t["relative_path"],
+                     "content": content, "language": pa.repeat(spec.language, t.num_rows)}, schema=REPOSITORY_FILE)
 
 
 def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
     """A Stack-Edu file: its metadata path, which begins with "/", taken relative to the repository's root."""
-    return pa.table({"id": sha1(t["text"]), "repo_name": t["repo_name"],
-                     "relative_path": pc.utf8_ltrim(t["path"], characters="/"), "content": t["text"],
+    content = lines(t["text"])
+    return pa.table({"id": sha1(content), "repo_name": t["repo_name"],
+                     "relative_path": pc.utf8_ltrim(t["path"], characters="/"), "content": content,
                      "language": pa.repeat(spec.language, t.num_rows)}, schema=REPOSITORY_FILE)
 
 
 def exercise(t: pa.Table, spec: Source) -> pa.Table:
-    return pa.table({"id": sha1(t["content"]), "content": t["content"],
-                     "language": pa.repeat(spec.language, t.num_rows)}, schema=EXERCISE)
+    content = lines(t["content"])
+    return pa.table({"id": sha1(content), "content": content, "language": pa.repeat(spec.language, t.num_rows)},
+                    schema=EXERCISE)
 
 
 def text(t: pa.Table, spec: Source) -> pa.Table:
-    return pa.table({"id": sha1(t[spec.text]), "content": t[spec.text]}, schema=spec.schema)
+    content = lines(t[spec.text])
+    return pa.table({"id": sha1(content), "content": content}, schema=spec.schema)
 
 
 def conversation(t: pa.Table, spec: Source) -> pa.Table:
     """A finished codeforces_cots trace (finish_reason "stop"; a truncated one mostly ends before its code): the R1
     prompt (ending with a line end) followed by its generation, and the problem's id."""
     t = t.filter(pc.equal(t["finish_reason"], "stop"))
-    content = pc.binary_join_element_wise(t["prompt"], t[spec.text], "")
+    content = lines(pc.binary_join_element_wise(t["prompt"], t[spec.text], ""))
     return pa.table({"id": sha1(content), "problem_id": t["id"], "content": content}, schema=CONVERSATION)
 
 
 def issue(t: pa.Table, spec: Source) -> pa.Table:
-    return pa.table({"id": sha1(t["text"]), "repo_name": t["repo_name"], "content": t["text"]}, schema=ISSUE)
+    content = lines(t["text"])
+    return pa.table({"id": sha1(content), "repo_name": t["repo_name"], "content": content}, schema=ISSUE)
 
 
 def notebook(t: pa.Table, spec: Source) -> pa.Table:
-    return pa.table({"id": sha1(t["text"]), "content": t["text"], "language": pa.repeat(spec.language, t.num_rows)},
+    content = lines(t["text"])
+    return pa.table({"id": sha1(content), "content": content, "language": pa.repeat(spec.language, t.num_rows)},
                     schema=NOTEBOOK)
 
 
@@ -221,21 +234,15 @@ def columns(source: str) -> list[str]:
 
 
 def standardize_file(task: tuple[str, int, Path]) -> None:
-    """Standardize one raw file into its standardized file: the rows with text; a repository file's text as Python and
-    C++ read source files, CR LF and a lone CR as LF and a leading U+FEFF dropped (Python Language Reference §2.1.2
-    "Physical lines" and §2.1.4 "Encoding declarations"; C++23 [lex.phases] phases 1 and 2)."""
+    """Standardize one raw file into its standardized file: the rows with text, each text's line ends normalized
+    (lines)."""
     source, k, path = task
     spec = SOURCES[source]
     pf = pq.ParquetFile(path)
     with pq.ParquetWriter(standardized_path(source, k), spec.schema, compression=COMPRESSION) as writer:
         for g in range(pf.num_row_groups):
             raw = pf.read_row_group(g)
-            texts = raw.filter(pc.is_valid(raw[spec.text]))
-            if spec.schema is REPOSITORY_FILE:
-                lines = pc.replace_substring_regex(texts[spec.text], "^\ufeff", "")
-                lines = pc.replace_substring(pc.replace_substring(lines, "\r\n", "\n"), "\r", "\n")
-                texts = texts.set_column(texts.schema.get_field_index(spec.text), spec.text, lines)
-            writer.write_table(STANDARDIZE[source](texts, spec))
+            writer.write_table(STANDARDIZE[source](raw.filter(pc.is_valid(raw[spec.text])), spec))
 
 
 def record(source: str, entry: dict) -> None:

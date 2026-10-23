@@ -105,11 +105,16 @@ def texts(source: str, table: pa.Table) -> list[str]:
     """The text of each row of a curated table: its content; for a repository file, the content after a line comment
     with the file's path (DeepSeek-Coder arXiv 2401.14196 §2.2: "a comment indicating the file's path is added at the
     beginning of each file"), with a line end appended when it does not end with one, as a non-empty source file is
-    read (C++23 [lex.phases] phase 2; Python Language Reference §2.1.2: the end of input terminates the last line)."""
+    read (C++23 [lex.phases] phase 2; Python Language Reference §2.1.2: the end of input terminates the last line). A
+    path's line breaks are written as the escapes \\r and \\n, so the comment stays one line; a C++ file whose last
+    line ends in a backslash gets an empty line after it, as phase 2 splices a backslash and the line end after it,
+    which would join the next file's comment to that line."""
     contents = table["content"].to_pylist()
     spec = SOURCES[source]
     if spec.schema is not REPOSITORY_FILE:
         return contents
     comment = COMMENTS[spec.language]
-    return [f"{comment} {path}\n{text.removesuffix('\n')}\n"
-            for path, text in zip(table["relative_path"].to_pylist(), contents, strict=True)]
+    bodies = [text.removesuffix("\n") for text in contents]
+    return [f"{comment} {path.replace('\r', '\\r').replace('\n', '\\n')}\n{body}\n"
+            + ("\n" if spec.language == "C++" and body.endswith("\\") else "")
+            for path, body in zip(table["relative_path"].to_pylist(), bodies, strict=True)]
