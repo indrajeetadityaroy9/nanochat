@@ -25,7 +25,7 @@ Evidence:
 | Filters | every Python file parses as Python 3, after repair; no generated, vendored or C++ syntax filter | 4.1, 4.2 |
 | Deduplication | exact copies only, across all sources, first occurrence kept | 4.3 |
 | Split | production's: 1% of groups (repository, problem or document) held out | 4.4 |
-| Mixture | 8K: repository code 75.5%, L3 exercises 10%, Kaggle notebooks 1.5%, ClimbMix 10%, UltraData-Math L3 3%; 32K: whole repositories and Codeforces-CoTs | 5 |
+| Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, L3 exercises 10%, Kaggle notebooks whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
 | FIM | rate 0.5, joint PSM/SPM, context level, AST-FIM's middles with 10% random spans, repository files only; production's line widening dropped | 6 |
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) across sources | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
@@ -197,6 +197,12 @@ macro-like call in 12–24%. Most of the rest are valid code following unexpande
 preprocessor would drop valid code. Seed-Coder does discard files with Tree-sitter syntax errors (arXiv 2506.03524
 §2.2.1).
 
+**No line-length or character-class rules.** DeepSeek-Coder filters "files with an average line length exceeding 100
+characters or a maximum line length surpassing 1000 characters" and "files with fewer than 25% alphabetic characters"
+(§2.1). Measured on 100,000 rows per corpus, these rules would drop at most 0.02% of the rows of each repository corpus.
+In Kaggle notebooks they would drop 1.86% of rows, and 90% of the notebooks with a line over 1,000 characters owe it to
+a prose paragraph written as one Markdown line (823 of 912 sampled).
+
 ### 4.2 Python 3 check, with repair
 
 Every Python repository file must parse with `ast.parse` (Python 3.12). Python 2 files are real code, so a file that
@@ -315,16 +321,28 @@ The token budget is 102.6B tokens, as production:
 
 | File-stage group | Sources | Share | Tokens | Supply (production's tokenizer) | Read |
 |---|---|---|---|---|---|
-| Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | 75.5% | 73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's 5.3B |
+| Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈75.5% | ≈73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
 | Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 34.2B (report Table 17; its tokenizer is not stated) | ≈28% |
-| Notebooks | Kaggle notebooks | 1.5% | 1.5B | 1.42B measured after near deduplication, which removed 5.33% | once |
-| General text | ClimbMix | 10% | 9.7B | ≈368B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at 4.32 bytes per token | 2.6%, ≈173 files |
-| Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | QA alone 22.8B: 66.5 GB of text (Parquet footers) at 2.92 bytes per token (20,000-row sample) | under 13% of QA's |
+| Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
+| General text | ClimbMix | 10% | 9.7B | ≈368B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at 4.32 bytes per token | 2.8% with the 32K stage's, ≈182 files |
+| Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | QA alone 22.8B: 66.5 GB of text (Parquet footers) at 2.92 bytes per token (20,000-row sample) | under 14% of QA's, with the 32K stage's |
 
-- **Code, notebooks included, is 87% of the file stage,** text 10% and mathematics 3%: production's 87 : 10 : 3, with
-  synthetic exercises and step-by-step mathematics in place of production's web mathematics.
-- **The repository stage** holds whole repositories (§7.2) and Codeforces-CoTs' finished traces, 0.305B tokens read
-  once: 5.4% of the stage.
+| Repository-stage group | Sources | Share | Tokens |
+|---|---|---|---|
+| Code | whole repositories (§7.2); Codeforces-CoTs' finished traces, 0.305B read once (§3.2) | 87% | 4.87B, 6.3% of it the traces |
+| General text | ClimbMix | 10% | 0.56B |
+| Mathematics | UltraData-Math L3 | 3% | 0.17B |
+
+- **Both stages keep production's 87 : 10 : 3 in tokens** (84.1 : 12.4 : 3.5 in bytes, from the measured bytes per
+  token). The file stage puts synthetic exercises and step-by-step mathematics in place of production's web
+  mathematics.
+- **The 32K stage keeps text and mathematics** rather than production's code alone (`config.REPO_STAGE`), because the
+  papers that change a mixture keep part of the old one. OpenCoder's anneal: "A significant distribution shift can
+  lead to catastrophic forgetting in the model's knowledge, and we ensure that 84% of the annealing data comes from the
+  original distribution of RefineCode" (arXiv 2411.04905 §2.2). To Code keeps "10% of code in text mixture data during
+  continual pre-training of code-initialized models … to avoid a full distribution shift" (arXiv 2408.10914, footnote
+  5). Measured on production's runs (`results/lr-curves.jsonl`): after its switch to code alone, the step-to-step
+  spread of the training loss grows 1.15–2.26 times.
 - **Within a group,** sources are weighted by their tokens after curation (production's `mixture_weights`). Within
   repository code, the 32K stage reads a partition of repositories: curated shards are residues of
   `md5_number(repo_name)`, and the stage reads the trailing ones (`train/stages.py`); the file stage reads the rest.
@@ -334,7 +352,9 @@ The token budget is 102.6B tokens, as production:
 
 **Code 87%, text 10%, mathematics 3%.**
 - DeepSeek-Coder: "87% source code, 10% English code-related natural language corpus, and 3% code-unrelated Chinese
-  natural language corpus" (arXiv 2401.14196 §2). The shares are not ablated.
+  natural language corpus" (arXiv 2401.14196 §2). That grounds the code share. Its 10% (Markdown and StackExchange) and
+  3% (Chinese) are other kinds of text than this design's ClimbMix and mathematics, which are production's and kept on
+  E1 below. The shares are not ablated.
 - To Code, or Not To Code? (arXiv 2408.10914), at 470M (§2.3):
   - "the 100% code leads to a 2.6x increase in the code benchmarks compared to the 25% code model" (§3.3);
   - language reasoning shows "a sharp relative drop of 18.3% when the model is trained on 100% code compared to a model
@@ -395,12 +415,16 @@ The token budget is 102.6B tokens, as production:
   it is not evidence against notebooks alone.
 
 **One file-stage mixture, no late phase.**
-- SmolLM2's 135M and 360M models "benefited from a single-stage training approach with consistently high-quality data"
+- SmolLM2 ran data ablations "at the target training length" for its 135M and 360M models, the scale closest to
+  this one, and found that they "benefited from a single-stage training approach with consistently high-quality data"
   (arXiv 2502.02737 §6).
-- The one comparison of placement scored near the floor: three consecutive 40B-token quality tiers against the same
-  tokens mixed, HumanEval 3.05 against 2.44 (arXiv 2602.09003 Table 7, 1.2B).
-- Under the linear decay to zero, the file stage's last 10% (steps 74,008–82,231) carries 1.9% of the learning-rate
-  integral, computed from `schedule.py`.
+- Under a linear decay to zero, the end of a run carries less weight: "both Constant and 10×, but not D2Z, overfit to
+  the very final portion", so "placing the highest-quality and most-recent data in the very final phase, while using
+  D2Z (e.g., as in dubey2024llama), may be suboptimal" (arXiv 2502.15938 §4.2). Here the file stage's last 10% (steps
+  74,008–82,231) carries 1.9% of the learning-rate integral [arithmetic from `schedule.py`].
+- Against: three consecutive 40B-token quality tiers beat the same tokens mixed in UltraData-Math's one comparison
+  (arXiv 2602.09003 Table 7, 1.2B from scratch, one run per arm): MBPP 16.34 against 12.06, HumanEval 3.05 against
+  2.44, code average 9.70 against 7.25, overall +1.49 points. Its schedule is not stated.
 
 Comparable models:
 
@@ -471,8 +495,15 @@ Comparable models:
 | later | 24.4% | 83.2% | 87.6% | 97.4% |
 
   Long C++ documents fail tree-sitter wherever they are cut (§4.1), so the rule helps Python only. Cut pieces hold
-  16.3% of the repository corpora's 8K tokens (12.4–19.6% per corpus), 8.1% of Kaggle's and 3.9% of ClimbMix's
-  (measured on production's packs).
+  14.7% of production's file-stage tokens: 16.3% of the repository corpora's (12.4–19.6% per corpus), 8.1% of
+  Kaggle's and 3.9% of ClimbMix's (measured on production's packs).
+- **Rows hold one corpus; steps hold every group.** A row is packed from one curated shard of one corpus, which is
+  Zhao et al.'s "Uni Chunk": "This helps to avoid packing documents from different distributions (such as code and
+  news text) together", lowering average perplexity against mixed chunks by 0.34 (2K) and 0.21 (8K) (§2.1, §3.2).
+  The loader assigns run row n to a corpus by frac((n + 1) · 0.618…) against the mixture's cumulative weights
+  (`loader.mixture_rows`). Replayed over production's file stage (11.84M rows), every step holds 124–126 code, 14–15
+  text and 4–5 mathematics rows of its 144; independent draws would leave a mathematics corpus out of 10.7–12.1% of
+  steps. No paper compares this interleaving with random sampling.
 
 ### 7.2 Repository documents for the 32K stage
 
@@ -502,19 +533,24 @@ Evidence:
 ### 7.3 Long traces
 
 Codeforces-CoTs is read at 32K, where 99.98% of its documents fit whole (§3.2). At 8K, 48.0% of its tokens fall in
-pieces that do not hold their problem statement. Code Llama, likewise, applies FIM only "to documents that are not cut
-across multiple model contexts" (§2.3).
+pieces that do not hold their problem statement.
 
 ## 8. Training dynamics
 
 - **Schedule: linear decay to zero,** "around 0.84% better than the optimal WSD" at 610M and 80 tokens per parameter
   (arXiv 2502.15938 §4.2).
 - **One switch, at 94.55% of steps and 5.5% of peak learning rate.** Context, rows per micro-batch and mixture change
-  together. Crystal's switch from "95% natural language and 5% code" to 63% code "requires about 70% of Phase 2 to
-  restore performance levels" on HellaSwag (arXiv 2411.04156 §5.1, 7B); this switch adds no new domain to the file
-  stage's.
-- **Budget: 102.6B tokens, no document read twice.** Each group's draw is below its supply (§5.1), so production's
-  `max_ratio` rule holds without epochs.
+  together; the 32K stage adds Codeforces-CoTs and keeps text and mathematics (§5.1). Crystal's switch from "95%
+  natural language and 5% code" to 63% code "requires about 70% of Phase 2 to restore performance levels" on HellaSwag
+  (arXiv 2411.04156 §5.1, 7B), and it concludes that "a more gradual transition to more code data may foster smoother
+  adaptation".
+- **The 32K stage learns at a low rate.** It carries 0.30% of the learning-rate integral, at 2.7% of peak on average
+  [arithmetic from `schedule.py`]. The long-context stages of the comparable models run at 6.7–10% of their peak:
+  DeepSeek-Coder keeps its final 10% (§3.6); StarCoder2 trains at 3×10⁻⁵ against 3×10⁻⁴ (Tables 7 and 8); Code Llama
+  at 2e−5 against 3e−4 (§2.6). No paper measures the learning rate of a long-context stage, so the decay stays linear
+  to zero.
+- **Budget: 102.6B tokens, no document read twice.** Each group's draw is below its supply, Kaggle's equal to it
+  (§5.1), so production's `max_ratio` rule holds without epochs.
 
 ## 9. Changes to the code
 
@@ -526,6 +562,6 @@ across multiple model contexts" (§2.3).
 | Python 3 check with repair, fissix in the image | new `corpus` curation step; `docker/Dockerfile` | to do |
 | Exact deduplication by `id`, keep-first across sources; no near deduplication, no go-enry filter | new `corpus` curation step | to do |
 | FIM without line widening (`LINE_SHARE`) | `data/pack.py`, `crate/pack.rs` | to do |
-| Mixture of §5.1; Codeforces-CoTs and whole repositories in the 32K stage | `config.py`, `data/loader.py`, `train/stages.py` | to do |
+| Mixture of §5.1: 87 : 10 : 3 in both stages; Kaggle whole; Codeforces-CoTs and whole repositories in the 32K stage | `config.py`, `data/loader.py`, `train/stages.py` | to do |
 | Repository documents per (repository, language) across sources | `data/curate.py`, `crate/repository.rs`, compile, 32K pack | to do; path comments exist (`data/sources.texts`) |
 | Packing, masking, cuts, schedule | — | unchanged |
