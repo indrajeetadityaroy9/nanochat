@@ -100,3 +100,47 @@ adopting it would be a mid-training experiment with its own contamination check.
 its Python rows are exact copies of another of its rows (MinHash keeps ⌈n/2⌉ of a component, so identical files
 survive in components of three or more [inference]); curation keeps 25,722,110 of its 70,096,376 normalized Python
 rows.
+
+### UltraData-Math: which level
+
+The levels (the card at `fe10db8`; UltraData-Math, arXiv 2602.09003 §2.2): **L0** Common Crawl pages parsed by a
+math-aware HTML parser (magic-html with w3m), MathML, KaTeX and AsciiMath turned into LaTeX; **L1** heuristic cleaning
+and document-level deduplication (method unstated); **L2** L1 selected by an embedding classifier distilled from large
+models' annotations (model, threshold and share kept unpublished; its selector's README reads "Coming soon"), released
+as `L2-preview`, which no source defines; **L3** synthetic rewriting in four formats (question and answer, multi-turn
+conversation, multi-style rewriting, textbook exercises) by Qwen2.5-72B-Instruct, Qwen3-32B and GLM-4.5, its seed data
+Nemotron-CC-Math, MegaMath and FineMath (the card's acknowledgements), not stated to be L2. Mainly English and Chinese,
+the split unstated.
+
+| Level (Hub folder at `fe10db8`) | Files, Parquet size | Columns | Size (card) |
+|---|---|---|---|
+| L1 (`data/UltraData-Math-L1/CC-MAIN-*`: 99 Common Crawl snapshots, 2014 to 2024) | 1,485, 367 GB | `content`, `meta` | 170.5B tokens, 85.6M documents |
+| L2-preview (`data/UltraData-Math-L2-preview`) | 138, 63.3 GB | `content`, `quality_label` | 33.7B tokens, 14.98M documents |
+| L3 (`data/UltraData-Math-L3/{QA,Conversation,Multi-Style,Textbook-Exercise}-Synthetic`) | 4 × 50, 122.6 GB | `uid`, `content` | 88B tokens, 81.4M documents |
+
+The publisher's comparison: MiniCPM-1.2B continually pretrained (30% the level's data, 70% general data, equal tokens
+per level), greedy accuracy:
+
+| Level | 10B tokens (Table 5): MATH500, GSM8K | ~100B-token decay (Table 6): MATH500, GSM8K, MBPP, HumanEval |
+|---|---|---|
+| L1 | 14.80, 32.75 | 27.78, 54.66, 44.71, 29.88 |
+| L2 | 15.60, 34.04 | 29.20, 52.92, 44.50, 32.32 |
+| L3 | 20.20, 41.47 | 37.02, 61.79, 49.27, 32.93 |
+
+At the same ~100B-token budget the card puts its result (the L3 row) above FineMath-4+ (29.84, 56.25), MegaMath-Web-Pro
+(32.12, 56.71) and Nemotron-CC 4plus (33.40, 58.45) on MATH500 and GSM8K.
+
+Measured here on the copy `nanochat/data` fetched (its first 94 L2-preview files; 2026-10-22): 59.7% of the rows are
+exact copies of another row, spread across files (median 3 copies, 280 at most), so curation kept 1,695,275 of
+9,400,000; in 80,000 rows of four files, 0.1% hold Chinese (over 20 CJK characters in the first 2,000), 51.6% LaTeX or
+dollar-delimited math, a median of 4,873 bytes.
+
+**L2-preview for pretraining, deduplicated.** The publisher calls L2 "the core resource for the pre-training phase" and
+L1 the broad pretraining pool; L2's gain over L1 is small and not consistent (MATH500 +0.8 and +1.4, GSM8K +1.3 and
+−1.7), so the choice rests on the selection, not on a measured gain. Its unique rows, about 40% of 14.98M documents
+[estimate: 59.7% exact copies in the first 94 files], cover a code model's math share (production's 3% of 102.6B
+tokens is 3.1B); L1, five times larger and deduplicated by the publisher, is the reserve should math's share grow
+beyond it. **L3 is not pretraining data here,** as UltraData-Code's L3: synthetic question-and-answer, conversation
+and exercise formats whose gains are measured on the benchmarks they resemble (it also lifted MBPP by 4.56 and
+HumanEval by 3.05 points over L1), placed by its authors in mid-training, SFT and RL (§2.2.4), with no decontamination
+statement; adopting it would be a mid-training experiment with its own contamination check.
