@@ -54,19 +54,24 @@ Evidence:
 
 **The dataset** (`CORPUS/manifest.json`):
 
-| Source | Hub dataset @ revision | Files read | Standardized rows |
+| Source | Hub dataset @ revision | Files read | Standardized rows (Hub rows of the files read) |
 |---|---|---|---|
-| `stack_edu_python`, `stack_edu_cpp` | HuggingFaceTB/stack-edu @ `eeec5caa` | 5 of 5, 4 of 4 | 25,285,896, 16,246,723 (of 25,286,019 and 16,246,746 metadata rows; the rest without a blob or decodable text) |
+| `stack_edu_python`, `stack_edu_cpp` | HuggingFaceTB/stack-edu @ `eeec5caa` | 5 of 5, 4 of 4 | 25,285,896, 16,246,723 (of 25,286,019 and 16,246,746: the 146 others' blobs are not in Software Heritage's bucket, `404 NoSuchKey`) |
 | `ultradata_stack_v3_l2_python`, `_cpp` | openbmb/UltraData-Stack-v3-L2 @ `62077439` | 45 of 45, 30 of 30 | 24,671,724, 17,990,102 |
 | `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 119 of 119, 31 of 31 | 72,844,227, 23,290,266 |
 | `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 11 of 147, 13 of 167 | 1,552,729, 1,759,348 |
-| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 5 of 64, 5 of 64 | 7,804,758, 2,297,005 |
-| `codexglue_python` | google/code_x_glue_ct_code_to_text @ `2678080e` | 2 of 2 (train) | 251,820 |
+| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 5 of 64, 5 of 64 (7.81% of 99,900,825 and 29,401,922 rows) | 7,804,758, 2,297,005 |
+| `codexglue_python` | google/code_x_glue_ct_code_to_text @ `2678080e` | 2 of 2 (train; the card's 251,820 examples) | 251,820 |
 | `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | openbmb/UltraData-Math @ `fe10db8e` | 2, 2, 3 and 2 of 50 | 1,084,548, 675,242, 686,726, 1,040,216 |
-| `codeforces_cots` | open-r1/codeforces-cots @ `39ac85c1` | 9 of 9 | 22,914 |
+| `codeforces_cots` | open-r1/codeforces-cots @ `39ac85c1` | 9 of 9 | 22,914 (of 24,399: the 1,485 `finish_reason` "length" traces dropped) |
 | `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks @ `ef882ad1` | 11 of 11 | 580,195 |
 | `climbmix` | karpathy/climbmix-400b-shuffle @ `915333b4` | 187 of 6,543 | 15,814,656 |
 
+- **Rows.** Every raw file holds exactly the rows of its Hub file's Parquet footer at the pinned revision (all 18
+  sources). Standardize drops only two sets of rows:
+  - Stack-Edu's 146 textless rows. Requested again over unsigned HTTP, all 146 blobs return `404 NoSuchKey`, while 45
+    blobs with text from the same files return `200 OK`. None failed to decode.
+  - Codeforces-CoTs' 1,485 traces whose `finish_reason` is "length" (§3).
 - **Revision.** Each source is read at its latest revision. `prepare` resolves `dataset_info(repo).sha` once per
   source, so the listing and every file come from one snapshot, and the manifest records it.
 - **Fetch.** `prepare.fetch` reads a Hub Parquet file by ranged reads and keeps only the columns its standardizer
