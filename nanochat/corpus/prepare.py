@@ -30,7 +30,7 @@ import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download, list_repo_files
 from obstore.store import S3Store
 
-from nanochat.corpus.schema import CONVERSATION, EXERCISE, REPOSITORY_FILE
+from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE
 from nanochat.corpus.sources import EDU, SOURCES, Source, raw_dir, standardized_path
 
 SPAWN = multiprocessing.get_context("spawn")
@@ -125,13 +125,23 @@ def conversation(t: pa.Table, spec: Source) -> pa.Table:
     return pa.table({"id": sha1(content), "problem_id": t["id"], "content": content}, schema=CONVERSATION)
 
 
+def issue(t: pa.Table, spec: Source) -> pa.Table:
+    return pa.table({"id": sha1(t["text"]), "repo_name": t["repo_name"], "content": t["text"]}, schema=ISSUE)
+
+
+def notebook(t: pa.Table, spec: Source) -> pa.Table:
+    return pa.table({"id": sha1(t["text"]), "content": t["text"], "language": pa.repeat(spec.language, t.num_rows)},
+                    schema=NOTEBOOK)
+
+
 STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
                "ultradata_stack_v3_l2_python": repository_file, "ultradata_stack_v3_l2_cpp": repository_file,
                "ultradata_code_l2_python": repository_file, "ultradata_code_l2_cpp": repository_file,
                "ultradata_code_l3_python": exercise, "ultradata_code_l3_cpp": exercise,
                "ultradata_math_l1": text, "ultradata_math_l3_qa": text, "ultradata_math_l3_conversation": text,
                "ultradata_math_l3_multi_style": text, "ultradata_math_l3_textbook_exercise": text,
-               "codeforces_cots": conversation, "climbmix": text}
+               "codeforces_cots": conversation, "github_issues": issue, "kaggle_notebooks": notebook,
+               "climbmix": text}
 
 
 def standardize_file(task: tuple[str, int, Path]) -> None:

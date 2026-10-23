@@ -10,7 +10,8 @@ UltraData-Stack-v3-L2 holds The Stack v3's files that UltraData's L2 classifiers
 language. UltraData-Math (arXiv 2602.09003) releases L1, Common Crawl's math pages cleaned and deduplicated, one folder
 per crawl snapshot, and L3, documents synthesized in four formats, a source each. Codeforces-CoTs holds DeepSeek-R1's
 reasoning traces and solutions to Codeforces problems: of its decontaminated subsets, the Python solutions and the C++
-solutions (short and long).
+solutions (short and long). issues-kaggle-notebooks holds StarCoder2's GitHub issues and Kaggle notebooks
+(arXiv 2402.19173) reformatted as text, a source each.
 """
 
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from nanochat.corpus.schema import CONVERSATION, EXERCISE, REPOSITORY_FILE, TEXT
+from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE, TEXT
 from nanochat.paths import CORPUS
 
 
@@ -41,6 +42,7 @@ STACK_V3 = ("openbmb/UltraData-Stack-v3-L2", "d6bdb3e707cf17bbfb64067cd4c4ed84b0
 CODE = ("openbmb/UltraData-Code", "525c9ac8639c5032633392d096e54db8c84a005e")
 MATH = ("openbmb/UltraData-Math", "fe10db8efd35597fd7fcff8ff576b5ec4ea5ff87")
 CLIMBMIX = ("karpathy/climbmix-400b-shuffle", "915333b4f8b8684f39aeaafea600fea6f43fb703")
+ISSUES_KAGGLE = ("HuggingFaceTB/issues-kaggle-notebooks", "ef882ad1ed8274340e8fc9bac087c903f2f75396")
 
 SOURCES = {
     "stack_edu_python": Source(REPOSITORY_FILE, *EDU, {"Python": "Python/*.parquet"}, "text"),
@@ -67,6 +69,8 @@ SOURCES = {
     "codeforces_cots": Source(CONVERSATION, "open-r1/codeforces-cots", "39ac85c150806230473c70ad72c31f6232fe3f41",
                               {"Python": "solutions_py_decontaminated/*.parquet",
                                "C++": "solutions_short_and_long_decontaminated/*.parquet"}, "generation"),
+    "github_issues": Source(ISSUE, *ISSUES_KAGGLE, {"English": "issues/*.parquet"}, "text"),
+    "kaggle_notebooks": Source(NOTEBOOK, *ISSUES_KAGGLE, {"Python": "kaggle/*.parquet"}, "text"),
     "climbmix": Source(TEXT, *CLIMBMIX, {"English": "shard_*.parquet"}, "text"),
 }
 
