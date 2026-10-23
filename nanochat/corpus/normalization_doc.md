@@ -14,14 +14,15 @@ Evidence:
   source is named. The UltraData-Code report (arXiv 2610.23960, absent from Hugging Face Papers) is read from
   `tech_report/UltraData_Code_Tech_Report.pdf` in `openbmb/UltraData-Code`.
 - **Measured** figures come from runs on the GB10 over `nanochat/data`'s copies of the sources and production's packs,
-  and over `nanochat/corpus`'s UltraData-Code L3. Each states its data and method where it is used.
+  and over `nanochat/corpus`'s own fetched, standardized and Hub files (§1). Each states its data and method where it
+  is used.
 - `[inference]` marks a step no source states.
 
 | Area | Decision | § |
 |---|---|---|
 | Sources | each read at its latest Hub revision, resolved once per build and recorded; only the columns standardization reads are fetched | 1 |
 | Schema | one Parquet schema per document category; `id` is the SHA-1 of the document's text | 2 |
-| Text | every text with LF line ends and no leading byte-order mark; repository files as their language reads them; UltraData-Code L3 the publisher's `content`; Codeforces-CoTs finished traces only; otherwise verbatim | 3 |
+| Text | every text with LF line ends and no leading byte-order mark; repository files as their language reads them; UltraData-Code L3 the publisher's `content`; Nemotron's rewritten and transpiled files as published; Codeforces-CoTs finished traces only; otherwise verbatim | 3 |
 | Filters | every Python file parses as Python 3, after repair; no generated, vendored or C++ syntax filter | 4.1, 4.2 |
 | Deduplication | exact copies only, across every source read, first occurrence kept | 4.3 |
 | Split | production's: 1% of groups (repository, problem or document) held out; repository names case-insensitive | 4.4 |
@@ -49,6 +50,20 @@ Evidence:
 | `github_issues` | ISSUE | `text` | no (§5.2) |
 | Nemotron-Pretraining-Code-v2's GitHub metadata, code-review, student-teacher and question-answering subsets | — | — | no (§3.3) |
 
+**The dataset** (`CORPUS/manifest.json`; Parquet footers for the files still being prepared):
+
+| Source | Hub dataset @ revision | Files read | Standardized rows |
+|---|---|---|---|
+| `stack_edu_python`, `stack_edu_cpp` | HuggingFaceTB/stack-edu @ `eeec5caa` | 5 of 5, 4 of 4 | preparing |
+| `ultradata_stack_v3_l2_python`, `_cpp` | openbmb/UltraData-Stack-v3-L2 @ `62077439` | 45 of 45, 30 of 30 | preparing |
+| `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 119 of 119, 31 of 31 | 72,844,227; preparing |
+| `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 11 of 147, 13 of 167 | 1,552,729, 1,759,348 |
+| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 5 of 64, 5 of 64 | preparing |
+| `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | openbmb/UltraData-Math @ `fe10db8e` | 2, 2, 3 and 2 of 50 | 1,084,548, 675,242, 686,726, 1,040,216 |
+| `codeforces_cots` | open-r1/codeforces-cots @ `39ac85c1` | 9 of 9 | 22,914 |
+| `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks @ `ef882ad1` | 11 of 11 | 580,195 |
+| `climbmix` | karpathy/climbmix-400b-shuffle @ `915333b4` | 187 of 6,543 | 15,814,656 |
+
 - **Revision.** Each source is read at its latest revision. `prepare` resolves `dataset_info(repo).sha` once per
   source, so the listing and every file come from one snapshot, and the manifest records it.
 - **Fetch.** `prepare.fetch` reads a Hub Parquet file by ranged reads and keeps only the columns its standardizer
@@ -66,18 +81,21 @@ Evidence:
   group's fraction of both stages' draws at production's bytes per token, over the train split's 99 of 100 residues
   (§4.4), widened by 6% (`mixture.SPREAD`) for a retrained tokenizer's compression. Dagan et al. bound that change:
   "the NSL on any given subset only varies by 5 to 6 percentage points" across tokenizer training mixes, "about 5%" in
-  its example (arXiv 2402.01035 §2.3). Their mixes change a domain's share, while UltraData-Code L3 and UltraData-Math
-  L3 enter a sample that held none of them, so the bound is borrowed [inference]. `tokenizer.main` reports each
-  group's train tokens under the retrained tokenizer over its draw, and `pack.fit` names a source that runs short.
-  Measured on the files fetched (standardized text bytes at production's bytes per token, before the val split):
+  its example (arXiv 2402.01035 §2.3). Their mixes change a domain's share, while the synthetic code (UltraData-Code L3,
+  Nemotron's rewriting and transpilation) and UltraData-Math L3 enter a sample that held none of them, so the bound is
+  borrowed [inference]. `tokenizer.main` reports each group's train tokens under the retrained tokenizer over its
+  draw, and `pack.fit` names a source that runs short.
+  Measured on the files fetched (text bytes at production's bytes per token, before the val split; standardized text,
+  or Parquet footers where noted):
 
   | Group | Files | Text | Held over the draw |
   |---|---|---|---|
-  | UltraData-Code L3 | 52 of 147 (Python), 59 of 167 (C++) | 38.71 GB | 1.077 |
+  | Synthetic code (footers) | UltraData-Code L3: 11 of 147 (Python), 13 of 167 (C++); Nemotron: 5 of 64 (rewriting), 5 of 64 (transpilation) | 42.50 GB | 1.150 |
   | ClimbMix | 187 of 6,543 | 47.13 GB | 1.075 |
   | UltraData-Math L3 | 2, 2, 3 and 2 of 50 per format | 11.57 GB | 1.185 |
 
-  A format's few files make its sample random at the granularity of files.
+  A source's few files make its sample random at the granularity of files: one Nemotron file is 1.56% of its subset,
+  which is why the synthetic group holds 15% more than its draw.
 
 ## 2. Schema
 
@@ -106,6 +124,7 @@ schema (`schema.py`):
   - timestamps, sizes, line counts and token counts;
   - serialized duplicates (`full_content`, `raw_content`, `messages`);
   - L3's `task`, `analysis`, `solution`, `test` and format fields;
+  - Nemotron's `prompts`, `seed_source`, `seed_language` and `nemotron_pretraining_id`;
   - Codeforces-CoTs' statement fields, tests and `finish_reason` (read by the filter, §3.2).
 - **Records:** `CORPUS/manifest.json` holds each source's repo, revision, Hub files fetched and rows (`prepare.record`);
   `CORPUS/packed.json` each stage's rows and corpus weights (`pack.py`); the tokenizer's data key names the compiled
@@ -214,10 +233,10 @@ Rewriting (SCOR) prompts", and "We applied this Python to C++ transpilation proc
 source-code corpus" (arXiv 2512.20848 §2.2.2). Measured on a row group of each (94,569 and 88,401 rows; 20,000-row
 samples):
 
-| Subset | Rows | Text (8 of 64 footers, scaled) | Starts with a code fence | Parses (`ast.parse`, 5,000 rows) | Production's bytes per token |
+| Subset | Rows | Text (Parquet footers) | Starts with a code fence | Parses (`ast.parse`, 5,000 rows) | Production's bytes per token |
 |---|---|---|---|---|---|
-| Rewriting (Python; prompts: NVIDIA's 68.8%, SGCR 15.6%, NVIDIA's and SCOR 15.6%) | 99.9M | 323 GB | 0.0% | 99.7% | 3.909 |
-| Transpilation (C++, from Python) | 29.4M | 114 GB | 0.0% | — | 3.651 |
+| Rewriting (Python; prompts: NVIDIA's 68.8%, SGCR 15.6%, NVIDIA's and SCOR 15.6%) | 99.9M | 322.7 GB | 0.0% | 99.7% | 3.909 |
+| Transpilation (C++, from Python) | 29.4M | 114.3 GB | 0.0% | — | 3.651 |
 
 - The files are code without prose around them, so they are SYNTHETIC_FILE rows: the Python 3 check applies to the
   rewritten Python (§4.2), and no path comment precedes them (they record none).
@@ -407,7 +426,7 @@ The token budget is 102.6B tokens, as production:
 | File-stage group | Sources | Share | Tokens | Supply (production's tokenizer) | Read |
 |---|---|---|---|---|---|
 | Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈75.5% | ≈73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
-| Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 29.56B measured: Python 14.14B (3.826 bytes per token), C++ 15.42B (3.593), on a 100,000-row sample each; the report's Table 17 gives 34.24B in an unstated tokenizer | 32.8%, from its extent (§1) |
+| Synthetic code | UltraData-Code L3 (Python, C++), Nemotron's rewriting (Python) and transpilation (C++) | 10% | 9.7B | 143.41B (Parquet footers at production's bytes per token): L3 14.14B and 15.42B (3.826, 3.593), rewriting 82.55B (3.909), transpilation 31.31B (3.651); the UltraData report's Table 17 gives L3 34.24B in an unstated tokenizer | 6.76%, from their extents (§1); weighted by tokens: L3 9.9% and 10.8%, rewriting 57.6%, transpilation 21.8% |
 | Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
 | General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, from its extent |
 | Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | 82.5B measured: QA 22.8B, Conversation 18.3B, Multi-Style 17.4B, Textbook-Exercise 24.0B; 260.5 GB of text (Parquet footers) at 2.92–3.46 bytes per token (20,000-row samples); the paper gives 88B in an unstated tokenizer | 3.7% with the 32K stage's, from its extent |
@@ -420,7 +439,7 @@ The token budget is 102.6B tokens, as production:
 
 - **Both stages keep production's 87 : 10 : 3 in tokens,** 84.5 : 12.2 : 3.3 in bytes [arithmetic: each group's share
   times its bytes per token, measured on production's compiled train splits: code 3.405, text 4.275, mathematics
-  3.911]. The file stage puts synthetic exercises and step-by-step mathematics in place of production's web mathematics.
+  3.911]. The file stage puts synthetic code and step-by-step mathematics in place of production's web mathematics.
 - **The 32K stage keeps text and mathematics** rather than production's code alone (`config.REPO_STAGE`), because the
   papers that change a mixture keep part of the old one. OpenCoder's anneal: "A significant distribution shift can
   lead to catastrophic forgetting in the model's knowledge, and we ensure that 84% of the annealing data comes from the
@@ -485,8 +504,8 @@ The token budget is 102.6B tokens, as production:
   That is continued pretraining on a 1.3T-token base, so it does not set a from-scratch share.
 - Rewritten code: continual pretraining of Llama-3.1-8B for 50B tokens on SwallowCode (SGCR and SCOR rewriting)
   "improves pass@1 by +17.0 on HumanEval and +16.1 on HumanEval+ compared to an equivalent budget using Stack-Edu";
-  SGCR alone "results in an approximate 10-point decrease on the MBPP benchmark", which SCOR addresses (arXiv
-  2505.02881 §1, §3.3.1). Its authors, under "Language generality": "our evaluations are confined to continual
+  SGCR alone "results in an approximate 10-point decrease on the MBPP benchmark", which SCOR addresses
+  (arXiv 2505.02881 §1, §3.3.1). Its authors, under "Language generality": "our evaluations are confined to continual
   pre-training with a 50 billion token budget". NVIDIA, for the subsets read here: "we also found that using LLMs to
   rephrase source code improved downstream code-generation accuracies", and transpiled C++ "improved downstream C++
   code-generation accuracy" (arXiv 2512.20848 §2.2.2; no numbers given).
@@ -685,9 +704,9 @@ Production's tokenizer (`nanochat/data/tokenizer.py`):
   tokens; Codeforces-CoTs, read at 32K only, is 0.3% of them [arithmetic: 0.305B of 102.6B] and is not sampled.
 - Measured: production's sample is 72.75 / 8.98 / 18.27% code, text and mathematics by bytes.
   - 18.27% comes from OPC FineWeb Math and UltraData-Math L2, which this design does not read.
-  - None comes from UltraData-Code L3 or UltraData-Math L3, 13% of the file stage. Production's tokenizer reads them
-    at 3.59–3.83 and 2.92–3.46 bytes per token, against 4.13 for OPC FineWeb Math and 3.70 for UltraData-Math L2
-    (measured).
+  - None comes from the synthetic code (UltraData-Code L3, Nemotron's rewriting and transpilation) or UltraData-Math
+    L3, 13% of the file stage. Production's tokenizer reads them at 3.59–3.91 and 2.92–3.46 bytes per token, against
+    4.13 for OPC FineWeb Math and 3.70 for UltraData-Math L2 (measured).
 - Leaving data out costs it: "Leaving a language out of tokenizer training raises its BPB in every language we
   study", and "both equal weighting and an allocation inverting the shares with respect to the language model training
   data increase their BPB" (arXiv 2610.12144, abstract; natural languages).
@@ -752,6 +771,8 @@ tree and history; `publish.pull` fetches a revision where the tokenizer is train
 | Curated documents in tokens; repository documents per (repository, language) across sources | `corpus/compile.py` | done (4985b09, d068c80) |
 | Mixture of §5.1 in both stages; stage-disjoint packs; FIM without line widening; weights fitted to the packed rows | `corpus/mixture.py`, `corpus/pack.py`, `corpus/loader.py` | done (d068c80) |
 | Document sources in 100 train shards; 32K partitions counted after the path rule; the extent over the train split; byte shares in the tokenizer sample; empty texts dropped | `corpus/curate.py`, `corpus/compile.py`, `corpus/prepare.py`, `corpus/tokenizer.py` | done |
+| Every text normalized (LF, no leading BOM); minimal Python repair; case-insensitive repositories; escaped path comments; atomic, resumable raw files | `corpus/prepare.py`, `corpus/curate.py`, `corpus/sources.py`, `corpus/compile.py` | done (be961a4, af2a7fb) |
+| Nemotron-Pretraining-Code-v2's rewriting and transpilation in the synthetic group; SYNTHETIC_FILE | `corpus/sources.py`, `corpus/schema.py`, `corpus/mixture.py`, `corpus/prepare.py`, `corpus/curate.py` | done (2d6bcc0) |
 | Every read source prepared and curated on the GB10; the curated shards published | `prepare`, `curate`, `publish` | running |
 | The tokenizer decided and trained, the corpus compiled and packed, after the pull | `tokenizer`, `compile`, `pack` | after the pull |
 | Training reads the corpus (`config.py`, `train/`, `eval/`, `inference/`); the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |
