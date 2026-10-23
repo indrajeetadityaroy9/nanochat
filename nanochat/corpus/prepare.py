@@ -109,7 +109,7 @@ def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
 
 
 def exercise(t: pa.Table, spec: Source) -> pa.Table:
-    return pa.table({"id": sha1(t["full_content"]), "language": pa.repeat(spec.language, t.num_rows)}
+    return pa.table({"id": sha1(t["content"]), "language": pa.repeat(spec.language, t.num_rows)}
                     | {name: t[name] for name in ("task", "analysis", "solution", "test", "content", "content_format",
                                                    "full_content", "full_content_format")}
                     | {"seed": t["raw_content"]}, schema=EXERCISE)

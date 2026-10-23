@@ -59,7 +59,7 @@ def scan(task: tuple[str, Path]) -> list[bytes]:
     for g in range(pf.num_row_groups):
         table = pf.read_row_group(g, columns=["id", "content", "relative_path"] if repository else ["id", "content"])
         texts = table["content"].cast(pa.large_binary()).to_pylist()
-        s, h = data_crate().sketch(texts, n=NGRAM, slots=SLOTS)
+        s, h = data_crate().sketch(texts, n=NGRAM, slots=SLOTS, min_words=0)
         signatures.append(s)
         shingled.append(h)
         ids.append(bytes.fromhex("".join(table["id"].to_pylist())))

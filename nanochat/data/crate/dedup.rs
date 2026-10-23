@@ -23,20 +23,24 @@
 //! first similar one of the bucket's leaders (the first document of each cluster met in it), else leads. Union-find
 //! (petgraph) joins clusters across bands; each cluster keeps its first document (PUFFER's keep-first order,
 //! arXiv 2608.28622). A document without an n-gram is in no band (StarCoder2's all-maximum signature would put every
-//! such document in one bucket), so only its exact copies join it.
+//! such document in one bucket), so only its exact copies join it; so is one below sketch's min_words.
+//!
+//! jaccard and word_counts measure what deduplication compares: the exact Jaccard similarity of two texts' n-gram sets
+//! and a text's words.
 
 use std::fs::File;
 use std::hash::Hasher;
 
 use memmap2::Mmap;
 use petgraph::unionfind::UnionFind;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::pybacked::PyBackedBytes;
+use pyo3::pybacked::{PyBackedBytes, PyBackedStr};
 use pyo3::types::PyBytes;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
-use rustc_hash::FxHasher;
+use rustc_hash::{FxHashSet, FxHasher};
 
 /// rensa's R-MinHash: three bucket rounds; a rank holds its round (or the fallback after the rounds) in its top bits
 /// and the mix's top bits below.
@@ -52,11 +56,36 @@ fn splitmix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+/// Whether the empty words that runs of non-word characters leave (StarCoder2's split) count as words: kept, as
+/// near-deduplication shingles a text, or dropped, the words alone.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Empty {
+    Kept,
+    Dropped,
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Empty {
+    type Error = PyErr;
+
+    fn extract(name: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        match &*name.extract::<PyBackedStr>()? {
+            "kept" => Ok(Empty::Kept),
+            "dropped" => Ok(Empty::Dropped),
+            other => Err(PyValueError::new_err(format!("empty_words {other:?}: \"kept\" or \"dropped\""))),
+        }
+    }
+}
+
+/// The words of a lowercased text: split at every non-word character, empty words kept or dropped.
+fn words(lower: &str, empty: Empty) -> impl Iterator<Item = &str> {
+    lower.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(move |w| empty == Empty::Kept || !w.is_empty())
+}
+
 /// Calls visit with the hash of each n-gram of a lowercased text, streaming through a ring of the last n words'
 /// hashes, so that a document needs no memory beyond its lowercased copy.
-fn for_each_ngram(lower: &str, n: usize, mut visit: impl FnMut(u64)) {
+fn for_each_ngram(lower: &str, n: usize, empty: Empty, mut visit: impl FnMut(u64)) {
     let mut ring = vec![0u64; n];
-    for (i, word) in lower.split(|c: char| !(c.is_alphanumeric() || c == '_')).enumerate() {
+    for (i, word) in words(lower, empty).enumerate() {
         let mut hasher = FxHasher::default();
         hasher.write(word.as_bytes());
         ring[i % n] = hasher.finish();
@@ -67,47 +96,86 @@ fn for_each_ngram(lower: &str, n: usize, mut visit: impl FnMut(u64)) {
 }
 
 /// The signatures of texts (UTF-8 bytes): slots bytes per document (zeros without an n-gram), and per document whether
-/// it has an n-gram (1) or not (0). The seeds (one per slot for the fallback, then one per round) are ChaCha8's draws
-/// under the zero key.
+/// it takes part in near-deduplication (1): it has an n-gram and at least min_words non-empty words (0: no minimum),
+/// else 0 (only its exact copies join it). The seeds (one per slot for the fallback, then one per round) are ChaCha8's
+/// draws under the zero key. Documents are sketched in parallel, each independently of the others.
 #[pyfunction]
-#[pyo3(signature = (texts, *, n, slots))]
-pub(crate) fn sketch<'py>(py: Python<'py>, texts: Vec<PyBackedBytes>, n: usize, slots: usize) -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>) {
+#[pyo3(signature = (texts, *, n, slots, min_words))]
+pub(crate) fn sketch<'py>(py: Python<'py>, texts: Vec<PyBackedBytes>, n: usize, slots: usize, min_words: usize) -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>) {
     let mut rng = ChaCha8Rng::from_seed(Default::default());
     let seeds: Vec<u64> = (0..slots + ROUNDS as usize).map(|_| rng.random()).collect();
     let (signatures, shingled) = py.detach(|| {
         let (mut signatures, mut shingled) = (vec![0u8; texts.len() * slots], vec![0u8; texts.len()]);
-        let (mut values, mut unfilled) = (vec![0u32; slots], Vec::with_capacity(slots));
-        for (d, text) in texts.iter().enumerate() {
-            let lower = std::str::from_utf8(text).unwrap().to_lowercase();
-            values.fill(u32::MAX);
-            for_each_ngram(&lower, n, |h| {
-                shingled[d] = 1;
-                for round in 0..ROUNDS {
-                    let mixed = splitmix64(h ^ seeds[slots + round as usize]);
-                    let slot = ((mixed as u32 as u64 * slots as u64) >> u32::BITS) as usize;
-                    values[slot] = values[slot].min((round << FRACTION_BITS) | (mixed >> (u64::BITS - FRACTION_BITS)) as u32);
+        signatures.par_chunks_mut(slots).zip(shingled.par_iter_mut()).zip(texts.par_iter()).for_each_init(
+            || (vec![0u32; slots], Vec::with_capacity(slots)),
+            |(values, unfilled), ((signature, shingle), text)| {
+                let lower = std::str::from_utf8(text).unwrap().to_lowercase();
+                if min_words > 0 && words(&lower, Empty::Dropped).count() < min_words {
+                    return; // below the minimum: its signature stays zeros
                 }
-            });
-            if shingled[d] == 0 {
-                continue; // no n-gram: its signature stays zeros
-            }
-            // a round's rank is below FALLBACK, so a slot still at u32::MAX was filled by no round
-            unfilled.clear();
-            unfilled.extend((0..slots).filter(|&j| values[j] == u32::MAX));
-            if !unfilled.is_empty() {
-                for_each_ngram(&lower, n, |h| {
-                    for &j in &unfilled {
-                        values[j] = values[j].min(FALLBACK | (splitmix64(h ^ seeds[j]) >> (u64::BITS - FRACTION_BITS)) as u32);
+                values.fill(u32::MAX);
+                for_each_ngram(&lower, n, Empty::Kept, |h| {
+                    *shingle = 1;
+                    for round in 0..ROUNDS {
+                        let mixed = splitmix64(h ^ seeds[slots + round as usize]);
+                        let slot = ((mixed as u32 as u64 * slots as u64) >> u32::BITS) as usize;
+                        values[slot] = values[slot].min((round << FRACTION_BITS) | (mixed >> (u64::BITS - FRACTION_BITS)) as u32);
                     }
                 });
-            }
-            for (byte, value) in signatures[d * slots..(d + 1) * slots].iter_mut().zip(&values) {
-                *byte = *value as u8;
-            }
-        }
+                if *shingle == 0 {
+                    return; // no n-gram: its signature stays zeros
+                }
+                // a round's rank is below FALLBACK, so a slot still at u32::MAX was filled by no round
+                unfilled.clear();
+                unfilled.extend((0..slots).filter(|&j| values[j] == u32::MAX));
+                if !unfilled.is_empty() {
+                    for_each_ngram(&lower, n, Empty::Kept, |h| {
+                        for &j in unfilled.iter() {
+                            values[j] = values[j].min(FALLBACK | (splitmix64(h ^ seeds[j]) >> (u64::BITS - FRACTION_BITS)) as u32);
+                        }
+                    });
+                }
+                for (byte, value) in signature.iter_mut().zip(values.iter()) {
+                    *byte = *value as u8;
+                }
+            },
+        );
         (signatures, shingled)
     });
     (PyBytes::new(py, &signatures), PyBytes::new(py, &shingled))
+}
+
+/// The Jaccard similarity of each pair (a[i], b[i]) of texts (UTF-8 bytes) over the sets of their n-grams of words, as
+/// sketch shingles a text (empty words kept) or over the words alone (dropped); 1 for two texts without an n-gram.
+/// Pairs in parallel; n-grams as 64-bit hashes.
+#[pyfunction]
+#[pyo3(signature = (a, b, *, n, empty_words))]
+pub(crate) fn jaccard(py: Python<'_>, a: Vec<PyBackedBytes>, b: Vec<PyBackedBytes>, n: usize, empty_words: Empty) -> Vec<f64> {
+    assert_eq!(a.len(), b.len(), "pairs");
+    let ngrams = |text: &[u8]| {
+        let mut set = FxHashSet::default();
+        for_each_ngram(&std::str::from_utf8(text).unwrap().to_lowercase(), n, empty_words, |h| {
+            set.insert(h);
+        });
+        set
+    };
+    py.detach(|| {
+        a.par_iter().zip(b.par_iter()).map(|(x, y)| {
+            let (x, y) = (ngrams(x), ngrams(y));
+            let shared = x.intersection(&y).count();
+            let union = x.len() + y.len() - shared;
+            if union == 0 { 1.0 } else { shared as f64 / union as f64 }
+        }).collect()
+    })
+}
+
+/// The number of non-empty words of each text (UTF-8 bytes), as sketch's min_words counts them, in parallel.
+#[pyfunction]
+pub(crate) fn word_counts(py: Python<'_>, texts: Vec<PyBackedBytes>) -> Vec<u32> {
+    py.detach(|| {
+        texts.par_iter().map(|t| words(&std::str::from_utf8(t).unwrap().to_lowercase(), Empty::Dropped).count() as u32)
+            .collect()
+    })
 }
 
 /// The documents d < n that are members, by key (in parallel), each as (key, d).
