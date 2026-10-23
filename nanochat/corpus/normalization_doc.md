@@ -113,8 +113,8 @@ of the execution sample below, with `task` and `analysis` fetched for the same r
 | L3 `content` (task and solution) | 61.2% | 54.1% |
 | L3 with its analysis added | 75.2% | 72.8% |
 
-- L3 mixes code with prose as natural code does, at two to three times the density. Its solutions alone comment more
-  than natural code does.
+- L3 mixes code with prose as natural code does, at 2.4–3.4 times the density [arithmetic from the table]. Its
+  solutions alone comment more than natural code does.
 - Adding the analysis would make L3 three quarters prose. Together with the report's ablation, this settles `content`
   without the analysis.
 
@@ -239,7 +239,7 @@ Measured on the first Hub file of the other two Python corpora, fetched through 
 Stack-Edu's text comes from Software Heritage without Stack v3's placeholders, and its Python 2 files are the largest
 share: repair keeps 98.05% of its rows against 88.81%.
 
-- **By failure class,** repair recovers:
+- **By failure class (R4),** repair recovers:
   - 774,851 of 782,378 print statements (99.0%);
   - 576,690 of 859,542 other syntax errors (67.1%);
   - 44,444 of 127,305 indentation or tab errors (34.9%).
@@ -292,7 +292,8 @@ six repository corpora after `nanochat/data`'s normalization: 172,953,953 rows h
 
 **Which copy is kept.** The literature keeps the copy with the most stars. OpenCoder keeps "the code files with the
 highest star count as well as the latest commit time" (arXiv 2411.04905 §2.1.1), and StarCoder2 does the same in
-near-deduplication "to preserve repository context" (§3.1). Three of the six sources carry no stars. Two rules were
+near-deduplication "to preserve repository context" (§3.1). Only UltraData-Stack-v3-L2 carries stars (in
+`source_meta.github_metadata`); Stack-Edu and UltraData-Code L2, four of the six sources, carry none. Two rules were
 measured over the six corpora's 20,412,334 (repository, language) groups:
 
 | Rule | Rows removed as another group's copy | Groups intact | Groups losing some files (rows lost) | Groups losing all |
