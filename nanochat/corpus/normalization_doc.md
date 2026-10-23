@@ -61,7 +61,7 @@ Evidence:
 | `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 119 of 119, 31 of 31 | 72,844,227; preparing |
 | `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 11 of 147, 13 of 167 | 1,552,729, 1,759,348 |
 | `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 5 of 64, 5 of 64 | preparing |
-| `codexglue_python` | google/code_x_glue_ct_code_to_text @ `2678080e` | 2 of 2 (train) | preparing |
+| `codexglue_python` | google/code_x_glue_ct_code_to_text @ `2678080e` | 2 of 2 (train) | 251,820 |
 | `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | openbmb/UltraData-Math @ `fe10db8e` | 2, 2, 3 and 2 of 50 | 1,084,548, 675,242, 686,726, 1,040,216 |
 | `codeforces_cots` | open-r1/codeforces-cots @ `39ac85c1` | 9 of 9 | 22,914 |
 | `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks @ `ef882ad1` | 11 of 11 | 580,195 |
