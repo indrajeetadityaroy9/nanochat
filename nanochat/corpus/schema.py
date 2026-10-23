@@ -7,6 +7,9 @@ name).
 EXERCISE: a synthetic programming exercise in its parts (task, analysis, solution, test), the publisher's two
 renderings of it (content: the task and the solution; full_content: all four parts, the document's text) with their
 formats, and the source file it was written from (seed).
+CONVERSATION: a codeforces_cots record as one document, the R1 prompt (the problem and its instructions) followed by
+its generation (a reasoning trace and a solution), with its problem's id (problem_id), which every generation of the
+problem shares.
 TEXT: a web document.
 """
 
@@ -36,5 +39,11 @@ EXERCISE = pa.schema([
 
 TEXT = pa.schema([
     pa.field("id", pa.string(), nullable=False),
+    pa.field("content", pa.string(), nullable=False),
+])
+
+CONVERSATION = pa.schema([
+    pa.field("id", pa.string(), nullable=False),
+    pa.field("problem_id", pa.string(), nullable=False),
     pa.field("content", pa.string(), nullable=False),
 ])

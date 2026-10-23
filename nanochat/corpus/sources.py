@@ -2,13 +2,15 @@
 The corpus's sources: a pinned Hub dataset each, the files it reads, its document category (schema.py) and the column
 of a fetched file that holds a document's text.
 
-files maps a language to the glob of the Hub files holding it (Linguist names for code; the language of a text
-corpus). Stack-Edu (arXiv 2502.02737) holds The Stack v2's educational files by Software Heritage blob ID, their text
-fetched from Software Heritage (prepare.fetch). UltraData-Stack-v3-L2 holds The Stack v3's files that UltraData's L2
-classifiers select. UltraData-Code (arXiv 2610.23960) releases L2, selected source files, and L3, exercises written
-from L2's algorithmic files; both per language. UltraData-Math (arXiv 2602.09003) releases L1, Common Crawl's math
-pages cleaned and deduplicated, one folder per crawl snapshot, and L3, documents synthesized in four formats, a source
-each.
+files maps a language to the glob of the Hub files holding it (Linguist names for code; the language of a text corpus;
+for codeforces_cots, the language of the R1 solutions each subset holds). Stack-Edu (arXiv 2502.02737) holds The Stack
+v2's educational files by Software Heritage blob ID, their text fetched from Software Heritage (prepare.fetch).
+UltraData-Stack-v3-L2 holds The Stack v3's files that UltraData's L2 classifiers select. UltraData-Code
+(arXiv 2610.23960) releases L2, selected source files, and L3, exercises written from L2's algorithmic files; both per
+language. UltraData-Math (arXiv 2602.09003) releases L1, Common Crawl's math pages cleaned and deduplicated, one folder
+per crawl snapshot, and L3, documents synthesized in four formats, a source each. Codeforces-CoTs holds DeepSeek-R1's
+reasoning traces and solutions to Codeforces problems: of its decontaminated subsets, the Python solutions and the C++
+solutions (short and long).
 """
 
 from dataclasses import dataclass
@@ -16,7 +18,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from nanochat.corpus.schema import EXERCISE, REPOSITORY_FILE, TEXT
+from nanochat.corpus.schema import CONVERSATION, EXERCISE, REPOSITORY_FILE, TEXT
 from nanochat.paths import CORPUS
 
 
@@ -62,6 +64,9 @@ SOURCES = {
         TEXT, *MATH, {"English": "data/UltraData-Math-L3/Multi-Style-Synthetic/*.parquet"}, "content"),
     "ultradata_math_l3_textbook_exercise": Source(
         TEXT, *MATH, {"English": "data/UltraData-Math-L3/Textbook-Exercise-Synthetic/*.parquet"}, "content"),
+    "codeforces_cots": Source(CONVERSATION, "open-r1/codeforces-cots", "39ac85c150806230473c70ad72c31f6232fe3f41",
+                              {"Python": "solutions_py_decontaminated/*.parquet",
+                               "C++": "solutions_short_and_long_decontaminated/*.parquet"}, "generation"),
     "climbmix": Source(TEXT, *CLIMBMIX, {"English": "shard_*.parquet"}, "text"),
 }
 
