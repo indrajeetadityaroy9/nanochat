@@ -1,6 +1,6 @@
 """
-The corpus's sources: a pinned Hub dataset each, the files it reads, its document category (schema.py) and the column
-of a fetched file that holds a document's text.
+The corpus's sources: a Hub dataset each, read at its latest revision (prepare.prepare), the files it reads, its
+document category (schema.py) and the column of a fetched file that holds a document's text.
 
 files maps a language to the glob of the Hub files holding it (Linguist names for code; the language of a text corpus;
 for codeforces_cots, the language of the R1 solutions each subset holds). Stack-Edu (arXiv 2502.02737) holds The Stack
@@ -28,7 +28,6 @@ from nanochat.paths import CORPUS
 class Source:
     schema: pa.Schema
     repo: str
-    revision: str
     files: dict[str, str]
     text: str
 
@@ -38,43 +37,42 @@ class Source:
         return language
 
 
-EDU = ("HuggingFaceTB/stack-edu", "eeec5caac5cc3758a18f1d3ba4416837a9ba814c")
-STACK_V3 = ("openbmb/UltraData-Stack-v3-L2", "d6bdb3e707cf17bbfb64067cd4c4ed84b0809baf")
-CODE = ("openbmb/UltraData-Code", "525c9ac8639c5032633392d096e54db8c84a005e")
-MATH = ("openbmb/UltraData-Math", "fe10db8efd35597fd7fcff8ff576b5ec4ea5ff87")
-CLIMBMIX = ("karpathy/climbmix-400b-shuffle", "915333b4f8b8684f39aeaafea600fea6f43fb703")
-ISSUES_KAGGLE = ("HuggingFaceTB/issues-kaggle-notebooks", "ef882ad1ed8274340e8fc9bac087c903f2f75396")
+EDU = "HuggingFaceTB/stack-edu"
+STACK_V3 = "openbmb/UltraData-Stack-v3-L2"
+CODE = "openbmb/UltraData-Code"
+MATH = "openbmb/UltraData-Math"
+ISSUES_KAGGLE = "HuggingFaceTB/issues-kaggle-notebooks"
 
 SOURCES = {
-    "stack_edu_python": Source(REPOSITORY_FILE, *EDU, {"Python": "Python/*.parquet"}, "text"),
-    "stack_edu_cpp": Source(REPOSITORY_FILE, *EDU, {"C++": "Cpp/*.parquet"}, "text"),
-    "ultradata_stack_v3_l2_python": Source(REPOSITORY_FILE, *STACK_V3,
+    "stack_edu_python": Source(REPOSITORY_FILE, EDU, {"Python": "Python/*.parquet"}, "text"),
+    "stack_edu_cpp": Source(REPOSITORY_FILE, EDU, {"C++": "Cpp/*.parquet"}, "text"),
+    "ultradata_stack_v3_l2_python": Source(REPOSITORY_FILE, STACK_V3,
                                            {"Python": "data/UltraData-Stack-v3-L2/python/*.parquet"}, "content"),
-    "ultradata_stack_v3_l2_cpp": Source(REPOSITORY_FILE, *STACK_V3,
+    "ultradata_stack_v3_l2_cpp": Source(REPOSITORY_FILE, STACK_V3,
                                         {"C++": "data/UltraData-Stack-v3-L2/cpp/*.parquet"}, "content"),
-    "ultradata_code_l2_python": Source(REPOSITORY_FILE, *CODE, {"Python": "data/UltraData-Code-L2/py/*.parquet"},
+    "ultradata_code_l2_python": Source(REPOSITORY_FILE, CODE, {"Python": "data/UltraData-Code-L2/py/*.parquet"},
                                        "content"),
-    "ultradata_code_l2_cpp": Source(REPOSITORY_FILE, *CODE, {"C++": "data/UltraData-Code-L2/cpp/*.parquet"}, "content"),
-    "ultradata_code_l3_python": Source(EXERCISE, *CODE, {"Python": "data/UltraData-Code-L3/py/*.parquet"},
+    "ultradata_code_l2_cpp": Source(REPOSITORY_FILE, CODE, {"C++": "data/UltraData-Code-L2/cpp/*.parquet"}, "content"),
+    "ultradata_code_l3_python": Source(EXERCISE, CODE, {"Python": "data/UltraData-Code-L3/py/*.parquet"},
                                        "full_content"),
-    "ultradata_code_l3_cpp": Source(EXERCISE, *CODE, {"C++": "data/UltraData-Code-L3/cpp/*.parquet"}, "full_content"),
-    "ultradata_math_l1": Source(TEXT, *MATH, {"English": "data/UltraData-Math-L1/*/*.parquet"}, "content"),
-    "ultradata_math_l3_qa": Source(TEXT, *MATH, {"English": "data/UltraData-Math-L3/QA-Synthetic/*.parquet"},
+    "ultradata_code_l3_cpp": Source(EXERCISE, CODE, {"C++": "data/UltraData-Code-L3/cpp/*.parquet"}, "full_content"),
+    "ultradata_math_l1": Source(TEXT, MATH, {"English": "data/UltraData-Math-L1/*/*.parquet"}, "content"),
+    "ultradata_math_l3_qa": Source(TEXT, MATH, {"English": "data/UltraData-Math-L3/QA-Synthetic/*.parquet"},
                                    "content"),
     "ultradata_math_l3_conversation": Source(
-        TEXT, *MATH, {"English": "data/UltraData-Math-L3/Conversation-Synthetic/*.parquet"}, "content"),
+        TEXT, MATH, {"English": "data/UltraData-Math-L3/Conversation-Synthetic/*.parquet"}, "content"),
     "ultradata_math_l3_multi_style": Source(
-        TEXT, *MATH, {"English": "data/UltraData-Math-L3/Multi-Style-Synthetic/*.parquet"}, "content"),
+        TEXT, MATH, {"English": "data/UltraData-Math-L3/Multi-Style-Synthetic/*.parquet"}, "content"),
     "ultradata_math_l3_textbook_exercise": Source(
-        TEXT, *MATH, {"English": "data/UltraData-Math-L3/Textbook-Exercise-Synthetic/*.parquet"}, "content"),
-    "codeforces_cots": Source(CONVERSATION, "open-r1/codeforces-cots", "39ac85c150806230473c70ad72c31f6232fe3f41",
+        TEXT, MATH, {"English": "data/UltraData-Math-L3/Textbook-Exercise-Synthetic/*.parquet"}, "content"),
+    "codeforces_cots": Source(CONVERSATION, "open-r1/codeforces-cots",
                               {"Python": "solutions_py_decontaminated/*.parquet",
                                "C++": "solutions_short_and_long_decontaminated/*.parquet"}, "generation"),
-    "github_issues": Source(ISSUE, *ISSUES_KAGGLE, {"English": "issues/*.parquet"}, "text"),
-    "kaggle_notebooks": Source(NOTEBOOK, *ISSUES_KAGGLE, {"Python": "kaggle/*.parquet"}, "text"),
-    "climbmix": Source(TEXT, *CLIMBMIX, {"English": "shard_*.parquet"}, "text"),
-    "opc_fineweb_math": Source(TEXT, "OpenCoder-LLM/opc-fineweb-math-corpus",
-                               "858b10c748e6c95e0cbc5ebd38543b1c4699857b", {"English": "data/train-*.parquet"}, "text"),
+    "github_issues": Source(ISSUE, ISSUES_KAGGLE, {"English": "issues/*.parquet"}, "text"),
+    "kaggle_notebooks": Source(NOTEBOOK, ISSUES_KAGGLE, {"Python": "kaggle/*.parquet"}, "text"),
+    "climbmix": Source(TEXT, "karpathy/climbmix-400b-shuffle", {"English": "shard_*.parquet"}, "text"),
+    "opc_fineweb_math": Source(TEXT, "OpenCoder-LLM/opc-fineweb-math-corpus", {"English": "data/train-*.parquet"},
+                               "text"),
 }
 
 

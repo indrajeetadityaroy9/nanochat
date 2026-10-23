@@ -148,12 +148,13 @@ statement; adopting it would be a mid-training experiment with its own contamina
 ## Source catalog
 
 The 19 sources of `nanochat/corpus/sources.py`, by Hub dataset: every column of the files a source reads, its type, its
-meaning and what standardization keeps (`nanochat/corpus/prepare.py`). Meanings quote the dataset's card at the pinned
+meaning and what standardization keeps (`nanochat/corpus/prepare.py`). `prepare.py` reads each dataset at its latest
+revision (and prints it); each is catalogued at the revision in its heading. Meanings quote the dataset's card at that
 revision, or the cards and papers it defers to (named); `[inference]` marks a meaning read from the type and the
 values. Every standardized document also gets an `id`, the sha1 of its text, computed locally; a row whose text column
 is null is dropped. Rows and nulls are counted from the Parquet footers. Each sample is the first row of the source's
-first file (or the datasets-server's first row, where the Hub's main is the pinned revision); long values are cut (…),
-their full length in characters in parentheses.
+first file (or the datasets-server's first row, where the Hub's main is the catalogued revision); long values are cut
+(…), their full length in characters in parentheses.
 
 ### HuggingFaceTB/stack-edu @ `eeec5ca`
 
@@ -193,7 +194,7 @@ card describes no column one by one; SmolLM2 (arXiv 2502.02737) describes the cl
 
 `ultradata_stack_v3_l2_python` (`data/UltraData-Stack-v3-L2/python/*.parquet`: 45 files, 24,671,724 rows) and
 `ultradata_stack_v3_l2_cpp` (`.../cpp/*.parquet`: 30 files, 17,990,102 rows). The Hub's main (`6207743`) changes only
-the card (it adds the tech report's URL); the data files are the pinned ones. The card describes no column: the
+the card (it adds the tech report's URL); its data files are the catalogued ones. The card describes no column: the
 meanings below quote The Stack v3's card (`HuggingFaceCode/stack-v3-train`) and the classifier's card
 (`openbmb/UltraData-Code-L2-Classifier`), both at their main. Seven top-level columns; `source_meta` nests 18.
 
@@ -243,7 +244,7 @@ meanings below quote The Stack v3's card (`HuggingFaceCode/stack-v3-train`) and 
 `ultradata_code_l2_python` (`data/UltraData-Code-L2/py/*.parquet`: 119 files, 72,844,227 rows), `ultradata_code_l2_cpp`
 (`.../cpp/*.parquet`: 31 files, 23,290,266 rows), `ultradata_code_l3_python` (`data/UltraData-Code-L3/py/*.parquet`: 147
 files, 20,750,202 rows), `ultradata_code_l3_cpp` (`.../cpp/*.parquet`: 167 files, 22,600,686 rows); no nulls. The Hub's
-main (`b20cabc`) adds the tech report (arXiv 2610.23960) and edits the card; the data files are the pinned ones. The
+main (`b20cabc`) adds the tech report (arXiv 2610.23960) and edits the card; its data files are the catalogued ones. The
 meanings quote the card. L2 is "one selected source file" per row; L3 "uses ALGO files at L2 as seeds and generates
 aligned task, analysis, solution, and test fields grounded in the source implementation" (card).
 

@@ -1,7 +1,7 @@
 """
 The pretraining corpus, built from the ground up, one module per stage, under paths.CORPUS:
 
-  sources.py   the sources: a pinned Hub dataset each, the files it reads, its document category
+  sources.py   the sources: a Hub dataset each (read at its latest revision), the files it reads, its document category
   schema.py    the document categories' schemas
   prepare.py   fetch every Hub file of a source, then standardize each into its category's schema
 

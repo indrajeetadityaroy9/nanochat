@@ -1,5 +1,6 @@
 """
-Prepare sources (sources.py): fetch each Hub file a source's globs match, in sorted order at its pinned revision, then
+Prepare sources (sources.py): fetch each Hub file a source's globs match, in sorted order at the dataset's latest
+revision (its main's commit, resolved once per source, so the listing and every file are one snapshot), then
 standardize each into its category's schema (schema.py), one standardized file per Hub file.
 
 Stack-Edu's Hub files are metadata: its raw file adds each blob's text, fetched from Software Heritage's public S3
@@ -27,7 +28,7 @@ import obstore
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import dataset_info, hf_hub_download, list_repo_files
 from obstore.store import S3Store
 
 from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE
@@ -36,10 +37,10 @@ from nanochat.corpus.sources import EDU, SOURCES, Source, raw_dir, standardized_
 SPAWN = multiprocessing.get_context("spawn")
 
 
-def hub_files(source: str) -> list[str]:
-    """The source's Hub files, every file its globs match at its revision, sorted."""
+def hub_files(source: str, revision: str) -> list[str]:
+    """The source's Hub files, every file its globs match at the revision, sorted."""
     spec = SOURCES[source]
-    return sorted(f for f in list_repo_files(spec.repo, repo_type="dataset", revision=spec.revision)
+    return sorted(f for f in list_repo_files(spec.repo, repo_type="dataset", revision=revision)
                   if any(fnmatch.fnmatchcase(f, glob) for glob in spec.files.values()))
 
 
@@ -70,16 +71,16 @@ def blob_texts(task: tuple[Path, int]) -> pa.Table:
     return rows.append_column("text", pa.array(asyncio.run(texts()), pa.string()))
 
 
-def fetch(source: str, file: str) -> Path:
-    """The local path of one of the source's Hub files, downloaded at its pinned revision. Stack-Edu's blobs are fetched
-    by a pool that lives for that file only, so its workers hold no memory beside standardize's."""
+def fetch(source: str, file: str, revision: str) -> Path:
+    """The local path of one of the source's Hub files, downloaded at the revision. Stack-Edu's blobs are fetched by a
+    pool that lives for that file only, so its workers hold no memory beside standardize's."""
     spec = SOURCES[source]
-    if spec.repo != EDU[0]:
-        return Path(hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision,
+    if spec.repo != EDU:
+        return Path(hf_hub_download(spec.repo, file, repo_type="dataset", revision=revision,
                                     local_dir=raw_dir(source)))
     path = raw_dir(source) / file
     path.parent.mkdir(parents=True, exist_ok=True)
-    meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision)
+    meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=revision)
     with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
           pq.ParquetWriter(path, pq.read_schema(meta).append(pa.field("text", pa.string()))) as writer):
         for table in pool.map(blob_texts, [(meta, g) for g in range(pq.ParquetFile(meta).num_row_groups)]):
@@ -163,14 +164,15 @@ def standardize_file(task: tuple[str, int, Path]) -> None:
 
 
 def prepare(sources: list[str]) -> None:
-    """Fetch every Hub file of each source, then standardize its files in parallel."""
+    """Fetch every Hub file of each source at its dataset's latest revision, then standardize its files in parallel."""
     for source in sources:
-        files = hub_files(source)
+        revision = dataset_info(SOURCES[source].repo).sha
+        files = hub_files(source, revision)
         standardized_path(source, 0).parent.mkdir(parents=True)
-        paths = [fetch(source, file) for file in files]
+        paths = [fetch(source, file, revision) for file in files]
         with ProcessPoolExecutor(mp_context=SPAWN) as pool:
             list(pool.map(standardize_file, [(source, k, path) for k, path in enumerate(paths)]))
-        print(f"{source}: {len(files)} files")
+        print(f"{source}: {len(files)} files at {SOURCES[source].repo}@{revision}")
 
 
 if __name__ == "__main__":
