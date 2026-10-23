@@ -6,13 +6,13 @@ int64), and the number of documents of each curated shard or partition (<split>.
 documents together).
 
 A corpus is a read source (mixture.READ), its documents its curated rows: a repository source's are its
-import-connected samples, each file after a comment with its path (sources.texts). The 32K stage reads one more,
-"repositories": one document per (repository, language) across the six repository sources (normalization_doc.md
-§7.2), from the fewest trailing partitions whose files hold the stage's draw of repository code (repository_parts),
-and from partition 0 for val. Of a path that several sources hold in one repository, the first source's file is kept
-(mixture.REPOSITORY_SOURCES order, deduplication's); a repository's files, in path order, are cut into import-connected
-components (the data crate's repository_samples), each in dependency order, and the components follow one another in
-the order of their first file.
+import-connected samples, each file after a comment with its path (sources.texts). The 32K stage reads two more,
+mixture.REPOSITORIES: per language, one document per repository across that language's repository sources
+(normalization_doc.md §7.2), from the fewest trailing partitions whose files hold the stage's draw of repository code
+(repository_parts), and from partition 0 for val. Of a path that several sources hold in one repository, the first
+source's file is kept (mixture.REPOSITORY_SOURCES order, deduplication's); a repository's files, in path order, are cut
+into import-connected components (the data crate's repository_samples), each in dependency order, and the components
+follow one another in the order of their first file.
 
 Row groups (a source's) and partitions (repositories') are the unit of parallel work; the parent writes their tokens
 in task order, so the output does not depend on the number of workers.
@@ -37,8 +37,6 @@ from nanochat.corpus.schema import REPOSITORY_FILE
 from nanochat.corpus.sources import SOURCES, curated_dir, texts
 from nanochat.corpus.tokenizer import get_tokenizer
 from nanochat.native import data_crate
-
-REPOSITORIES = "repositories"
 
 
 def encode(documents: list[str]) -> tuple[np.ndarray, np.ndarray]:
@@ -143,14 +141,13 @@ def main() -> None:
             tasks = [[(corpus, path, g) for g in range(pq.read_metadata(path).num_row_groups)]
                      for path in shards(corpus, split)]
             compile_split(corpus, split, row_group_documents, tasks)
-    split_path(REPOSITORIES, "val", tokenizer).parent.mkdir(parents=True)
-    languages = sorted({SOURCES[s].language for s in mixture.REPOSITORY_SOURCES})
     parts = repository_parts()
-    for split, split_parts in (("val", [0]), ("train", parts)):
-        compile_split(REPOSITORIES, split, repository_documents,
-                      [[(language, split, part) for language in languages] for part in split_parts])
-    print(f"{REPOSITORIES}: train partitions {parts[0]}..{parts[-1]}, "
-          f"{shard_tokens(REPOSITORIES, 'train').sum():,} tokens", flush=True)
+    for language, corpus in mixture.REPOSITORIES.items():
+        split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
+        for split, split_parts in (("val", [0]), ("train", parts)):
+            compile_split(corpus, split, repository_documents, [[(language, split, part)] for part in split_parts])
+        print(f"{corpus}: train partitions {parts[0]}..{parts[-1]}, {shard_tokens(corpus, 'train').sum():,} tokens",
+              flush=True)
 
 
 if __name__ == "__main__":

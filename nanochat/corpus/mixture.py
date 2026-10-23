@@ -8,6 +8,7 @@ The groups read in part (IN_PART) read the same fraction of each of their source
 fraction of each source's Hub files (prepare.extent).
 """
 
+from collections.abc import Mapping
 from typing import Literal, cast
 
 from nanochat.corpus.sources import SOURCES
@@ -19,6 +20,9 @@ STEPS, STEP_TOKENS = 86_975, 12 * 98_304
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
 REPO_STEPS = round(REPO_SHARE * STEPS)
 FILE_TOKENS, REPO_TOKENS = (STEPS - REPO_STEPS) * STEP_TOKENS, REPO_STEPS * STEP_TOKENS
+# Each stage's rows: its tokens in rows of its context (Qwen2.5-Coder's 8,192 and 32,768, arXiv 2409.12186 §3.2)
+FILE_SEQ, REPO_SEQ = 8192, 32_768
+FILE_ROWS, REPO_ROWS = FILE_TOKENS // FILE_SEQ, REPO_TOKENS // REPO_SEQ
 
 CODE_SHARE = 0.87
 REPOSITORY_SOURCES = ["stack_edu_python", "ultradata_stack_v3_l2_python", "ultradata_code_l2_python",
@@ -34,9 +38,12 @@ FILE_STAGE: dict[str, tuple[Share, list[str]]] = {
     "text": (0.10, ["climbmix"]),
     "math": (0.03, MATH_SOURCES),
 }
-# "repositories": the stage's documents per (repository, language) across REPOSITORY_SOURCES (compile.py)
+# The repository stage's documents per (repository, language) across REPOSITORY_SOURCES (compile.py), a corpus per
+# language, as a pack call parses one grammar; Codeforces-CoTs is read whole, the repositories take the rest of code
+REPOSITORIES = {"Python": "repositories_python", "C++": "repositories_cpp"}
 REPO_STAGE: dict[str, tuple[Share, list[str]]] = {
-    "code": (CODE_SHARE, ["repositories", "codeforces_cots"]),
+    "repositories": ("rest", list(REPOSITORIES.values())),
+    "traces": ("supply", ["codeforces_cots"]),
     "text": (0.10, ["climbmix"]),
     "math": (0.03, MATH_SOURCES),
 }
@@ -66,7 +73,7 @@ def draw(group: str) -> float:
                for stage, tokens in ((FILE_STAGE, FILE_TOKENS), (REPO_STAGE, REPO_TOKENS)) if group in stage)
 
 
-def source_shares(stage: dict[str, tuple[Share, list[str]]], stage_tokens: int, tokens: dict[str, float]
+def source_shares(stage: dict[str, tuple[Share, list[str]]], stage_tokens: int, tokens: Mapping[str, float]
                   ) -> dict[str, float]:
     """{source: its share of a stage's tokens}, given each source's tokens: a fixed group share; a "supply" group's
     tokens over the stage's; the "rest" group, the code share less the stage's other code groups (every group of the
