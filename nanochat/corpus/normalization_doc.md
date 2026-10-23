@@ -1,7 +1,7 @@
 # Pretraining corpus for Python and C++ code generation: specification
 
 This document specifies `nanochat/corpus` and the parts of `nanochat/data` it replaces: pretraining from scratch for
-code generation in Python and C++, from the 20 sources of `nanochat/corpus/sources.py`. Every rule is a decision;
+code generation in Python and C++, from the 21 sources of `nanochat/corpus/sources.py`. Every rule is a decision;
 none is optional. Every number is either quoted from a paper, read from the code, or measured on the GB10.
 
 The reference run is production's d24:
@@ -26,7 +26,7 @@ Evidence:
 | Filters | every Python file parses as Python 3, after repair; no generated, vendored or C++ syntax filter | 4.1, 4.2 |
 | Deduplication | exact copies only, across every source read, first occurrence kept | 4.3 |
 | Split | production's: 1% of groups (repository, problem or document) held out; repository names case-insensitive | 4.4 |
-| Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, synthetic code 10% (UltraData-Code L3's exercises, Nemotron's rewritten Python and Python transpiled into C++), Kaggle notebooks whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
+| Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, synthetic code 10% (UltraData-Code L3's exercises, Nemotron's rewritten Python and Python transpiled into C++), Kaggle notebooks and CodeXGLUE's Python functions whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
 | FIM | rate 0.5, joint PSM/SPM, context level, AST-FIM's middles with 10% random spans, repository files only; production's line widening dropped | 6 |
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) across sources | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
@@ -42,6 +42,7 @@ Evidence:
 | `ultradata_code_l2_python`, `ultradata_code_l2_cpp` | REPOSITORY_FILE | `content` | yes |
 | `ultradata_code_l3_python`, `ultradata_code_l3_cpp` | EXERCISE | `content` | in part (§5.1) |
 | `nemotron_rewriting_python`, `nemotron_transpilation_cpp`: Nemotron-Pretraining-Code-v2's `synthetic-rewriting`, `synthetic-transpilation` | SYNTHETIC_FILE | `content` | in part (§5.1) |
+| `codexglue_python`: CodeXGLUE code-to-text's `python/train-*` | FUNCTION | `code` | yes |
 | `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | TEXT | `content` | in part |
 | `codeforces_cots`: `solutions_py_decontaminated`, `solutions_short_and_long_decontaminated` | CONVERSATION | `prompt`, then `generation` | yes, at 32K |
 | `kaggle_notebooks` | NOTEBOOK | `text` | yes |
@@ -49,6 +50,7 @@ Evidence:
 | `ultradata_math_l1`, `opc_fineweb_math` | TEXT | `content`, `text` | no (§5.2) |
 | `github_issues` | ISSUE | `text` | no (§5.2) |
 | Nemotron-Pretraining-Code-v2's GitHub metadata, code-review, student-teacher and question-answering subsets | — | — | no (§3.3) |
+| CodeXGLUE code-to-text's Python validation and test splits, the benchmark's | — | — | no (§3.4) |
 
 **The dataset** (`CORPUS/manifest.json`; Parquet footers for the files still being prepared):
 
@@ -59,6 +61,7 @@ Evidence:
 | `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 119 of 119, 31 of 31 | 72,844,227; preparing |
 | `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | 11 of 147, 13 of 167 | 1,552,729, 1,759,348 |
 | `nemotron_rewriting_python`, `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | 5 of 64, 5 of 64 | preparing |
+| `codexglue_python` | google/code_x_glue_ct_code_to_text @ `2678080e` | 2 of 2 (train) | preparing |
 | `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | openbmb/UltraData-Math @ `fe10db8e` | 2, 2, 3 and 2 of 50 | 1,084,548, 675,242, 686,726, 1,040,216 |
 | `codeforces_cots` | open-r1/codeforces-cots @ `39ac85c1` | 9 of 9 | 22,914 |
 | `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks @ `ef882ad1` | 11 of 11 | 580,195 |
@@ -107,6 +110,7 @@ schema (`schema.py`):
 | REPOSITORY_FILE | `id`, `repo_name`, `relative_path`, `content`, `language` | `repo_name` |
 | EXERCISE | `id`, `content`, `language` | `id` |
 | SYNTHETIC_FILE | `id`, `content`, `language` | `id` |
+| FUNCTION | `id`, `repo_name`, `content`, `language` | `repo_name` |
 | CONVERSATION | `id`, `problem_id`, `content` | `problem_id` |
 | ISSUE | `id`, `repo_name`, `content` | `repo_name` |
 | NOTEBOOK | `id`, `content`, `language` | `id` |
@@ -246,6 +250,34 @@ samples):
 - **License:** the NVIDIA Data Access Agreement for Model Training; a model trained on it "may be subject to
   redistribution and use requirements in the Qwen License Agreement" (card).
 
+### 3.4 CodeXGLUE code-to-text (Python): functions with their docstrings
+
+**`content` is the function's `code`, which holds its docstring** where Python puts it, after the `def` line: the
+layout of HumanEval's prompts. The pairs are CodeSearchNet's: functions from "publicly available open-source non-fork
+GitHub repositories" used by another project, documentation "truncated to the first full paragraph", functions
+"shorter than three lines" and "(near) duplicate functions" removed (arXiv 1909.09436 §2). For code summarization
+CodeXGLUE filters them "with the same four rules mentioned in Section 3.6" (arXiv 2102.04664 §3.9): it removes
+examples "whose code could not be parsed into abstract syntax tree", whose "document tokens number is shorter than 3 or
+larger than 256", whose document "contains special tokens such as 'http://'", or is "not written in English" (§3.6).
+
+Measured on the Hub's Python splits:
+
+| | Train (read) | Validation, test (not read) |
+|---|---|---|
+| Pairs; repositories | 251,820; 11,116 | 13,914, 14,918; 622, 623 |
+| Code | 223.0 MB, median 623 bytes | 12.9, 14.0 MB |
+| Production's tokenizer (5,000-row samples) | 4.028 bytes per token: 55.4M tokens | 3.3M, 3.4M tokens |
+| Docstring inside `code`; `code` equal to `original_string` | 100%; 100% | 100%; 100% |
+| Parses as Python 3 (5,000 rows) | 99.0% | 99.0%, 98.9% |
+
+- `code_tokens` and `docstring_tokens` are not text: the code's tokens without its docstring, whitespace or line
+  breaks (they do not rejoin into the code), and the docstring's first sentence. The tokenizer reads `code`.
+- **Largely new text:** of 20,000 random train pairs, 5,006 (25.0%) come from a (repository, path) that Stack-Edu,
+  UltraData-Code L2 or UltraData-Stack-v3-L2 Python holds, and 3,124 (15.6%) appear verbatim inside that file
+  (measured); the rest are 2019 versions or repositories the newer crawls lack.
+- **Not read:** the validation and test splits, CodeXGLUE's evaluation sets.
+- **License:** C-UDA (the card); used for research.
+
 ## 4. Curation
 
 The steps run in order: the Python 3 check with repair, exact deduplication, split.
@@ -283,10 +315,10 @@ a prose paragraph written as one Markdown line (823 of 912 sampled).
 
 ### 4.2 Python 3 check, with repair
 
-Every Python file, a repository's or a synthetic one (§3.3), must parse with `ast.parse` (Python 3.12). Python 2 files
-are real code, so a file that fails is repaired before it is dropped, by the smallest set of the steps below that
-makes it parse (`curate.repaired`: of the steps that change the file, every subset by size, then in step order), and
-the kept text is the repaired one:
+Every Python file, a repository's, a synthetic one (§3.3) or a function (§3.4), must parse with `ast.parse` (Python
+3.12). Python 2 files are real code, so a file that fails is repaired before it is dropped, by the smallest set of the
+steps below that makes it parse (`curate.repaired`: of the steps that change the file, every subset by size, then in
+step order), and the kept text is the repaired one:
 1. Stack v3's placeholders `<EMAIL>`, `<KEY>`, `<NAME>` and `<PASSWORD>` become the bare word (`<NAME>` → `NAME`).
 2. Leading-indentation tabs are expanded to 8 columns, Python 2's rule: "tabs are replaced (from left to right) by one
    to eight spaces such that the total number of characters up to and including the replacement is a multiple of
@@ -402,15 +434,17 @@ the removal of the vendored filter; vendored copies are counted.
     and MBPP by 1-4%" (arXiv 2301.03988 §6.1).
 - Near duplicates can sit on both sides of the split; validation loss counts them. Nemotron's rewritten and
   transpiled files record no repository, so a validation repository's file can have a rewritten copy in training.
+  15.6% of CodeXGLUE's functions also appear verbatim inside a repository file the corpus reads (§3.4), so they are
+  read twice, once alone.
 
 ### 4.4 Split
 
 A group goes to validation when `md5_number(group) % 100 = 0` (`schema.SPLIT`, as `nanochat/data/curate.SPLIT`), the
-group being the one in §2's table. A repository's group is its lowercased name: GitHub's names are case-insensitive,
-and of 4,146,969 names shared by UltraData-Stack-v3-L2 Python and C++ and UltraData-Code L2 Python, 63 differ only in
-case, 2 of them on both sides of production's case-sensitive split (measured). Otherwise this is production's split;
-no paper sets its size. Deduplication runs over both splits first, so no validation text has an exact copy in
-training.
+group being the one in §2's table. A repository's group, and a function's, is its lowercased name: GitHub's names are
+case-insensitive, and of 4,146,969 names shared by UltraData-Stack-v3-L2 Python and C++ and UltraData-Code L2 Python,
+63 differ only in case, 2 of them on both sides of production's case-sensitive split (measured). Otherwise this is
+production's split; no paper sets its size. Deduplication runs over both splits first, so no validation text has an
+exact copy in training.
 
 ## 5. Mixture
 
@@ -428,6 +462,7 @@ The token budget is 102.6B tokens, as production:
 | Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈75.5% | ≈73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
 | Synthetic code | UltraData-Code L3 (Python, C++), Nemotron's rewriting (Python) and transpilation (C++) | 10% | 9.7B | 143.41B (Parquet footers at production's bytes per token): L3 14.14B and 15.42B (3.826, 3.593), rewriting 82.55B (3.909), transpilation 31.31B (3.651); the UltraData report's Table 17 gives L3 34.24B in an unstated tokenizer | 6.76%, from their extents (§1); weighted by tokens: L3 9.9% and 10.8%, rewriting 57.6%, transpilation 21.8% |
 | Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
+| Functions | CodeXGLUE code-to-text, Python train | its supply: ≈0.057% | ≈55M | 55.4M measured (4.028 bytes per token, §3.4) | once, whole |
 | General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, from its extent |
 | Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | 82.5B measured: QA 22.8B, Conversation 18.3B, Multi-Style 17.4B, Textbook-Exercise 24.0B; 260.5 GB of text (Parquet footers) at 2.92–3.46 bytes per token (20,000-row samples); the paper gives 88B in an unstated tokenizer | 3.7% with the 32K stage's, from its extent |
 
@@ -523,6 +558,16 @@ The token budget is 102.6B tokens, as production:
   Seed-Coder uses `open-r1/codeforces-cots` "for a distilled model" (arXiv 2506.03524 §3.2.1), not its base model.
 - At 0.305B tokens they cost 5.4% of the 32K stage, read once and whole (§3.2).
 
+**Functions with docstrings: CodeXGLUE's Python train split, read once, whole.**
+- At 55.4M tokens it is 0.057% of the file stage, so a fixed share would repeat it: 1% of the stage is 17.5 readings,
+  and "repeating 0.1% of the data 100 times" degrades a model (arXiv 2205.10487). Read once, it is a supply group.
+- The measured gain from such pairs is a separate stage: PanGu-Coder (317M) went from HumanEval pass@1 10.37 after
+  causal pretraining on code to 17.07 after a second stage on docstring–code pairs with the loss on the code tokens
+  only, while adding a loss on the docstring gave 12.80 and 12.19 ("perform poorly"; arXiv 2207.11280 §3.4.4,
+  Table 7). This design has one file-stage mixture and a loss on every token (§5.2, §8), so the pairs are read as
+  pretraining text; a code-only-loss stage is a training-side choice, the docstring's place recoverable from the
+  function's syntax tree.
+
 **Kaggle notebooks as production; GitHub issues not added.**
 - Production reads Kaggle notebooks in its code group, and both E1 arms include them. StarCoder2 trains on them: "We
   include Python notebooks released by the Kaggle platform" (§2.4.2).
@@ -579,7 +624,8 @@ line widening):
   - AST-FIM: "For the natural language data, we only apply the standard L2R objective without any FIM" (§5.1);
   - StarCoder2 applies FIM to source code, not to "the repository metadata" (§5);
   - the UltraData-Code report never mentions FIM, so L3's measured gains are left to right, as are the rewriting and
-    transpilation gains above (§5.2); synthetic code is read left to right.
+    transpilation gains above (§5.2); synthetic code is read left to right, and so are CodeXGLUE's functions, whose
+    measured use is left to right (§5.2).
 - **C++ middles are random more often.** tree-sitter-cpp fails on 5.5–12.5% of whole C++ files (§4.1), so C++'s random
   share there is 15–21% against AST-FIM's 10% [arithmetic]; cut C++ pieces fail far more often (§7.1). Python files
   fail in 0–0.03%.
@@ -773,6 +819,7 @@ tree and history; `publish.pull` fetches a revision where the tokenizer is train
 | Document sources in 100 train shards; 32K partitions counted after the path rule; the extent over the train split; byte shares in the tokenizer sample; empty texts dropped | `corpus/curate.py`, `corpus/compile.py`, `corpus/prepare.py`, `corpus/tokenizer.py` | done |
 | Every text normalized (LF, no leading BOM); minimal Python repair; case-insensitive repositories; escaped path comments; atomic, resumable raw files | `corpus/prepare.py`, `corpus/curate.py`, `corpus/sources.py`, `corpus/compile.py` | done (be961a4, af2a7fb) |
 | Nemotron-Pretraining-Code-v2's rewriting and transpilation in the synthetic group; SYNTHETIC_FILE | `corpus/sources.py`, `corpus/schema.py`, `corpus/mixture.py`, `corpus/prepare.py`, `corpus/curate.py` | done (2d6bcc0) |
+| CodeXGLUE code-to-text's Python train split as a supply group; FUNCTION; the stages' supply sources from the mixture | `corpus/sources.py`, `corpus/schema.py`, `corpus/mixture.py`, `corpus/prepare.py`, `corpus/curate.py`, `corpus/pack.py`, `corpus/compile.py` | done (6e11acf) |
 | Every read source prepared and curated on the GB10; the curated shards published | `prepare`, `curate`, `publish` | running |
 | The tokenizer decided and trained, the corpus compiled and packed, after the pull | `tokenizer`, `compile`, `pack` | after the pull |
 | Training reads the corpus (`config.py`, `train/`, `eval/`, `inference/`); the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |
