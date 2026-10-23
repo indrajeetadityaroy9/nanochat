@@ -119,6 +119,7 @@ def text(t: pa.Table, spec: Source) -> pa.Table:
 
 
 STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
+               "ultradata_stack_v3_l2_python": repository_file, "ultradata_stack_v3_l2_cpp": repository_file,
                "ultradata_code_l2_python": repository_file, "ultradata_code_l2_cpp": repository_file,
                "ultradata_code_l3_python": exercise, "ultradata_code_l3_cpp": exercise, "climbmix": text}
 
