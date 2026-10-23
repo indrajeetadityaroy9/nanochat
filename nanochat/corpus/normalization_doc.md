@@ -53,6 +53,12 @@ Evidence:
   metadata is fetched whole, one file at a time, and its text by blob id from Software Heritage's public S3 bucket.
 - **4 files at once** (`FETCHES`). Measured on this link, reading one column of 8 L3 files per setting: 8.5 MB/s with
   1 file in flight, 11.5 with 2, 12.4 with 4 and 10.5 with 8.
+- **A source read in part fetches only its extent** (`prepare.extent`): the fewest Hub files, in the sha1 order of
+  their paths (a random order whose prefixes nest as the extent grows), whose text bytes (Parquet footers) hold its
+  group's fraction of both stages' draws at production's bytes per token, widened by 6% for a retrained tokenizer's
+  compression: "the NSL on any given subset only varies by 5 to 6 percentage points" across tokenizer training mixes
+  (arXiv 2402.01035 §2.3). For UltraData-Math L3 that is 2 of 50 files per format, 4.0% of their bytes (measured), so
+  its sample is random at the granularity of files.
 
 ## 2. Schema
 
@@ -349,7 +355,7 @@ The token budget is 102.6B tokens, as production:
 
 | Repository-stage group | Sources | Share | Tokens |
 |---|---|---|---|
-| Code | whole repositories (§7.2); Codeforces-CoTs' finished traces, 0.305B read once (§3.2) | 87% | 4.87B, 6.3% of it the traces |
+| Code | the repository documents per language (§7.2), the rest of 87%; Codeforces-CoTs' finished traces, 0.305B, their supply read whole (§3.2) | 87% | 4.87B, 6.3% of it the traces |
 | General text | ClimbMix | 10% | 0.56B |
 | Mathematics | UltraData-Math L3 | 3% | 0.17B |
 
@@ -363,10 +369,14 @@ The token budget is 102.6B tokens, as production:
   continual pre-training of code-initialized models … to avoid a full distribution shift" (arXiv 2408.10914, footnote
   5). Measured on production's runs (`results/lr-curves.jsonl`): after its switch to code alone, the step-to-step
   spread of the training loss grows 1.15–2.26 times.
-- **Within a group,** sources are weighted by their tokens after curation (production's `mixture_weights`). Within
-  repository code, the 32K stage reads a partition of repositories: curated shards are residues of
-  `md5_number(repo_name)`, and the stage reads the trailing ones (`train/stages.py`); the file stage reads the rest.
-- **A group read in part** reads its rows in `id` order, a uniform sample because `id` is a hash.
+- **Within a group,** sources are weighted by their packed rows (production's `mixture_weights`), which follow their
+  tokens. Within repository code, the 32K stage reads a partition of repositories: curated shards are residues of
+  `md5_number(repo_name)`, and the stage reads the trailing ones; the file stage reads the rest, as each source's
+  import-connected samples (production's 8K unit).
+- **A group read in part** reads its rows in `id` order, a uniform sample of its extent because `id` is a hash.
+- **Every draw fits its rows** (`pack.fit`): each stage's weights are replayed through the loader's `mixture_rows`
+  over its rows; a source read in part packs its next shard while its draw exceeds its rows, and a source read whole
+  ("supply": Kaggle notebooks, Codeforces-CoTs) weighs as many rows less as the replay overdraws it.
 
 ### 5.2 Why these shares
 
@@ -527,10 +537,12 @@ Comparable models:
 
 ### 7.2 Repository documents for the 32K stage
 
-**One document per (`repo_name`, `language`) across the six repository sources,** after deduplication.
-- Files come in dependency order, DeepSeek-Coder's topological sort (§2.2), then the rest in path order.
-- Each file is preceded by a comment line holding its path, `# path` or `// path`, as `nanochat/data/sources.texts`
-  writes it: "a comment indicating the file's path is added at the beginning of each file" (DeepSeek-Coder §2.2).
+**One document per (`repo_name`, `language`) across the six repository sources,** after deduplication, a corpus per
+language (`repositories_python`, `repositories_cpp`), as a pack call parses one grammar.
+- Files come in dependency order, DeepSeek-Coder's topological sort (§2.2), then the rest in path order. Of a path
+  that several sources hold in one repository, the first source's file is kept (`sources.py` order, deduplication's).
+- Each file is preceded by a comment line holding its path, `# path` or `// path` (`corpus/sources.texts`): "a comment
+  indicating the file's path is added at the beginning of each file" (DeepSeek-Coder §2.2).
 
 Measured (R3) against the current samples, which are import-connected components within one corpus:
 
@@ -600,6 +612,8 @@ Production's tokenizer (`nanochat/data/tokenizer.py`):
   (arXiv 2405.05417 §5).
 - Authorship units are `repo_name` for repository files and the document itself otherwise. The TEXT schema keeps no
   URL, and production used hosts as units for OPC FineWeb Math only.
+- The sample holds 13.38 GB, production's sample size (its curated splits' Parquet footers), so the two vocabularies
+  differ in their sample's composition only.
 - Every token figure in this document is in production's tokenizer. A retrained tokenizer rescales each by its bytes
   per token.
 
@@ -632,12 +646,11 @@ it has not been run. Measured properties of the pattern, on 20,000 documents per
 | Change | Where | Status |
 |---|---|---|
 | Fetch only the columns standardization reads; EXERCISE holds `id`, `content`, `language` | `corpus/prepare.py`, `corpus/schema.py` | done (3f9f335) |
-| Codeforces-CoTs: `finish_reason = 'stop'` rows only | `corpus/prepare.py` | to do |
-| Record each source's revision in the manifest | `corpus/prepare.py` | to do |
-| Python 3 check with repair, fissix in the image | new `corpus` curation step; `docker/Dockerfile` | to do |
-| Exact deduplication by `id`, keep-first across sources; no near deduplication, no go-enry filter | new `corpus` curation step | to do |
-| FIM without line widening (`LINE_SHARE`) | `data/pack.py`, `crate/pack.rs` | to do |
-| Mixture of §5.1: 87 : 10 : 3 in both stages; Kaggle whole; Codeforces-CoTs and whole repositories in the 32K stage | `config.py`, `data/loader.py`, `train/stages.py` | to do |
-| Repository documents per (repository, language) across sources | `data/curate.py`, `crate/repository.rs`, compile, 32K pack | to do; path comments exist (`data/sources.texts`) |
-| Tokenizer sample from this corpus's sources at the mixture's shares; authorship units from the schemas | `data/tokenizer.py` | to do |
+| Codeforces-CoTs: `finish_reason = 'stop'` rows only; each source's revision, files and rows in the manifest; extents of the sources read in part | `corpus/prepare.py`, `corpus/mixture.py` | done (a64c637) |
+| Python 3 check with repair (fissix in `pyproject.toml`); exact deduplication by `id`, keep-first across sources; the split; curated shards | `corpus/curate.py` | done (4985b09) |
+| Tokenizer sample from this corpus's sources at the file stage's shares; authorship units from the schemas | `corpus/tokenizer.py` | done (4985b09) |
+| Curated documents in tokens; repository documents per (repository, language) across sources | `corpus/compile.py` | done (4985b09, d068c80) |
+| Mixture of §5.1 in both stages; stage-disjoint packs; FIM without line widening; weights fitted to the packed rows | `corpus/mixture.py`, `corpus/pack.py`, `corpus/loader.py` | done (d068c80) |
+| Every read source prepared, curated, tokenized, compiled and packed on the GB10 | `python -m nanochat.corpus.<stage>` | running |
+| Training reads the corpus (`config.py`, `train/`, `eval/`, `inference/`); the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |
 | Packing, masking, cuts, schedule | — | unchanged |
