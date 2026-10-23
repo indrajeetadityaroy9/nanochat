@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / "artifacts"
 DATA = ARTIFACTS / "data"                # the data pipeline's stages (nanochat/data/__init__.py)
+CORPUS = ARTIFACTS / "corpus"            # the ground-up corpus pipeline's stages (nanochat/corpus/__init__.py)
 TOKENIZER = ARTIFACTS / "tokenizer"
 # the tokenizer ablation (ablations/tokenizer.py): <arm>/tokenizer.*, and compiled/ every arm's compiled and packed data
 TOKENIZER_ABLATION = ARTIFACTS / "tokenizer-ablation"
@@ -26,6 +27,6 @@ if __name__ == "__main__":
 
     from nanochat.config import DATASET, DATASET_REVISION
 
-    for directory in (DATA, TOKENIZER, CHECKPOINTS, METRICS, BASE_EVAL, LOGS, CACHE, NATIVE):
+    for directory in (DATA, CORPUS, TOKENIZER, CHECKPOINTS, METRICS, BASE_EVAL, LOGS, CACHE, NATIVE):
         directory.mkdir(parents=True, exist_ok=True)
     snapshot_download(DATASET, repo_type="dataset", revision=DATASET_REVISION, local_dir=ARTIFACTS)
