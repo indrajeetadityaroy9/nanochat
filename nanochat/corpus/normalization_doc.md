@@ -94,6 +94,8 @@ schema (`schema.py`):
 ### 3.1 UltraData-Code L3: the publisher's `content`
 
 **`content` is the task followed by its solution,** with the task as a code comment, as unfenced text or as Markdown.
+The release holds 20,750,202 Python and 22,600,686 C++ exercises, 54.1 and 55.4 GB of `content`, with median lengths
+of 2,023 and 1,932 bytes (measured on the standardized files).
 - **The format proportions are 50 / 25 / 25,** as the report trains: "examples are randomly assigned to code comment,
   no fence, and Markdown formats with proportions of 50%, 25%, and 25%, respectively" (App. C.3). Measured on the
   first file of each language: Python 0.50 / 0.25 / 0.25, C++ 0.499 / 0.248 / 0.252.
@@ -286,7 +288,8 @@ six repository corpora after `nanochat/data`'s normalization: 172,953,953 rows h
   - 0.09% (Stack-Edu Python) and 0.06% (C++);
   - 12.57% / 12.18% (UltraData-Stack-v3-L2);
   - 32.26% / 16.48% (UltraData-Code L2);
-  - 0.03% of Codeforces-CoTs and 0.61% of ClimbMix (R1).
+  - 0.03% of Codeforces-CoTs and 0.61% of ClimbMix (R1);
+  - 306 rows of UltraData-Code L3 Python and 130 of C++ (0.001%), and 4 texts in both languages (measured).
 - **Repetition is what exact deduplication prevents:** "performance of an 800M parameter model can be degraded to that
   of a 2x smaller model (400M params) by repeating 0.1% of the data 100 times" (arXiv 2205.10487).
 
@@ -337,7 +340,7 @@ The token budget is 102.6B tokens, as production:
 | File-stage group | Sources | Share | Tokens | Supply (production's tokenizer) | Read |
 |---|---|---|---|---|---|
 | Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈75.5% | ≈73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
-| Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 34.2B (report Table 17; its tokenizer is not stated) | ≈28% |
+| Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 29.56B measured: Python 14.14B (3.826 bytes per token), C++ 15.42B (3.593), on a 100,000-row sample each; the report's Table 17 gives 34.24B in an unstated tokenizer | ≈33% |
 | Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
 | General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, ≈180 files |
 | Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | QA alone 22.8B: 66.5 GB of text (Parquet footers) at 2.92 bytes per token (20,000-row sample) | under 14% of QA's, with the 32K stage's |
