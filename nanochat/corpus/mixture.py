@@ -1,0 +1,57 @@
+"""
+The corpus's training mixture (the design document, normalization_doc.md §5): the run's tokens, its two stages, and
+each stage's groups {group: (share, sources)}. A share is the group's fraction of its stage's tokens, "supply" for a
+group read whole once (its share is its tokens over the stage's), or "rest" for the group that takes what the others
+leave of the code share. Within a group, sources weigh in by their tokens.
+
+The groups read in part (IN_PART) read the same fraction of each of their sources' tokens; prepare fetches only that
+fraction of each source's Hub files (prepare.extent).
+"""
+
+from typing import Literal, cast
+
+# Production's d24 run (docs/h100-pretraining.md): 86,975 steps of 12 micro-batches of 98,304 tokens
+STEPS, STEP_TOKENS = 86_975, 12 * 98_304
+# Repository-stage share of steps: Qwen2.5-Coder's 300B of 5.2T + 300B (arXiv 2409.12186 §3.2.1-3.2.2), placed as
+# train/schedule.plan places it
+REPO_SHARE = 300e9 / (5.2e12 + 300e9)
+REPO_STEPS = round(REPO_SHARE * STEPS)
+FILE_TOKENS, REPO_TOKENS = (STEPS - REPO_STEPS) * STEP_TOKENS, REPO_STEPS * STEP_TOKENS
+
+CODE_SHARE = 0.87
+REPOSITORY_SOURCES = ["stack_edu_python", "ultradata_stack_v3_l2_python", "ultradata_code_l2_python",
+                      "stack_edu_cpp", "ultradata_stack_v3_l2_cpp", "ultradata_code_l2_cpp"]
+MATH_SOURCES = ["ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultradata_math_l3_multi_style",
+                "ultradata_math_l3_textbook_exercise"]
+
+Share = float | Literal["supply", "rest"]
+FILE_STAGE: dict[str, tuple[Share, list[str]]] = {
+    "repository": ("rest", REPOSITORY_SOURCES),
+    "exercises": (0.10, ["ultradata_code_l3_python", "ultradata_code_l3_cpp"]),
+    "notebooks": ("supply", ["kaggle_notebooks"]),
+    "text": (0.10, ["climbmix"]),
+    "math": (0.03, MATH_SOURCES),
+}
+# "repositories": the stage's documents per (repository, language) across REPOSITORY_SOURCES (compile.py)
+REPO_STAGE: dict[str, tuple[Share, list[str]]] = {
+    "code": (CODE_SHARE, ["repositories", "codeforces_cots"]),
+    "text": (0.10, ["climbmix"]),
+    "math": (0.03, MATH_SOURCES),
+}
+
+IN_PART = ("exercises", "text", "math")
+# Production's tokenizer's bytes per token on each source read in part (measured: normalization_doc.md §5.1), and how
+# far a retrained tokenizer's compression may move from it: "the NSL on any given subset only varies by 5 to 6
+# percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035 §2.3)
+BYTES_PER_TOKEN = {"ultradata_code_l3_python": 3.826, "ultradata_code_l3_cpp": 3.593, "climbmix": 4.275,
+                   "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
+                   "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
+SPREAD = 0.06
+# {source: its group} for every source of a group read in part (each such group has the same sources in both stages)
+PART = {source: group for group in IN_PART for source in FILE_STAGE[group][1]}
+
+
+def draw(group: str) -> float:
+    """The tokens both stages draw of a group read in part (its share is a fraction in each stage that has it)."""
+    return sum(cast(float, stage[group][0]) * tokens
+               for stage, tokens in ((FILE_STAGE, FILE_TOKENS), (REPO_STAGE, REPO_TOKENS)) if group in stage)

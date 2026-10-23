@@ -82,6 +82,6 @@ def raw_dir(source: str) -> Path:
 
 
 def standardized_path(source: str, k: int) -> Path:
-    """CORPUS/standardized/<source>/<k>.parquet: Hub file k of the source in sorted order, in its schema
-    (prepare.standardize_file)."""
+    """CORPUS/standardized/<source>/<k>.parquet: the source's fetched Hub file k in the order prepare.extent gives, in
+    its schema (prepare.standardize_file)."""
     return CORPUS / "standardized" / source / f"{k}.parquet"
