@@ -49,8 +49,6 @@ fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(train::train, m)?)?;
     m.add_function(wrap_pyfunction!(dedup::sketch, m)?)?;
     m.add_function(wrap_pyfunction!(dedup::duplicates, m)?)?;
-    m.add_function(wrap_pyfunction!(dedup::jaccard, m)?)?;
-    m.add_function(wrap_pyfunction!(dedup::word_counts, m)?)?;
     m.add_function(wrap_pyfunction!(repository::repository_samples, m)?)?;
     m.add_function(wrap_pyfunction!(pack::pack, m)?)?;
     m.add_function(wrap_pyfunction!(leaves::leaves, m)?)
