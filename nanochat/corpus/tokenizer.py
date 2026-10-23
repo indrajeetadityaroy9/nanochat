@@ -97,8 +97,9 @@ def sample() -> tuple[list[str], list[int]]:
 
 def main() -> None:
     """Train, save and load the corpus's tokenizer; report each source's bytes per token on its curated val split
-    under it and under production's, and each group read in part's train tokens under it over its draw (Parquet
-    footers' bytes at the val split's bytes per token): below 1, pack.fit runs out of its shards."""
+    under it and production's (mixture.BYTES_PER_TOKEN, measured), and each group read in part's train tokens under it
+    over its draw (Parquet footers' bytes at the val split's bytes per token): below 1, pack.fit runs out of its
+    shards."""
     docs, units = sample()
     print(f"sample: {len(docs):,} documents, {sum(map(len, map(str.encode, docs))) / 1e9:.2f} GB, {max(units) + 1:,} "
           f"authorship units", flush=True)
@@ -108,16 +109,16 @@ def main() -> None:
         mergeable.append(mergeable[left] + mergeable[right])
     TOKENIZER.mkdir(parents=True)
     production.save(TOKENIZER, mergeable, production.SPLIT_PATTERN)
-    corpus, reference = get_tokenizer(), production.get_tokenizer()
+    corpus = get_tokenizer()
     print(f"data key {corpus.data_key}")
     bytes_per_token = {}
     for source in mixture.READ:
         val = [text for path in sorted(curated_dir(source, "val").iterdir())
                for text in texts(source, pq.read_table(path))]
-        size = sum(len(text.encode()) for text in val)
-        bytes_per_token[source], old = (size / sum(map(len, t.enc.encode_ordinary_batch(val)))
-                                        for t in (corpus, reference))
-        print(f"{source}: {bytes_per_token[source]:.3f} bytes per token, production's {old:.3f}", flush=True)
+        bytes_per_token[source] = sum(len(text.encode()) for text in val) / sum(
+            map(len, corpus.enc.encode_ordinary_batch(val)))
+        print(f"{source}: {bytes_per_token[source]:.3f} bytes per token, production's "
+              f"{mixture.BYTES_PER_TOKEN[source]:.3f}", flush=True)
     for group in mixture.IN_PART:
         held = sum(sum(map(content_bytes, train_files(s))) / bytes_per_token[s]
                    for s, g in mixture.PART.items() if g == group)

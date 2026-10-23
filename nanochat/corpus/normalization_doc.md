@@ -30,6 +30,7 @@ Evidence:
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) across sources | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
 | Tokenizer | retrained on this corpus's sources at the file stage's shares of bytes; production's vocabulary size, split pattern and score | 9 |
+| Publication | the curated text, tokenizer-independent, in the private `iaroy/nanochat-data`; tokenizer, compile, packing and FIM run after the pull, as they need the tokenizer | 10 |
 
 ## 1. Sources
 
@@ -676,6 +677,13 @@ described there and not trained on. Measured properties of the pattern, on 20,00
 
 ## 10. Changes to the code
 
+**The pipeline splits at the tokenizer.** Everything through curation is text: standardization, the Python 3 check
+and repair, deduplication, the split, the shards and the import-connected samples. Everything after needs the
+tokenizer: packing places pieces in rows of `seq_len` tokens and cuts them at token offsets (`crate/pack.rs`), FIM
+encodes prefix, suffix and middle separately around sentinel ids, and the 32K stage's partitions are counted in tokens
+(`compile.stage_parts`). `publish.push` puts the curated shards, the manifest and a card in the dataset, replacing its
+tree and history; `publish.pull` fetches a revision where the tokenizer is trained and decided.
+
 | Change | Where | Status |
 |---|---|---|
 | Fetch only the columns standardization reads; EXERCISE holds `id`, `content`, `language` | `corpus/prepare.py`, `corpus/schema.py` | done (3f9f335) |
@@ -685,6 +693,7 @@ described there and not trained on. Measured properties of the pattern, on 20,00
 | Curated documents in tokens; repository documents per (repository, language) across sources | `corpus/compile.py` | done (4985b09, d068c80) |
 | Mixture of §5.1 in both stages; stage-disjoint packs; FIM without line widening; weights fitted to the packed rows | `corpus/mixture.py`, `corpus/pack.py`, `corpus/loader.py` | done (d068c80) |
 | Document sources in 100 train shards; 32K partitions counted after the path rule; the extent over the train split; byte shares in the tokenizer sample; empty texts dropped | `corpus/curate.py`, `corpus/compile.py`, `corpus/prepare.py`, `corpus/tokenizer.py` | done |
-| Every read source prepared, curated, tokenized, compiled and packed on the GB10 | `python -m nanochat.corpus.<stage>` | running |
+| Every read source prepared and curated on the GB10; the curated shards published | `prepare`, `curate`, `publish` | running |
+| The tokenizer decided and trained, the corpus compiled and packed, after the pull | `tokenizer`, `compile`, `pack` | after the pull |
 | Training reads the corpus (`config.py`, `train/`, `eval/`, `inference/`); the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |
 | Packing, masking, cuts, schedule | — | unchanged |
