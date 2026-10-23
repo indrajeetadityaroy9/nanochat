@@ -23,6 +23,9 @@ import pyarrow as pa
 from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE, TEXT
 from nanochat.paths import CORPUS
 
+# The line comment of each repository-file language: Python Language Reference §2.1.3 "Comments", C++23 [lex.comment]
+COMMENTS = {"Python": "#", "C++": "//"}
+
 
 @dataclass(frozen=True)
 class Source:
@@ -85,3 +88,28 @@ def standardized_path(source: str, k: int) -> Path:
     """CORPUS/standardized/<source>/<k>.parquet: the source's fetched Hub file k in the order prepare.extent gives, in
     its schema (prepare.standardize_file)."""
     return CORPUS / "standardized" / source / f"{k}.parquet"
+
+
+def checked_path(source: str, k: int) -> Path:
+    """CORPUS/checked/<source>/<k>.parquet: a Python repository source's standardized file k with every file parsing as
+    Python 3, repaired where it did not (curate.check)."""
+    return CORPUS / "checked" / source / f"{k}.parquet"
+
+
+def curated_dir(source: str, split: str) -> Path:
+    """CORPUS/curated/<source>/<split>: the source's curated shards of a split, <k>.parquet (curate.py)."""
+    return CORPUS / "curated" / source / split
+
+
+def texts(source: str, table: pa.Table) -> list[str]:
+    """The text of each row of a curated table: its content; for a repository file, the content after a line comment
+    with the file's path (DeepSeek-Coder arXiv 2401.14196 §2.2: "a comment indicating the file's path is added at the
+    beginning of each file"), with a line end appended when it does not end with one, as a non-empty source file is
+    read (C++23 [lex.phases] phase 2; Python Language Reference §2.1.2: the end of input terminates the last line)."""
+    contents = table["content"].to_pylist()
+    spec = SOURCES[source]
+    if spec.schema is not REPOSITORY_FILE:
+        return contents
+    comment = COMMENTS[spec.language]
+    return [f"{comment} {path}\n{text.removesuffix('\n')}\n"
+            for path, text in zip(table["relative_path"].to_pylist(), contents, strict=True)]

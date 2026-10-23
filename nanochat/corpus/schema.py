@@ -14,6 +14,8 @@ and its status), with its repository.
 NOTEBOOK: a Kaggle notebook as one document, in Markdown (its title, the description of the datasets it reads, its
 code converted to a script in code blocks), with the code's language.
 TEXT: a web document.
+SAMPLE_FILE: a curated repository file and its import-connected sample (curate.py): the files of a sample are
+consecutive rows, in the sample's dependency order.
 """
 
 import pyarrow as pa
@@ -53,4 +55,11 @@ NOTEBOOK = pa.schema([
     pa.field("id", pa.string(), nullable=False),
     pa.field("content", pa.string(), nullable=False),
     pa.field("language", pa.string(), nullable=False),
+])
+
+SAMPLE_FILE = pa.schema([
+    pa.field("repo_name", pa.string(), nullable=False),
+    pa.field("relative_path", pa.string(), nullable=False),
+    pa.field("content", pa.string(), nullable=False),
+    pa.field("sample", pa.int64(), nullable=False),  # the sample's number in its curated file
 ])
