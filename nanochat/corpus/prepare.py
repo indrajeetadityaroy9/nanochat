@@ -36,8 +36,9 @@ from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPO
 from nanochat.corpus.sources import EDU, SOURCES, Source, raw_dir, standardized_path
 
 SPAWN = multiprocessing.get_context("spawn")
-# Hub files fetched at once: the link bounds a fetch, not one connection
-FETCHES = 8
+# Hub files fetched at once: throughput rises from one connection to a few and falls beyond (measured; the corpus
+# design document, normalization_doc.md §1)
+FETCHES = 4
 
 
 def hub_files(source: str, revision: str) -> list[str]:

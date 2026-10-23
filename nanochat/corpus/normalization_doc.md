@@ -51,6 +51,8 @@ Evidence:
 - **Fetch.** `prepare.fetch` reads a Hub Parquet file by ranged reads and keeps only the columns its standardizer
   reads. For UltraData-Code L3 that is `content`: 50.1 of the release's 340.7 GB (Parquet footers). Stack-Edu's
   metadata is fetched whole, one file at a time, and its text by blob id from Software Heritage's public S3 bucket.
+- **4 files at once** (`FETCHES`). Measured on this link, reading one column of 8 L3 files per setting: 8.5 MB/s with
+  1 file in flight, 11.5 with 2, 12.4 with 4 and 10.5 with 8.
 
 ## 2. Schema
 
