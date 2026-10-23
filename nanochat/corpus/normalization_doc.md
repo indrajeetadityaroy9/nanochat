@@ -29,6 +29,7 @@ Evidence:
 | FIM | rate 0.5, joint PSM/SPM, context level, AST-FIM's middles with 10% random spans, repository files only; production's line widening dropped | 6 |
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) across sources | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
+| Tokenizer | retrained on this corpus's sources at the mixture's shares; production's vocabulary size, split pattern and score | 9 |
 
 ## 1. Sources
 
@@ -324,7 +325,7 @@ The token budget is 102.6B tokens, as production:
 | Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈75.5% | ≈73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
 | Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 34.2B (report Table 17; its tokenizer is not stated) | ≈28% |
 | Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
-| General text | ClimbMix | 10% | 9.7B | ≈368B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at 4.32 bytes per token | 2.8% with the 32K stage's, ≈182 files |
+| General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, ≈180 files |
 | Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | QA alone 22.8B: 66.5 GB of text (Parquet footers) at 2.92 bytes per token (20,000-row sample) | under 14% of QA's, with the 32K stage's |
 
 | Repository-stage group | Sources | Share | Tokens |
@@ -333,9 +334,9 @@ The token budget is 102.6B tokens, as production:
 | General text | ClimbMix | 10% | 0.56B |
 | Mathematics | UltraData-Math L3 | 3% | 0.17B |
 
-- **Both stages keep production's 87 : 10 : 3 in tokens** (84.1 : 12.4 : 3.5 in bytes, from the measured bytes per
-  token). The file stage puts synthetic exercises and step-by-step mathematics in place of production's web
-  mathematics.
+- **Both stages keep production's 87 : 10 : 3 in tokens,** 84.5 : 12.2 : 3.3 in bytes [arithmetic: each group's share
+  times its bytes per token, measured on production's compiled train splits: code 3.405, text 4.275, mathematics
+  3.911]. The file stage puts synthetic exercises and step-by-step mathematics in place of production's web mathematics.
 - **The 32K stage keeps text and mathematics** rather than production's code alone (`config.REPO_STAGE`), because the
   papers that change a mixture keep part of the old one. OpenCoder's anneal: "A significant distribution shift can
   lead to catastrophic forgetting in the model's knowledge, and we ensure that 84% of the annealing data comes from the
@@ -552,7 +553,60 @@ pieces that do not hold their problem statement.
 - **Budget: 102.6B tokens, no document read twice.** Each group's draw is below its supply, Kaggle's equal to it
   (§5.1), so production's `max_ratio` rule holds without epochs.
 
-## 9. Changes to the code
+## 9. Tokenizer
+
+Production's tokenizer (`nanochat/data/tokenizer.py`):
+- byte-level BPE scored by SA-BPE's F·ln R: a pair's frequency times the log of the number of authorship units holding
+  it, so a pair seen in one unit scores 0;
+- 32,768 ids: 256 bytes, 32,508 merges, and 4 special tokens (BOS and the three FIM sentinels);
+- the split pattern below (`SPLIT_PATTERN`), cl100k's with numbers in one or two digits:
+
+  ```
+  '(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]|\s+(?!\S)|\s+
+  ```
+
+- trained on equal bytes from each curated source (`SAMPLE_SHARES = "equal"`).
+
+**Retrain it on this corpus's sources, at the training mixture's shares.**
+- Measured: production's sample is 72.75 / 8.98 / 18.27% code, text and mathematics by bytes.
+  - 18.27% comes from OPC FineWeb Math and UltraData-Math L2, which this design does not read.
+  - None comes from UltraData-Code L3 or UltraData-Math L3, 13% of the file stage.
+- Leaving data out costs it: "Leaving a language out of tokenizer training raises its BPB in every language we
+  study", and "both equal weighting and an allocation inverting the shares with respect to the language model training
+  data increase their BPB" (arXiv 2610.12144, abstract; natural languages).
+- "tokenizers should be trained on the data mix that they are expected to see during training/inference"
+  (arXiv 2402.01035 §2.3). Magikarp advises "ensuring that it is representative of model training data"
+  (arXiv 2405.05417 §5).
+- Authorship units are `repo_name` for repository files and the document itself otherwise. The TEXT schema keeps no
+  URL, and production used hosts as units for OPC FineWeb Math only.
+- Every token figure in this document is in production's tokenizer. A retrained tokenizer rescales each by its bytes
+  per token.
+
+**Vocabulary: 32,768, as production.**
+- SA-BPE ran at 32,768 ids with 100M-parameter models (arXiv 2604.14053 Table 5); DeepSeek-Coder uses "a vocabulary
+  size of 32,000" (§3.2).
+- StarCoder2 found that "increasing the vocabulary size to 100K did not improve performance" (§6.2).
+- Dagan et al. measured HumanEval 20.52–20.84 from 32K to 256K, "correlation coefficient of −0.13 with a p-value of
+  0.87" (§3.2, Table 3).
+- Measured: of production's 32,508 merges, 3 never occur in its 104.25B compiled train tokens and 14 occur fewer than
+  1,000 times. Magikarp finds under-trained tokens "typically around 0.1–1% of the vocabulary".
+
+**Split pattern and score: production's.** `ablations/tokenizer.py` tests them, with four arms at d16 and equal bytes;
+it has not been run. Measured properties of the pattern, on 20,000 documents per corpus:
+- **Numbers come in pairs from the left** (`12345` → `12 34 5`), and all 110 one- and two-digit tokens exist. Digit
+  tokens are 5.5–7.8% of mathematics tokens, 4.2–7.5% of code's and 2.0% of text's.
+  - Single digits, as Llama 2 (§2.2) and DeepSeek LLM (§2.1) split them, would cost 0.91–3.14% more tokens.
+  - Right-to-left chunks help arithmetic at inference: "up to 20% higher" for 3-digit chunks in GPT-3.5 and GPT-4
+    (arXiv 2402.14903). No paper compares chunkings in training.
+- **A space before a number is its own token,** because `\p{N}{1,2}` takes no leading space; GPT-2's pattern does
+  (` ?\p{N}+`). Such tokens are 3.12% of UltraData-Math L2's tokens, 2.45% of OPC's, 2.21% of Codeforces-CoTs',
+  0.77–1.89% of code's and 0.84% of ClimbMix's. That bounds the saving if a number took its space; no paper measures
+  the choice.
+- **Indentation of d spaces costs 2 tokens:** d − 1 spaces, then the last space joined to the statement's first token
+  (99.2–99.9% of indented lines in the repository corpora). Whitespace-only tokens are 15.6–17.6% of Python
+  repository tokens and 18.1–19.2% of C++'s.
+
+## 10. Changes to the code
 
 | Change | Where | Status |
 |---|---|---|
@@ -564,4 +618,5 @@ pieces that do not hold their problem statement.
 | FIM without line widening (`LINE_SHARE`) | `data/pack.py`, `crate/pack.rs` | to do |
 | Mixture of §5.1: 87 : 10 : 3 in both stages; Kaggle whole; Codeforces-CoTs and whole repositories in the 32K stage | `config.py`, `data/loader.py`, `train/stages.py` | to do |
 | Repository documents per (repository, language) across sources | `data/curate.py`, `crate/repository.rs`, compile, 32K pack | to do; path comments exist (`data/sources.texts`) |
+| Tokenizer sample from this corpus's sources at the mixture's shares; authorship units from the schemas | `data/tokenizer.py` | to do |
 | Packing, masking, cuts, schedule | — | unchanged |
