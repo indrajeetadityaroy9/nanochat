@@ -27,6 +27,7 @@ import json
 import multiprocessing
 import resource
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 
 import obstore
@@ -103,9 +104,14 @@ def extent(source: str) -> list[str]:
 @functools.cache
 def swh_store() -> S3Store:
     """This process's client of Software Heritage's bucket, created once so its connections are reused across row
-    groups; the file-descriptor limit is raised to its hard limit, as a row group's requests are in flight at once."""
+    groups; the file-descriptor limit is raised to its hard limit, as a row group's requests are in flight at once.
+    A request retries for up to 15 minutes, its waits doubling from a second to a minute: with obstore's default
+    backoff, a reset connection exhausted its retries at once and failed the source."""
     resource.setrlimit(resource.RLIMIT_NOFILE, (resource.getrlimit(resource.RLIMIT_NOFILE)[1],) * 2)
-    return S3Store("softwareheritage", region="us-east-1", skip_signature=True)
+    return S3Store("softwareheritage", region="us-east-1", skip_signature=True,
+                   retry_config={"max_retries": 15, "retry_timeout": timedelta(minutes=15),
+                                 "backoff": {"init_backoff": timedelta(seconds=1), "max_backoff": timedelta(minutes=1),
+                                             "base": 2}})
 
 
 def blob_texts(task: tuple[Path, int]) -> pa.Table:
@@ -129,30 +135,32 @@ def blob_texts(task: tuple[Path, int]) -> pa.Table:
 
 def fetch(source: str, file: str) -> Path:
     """The local path of one of the source's Hub files at the revision: a Parquet file of the columns its standardizer
-    reads (written whole, then renamed into place, so an existing file is complete). Stack-Edu's blobs are fetched by
-    a pool that lives for that file only, so its workers hold no memory beside standardize's."""
+    reads, or for Stack-Edu its metadata and each blob's text, written whole, then renamed into place (a writer closed
+    by an error still writes a valid footer, so only the rename marks a file complete; an existing file is kept).
+    Stack-Edu's blobs are fetched by a pool that lives for that file only, so its workers hold no memory beside
+    standardize's."""
     spec = SOURCES[source]
     path = raw_dir(source) / file
-    if spec.repo != EDU:
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            partial, read = path.with_name(path.name + ".partial"), columns(source)
-            with HfFileSystem().open(f"datasets/{spec.repo}@{revision(source)}/{file}", "rb") as remote:
-                hub = pq.ParquetFile(remote)
-                with pq.ParquetWriter(partial, pa.schema([hub.schema_arrow.field(c) for c in read]),
-                                      compression=COMPRESSION) as writer:
-                    for g in range(hub.num_row_groups):
-                        writer.write_table(hub.read_row_group(g, columns=read))
-            partial.rename(path)
+    if path.exists():
         return path
-    path = raw_dir(source) / file
     path.parent.mkdir(parents=True, exist_ok=True)
-    meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=revision(source))
-    with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
-          pq.ParquetWriter(path, pq.read_schema(meta).append(pa.field("text", pa.string())),
-                           compression=COMPRESSION) as writer):
-        for table in pool.map(blob_texts, [(meta, g) for g in range(pq.ParquetFile(meta).num_row_groups)]):
-            writer.write_table(table)
+    partial = path.with_name(path.name + ".partial")
+    if spec.repo != EDU:
+        read = columns(source)
+        with HfFileSystem().open(f"datasets/{spec.repo}@{revision(source)}/{file}", "rb") as remote:
+            hub = pq.ParquetFile(remote)
+            with pq.ParquetWriter(partial, pa.schema([hub.schema_arrow.field(c) for c in read]),
+                                  compression=COMPRESSION) as writer:
+                for g in range(hub.num_row_groups):
+                    writer.write_table(hub.read_row_group(g, columns=read))
+    else:
+        meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=revision(source))
+        with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
+              pq.ParquetWriter(partial, pq.read_schema(meta).append(pa.field("text", pa.string())),
+                               compression=COMPRESSION) as writer):
+            for table in pool.map(blob_texts, [(meta, g) for g in range(pq.ParquetFile(meta).num_row_groups)]):
+                writer.write_table(table)
+    partial.rename(path)
     return path
 
 

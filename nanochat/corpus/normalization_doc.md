@@ -52,6 +52,11 @@ Evidence:
 - **Fetch.** `prepare.fetch` reads a Hub Parquet file by ranged reads and keeps only the columns its standardizer
   reads. For UltraData-Code L3 that is `content`: 50.1 of the release's 340.7 GB (Parquet footers). Stack-Edu's
   metadata is fetched whole, one file at a time, and its text by blob id from Software Heritage's public S3 bucket.
+  - Every raw file is written under a temporary name and renamed when whole: a Parquet writer closed by an error
+    still writes a valid footer, and one such Stack-Edu file held 1,342,000 of its 5,057,204 rows (observed).
+  - Each process keeps one metadata row group's blobs in flight (about 1,000). Measured per process: 490, 1,665,
+    2,085 and 2,692 blobs a second with 64, 256, 1,024 and 4,096 in flight. A request retries for up to 15 minutes;
+    obstore's default backoff exhausted its retries on a reset connection within 8.2 seconds and failed the source.
 - **4 files at once** (`FETCHES`). Measured on this link, reading one column of 8 L3 files per setting: 8.5 MB/s with
   1 file in flight, 11.5 with 2, 12.4 with 4 and 10.5 with 8.
 - **A source read in part fetches only its extent** (`prepare.extent`): the fewest Hub files, in the sha1 order of
