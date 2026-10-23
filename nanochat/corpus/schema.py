@@ -2,8 +2,8 @@
 The document categories of the corpus's sources: every standardized file holds one. id is computed locally, the sha1
 of the document's text; no publisher's identifier is kept as id.
 
-REPOSITORY_FILE: a source file of a code repository, with its path in the repository, its language (Linguist name)
-and the publisher's labels and scores.
+REPOSITORY_FILE: a source file of a code repository, with its path in the repository and its language (Linguist
+name).
 EXERCISE: a synthetic programming exercise in its parts (task, analysis, solution, test), the publisher's two
 renderings of it (content: the task and the solution; full_content: all four parts, the document's text) with their
 formats, and the source file it was written from (seed).
@@ -18,9 +18,6 @@ REPOSITORY_FILE = pa.schema([
     pa.field("relative_path", pa.string(), nullable=False),
     pa.field("content", pa.string(), nullable=False),
     pa.field("language", pa.string(), nullable=False),
-    pa.field("category", pa.string()),         # UltraData-Code's role label
-    pa.field("algo_rel_score", pa.float64()),  # its algorithmic-relevance score
-    pa.field("quality_score", pa.float64()),   # its quality score
 ])
 
 EXERCISE = pa.schema([

@@ -49,9 +49,8 @@ def sha1(texts: pa.ChunkedArray) -> pa.Array:
 
 def repository_file(t: pa.Table, spec: Source) -> pa.Table:
     return pa.table({"id": sha1(t["content"]), "repo_name": t["repo_name"], "relative_path": t["relative_path"],
-                     "content": t["content"], "language": pa.repeat(spec.language, t.num_rows),
-                     "category": t["category"], "algo_rel_score": t["algo_rel_score"],
-                     "quality_score": t["quality_score"]}, schema=REPOSITORY_FILE)
+                     "content": t["content"], "language": pa.repeat(spec.language, t.num_rows)},
+                    schema=REPOSITORY_FILE)
 
 
 def exercise(t: pa.Table, spec: Source) -> pa.Table:
