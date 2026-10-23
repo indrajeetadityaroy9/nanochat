@@ -8,11 +8,11 @@ documents together).
 A corpus is a read source (mixture.READ), its documents its curated rows: a repository source's are its
 import-connected samples, each file after a comment with its path (sources.texts). The 32K stage reads two more,
 mixture.REPOSITORIES: per language, one document per repository across that language's repository sources
-(normalization_doc.md §7.2), from the fewest trailing partitions whose files hold the stage's draw of repository code
-(repository_parts), and from partition 0 for val. Of a path that several sources hold in one repository, the first
-source's file is kept (mixture.REPOSITORY_SOURCES order, deduplication's); a repository's files, in path order, are cut
-into import-connected components (the data crate's repository_samples), each in dependency order, and the components
-follow one another in the order of their first file.
+(normalization_doc.md §7.2), from the fewest trailing partitions whose repository documents hold the stage's draw of
+repository code (stage_parts), and from partition 0 for val. Of a path that several sources hold in one repository,
+the first source's file is kept (mixture.REPOSITORY_SOURCES order, deduplication's), and of a path one source holds
+twice, its first row; a repository's files, in path order, are cut into import-connected components (the data crate's
+repository_samples), each in dependency order, and the components follow one another in the order of their first file.
 
 Row groups (a source's) and partitions (repositories') are the unit of parallel work; the parent writes their tokens
 in task order, so the output does not depend on the number of workers.
@@ -118,18 +118,27 @@ def shard_tokens(corpus: str, split: str) -> np.ndarray:
     return np.diff(offsets[documents])
 
 
-def repository_parts() -> list[int]:
-    """The fewest trailing train partitions whose repository sources' compiled tokens hold the 32K stage's draw of
-    repository code: the code share of its tokens less Codeforces-CoTs', which it reads whole."""
+def train_parts() -> list[int]:
+    """The repository sources' train partitions, in order."""
+    return sorted(int(p.stem) for p in curated_dir(mixture.REPOSITORY_SOURCES[0], "train").iterdir())
+
+
+def stage_parts() -> list[int]:
+    """The fewest trailing train partitions whose repository documents (both languages, after the path rule) hold the
+    32K stage's draw of repository code: the code share of its tokens less Codeforces-CoTs', which it reads whole. A
+    partition at a time, from the last: each task holds a partition of its language's sources twice at peak."""
     need = mixture.CODE_SHARE * mixture.REPO_TOKENS - shard_tokens("codeforces_cots", "train").sum()
-    parts = sorted(int(p.stem) for p in curated_dir(mixture.REPOSITORY_SOURCES[0], "train").iterdir())
-    tokens = {part: 0 for part in parts}
-    for source in mixture.REPOSITORY_SOURCES:
-        for part, count in zip([int(p.stem) for p in shards(source, "train")], shard_tokens(source, "train"),
-                               strict=True):
-            tokens[part] += int(count)
-    held = itertools.accumulate(tokens[part] for part in reversed(parts))
-    return parts[-next(k + 1 for k, total in enumerate(held) if total >= need):]
+    parts = train_parts()
+    with ProcessPoolExecutor(len(mixture.REPOSITORIES)) as pool:
+        tokens = (sum(len(ids) for ids, _ in pool.map(repository_documents, [(language, "train", part)
+                                                                             for language in mixture.REPOSITORIES]))
+                  for part in reversed(parts))
+        return parts[-next(k + 1 for k, total in enumerate(itertools.accumulate(tokens)) if total >= need):]
+
+
+def repository_parts() -> list[int]:
+    """The train partitions the compiled repositories corpora hold (stage_parts): the 32K stage's."""
+    return train_parts()[-len(shard_tokens(mixture.REPOSITORIES["Python"], "train")):]
 
 
 def main() -> None:
@@ -141,7 +150,7 @@ def main() -> None:
             tasks = [[(corpus, path, g) for g in range(pq.read_metadata(path).num_row_groups)]
                      for path in shards(corpus, split)]
             compile_split(corpus, split, row_group_documents, tasks)
-    parts = repository_parts()
+    parts = stage_parts()
     for language, corpus in mixture.REPOSITORIES.items():
         split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
         for split, split_parts in (("val", [0]), ("train", parts)):

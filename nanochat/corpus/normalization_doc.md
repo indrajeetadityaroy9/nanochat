@@ -23,13 +23,13 @@ Evidence:
 | Schema | one Parquet schema per document category; `id` is the SHA-1 of the document's text | 2 |
 | Text | repository files as their language reads them; UltraData-Code L3 the publisher's `content`; Codeforces-CoTs finished traces only; everything else verbatim | 3 |
 | Filters | every Python file parses as Python 3, after repair; no generated, vendored or C++ syntax filter | 4.1, 4.2 |
-| Deduplication | exact copies only, across all sources, first occurrence kept | 4.3 |
+| Deduplication | exact copies only, across every source read, first occurrence kept | 4.3 |
 | Split | production's: 1% of groups (repository, problem or document) held out | 4.4 |
 | Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, L3 exercises 10%, Kaggle notebooks whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
 | FIM | rate 0.5, joint PSM/SPM, context level, AST-FIM's middles with 10% random spans, repository files only; production's line widening dropped | 6 |
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) across sources | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
-| Tokenizer | retrained on this corpus's sources at the mixture's shares; production's vocabulary size, split pattern and score | 9 |
+| Tokenizer | retrained on this corpus's sources at the file stage's shares of bytes; production's vocabulary size, split pattern and score | 9 |
 
 ## 1. Sources
 
@@ -55,10 +55,21 @@ Evidence:
   1 file in flight, 11.5 with 2, 12.4 with 4 and 10.5 with 8.
 - **A source read in part fetches only its extent** (`prepare.extent`): the fewest Hub files, in the sha1 order of
   their paths (a random order whose prefixes nest as the extent grows), whose text bytes (Parquet footers) hold its
-  group's fraction of both stages' draws at production's bytes per token, widened by 6% for a retrained tokenizer's
-  compression: "the NSL on any given subset only varies by 5 to 6 percentage points" across tokenizer training mixes
-  (arXiv 2402.01035 §2.3). For UltraData-Math L3 that is 2 of 50 files per format, 4.0% of their bytes (measured), so
-  its sample is random at the granularity of files.
+  group's fraction of both stages' draws at production's bytes per token, over the train split's 99 of 100 residues
+  (§4.4), widened by 6% (`mixture.SPREAD`) for a retrained tokenizer's compression. Dagan et al. bound that change:
+  "the NSL on any given subset only varies by 5 to 6 percentage points" across tokenizer training mixes, "about 5%" in
+  its example (arXiv 2402.01035 §2.3). Their mixes change a domain's share, while UltraData-Code L3 and UltraData-Math
+  L3 enter a sample that held none of them, so the bound is borrowed [inference]. `tokenizer.main` reports each
+  group's train tokens under the retrained tokenizer over its draw, and `pack.fit` names a source that runs short.
+  Measured on the files fetched (standardized text bytes at production's bytes per token, before the val split):
+
+  | Group | Files | Text | Held over the draw |
+  |---|---|---|---|
+  | UltraData-Code L3 | 52 of 147 (Python), 59 of 167 (C++) | 38.71 GB | 1.077 |
+  | ClimbMix | 187 of 6,543 | 47.13 GB | 1.075 |
+  | UltraData-Math L3 | 2, 2, 3 and 2 of 50 per format | 11.57 GB | 1.185 |
+
+  A format's few files make its sample random at the granularity of files.
 
 ## 2. Schema
 
@@ -87,12 +98,14 @@ schema (`schema.py`):
   - serialized duplicates (`full_content`, `raw_content`, `messages`);
   - L3's `task`, `analysis`, `solution`, `test` and format fields;
   - Codeforces-CoTs' statement fields, tests and `finish_reason` (read by the filter, §3.2).
-- **The manifest** records each source's revision, the mixture and stage boundaries, and the tokenizer.
+- **Records:** `CORPUS/manifest.json` holds each source's repo, revision, Hub files fetched and rows (`prepare.record`);
+  `CORPUS/packed.json` each stage's rows and corpus weights (`pack.py`); the tokenizer's data key names the compiled
+  directories.
 
 ## 3. Standardization
 
-- **Rows without text are dropped,** including a Stack-Edu blob that the bucket does not hold or that does not decode
-  with its `src_encoding`.
+- **Rows without text are dropped:** a null at standardization, including a Stack-Edu blob that the bucket does not
+  hold or that does not decode with its `src_encoding`; an empty text at deduplication (§4.3).
 - **Repository source files are kept as their language reads them.** CR LF and a lone CR become LF, and a leading
   U+FEFF is dropped (Python Language Reference §2.1.2 and §2.1.4; C++ [lex.phases] phases 1 and 2). Stack-Edu's
   `relative_path` is its `path` without the leading "/".
@@ -103,7 +116,7 @@ schema (`schema.py`):
 
 **`content` is the task followed by its solution,** with the task as a code comment, as unfenced text or as Markdown.
 The release holds 20,750,202 Python and 22,600,686 C++ exercises, 54.1 and 55.4 GB of `content`, with median lengths
-of 2,023 and 1,932 bytes (measured on the standardized files).
+of 2,023 and 1,932 bytes (measured on all 147 and 167 files, standardized whole before the extent rule of §1).
 - **The format proportions are 50 / 25 / 25,** as the report trains: "examples are randomly assigned to code comment,
   no fence, and Markdown formats with proportions of 50%, 25%, and 25%, respectively" (App. C.3). Measured on the
   first file of each language: Python 0.50 / 0.25 / 0.25, C++ 0.499 / 0.248 / 0.252.
@@ -270,9 +283,9 @@ share: repair keeps 98.05% of its rows against 88.81%.
 
 ### 4.3 Exact deduplication only
 
-**One row per `id` across all sources and both splits.** `nanochat/data` deduplicates within two universes, repository
-files and other documents; this design uses one, a single `GROUP BY id`. The first occurrence in `sources.py` order is
-kept, then file and row order within a source, as in `nanochat/data` (keep-first).
+**One row per `id` across every source read and both splits.** `nanochat/data` deduplicates within two universes,
+repository files and other documents; this design uses one, a single `GROUP BY id`. The first occurrence in
+`sources.py` order is kept, then file and row order within a source, as in `nanochat/data` (keep-first).
 
 Exact copies add no text, and the heavy tail repeats some texts hundreds of thousands of times. Measured (R5) over the
 six repository corpora after `nanochat/data`'s normalization: 172,953,953 rows hold 122,801,135 distinct texts, so
@@ -329,10 +342,10 @@ the removal of the vendored filter; vendored copies are counted.
 
 ### 4.4 Split
 
-A group goes to validation when `md5_number(group) % 100 = 0` (`nanochat/data/curate.SPLIT`), the group being the one
-in §2's table. This is production's split; no paper sets its size, and keeping it keeps validation comparable with
-production's runs (E1, §5.2). Deduplication runs over both splits first, so no validation text has an exact copy in
-training.
+A group goes to validation when `md5_number(group) % 100 = 0` (`schema.SPLIT`, as `nanochat/data/curate.SPLIT`), the
+group being the one in §2's table. This is production's split; no paper sets its size, and keeping it keeps validation
+comparable with production's runs (E1, §5.2). Deduplication runs over both splits first, so no validation text has an
+exact copy in training.
 
 ## 5. Mixture
 
@@ -348,10 +361,10 @@ The token budget is 102.6B tokens, as production:
 | File-stage group | Sources | Share | Tokens | Supply (production's tokenizer) | Read |
 |---|---|---|---|---|---|
 | Repository code | Stack-Edu, UltraData-Stack-v3-L2, UltraData-Code L2 | the rest of code's 87%: ≈75.5% | ≈73.2B | more than 88.8B: `nanochat/data`'s curation, near-deduplicated and without repair | once, with the 32K stage's ≈4.6B |
-| Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 29.56B measured: Python 14.14B (3.826 bytes per token), C++ 15.42B (3.593), on a 100,000-row sample each; the report's Table 17 gives 34.24B in an unstated tokenizer | ≈33% |
+| Synthetic exercises | UltraData-Code L3 | 10% | 9.7B | 29.56B measured: Python 14.14B (3.826 bytes per token), C++ 15.42B (3.593), on a 100,000-row sample each; the report's Table 17 gives 34.24B in an unstated tokenizer | 32.8%, from its extent (§1) |
 | Notebooks | Kaggle notebooks | its supply: ≈1.5% | ≈1.5B | 1.417B measured after near deduplication, which removed 5.33% | once, whole |
-| General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, ≈180 files |
-| Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | 82.5B measured: QA 22.8B, Conversation 18.3B, Multi-Style 17.4B, Textbook-Exercise 24.0B; 260.5 GB of text (Parquet footers) at 2.92–3.46 bytes per token (20,000-row samples); the paper gives 88B in an unstated tokenizer | 3.7% with the 32K stage's |
+| General text | ClimbMix | 10% | 9.7B | ≈372B: 232.0 GB of text in 955 of its 6,543 files (measured), times 6,543 / 955, at its measured 4.275 bytes per token | 2.8% with the 32K stage's, from its extent |
+| Mathematics | UltraData-Math L3, four formats | 3% | 2.9B | 82.5B measured: QA 22.8B, Conversation 18.3B, Multi-Style 17.4B, Textbook-Exercise 24.0B; 260.5 GB of text (Parquet footers) at 2.92–3.46 bytes per token (20,000-row samples); the paper gives 88B in an unstated tokenizer | 3.7% with the 32K stage's, from its extent |
 
 | Repository-stage group | Sources | Share | Tokens |
 |---|---|---|---|
@@ -373,7 +386,9 @@ The token budget is 102.6B tokens, as production:
   tokens. Within repository code, the 32K stage reads a partition of repositories: curated shards are residues of
   `md5_number(repo_name)`, and the stage reads the trailing ones; the file stage reads the rest, as each source's
   import-connected samples (production's 8K unit).
-- **A group read in part** reads its rows in `id` order, a uniform sample of its extent because `id` is a hash.
+- **A group read in part** reads its rows in `id` order, a uniform sample of its extent because `id` is a hash. A
+  document source's train split is 100 shards of 1% (`schema.SPLIT`), as a repository source's partitions are; the
+  file stage packs the leading shards it needs, the 32K stage the next.
 - **Every draw fits its rows** (`pack.fit`): each stage's weights are replayed through the loader's `mixture_rows`
   over its rows; a source read in part packs its next shard while its draw exceeds its rows, and a source read whole
   ("supply": Kaggle notebooks, Codeforces-CoTs) weighs as many rows less as the replay overdraws it.
@@ -469,7 +484,8 @@ Comparable models:
 
 ## 6. Fill-in-the-middle
 
-`nanochat/data/pack.py` and `crate/pack.rs` keep their mechanism, with one change (the line widening):
+`corpus/pack.py` calls the data crate's pack (`crate/pack.rs`) as `nanochat/data/pack.py` does, with one change (the
+line widening):
 - **Rate 0.5, at the context level.** Each piece of a cut document draws its own FIM decision as it is cut; a FIM
   piece's window leaves room for its three sentinels. Measured on production's packs: 49.96–50.02% of repository pieces
   and tokens are FIM examples, in both stages. With repository code at 75.5% of the file stage, FIM examples are 37.8%
@@ -539,10 +555,15 @@ Comparable models:
 
 **One document per (`repo_name`, `language`) across the six repository sources,** after deduplication, a corpus per
 language (`repositories_python`, `repositories_cpp`), as a pack call parses one grammar.
-- Files come in dependency order, DeepSeek-Coder's topological sort (§2.2), then the rest in path order. Of a path
-  that several sources hold in one repository, the first source's file is kept (`sources.py` order, deduplication's).
+- A repository's files, in path order, are cut into import-connected components (`repository_samples`), each in
+  dependency order, DeepSeek-Coder's topological sort (§2.2), a cycle in path order; the components follow one another
+  in the order of their first file.
+- Of a path that several sources hold in one repository, the first source's file is kept (`sources.py` order,
+  deduplication's); of a path one source holds twice, its first row.
 - Each file is preceded by a comment line holding its path, `# path` or `// path` (`corpus/sources.texts`): "a comment
   indicating the file's path is added at the beginning of each file" (DeepSeek-Coder §2.2).
+- The stage reads the fewest trailing partitions whose documents hold its draw, counted after the path rule
+  (`compile.stage_parts`).
 
 Measured (R3) against the current samples, which are import-connected components within one corpus:
 
@@ -581,8 +602,8 @@ pieces that do not hold their problem statement.
   DeepSeek-Coder keeps its final 10% (§3.6); StarCoder2 trains at 3×10⁻⁵ against 3×10⁻⁴ (Tables 7 and 8); Code Llama
   at 2e−5 against 3e−4 (§2.6). No paper measures the learning rate of a long-context stage, so the decay stays linear
   to zero.
-- **Budget: 102.6B tokens, no document read twice.** Each group's draw is below its supply, Kaggle's equal to it
-  (§5.1), so production's `max_ratio` rule holds without epochs.
+- **Budget: 102.6B tokens, no document read twice.** `pack.fit` makes every draw fit its rows (§5.1): a source read
+  in part packs more of its shards, a source read whole weighs less, and repository code holds more than its draw.
 
 ## 9. Tokenizer
 
@@ -598,7 +619,10 @@ Production's tokenizer (`nanochat/data/tokenizer.py`):
 
 - trained on equal bytes from each curated source (`SAMPLE_SHARES = "equal"`).
 
-**Retrain it on this corpus's sources, at the training mixture's shares.**
+**Retrain it on this corpus's sources, at the file stage's shares of bytes.**
+- A source's share of the sample's bytes is its share of the file stage's tokens at its bytes per token, a
+  systematic sample of its curated train split (`corpus/tokenizer.sample`). The file stage is 94.5% of the run's
+  tokens; Codeforces-CoTs, read at 32K only, is 0.3% of them [arithmetic: 0.305B of 102.6B] and is not sampled.
 - Measured: production's sample is 72.75 / 8.98 / 18.27% code, text and mathematics by bytes.
   - 18.27% comes from OPC FineWeb Math and UltraData-Math L2, which this design does not read.
   - None comes from UltraData-Code L3 or UltraData-Math L3, 13% of the file stage. Production's tokenizer reads them
@@ -612,8 +636,8 @@ Production's tokenizer (`nanochat/data/tokenizer.py`):
   (arXiv 2405.05417 §5).
 - Authorship units are `repo_name` for repository files and the document itself otherwise. The TEXT schema keeps no
   URL, and production used hosts as units for OPC FineWeb Math only.
-- The sample holds 13.38 GB, production's sample size (its curated splits' Parquet footers), so the two vocabularies
-  differ in their sample's composition only.
+- The sample targets 13.38 GB (`SAMPLE_BYTES`), production's sample size (its curated splits' Parquet footers), so
+  the two vocabularies differ in their sample's composition only.
 - Every token figure in this document is in production's tokenizer. A retrained tokenizer rescales each by its bytes
   per token.
 
@@ -627,19 +651,28 @@ Production's tokenizer (`nanochat/data/tokenizer.py`):
   1,000 times. Magikarp finds under-trained tokens "typically around 0.1–1% of the vocabulary".
 
 **Split pattern and score: production's.** `ablations/tokenizer.py` tests them, with four arms at d16 and equal bytes;
-it has not been run. Measured properties of the pattern, on 20,000 documents per corpus:
+it has not been run. It reads `nanochat/data`'s corpus and production's equal-bytes sample, so it decides production's
+pattern and score, not this corpus's sample; its `sa-bpe-mixture` vocabulary, the sample at the mixture's shares, is
+described there and not trained on. Measured properties of the pattern, on 20,000 documents per corpus:
 - **Numbers come in pairs from the left** (`12345` → `12 34 5`), and all 110 one- and two-digit tokens exist. Digit
-  tokens are 5.5–7.8% of mathematics tokens, 4.2–7.5% of code's and 2.0% of text's.
-  - Single digits, as Llama 2 (§2.2) and DeepSeek LLM (§2.1) split them, would cost 0.91–3.14% more tokens.
+  tokens are 8.3–11.5% of UltraData-Math L3's tokens, 4.2–7.5% of code's (4.4–4.9% of UltraData-Code L3's) and 2.0% of
+  text's.
+  - Single digits, as Llama 2 (§2.2) and DeepSeek LLM (§2.1) split them, would add a token per two-digit token:
+    2.4–3.3% more of UltraData-Math L3's tokens, 0.6–0.8% of UltraData-Code L3's, 0.91–3.14% of production's corpora.
   - Right-to-left chunks help arithmetic at inference: "up to 20% higher" for 3-digit chunks in GPT-3.5 and GPT-4
     (arXiv 2402.14903). No paper compares chunkings in training.
 - **A space before a number is its own token,** because `\p{N}{1,2}` takes no leading space; GPT-2's pattern does
-  (` ?\p{N}+`). Such tokens are 3.12% of UltraData-Math L2's tokens, 2.45% of OPC's, 2.21% of Codeforces-CoTs',
-  0.77–1.89% of code's and 0.84% of ClimbMix's. That bounds the saving if a number took its space; no paper measures
-  the choice.
+  (` ?\p{N}+`). Such tokens are 3.4–4.8% of UltraData-Math L3's tokens, 2.21% of Codeforces-CoTs', 2.1–2.2% of
+  UltraData-Code L3's, 0.77–1.89% of repository code's and 0.84% of ClimbMix's. That bounds the saving if a number took
+  its space; no paper measures the choice.
+- **A LaTeX command after a space or punctuation is two chunks:** the punctuation clause takes the space and backslash
+  (` \`, `$\`, `(\`), the letter clause the name (`frac`), so no merge joins them. In UltraData-Math L3 (QA,
+  Textbook-Exercise; 5,000 documents each) commands occur 4.5–4.9 times per 100 tokens, 90% of them cut so, and ` \` is
+  2.2–4.0% of the four formats' tokens. Binding them saves at most a token per command: 4.9% of mathematics tokens,
+  0.15% of the run's [arithmetic]. No paper measures LaTeX chunking.
 - **Indentation of d spaces costs 2 tokens:** d − 1 spaces, then the last space joined to the statement's first token
   (99.2–99.9% of indented lines in the repository corpora). Whitespace-only tokens are 15.6–17.6% of Python
-  repository tokens and 18.1–19.2% of C++'s.
+  repository tokens, 18.1–19.2% of C++'s, and 15.2% and 12.9% of UltraData-Code L3 Python's and C++'s.
 
 ## 10. Changes to the code
 
@@ -651,6 +684,7 @@ it has not been run. Measured properties of the pattern, on 20,000 documents per
 | Tokenizer sample from this corpus's sources at the file stage's shares; authorship units from the schemas | `corpus/tokenizer.py` | done (4985b09) |
 | Curated documents in tokens; repository documents per (repository, language) across sources | `corpus/compile.py` | done (4985b09, d068c80) |
 | Mixture of §5.1 in both stages; stage-disjoint packs; FIM without line widening; weights fitted to the packed rows | `corpus/mixture.py`, `corpus/pack.py`, `corpus/loader.py` | done (d068c80) |
+| Document sources in 100 train shards; 32K partitions counted after the path rule; the extent over the train split; byte shares in the tokenizer sample; empty texts dropped | `corpus/curate.py`, `corpus/compile.py`, `corpus/prepare.py`, `corpus/tokenizer.py` | done |
 | Every read source prepared, curated, tokenized, compiled and packed on the GB10 | `python -m nanochat.corpus.<stage>` | running |
 | Training reads the corpus (`config.py`, `train/`, `eval/`, `inference/`); the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |
 | Packing, masking, cuts, schedule | — | unchanged |

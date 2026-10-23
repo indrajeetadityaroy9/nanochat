@@ -53,15 +53,16 @@ READ = [source for source in SOURCES
 
 IN_PART = ("exercises", "text", "math")
 # Production's tokenizer's bytes per token on each source (measured on its compiled train splits and on samples of the
-# sources it did not compile: normalization_doc.md §5.1, §9), for token counts before this corpus's tokenizer exists,
-# and how far a retrained tokenizer's compression may move from it: "the NSL on any given subset only varies by 5 to 6
-# percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035 §2.3)
+# sources it did not compile: normalization_doc.md §5.1, §9), for token counts before this corpus's tokenizer exists
 BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.638,
                    "ultradata_code_l2_python": 3.709, "stack_edu_cpp": 3.065, "ultradata_stack_v3_l2_cpp": 3.015,
                    "ultradata_code_l2_cpp": 2.935, "kaggle_notebooks": 3.459, "codeforces_cots": 3.536,
                    "ultradata_code_l3_python": 3.826, "ultradata_code_l3_cpp": 3.593, "climbmix": 4.275,
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
+# How much better a retrained tokenizer may compress a source than production's: "the NSL on any given subset only
+# varies by 5 to 6 percentage points" across tokenizer training mixes, "about 5%" in its example (Dagan et al.,
+# arXiv 2402.01035 §2.3); tokenizer.main reports each group's margin under the corpus's tokenizer
 SPREAD = 0.06
 # {source: its group} for every source of a group read in part (each such group has the same sources in both stages)
 PART = {source: group for group in IN_PART for source in FILE_STAGE[group][1]}

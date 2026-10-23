@@ -106,6 +106,13 @@ def shard_count(corpus: str, split: str) -> int:
     return len(shard_documents(corpus, split, get_tokenizer())) - 1
 
 
+def take(corpus: str, more: Generator[Shard]) -> Shard:
+    """The next packed shard of a corpus read in part; it has one while its rows fall short of its draw."""
+    shard = next(more, None)
+    assert shard is not None, f"{corpus} holds fewer rows than its draw: its extent is too small (prepare.extent)"
+    return shard
+
+
 def fit(stage: dict[str, tuple[mixture.Share, list[str]]], n_rows: int, rows: dict[str, int],
         more: dict[str, Generator[Shard]], held: dict[str, list[Shard]]) -> dict[str, float]:
     """The stage's weights once every corpus holds its draw: replay mixture_rows over the stage's n_rows; a corpus read
@@ -123,7 +130,7 @@ def fit(stage: dict[str, tuple[mixture.Share, list[str]]], n_rows: int, rows: di
             return shares
         for name, excess in over.items():
             if name in more:
-                shard = next(more[name])
+                shard = take(name, more[name])
                 held[name].append(shard)
                 rows[name] += len(shard[1])
                 weighed[name] = rows[name]
@@ -142,7 +149,7 @@ def stage(stage_groups: dict[str, tuple[mixture.Share, list[str]]], *, seq_len: 
     more = {corpus: in_order(corpus, "train", shards, seq_len=seq_len) for corpus, shards in part.items()}
     held = {corpus: [] for corpus in part}
     for corpus in part:  # one shard each, then fit takes more as their draws need
-        held[corpus].append(next(more[corpus]))
+        held[corpus].append(take(corpus, more[corpus]))
         rows[corpus] = len(held[corpus][0][1])
     weights = fit(stage_groups, n_rows, rows, more, held)
     for corpus, shards in held.items():

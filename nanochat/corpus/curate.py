@@ -7,13 +7,13 @@ design document (normalization_doc.md §4):
    <PASSWORD> become the bare word; leading-indentation tabs are expanded to 8 columns, Python 2's rule (Python 2
    Language Reference §2.1.8); every 2to3 fixer of fissix (the maintained fork of lib2to3, which Python 3.12 lacks) is
    applied. The repaired text is kept and its id recomputed; a file that never parses is dropped (checked_path).
-2. dedup: one row per id over every source and both splits, the first in mixture.READ's order, then file and row.
-3. split: a group is val when md5_number(group) % SPLIT = 0; the group is the repository (REPOSITORY_FILE), the
-   problem (CONVERSATION), else the document.
+2. dedup: one row per id over every source and both splits, the first in mixture.READ's order, then file and row; an
+   empty text is dropped.
+3. split: a group is val when md5_number(group) % SPLIT = 0 (schema.py).
 4. shards (curated_dir): a repository source's files as the partitions of the residue of md5_number(repo_name)
    (partition 0 val, 1..SPLIT-1 train), each sorted by (repository, path, id) and cut into import-connected samples by
    the data crate's repository_samples (SAMPLE_FILE); any other source's train rows in id order, a uniform order as id
-   is a hash, over as many shards as it has standardized files, and its val rows in one shard.
+   is a hash, over SPLIT shards (1% of the source each, as a repository partition), and its val rows in one shard.
 
 python -m nanochat.corpus.curate
 """
@@ -21,6 +21,7 @@ python -m nanochat.corpus.curate
 import ast
 import collections
 import functools
+import hashlib
 import itertools
 import multiprocessing
 import os
@@ -39,13 +40,14 @@ import pyarrow.parquet as pq
 
 from nanochat.corpus import mixture
 from nanochat.corpus.prepare import COMPRESSION, sha1
-from nanochat.corpus.schema import CONVERSATION, REPOSITORY_FILE, SAMPLE_FILE
+from nanochat.corpus.schema import CONVERSATION, ISSUE, REPOSITORY_FILE, SAMPLE_FILE, SPLIT
 from nanochat.corpus.sources import SOURCES, checked_path, curated_dir, standardized_path
 from nanochat.native import data_crate
 from nanochat.paths import CORPUS
 
 SPAWN = multiprocessing.get_context("spawn")
-SPLIT = 100  # production's split (nanochat/data/curate.py): a group is val when its residue is 0, 1% of groups
+# The id of an empty text
+EMPTY = hashlib.sha1(b"").hexdigest()
 # Half the machine's memory: the lower end of DuckDB's guidance, as some operations bypass the buffer manager's limit
 # (duckdb.org/docs/lts/guides/troubleshooting/oom_errors) and other jobs share the unified memory.
 MEMORY = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2
@@ -134,7 +136,7 @@ def check_row_group(task: tuple[str, int, int]) -> pa.Table:
     sys.setrecursionlimit(RECURSION)
     table = pq.ParquetFile(standardized_path(source, k)).read_row_group(g)
     texts = [repaired(text) for text in table["content"].to_pylist()]
-    table = table.filter(pa.array([text is not None for text in texts]))
+    table = table.filter(pa.array([text is not None for text in texts], pa.bool_()))
     content = pa.chunked_array([pa.array([text for text in texts if text is not None], pa.string())])
     table = table.set_column(table.schema.get_field_index("content"), "content", content)
     return table.set_column(table.schema.get_field_index("id"), "id", sha1(content)).cast(REPOSITORY_FILE)
@@ -159,16 +161,16 @@ def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
 # ---- 2. dedup
 
 def duplicates(paths: dict[str, list[Path]]) -> dict[str, pa.Table]:
-    """{source: (file, row) of each row that is not the first of its id}: the first in the order of paths' sources,
-    then file and row."""
+    """{source: (file, row) of each row to drop}: every row that is not the first of its id (the first in the order of
+    paths' sources, then file and row), and every empty text."""
     union = " UNION ALL ".join(
         f"SELECT id, {i} AS source, file_index AS file, file_row_number AS row "
         f"FROM read_parquet({[str(p) for p in files]}, file_row_number = true)"
         for i, files in enumerate(paths.values()))
     with database() as con:
-        drops = con.execute(f"SELECT source, file, row FROM (SELECT source, file, row, row_number() OVER "
-                            f"(PARTITION BY id ORDER BY source, file, row) AS n FROM ({union})) WHERE n > 1"
-                            ).fetch_arrow_table()
+        drops = con.execute(f"SELECT source, file, row FROM (SELECT id, source, file, row, row_number() OVER "
+                            f"(PARTITION BY id ORDER BY source, file, row) AS n FROM ({union})) "
+                            f"WHERE n > 1 OR id = '{EMPTY}'").fetch_arrow_table()
     return {source: drops.filter(pc.equal(drops["source"], i)).select(["file", "row"])
             for i, source in enumerate(paths)}
 
@@ -229,10 +231,10 @@ def curate_partition(task: tuple[str, int]) -> None:
 
 
 def shard_documents(source: str, paths: list[Path], drops: pa.Table) -> None:
-    """A document source's rows without the duplicates: val rows in one shard, train rows in id order over as many
-    shards as the source has standardized files."""
+    """A document source's rows without the dropped ones: val rows in one shard, train rows in id order over SPLIT
+    shards."""
     spec = SOURCES[source]
-    group = "problem_id" if spec.schema is CONVERSATION else "id"
+    group = {CONVERSATION: "problem_id", ISSUE: "repo_name"}.get(spec.schema, "id")
     columns = ", ".join(f"n.{name}" for name in spec.schema.names)
     with database() as con:
         con.register("drops", drops)
@@ -242,9 +244,9 @@ def shard_documents(source: str, paths: list[Path], drops: pa.Table) -> None:
         names = ", ".join(spec.schema.names)
         con.execute(f"COPY (SELECT {names} FROM kept WHERE val ORDER BY id) "
                     f"TO '{curated_dir(source, 'val')}/0.parquet' (FORMAT parquet, COMPRESSION {COMPRESSION})")
-        con.execute(f"CREATE TABLE train AS SELECT {names}, ntile({len(paths)}) OVER (ORDER BY id) - 1 AS shard "
+        con.execute(f"CREATE TABLE train AS SELECT {names}, ntile({SPLIT}) OVER (ORDER BY id) - 1 AS shard "
                     f"FROM kept WHERE NOT val")
-        for k in range(len(paths)):
+        for k in range(SPLIT):
             con.execute(f"COPY (SELECT {names} FROM train WHERE shard = {k} ORDER BY id) "
                         f"TO '{curated_dir(source, 'train')}/{k}.parquet' (FORMAT parquet, COMPRESSION {COMPRESSION})")
 

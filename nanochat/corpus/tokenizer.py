@@ -1,8 +1,8 @@
 """
 The corpus's tokenizer (the design document, normalization_doc.md §9): production's algorithm, vocabulary size, split
 pattern and special tokens (nanochat/data/tokenizer.py: SA-BPE's F·ln R within the chunks of SPLIT_PATTERN, trained by
-the data crate, encoded by tiktoken), trained on this corpus's curated train splits at the file stage's shares
-(mixture.FILE_STAGE): "tokenizers should be trained on the data mix that they are expected to see during
+the data crate, encoded by tiktoken), trained on this corpus's curated train splits at the file stage's shares of
+bytes (mixture.FILE_STAGE): "tokenizers should be trained on the data mix that they are expected to see during
 training/inference" (arXiv 2402.01035 §2.3), and leaving a source out of tokenizer training or weighting sources
 equally raises their bits per byte (arXiv 2610.12144). Writes CORPUS/tokenizer/tokenizer.tiktoken and tokenizer.pattern;
 get_tokenizer loads it, its compiled and packed data in CORPUS/compiled.
@@ -52,13 +52,15 @@ def content_bytes(path: Path) -> int:
     return sum(md.row_group(g).column(column).total_uncompressed_size for g in range(md.num_row_groups))
 
 
-def sample_row_group(task: tuple[str, Path, int, int, int]) -> tuple[list[str], list[str]]:
-    """Row group g of a curated train shard: the texts (sources.texts) and authorship units of its rows at the source's
-    sample step, `start` the source's rows before the group. A repository file's unit is its repository (one name
-    across the sources that hold it); any other document's is itself."""
-    source, path, g, start, step = task
+def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str], list[str]]:
+    """Row group g of a curated train shard: the texts (sources.texts) and authorship units of its rows that the
+    source's systematic sample takes, `start` the source's rows before the group: row i when floor((i + 1) * fraction)
+    exceeds floor(i * fraction). A repository file's unit is its repository (one name across the sources that hold it);
+    any other document's is itself."""
+    source, path, g, start, fraction = task
     group = pq.ParquetFile(path).read_row_group(g)
-    batch = group.take(np.arange(-start % step, group.num_rows, step))
+    rows = np.arange(start, start + group.num_rows)
+    batch = group.take(np.flatnonzero(np.floor((rows + 1) * fraction) > np.floor(rows * fraction)))
     if SOURCES[source].schema is REPOSITORY_FILE:
         units = ["repo:" + name for name in batch["repo_name"].to_pylist()]
     else:
@@ -68,20 +70,22 @@ def sample_row_group(task: tuple[str, Path, int, int, int]) -> tuple[list[str], 
 
 def sample() -> tuple[list[str], list[int]]:
     """The training sample (texts, unit ids): of each file-stage source's curated train split, its share of the stage's
-    tokens (mixture.source_shares, tokens counted at production's bytes per token) taken as its share of SAMPLE_BYTES; a
-    systematic sample, every step-th row in shard order (step = the split's content bytes over its part of the sample),
-    row groups read in parallel, the sample kept in order."""
+    bytes as its share of SAMPLE_BYTES; the share of bytes is its share of the stage's tokens (mixture.source_shares,
+    tokens counted at production's bytes per token) at its bytes per token. A systematic sample in shard order, row
+    groups read in parallel, the sample kept in order."""
     sources = [s for _, members in mixture.FILE_STAGE.values() for s in members]
     sizes = {s: sum(content_bytes(path) for path in train_files(s)) for s in sources}
     shares = mixture.source_shares(mixture.FILE_STAGE, mixture.FILE_TOKENS,
                                    {s: sizes[s] / mixture.BYTES_PER_TOKEN[s] for s in sources})
+    stage_bytes = sum(shares[s] * mixture.BYTES_PER_TOKEN[s] for s in sources)
     tasks = []
     for s in sources:
-        step, at = max(1, int(sizes[s] / (shares[s] * SAMPLE_BYTES))), 0
+        fraction, at = shares[s] * mixture.BYTES_PER_TOKEN[s] / stage_bytes * SAMPLE_BYTES / sizes[s], 0
+        print(f"{s}: {fraction:.4f} of its {sizes[s] / 1e9:.2f} GB", flush=True)
         for path in train_files(s):
             md = pq.read_metadata(path)
             for g in range(md.num_row_groups):
-                tasks.append((s, path, g, at, step))
+                tasks.append((s, path, g, at, fraction))
                 at += md.row_group(g).num_rows
     docs, units, ids = [], [], {}
     with ProcessPoolExecutor() as pool:
@@ -93,7 +97,8 @@ def sample() -> tuple[list[str], list[int]]:
 
 def main() -> None:
     """Train, save and load the corpus's tokenizer; report each source's bytes per token on its curated val split
-    under it and under production's."""
+    under it and under production's, and each group read in part's train tokens under it over its draw (Parquet
+    footers' bytes at the val split's bytes per token): below 1, pack.fit runs out of its shards."""
     docs, units = sample()
     print(f"sample: {len(docs):,} documents, {sum(map(len, map(str.encode, docs))) / 1e9:.2f} GB, {max(units) + 1:,} "
           f"authorship units", flush=True)
@@ -105,12 +110,18 @@ def main() -> None:
     production.save(TOKENIZER, mergeable, production.SPLIT_PATTERN)
     corpus, reference = get_tokenizer(), production.get_tokenizer()
     print(f"data key {corpus.data_key}")
+    bytes_per_token = {}
     for source in mixture.READ:
         val = [text for path in sorted(curated_dir(source, "val").iterdir())
                for text in texts(source, pq.read_table(path))]
         size = sum(len(text.encode()) for text in val)
-        new, old = (size / sum(map(len, t.enc.encode_ordinary_batch(val))) for t in (corpus, reference))
-        print(f"{source}: {new:.3f} bytes per token, production's {old:.3f}", flush=True)
+        bytes_per_token[source], old = (size / sum(map(len, t.enc.encode_ordinary_batch(val)))
+                                        for t in (corpus, reference))
+        print(f"{source}: {bytes_per_token[source]:.3f} bytes per token, production's {old:.3f}", flush=True)
+    for group in mixture.IN_PART:
+        held = sum(sum(map(content_bytes, train_files(s))) / bytes_per_token[s]
+                   for s, g in mixture.PART.items() if g == group)
+        print(f"{group}: train tokens over the draw {held / mixture.draw(group):.4f}", flush=True)
 
 
 if __name__ == "__main__":

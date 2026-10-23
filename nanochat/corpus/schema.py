@@ -16,9 +16,14 @@ code converted to a script in code blocks), with the code's language.
 TEXT: a web document.
 SAMPLE_FILE: a curated repository file and its import-connected sample (curate.py): the files of a sample are
 consecutive rows, in the sample's dependency order.
+
+The split (curate.py): a document's group is val when md5_number(group) % SPLIT is 0. The group is the repository
+(REPOSITORY_FILE, ISSUE), the problem (CONVERSATION), else the document.
 """
 
 import pyarrow as pa
+
+SPLIT = 100  # production's split (nanochat/data/curate.py): 1% of groups held out
 
 REPOSITORY_FILE = pa.schema([
     pa.field("id", pa.string(), nullable=False),

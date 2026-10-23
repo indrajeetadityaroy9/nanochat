@@ -37,7 +37,7 @@ from huggingface_hub import HfFileSystem, dataset_info, hf_hub_download, list_re
 from obstore.store import S3Store
 
 from nanochat.corpus import mixture
-from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE
+from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE, SPLIT
 from nanochat.corpus.sources import EDU, SOURCES, Source, raw_dir, standardized_path
 from nanochat.paths import CORPUS
 
@@ -87,12 +87,14 @@ def extent(source: str) -> list[str]:
     """The Hub files prepare fetches: all of them in sorted order, or, of a source the mixture reads in part, the
     fewest in the order of their paths' sha1 (a uniformly random order whose prefixes nest as the extent grows) whose
     text bytes hold the group's fraction of the source. The fraction is the group's draw over its sources' tokens at
-    production's bytes per token, widened by mixture.SPREAD for a retrained tokenizer's compression."""
+    production's bytes per token, widened by mixture.SPREAD for a retrained tokenizer's compression and over the train
+    split's share of groups (schema.SPLIT)."""
     if source not in mixture.PART:
         return hub_files(source)
     group = mixture.PART[source]
     tokens = sum(sum(supply(s).values()) / mixture.BYTES_PER_TOKEN[s] for s, g in mixture.PART.items() if g == group)
-    need = mixture.draw(group) / tokens * (1 + mixture.SPREAD) * sum(supply(source).values())
+    need = (mixture.draw(group) / tokens * (1 + mixture.SPREAD) * SPLIT / (SPLIT - 1)
+            * sum(supply(source).values()))
     order = sorted(hub_files(source), key=lambda f: hashlib.sha1(f.encode()).digest())
     held = itertools.accumulate(supply(source)[f] for f in order)
     return order[:next(k + 1 for k, total in enumerate(held) if total >= need)]
