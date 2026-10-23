@@ -2,6 +2,10 @@
 Prepare sources (sources.py): fetch each Hub file a source's globs match, in sorted order at its pinned revision, then
 standardize each into its category's schema (schema.py), one standardized file per Hub file.
 
+Stack-Edu's Hub files are metadata: its raw file adds each blob's text, fetched from Software Heritage's public S3
+bucket by blob ID (obstore) and decoded with its src_encoding (The Stack v2 dataset card, download_contents); a blob
+the bucket does not hold or that does not decode has no text.
+
 Standardize keeps the rows with text, gives each a local id (the sha1 of the document's text) and keeps a repository
 file's text as its language reads it (standardize_file); it selects nothing else, and every source is taken whole.
 
@@ -9,19 +13,25 @@ python -m nanochat.corpus.prepare <source> ...
 """
 
 import argparse
+import asyncio
 import fnmatch
+import functools
+import gzip
 import hashlib
 import multiprocessing
+import resource
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+import obstore
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download, list_repo_files
+from obstore.store import S3Store
 
 from nanochat.corpus.schema import EXERCISE, REPOSITORY_FILE
-from nanochat.corpus.sources import SOURCES, Source, raw_dir, standardized_path
+from nanochat.corpus.sources import EDU, SOURCES, Source, raw_dir, standardized_path
 
 SPAWN = multiprocessing.get_context("spawn")
 
@@ -33,11 +43,48 @@ def hub_files(source: str) -> list[str]:
                   if any(fnmatch.fnmatchcase(f, glob) for glob in spec.files.values()))
 
 
+@functools.cache
+def swh_store() -> S3Store:
+    """This process's client of Software Heritage's bucket, created once so its connections are reused across row
+    groups; the file-descriptor limit is raised to its hard limit, as a row group's requests are in flight at once."""
+    resource.setrlimit(resource.RLIMIT_NOFILE, (resource.getrlimit(resource.RLIMIT_NOFILE)[1],) * 2)
+    return S3Store("softwareheritage", region="us-east-1", skip_signature=True)
+
+
+def blob_texts(task: tuple[Path, int]) -> pa.Table:
+    """A Stack-Edu metadata row group with each blob's text (null without one), all requests in flight at once."""
+    meta, group = task
+    rows = pq.ParquetFile(meta).read_row_group(group)
+    store = swh_store()
+
+    async def blob(blob_id: str, encoding: str) -> str | None:
+        try:
+            response = await obstore.get_async(store, "content/" + blob_id)
+            return gzip.decompress(await response.bytes_async()).decode(encoding)
+        except (FileNotFoundError, UnicodeDecodeError):  # not in the bucket, or not text in its src_encoding
+            return None
+
+    async def texts() -> list[str | None]:
+        return await asyncio.gather(*map(blob, rows["blob_id"].to_pylist(), rows["src_encoding"].to_pylist()))
+
+    return rows.append_column("text", pa.array(asyncio.run(texts()), pa.string()))
+
+
 def fetch(source: str, file: str) -> Path:
-    """The local path of one of the source's Hub files, downloaded at its pinned revision."""
+    """The local path of one of the source's Hub files, downloaded at its pinned revision. Stack-Edu's blobs are fetched
+    by a pool that lives for that file only, so its workers hold no memory beside standardize's."""
     spec = SOURCES[source]
-    return Path(hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision,
-                                local_dir=raw_dir(source)))
+    if spec.repo != EDU[0]:
+        return Path(hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision,
+                                    local_dir=raw_dir(source)))
+    path = raw_dir(source) / file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision)
+    with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
+          pq.ParquetWriter(path, pq.read_schema(meta).append(pa.field("text", pa.string()))) as writer):
+        for table in pool.map(blob_texts, [(meta, g) for g in range(pq.ParquetFile(meta).num_row_groups)]):
+            writer.write_table(table)
+    return path
 
 
 # ---- standardize: one function per category, raw table -> its schema
@@ -53,6 +100,13 @@ def repository_file(t: pa.Table, spec: Source) -> pa.Table:
                     schema=REPOSITORY_FILE)
 
 
+def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
+    """A Stack-Edu file: its metadata path, which begins with "/", taken relative to the repository's root."""
+    return pa.table({"id": sha1(t["text"]), "repo_name": t["repo_name"],
+                     "relative_path": pc.utf8_ltrim(t["path"], characters="/"), "content": t["text"],
+                     "language": pa.repeat(spec.language, t.num_rows)}, schema=REPOSITORY_FILE)
+
+
 def exercise(t: pa.Table, spec: Source) -> pa.Table:
     return pa.table({"id": sha1(t["full_content"]), "language": pa.repeat(spec.language, t.num_rows)}
                     | {name: t[name] for name in ("task", "analysis", "solution", "test", "content", "content_format",
@@ -64,7 +118,8 @@ def text(t: pa.Table, spec: Source) -> pa.Table:
     return pa.table({"id": sha1(t[spec.text]), "content": t[spec.text]}, schema=spec.schema)
 
 
-STANDARDIZE = {"ultradata_code_l2_python": repository_file, "ultradata_code_l2_cpp": repository_file,
+STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
+               "ultradata_code_l2_python": repository_file, "ultradata_code_l2_cpp": repository_file,
                "ultradata_code_l3_python": exercise, "ultradata_code_l3_cpp": exercise, "climbmix": text}
 
 

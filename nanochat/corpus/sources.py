@@ -3,8 +3,9 @@ The corpus's sources: a pinned Hub dataset each, the files it reads, its documen
 of a fetched file that holds a document's text.
 
 files maps a language to the glob of the Hub files holding it (Linguist names for code; the language of a text
-corpus). UltraData-Code (arXiv 2610.23960) releases L2, selected source files, and L3, exercises written from L2's
-algorithmic files; both per language.
+corpus). Stack-Edu (arXiv 2502.02737) holds The Stack v2's educational files by Software Heritage blob ID, their text
+fetched from Software Heritage (prepare.fetch). UltraData-Code (arXiv 2610.23960) releases L2, selected source files,
+and L3, exercises written from L2's algorithmic files; both per language.
 """
 
 from dataclasses import dataclass
@@ -30,10 +31,13 @@ class Source:
         return language
 
 
+EDU = ("HuggingFaceTB/stack-edu", "eeec5caac5cc3758a18f1d3ba4416837a9ba814c")
 CODE = ("openbmb/UltraData-Code", "525c9ac8639c5032633392d096e54db8c84a005e")
 CLIMBMIX = ("karpathy/climbmix-400b-shuffle", "915333b4f8b8684f39aeaafea600fea6f43fb703")
 
 SOURCES = {
+    "stack_edu_python": Source(REPOSITORY_FILE, *EDU, {"Python": "Python/*.parquet"}, "text"),
+    "stack_edu_cpp": Source(REPOSITORY_FILE, *EDU, {"C++": "Cpp/*.parquet"}, "text"),
     "ultradata_code_l2_python": Source(REPOSITORY_FILE, *CODE, {"Python": "data/UltraData-Code-L2/py/*.parquet"},
                                        "content"),
     "ultradata_code_l2_cpp": Source(REPOSITORY_FILE, *CODE, {"C++": "data/UltraData-Code-L2/cpp/*.parquet"}, "content"),
