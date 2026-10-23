@@ -61,3 +61,42 @@ curated store (`data/manifest.json`), 2026-10-22.
 
 Not read by `sources.py`: UltraData-Code L3, UltraData-Math L1 and L3, the `issues` subset of Issues-Kaggle-Notebooks,
 the other Codeforces-CoTs configurations, and every language but Python and C++.
+
+### UltraData-Code: which level
+
+The levels (UltraData report, arXiv 2610.23960 §2): **L0** the latest default-branch commit of about 192M public
+GitHub repositories (July 2025 cutoff); **L1** extension-aware cleaning, then MinHash near deduplication within each
+file extension, keeping ⌈n/2⌉ files of each near-duplicate component ranked by stars, creation time, length and id
+(3.98B files, 44.05% removed); **L2** files embedded by Qwen3-Embedding-0.6B and kept when a role head does not
+exclude them, an algorithmic-relevance head clears its threshold (0.85 for Python) and a quality score reaches 3 of 5
+(about 12.23% of L1's files); **L3** L2's algorithmic files rewritten by DeepSeek-v4-flash into a task, an analysis,
+a solution and tests. Only L2 (~400B tokens) and L3 (~150B) are released; L0 and L1 are not downloadable.
+
+| | Python | C++ |
+|---|---|---|
+| L1 files after deduplication (Table 14) | 575,184,540 | 80,822,744 |
+| L2 tokens, snapshot before decontamination (Table 15) | 102.57B | 31.94B |
+| L3 tokens, task + solution / all fields (Table 17) | 16.24B / 38.88B | 18.00B / 49.09B |
+| L2 here after curation (`data/manifest.json`, production's tokenizer) | 21.08B | 4.32B |
+
+The publisher's comparison: a 1B model continually pretrained from a 1.3T-token checkpoint, each corpus at the same
+token budget, EvalPlus average greedy pass@1 (and MultiPL-E):
+
+| Corpus | Python, 10B tokens (Table 4) | 11 languages, 10B (Table 5) | 11 languages, 100B (Table 6) |
+|---|---|---|---|
+| UltraData-Code L1 | 25.22 | 23.62 (15.25) | 26.97 (18.16) |
+| Stack-Edu | 34.67 | 27.05 (17.33) | 37.09 (21.44) |
+| UltraData-Stack-v3-L2 | 41.87 | — | — |
+| UltraData-Code L2 | 43.13 | 31.42 (20.38) | 46.95 (27.15) |
+| L2 and L3, 1:1 | 46.43 | 39.84 (28.45) | 57.06 (39.54) |
+
+**L2, as `sources.py` reads it.** L0 and L1 are not released, and at equal tokens L1 scores 18 points below L2 on
+Python (L0 is the uncleaned crawl L1 is made from). The evidence is continual pretraining of a 1B model, not training
+from scratch at d24 [inference: the ranking of selected over unselected code carries; the size of the gain need not].
+**L3 is not pretraining data here:** its records have the benchmarks' own form (a task, a solution, tests), its gain
+is measured by those benchmarks, the authors place it in mid-training or SFT ("L3 provides task-oriented data for
+mid-training or SFT", §2), and the release does not say which benchmarks its 13-gram decontamination (§3.1) covered;
+adopting it would be a mid-training experiment with its own contamination check. L2's release repeats itself: 34.8% of
+its Python rows are exact copies of another of its rows (MinHash keeps ⌈n/2⌉ of a component, so identical files
+survive in components of three or more [inference]); curation keeps 25,722,110 of its 70,096,376 normalized Python
+rows.
