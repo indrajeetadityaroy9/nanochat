@@ -76,7 +76,8 @@ SOURCES = {
 
 
 def raw_dir(source: str) -> Path:
-    """CORPUS/raw/<source>: the source's Hub files at their Hub paths (prepare.fetch)."""
+    """CORPUS/raw/<source>: the source's Hub files at their Hub paths, the columns standardization reads
+    (prepare.fetch)."""
     return CORPUS / "raw" / source
 
 

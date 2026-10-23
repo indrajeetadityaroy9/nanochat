@@ -1,7 +1,8 @@
 """
 Prepare sources (sources.py): fetch each Hub file a source's globs match, in sorted order at the dataset's latest
 revision (its main's commit, resolved once per source, so the listing and every file are one snapshot), then
-standardize each into its category's schema (schema.py), one standardized file per Hub file.
+standardize each into its category's schema (schema.py), one standardized file per Hub file. A fetch reads only the
+columns the source's standardizer reads (columns), by ranged reads of the Hub's Parquet file, several files at once.
 
 Stack-Edu's Hub files are metadata: its raw file adds each blob's text, fetched from Software Heritage's public S3
 bucket by blob ID (obstore) and decoded with its src_encoding (The Stack v2 dataset card, download_contents); a blob
@@ -21,20 +22,22 @@ import gzip
 import hashlib
 import multiprocessing
 import resource
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 import obstore
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from huggingface_hub import dataset_info, hf_hub_download, list_repo_files
+from huggingface_hub import HfFileSystem, dataset_info, hf_hub_download, list_repo_files
 from obstore.store import S3Store
 
 from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE
 from nanochat.corpus.sources import EDU, SOURCES, Source, raw_dir, standardized_path
 
 SPAWN = multiprocessing.get_context("spawn")
+# Hub files fetched at once: the link bounds a fetch, not one connection
+FETCHES = 8
 
 
 def hub_files(source: str, revision: str) -> list[str]:
@@ -71,13 +74,23 @@ def blob_texts(task: tuple[Path, int]) -> pa.Table:
     return rows.append_column("text", pa.array(asyncio.run(texts()), pa.string()))
 
 
-def fetch(source: str, file: str, revision: str) -> Path:
-    """The local path of one of the source's Hub files, downloaded at the revision. Stack-Edu's blobs are fetched by a
-    pool that lives for that file only, so its workers hold no memory beside standardize's."""
+def fetch(source: str, file: str, *, revision: str) -> Path:
+    """The local path of one of the source's Hub files at the revision: a Parquet file of the columns its standardizer
+    reads (written whole, then renamed into place, so an existing file is complete). Stack-Edu's blobs are fetched by
+    a pool that lives for that file only, so its workers hold no memory beside standardize's."""
     spec = SOURCES[source]
+    path = raw_dir(source) / file
     if spec.repo != EDU:
-        return Path(hf_hub_download(spec.repo, file, repo_type="dataset", revision=revision,
-                                    local_dir=raw_dir(source)))
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            partial, read = path.with_name(path.name + ".partial"), columns(source)
+            with HfFileSystem().open(f"datasets/{spec.repo}@{revision}/{file}", "rb") as remote:
+                hub = pq.ParquetFile(remote)
+                with pq.ParquetWriter(partial, pa.schema([hub.schema_arrow.field(c) for c in read])) as writer:
+                    for g in range(hub.num_row_groups):
+                        writer.write_table(hub.read_row_group(g, columns=read))
+            partial.rename(path)
+        return path
     path = raw_dir(source) / file
     path.parent.mkdir(parents=True, exist_ok=True)
     meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=revision)
@@ -109,10 +122,8 @@ def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
 
 
 def exercise(t: pa.Table, spec: Source) -> pa.Table:
-    return pa.table({"id": sha1(t["content"]), "language": pa.repeat(spec.language, t.num_rows)}
-                    | {name: t[name] for name in ("task", "analysis", "solution", "test", "content", "content_format",
-                                                   "full_content", "full_content_format")}
-                    | {"seed": t["raw_content"]}, schema=EXERCISE)
+    return pa.table({"id": sha1(t["content"]), "content": t["content"],
+                     "language": pa.repeat(spec.language, t.num_rows)}, schema=EXERCISE)
 
 
 def text(t: pa.Table, spec: Source) -> pa.Table:
@@ -145,6 +156,14 @@ STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
                "climbmix": text, "opc_fineweb_math": text}
 
 
+def columns(source: str) -> list[str]:
+    """The Hub columns a source's standardizer reads (Stack-Edu's metadata is fetched whole)."""
+    spec = SOURCES[source]
+    return {repository_file: ["repo_name", "relative_path", "content"], exercise: ["content"], text: [spec.text],
+            conversation: ["id", "prompt", "generation"], issue: ["repo_name", "text"],
+            notebook: ["text"]}[STANDARDIZE[source]]
+
+
 def standardize_file(task: tuple[str, int, Path]) -> None:
     """Standardize one raw file into its standardized file: the rows with text; a repository file's text as Python and
     C++ read source files, CR LF and a lone CR as LF and a leading U+FEFF dropped (Python Language Reference §2.1.2
@@ -169,7 +188,8 @@ def prepare(sources: list[str]) -> None:
         revision = dataset_info(SOURCES[source].repo).sha
         files = hub_files(source, revision)
         standardized_path(source, 0).parent.mkdir(parents=True)
-        paths = [fetch(source, file, revision) for file in files]
+        with ThreadPoolExecutor(1 if SOURCES[source].repo == EDU else FETCHES) as pool:
+            paths = list(pool.map(functools.partial(fetch, source, revision=revision), files))
         with ProcessPoolExecutor(mp_context=SPAWN) as pool:
             list(pool.map(standardize_file, [(source, k, path) for k, path in enumerate(paths)]))
         print(f"{source}: {len(files)} files at {SOURCES[source].repo}@{revision}")
