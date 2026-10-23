@@ -38,7 +38,7 @@ from huggingface_hub import HfFileSystem, dataset_info, hf_hub_download, list_re
 from obstore.store import S3Store
 
 from nanochat.corpus import mixture
-from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE, SPLIT
+from nanochat.corpus.schema import CONVERSATION, ISSUE, NOTEBOOK, REPOSITORY_FILE, SPLIT
 from nanochat.corpus.sources import EDU, SOURCES, Source, raw_dir, standardized_path
 from nanochat.paths import CORPUS
 
@@ -193,10 +193,11 @@ def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
                      "language": pa.repeat(spec.language, t.num_rows)}, schema=REPOSITORY_FILE)
 
 
-def exercise(t: pa.Table, spec: Source) -> pa.Table:
+def synthetic(t: pa.Table, spec: Source) -> pa.Table:
+    """An exercise or a synthetic source file: its content and language (the two schemas share their fields)."""
     content = lines(t["content"])
     return pa.table({"id": sha1(content), "content": content, "language": pa.repeat(spec.language, t.num_rows)},
-                    schema=EXERCISE)
+                    schema=spec.schema)
 
 
 def text(t: pa.Table, spec: Source) -> pa.Table:
@@ -226,7 +227,8 @@ def notebook(t: pa.Table, spec: Source) -> pa.Table:
 STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
                "ultradata_stack_v3_l2_python": repository_file, "ultradata_stack_v3_l2_cpp": repository_file,
                "ultradata_code_l2_python": repository_file, "ultradata_code_l2_cpp": repository_file,
-               "ultradata_code_l3_python": exercise, "ultradata_code_l3_cpp": exercise,
+               "ultradata_code_l3_python": synthetic, "ultradata_code_l3_cpp": synthetic,
+               "nemotron_rewriting_python": synthetic, "nemotron_transpilation_cpp": synthetic,
                "ultradata_math_l1": text, "ultradata_math_l3_qa": text, "ultradata_math_l3_conversation": text,
                "ultradata_math_l3_multi_style": text, "ultradata_math_l3_textbook_exercise": text,
                "codeforces_cots": conversation, "github_issues": issue, "kaggle_notebooks": notebook,
@@ -236,7 +238,7 @@ STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
 def columns(source: str) -> list[str]:
     """The Hub columns a source's standardizer reads (Stack-Edu's metadata is fetched whole)."""
     spec = SOURCES[source]
-    return {repository_file: ["repo_name", "relative_path", "content"], exercise: ["content"], text: [spec.text],
+    return {repository_file: ["repo_name", "relative_path", "content"], synthetic: ["content"], text: [spec.text],
             conversation: ["id", "prompt", "generation", "finish_reason"], issue: ["repo_name", "text"],
             notebook: ["text"]}[STANDARDIZE[source]]
 

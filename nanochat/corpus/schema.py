@@ -6,6 +6,8 @@ REPOSITORY_FILE: a source file of a code repository, with its path in the reposi
 name).
 EXERCISE: a synthetic programming exercise as the publisher serializes its task and solution (content: the task as a
 code comment, unfenced text or Markdown, then the solution), with its language.
+SYNTHETIC_FILE: a source file an LLM wrote from a repository file (rewritten in its language, or transpiled into
+another), with its language; no repository or path.
 CONVERSATION: a codeforces_cots record as one document, the R1 prompt (the problem and its instructions) followed by
 its generation (a reasoning trace and a solution), with its problem's id (problem_id), which every generation of the
 problem shares.
@@ -34,6 +36,12 @@ REPOSITORY_FILE = pa.schema([
 ])
 
 EXERCISE = pa.schema([
+    pa.field("id", pa.string(), nullable=False),
+    pa.field("content", pa.string(), nullable=False),
+    pa.field("language", pa.string(), nullable=False),
+])
+
+SYNTHETIC_FILE = pa.schema([
     pa.field("id", pa.string(), nullable=False),
     pa.field("content", pa.string(), nullable=False),
     pa.field("language", pa.string(), nullable=False),

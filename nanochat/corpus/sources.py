@@ -12,7 +12,9 @@ per crawl snapshot, and L3, documents synthesized in four formats, a source each
 reasoning traces and solutions to Codeforces problems: of its decontaminated subsets, the Python solutions and the C++
 solutions (short and long). issues-kaggle-notebooks holds StarCoder2's GitHub issues and Kaggle notebooks
 (arXiv 2402.19173) reformatted as text, a source each. opc-fineweb-math-corpus holds the math pages OpenCoder's
-fastText classifiers recalled from FineWeb (arXiv 2411.04905).
+fastText classifiers recalled from FineWeb (arXiv 2411.04905). Nemotron-Pretraining-Code-v2 (arXiv 2512.20848 §2.2)
+holds, of its synthetic code, every Python file of NVIDIA's GitHub corpus rewritten by Qwen3-32B (SGCR and SCOR prompts,
+arXiv 2505.02881, and NVIDIA's own) and Python files transpiled into C++, a source each.
 """
 
 from dataclasses import dataclass
@@ -20,7 +22,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE, TEXT
+from nanochat.corpus.schema import CONVERSATION, EXERCISE, ISSUE, NOTEBOOK, REPOSITORY_FILE, SYNTHETIC_FILE, TEXT
 from nanochat.paths import CORPUS
 
 # The line comment of each repository-file language: Python Language Reference §2.1.3 "Comments", C++23 [lex.comment]
@@ -45,6 +47,7 @@ STACK_V3 = "openbmb/UltraData-Stack-v3-L2"
 CODE = "openbmb/UltraData-Code"
 MATH = "openbmb/UltraData-Math"
 ISSUES_KAGGLE = "HuggingFaceTB/issues-kaggle-notebooks"
+NEMOTRON = "nvidia/Nemotron-Pretraining-Code-v2"
 
 SOURCES = {
     "stack_edu_python": Source(REPOSITORY_FILE, EDU, {"Python": "Python/*.parquet"}, "text"),
@@ -58,6 +61,10 @@ SOURCES = {
     "ultradata_code_l2_cpp": Source(REPOSITORY_FILE, CODE, {"C++": "data/UltraData-Code-L2/cpp/*.parquet"}, "content"),
     "ultradata_code_l3_python": Source(EXERCISE, CODE, {"Python": "data/UltraData-Code-L3/py/*.parquet"}, "content"),
     "ultradata_code_l3_cpp": Source(EXERCISE, CODE, {"C++": "data/UltraData-Code-L3/cpp/*.parquet"}, "content"),
+    "nemotron_rewriting_python": Source(SYNTHETIC_FILE, NEMOTRON,
+                                        {"Python": "Synthetic-Code/synthetic-rewriting/*.parquet"}, "content"),
+    "nemotron_transpilation_cpp": Source(SYNTHETIC_FILE, NEMOTRON,
+                                         {"C++": "Synthetic-Code/synthetic-transpilation/*.parquet"}, "content"),
     "ultradata_math_l1": Source(TEXT, MATH, {"English": "data/UltraData-Math-L1/*/*.parquet"}, "content"),
     "ultradata_math_l3_qa": Source(TEXT, MATH, {"English": "data/UltraData-Math-L3/QA-Synthetic/*.parquet"},
                                    "content"),

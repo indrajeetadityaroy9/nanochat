@@ -29,11 +29,14 @@ REPOSITORY_SOURCES = ["stack_edu_python", "ultradata_stack_v3_l2_python", "ultra
                       "stack_edu_cpp", "ultradata_stack_v3_l2_cpp", "ultradata_code_l2_cpp"]
 MATH_SOURCES = ["ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultradata_math_l3_multi_style",
                 "ultradata_math_l3_textbook_exercise"]
+# Synthetic code: UltraData-Code L3's exercises and Nemotron's rewritten Python and Python transpiled into C++
+SYNTHETIC_SOURCES = ["ultradata_code_l3_python", "ultradata_code_l3_cpp", "nemotron_rewriting_python",
+                     "nemotron_transpilation_cpp"]
 
 Share = float | Literal["supply", "rest"]
 FILE_STAGE: dict[str, tuple[Share, list[str]]] = {
     "repository": ("rest", REPOSITORY_SOURCES),
-    "exercises": (0.10, ["ultradata_code_l3_python", "ultradata_code_l3_cpp"]),
+    "synthetic": (0.10, SYNTHETIC_SOURCES),
     "notebooks": ("supply", ["kaggle_notebooks"]),
     "text": (0.10, ["climbmix"]),
     "math": (0.03, MATH_SOURCES),
@@ -51,13 +54,14 @@ REPO_STAGE: dict[str, tuple[Share, list[str]]] = {
 READ = [source for source in SOURCES
         if any(source in sources for stage in (FILE_STAGE, REPO_STAGE) for _, sources in stage.values())]
 
-IN_PART = ("exercises", "text", "math")
+IN_PART = ("synthetic", "text", "math")
 # Production's tokenizer's bytes per token on each source (measured on its compiled train splits and on samples of the
 # sources it did not compile: normalization_doc.md §5.1, §9), for token counts before this corpus's tokenizer exists
 BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.638,
                    "ultradata_code_l2_python": 3.709, "stack_edu_cpp": 3.065, "ultradata_stack_v3_l2_cpp": 3.015,
                    "ultradata_code_l2_cpp": 2.935, "kaggle_notebooks": 3.459, "codeforces_cots": 3.536,
                    "ultradata_code_l3_python": 3.826, "ultradata_code_l3_cpp": 3.593, "climbmix": 4.275,
+                   "nemotron_rewriting_python": 3.909, "nemotron_transpilation_cpp": 3.651,
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
 # How much better a retrained tokenizer may compress a source than production's: "the NSL on any given subset only

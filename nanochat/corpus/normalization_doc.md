@@ -1,7 +1,7 @@
 # Pretraining corpus for Python and C++ code generation: specification
 
 This document specifies `nanochat/corpus` and the parts of `nanochat/data` it replaces: pretraining from scratch for
-code generation in Python and C++, from the 18 sources of `nanochat/corpus/sources.py`. Every rule is a decision;
+code generation in Python and C++, from the 20 sources of `nanochat/corpus/sources.py`. Every rule is a decision;
 none is optional. Every number is either quoted from a paper, read from the code, or measured on the GB10.
 
 The reference run is production's d24:
@@ -25,7 +25,7 @@ Evidence:
 | Filters | every Python file parses as Python 3, after repair; no generated, vendored or C++ syntax filter | 4.1, 4.2 |
 | Deduplication | exact copies only, across every source read, first occurrence kept | 4.3 |
 | Split | production's: 1% of groups (repository, problem or document) held out; repository names case-insensitive | 4.4 |
-| Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, L3 exercises 10%, Kaggle notebooks whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
+| Mixture | 87 : 10 : 3 code, text, mathematics in both stages. 8K code: repository files, synthetic code 10% (UltraData-Code L3's exercises, Nemotron's rewritten Python and Python transpiled into C++), Kaggle notebooks whole; 32K code: whole repositories and Codeforces-CoTs | 5 |
 | FIM | rate 0.5, joint PSM/SPM, context level, AST-FIM's middles with 10% random spans, repository files only; production's line widening dropped | 6 |
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) across sources | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
@@ -40,12 +40,14 @@ Evidence:
 | `ultradata_stack_v3_l2_python`, `ultradata_stack_v3_l2_cpp` | REPOSITORY_FILE | `content` | yes |
 | `ultradata_code_l2_python`, `ultradata_code_l2_cpp` | REPOSITORY_FILE | `content` | yes |
 | `ultradata_code_l3_python`, `ultradata_code_l3_cpp` | EXERCISE | `content` | in part (§5.1) |
+| `nemotron_rewriting_python`, `nemotron_transpilation_cpp`: Nemotron-Pretraining-Code-v2's `synthetic-rewriting`, `synthetic-transpilation` | SYNTHETIC_FILE | `content` | in part (§5.1) |
 | `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | TEXT | `content` | in part |
 | `codeforces_cots`: `solutions_py_decontaminated`, `solutions_short_and_long_decontaminated` | CONVERSATION | `prompt`, then `generation` | yes, at 32K |
 | `kaggle_notebooks` | NOTEBOOK | `text` | yes |
 | `climbmix` | TEXT | `text` | in part |
 | `ultradata_math_l1`, `opc_fineweb_math` | TEXT | `content`, `text` | no (§5.2) |
 | `github_issues` | ISSUE | `text` | no (§5.2) |
+| Nemotron-Pretraining-Code-v2's GitHub metadata, code-review, student-teacher and question-answering subsets | — | — | no (§3.3) |
 
 - **Revision.** Each source is read at its latest revision. `prepare` resolves `dataset_info(repo).sha` once per
   source, so the listing and every file come from one snapshot, and the manifest records it.
@@ -86,6 +88,7 @@ schema (`schema.py`):
 |---|---|---|
 | REPOSITORY_FILE | `id`, `repo_name`, `relative_path`, `content`, `language` | `repo_name` |
 | EXERCISE | `id`, `content`, `language` | `id` |
+| SYNTHETIC_FILE | `id`, `content`, `language` | `id` |
 | CONVERSATION | `id`, `problem_id`, `content` | `problem_id` |
 | ISSUE | `id`, `repo_name`, `content` | `repo_name` |
 | NOTEBOOK | `id`, `content`, `language` | `id` |
@@ -203,6 +206,27 @@ code (§5.2).
   At 32K, 0.02% of documents (0.04% of tokens) exceed the context; the median document is 14,303 tokens. The traces
   are read in the 32K stage (§5.1, §7.3).
 
+### 3.3 Nemotron-Pretraining-Code-v2: rewritten and transpiled source files
+
+**`content` is a whole source file an LLM wrote from a GitHub file:** "Using Qwen3 32B, we rephrased all of our raw
+Python source code using a combination of the Style-Guided Code Rewriting (SGCR) and Self-Contained Optimization
+Rewriting (SCOR) prompts", and "We applied this Python to C++ transpilation procedure to all Python source files in our
+source-code corpus" (arXiv 2512.20848 §2.2.2). Measured on a row group of each (94,569 and 88,401 rows; 20,000-row
+samples):
+
+| Subset | Rows | Text (8 of 64 footers, scaled) | Starts with a code fence | Parses (`ast.parse`, 5,000 rows) | Production's bytes per token |
+|---|---|---|---|---|---|
+| Rewriting (Python; prompts: NVIDIA's 68.8%, SGCR 15.6%, NVIDIA's and SCOR 15.6%) | 99.9M | 323 GB | 0.0% | 99.7% | 3.909 |
+| Transpilation (C++, from Python) | 29.4M | 114 GB | 0.0% | — | 3.651 |
+
+- The files are code without prose around them, so they are SYNTHETIC_FILE rows: the Python 3 check applies to the
+  rewritten Python (§4.2), and no path comment precedes them (they record none).
+- **Not read:** the GitHub metadata (`repo`, a 7-character `commit_id`, `rel_path`, `language` for 376,752,751 files)
+  holds no blob id, so its text is one GitHub request per file; the code-review (85.5M rows, 322 GB), student-teacher
+  (44.9M, 118 GB) and question-answering (390.7M, 997 GB, 39% Python) dialogues have no measured pretraining effect.
+- **License:** the NVIDIA Data Access Agreement for Model Training; a model trained on it "may be subject to
+  redistribution and use requirements in the Qwen License Agreement" (card).
+
 ## 4. Curation
 
 The steps run in order: the Python 3 check with repair, exact deduplication, split.
@@ -240,9 +264,10 @@ a prose paragraph written as one Markdown line (823 of 912 sampled).
 
 ### 4.2 Python 3 check, with repair
 
-Every Python repository file must parse with `ast.parse` (Python 3.12). Python 2 files are real code, so a file that
-fails is repaired before it is dropped, by the smallest set of the steps below that makes it parse (`curate.repaired`:
-of the steps that change the file, every subset by size, then in step order), and the kept text is the repaired one:
+Every Python file, a repository's or a synthetic one (§3.3), must parse with `ast.parse` (Python 3.12). Python 2 files
+are real code, so a file that fails is repaired before it is dropped, by the smallest set of the steps below that
+makes it parse (`curate.repaired`: of the steps that change the file, every subset by size, then in step order), and
+the kept text is the repaired one:
 1. Stack v3's placeholders `<EMAIL>`, `<KEY>`, `<NAME>` and `<PASSWORD>` become the bare word (`<NAME>` → `NAME`).
 2. Leading-indentation tabs are expanded to 8 columns, Python 2's rule: "tabs are replaced (from left to right) by one
    to eight spaces such that the total number of characters up to and including the replacement is a multiple of
@@ -356,7 +381,8 @@ the removal of the vendored filter; vendored copies are counted.
     HumanEval performance from 27.21% to 37.00% pass@100" (§4.2, 350M).
   - SantaCoder: a further near-deduplication of already near-deduplicated data "improves HumanEval performance by 1-3%
     and MBPP by 1-4%" (arXiv 2301.03988 §6.1).
-- Near duplicates can sit on both sides of the split; validation loss counts them.
+- Near duplicates can sit on both sides of the split; validation loss counts them. Nemotron's rewritten and
+  transpiled files record no repository, so a validation repository's file can have a rewritten copy in training.
 
 ### 4.4 Split
 
@@ -451,12 +477,19 @@ The token budget is 102.6B tokens, as production:
   HumanEval+ tasks). With one seed per arm, the parse difference is the only evidence on generation, so the split
   stays at 87 : 10 : 3.
 
-**Synthetic exercises 10%.**
+**Synthetic code 10%: UltraData-Code L3, Nemotron's rewriting and transpilation, weighted by their tokens.**
 - At 470M, "despite a small weighting of 10%, the inclusion of synthetic data leads to relative improvements of 9% on
   natural language reasoning, and 44.9% on code benchmarks compared to the baseline of web-code-only"
   (arXiv 2408.10914 §3.4), "from the perspective of training from scratch". That measurement sets the share.
 - The report's L2 plus L3 at 1:1 reached EvalPlus 57.06 against L2's 46.95 (Table 6), "replacing half of L2 with L3".
   That is continued pretraining on a 1.3T-token base, so it does not set a from-scratch share.
+- Rewritten code: continual pretraining of Llama-3.1-8B for 50B tokens on SwallowCode (SGCR and SCOR rewriting)
+  "improves pass@1 by +17.0 on HumanEval and +16.1 on HumanEval+ compared to an equivalent budget using Stack-Edu";
+  SGCR alone "results in an approximate 10-point decrease on the MBPP benchmark", which SCOR addresses (arXiv
+  2505.02881 §1, §3.3.1). Its authors, under "Language generality": "our evaluations are confined to continual
+  pre-training with a 50 billion token budget". NVIDIA, for the subsets read here: "we also found that using LLMs to
+  rephrase source code improved downstream code-generation accuracies", and transpiled C++ "improved downstream C++
+  code-generation accuracy" (arXiv 2512.20848 §2.2.2; no numbers given).
 
 **Mathematics: UltraData-Math L3.**
 - The one code-relevant measurement favours the synthetic tier. As the 30% slice of a ~105B-token decay on a 1.3T-token
@@ -526,7 +559,8 @@ line widening):
 - **Eligibility: repository source files, train split, both stages.** Validation is left to right. Grounding:
   - AST-FIM: "For the natural language data, we only apply the standard L2R objective without any FIM" (§5.1);
   - StarCoder2 applies FIM to source code, not to "the repository metadata" (§5);
-  - the UltraData-Code report never mentions FIM, so L3's measured gains are left to right.
+  - the UltraData-Code report never mentions FIM, so L3's measured gains are left to right, as are the rewriting and
+    transpilation gains above (§5.2); synthetic code is read left to right.
 - **C++ middles are random more often.** tree-sitter-cpp fails on 5.5–12.5% of whole C++ files (§4.1), so C++'s random
   share there is 15–21% against AST-FIM's 10% [arithmetic]; cut C++ pieces fail far more often (§7.1). Python files
   fail in 0–0.03%.

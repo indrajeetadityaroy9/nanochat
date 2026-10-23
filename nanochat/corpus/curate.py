@@ -2,11 +2,12 @@
 Curate the sources the mixture reads (mixture.READ) from their standardized files (prepare.py), in the steps of the
 design document (normalization_doc.md §4):
 
-1. check: every Python repository file must parse with ast.parse (this image's Python 3.12). A file that does not is
-   repaired by the smallest set of steps that makes it parse (repaired): Stack v3's placeholders <EMAIL>, <KEY>, <NAME>
-   and <PASSWORD> become the bare word; leading-indentation tabs are expanded to 8 columns, Python 2's rule (Python 2
-   Language Reference §2.1.8); every 2to3 fixer of fissix (the maintained fork of lib2to3, which Python 3.12 lacks) is
-   applied. The repaired text is kept and its id recomputed; a file that never parses is dropped (checked_path).
+1. check: every Python file, a repository's or a synthetic one, must parse with ast.parse (this image's Python 3.12).
+   A file that does not is repaired by the smallest set of steps that makes it parse (repaired): Stack v3's
+   placeholders <EMAIL>, <KEY>, <NAME> and <PASSWORD> become the bare word; leading-indentation tabs are expanded to 8
+   columns, Python 2's rule (Python 2 Language Reference §2.1.8); every 2to3 fixer of fissix (the maintained fork of
+   lib2to3, which Python 3.12 lacks) is applied. The repaired text is kept and its id recomputed; a file that never
+   parses is dropped (checked_path).
 2. dedup: one row per id over every source and both splits, the first in mixture.READ's order, then file and row; an
    empty text is dropped.
 3. split: a group is val when md5_number(group) % SPLIT = 0 (schema.py); a repository's group is its lowercased name.
@@ -40,7 +41,7 @@ import pyarrow.parquet as pq
 
 from nanochat.corpus import mixture
 from nanochat.corpus.prepare import COMPRESSION, sha1
-from nanochat.corpus.schema import CONVERSATION, ISSUE, REPOSITORY_FILE, SAMPLE_FILE, SPLIT
+from nanochat.corpus.schema import CONVERSATION, ISSUE, REPOSITORY_FILE, SAMPLE_FILE, SPLIT, SYNTHETIC_FILE
 from nanochat.corpus.sources import SOURCES, checked_path, curated_dir, standardized_path
 from nanochat.native import data_crate
 from nanochat.paths import CORPUS
@@ -144,7 +145,7 @@ def check_row_group(task: tuple[str, int, int]) -> pa.Table:
     table = table.filter(pa.array([text is not None for text in texts], pa.bool_()))
     content = pa.chunked_array([pa.array([text for text in texts if text is not None], pa.string())])
     table = table.set_column(table.schema.get_field_index("content"), "content", content)
-    return table.set_column(table.schema.get_field_index("id"), "id", sha1(content)).cast(REPOSITORY_FILE)
+    return table.set_column(table.schema.get_field_index("id"), "id", sha1(content)).cast(SOURCES[source].schema)
 
 
 def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
@@ -157,7 +158,7 @@ def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(path.name + ".partial")
         groups = pq.ParquetFile(standardized_path(source, k)).num_row_groups
-        with pq.ParquetWriter(partial, REPOSITORY_FILE, compression=COMPRESSION) as writer:
+        with pq.ParquetWriter(partial, SOURCES[source].schema, compression=COMPRESSION) as writer:
             for table in in_order(pool, check_row_group, [(source, k, g) for g in range(groups)]):
                 writer.write_table(table)
         partial.rename(path)
@@ -263,7 +264,8 @@ def curate() -> None:
     """Every read source's curated shards, from its standardized files (the Python repository sources' checked ones)."""
     data_crate()  # built once here, before the workers load it
     files = {source: len(list(standardized_path(source, 0).parent.iterdir())) for source in mixture.READ}
-    python = [s for s in mixture.READ if SOURCES[s].schema is REPOSITORY_FILE and SOURCES[s].language == "Python"]
+    python = [s for s in mixture.READ
+              if SOURCES[s].schema in (REPOSITORY_FILE, SYNTHETIC_FILE) and SOURCES[s].language == "Python"]
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
         for source in python:
             check(source, files[source], pool)
