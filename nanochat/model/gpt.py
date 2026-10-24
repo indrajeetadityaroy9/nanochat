@@ -32,6 +32,7 @@ from nanochat.ops.cross_entropy import lm_loss, lm_losses
 from nanochat.ops.flash_attn import flash_attn
 from nanochat.ops.linear import linear, relu2_mlp
 from nanochat.ops.qk_prologue import qk_norm_rope
+from nanochat.ops.ve_gate import ve_mix
 
 # Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 §2.2.2, Fig. 4)
 ASPECT_RATIO = 960 // 32
@@ -83,16 +84,14 @@ class Attention(nn.Module):
         self.k_gain = nn.Parameter(torch.empty(HEAD_DIM))
         self.ve_gate = nn.Linear(C, C // HEAD_DIM, bias=False) if has_ve(layer_idx, n_layer=config.n_layer) else None
 
-    def forward(self, n: Tensor, ve: Tensor | None, *, cos_sin: tuple[Tensor, Tensor], window_size: int,
-                cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-        """n: normed stream; ve: this layer's value embeddings or None."""
+    def forward(self, n: Tensor, idx: Tensor, ve_table: Tensor | None, *, cos_sin: tuple[Tensor, Tensor],
+                window_size: int, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
+        """n: normed stream; idx: the token ids; ve_table: this layer's value embeddings or None."""
         B, T, C = n.size()
         q, k, v = (linear(n, w).view(B, T, -1, HEAD_DIM) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
-        # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once. Broadcast-sum gate
-        # fused by Inductor: faster than separate fp32 GEMMs
-        if ve is not None:
-            gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))
-            v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
+        # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once (ops/ve_gate.py)
+        if ve_table is not None:
+            v = ve_mix(n, v, idx, ve_table, self.ve_gate.weight)[0]
         q, k = qk_norm_rope(q, k, self.q_gain, self.k_gain, *cos_sin)
         return linear(flash_attn(q, k, v, window_size, cu_seqlens, segments)[0].view(B, T, C), self.c_o.weight)
 
@@ -116,9 +115,9 @@ class Block(nn.Module):
         self.attn = Attention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x: Tensor, ve: Tensor | None, *, cos_sin: tuple[Tensor, Tensor], window_size: int,
-                cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-        x = x + self.attn(norm(x), ve, cos_sin=cos_sin, window_size=window_size, cu_seqlens=cu_seqlens,
+    def forward(self, x: Tensor, idx: Tensor, ve_table: Tensor | None, *, cos_sin: tuple[Tensor, Tensor],
+                window_size: int, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
+        x = x + self.attn(norm(x), idx, ve_table, cos_sin=cos_sin, window_size=window_size, cu_seqlens=cu_seqlens,
                           segments=segments)
         return x + self.mlp(norm(x))
 
@@ -177,16 +176,16 @@ class GPT(nn.Module):
         self.init_buffers()
 
     def hidden(self, idx: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-        """Final normed hidden states (B*T, C) of idx (B, T); cu_seqlens: int32 document bounds in flattened idx, the
-        first segments + 1 of them in use (segments: 0-dim int32 on the host; corpus/loader.py PretrainingBatches)."""
+        """Final normed hidden states (B*T, C) of idx (B, T) int32; cu_seqlens: int32 document bounds in flattened idx,
+        the first segments + 1 of them in use (segments: 0-dim int32 on the host; corpus/loader.py
+        PretrainingBatches)."""
         x = x0 = norm(F.embedding(idx, self.wte.weight).to(torch.bfloat16))
         for i, block in enumerate(self.blocks):
             # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 without fp32 copies of the mix
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = (F.embedding(idx, self.value_embeds[str(i)].weight).to(torch.bfloat16) if str(i) in self.value_embeds
-                  else None)
-            x = block(x, ve, cos_sin=(self.cos, self.sin), window_size=self.window_sizes[i], cu_seqlens=cu_seqlens,
-                      segments=segments)
+            ve_table = self.value_embeds[str(i)].weight if str(i) in self.value_embeds else None
+            x = block(x, idx, ve_table, cos_sin=(self.cos, self.sin), window_size=self.window_sizes[i],
+                      cu_seqlens=cu_seqlens, segments=segments)
         return norm(x).flatten(0, 1)
 
     def forward(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
