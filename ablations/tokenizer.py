@@ -1,19 +1,29 @@
 """
-The tokenizer ablation: it decides the corpus tokenizer's split pattern and merge score (nanochat/corpus/tokenizer.py
-PATTERN, SCORE), the tokenizer every later step of pretraining reads. Each candidate is a vocabulary of 32,768 ids
-(32,764 mergeable tokens, BOS and 3 FIM sentinels) trained on the same sample (corpus/tokenizer.py sample: the curated
-train splits at the file stage's shares of bytes) by the same trainer (corpus/tokenizer.py train, the data crate's) and
-encoded by tiktoken, and each is trained on, so every candidate the corpus keeps or dismisses has runs of its own.
+The tokenizer ablation: it trains every candidate vocabulary of the corpus's tokenizer, measures them on the corpus,
+decides the split pattern and merge score, and adopts the decided vocabulary as the corpus's tokenizer
+(nanochat/corpus/tokenizer.py TOKENIZER), the tokenizer every later step of pretraining reads. Each candidate is a
+vocabulary of 32,768 ids (32,764 mergeable tokens, BOS and 3 FIM sentinels) trained on the same sample by the same
+trainer (train: the data crate's) and encoded by tiktoken, and each is trained on, so every candidate the corpus keeps
+or dismisses has runs of its own. Its data are the corpus's: the sample, the val splits and the packs come from the
+curated shards through nanochat/corpus (mixture.py, compile.py, pack.py).
+
+Sample (sample): of each file-stage source's curated train split, its share of the stage's bytes (byte_shares: its
+share of the stage's tokens, Stage.shares, at production's bytes per token) as its share of SAMPLE_BYTES, a systematic
+sample in shard order: tokenizer training data "representative of model training data" (arXiv 2405.05417 §5); across
+tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage points", better as the mix holds
+more of it (arXiv 2402.01035 §2.3, compression alone); over languages, proportional tokenizer-training weights gave
+lower bits per byte than equal ones (arXiv 2610.12144 Table 6, §7). The sample's composition is not an arm
+(normalization_doc.md §9). An authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository
+files and functions; any other document is its own.
 
 Arms (ARMS):
 - sa-bpe: production's pattern (SPLIT_PATTERN) and score, SA-BPE's F·log R (arXiv 2604.14053 §4.1: F the pair's
   frequency, R the authorship units holding it in the current segmentation, a pair of one unit scoring 0; the paper's
   code takes the natural log, pchizhov/sa-bpe scoring.py). Table 3: the highest compression of its rows and far fewer
-  tokens verified under-trained than BPE's (one tokenizer each, no seeds). A unit is the repository for repository
-  files and functions, as in the paper; the document otherwise, as §6 suggests for natural language ("documents,
-  books, or document collections"), untested there. Not the paper's recommended F·log R·L (§6, Table 4): §6 says the
-  language aspect "must be avoided" for natural language, five of the sample's 17 sources, and with Python, C++ and
-  English L takes three values;
+  tokens verified under-trained than BPE's (one tokenizer each, no seeds). The repository as the unit is the paper's;
+  the document, as §6 suggests for natural language ("documents, books, or document collections"), is untested there.
+  Not the paper's recommended F·log R·L (§6, Table 4): §6 says the language aspect "must be avoided" for natural
+  language, five of the sample's 17 sources, and with Python, C++ and English L takes three values;
 - sa-bpe-fused: FUSED_PATTERN, whose punctuation clause takes the line breaks after it, as cl100k's does. The positive
   control: arXiv 2608.18062's companion post deletes those trailing line breaks from GPT-4o's clause, the tokenizer
   corpus held fixed, and MBPP pass@1 rises with non-overlapping seed ranges (three seeds each; healed prompts, the
@@ -22,16 +32,14 @@ Arms (ARMS):
 - hybrid: HYBRID_PATTERN, whose statement chunks are the same at every indentation depth (its comment);
 - bpe: frequency alone (Table 3's F row, SA-BPE's baseline) within SPLIT_PATTERN, close to F·log R in compression,
   so a tie in the runs is likely [inference], which the val coverage breaks.
-The sample's composition is not an arm (normalization_doc.md §9). Not run: tiktoken encodes by merge rank alone, which
-has no form for PickyBPE's token removals (arXiv 2409.04599 Alg. 2) or BoundlessBPE's supermerges (arXiv 2504.00178
-§3.2); SuperBPE's code results moved HumanEval and MBPP pass@10 in opposite directions, neither significantly
-(arXiv 2503.13423 Table 1).
+Not run: tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (arXiv 2409.04599
+Alg. 2) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.2); SuperBPE's code results moved HumanEval and MBPP pass@10
+in opposite directions, neither significantly (arXiv 2503.13423 Table 1).
 
 vocabularies: every arm on one draw of the sample, at once (the crate releases the GIL and each training's merge loop
 is mostly serial; every merge is an argmax with fixed tie-breaks, so an arm does not depend on the others); its
-vocabulary and merges in CORPUS/tokenizer-ablation/<arm>; RESULTS/tokenizer-vocabularies.json: the sample's
-composition per source (target bytes, the fraction of rows taken, the documents, bytes and units taken: the sample is
-what corpus/tokenizer.py trains on) and each arm's training time.
+vocabulary and merges in ABLATION/<arm>; RESULTS/tokenizer-vocabularies.json: the sample's composition per source
+(target bytes, the fraction of rows taken, the documents, bytes and units taken) and each arm's training time.
 
 intrinsic: every arm's compiled val splits of the 18 sources, and RESULTS/tokenizer-intrinsic.json, only the measures
 that plan the runs, gate their validity, test an arm's mechanism or break the decision's tie:
@@ -60,7 +68,7 @@ leading train documents whose sa-bpe tokens fill its file-level draw, so the cod
 of text and math the leading shards, and of each repository corpus the trailing partitions, holding a margin over
 their draws, so they never bind. The runs train through ablations/harness.py, whose stack (nanochat/train,
 nanochat/eval) reads nanochat/data until training reads the corpus; that cutover builds the set and every arm's packs
-(corpus compile.py and pack.py take the arm's tokenizer; nanochat/corpus/gh200.md).
+(corpus compile.py and pack.py, given the arm's directory; nanochat/corpus/gh200.md).
 
 Decisions, pre-registered (RESULTS/tokenizer.json "decision"), each challenger (CHALLENGERS) against sa-bpe on the
 seeds where both have an evaluation (a diverged run drops its seed from the arm's contrasts on both sides):
@@ -71,26 +79,33 @@ seeds where both have an evaluation (a diverged run drops its seed from the arm'
   type of defect" (the post);
 - code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal bound
   1.96 CODE_SIGMA √(1 / n + 1 / n), n the contrast's seeds per arm, else equal;
-- the positive control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps its pattern and score.
-  Else a challenger qualifies iff it is worse on neither and better on one. Pattern: of sa-bpe-fused and the hybrid,
-  the qualifier with the lower MBPP+ unparsed share, else sa-bpe's. Score: bpe iff it qualifies, or is equal on both
-  and the val documents read fewer of its merged tokens under 100 times than of sa-bpe's (SA-BPE's claimed benefit, a
-  higher coverage than BPE's), carried to the adopted pattern [inference]; otherwise SA-BPE.
+- the positive control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps sa-bpe's pattern and
+  score. Else a challenger qualifies iff it is worse on neither and better on one. Pattern: of sa-bpe-fused and the
+  hybrid, the qualifier with the lower MBPP+ unparsed share, else sa-bpe's. Score: bpe iff it qualifies, or is equal
+  on both and the val documents read fewer of its merged tokens under 100 times than of sa-bpe's (SA-BPE's claimed
+  benefit, a higher coverage than BPE's), carried to the adopted pattern [inference]; otherwise SA-BPE.
 
-python -m ablations.tokenizer vocabularies|intrinsic|runs
+adopt: the decided vocabulary as the corpus's tokenizer: the arm of the decided pattern and score, or, bpe's score
+carried to another arm's pattern, that pair trained on the sample.
+
+python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt
 """
 import datetime
+import functools
 import importlib.metadata
 import itertools
 import json
 import math
 import os
 import platform
+import shutil
 import statistics
 import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -98,28 +113,24 @@ import regex
 from scipy.stats import binomtest, norm
 from tokenizers import models
 
-from ablations.harness import Setting, main
+from nanochat.config import VOCAB_SIZE
 from nanochat.corpus import mixture
 from nanochat.corpus.compile import compile_source
 from nanochat.corpus.loader import TOKEN_DTYPE, split_path
 from nanochat.corpus.parallel import SPAWN
 from nanochat.corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
-from nanochat.corpus.sources import SOURCES, curated_shards, texts
-from nanochat.corpus.tokenizer import (
-    ABLATION,
-    Score,
-    byte_shares,
-    get_tokenizer,
-    sample,
-    train,
-    train_bytes,
-    vocabulary,
-)
-from nanochat.data.tokenizer import SPLIT_PATTERN, save
+from nanochat.corpus.sources import SOURCES, curated_shards, text_bytes, texts
+from nanochat.corpus.tokenizer import TOKENIZER, get_tokenizer
+from nanochat.data.tokenizer import SPECIAL_TOKENS, SPLIT_PATTERN, save
 from nanochat.native import data_crate
-from nanochat.paths import RESULTS, ROOT
-from nanochat.train.stages import max_ratio
+from nanochat.paths import CORPUS, RESULTS, ROOT
 
+Score = Literal["sa-bpe", "frequency"]
+
+# The arms' vocabularies, ABLATION/<arm>, and their compiled data, ABLATION/compiled (corpus/tokenizer.py)
+ABLATION = CORPUS / "tokenizer-ablation"
+# The sample's bytes: production's tokenizer sample's (its curated splits' Parquet footers)
+SAMPLE_BYTES = 13.38e9
 # karpathy/nanochat's split pattern (92d63d4), the first tokenizer's: SPLIT_PATTERN with cl100k's punctuation clause,
 # whose [\r\n]* takes the line breaks after a run of punctuation ("):\n" one chunk)
 FUSED_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]"""
@@ -183,6 +194,79 @@ INDENTED_LINES = 50_000
 INDENTED = regex.compile(r"([ \t]+)(\S.*)")
 
 
+@functools.cache
+def train_bytes(source: str) -> int:
+    """The text bytes of the source's curated train split (Parquet footers)."""
+    return sum(text_bytes(pq.read_metadata(path), "content") for path in curated_shards(source, "train"))
+
+
+def byte_shares() -> dict[str, float]:
+    """Each file-stage source's share of the stage's bytes: its share of the stage's tokens (Stage.shares, tokens
+    counted at production's bytes per token) at its bytes per token."""
+    sources, per_token = mixture.FILE_STAGE.sources, mixture.BYTES_PER_TOKEN
+    shares = mixture.FILE_STAGE.shares({s: train_bytes(s) / per_token[s] for s in sources}, mixture.FILE_STAGE.tokens)
+    stage_bytes = sum(shares[s] * per_token[s] for s in sources)
+    return {s: shares[s] * per_token[s] / stage_bytes for s in sources}
+
+
+def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str], list[str]]:
+    """Row group g of a curated train shard: the texts (sources.texts) and authorship units of its rows that the
+    source's systematic sample takes, `start` the source's rows before the group: row i when floor((i + 1) * fraction)
+    exceeds floor(i * fraction). A row naming its repository (a repository file, a function) has that repository as its
+    unit, its name lowercased (one unit across the sources that hold it); any other document is its own."""
+    source, path, g, start, fraction = task
+    group = pq.ParquetFile(path).read_row_group(g)
+    rows = np.arange(start, start + group.num_rows)
+    batch = group.take(np.flatnonzero(np.floor((rows + 1) * fraction) > np.floor(rows * fraction)))
+    if "repo_name" in batch.column_names:
+        units = ["repo:" + name.lower() for name in batch["repo_name"].to_pylist()]
+    else:
+        units = ["doc:" + id for id in batch["id"].to_pylist()]
+    return texts(source, batch), units
+
+
+def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
+    """The training sample (texts, unit ids) and its composition per source (its target bytes, the fraction of its rows
+    taken, and the documents, bytes and authorship units taken), row groups read in parallel, the sample kept in
+    order (module docstring)."""
+    tasks, composition = [], {}
+    for s, share in byte_shares().items():
+        fraction, at = share * SAMPLE_BYTES / train_bytes(s), 0
+        composition[s] = {"target_bytes": share * SAMPLE_BYTES, "fraction": fraction}
+        for path in curated_shards(s, "train"):
+            md = pq.read_metadata(path)
+            for g in range(md.num_row_groups):
+                tasks.append((s, path, g, at, fraction))
+                at += md.row_group(g).num_rows
+    docs, units, ids, held = [], [], {}, {s: set() for s in composition}
+    with ProcessPoolExecutor(mp_context=SPAWN) as pool:
+        for (s, *_), (batch, names) in zip(tasks, pool.map(sample_row_group, tasks), strict=True):
+            docs += batch
+            units += [ids.setdefault(name, len(ids)) for name in names]
+            held[s].update(names)
+            composition[s]["documents"] = composition[s].get("documents", 0) + len(batch)
+            composition[s]["bytes"] = composition[s].get("bytes", 0) + sum(len(text.encode()) for text in batch)
+    for s, names in held.items():
+        composition[s]["units"] = len(names)
+    return docs, units, composition
+
+
+def train(docs: list[str], units: list[int], *, pattern: str, score: Score) -> list[tuple[int, int]]:
+    """VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 merges (merge i makes token 256 + i) trained on the documents (each from
+    its authorship unit) within the chunks of `pattern`, by SA-BPE's F·ln R or by frequency alone (the crate's
+    train)."""
+    return data_crate().train(docs, units, pattern=pattern, n_merges=VOCAB_SIZE - len(SPECIAL_TOKENS) - 256,
+                              score=score)
+
+
+def vocabulary(merges: list[tuple[int, int]]) -> list[bytes]:
+    """The mergeable tokens of merges, bytes in rank order: the 256 bytes, then each merge's."""
+    mergeable = [bytes([i]) for i in range(256)]
+    for left, right in merges:
+        mergeable.append(mergeable[left] + mergeable[right])
+    return mergeable
+
+
 def provenance() -> dict:
     """Where and when a step ran: the checkout's commit, the UTC time, the host, its cores and memory, and the versions
     of Python and of the packages that compute the measures."""
@@ -218,7 +302,7 @@ def vocabularies() -> None:
             save(ABLATION / arm, vocabulary(merges), pattern)
             (ABLATION / arm / "merges.json").write_text(json.dumps(merges))
             arms[arm] = {"pattern": pattern, "score": score, "merges": len(merges), "seconds": seconds,
-                         "data_key": get_tokenizer(arm).data_key}
+                         "data_key": get_tokenizer(ABLATION / arm).data_key}
             print(f"{arm}: {len(merges):,} merges in {seconds:.0f} s, data key {arms[arm]['data_key']}", flush=True)
     record = {"sample": {"documents": len(docs), "bytes": sum(c["bytes"] for c in composition.values()),
                          "units": max(units) + 1, "seconds": sampled, "sources": composition},
@@ -228,7 +312,7 @@ def vocabularies() -> None:
 
 def describe(arm: str) -> dict:
     """An arm's planning, mechanism and tie-break measures on the corpus's val splits (module docstring)."""
-    tokenizer = get_tokenizer(arm)
+    tokenizer = get_tokenizer(ABLATION / arm)
     lengths = tokenizer.token_lengths[:tokenizer.bos_token_id]
     held = np.zeros(tokenizer.bos_token_id, dtype=np.int64)
     sources = {}
@@ -281,7 +365,7 @@ def depth_invariance(source: str) -> dict[str, dict[str, float]]:
     lines = indented_lines(source)
     result = {}
     for arm in ARMS:
-        enc = get_tokenizer(arm).enc
+        enc = get_tokenizer(ABLATION / arm).enc
         whole = enc.encode_ordinary_batch([indent + statement for indent, statement in lines])
         indents = enc.encode_ordinary_batch([indent for indent, _ in lines])
         statements = enc.encode_ordinary_batch([statement for _, statement in lines])
@@ -305,7 +389,7 @@ def fidelity(task: tuple[str, str]) -> dict[str, int]:
     training segmentation is Hugging Face tokenizers' BPE model over the arm's merges: listed pairs merged by rank,
     each over every occurrence from the left (data/crate train.rs merge_pair), never a pair whose bytes another made."""
     arm, source = task
-    tokenizer = get_tokenizer(arm)
+    tokenizer = get_tokenizer(ABLATION / arm)
     alphabet = byte_alphabet()
     spelled = ["".join(alphabet[b] for b in entry) for entry in tokenizer.token_bytes[:tokenizer.bos_token_id]]
     merges = json.loads((ABLATION / arm / "merges.json").read_text())
@@ -329,31 +413,31 @@ def fidelity(task: tuple[str, str]) -> dict[str, int]:
 
 
 def intrinsic() -> None:
-    """Every arm's compiled val split of every source, and RESULTS/tokenizer-intrinsic.json (module docstring): the
-    equal-bytes check, then each arm's measures, depth invariance per program source and fidelity per arm and source in
-    one process pool."""
+    """Every arm's compiled val split of every source, the equal-bytes check, and RESULTS/tokenizer-intrinsic.json
+    (module docstring): the compiles and then each arm's measures, depth invariance per program source and fidelity per
+    arm and source, all in one process pool."""
     seconds, start, began = {}, time.perf_counter(), provenance()
-    tokenizers = [get_tokenizer(arm) for arm in ARMS]
-    for tokenizer in tokenizers:
-        begin = time.perf_counter()
-        for corpus in SOURCES:
-            split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
-            compile_source(corpus, "val", tokenizer)
-        seconds[f"compile {tokenizer.name}"] = time.perf_counter() - begin
-    for corpus in SOURCES:
-        sizes = []
-        for tokenizer in tokenizers:
-            path = split_path(corpus, "val", tokenizer)
-            tokens = np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE)
-            ends = np.concatenate([[0], np.cumsum(tokenizer.token_lengths[tokens])])
-            sizes.append(np.diff(ends[np.fromfile(path.with_suffix(".idx"), dtype=np.int64)]))
-        if not all(np.array_equal(sizes[0], other) for other in sizes[1:]):
-            raise RuntimeError(f"{corpus}: the arms' compiled val documents differ in bytes")
     programs = [s for s, spec in SOURCES.items() if spec.category in PROGRAMS]
     checks = [(arm, source) for arm in ARMS for source in SOURCES]
-    begin = time.perf_counter()
-    with ProcessPoolExecutor(mp_context=SPAWN) as pool:  # every map submits at once
-        described = pool.map(describe, ARMS)
+    with ProcessPoolExecutor(mp_context=SPAWN) as pool:
+        for arm in ARMS:
+            begin = time.perf_counter()
+            for corpus in SOURCES:
+                split_path(corpus, "val", get_tokenizer(ABLATION / arm)).parent.mkdir(parents=True)
+                compile_source(corpus, "val", ABLATION / arm, pool)
+            seconds[f"compile {arm}"] = time.perf_counter() - begin
+        for corpus in SOURCES:
+            sizes = []
+            for arm in ARMS:
+                tokenizer = get_tokenizer(ABLATION / arm)
+                path = split_path(corpus, "val", tokenizer)
+                tokens = np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE)
+                ends = np.concatenate([[0], np.cumsum(tokenizer.token_lengths[tokens])])
+                sizes.append(np.diff(ends[np.fromfile(path.with_suffix(".idx"), dtype=np.int64)]))
+            if not all(np.array_equal(sizes[0], other) for other in sizes[1:]):
+                raise RuntimeError(f"{corpus}: the arms' compiled val documents differ in bytes")
+        begin = time.perf_counter()
+        described = pool.map(describe, ARMS)  # every map submits at once
         invariance = pool.map(depth_invariance, programs)
         fidelities = pool.map(fidelity, checks)
         record = {"arms": {arm: result | {"depth_invariance": {}, "fidelity": {}}
@@ -363,7 +447,7 @@ def intrinsic() -> None:
                 record["arms"][arm]["depth_invariance"][source] = result
         for (arm, source), result in zip(checks, fidelities, strict=True):
             record["arms"][arm]["fidelity"][source] = result
-    seconds["measures"] = time.perf_counter() - begin
+        seconds["measures"] = time.perf_counter() - begin
     record |= {"seconds": seconds | {"all": time.perf_counter() - start}, "provenance": began}
     (RESULTS / "tokenizer-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
@@ -371,7 +455,11 @@ def intrinsic() -> None:
 def runs() -> None:
     """Every arm at d16, each at its max_ratio (ablations/harness.py main); then RESULTS/tokenizer.json gains each
     challenger's contrast with sa-bpe and the decision (module docstring)."""
-    ratios = {arm: max_ratio(get_tokenizer(arm), depth=DEPTH) for arm in ARMS}
+    # the training stack (torch) here alone: the sample's and the measures' spawned workers import this module
+    from ablations.harness import Setting, main
+    from nanochat.train.stages import max_ratio
+
+    ratios = {arm: max_ratio(get_tokenizer(ABLATION / arm), depth=DEPTH) for arm in ARMS}
     main(experiment="tokenizer",
          settings=[Setting(depth=DEPTH, ratio=ratios["sa-bpe"], seeds=range(SEEDS),
                            alternatives={arm: {"tokenizer": arm, "ratio": ratios[arm]} for arm in CHALLENGERS})],
@@ -411,7 +499,7 @@ def runs() -> None:
     record = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))
     rare = {arm: measures["merged_reads"]["under 100"] for arm, measures in record["arms"].items()}
     frequency = "bpe" in qualified or (verdicts["bpe"] == ("equal", "equal") and rare["bpe"] < rare["sa-bpe"])
-    # the positive control gates the decision: undetected, the corpus keeps its pattern and score
+    # the positive control gates the decision: undetected, the corpus keeps sa-bpe's pattern and score
     control = verdicts["sa-bpe-fused"][0] == "worse"
     pattern = min(qualified & {"sa-bpe-fused", "hybrid"}, key=lambda arm: contrasts[arm]["unparsed_difference"],
                   default="sa-bpe")
@@ -422,6 +510,23 @@ def runs() -> None:
         json.dumps(summary | {"contrasts": contrasts, "decision": decision}, allow_nan=False), encoding="utf-8")
 
 
+def adopt() -> None:
+    """The decided vocabulary (RESULTS/tokenizer.json "decision") as the corpus's tokenizer, TOKENIZER: the arm of the
+    decided pattern and score, copied, or that pair trained on the sample when no arm holds it."""
+    decision = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))["decision"]
+    pattern, score = ARMS[decision["pattern"]][0], decision["score"]
+    TOKENIZER.mkdir(parents=True)
+    arm = next((arm for arm, spec in ARMS.items() if spec == (pattern, score)), None)
+    if arm is None:
+        docs, units, _ = sample()
+        save(TOKENIZER, vocabulary(train(docs, units, pattern=pattern, score=score)), pattern)
+    else:
+        for name in ("tokenizer.tiktoken", "tokenizer.pattern"):
+            shutil.copyfile(ABLATION / arm / name, TOKENIZER / name)
+    print(f"the corpus's tokenizer: {decision['pattern']}'s pattern, score {score}, data key "
+          f"{get_tokenizer(TOKENIZER).data_key}", flush=True)
+
+
 if __name__ == "__main__":
     match sys.argv[1:]:
         case ["vocabularies"]:
@@ -430,5 +535,7 @@ if __name__ == "__main__":
             intrinsic()
         case ["runs"]:
             runs()
+        case ["adopt"]:
+            adopt()
         case _:
-            raise SystemExit("usage: python -m ablations.tokenizer vocabularies|intrinsic|runs")
+            raise SystemExit("usage: python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt")

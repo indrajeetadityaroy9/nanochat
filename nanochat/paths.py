@@ -12,7 +12,7 @@ DATA = ARTIFACTS / "data"                # the data pipeline's stages (nanochat/
 CORPUS = ARTIFACTS / "corpus"            # the ground-up corpus pipeline's stages (nanochat/corpus/__init__.py)
 TOKENIZER = ARTIFACTS / "tokenizer"
 # production's tokenizer ablation directory (nanochat/data/tokenizer.py get_tokenizer): <name>/tokenizer.*, compiled/;
-# the ablation now trains its arms in CORPUS/tokenizer-ablation (nanochat/corpus/tokenizer.py)
+# the ablation now trains its arms in CORPUS/tokenizer-ablation (ablations/tokenizer.py ABLATION)
 TOKENIZER_ABLATION = ARTIFACTS / "tokenizer-ablation"
 CHECKPOINTS = ARTIFACTS / "checkpoints"  # <tag>-step<step>.pt (train/checkpoint.py)
 METRICS = ARTIFACTS / "metrics"          # <tag>.jsonl (train/metrics.py)

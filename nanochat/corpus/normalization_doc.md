@@ -66,8 +66,9 @@ splits, the benchmark's, §3.4.
   a retrained tokenizer's compression. Across tokenizer training mixes "the NSL on any given subset only varies by 5 to
   6 percentage points" (arXiv 2402.01035 §2.3); synthetic code and UltraData-Math L3 enter a sample that held none of
   them, so the bound is borrowed [inference]. A trial retraining (§9: production's pattern and score on this corpus's
-  sample) holds 1.096, 1.071 and 1.169 times the synthetic, text and mathematics draws (measured); `tokenizer.main`
-  reports them under the decided tokenizer, and `pack.fit` names a source that runs short.
+  sample) holds 1.096, 1.071 and 1.169 times the synthetic, text and mathematics draws (measured); the tokenizer
+  ablation's intrinsic record measures them under every arm (`ablations/tokenizer.py` `train_tokens_over_draw`), and
+  `pack.fit` names a source that runs short.
 
   | Group | Files | Standardized text | Over the draw | Curated train text | Over the draw |
   |---|---|---|---|---|---|
@@ -558,9 +559,9 @@ after a punctuation run; trained on equal bytes from each curated source.
 '(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]|\s+(?!\S)|\s+
 ```
 
-**Retrained on this corpus, at the file stage's shares of bytes** (`corpus/tokenizer.sample`: each source's share of
-the 8K stage's tokens at its bytes per token, a systematic sample of its curated train split; Codeforces-CoTs, 0.3% of
-the run, is not sampled).
+**Retrained on this corpus, at the file stage's shares of bytes** (`ablations/tokenizer.py` `sample`: each source's
+share of the 8K stage's tokens at its bytes per token, a systematic sample of its curated train split; Codeforces-CoTs,
+0.3% of the run, is not sampled).
 - Production's sample holds none of the synthetic code or UltraData-Math L3, 29.1% of the file stage, and 18.27% of
   its bytes are web mathematics this corpus does not read (measured).
 - "tokenizers should be trained on the data mix that they are expected to see during training/inference"
@@ -618,7 +619,7 @@ packing cuts pieces at token offsets in rows of `seq_len` tokens, FIM encodes it
 | Prepare: fetch, standardize, manifest | `prepare.py` | done: 18 sources (§1) |
 | Curate: Python check, deduplication, split, shards | `curate.py` | done: 178,887,291 rows, verified (§4) |
 | Publish | `publish.py` | done: `iaroy/nanochat-data`, one commit and one branch: `<source>/<split>/<k>.parquet` (1,812 shards), the manifest and the card (code `aa37215`); viewer off; constant |
-| Tokenizer: decision, sample, training | `tokenizer.py`, `ablations/tokenizer.py` | sample and a trial training measured on the GB10 (§9); the ablation and the decided tokenizer on the GH200 |
+| Tokenizer: sample, arms, decision, adoption | `ablations/tokenizer.py` (trains, decides, adopts), `tokenizer.py` (loads) | sample and a trial training measured on the GB10 (§9); the ablation and the adopted tokenizer on the GH200 |
 | Compile: 8K samples, 32K repository documents | `compile.py` | on the GH200 |
 | Mixture, pack, loader | `mixture.py`, `pack.py`, `loader.py` | written; run on the GH200 |
 | Training reads the corpus; the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |

@@ -9,7 +9,7 @@ paths.CORPUS:
   prepare.py    fetch each source's Hub files (of a source read in part, its extent), standardize them into its schema
   curate.py     the Python 3 check with repair, exact deduplication, the split, the curated shards
   publish.py    the curated shards to the Hub (config.DATASET), and back where the tokenizer is trained
-  tokenizer.py  the corpus's tokenizer, trained on its curated train splits at the file stage's shares of bytes
+  tokenizer.py  the corpus's tokenizer: its directory and loader (ablations/tokenizer.py trains, decides, adopts it)
   compile.py    the curated documents in tokens, and the 32K stage's repository documents per language
   pack.py       each stage's training rows (and FIM examples), holding exactly what it reads; the stages' weights
   loader.py     the compiled and packed data, and their micro-batches
@@ -20,8 +20,7 @@ Run in this order; everything up to publish is text, everything after it needs t
   python -m nanochat.corpus.curate
   python -m nanochat.corpus.publish push
   python -m nanochat.corpus.publish pull
-  python -m ablations.tokenizer vocabularies|intrinsic|runs  (the pattern and score: tokenizer.PATTERN, SCORE)
-  python -m nanochat.corpus.tokenizer
+  python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt  (adopt: the decided vocabulary, CORPUS/tokenizer)
   python -m nanochat.corpus.compile
   python -m nanochat.corpus.pack
 

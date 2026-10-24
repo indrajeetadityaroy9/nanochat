@@ -518,23 +518,22 @@ exponent and its net of d8's batch growth, production's multiplier and lr, null 
 
 ### The tokenizer experiment
 
-`ablations/tokenizer.py`: the decision the corpus tokenizer's split pattern and merge score wait on
-(`nanochat/corpus/tokenizer.py` `PATTERN`, `SCORE`), as every later step trains on its tokens. Data and stages
-describes the current vocabulary (SA-BPE within the non-fusing pattern), production's until this decides. The arms
-come from TokEval (arXiv 2608.18062, its companion post "Tokenizer Code Ablations" and its library), SA-BPE
-(arXiv 2604.14053 and its repository), tiktoken's encodings and the code-tokenizer literature; every claim below was
-checked against its source on 2026-10-21 and again on 2026-10-24 (the papers' full text, the post, the repositories at
-the commits cited). Every candidate the corpus keeps or dismisses is trained, two seeds each: the literature's
-evidence is at 1.27B parameters and about 128K ids, on Python, and a dismissal at this scale, vocabulary and mixture
-rests on a run of its own.
+`ablations/tokenizer.py`: the experiment that trains, decides and adopts the corpus's tokenizer (its split pattern and
+merge score; `python -m ablations.tokenizer adopt` writes the decided vocabulary to `artifacts/corpus/tokenizer`), as
+every later step trains on its tokens. Data and stages describes the current vocabulary (SA-BPE within the non-fusing
+pattern), production's until this decides. The arms come from TokEval (arXiv 2608.18062, its companion post "Tokenizer
+Code Ablations" and its library), SA-BPE (arXiv 2604.14053 and its repository), tiktoken's encodings and the
+code-tokenizer literature; every claim below was checked against its source on 2026-10-21 and again on 2026-10-24 (the
+papers' full text, the post, the repositories at the commits cited). Every candidate the corpus keeps or dismisses is
+trained, two seeds each: the literature's evidence is at 1.27B parameters and about 128K ids, on Python, and a
+dismissal at this scale, vocabulary and mixture rests on a run of its own.
 
-- **Arms.** Four vocabularies of 32,768 ids (32,764 mergeable tokens, BOS and the 3 FIM sentinels), trained on the
-  corpus tokenizer's sample (`nanochat/corpus/tokenizer.py` `sample`: the corpus's curated train splits at the file
-  stage's shares of bytes) by the same crate (`corpus/tokenizer.py` `train`, into
-  `artifacts/corpus/tokenizer-ablation/<arm>`) and encoded by tiktoken: sa-bpe, production's; sa-bpe-fused, the same
-  score within karpathy/nanochat's pattern (the first tokenizer's), whose punctuation clause takes the line breaks
-  after it as cl100k's does; the hybrid (below); bpe, frequency alone within production's pattern (SA-BPE's baseline,
-  its Table 3 row F).
+- **Arms.** Four vocabularies of 32,768 ids (32,764 mergeable tokens, BOS and the 3 FIM sentinels), trained on one
+  sample (`ablations/tokenizer.py` `sample`: the corpus's curated train splits at the file stage's shares of bytes) by
+  the same crate (`train`, into `artifacts/corpus/tokenizer-ablation/<arm>`) and encoded by tiktoken: sa-bpe,
+  production's; sa-bpe-fused, the same score within karpathy/nanochat's pattern (the first tokenizer's), whose
+  punctuation clause takes the line breaks after it as cl100k's does; the hybrid (below); bpe, frequency alone within
+  production's pattern (SA-BPE's baseline, its Table 3 row F).
 - **The sample's composition** is not an arm: the corpus's sample already follows the training mixture (its evidence
   in `nanochat/corpus/normalization_doc.md` §9), and every arm trains on it. On code accuracy the companion post's
   grid of tokenizer corpora of 0, 5, 30 and 50% code has HumanEval highest at 50% (single runs, no test).
@@ -1370,8 +1369,9 @@ lists (Table 5: 110K each for the educational and package instructions).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
 - `ablations/`: the ablation experiments and their mechanism (`harness.py`): `lr.py`; `tokenizer.py`, the tokenizer
-  experiment's arms (trained on the corpus sample into `artifacts/corpus/tokenizer-ablation/`), val data, intrinsic
-  record, runs and decision (`python -m ablations.tokenizer vocabularies|intrinsic|runs`).
+  experiment's sample and arms (trained on the corpus into `artifacts/corpus/tokenizer-ablation/`), val data, intrinsic
+  record, runs, decision and adoption into `artifacts/corpus/tokenizer`
+  (`python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt`).
 - `docker/Dockerfile`: the image.
 
 ## References
