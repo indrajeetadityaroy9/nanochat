@@ -100,10 +100,15 @@ python -m ablations.tokenizer data           (every arm's compiled val splits, i
 python -m ablations.tokenizer runs           (ablations/harness.py, then the decision; once training reads the corpus)
 """
 import argparse
+import datetime
+import importlib.metadata
 import itertools
 import json
 import math
+import os
+import platform
 import statistics
+import subprocess
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
@@ -132,7 +137,7 @@ from nanochat.corpus.tokenizer import (
     vocabulary,
 )
 from nanochat.data.tokenizer import SPLIT_PATTERN, save
-from nanochat.paths import RESULTS
+from nanochat.paths import RESULTS, ROOT
 from nanochat.train.stages import max_ratio
 
 # karpathy/nanochat's split pattern (92d63d4), the first tokenizer's: SPLIT_PATTERN with cl100k's punctuation clause,
@@ -201,6 +206,21 @@ CLASSES = {"whitespace": regex.compile(r"\s+"), "word": regex.compile(r" ?\p{L}+
            "number": regex.compile(r" ?\p{N}+"), "punctuation": regex.compile(r" ?[^\s\p{L}\p{N}]+")}
 # An indented line: its leading spaces and tabs, then its statement
 INDENTED = regex.compile(r"([ \t]+)(\S.*)")
+# The bins of a source's documents' bytes per token: 0.05 wide up to 10, then one open bin
+DOCUMENT_BINS = np.append(np.linspace(0, 10, 201), np.inf)
+
+
+def provenance() -> dict:
+    """Where and when a step ran: the checkout's commit, the UTC time, the host, its cores and memory, and the versions
+    of Python and of the packages that compute the measures."""
+    commit = subprocess.run(["git", "-c", f"safe.directory={ROOT}", "-C", str(ROOT), "rev-parse", "HEAD"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    return {"commit": commit, "utc": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+            "host": platform.node(), "machine": platform.machine(), "cpus": os.cpu_count(),
+            "memory_gb": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30,
+            "python": platform.python_version(),
+            "packages": {name: importlib.metadata.version(name)
+                         for name in ("tiktoken", "tokenizers", "numpy", "scipy", "pyarrow", "regex")}}
 
 
 def vocabularies() -> None:
@@ -211,7 +231,7 @@ def vocabularies() -> None:
     vocabulary does not depend on the others."""
     for arm in ARMS:
         (ABLATION / arm).mkdir(parents=True)
-    start = time.perf_counter()
+    start, began = time.perf_counter(), provenance()
     docs, units, composition = sample()
     sampled = time.perf_counter() - start
 
@@ -231,7 +251,7 @@ def vocabularies() -> None:
             print(f"{arm}: {len(merges):,} merges in {seconds:.0f} s, data key {arms[arm]['data_key']}", flush=True)
     record = {"sample": {"documents": len(docs), "bytes": sum(c["bytes"] for c in composition.values()),
                          "units": max(units) + 1, "seconds": sampled, "sources": composition},
-              "arms": arms, "seconds": time.perf_counter() - start}
+              "arms": arms, "seconds": time.perf_counter() - start, "provenance": began}
     (RESULTS / "tokenizer-vocabularies.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
@@ -247,23 +267,26 @@ def describe(arm: str) -> dict:
     tokenizer = get_tokenizer(arm)
     held = np.zeros(tokenizer.bos_token_id, dtype=np.int64)
     lengths = tokenizer.token_lengths[:tokenizer.bos_token_id]
-    sources = {}
+    sources, raw = {}, {}
     for corpus in SOURCES:
         path = split_path(corpus, "val", tokenizer)
         tokens = np.memmap(path.with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r")
         offsets = np.fromfile(path.with_suffix(".idx"), dtype=np.int64)
-        counts = np.bincount(tokens, minlength=tokenizer.bos_token_id)
+        counts = raw[corpus] = np.bincount(tokens, minlength=tokenizer.bos_token_id)
         held += counts
         # every document holds a token (no curated text is empty), so reduceat sums each document's bytes
         per_document = np.add.reduceat(lengths[tokens], offsets[:-1]) / np.diff(offsets)
         sources[corpus] = {
-            "bytes": int(counts @ lengths), "tokens": len(tokens),
+            "bytes": int(counts @ lengths), "tokens": len(tokens), "documents": len(offsets) - 1,
             "bytes_per_token": float(counts @ lengths / len(tokens)),
             "renyi_efficiency": {str(o): tokeval.renyi_efficiency(counts, tokenizer.vocab_size, o)
                                  for o in tokeval.RENYI_ORDERS},
             "document_bytes_per_token": {"mean": float(per_document.mean())} | {
                 f"q{round(100 * q):02d}": float(v) for q, v in zip(QUANTILES, np.quantile(per_document, QUANTILES),
-                                                                  strict=True)}}
+                                                                  strict=True)}
+            | {"histogram": np.histogram(per_document, bins=DOCUMENT_BINS)[0].tolist()}}
+    # every token's val reads per source, for any later analysis (RESULTS/tokenizer-counts/<arm>.npz)
+    np.savez_compressed(RESULTS / "tokenizer-counts" / f"{arm}.npz", **raw)
     shares = byte_shares()
 
     def mixed(members: tuple[str, ...] | list[str]) -> float:
@@ -393,7 +416,8 @@ def data() -> None:
     """Every arm's compiled val split of every source, checked to hold the same bytes per document in each, and
     RESULTS/tokenizer-data.json (module docstring). Every measure runs in one process pool at once: TokEval's metrics
     per corpus, each arm's record, depth invariance per program source, fidelity per arm and source."""
-    seconds, start = {}, time.perf_counter()
+    seconds, start, began = {}, time.perf_counter(), provenance()
+    (RESULTS / "tokenizer-counts").mkdir(exist_ok=True)
     tokenizers = [get_tokenizer(arm) for arm in ARMS]
     for tokenizer in tokenizers:
         begin = time.perf_counter()
@@ -435,6 +459,7 @@ def data() -> None:
     seconds["measures"] = time.perf_counter() - begin
     record["overlap"] = overlap()
     record["seconds"] = seconds | {"all": time.perf_counter() - start}
+    record["provenance"] = began | {"document_bins": DOCUMENT_BINS[:-1].tolist() + ["inf"]}
     (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
