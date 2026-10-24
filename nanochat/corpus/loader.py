@@ -1,7 +1,6 @@
 """
 The corpus's compiled and packed data on disk (compile.py, pack.py), and training's reading of them: a stage's
-mixture of packed corpora, row by row (mixture_rows), assembled into micro-batches (PretrainingBatches), as
-nanochat/data/loader.py reads production's.
+mixture of packed corpora, row by row (mixture_rows), assembled into micro-batches (PretrainingBatches).
 """
 
 import itertools
@@ -98,9 +97,9 @@ def mixture_rows(weights: np.ndarray, *, start: int, count: int) -> np.ndarray:
 
 
 class PretrainingBatches:
-    """Re-iterable micro-batches (inputs, targets, cu_seqlens) of a mixture {corpus: weight} of packed corpora, as
-    nanochat/data/loader.py's. orders: {corpus: row ids in read order, -1 an empty row (all padding)}; start: the run
-    rows already consumed (resume), whose rows of each corpus (mixture_rows) are skipped; iteration stops when a
+    """Re-iterable micro-batches (inputs, targets, cu_seqlens) of a mixture {corpus: weight} of packed corpora.
+    orders: {corpus: row ids in read order, -1 an empty row (all padding)}; start: the run rows already consumed
+    (resume), whose rows of each corpus (mixture_rows) are skipped; iteration stops when a
     corpus's order is exhausted, without the partial micro-batch. reading: "fim" reads the packed fill-in-the-middle
     examples in place of their pieces' tokens, "left_to_right" every piece left to right (assemble).
     - inputs (int32), targets (int64): on the device

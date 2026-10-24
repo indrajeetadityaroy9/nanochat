@@ -1,7 +1,7 @@
 """
 The corpus's parallel execution. Worker processes start by spawn, so none inherits a parent's threads (DuckDB's,
 tiktoken's, the data crate's) or state. ordered() keeps a bounded window of tasks in flight and yields their results
-in task order: Python 3.14's Executor.map(buffersize=window); the project runs on 3.12.
+in task order, as Python 3.14's Executor.map(buffersize=window) does (the project runs on 3.12).
 """
 
 import collections

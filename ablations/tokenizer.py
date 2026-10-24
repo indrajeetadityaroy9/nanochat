@@ -74,7 +74,7 @@ seeds where both have an evaluation (a diverged run drops its seed from the arm'
   sa-bpe; the exact sign test over the problems whose difference is not 0 (McNemar's exact test at one seed, the
   companion post's test, its App. D); better or worse at p < ALPHA, else equal. MBPP+ alone: its prompts leave the
   function header to the model, and "an evaluation that uses HumanEval alone does not expose this type of defect"
-  (the post), where code bits per byte "shows no association with MBPP at any level";
+  (the post, which finds that code bits per byte "shows no association with MBPP at any level");
 - code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal bound
   1.96 CODE_SIGMA √(1 / n + 1 / n), n the contrast's seeds per arm, else equal;
 - the positive control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps sa-bpe's pattern and

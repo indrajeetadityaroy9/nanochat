@@ -1,15 +1,15 @@
 """
 Curate every source (sources.py) from its standardized files (prepare.py), in the steps of normalization_doc.md §4:
 
-1. check: every Python file, a repository's, a synthetic one or a function (a category whose content is code), must
-   parse with ast.parse (Python 3.12). A file that does not is repaired by the smallest set of steps that makes it
+1. check (§4.2): every Python file, a repository's, a synthetic one or a function (a category whose content is code),
+   must parse with ast.parse (Python 3.12). A file that does not is repaired by the smallest set of steps that makes it
    parse (repaired): Stack v3's placeholders <EMAIL>, <KEY>, <NAME> and <PASSWORD> become the bare word;
    leading-indentation tabs are expanded to 8 columns, Python 2's rule (Python 2 Language Reference §2.1.8); every
    2to3 fixer of fissix (the maintained fork of lib2to3, which Python 3.12 lacks) is applied. The repaired text is kept
    and its id recomputed; a file that never parses is dropped (checked_path).
-2. dedup: one row per id over every source and both splits, the first in SOURCES's order, then file and row; an empty
-   text is dropped.
-3. split: a document is val when md5_number(group) % SPLIT = 0, its category's group (schema.py).
+2. dedup (§4.3): one row per id over every source and both splits, the first in SOURCES's order, then file and row;
+   an empty text is dropped.
+3. split (§4.4): a document is val when md5_number(group) % SPLIT = 0, its category's group (schema.py).
 4. shards (curated_dir): a repository source's files as the partitions of that residue (partition 0 val, 1..SPLIT-1
    train), each sorted by (repository, path, id) and cut into import-connected samples by the data crate's
    repository_samples (SAMPLE_FILE); any other source's train rows in id order, a uniform order as id is a hash, over

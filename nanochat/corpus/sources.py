@@ -7,12 +7,12 @@ fetched file that holds a document's text. SOURCES is in deduplication's keep-fi
 - Stack-Edu (arXiv 2502.02737): The Stack v2's educational files, by Software Heritage blob id (prepare.fetch).
 - UltraData-Stack-v3-L2: The Stack v3's files that UltraData's L2 classifiers select.
 - UltraData-Code (arXiv 2610.23960): L2, selected source files; L3, exercises written from L2's algorithmic files.
-- Nemotron-Pretraining-Code-v2 (arXiv 2512.20848 §2.2): every Python file of NVIDIA's GitHub corpus rewritten by
+- Nemotron-Pretraining-Code-v2 (arXiv 2512.20848 §2.2.2): every Python file of NVIDIA's GitHub corpus rewritten by
   Qwen3-32B, and Python files transpiled into C++.
 - CodeXGLUE code-to-text (arXiv 2102.04664): CodeSearchNet's functions with their docstrings; its train split only.
 - UltraData-Math L3 (arXiv 2602.09003): synthesized mathematics in four formats.
 - Codeforces-CoTs: DeepSeek-R1's reasoning traces and Python or C++ solutions to Codeforces problems.
-- issues-kaggle-notebooks: StarCoder2's Kaggle notebooks (arXiv 2402.19173) as text.
+- issues-kaggle-notebooks: StarCoder2's Kaggle notebooks (arXiv 2402.19173 §2.4.2) as text.
 - ClimbMix: English web text.
 """
 

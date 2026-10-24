@@ -11,7 +11,7 @@ Runs train one at a time (one d8 run saturates the GPU), each in its own process
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
 rerun experiment resumes: a run whose evaluation exists is not trained again, nor is one that diverged (its
 train/metrics.py failure record: a non-finite loss or gradient norm, an outcome of a lr sweep's high end,
-arXiv 2309.14322); any other failure stops the experiment, and a stopped run trains again from its start (its one
+arXiv 2309.14322 §3.1); any other failure stops the experiment, and a stopped run trains again from its start (its one
 checkpoint is its final model; train/metrics.py attempts keep both traceable). The experiment then writes every
 tracked metric of every run, RESULTS/<experiment>.jsonl (a record per run: eval/suite.py record, setting, fields, the
 compared measures, efficiency, the step it diverged at) and RESULTS/<experiment>-curves.jsonl (per run,

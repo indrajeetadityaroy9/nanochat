@@ -53,11 +53,9 @@ from nanochat.corpus.sources import (
     text_bytes,
 )
 
-# Parquet codec of the files the corpus writes: zstd, smaller than pyarrow's default snappy at the same speed (measured
-# on an UltraData-Code L3 raw file)
+# Parquet codec of the files the corpus writes
 COMPRESSION = "zstd"
-# Hub files fetched at once: throughput rises from one connection to a few and falls beyond (measured,
-# normalization_doc.md §1)
+# Hub files fetched at once (normalization_doc.md §1)
 FETCHES = 4
 
 
@@ -110,8 +108,8 @@ def extent(source: str) -> list[str]:
 def swh_store() -> S3Store:
     """This process's client of Software Heritage's bucket, created once so its connections are reused across row
     groups; the file-descriptor limit is raised to its hard limit, as a row group's requests are in flight at once.
-    A request retries for up to 15 minutes, its waits doubling from a second to a minute: with obstore's default
-    backoff, a reset connection exhausted its retries at once and failed the source."""
+    A request retries for up to 15 minutes, its waits doubling from a second to a minute, so a reset connection does
+    not fail the source."""
     resource.setrlimit(resource.RLIMIT_NOFILE, (resource.getrlimit(resource.RLIMIT_NOFILE)[1],) * 2)
     return S3Store("softwareheritage", region="us-east-1", skip_signature=True,
                    retry_config={"max_retries": 15, "retry_timeout": timedelta(minutes=15),

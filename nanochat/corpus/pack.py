@@ -1,9 +1,8 @@
 """
-Pack the compiled corpus (compile.py) into training rows of seq_len + 1 tokens, stage by stage (mixture.py), as
-nanochat/data/pack.py packs production's: the data crate's pack, one curated shard per call (Best-Fit-Decreasing,
-every piece its own attention segment, long documents cut between whole statements; normalization_doc.md §7.1), with
-fill-in-the-middle examples in repository code's train splits (§6). Per corpus and stage, <split>-T<seq_len>.pieces,
-.rows and .fim beside its compiled split.
+Pack the compiled corpus (compile.py) into training rows of seq_len + 1 tokens, stage by stage (mixture.py): the data
+crate's pack, one curated shard per call (Best-Fit-Decreasing, every piece its own attention segment, long documents
+cut between whole statements; normalization_doc.md §7.1), with fill-in-the-middle examples in repository code's train
+splits (§6). Per corpus and stage, <split>-T<seq_len>.pieces, .rows and .fim beside its compiled split (loader.py).
 
 A stage's train packs hold exactly the rows it may read, so no document is read twice:
 - file stage: the repository sources' partitions before the repository stage's (compile.repository_parts) and the
@@ -45,14 +44,13 @@ from nanochat.corpus.tokenizer import TOKENIZER, get_tokenizer
 from nanochat.data.tokenizer import FIM_TOKENS
 from nanochat.native import data_crate
 
-# Fill-in-the-middle as production's (nanochat/data/pack.py), without its line widening (normalization_doc.md §6):
-# DeepSeek-Coder's rate (arXiv 2401.14196 §3.1.2: "an FIM rate of 0.5") and arXiv 2207.14255's 50% FIM; AST-FIM's
-# middles (arXiv 2506.00204v1 §5.1: of FIM, 90% AST-FIM and 10% random character spans, 50% PSM and 50% SPM; §3.3: "an
-# equal mix" of Single-Node and Aligned-Span masking). The crate draws each piece's FIM from ChaCha8 keyed by its
-# document and piece, so the packs do not depend on the order of work
+# Fill-in-the-middle, without line widening (normalization_doc.md §6): FIM rate 0.5 (DeepSeek-Coder, arXiv 2401.14196
+# §3.1.2: "an FIM rate of 0.5"; arXiv 2207.14255 §3: p = 0.5); of FIM, 90% AST middles and 10% random character spans,
+# 50% PSM and 50% SPM (AST-FIM, arXiv 2506.00204v1 §5.1); AST middles "an equal mix" of Single-Node and Aligned-Span
+# masking (§3.3). The crate draws each piece's FIM from ChaCha8 keyed by its document and piece, so the packs do not
+# depend on the order of work
 FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5, 0.5
-# Pack calls in flight: one per core, so a core finishing its share of one shard's documents takes up another's (the
-# crate releases the GIL)
+# Pack calls in flight: one per core (the crate releases the GIL)
 WINDOW = os.cpu_count()
 
 Shard = tuple[np.ndarray, np.ndarray, np.ndarray]

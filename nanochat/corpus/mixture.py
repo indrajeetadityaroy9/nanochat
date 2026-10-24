@@ -54,8 +54,9 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# Production's d24 run (docs/h100-pretraining.md): 86,975 steps of 12 micro-batches; its last REPO_SHARE of steps,
-# Qwen2.5-Coder's 300B of 5.2T + 300B (config.py), at 32K, placed as train/schedule.plan places it
+# The run: production's d24 schedule (docs/h100-pretraining.md), 86,975 steps of 12 micro-batches; its last REPO_SHARE
+# of steps (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv 2409.12186 §3.2.1-3.2.2) at 32K, placed
+# as train/schedule.plan places it
 STEPS, STEP_TOKENS = 86_975, 12 * MICRO_BATCH_TOKENS
 REPO_STEPS = round(REPO_SHARE * STEPS)
 
@@ -66,13 +67,13 @@ REPOSITORY_SOURCES = ("stack_edu_python", "ultradata_stack_v3_l2_python", "ultra
 MATH_SOURCES = ("ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultradata_math_l3_multi_style",
                 "ultradata_math_l3_textbook_exercise")
 # Synthetic code: UltraData-Code L3's exercises and Nemotron's rewritten Python and Python transpiled into C++, 30% of
-# code: the share of rephrased data that good mixtures converge to from scratch (Kang et al., arXiv 2510.01631)
+# code: good mixtures' share of rephrased synthetic data, "converging to ~30%" (Kang et al., arXiv 2510.01631 §1)
 SYNTHETIC_SOURCES = ("ultradata_code_l3_python", "ultradata_code_l3_cpp", "nemotron_rewriting_python",
                      "nemotron_transpilation_cpp")
 # The repository stage's documents per (repository, language) across REPOSITORY_SOURCES (compile.py), a corpus per
 # language, as a pack call parses one grammar
 REPOSITORIES = {"Python": "repositories_python", "C++": "repositories_cpp"}
-# Each stage's context: Qwen2.5-Coder's 8,192 and 32,768 (arXiv 2409.12186 §3.2)
+# Each stage's context: Qwen2.5-Coder's 8,192 and 32,768 (arXiv 2409.12186 §3.2.1, §3.2.2)
 FILE_STAGE = Stage(8192, (STEPS - REPO_STEPS) * STEP_TOKENS, {
     "repository": Group("rest", REPOSITORY_SOURCES),
     "synthetic": Group(0.30 * CODE_SHARE, SYNTHETIC_SOURCES),
@@ -91,8 +92,8 @@ REPO_STAGE = Stage(32_768, REPO_STEPS * STEP_TOKENS, {
 IN_PART = ("synthetic", "text", "math")
 # {source: its group} of every source of a group read in part (such a group has the same sources in both stages)
 PART = {source: group for group in IN_PART for source in FILE_STAGE.groups[group].sources}
-# Production's tokenizer's bytes per token on each source (measured on its compiled train splits and on samples of the
-# sources it did not compile: normalization_doc.md §5.1), for token counts before this corpus's tokenizer exists
+# Bytes per token of production's tokenizer on each source (normalization_doc.md §5.1), for token counts before this
+# corpus's tokenizer exists
 BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.638,
                    "ultradata_code_l2_python": 3.709, "stack_edu_cpp": 3.065, "ultradata_stack_v3_l2_cpp": 3.015,
                    "ultradata_code_l2_cpp": 2.935, "kaggle_notebooks": 3.459, "codeforces_cots": 3.536,
@@ -101,8 +102,8 @@ BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
 # How much better a retrained tokenizer may compress a source than production's: "the NSL on any given subset only
-# varies by 5 to 6 percentage points" across tokenizer training mixes, "about 5%" in its example (Dagan et al.,
-# arXiv 2402.01035 §2.3); ablations/tokenizer.py intrinsic measures each arm's margin (train_tokens_over_draw)
+# varies by 5 to 6 percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035 §2.3);
+# ablations/tokenizer.py intrinsic measures each arm's margin (train_tokens_over_draw)
 SPREAD = 0.06
 
 
