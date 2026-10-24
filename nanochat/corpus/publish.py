@@ -5,9 +5,10 @@ nothing in them depends on a tokenizer. Tokenization, compile and pack run after
 rows of a fixed number of tokens, and FIM encodes prefix, suffix and middle separately around sentinel ids
 (nanochat/data/crate/src/pack.rs), so both need the tokenizer.
 
-The dataset (config.DATASET, private) holds curated/<source>/<split>/<k>.parquet, manifest.json (prepare's sources,
-the code's commit and the curated shards' rows) and its card. push replaces the dataset's whole tree and squashes its
-history into one commit, whose sha it prints; pull downloads a revision into CORPUS.
+The dataset (config.DATASET, private) holds CORPUS/curated's tree at its root, <source>/<split>/<k>.parquet, beside
+manifest.json (prepare's sources, the code's commit and the curated shards' rows) and its card. push replaces the
+dataset's whole tree and squashes its history into one commit, whose sha it prints; pull downloads a revision's shards
+into CORPUS/curated and its manifest into CORPUS.
 
 python -m nanochat.corpus.publish push
 python -m nanochat.corpus.publish pull --revision <sha>
@@ -18,7 +19,7 @@ import json
 import subprocess
 
 import pyarrow.parquet as pq
-from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, dataset_info, snapshot_download
+from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, hf_hub_download, snapshot_download
 
 from nanochat.config import DATASET
 from nanochat.corpus import mixture
@@ -26,10 +27,39 @@ from nanochat.corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
 from nanochat.corpus.sources import SOURCES, curated_dir
 from nanochat.paths import CORPUS
 
-PATTERNS = ["curated/**", "manifest.json", "README.md"]
 # Bytes per preupload call: an upload URL the Hub's LFS batch call returns expires 15 minutes after the call
 # (X-Amz-Expires=900), so every file of a call must start uploading within them
 PREUPLOAD = 4 * 1024**3
+# The card's account of each folder and each column (normalization_doc.md §1-§3)
+CONTENTS = {
+    "stack_edu_python": "GitHub Python files filtered for educational value",
+    "stack_edu_cpp": "GitHub C++ files filtered for educational value",
+    "ultradata_stack_v3_l2_python": "GitHub Python files, quality-filtered",
+    "ultradata_stack_v3_l2_cpp": "GitHub C++ files, quality-filtered",
+    "ultradata_code_l2_python": "GitHub Python files, quality-filtered",
+    "ultradata_code_l2_cpp": "GitHub C++ files, quality-filtered",
+    "ultradata_code_l3_python": "synthetic Python exercises: a task, then its solution",
+    "ultradata_code_l3_cpp": "synthetic C++ exercises: a task, then its solution",
+    "nemotron_rewriting_python": "GitHub Python files rewritten by an LLM (Qwen3-32B)",
+    "nemotron_transpilation_cpp": "GitHub Python files transpiled into C++ by an LLM (Qwen3-32B)",
+    "codexglue_python": "Python functions with their docstrings (CodeSearchNet)",
+    "ultradata_math_l3_qa": "synthetic mathematics: questions and answers",
+    "ultradata_math_l3_conversation": "synthetic mathematics: conversations",
+    "ultradata_math_l3_multi_style": "synthetic mathematics: varied styles",
+    "ultradata_math_l3_textbook_exercise": "synthetic mathematics: textbook exercises",
+    "codeforces_cots": "Codeforces problems with finished DeepSeek-R1 reasoning traces and Python or C++ solutions",
+    "kaggle_notebooks": "Kaggle notebooks in Markdown: title, dataset description, the notebook as a Python script",
+    "climbmix": "English web text",
+}
+COLUMNS = {
+    "content": "the document's text",
+    "repo_name": "its GitHub repository, `owner/name`",
+    "relative_path": "the file's path in its repository",
+    "sample": "within a shard, files sharing a number import one another; they are consecutive, in dependency order",
+    "id": "the SHA-1 of `content`",
+    "language": "the code's language, `Python` or `C++`",
+    "problem_id": "the Codeforces problem",
+}
 
 
 def curated() -> dict[str, dict[str, dict[str, int]]]:
@@ -48,35 +78,34 @@ def curated() -> dict[str, dict[str, dict[str, int]]]:
 
 
 def card(manifest: dict) -> str:
-    """The dataset card: what the dataset holds, its layout, and per source its Hub origin, license, curated columns and
+    """The dataset card: what the dataset is, its layout and schema, and per folder its contents, columns, origin and
     rows. The Hub's viewer is off: its Parquet converter would copy every shard into one configuration of mixed
     schemas."""
-    rows = []
+    folders = []
     for source, splits in manifest["curated"].items():
-        origin = manifest["sources"][source]
-        license_ = (dataset_info(origin["repo"]).card_data or {}).get("license", "not declared")
+        repo = manifest["sources"][source]["repo"]
         columns = (SAMPLE_FILE if SOURCES[source].schema is REPOSITORY_FILE else SOURCES[source].schema).names
-        rows.append(f"| `{source}` | [{origin['repo']}](https://huggingface.co/datasets/{origin['repo']}) "
-                    f"`{origin['revision'][:8]}` | {', '.join(license_) if isinstance(license_, list) else license_} | "
-                    f"{', '.join(f'`{c}`' for c in columns)} | "
-                    f"{splits['train']['shards']} / {splits['train']['rows']:,} | {splits['val']['rows']:,} |")
+        folders.append(f"| `{source}` | {CONTENTS[source]} | {', '.join(f'`{c}`' for c in columns)} | "
+                       f"[{repo}](https://huggingface.co/datasets/{repo}) | {splits['train']['rows']:,} | "
+                       f"{splits['val']['rows']:,} |")
+    rows = sum(split["rows"] for splits in manifest["curated"].values() for split in splits.values())
     return "\n".join([
-        "---", "pretty_name: nanochat pretraining corpus, curated", "viewer: false", "---", "",
-        "# nanochat pretraining corpus, curated", "",
-        "The curated text of the nanochat pretraining corpus (`nanochat/corpus`, specified by",
-        "`nanochat/corpus/normalization_doc.md`) at code commit "
-        f"`{manifest['code']}`: every source normalized, Python files checked (and repaired) to parse as Python 3,",
-        "exact copies removed across sources, 1% of groups held out as val, repository files cut into",
-        "import-connected samples. Nothing depends on a tokenizer: tokenizer training, compile and packing (with FIM)",
-        "run after `python -m nanochat.corpus.publish pull --revision <sha>`.", "",
-        "Layout: `curated/<source>/<split>/<k>.parquet`. A repository source's shard k holds the repositories whose",
-        "lowercased name has `md5_number(lower(repo_name)) % 100 = k`: `val/0`, `train/1` to `train/99`, each",
-        "sorted by repository and path and cut into import-connected samples (`sample`). Any other source holds out",
-        "1% of its groups (its lowercased repository for functions, the problem for Codeforces-CoTs, the document",
-        "otherwise) in `val/0`, and its train rows in `id` order over `train/0` to `train/99`.",
-        "`manifest.json` holds each source's Hub revision and files, and each split's shards, rows and text bytes.", "",
-        "| Source | Origin (revision) | License | Columns | Train shards / rows | Val rows |",
-        "|---|---|---|---|---|---|", *rows, ""])
+        "---", "pretty_name: nanochat pretraining corpus", "viewer: false", "---", "",
+        "# nanochat pretraining corpus", "",
+        f"Text for pretraining a Python and C++ code model from scratch: {rows:,} documents from "
+        f"{len(manifest['curated'])} sources. Every text has LF line ends and no byte-order mark; every Python file "
+        "parses as Python 3, repaired from Python 2 where it did not; exact copies are removed across all sources.", "",
+        "## Layout", "",
+        "One folder per source, each with `train/` and `val/` Parquet shards. Validation holds 1% of each source: "
+        "whole repositories in the repository folders (`stack_edu_*`, `ultradata_stack_v3_l2_*`, "
+        "`ultradata_code_l2_*`) and `codexglue_python`, whole problems in `codeforces_cots`, documents elsewhere. A "
+        "repository folder's shard holds whole repositories, each cut into samples of files that import one another "
+        "(`sample`); any other folder's train rows are in `id` order, so its leading shards are a uniform sample. "
+        "`manifest.json` records each source's origin and each folder's rows.", "",
+        "## Schema", "",
+        "| Column | Meaning |", "|---|---|", *(f"| `{c}` | {m} |" for c, m in COLUMNS.items()), "",
+        "## Folders", "",
+        "| Folder | Contents | Columns | Source | Train rows | Val rows |", "|---|---|---|---|---|---|", *folders, ""])
 
 
 def push() -> None:
@@ -96,8 +125,9 @@ def push() -> None:
     if old:
         api.create_commit(DATASET, repo_type="dataset", operations=[CommitOperationDelete(f) for f in old],
                           commit_message="Delete the previous corpus")
-    files = [*sorted(CORPUS.glob("curated/*/*/*.parquet")), path, CORPUS / "README.md"]
-    additions = [CommitOperationAdd(path_in_repo=f.relative_to(CORPUS).as_posix(), path_or_fileobj=f) for f in files]
+    additions = [CommitOperationAdd(path_in_repo=f.relative_to(CORPUS / "curated").as_posix(), path_or_fileobj=f)
+                 for f in sorted((CORPUS / "curated").glob("*/*/*.parquet"))]
+    additions += [CommitOperationAdd(path_in_repo=f.name, path_or_fileobj=f) for f in (path, CORPUS / "README.md")]
     group, size = [], 0
     for addition in additions:
         group.append(addition)
@@ -111,7 +141,10 @@ def push() -> None:
 
 
 def pull(revision: str) -> None:
-    snapshot_download(DATASET, repo_type="dataset", revision=revision, local_dir=CORPUS, allow_patterns=PATTERNS)
+    """The revision's shards into CORPUS/curated, its manifest into CORPUS."""
+    snapshot_download(DATASET, repo_type="dataset", revision=revision, local_dir=CORPUS / "curated",
+                      allow_patterns=[f"{source}/**" for source in mixture.READ])
+    hf_hub_download(DATASET, "manifest.json", repo_type="dataset", revision=revision, local_dir=CORPUS)
 
 
 if __name__ == "__main__":
