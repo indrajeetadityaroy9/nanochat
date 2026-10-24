@@ -9,7 +9,7 @@ import collections
 import multiprocessing
 import os
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Executor, Future
+from concurrent.futures import Executor, Future, wait
 from pathlib import Path
 
 SPAWN = multiprocessing.get_context("spawn")
@@ -30,11 +30,17 @@ MEMORY = memory() // 2
 
 def ordered[T, R](pool: Executor, fn: Callable[[T], R], tasks: Iterable[T], window: int) -> Iterator[R]:
     """fn of each task in task order, at most `window` submitted and not yet yielded, so no more results wait in
-    memory than the window holds and tasks are submitted only as results are taken."""
+    memory than the window holds and tasks are submitted only as results are taken. Closed early, it cancels the
+    tasks not started and waits for the running ones, so none outlives it beside the caller's next tasks."""
     pending: collections.deque[Future[R]] = collections.deque()
-    for task in tasks:
-        pending.append(pool.submit(fn, task))
-        if len(pending) == window:
+    try:
+        for task in tasks:
+            pending.append(pool.submit(fn, task))
+            if len(pending) == window:
+                yield pending.popleft().result()
+        while pending:
             yield pending.popleft().result()
-    while pending:
-        yield pending.popleft().result()
+    finally:
+        for future in pending:
+            future.cancel()
+        wait(pending)

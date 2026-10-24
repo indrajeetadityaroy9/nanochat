@@ -7,6 +7,7 @@ use std::cell::OnceCell;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::sync::OnceLock;
 
 use memmap2::Mmap;
 use pyo3::prelude::*;
@@ -216,6 +217,22 @@ fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng:
 /// A piece of a document: its token range, and as a FIM example its tokens (fim_example).
 type Piece = ([usize; 2], Option<Vec<u16>>);
 
+/// The tokenizer's encoder (tiktoken-rs's CoreBPE) of each rayon worker, built on the worker's first FIM example:
+/// clones of one CoreBPE share fancy-regex's pool of matching scratch space, which the workers would contend for.
+struct Encoders<'a> {
+    token_bytes: &'a [Vec<u8>],
+    pattern: &'a str,
+    workers: Vec<OnceLock<CoreBPE>>,
+}
+
+impl Encoders<'_> {
+    fn get(&self) -> &CoreBPE {
+        self.workers[rayon::current_thread_index().unwrap()].get_or_init(|| {
+            CoreBPE::new(self.token_bytes.iter().enumerate().map(|(rank, token)| (token.clone(), rank as u32)).collect(), Default::default(), self.pattern).unwrap()
+        })
+    }
+}
+
 /// What a document's pieces are cut from: the split's tokens, each token's bytes and whether it ends a line or starts a
 /// character, the row length, the grammar of a repository corpus and, in its train split, fill-in-the-middle.
 struct Split<'a> {
@@ -225,7 +242,7 @@ struct Split<'a> {
     starts_char: &'a [bool],
     row_len: usize,
     grammar: Option<&'a Grammar>,
-    fim: Option<(&'a Fim, &'a CoreBPE)>,
+    fim: Option<(&'a Fim, &'a Encoders<'a>)>,
 }
 
 impl Split<'_> {
@@ -262,16 +279,16 @@ impl Split<'_> {
         };
         let (mut pieces, mut s) = (Vec::new(), start);
         while s < end {
-            let piece = match self.fim.and_then(|(fim, bpe)| fim_draw(fim, document, pieces.len()).map(|rng| (fim, bpe, rng))) {
+            let piece = match self.fim.and_then(|(fim, encoders)| fim_draw(fim, document, pieces.len()).map(|rng| (fim, encoders, rng))) {
                 None => {
                     let q = if end - s <= self.row_len - 2 { end } else { cut(s, self.row_len - 1) };
                     ([s, q], None)
                 }
-                Some((fim, bpe, rng)) => {
+                Some((fim, encoders, rng)) => {
                     let mut window = self.row_len - 2 - fim.sentinels.len();
                     loop {
                         let q = if end - s <= window { end } else { cut(s, window) };
-                        let example = fim_example(&self.text(s, q), fim, self.grammar.unwrap(), bpe, rng.clone());
+                        let example = fim_example(&self.text(s, q), fim, self.grammar.unwrap(), encoders.get(), rng.clone());
                         let excess = (1 + example.len() + 1).saturating_sub(self.row_len);
                         if excess == 0 {
                             break ([s, q], Some(example));
@@ -367,6 +384,7 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize)) -> 
 /// (native-endian int64, 4 per piece), the pieces per row (int64) and the FIM tokens (uint16).
 #[pyfunction]
 #[pyo3(signature = (tokens_path, offsets_path, shard, *, row_len, token_bytes, pattern, grammar, fim))]
+#[allow(clippy::too_many_arguments)] // the keyword arguments of Python's call
 pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, shard: (usize, usize), row_len: usize, token_bytes: Vec<Vec<u8>>,
                         pattern: &str, grammar: Option<Lang>, fim: Option<Fim>)
                         -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>) {
@@ -377,10 +395,10 @@ pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, 
     // a token starts a character unless its first byte is a UTF-8 continuation byte 10xxxxxx (RFC 3629 §3)
     let starts_char: Vec<bool> = token_bytes.iter().map(|token| token[0] & 0xC0 != 0x80).collect();
     let grammar = grammar.map(Grammar::new);
-    let bpe = fim.as_ref().map(|_| CoreBPE::new(token_bytes.iter().enumerate().map(|(rank, token)| (token.clone(), rank as u32)).collect(), Default::default(), pattern).unwrap());
+    let encoders = Encoders { token_bytes: &token_bytes, pattern, workers: (0..rayon::current_num_threads()).map(|_| OnceLock::new()).collect() };
     let (index, counts, fim_tokens) = py.detach(|| {
         let split = Split { tokens: bytemuck::cast_slice(&tokens), token_bytes: &token_bytes, ends_line: &ends_line, starts_char: &starts_char, row_len,
-                            grammar: grammar.as_ref(), fim: fim.as_ref().zip(bpe.as_ref()) };
+                            grammar: grammar.as_ref(), fim: fim.as_ref().map(|fim| (fim, &encoders)) };
         pack_shard(&split, bytemuck::cast_slice(&offsets), shard)
     });
     (PyBytes::new(py, bytemuck::cast_slice(&index)), PyBytes::new(py, bytemuck::cast_slice(&counts)), PyBytes::new(py, bytemuck::cast_slice(&fim_tokens)))
