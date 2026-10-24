@@ -5,10 +5,9 @@
 
 use crate::lexer::{Ev, Lexicon, Terms};
 
-const TAB_SIZE: u32 = 8; // tokenizer.c TABSIZE
-const ALT_TAB_SIZE: u32 = 1; // tokenizer.c ALTTABSIZE
+const TAB_SIZE: u32 = 8; // tokenizer.c TABSIZE; ALTTABSIZE is 1: a tab is one alt column, as a space
 /// an action table entry with no action
-pub const NO_ACTION: i32 = i32::MIN;
+const NO_ACTION: i32 = i32::MIN;
 
 /// Lark's parse table: actions[state * terminals + terminal] a state to shift to (>= 0) or !rule to reduce by (or
 /// NO_ACTION); goto[state * nonterminals + nonterminal]; each rule's (length, left-hand side).
@@ -99,7 +98,7 @@ impl Tables {
         }
     }
 
-    fn shift_all(&self, stacks: &[Vec<u32>], terminal: u16) -> Vec<Vec<u32>> {
+    pub fn shift_all(&self, stacks: &[Vec<u32>], terminal: u16) -> Vec<Vec<u32>> {
         stacks.iter().filter_map(|s| self.shift(s, terminal)).collect()
     }
 
@@ -109,8 +108,9 @@ impl Tables {
             Ev::Lex(lexeme) => {
                 let mut indents_changed = None;
                 let mut stacks_changed: Option<Vec<Vec<u32>>> = None;
-                if !state.line && state.depth == 0 {
-                    // the line's first token: tokenizer.c's indentation check
+                if !state.line {
+                    // the line's first token (outside brackets: a bracket's lexeme sets line): tokenizer.c's
+                    // indentation check
                     let (col, alt) = if state.cont != 0 { (state.cont, state.cont) } else { (state.col, state.alt) };
                     let (top, top_alt) = *state.indents.last().unwrap();
                     if col == top {
@@ -149,8 +149,9 @@ impl Tables {
                         }
                     }
                 }
+                // never negative: the grammar pairs every closer with an opener before it
                 let depth = state.depth + lexicon.depth_change[lexeme as usize] as i32;
-                if stacks.is_empty() || depth < 0 {
+                if stacks.is_empty() {
                     return None;
                 }
                 let indents = indents_changed.unwrap_or_else(|| state.indents.clone());
@@ -174,11 +175,7 @@ impl Tables {
             _ if state.line => Some(state.clone()),
             Ev::Cont => Some(Parse { cont: if state.cont != 0 { state.cont } else { state.col }, ..state.clone() }),
             Ev::Space => Some(Parse { col: state.col + 1, alt: state.alt + 1, ..state.clone() }),
-            Ev::Tab => Some(Parse {
-                col: (state.col / TAB_SIZE + 1) * TAB_SIZE,
-                alt: (state.alt / ALT_TAB_SIZE + 1) * ALT_TAB_SIZE,
-                ..state.clone()
-            }),
+            Ev::Tab => Some(Parse { col: (state.col / TAB_SIZE + 1) * TAB_SIZE, alt: state.alt + 1, ..state.clone() }),
             Ev::FormFeed => Some(Parse { col: 0, alt: 0, ..state.clone() }),
         }
     }

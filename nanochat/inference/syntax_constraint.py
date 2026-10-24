@@ -51,12 +51,13 @@ OPERATORS = (*pytoken.EXACT_TOKEN_TYPES, "<>")  # tokenizer.c _PyToken_TwoChars:
 SOFT_KEYWORDS = {"match": "MATCH_SOFT", "case": "CASE_SOFT", "type": "TYPE_SOFT"}  # "_" is a name in every pattern
 BASIC = ("NAME", "NUMBER", "STRING", "FSTRING_START", "FSTRING_END")
 SPECIAL = ("$END", "NEWLINE", "INDENT", "DEDENT")
-NO_ACTION = np.iinfo(np.int32).min
+NO_ACTION = np.iinfo(np.int32).min  # parser.rs NO_ACTION
 
 
-def identifier_ranges(chars: str, test) -> list[tuple[int, int]]:
-    """The inclusive code point ranges of chars where test holds."""
-    hits = np.flatnonzero(np.fromiter(map(test, chars), dtype=bool, count=len(chars))) + 0x80
+def identifier_ranges(test) -> list[tuple[int, int]]:
+    """The inclusive ranges of the non-ASCII code points c where test(chr(c)) holds."""
+    chars = range(0x80, sys.maxunicode + 1)
+    hits = np.flatnonzero(np.fromiter(map(test, map(chr, chars)), dtype=bool, count=len(chars))) + 0x80
     starts = np.flatnonzero(np.diff(hits, prepend=-2) != 1)
     ends = np.append(starts[1:], len(hits)) - 1
     return list(zip(hits[starts].tolist(), hits[ends].tolist(), strict=True))
@@ -71,13 +72,11 @@ def python_syntax(tokenizer: Tokenizer):
     lark = Lark((CRATE / "python.lark").read_text(), parser="lalr", lexer="basic", start="file_input", strict=True)
     conf = lark.parse_interactive().parser_state.parse_conf
     rows = conf.states
-    rules = list({arg for row in rows.values() for action, arg in row.values() if action.name == "Reduce"})
-    rule_index = {rule: i for i, rule in enumerate(rules)}
+    rule_index = {rule: i for i, rule in enumerate(lark.rules)}
     terminal = {t.pattern.value: t.name for t in lark.terminals}
-    terminals = sorted({t for row in rows.values() for t in row if t.isupper()} | set(BASIC) | set(SPECIAL)
-                       | set(SOFT_KEYWORDS.values()) | set(terminal.values()))
-    nonterminals = sorted({t for row in rows.values() for t in row if not t.isupper()}
-                          | {rule.origin.name for rule in rules})
+    # every terminal and nonterminal of the grammar has an action or goto in some state
+    terminals = sorted({t for row in rows.values() for t in row if t.isupper()})
+    nonterminals = sorted({t for row in rows.values() for t in row if not t.isupper()})
     tid, nid = {t: i for i, t in enumerate(terminals)}, {t: i for i, t in enumerate(nonterminals)}
     actions = np.full((len(rows), len(terminals)), NO_ACTION, dtype=np.int32)
     goto = np.full((len(rows), len(nonterminals)), -1, dtype=np.int32)
@@ -87,7 +86,6 @@ def python_syntax(tokenizer: Tokenizer):
                 actions[s, tid[t]] = arg if action.name == "Shift" else ~rule_index[arg]
             else:
                 goto[s, nid[t]] = arg
-    chars = "".join(map(chr, range(0x80, sys.maxunicode + 1)))
     bos = tokenizer.bos_token_id
     return crate_module(CRATE).Syntax(
         keywords=[(w, [tid[terminal[w]]]) for w in keyword.kwlist],
@@ -96,10 +94,10 @@ def python_syntax(tokenizer: Tokenizer):
         basic=[tid[t] for t in BASIC], special=[tid[t] for t in SPECIAL],
         terminals=len(terminals), nonterminals=len(nonterminals),
         actions=actions.ravel().tolist(), goto=goto.ravel().tolist(),
-        rules=[(len(rule.expansion), nid[rule.origin.name]) for rule in rules],
+        rules=[(len(rule.expansion), nid[rule.origin.name]) for rule in lark.rules],
         start=conf.start_state, end=conf.end_state,
-        xid_start=identifier_ranges(chars, str.isidentifier),
-        xid_continue=identifier_ranges(chars, lambda c: ("a" + c).isidentifier()),
+        xid_start=identifier_ranges(str.isidentifier),
+        xid_continue=identifier_ranges(lambda c: ("a" + c).isidentifier()),
         token_bytes=tokenizer.token_bytes[:bos], vocab_size=tokenizer.vocab_size, bos=bos)
 
 

@@ -50,14 +50,18 @@ impl Syntax {
     /// (then BOS is a candidate at every step). Raises ValueError when prefix is not a prefix of any module.
     fn constraint(&self, prefix: &[u8], suffix: bool) -> PyResult<Constraint> {
         let syntax = &self.inner;
-        let state = syntax.extend(&syntax.start(), prefix).map_err(|i| PyValueError::new_err(
-            format!("the text stops being a prefix of a Python 3.12 module at byte {i}")))?;
+        let state = syntax.extend(&syntax.start(), prefix).map_err(stops_at)?;
         if !syntax.viable_end(&state) {
             return Err(PyValueError::new_err(format!(
                 "the prefix is not a prefix of a Python 3.12 module (at byte {})", prefix.len())));
         }
         Ok(Constraint { syntax: syntax.clone(), state: Arc::new(state), text: prefix.to_vec(), suffix })
     }
+}
+
+/// The ValueError of a text that stops being a prefix of a module at byte.
+fn stops_at(byte: usize) -> PyErr {
+    PyValueError::new_err(format!("the text stops being a prefix of a Python 3.12 module at byte {byte}"))
 }
 
 /// A constraint's text (bytes), its lexer and parser states.
@@ -74,8 +78,7 @@ impl Constraint {
     /// Advance by a token; ValueError if its bytes end the text's viability (the state is then unchanged).
     fn push(&mut self, token: u32) -> PyResult<()> {
         let bytes = &self.syntax.token_bytes[token as usize];
-        let state = self.syntax.extend(&self.state, bytes).map_err(|i| PyValueError::new_err(format!(
-            "the text stops being a prefix of a Python 3.12 module at byte {}", self.text.len() + i)))?;
+        let state = self.syntax.extend(&self.state, bytes).map_err(|i| stops_at(self.text.len() + i))?;
         self.state = Arc::new(state);
         self.text.extend_from_slice(bytes);
         Ok(())
@@ -88,9 +91,10 @@ impl Constraint {
     }
 }
 
-/// The next masks of constraints, rows in order, computed in parallel without the GIL: the rows' uint32 words as
-/// bytes, bit t % 32 of word t / 32 set iff token t keeps the text viable, BOS's set iff it is a candidate (a suffix
-/// follows, or the lexer and parser end a module here), which the caller's ast.parse decides.
+/// The next masks of constraints, rows in order, computed in parallel without the GIL: bit t % 8 of byte t / 8 of a
+/// row (read as little-endian uint32 words: bit t % 32 of word t / 32) set iff token t keeps the text viable, BOS's set
+/// iff it is a candidate (a suffix follows, or the lexer and parser end a module here), which the caller's ast.parse
+/// decides.
 #[pyfunction]
 fn masks<'py>(py: Python<'py>, constraints: Vec<Bound<'py, Constraint>>) -> Bound<'py, PyBytes> {
     let jobs: Vec<_> = constraints.iter().map(|c| {
@@ -98,14 +102,15 @@ fn masks<'py>(py: Python<'py>, constraints: Vec<Bound<'py, Constraint>>) -> Boun
         let ends_line = matches!(c.text.last(), Some(b'\n' | b'\r'));
         (c.syntax.clone(), c.state.clone(), c.suffix, ends_line)
     }).collect();
-    let rows: Vec<Vec<u32>> = py.detach(|| jobs.par_iter().map(|(syntax, state, suffix, ends_line)| {
-        let mut words = syntax.allowed(state);
+    let row = jobs[0].0.vocab_size / 8;
+    let mut out = vec![0u8; jobs.len() * row];
+    py.detach(|| out.par_chunks_mut(row).zip(&jobs).for_each(|(bits, (syntax, state, suffix, ends_line))| {
+        syntax.allowed(state, bits);
         if *suffix || syntax.complete(state, *ends_line) {
-            words[syntax.bos as usize / 32] |= 1 << (syntax.bos % 32);
+            bits[syntax.bos as usize / 8] |= 1 << (syntax.bos % 8);
         }
-        words
-    }).collect());
-    PyBytes::new(py, &rows.iter().flatten().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
+    }));
+    PyBytes::new(py, &out)
 }
 
 #[pymodule]

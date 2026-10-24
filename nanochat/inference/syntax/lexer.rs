@@ -81,18 +81,18 @@ pub enum Pend {
 }
 
 /// NONE: a name that spells no keyword, soft keyword or string prefix.
-pub const NONE: u16 = u16::MAX;
+const NONE: u16 = u16::MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Sub {
     /// between tokens at a line's start (true: after a backslash continuation)
     Bol(bool),
-    /// between tokens (true: after a backslash continuation)
-    Sp(bool),
-    /// a name: its spelled prefix (Lexicon::spelled) or NONE
+    /// between tokens
+    Sp,
+    /// a name: its spelled prefix (a node of Lexicon::spelled_next) or NONE
     Name(u16),
     Num(Num),
-    /// operator characters: a prefix of an operator (Lexicon::ops)
+    /// operator characters: a prefix of an operator (a node of Lexicon::op_next)
     Op(u16),
     /// a string's first quote(s): n of them
     Q { kind: Kind, quote: u8, n: u8 },
@@ -232,14 +232,10 @@ impl Lexicon {
                basic: [u16; 5], xid_start: Vec<(u32, u32)>, xid_continue: Vec<(u32, u32)>) -> Lexicon {
         let mut lexemes: Vec<Vec<u16>> = basic.iter().map(|&t| vec![t]).collect();
         let mut word_lexeme: FxHashMap<String, Lexeme> = FxHashMap::default();
-        let mut add = |lexemes: &mut Vec<Vec<u16>>, words: &[(String, Vec<u16>)]| {
-            for (w, ts) in words {
-                word_lexeme.insert(w.clone(), lexemes.len() as Lexeme);
-                lexemes.push(ts.clone());
-            }
-        };
-        add(&mut lexemes, &keywords);
-        add(&mut lexemes, &soft);
+        for (w, ts) in keywords.iter().chain(&soft) {
+            word_lexeme.insert(w.clone(), lexemes.len() as Lexeme);
+            lexemes.push(ts.clone());
+        }
         let op_words: Vec<String> = operators.iter().map(|(w, _)| w.clone()).collect();
         let mut op_lex: FxHashMap<String, Lexeme> = FxHashMap::default();
         for (w, ts) in &operators {
@@ -269,7 +265,6 @@ impl Lexicon {
             }
         }
         let (spelled, spelled_next, spelled_first) = prefix_trie(&spelled_words);
-        let kw_soft: Vec<&String> = keywords.iter().chain(&soft).map(|(w, _)| w).collect();
         let mut spelled_lexeme = Vec::new();
         let mut spelled_kind = Vec::new();
         let mut spelled_terms = Vec::new();
@@ -286,7 +281,7 @@ impl Lexicon {
                 }
             }));
             let mut set = vec![vec![NAME]];
-            set.extend(kw_soft.iter().filter(|w| w.starts_with(text.as_str())).map(|w| vec![word_lexeme[*w]]));
+            set.extend(word_lexeme.iter().filter(|(w, _)| w.starts_with(text.as_str())).map(|(_, &l)| vec![l]));
             set.extend(STRING_PREFIXES.iter().filter(|p| p.starts_with(low.as_str()))
                 .map(|p| vec![if p.contains('f') { FSTRING_START } else { STRING }]));
             spelled_terms.push(intern(&mut terms, &mut index, set));
@@ -331,7 +326,7 @@ impl Lexicon {
     /// The lexer state after character c (events appended to ev), None if no module continues this way.
     fn char(&self, frames: Vec<Frame>, sub: Sub, c: char, ev: &mut Vec<Ev>) -> Step {
         match sub {
-            Sub::Sp(_) => self.start(frames, c, ev, false),
+            Sub::Sp => self.start(frames, c, ev, false),
             Sub::Bol(_) => self.start(frames, c, ev, true),
             Sub::Name(text) => {
                 if c.is_ascii() {
@@ -346,8 +341,6 @@ impl Lexicon {
                     }
                 } else if in_ranges(&self.xid_continue, c as u32) {
                     return Some((frames, Sub::Name(NONE)));
-                } else {
-                    return None;
                 }
                 ev.push(Ev::Lex(if text == NONE { NAME } else { self.spelled_lexeme[text as usize] }));
                 self.start(frames, c, ev, false)
@@ -373,7 +366,7 @@ impl Lexicon {
                     ev.push(Ev::Cont);
                     return Some((frames, Sub::Bol(true)));
                 }
-                Some((frames, Sub::Sp(true)))
+                Some((frames, Sub::Sp))
             }
         }
     }
@@ -390,7 +383,7 @@ impl Lexicon {
                     });
                     return Some((frames, Sub::Bol(false)));
                 }
-                return Some((frames, Sub::Sp(false)));
+                return Some((frames, Sub::Sp));
             }
             '\n' => {
                 ev.push(Ev::Nl);
@@ -437,22 +430,20 @@ impl Lexicon {
             }
             return Some((frames, Sub::Fl { pend: Pend::No, endq: 0 }));
         }
+        // brackets extend no operator
         let open = OPEN.contains(&b);
-        if open || CLOSE.contains(&b) {
-            if let Some(depth) = field {
-                if depth == 0 && !open {
-                    return None;
-                }
-                *frames.last_mut().unwrap().fields.last_mut().unwrap() = (depth + if open { 1 } else { -1 }, false);
+        if let Some(depth) = field
+            && (open || CLOSE.contains(&b))
+        {
+            if depth == 0 && !open {
+                return None;
             }
-            ev.push(Ev::Lex(self.op_lexeme(op)));
-            return Some((frames, Sub::Sp(false)));
-        }
-        if self.op_extensible[op as usize] {
+            *frames.last_mut().unwrap().fields.last_mut().unwrap() = (depth + if open { 1 } else { -1 }, false);
+        } else if self.op_extensible[op as usize] {
             return Some((frames, Sub::Op(op)));
         }
         ev.push(Ev::Lex(self.op_lexeme(op)));
-        Some((frames, Sub::Sp(false)))
+        Some((frames, Sub::Sp))
     }
 
     /// Character c after the operator characters text.
@@ -466,7 +457,7 @@ impl Lexicon {
                 return Some((frames, Sub::Op(extended)));
             }
             ev.push(Ev::Lex(self.op_lexeme(extended)));
-            return Some((frames, Sub::Sp(false)));
+            return Some((frames, Sub::Sp));
         }
         if text == self.op_dotdot {
             // two dots: one '.', then '.' again (tokenizer.c backs up)
@@ -591,11 +582,8 @@ impl Lexicon {
             }
             if c == 'j' || c == 'J' {
                 ev.push(Ev::Lex(NUMBER));
-                return Some((frames, Sub::Sp(false)));
+                return Some((frames, Sub::Sp));
             }
-        }
-        if state == ZeroD {
-            return None;
         }
         ev.push(Ev::Lex(NUMBER));
         self.start(frames, c, ev, false)
@@ -680,7 +668,7 @@ impl Lexicon {
             if size == 1 || endq == 2 {
                 ev.push(Ev::Lex(FSTRING_END));
                 frames.pop();
-                return Some((frames, Sub::Sp(false)));
+                return Some((frames, Sub::Sp));
             }
             return Some((frames, Sub::Fl { pend: Pend::No, endq: endq + 1 }));
         }
@@ -698,7 +686,7 @@ impl Lexicon {
             }
             ev.push(Ev::Lex(self.lex_lbrace));
             frames.last_mut().unwrap().fields.push((0, false));
-            return Some((frames, Sub::Sp(false)));
+            return Some((frames, Sub::Sp));
         }
         if c == '}' {
             if !spec {
@@ -793,7 +781,7 @@ fn string_char(frames: Vec<Frame>, sub: Sub, c: char, ev: &mut Vec<Ev>) -> Step 
     if c == quote as char {
         if size == 1 || endq == 2 {
             ev.push(Ev::Lex(STRING));
-            return Some((frames, Sub::Sp(false)));
+            return Some((frames, Sub::Sp));
         }
         return Some((frames, Sub::S { ascii_only, quote, size, escaped: false, endq: endq + 1 }));
     }

@@ -10,13 +10,13 @@ use rustc_hash::FxHashMap;
 use crate::lexer::{Ev, Lex, Lexicon, Sub, Terms};
 use crate::parser::{Parse, Tables};
 
-/// A key of a token's verdict: its events, and the beginnings of the partial token it ends with (None: no character
-/// completes its pending UTF-8 sequence, so no module continues).
-type Key = (Vec<Ev>, Option<Terms>);
+/// A key of a token's verdict: its events, and the beginnings of the partial token it ends with. A token after which
+/// no character completes the pending UTF-8 sequence (no module continues) has no key.
+type Key = (Vec<Ev>, Terms);
 
 struct Node {
     children: Vec<(u8, u32)>,
-    ids: Vec<u32>,
+    id: Option<u32>,
 }
 
 /// The tokens starting with one byte, read from the lexer state after it: their ids, the distinct keys, each id's key.
@@ -33,7 +33,7 @@ struct Grouping {
     parent: Vec<u32>,
     event: Vec<Ev>,
     group_node: Vec<u32>,
-    group_terms: Vec<Option<Terms>>,
+    group_terms: Vec<Terms>,
 }
 
 const NO_GROUP: u16 = u16::MAX;
@@ -47,17 +47,27 @@ fn memoized<K: std::hash::Hash + Eq + Clone, V>(memo: &Memo<K, V>, key: &K, make
     cell.get_or_init(|| Arc::new(make())).clone()
 }
 
+/// The keys of an interning map (key -> index), in index order.
+fn by_index(keys: FxHashMap<Key, u32>) -> Vec<Key> {
+    let mut out = vec![(Vec::new(), 0); keys.len()];
+    for (key, k) in keys {
+        out[k as usize] = key;
+    }
+    out
+}
+
 /// The Python 3.12 syntax of a tokenizer's vocabulary: the lexicon, the LALR tables, the vocabulary's byte trie, and
 /// the per-lexer-state token groupings, filled on first use and shared by every constraint (and thread).
 pub struct Syntax {
-    pub lexicon: Lexicon,
-    pub tables: Tables,
+    lexicon: Lexicon,
+    tables: Tables,
     pub vocab_size: usize,
     pub bos: u32,
     pub token_bytes: Vec<Vec<u8>>,
     trie: Vec<Node>,
     groupings: Memo<Lex, Grouping>,
-    subtrees: Memo<(u8, Lex), Subtree>,
+    /// keyed by the trie node of the first byte
+    subtrees: Memo<(u32, Lex), Subtree>,
 }
 
 /// A constraint's state: its text's lexer and parser states.
@@ -68,9 +78,10 @@ pub struct State {
 }
 
 impl Syntax {
-    /// token_bytes: the mergeable tokens' bytes (ids below bos); vocab_size counts the special tokens too.
+    /// token_bytes: the mergeable tokens' bytes (ids below bos, each distinct); vocab_size counts the special tokens
+    /// too.
     pub fn new(lexicon: Lexicon, tables: Tables, token_bytes: Vec<Vec<u8>>, vocab_size: usize, bos: u32) -> Syntax {
-        let mut trie = vec![Node { children: Vec::new(), ids: Vec::new() }];
+        let mut trie = vec![Node { children: Vec::new(), id: None }];
         for (id, bytes) in token_bytes.iter().enumerate() {
             let mut node = 0usize;
             for &b in bytes {
@@ -78,13 +89,13 @@ impl Syntax {
                     Some(&(_, child)) => child as usize,
                     None => {
                         let child = trie.len();
-                        trie.push(Node { children: Vec::new(), ids: Vec::new() });
+                        trie.push(Node { children: Vec::new(), id: None });
                         trie[node].children.push((b, child as u32));
                         child
                     }
                 };
             }
-            trie[node].ids.push(id as u32);
+            trie[node].id = Some(id as u32);
         }
         Syntax {
             lexicon, tables, vocab_size, bos, token_bytes, trie,
@@ -97,7 +108,7 @@ impl Syntax {
     }
 
     /// The parser state after events, None on a syntax error.
-    pub fn feed_all(&self, parse: &Parse, events: &[Ev]) -> Option<Parse> {
+    fn feed_all(&self, parse: &Parse, events: &[Ev]) -> Option<Parse> {
         let mut parse = parse.clone();
         for &e in events {
             parse = self.tables.feed(&self.lexicon, &parse, e)?;
@@ -121,10 +132,7 @@ impl Syntax {
     pub fn viable_end(&self, state: &State) -> bool {
         let mut ev = Vec::new();
         let Some(terms) = self.lexicon.partial(&state.lex, &mut ev) else { return false };
-        match self.feed_all(&state.parse, &ev) {
-            Some(parse) => self.tables.viable(&self.lexicon, &parse, terms),
-            None => false, // the events before the partial token do not parse: nothing can continue (as `allowed`)
-        }
+        self.feed_all(&state.parse, &ev).is_some_and(|parse| self.tables.viable(&self.lexicon, &parse, terms))
     }
 
     /// Whether the state (ends_line: its text ends with a line end) ends a module: the implied final line end, then
@@ -143,40 +151,34 @@ impl Syntax {
         }
         let mut stacks = parse.stacks;
         for _ in 1..parse.indents.len() {
-            stacks = stacks.iter().filter_map(|s| self.tables.shift(s, self.tables.t_dedent)).collect();
+            stacks = self.tables.shift_all(&stacks, self.tables.t_dedent);
         }
         stacks.iter().any(|s| self.tables.accepts_end(s))
     }
 
-    /// The tokens starting with byte b, read from the lexer state after b. Shared by every lexer state that b takes
-    /// to state: from most states, the first byte ends the partial token and the lexers converge.
-    fn subtree(&self, b: u8, state: &Lex) -> Arc<Subtree> {
-        memoized(&self.subtrees, &(b, state.clone()), || {
+    /// The tokens below trie node root (a first byte's), read from the lexer state after that byte. Shared by every
+    /// lexer state that the byte takes to state: from most states, the first byte ends the partial token and the
+    /// lexers converge.
+    fn subtree(&self, root: u32, state: &Lex) -> Arc<Subtree> {
+        memoized(&self.subtrees, &(root, state.clone()), || {
             let mut sub = Subtree { ids: Vec::new(), keys: Vec::new(), index: Vec::new() };
             let mut keys: FxHashMap<Key, u32> = FxHashMap::default();
-            let root = self.trie[0].children.iter().find(|&&(c, _)| c == b).unwrap().1;
             let mut events = Vec::new();
             self.visit(root, state, &mut events, &mut sub, &mut keys);
-            sub.keys.resize(keys.len(), (Vec::new(), None));
-            for (key, k) in keys {
-                sub.keys[k as usize] = key;
-            }
+            sub.keys = by_index(keys);
             sub
         })
     }
 
     fn visit(&self, node: u32, state: &Lex, events: &mut Vec<Ev>, sub: &mut Subtree, keys: &mut FxHashMap<Key, u32>) {
         let node = &self.trie[node as usize];
-        if !node.ids.is_empty() {
+        if let Some(id) = node.id {
             let mut key_events = events.clone();
-            let terms = self.lexicon.partial(state, &mut key_events);
-            if terms.is_none() {
-                key_events.truncate(events.len());
+            if let Some(terms) = self.lexicon.partial(state, &mut key_events) {
+                let n = keys.len() as u32;
+                sub.ids.push(id);
+                sub.index.push(*keys.entry((key_events, terms)).or_insert(n));
             }
-            let n = keys.len() as u32;
-            let k = *keys.entry((key_events, terms)).or_insert(n);
-            sub.ids.extend_from_slice(&node.ids);
-            sub.index.extend(std::iter::repeat_n(k, node.ids.len()));
         }
         let len = events.len();
         for &(b, child) in &node.children {
@@ -190,28 +192,25 @@ impl Syntax {
     /// Every vocabulary token's events and end state from lexer state lex (computed once per state).
     fn grouping(&self, lex: &Lex) -> Arc<Grouping> {
         memoized(&self.groupings, lex, || {
-            let mut group_of = vec![NO_GROUP; self.vocab_size];
+            let mut group_of = vec![NO_GROUP; self.token_bytes.len()];
             let mut groups: FxHashMap<Key, u32> = FxHashMap::default();
-            let mut order: Vec<Key> = Vec::new();
             let mut ev = Vec::new();
-            for &(b, _) in &self.trie[0].children {
+            for &(b, child) in &self.trie[0].children {
                 ev.clear();
                 let Some(next) = self.lexicon.byte(lex, b, &mut ev) else { continue };
-                let sub = self.subtree(b, &next);
+                let sub = self.subtree(child, &next);
                 let remap: Vec<u32> = sub.keys.iter().map(|(events, terms)| {
                     let mut key_events = ev.clone();
                     key_events.extend_from_slice(events);
-                    let key = (key_events, *terms);
-                    *groups.entry(key.clone()).or_insert_with(|| {
-                        order.push(key);
-                        (order.len() - 1) as u32
-                    })
+                    let n = groups.len() as u32;
+                    *groups.entry((key_events, *terms)).or_insert(n)
                 }).collect();
                 for (&id, &k) in sub.ids.iter().zip(&sub.index) {
                     group_of[id as usize] = remap[k as usize] as u16;
                 }
             }
-            assert!(order.len() < NO_GROUP as usize);
+            assert!(groups.len() < NO_GROUP as usize);
+            let order = by_index(groups);
             // the event-prefix tree: a node per distinct prefix of the groups' event sequences
             let (mut parent, mut event) = (vec![u32::MAX], vec![Ev::Nl]);
             let mut nodes: FxHashMap<(u32, Ev), u32> = FxHashMap::default();
@@ -229,9 +228,8 @@ impl Syntax {
         })
     }
 
-    /// The mask words (bit t % 32 of word t / 32: token t) of the mergeable tokens that keep the text viable from the
-    /// state; special tokens unset.
-    pub fn allowed(&self, state: &State) -> Vec<u32> {
+    /// Sets bit t % 8 of bits[t / 8] for each mergeable token t that keeps the text viable from the state.
+    pub fn allowed(&self, state: &State, bits: &mut [u8]) {
         let g = self.grouping(&state.lex);
         let mut states: Vec<Option<Parse>> = Vec::with_capacity(g.parent.len());
         states.push(Some(state.parse.clone()));
@@ -240,17 +238,12 @@ impl Syntax {
             states.push(p);
         }
         let ok: Vec<bool> = g.group_node.iter().zip(&g.group_terms).map(|(&node, &terms)| {
-            match (terms, &states[node as usize]) {
-                (Some(terms), Some(parse)) => self.tables.viable(&self.lexicon, parse, terms),
-                _ => false,
-            }
+            states[node as usize].as_ref().is_some_and(|parse| self.tables.viable(&self.lexicon, parse, terms))
         }).collect();
-        let mut words = vec![0u32; self.vocab_size / 32];
         for (t, &k) in g.group_of.iter().enumerate() {
             if k != NO_GROUP && ok[k as usize] {
-                words[t / 32] |= 1 << (t % 32);
+                bits[t / 8] |= 1 << (t % 8);
             }
         }
-        words
     }
 }
