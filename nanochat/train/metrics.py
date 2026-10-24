@@ -5,11 +5,12 @@ from the latest attempt supersedes the earlier ones; records are never rewritten
 kind's fields. NaN and infinities are not JSON and are never written. Checkpoint evaluations: eval/suite.py.
 
 run (each process start): step (the first step it trains), plan (schedule.RunPlan), seed (initialization and data
-    order), model (model/gpt.py GPTConfig as the model was built), variant (an ablation run's fields,
-    ablations/harness.py; the base model's lr scale), params (the model's parameters), flops_per_token (model/gpt.py
-    non_embedding_flops_per_token at the stage it starts in: DeepSeek LLM's M, arXiv 2401.02954 §3.2 Eq. 2), max_norm
-    (the gradient clip threshold), lr and weight_decay (as the optimizers hold them; a resumed process's come from its
-    checkpoint), stage (corpus/mixture.py Stage as the model runs it, mixture as {corpus: row weight}).
+    order), model (model/gpt.py GPTConfig at the stage of the weights it starts from: the file-level stage, or its
+    checkpoint's), variant (an ablation run's fields, ablations/harness.py; the base model's lr scale), params (the
+    model's parameters), flops_per_token (model/gpt.py non_embedding_flops_per_token of that model: DeepSeek LLM's M,
+    arXiv 2401.02954 §3.2 Eq. 2), max_norm (the gradient clip threshold), lr and weight_decay (as the optimizers hold
+    them; a resumed process's come from its checkpoint), stage (corpus/mixture.py Stage as the model runs it, mixture
+    as {corpus: row weight}).
 stage (switch to the repo-level stage): step, stage.
 train (each optimizer step, 0-based): step; tokens (row positions after it, padding included); loss (mean next-token
     loss in nats over the step's valid targets, fp64); lr (LambdaLR's at the step); grad_norm (global L2 norm of the

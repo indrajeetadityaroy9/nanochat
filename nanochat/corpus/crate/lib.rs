@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use tree_sitter::Language;
 
-/// A repository source's language, extracted from its name (sources.Source.grammar: "Python" or "C++").
+/// A repository source's language, extracted from its name (sources.Source.language: "Python" or "C++").
 #[derive(Clone, Copy)]
 pub(crate) enum Lang {
     Python,

@@ -28,7 +28,7 @@ def save_checkpoint(path: Path, checkpoint: dict) -> None:
 
 
 def load_model(tag: str, step: int, *, device: torch.device) -> GPT:
-    """A checkpoint's model, at the stage (context, RoPE base) its weights trained in."""
+    """A checkpoint's model, at the context its weights trained in."""
     checkpoint = torch.load(checkpoint_path(tag, step), map_location=device)
     with torch.device("meta"):
         model = GPT(GPTConfig(**checkpoint["model_config"]))

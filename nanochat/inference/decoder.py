@@ -59,10 +59,6 @@ class Request:
     seed: int = 0
     constraint: Constraint | None = None
 
-    def __post_init__(self):
-        if not 0.0 < self.top_p <= 1.0:
-            raise ValueError(f"top_p {self.top_p} outside (0, 1]")
-
 
 @functools.cache
 def prefix_index(tokenizer) -> tuple[list[bytes], np.ndarray]:
@@ -308,7 +304,8 @@ class NativeDecoder:
         while flags[0].any():
             # slots whose step chooses a token: past their prompt (a prompt step's choice is replaced by the prompt)
             choosers = [b for b, s in enumerate(slots) if s is not None and s.prompt_steps == 0]
-            choosing = any(slots[b].request.temperature > 0 or slots[b].request.constraint is not None for b in choosers)
+            choosing = any(slots[b].request.temperature > 0 or slots[b].request.constraint is not None
+                           for b in choosers)
             if choosing:
                 lib.dec_launch_body(handle)
             else:

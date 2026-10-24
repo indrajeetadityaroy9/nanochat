@@ -20,9 +20,8 @@ import zlib
 from dataclasses import dataclass, replace
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
+from torch import Tensor, nn
 
 from nanochat.config import HEAD_DIM, ROPE_BASE, VOCAB_SIZE
 from nanochat.corpus.mixture import Stage
@@ -55,13 +54,10 @@ def has_ve(layer_idx: int, *, n_layer: int) -> bool:
 
 
 def layer_windows(config: GPTConfig) -> list[int]:
-    """Keys before each query, per layer: SSSL tiled, the last layer full (LOG 2026-01-11; 92d63d4 gpt.py:287-314);
-    S = 512, the smallest local window Gemma 3 finds near-lossless (arXiv 2503.19786 §5.2, Fig. 4)."""
-    pattern = "SSSL"
-    window = {"S": 512, "L": config.sequence_len}
-    sizes = [window[pattern[i % len(pattern)]] for i in range(config.n_layer)]
-    sizes[-1] = config.sequence_len
-    return sizes
+    """Keys before each query, per layer: SSSL tiled (every fourth layer L), the last layer L too (LOG 2026-01-11;
+    92d63d4 gpt.py:287-314); L the full context, S = 512, the smallest local window Gemma 3 finds near-lossless
+    (arXiv 2503.19786 §5.2, Fig. 4)."""
+    return [config.sequence_len if i % 4 == 3 or i == config.n_layer - 1 else 512 for i in range(config.n_layer)]
 
 
 def norm(x: Tensor) -> Tensor:

@@ -45,8 +45,7 @@ class Tokenizer:
     directory of its compiled and packed data (loader.split_path)."""
 
     def __init__(self, mergeable: list[bytes], pattern: str, *, name: str, compiled: Path) -> None:
-        self.name, self.compiled = name, compiled
-        self.pattern = pattern
+        self.name, self.compiled, self.pattern = name, compiled, pattern
         self.bos_token_id = len(mergeable)
         self.special_tokens = {token: len(mergeable) + i for i, token in enumerate(SPECIAL_TOKENS)}
         # every id's bytes, a special token's as its text (as tiktoken decodes it), and its byte length in the

@@ -1,8 +1,7 @@
 //! The packer (nanochat/corpus/pack.py): one curated shard of a compiled split at a time, its documents cut into pieces
 //! that fit a training row, the pieces of a train split of a repository corpus drawn fill-in-the-middle examples
 //! (context-level FIM: per piece, after cutting; arXiv 2207.14255 §3.2) whose middles AST-FIM chooses
-//! (arXiv 2506.00204v1 §3.3, §5.1), half of them widened to whole lines (line-level infilling), and the
-//! pieces placed in rows by Best-Fit-Decreasing.
+//! (arXiv 2506.00204v1 §3.3, §5.1), and the pieces placed in rows by Best-Fit-Decreasing.
 
 use std::cell::OnceCell;
 use std::cmp::Reverse;
@@ -120,15 +119,14 @@ fn statement_cuts(ids: &[u16], token_bytes: &[Vec<u8>], ends_line: &[bool], gram
 /// Fill-in-the-middle as AST-FIM trains it (arXiv 2506.00204v1 §5.1 "FIM", §3.3 "Masking Algorithm"), extracted from
 /// pack.py's mapping: the share of pieces made FIM examples (rate); of those the share whose middle is a random
 /// character span (random: Rand-FIM) rather than AST-aligned; of AST-aligned middles the share by Single-Node rather
-/// than Aligned-Span masking (single); of AST-aligned middles the share widened to whole lines (line: whole_lines); the
-/// share in SPM rather than PSM order (spm); the ids of <fim_prefix>, <fim_suffix>, <fim_middle> (sentinels).
+/// than Aligned-Span masking (single); the share in SPM rather than PSM order (spm); the ids of <fim_prefix>,
+/// <fim_suffix>, <fim_middle> (sentinels).
 #[derive(FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct Fim {
     rate: f64,
     random: f64,
     single: f64,
-    line: f64,
     spm: f64,
     sentinels: [u32; 3],
 }
@@ -158,20 +156,14 @@ fn random_span(text: &str, rng: &mut ChaCha8Rng) -> (usize, usize) {
 /// errors span at least one byte). With probability single, Single-Node masking: a named node below the root drawn with
 /// probability proportional to its bytes; else Aligned-Span masking: a random character span (random_span), the lowest
 /// named node holding it, and the run of that node's named children of the largest character intersection over union
-/// with the span (the node itself when it has no named child or none of them meets the span). Then, with probability
-/// line (the last draw, so the syntactic choice is AST-FIM's), the middle widened to the line boundaries of line-level
-/// infilling (the single- and multi-line infilling of HumanEval, arXiv 2204.05999, arXiv 2207.14255: the
-/// prefix ends with a line break, the middle runs from its first line's indentation through its last line break): a
-/// moves to the start of its line when only spaces and tabs precede it there; b moves after the line break ending its
-/// line when only spaces and tabs follow it there (b stays when it already follows a line break, its line holds more
-/// after it, or the text ends without a line break).
+/// with the span (the node itself when it has no named child or none of them meets the span).
 fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) -> Option<(usize, usize)> {
     let tree = grammar.parse(text.as_bytes());
     let root = tree.root_node();
     if root.has_error() || root.named_child_count() == 0 {
         return None;
     }
-    let (a, b) = if rng.random_bool(fim.single) {
+    Some(if rng.random_bool(fim.single) {
         let mut nodes = Vec::new();
         let mut stack: Vec<Node> = root.named_children(&mut root.walk()).collect();
         while let Some(node) = stack.pop() {
@@ -201,19 +193,7 @@ fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) ->
             }
         }
         best
-    };
-    if !rng.random_bool(fim.line) {
-        return Some((a, b));
-    }
-    let text = text.as_bytes();
-    let blank = |bytes: &[u8]| bytes.iter().all(|&c| c == b' ' || c == b'\t');
-    let start = text[..a].iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
-    let a = if blank(&text[start..a]) { start } else { a };
-    let b = match text[b..].iter().position(|&c| c == b'\n') {
-        Some(i) if text[b - 1] != b'\n' && blank(&text[b..b + i]) => b + i + 1,
-        _ => b,
-    };
-    Some((a, b))
+    })
 }
 
 /// The FIM example of a piece's text: its middle a random character span (random_span) with probability random, else

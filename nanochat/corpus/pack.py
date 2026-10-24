@@ -61,8 +61,8 @@ def pack_shard(task: tuple[str, str, int, int, Path]) -> Shard:
     tokenizer = get_tokenizer(vocabulary)
     compiled = split_path(corpus, split, tokenizer)
     bounds = shard_bounds(corpus, split, tokenizer)
-    fim = (dict(rate=FIM_RATE, random=RANDOM_SHARE, single=SINGLE_NODE_SHARE, line=0.0, spm=SPM_SHARE,
-                sentinels=[tokenizer.special_tokens[name] for name in FIM_TOKENS])
+    fim = ({"rate": FIM_RATE, "random": RANDOM_SHARE, "single": SINGLE_NODE_SHARE, "spm": SPM_SHARE,
+            "sentinels": [tokenizer.special_tokens[name] for name in FIM_TOKENS]}
            if fim_packed(corpus, split) else None)
     pieces, counts, tokens = data_crate().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
                                                (int(bounds[i]), int(bounds[i + 1])), row_len=seq_len + 1,

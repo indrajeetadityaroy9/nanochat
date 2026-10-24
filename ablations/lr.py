@@ -60,8 +60,6 @@ def fit(lines: list[dict]) -> dict:
     curvature by construction; a local bracket, as arXiv 2409.19913 §3.1 fits quadratics in log lr), or the lowest-code
     run itself when the neighbour above it diverged."""
     runs = sorted(lines, key=lambda line: line["fields"]["lr_scale"])
-    if len({line["fields"]["lr_scale"] for line in runs}) != len(runs):
-        raise RuntimeError("a setting holds two runs at one lr_scale")
     u = [math.log(line["fields"]["lr_scale"]) for line in runs]
     code = [math.inf if line["measures"] is None else line["measures"]["code"] for line in runs]
     best = int(np.argmin(code))

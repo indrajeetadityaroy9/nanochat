@@ -25,7 +25,6 @@ import json
 import statistics
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -42,7 +41,7 @@ from nanochat.train.loop import train
 from nanochat.train.schedule import RunPlan, plan
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class Run:
     """A run: the base model's recipe except these fields."""
     n_layer: int
@@ -56,7 +55,7 @@ class Run:
         return CORPUS / self.tokenizer
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class Setting:
     """An experiment's setting: the base model at `depth` trained at `ratio` tokens per scaling parameter on each of
     `seeds`, and its alternatives {arm name: the Run fields in which the arm departs from the baseline}."""
@@ -162,7 +161,7 @@ def main(*, experiment: str, settings: list[Setting], baseline: dict) -> None:
             continue
         with (LOGS / f"{tag}.log").open("a", encoding="utf-8") as log:
             child = subprocess.run([sys.executable, "-m", "ablations.harness", json.dumps(dataclasses.asdict(run))],
-                                   stdout=log, stderr=subprocess.STDOUT)
+                                   check=False, stdout=log, stderr=subprocess.STDOUT)
         if child.returncode and diverged(tag) is None:
             raise RuntimeError(f"run {tag} failed: {LOGS / f'{tag}.log'}")
     stopped = {tag: diverged(tag) for tag in tags.values()}

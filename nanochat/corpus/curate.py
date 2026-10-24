@@ -36,6 +36,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from fissix import refactor
 
 from nanochat.corpus.parallel import SPAWN, ordered
 from nanochat.corpus.prepare import COMPRESSION, sha1
@@ -83,9 +84,8 @@ def parses(text: str) -> bool:
 
 
 @functools.cache
-def fixers():
+def fixers() -> refactor.RefactoringTool:
     """fissix's tool with every fixer of fissix.fixes, made once per process."""
-    from fissix import refactor
     return refactor.RefactoringTool(refactor.get_fixers_from_package("fissix.fixes"))
 
 
@@ -129,13 +129,13 @@ def check_row_group(task: tuple[str, int, int]) -> pa.Table:
     recomputed."""
     source, k, g = task
     sys.setrecursionlimit(RECURSION)
+    schema = SOURCES[source].category.schema
     table = pq.ParquetFile(standardized_path(source, k)).read_row_group(g)
-    texts = [repaired(text) for text in table["content"].to_pylist()]
-    table = table.filter(pa.array([text is not None for text in texts], pa.bool_()))
-    content = pa.chunked_array([pa.array([text for text in texts if text is not None], pa.string())])
-    table = table.set_column(table.schema.get_field_index("content"), "content", content)
-    return table.set_column(table.schema.get_field_index("id"), "id", sha1(content)).cast(
-        SOURCES[source].category.schema)
+    texts = pa.array([repaired(text) for text in table["content"].to_pylist()], pa.string())
+    content = texts.drop_null()
+    table = table.filter(texts.is_valid())
+    table = table.set_column(schema.get_field_index("content"), schema.field("content"), content)
+    return table.set_column(schema.get_field_index("id"), schema.field("id"), sha1(content))
 
 
 def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
@@ -181,6 +181,12 @@ def shuffle_dir(source: str) -> Path:
     return CORPUS / "shuffle" / source
 
 
+def undropped(paths: list[Path]) -> str:
+    """A DuckDB FROM clause of the rows of paths that the registered table drops does not list, as n."""
+    return (f"read_parquet({[str(p) for p in paths]}, file_row_number = true) AS n "
+            f"ANTI JOIN drops AS d ON d.file = n.file_index AND d.row = n.file_row_number")
+
+
 def shuffle(source: str, paths: list[Path], drops: pa.Table) -> None:
     """A repository source's rows without the duplicates, as Hive partitions shuffle/<source>/part=<p>/ by the residue
     of its repository (DuckDB COPY ... PARTITION_BY, which creates the partition directories, not their parent)."""
@@ -188,8 +194,7 @@ def shuffle(source: str, paths: list[Path], drops: pa.Table) -> None:
     with database() as con:
         con.register("drops", drops)
         con.execute(f"COPY (SELECT n.repo_name, n.relative_path, n.content, n.id, {residue(REPOSITORY_FILE.group)} "
-                    f"AS part FROM read_parquet({[str(p) for p in paths]}, file_row_number = true) AS n "
-                    f"ANTI JOIN drops AS d ON d.file = n.file_index AND d.row = n.file_row_number) "
+                    f"AS part FROM {undropped(paths)}) "
                     f"TO '{shuffle_dir(source)}' (FORMAT parquet, COMPRESSION {COMPRESSION}, PARTITION_BY (part))")
 
 
@@ -233,8 +238,7 @@ def shard_documents(source: str, paths: list[Path], drops: pa.Table) -> None:
     with database() as con:
         con.register("drops", drops)
         con.execute(f"CREATE TABLE kept AS SELECT {columns}, {residue(category.group)} = 0 AS val "
-                    f"FROM read_parquet({[str(p) for p in paths]}, file_row_number = true) AS n "
-                    f"ANTI JOIN drops AS d ON d.file = n.file_index AND d.row = n.file_row_number")
+                    f"FROM {undropped(paths)}")
         con.execute(f"COPY (SELECT {names} FROM kept WHERE val ORDER BY id) "
                     f"TO '{curated_dir(source, 'val')}/0.parquet' (FORMAT parquet, COMPRESSION {COMPRESSION})")
         con.execute(f"CREATE TABLE train AS SELECT {names}, ntile({SPLIT}) OVER (ORDER BY id) - 1 AS shard "

@@ -18,5 +18,5 @@ NATIVE = CACHE / "native"                # native libraries and their build dire
 RESULTS = ROOT / "results"               # eval/suite.py export, ablations/harness.py (tracked; results/.gitkeep)
 
 if __name__ == "__main__":
-    for directory in (CORPUS, CHECKPOINTS, METRICS, BASE_EVAL, LOGS, CACHE, NATIVE):
+    for directory in (CORPUS, CHECKPOINTS, METRICS, BASE_EVAL, LOGS, NATIVE):  # NATIVE's parents: CACHE
         directory.mkdir(parents=True, exist_ok=True)

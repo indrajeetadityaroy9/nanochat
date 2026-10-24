@@ -31,11 +31,11 @@ class RunPlan:
 
 
 def plan(*, model: GPT, ratio: float) -> RunPlan:
-    """Plan of `model` (any device, its file-level stage's context) at `ratio` tokens per scaling parameter. With C = M D
-    (M: non-embedding training FLOPs per token at the file-level stage), B_opt = 0.2920 C^0.3271 tokens, rounded to
-    whole micro-batches, at least one (d8 at 5 tokens per parameter: 0.46), and eta_opt = 0.3118 C^-0.1250 (DeepSeek
-    LLM, arXiv 2401.02954 §3.1 Eq. 1). Every run, an ablation's or the base model's, uses its own compute's batch and lr
-    for both stages."""
+    """Plan of `model` (any device, its file-level stage's context) at `ratio` tokens per scaling parameter. With
+    C = M D (M: non-embedding training FLOPs per token at the file-level stage), B_opt = 0.2920 C^0.3271 tokens, rounded
+    to whole micro-batches, at least one (d8 at 5 tokens per parameter: 0.46), and eta_opt = 0.3118 C^-0.1250 (DeepSeek
+    LLM, arXiv 2401.02954 §3.1 Eq. 1). Every run, an ablation's or the base model's, uses its own compute's batch and
+    lr for both stages."""
     params = scaling_params(model)
     tokens = int(ratio * params)
     compute = non_embedding_flops_per_token(model) * tokens

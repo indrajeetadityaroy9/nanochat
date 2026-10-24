@@ -20,14 +20,12 @@ Run in this order; everything up to publish is text, everything after it needs t
   python -m nanochat.corpus.curate
   python -m nanochat.corpus.publish push
   python -m nanochat.corpus.publish pull
-  python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt  (adopt: the decided vocabulary, CORPUS/tokenizer)
+  python -m ablations.tokenizer vocabularies|intrinsic|data|runs|adopt  (adopt: the decided arm to CORPUS/tokenizer)
   python -m nanochat.corpus.compile
   python -m nanochat.corpus.pack
 
   CORPUS/raw/<source>/<Hub path>                     the Hub files' columns the standardizer reads (prepare.fetch)
   CORPUS/standardized/<source>/<k>.parquet           fetched Hub file k of the source, in its category's schema
-  CORPUS/manifest.json                               each source's repo, files and rows (prepare.py);
-                                                     the code's commit and the curated shards' rows (publish.push)
   CORPUS/checked/<source>/<k>.parquet                a Python source's standardized file k, every file parsing
   CORPUS/curated/<source>/<split>/<k>.parquet        the source's curated shard k of a split (published)
   CORPUS/README.md                                   the published dataset's card (publish.card)
@@ -35,5 +33,4 @@ Run in this order; everything up to publish is text, everything after it needs t
   CORPUS/tokenizer-ablation/<arm>/, compiled/        the tokenizer ablation's arms and their compiled data
   CORPUS/compiled/<corpus>-<data key>/<split>.*      the compiled split (.bin, .idx, .json) and its packs
                                                      (<split>-T<seq_len>.pieces, .rows, .fim)
-  CORPUS/packed.json                                 each stage's rows and corpus weights (pack.py)
 """

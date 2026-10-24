@@ -194,14 +194,19 @@ INDENTED = regex.compile(r"([ \t]+)(\S.*)")
 
 
 @functools.cache
+def shard_bytes(source: str) -> list[int]:
+    """The text bytes of each shard of the source's curated train split (Parquet footers)."""
+    return [text_bytes(pq.read_metadata(path), "content") for path in curated_shards(source, "train")]
+
+
 def train_bytes(source: str) -> int:
-    """The text bytes of the source's curated train split (Parquet footers)."""
-    return sum(text_bytes(pq.read_metadata(path), "content") for path in curated_shards(source, "train"))
+    """The text bytes of the source's curated train split."""
+    return sum(shard_bytes(source))
 
 
 def byte_shares() -> dict[str, float]:
     """Each file-stage source's share of the stage's bytes: its share of the stage's tokens (Stage.shares, tokens
-    counted at production's bytes per token) at its bytes per token."""
+    counted at the reference tokenizer's bytes per token) at its bytes per token."""
     sources, per_token = mixture.FILE_STAGE.sources, mixture.BYTES_PER_TOKEN
     shares = mixture.FILE_STAGE.shares({s: train_bytes(s) / per_token[s] for s in sources}, mixture.FILE_STAGE.tokens)
     stage_bytes = sum(shares[s] * per_token[s] for s in sources)
@@ -231,7 +236,7 @@ def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
     tasks, composition = [], {}
     for s, share in byte_shares().items():
         fraction, at = share * SAMPLE_BYTES / train_bytes(s), 0
-        composition[s] = {"target_bytes": share * SAMPLE_BYTES, "fraction": fraction}
+        composition[s] = {"target_bytes": share * SAMPLE_BYTES, "fraction": fraction, "documents": 0, "bytes": 0}
         for path in curated_shards(s, "train"):
             md = pq.read_metadata(path)
             for g in range(md.num_row_groups):
@@ -243,8 +248,8 @@ def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
             docs += batch
             units += [ids.setdefault(name, len(ids)) for name in names]
             held[s].update(names)
-            composition[s]["documents"] = composition[s].get("documents", 0) + len(batch)
-            composition[s]["bytes"] = composition[s].get("bytes", 0) + sum(len(text.encode()) for text in batch)
+            composition[s]["documents"] += len(batch)
+            composition[s]["bytes"] += sum(len(text.encode()) for text in batch)
     for s, names in held.items():
         composition[s]["units"] = len(names)
     return docs, units, composition
@@ -373,24 +378,16 @@ def depth_invariance(source: str) -> dict[str, dict[str, float]]:
     return result
 
 
-def byte_alphabet() -> list[str]:
-    """GPT-2's reversible map of the 256 bytes to printable characters, the byte-level alphabet of Hugging Face
-    tokenizers' ByteLevel: a printable byte stands for itself, every other takes the next code point from 256."""
-    printable = {*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)}
-    beyond = iter(range(256, 512))
-    return [chr(b) if b in printable else chr(next(beyond)) for b in range(256)]
-
-
 def fidelity(task: tuple[str, str]) -> dict[str, int]:
     """An arm's encoding checked on a source's first FIDELITY_DOCUMENTS val texts (the documents and chunks checked):
     its pattern's chunks (Python regex, whose chunks fancy-regex's equal) cover every text, tiktoken's encoding (by the
     rank of the joined bytes) equals the training segmentation chunk by chunk, and every text decodes back. The
-    training segmentation is Hugging Face tokenizers' BPE model over the arm's merges: listed pairs merged by rank,
-    each over every occurrence from the left (data/crate train.rs merge_pair), never a pair whose bytes another made."""
+    training segmentation is Hugging Face tokenizers' BPE model over the arm's merges, each byte spelled as the
+    Latin-1 character of its value: listed pairs merged by rank, each over every occurrence from the left (data/crate
+    train.rs merge_pair), never a pair whose bytes another made."""
     arm, source = task
     tokenizer = get_tokenizer(ABLATION / arm)
-    alphabet = byte_alphabet()
-    spelled = ["".join(alphabet[b] for b in entry) for entry in tokenizer.token_bytes[:tokenizer.bos_token_id]]
+    spelled = [entry.decode("latin-1") for entry in tokenizer.token_bytes[:tokenizer.bos_token_id]]
     merges = json.loads((ABLATION / arm / "merges.json").read_text())
     bpe = models.BPE(vocab={s: i for i, s in enumerate(spelled)}, merges=[(spelled[a], spelled[b]) for a, b in merges])
     pattern = regex.compile(tokenizer.pattern)
@@ -404,8 +401,7 @@ def fidelity(task: tuple[str, str]) -> dict[str, int]:
         if tokenizer.enc.decode(tokenizer.enc.encode_ordinary(doc)) != doc:
             raise RuntimeError(f"{arm}: a {source} document does not decode back")
         for piece in pieces:
-            if tokenizer.enc._encode_single_piece(piece) != [t.id for t in bpe.tokenize(
-                    "".join(alphabet[b] for b in piece))]:
+            if tokenizer.enc._encode_single_piece(piece) != [t.id for t in bpe.tokenize(piece.decode("latin-1"))]:
                 raise RuntimeError(f"{arm}: tiktoken encodes {piece!r} ({source}) unlike the trained merges")
         chunks += len(pieces)
     return {"documents": len(docs), "chunks": chunks}
@@ -462,8 +458,7 @@ def document_set(pool: ProcessPoolExecutor, run) -> dict:
     from nanochat.train.stages import drawn
 
     measured = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))["arms"]["sa-bpe"]
-    estimate = {s: np.array([text_bytes(pq.read_metadata(path), "content") for path in curated_shards(s, "train")])
-                / measured["sources"][s]["bytes_per_token"] for s in SOURCES}
+    estimate = {s: np.array(shard_bytes(s)) / measured["sources"][s]["bytes_per_token"] for s in SOURCES}
 
     def shards(source: str, tokens: float, start: int) -> int:
         """The fewest train shards of a source from shard `start` whose estimated sa-bpe tokens hold `tokens`."""
@@ -479,7 +474,8 @@ def document_set(pool: ProcessPoolExecutor, run) -> dict:
         return {s: share * drawn(stage, run) * stage.seq_len for s, share in shares.items()}
 
     file_draws, repo_draws = draws(mixture.FILE_STAGE), draws(mixture.REPO_STAGE)
-    file = {s: shards(s, tokens * (1 if s in mixture.FILE_STAGE.code else MARGIN), 0) for s, tokens in file_draws.items()}
+    file = {s: shards(s, tokens * (1 if s in mixture.FILE_STAGE.code else MARGIN), 0)
+            for s, tokens in file_draws.items()}
     repository = {s: shards(s, tokens * (1 if s in mixture.REPO_STAGE.supply else MARGIN), file.get(s, 0))
                   for s, tokens in repo_draws.items() if s in SOURCES}
     partitions = stage_parts(ABLATION / "sa-bpe", pool,

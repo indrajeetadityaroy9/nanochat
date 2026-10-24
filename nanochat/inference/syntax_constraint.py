@@ -27,10 +27,10 @@ replacement field's unparenthesized lambda, and the limits on nesting are not ch
 barry_as_FLUFL); a partial token at the end is judged by the lexemes it can begin with. BOS is exact: the crate
 proposes it when the lexer and parser end a module (always, before a suffix), ast.parse decides.
 
-Masks (vocab.rs): for each lexer state, every vocabulary token's events (tokens emitted, newlines, line-start whitespace)
-and end state are computed once over a byte trie of the vocabulary, the subtrie after each first byte shared by the
-lexer states that byte takes to one state; a step then runs the parser once per distinct event sequence and maps the
-verdicts back to tokens. masks() computes a batch of constraints' masks in parallel, without the GIL.
+Masks (vocab.rs): for each lexer state, every vocabulary token's events (tokens emitted, newlines, line-start
+whitespace) and end state are computed once over a byte trie of the vocabulary, the subtrie after each first byte
+shared by the lexer states that byte takes to one state; a step then runs the parser once per distinct event sequence
+and maps the verdicts back to tokens. masks() computes a batch of constraints' masks in parallel, without the GIL.
 """
 
 import ast

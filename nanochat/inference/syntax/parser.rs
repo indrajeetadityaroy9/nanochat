@@ -3,7 +3,7 @@
 //! line's first column) and its bracket level (newlines inside brackets are not NEWLINE tokens). A soft keyword's
 //! lexeme has two terminals (a name and the keyword): every stack takes each, so the stacks fork until one dies.
 
-use crate::lexer::{Ev, Lexicon};
+use crate::lexer::{Ev, Lexicon, Terms};
 
 const TAB_SIZE: u32 = 8; // tokenizer.c TABSIZE
 const ALT_TAB_SIZE: u32 = 1; // tokenizer.c ALTTABSIZE
@@ -184,7 +184,7 @@ impl Tables {
     }
 
     /// Whether the parser state takes one of the partial token's lexeme sequences next (any state if none).
-    pub fn viable(&self, lexicon: &Lexicon, state: &Parse, terms: u32) -> bool {
+    pub fn viable(&self, lexicon: &Lexicon, state: &Parse, terms: Terms) -> bool {
         let set = &lexicon.terms[terms as usize];
         set.is_empty() || set.iter().any(|sequence| {
             let mut s = state.clone();

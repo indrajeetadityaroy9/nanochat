@@ -91,10 +91,6 @@ SOURCES = {
     "climbmix": Source(TEXT, "karpathy/climbmix-400b-shuffle", {"English": "shard_*.parquet"}, "text"),
 }
 
-# Each source's repo, files and rows (prepare.py); at publication, the code's commit and each curated split's
-# shards, rows and text bytes (publish.push)
-MANIFEST = CORPUS / "manifest.json"
-
 
 def raw_dir(source: str) -> Path:
     """The source's fetched Hub files at their Hub paths (prepare.fetch)."""

@@ -195,15 +195,16 @@ typedef struct {
     const uint32_t *allow;           /* [B][rows / WORD_BITS]: a masked slot's allowed rows, bit row % WORD_BITS of
                                       * word row / WORD_BITS */
     const float *temperature;        /* [B]: 0 the logits' argmax, else Gumbel-max sampling at that temperature */
-    const float *top_p;              /* [B]: at temperature > 0, below 1: from the nucleus holding that much (k_nucleus) */
+    const float *top_p;              /* [B]: at temperature > 0, below 1: from the nucleus holding that much
+                                      * (k_nucleus) */
     const unsigned long long *seed;  /* [B] */
     const int32_t *pos, *first;      /* [B]: the input's position and the first generated token's (i = pos - first) */
     float *logits;                   /* [B][rows]: a nucleus-sampled slot's logits, -inf outside its allowed rows */
     float *probs;                    /* [B][rows]: k_nucleus's exp(s / T - max) */
 } Choice;
 
-static __device__ __forceinline__ void mma16816(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
-                                                uint32_t b1) {
+static __device__ __forceinline__ void mma16816(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                                uint32_t b0, uint32_t b1) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                  "{%0,%1,%2,%3};\n"
                  : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
@@ -448,7 +449,8 @@ typedef struct {
     bf16 *out;                 /* [B][C] */
     const int32_t *tokens, *pos;  /* [B]: each slot's input token and its position */
     const unsigned long long *active;
-    float *part;               /* slot b, head h, split s: [(b H + h) part_slot + s][HEAD_DIM], each split's value sum */
+    float *part;               /* slot b, head h, split s: [(b H + h) part_slot + s][HEAD_DIM], each split's value
+                                * sum */
     float2 *stat;              /* same index: each split's maximum score m (x) and exponential sum l (y) */
     unsigned *done;            /* [B][H]: the head's splits finished in this launch; its last resets it */
     int part_slot;             /* splits per head and slot the partial buffers hold */
@@ -798,9 +800,9 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     d->layer = (Layer *)calloc(L, sizeof(Layer));
     for (int l = 0; l < L; l++) {
         const uint64_t *p = ptrs + GLOBAL_PTRS + LAYER_PTRS * l;
-        d->layer[l] = {(const bf16 *)p[0], (const bf16 *)p[1], (const bf16 *)p[2], (const bf16 *)p[3], (const bf16 *)p[4],
-                       (const float *)p[5], (const float *)p[6], (const float *)p[7], scal[2 * l], scal[2 * l + 1],
-                       window[l]};
+        d->layer[l] = {(const bf16 *)p[0], (const bf16 *)p[1], (const bf16 *)p[2], (const bf16 *)p[3],
+                       (const bf16 *)p[4], (const float *)p[5], (const float *)p[6], (const float *)p[7], scal[2 * l],
+                       scal[2 * l + 1], window[l]};
     }
     int device;
     cudaGetDevice(&device);

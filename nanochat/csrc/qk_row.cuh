@@ -1,9 +1,9 @@
 /*
- * Device code shared by csrc/qk_prologue.cu (training) and csrc/decode.cu (decoding), so the decoder's q and k equal the
- * training forward's bitwise. Row math on one head row x: n = x / sqrt(mean(x^2) + eps) (F.rms_norm's fp32 epsilon),
- * m = n * g, y = m rotated by -theta over the full head (m1, m2 the halves; y1 = m1 cos + m2 sin, y2 = -m1 sin + m2 cos;
- * karpathy/nanochat 92d63d4 gpt.py:57-65). A row is QK_LANES threads, each holding dims o..o+VEC-1 and their rotation
- * partners o+HALF..; row sums reduce by shuffles within those lanes.
+ * Device code shared by csrc/qk_prologue.cu (training) and csrc/decode.cu (decoding), so the decoder's q and k equal
+ * the training forward's bitwise. Row math on one head row x: n = x / sqrt(mean(x^2) + eps) (F.rms_norm's fp32
+ * epsilon), m = n * g, y = m rotated by -theta over the full head (m1, m2 the halves; y1 = m1 cos + m2 sin,
+ * y2 = -m1 sin + m2 cos; karpathy/nanochat 92d63d4 gpt.py:57-65). A row is QK_LANES threads, each holding dims
+ * o..o+VEC-1 and their rotation partners o+HALF..; row sums reduce by shuffles within those lanes.
  */
 #pragma once
 

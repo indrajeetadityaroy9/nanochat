@@ -29,7 +29,6 @@ import tempfile
 import tokenize
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -202,7 +201,7 @@ def verdicts(checks: list[tuple[str, str, list[str]]], *,
     return list(zip(diagnostics, passed, strict=True))
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class Candidate:
     """A generated candidate: a task's candidates[0] is greedy, candidates[a] for a > 0 a sample with seed a at
     TEMPERATURE."""
@@ -219,10 +218,10 @@ def search(decoder: NativeDecoder, request: Callable[[int], Request],
            check: Callable[[int, list[int]], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
            count: int) -> list[list[Candidate]]:
     """The candidates of tasks 0..count-1 in attempt order: request(i) is task i's greedy request (a fresh constraint
-    each call), check(i, ids) the (prompt, program, diagnostics) that verdicts checks for generated ids. Each round decodes every
-    task without an accepted candidate yet (attempt a: request(i) at temperature 0 for a = 0, TEMPERATURE with seed a
-    after), at most ATTEMPTS rounds, each candidate's check built by a thread as it completes (while the decoder runs
-    the round's others), then checks the round's candidates at once (verdicts)."""
+    each call), check(i, ids) the (prompt, program, diagnostics) that verdicts checks for generated ids. Each round
+    decodes every task without an accepted candidate yet (attempt a: request(i) at temperature 0 for a = 0, TEMPERATURE
+    with seed a after), at most ATTEMPTS rounds, each candidate's check built by a thread as it completes (while the
+    decoder runs the round's others), then checks the round's candidates at once (verdicts)."""
     tried = [[] for _ in range(count)]
     pending = list(range(count))
     with ThreadPoolExecutor(os.cpu_count()) as pool:

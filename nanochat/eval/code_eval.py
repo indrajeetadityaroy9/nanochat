@@ -219,7 +219,8 @@ def filtered_completions(decoder: NativeDecoder, tokenizer: Tokenizer, items: li
 
 def middle_request(tokenizer: Tokenizer, prompt: list[int], lines: int | None, *, max_tokens: int) -> Request:
     """The greedy request of a FIM prompt, stopping at its middle's last kept line (LinesStop; None: uncut)."""
-    return Request(prompt=prompt, max_tokens=max_tokens, stop=None if lines is None else LinesStop(tokenizer, lines=lines))
+    return Request(prompt=prompt, max_tokens=max_tokens,
+                   stop=None if lines is None else LinesStop(tokenizer, lines=lines))
 
 
 def filtered_middles(decoder: NativeDecoder, tokenizer: Tokenizer, problems: list[dict], prompts: list[list[int]],
@@ -238,9 +239,9 @@ def filtered_middles(decoder: NativeDecoder, tokenizer: Tokenizer, problems: lis
 
 @functools.cache
 def sanitizers() -> ProcessPoolExecutor:
-    """evalplus_check's sanitize workers, a process per CPU (sanitize parses every line span of a program: run serially,
-    the evaluation's bottleneck), from a forkserver (never a fork of this torch/CUDA process), SyntaxWarnings of generated
-    code ignored; started once per process."""
+    """evalplus_check's sanitize workers, a process per CPU (sanitize parses every line span of a program: run
+    serially, the evaluation's bottleneck), from a forkserver (never a fork of this torch/CUDA process), SyntaxWarnings
+    of generated code ignored; started once per process."""
     return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("forkserver"),
                                initializer=warnings.filterwarnings, initargs=("ignore", "", SyntaxWarning))
 
@@ -292,11 +293,10 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
     root = Path(os.environ["MULTIPL_E"])
     main = root / "evaluation" / "src" / "main.py"
     with tempfile.TemporaryDirectory() as tmp:
-        files = []
-        for t, task_samples in zip(items, samples, strict=True):
-            files.append(Path(tmp, f"{t.id}.json"))
-            files[-1].write_text(json.dumps({"name": t.id, "language": "cpp", "prompt": t.prompt, "tests": t.entry,
-                                             "completions": task_samples}), encoding="utf-8")
+        files = [Path(tmp, f"{t.id}.json") for t in items]
+        for file, t, task_samples in zip(files, items, samples, strict=True):
+            file.write_text(json.dumps({"name": t.id, "language": "cpp", "prompt": t.prompt, "tests": t.entry,
+                                        "completions": task_samples}), encoding="utf-8")
         with ThreadPoolExecutor(os.cpu_count()) as pool:
             list(pool.map(lambda file: subprocess.run([sys.executable, main, "--file", file, "--output-dir", tmp],
                                                       cwd=tmp, check=True), files))
@@ -377,9 +377,8 @@ def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
     """How a program fails to compile: IndentationError (TabError among them) checked before any other SyntaxError,
     the classification of TokEval's companion post (cimeister.github.io/blog/code_tokenizer_ablations, "How the failing
     generations fail"; linked from arXiv 2608.18062 App. F.3, footnote 15); the parser's overflow (MemoryError,
-    RecursionError) is a SyntaxError, as verify.syntax_error counts it."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    RecursionError) is a SyntaxError, as syntax_constraint.syntax_error counts it."""
+    with warnings.catch_warnings(action="ignore"):
         try:
             compile(source, "<completion>", "exec")
         except IndentationError:
@@ -419,8 +418,9 @@ def parse_generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, lis
 
 
 def fim_generation(model: GPT, tokenizer: Tokenizer) -> dict[str, dict[str, dict]]:
-    """{"<benchmark>/<mode>": {"greedy": infilling(...) of greedy middles cut to their lines (fim_lines)}} of the INFILLING benchmarks in each FIM_MODES
-    order, the FILTERED_MODE entry also {"filtered": that of filtered_middles' middles and their search record}."""
+    """{"<benchmark>/<mode>": {"greedy": infilling(...) of greedy middles cut to their lines (fim_lines)}} of the
+    INFILLING benchmarks in each FIM_MODES order, the FILTERED_MODE entry also {"filtered": that of filtered_middles'
+    middles and their search record}."""
     runs = {}
     for name in INFILLING:
         problems = list(read_problems(name).values())

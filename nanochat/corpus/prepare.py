@@ -1,11 +1,8 @@
 """
 Prepare every source (sources.py): fetch the Hub files it reads, standardize each into its category's schema
-(schema.py), one standardized file per fetched Hub file, and record the source in CORPUS/manifest.json.
-
-The manifest records each source's files, and a source is prepared again only when its extent differs from them (a
-changed mixture); its standardized and checked files are then rebuilt, while fetched files are kept. A fetch reads only
-the columns the standardizer reads, by ranged reads of the Hub's Parquet file, several files at once. A source the
-mixture reads whole is fetched whole; one it reads in part
+(schema.py), one standardized file per fetched Hub file. Its standardized and checked files are rebuilt; a fetched file
+is kept, and fetching skips it. A fetch reads only the columns the standardizer reads, by ranged reads of the Hub's
+Parquet file, several files at once. A source the mixture reads whole is fetched whole; one it reads in part
 (mixture.IN_PART), only the Hub files that hold its share of the draw (extent).
 
 Stack-Edu's Hub files are metadata: its raw file adds each blob's text, fetched from Software Heritage's public S3
@@ -24,7 +21,6 @@ import functools
 import gzip
 import hashlib
 import itertools
-import json
 import resource
 import shutil
 from collections.abc import Callable
@@ -44,7 +40,6 @@ from nanochat.corpus.parallel import SPAWN
 from nanochat.corpus.schema import CONVERSATION, FUNCTION, REPOSITORY_FILE, SPLIT
 from nanochat.corpus.sources import (
     EDU,
-    MANIFEST,
     SOURCES,
     Source,
     checked_path,
@@ -57,10 +52,6 @@ from nanochat.corpus.sources import (
 COMPRESSION = "zstd"
 # Hub files fetched at once (normalization_doc.md §1)
 FETCHES = 4
-
-
-def manifest() -> dict[str, dict]:
-    return json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {"sources": {}}
 
 
 @functools.cache
@@ -168,7 +159,7 @@ def fetch(source: str, file: str) -> Path:
 
 # ---- standardize: a raw table into its category's schema
 
-def sha1(texts: pa.ChunkedArray) -> pa.Array:
+def sha1(texts: pa.Array | pa.ChunkedArray) -> pa.Array:
     """The hex sha1 of each text's UTF-8 bytes."""
     return pa.array([hashlib.sha1(b).hexdigest() for b in texts.cast(pa.large_binary()).to_pylist()], pa.string())
 
@@ -238,36 +229,33 @@ def standardize(task: tuple[str, int, Path]) -> None:
     """One raw file into its standardized file: the rows with text, in the source's category's schema."""
     source, k, path = task
     spec = SOURCES[source]
+    standardized = standardizer(spec)
     pf = pq.ParquetFile(path)
     with pq.ParquetWriter(standardized_path(source, k), spec.category.schema, compression=COMPRESSION) as writer:
         for g in range(pf.num_row_groups):
             raw = pf.read_row_group(g)
-            writer.write_table(standardizer(spec)(raw.filter(pc.is_valid(raw[spec.text])), spec))
+            writer.write_table(standardized(raw.filter(pc.is_valid(raw[spec.text])), spec))
 
 
 def prepare(source: str, files: list[str]) -> None:
-    """Fetch the source's files, standardize them in parallel into a fresh standardized directory (its checked files,
-    derived from them, removed), and record the source."""
+    """Fetch the source's files and standardize them in parallel into a fresh standardized directory (its checked
+    files, derived from them, removed)."""
     spec = SOURCES[source]
-    shutil.rmtree(standardized_path(source, 0).parent, ignore_errors=True)
+    directory = standardized_path(source, 0).parent
+    shutil.rmtree(directory, ignore_errors=True)
     shutil.rmtree(checked_path(source, 0).parent, ignore_errors=True)
-    standardized_path(source, 0).parent.mkdir(parents=True)
+    directory.mkdir(parents=True)
     with ThreadPoolExecutor(1 if spec.repo == EDU else FETCHES) as pool:
         paths = list(pool.map(functools.partial(fetch, source), files))
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
         list(pool.map(standardize, [(source, k, path) for k, path in enumerate(paths)]))
     rows = sum(pq.read_metadata(standardized_path(source, k)).num_rows for k in range(len(files)))
-    record = manifest()
-    record["sources"][source] = {"repo": spec.repo, "hub_files": len(hub_files(source)), "files": files, "rows": rows}
-    MANIFEST.write_text(json.dumps(record, indent=1))
     print(f"{source}: {len(files)} of {len(hub_files(source))} files of {spec.repo}, {rows:,} rows", flush=True)
 
 
 def main() -> None:
     for source in SOURCES:
-        files = extent(source)
-        if manifest()["sources"].get(source, {}).get("files") != files:
-            prepare(source, files)
+        prepare(source, extent(source))
 
 
 if __name__ == "__main__":
