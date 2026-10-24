@@ -18,7 +18,7 @@ import json
 import subprocess
 
 import pyarrow.parquet as pq
-from huggingface_hub import CommitOperationDelete, HfApi, dataset_info, snapshot_download
+from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, dataset_info, snapshot_download
 
 from nanochat.config import DATASET
 from nanochat.corpus import mixture
@@ -26,6 +26,9 @@ from nanochat.corpus.sources import SOURCES, curated_dir
 from nanochat.paths import CORPUS
 
 PATTERNS = ["curated/**", "manifest.json", "README.md"]
+# Bytes per preupload call: an upload URL the Hub's LFS batch call returns expires 15 minutes after the call
+# (X-Amz-Expires=900), so every file of a call must start uploading within them
+PREUPLOAD = 4 * 1024**3
 
 
 def curated() -> dict[str, dict[str, dict[str, int]]]:
@@ -61,18 +64,20 @@ def card(manifest: dict) -> str:
         "import-connected samples. Nothing depends on a tokenizer: tokenizer training, compile and packing (with FIM)",
         "run after `python -m nanochat.corpus.publish pull --revision <sha>`.", "",
         "Layout: `curated/<source>/<split>/<k>.parquet`. A repository source's shard k holds the repositories whose",
-        "lowercased name has `md5_number(lower(repo_name)) % 100 = k`: `val/0`, `train/1` to `train/99`, each sorted by",
-        "repository and path and cut into import-connected samples (`sample`). Any other source holds out 1% of its",
-        "groups (its lowercased repository for issues and functions, the problem for Codeforces-CoTs, the document",
-        "otherwise) in `val/0`, and its train rows in `id` order over `train/0` to `train/99`. `manifest.json` holds each",
-        "source's Hub revision and files, and each split's shards, rows and text bytes.", "",
+        "lowercased name has `md5_number(lower(repo_name)) % 100 = k`: `val/0`, `train/1` to `train/99`, each",
+        "sorted by repository and path and cut into import-connected samples (`sample`). Any other source holds out",
+        "1% of its groups (its lowercased repository for issues and functions, the problem for Codeforces-CoTs, the",
+        "document otherwise) in `val/0`, and its train rows in `id` order over `train/0` to `train/99`.",
+        "`manifest.json` holds each source's Hub revision and files, and each split's shards, rows and text bytes.", "",
         "| Source | Origin (revision) | License | Columns | Train shards / rows | Val rows |",
         "|---|---|---|---|---|---|", *rows, ""])
 
 
 def push() -> None:
     """Write the curated summary and the code's commit into the manifest and the card, then replace the dataset's tree:
-    one commit deleting every file it holds, the upload, and a squash of the history into one commit."""
+    one commit deleting every file it holds, the files' upload in groups of at most PREUPLOAD bytes (the Hub skips an
+    object it holds, so a rerun uploads only the rest), one commit adding them all, and a squash of the history into
+    one commit."""
     path = CORPUS / "manifest.json"
     manifest = json.loads(path.read_text())
     manifest["code"] = subprocess.run(["git", "-c", f"safe.directory={CORPUS.parent.parent}", "rev-parse", "HEAD"],
@@ -85,8 +90,16 @@ def push() -> None:
     if old:
         api.create_commit(DATASET, repo_type="dataset", operations=[CommitOperationDelete(f) for f in old],
                           commit_message="Delete the previous corpus")
-    api.upload_folder(repo_id=DATASET, repo_type="dataset", folder_path=CORPUS, allow_patterns=PATTERNS,
-                      commit_message="nanochat corpus, curated")
+    files = [*sorted(CORPUS.glob("curated/*/*/*.parquet")), path, CORPUS / "README.md"]
+    additions = [CommitOperationAdd(path_in_repo=f.relative_to(CORPUS).as_posix(), path_or_fileobj=f) for f in files]
+    group, size = [], 0
+    for addition in additions:
+        group.append(addition)
+        size += addition.upload_info.size
+        if size >= PREUPLOAD or addition is additions[-1]:
+            api.preupload_lfs_files(DATASET, additions=group, repo_type="dataset")
+            group, size = [], 0
+    api.create_commit(DATASET, repo_type="dataset", operations=additions, commit_message="nanochat corpus, curated")
     api.super_squash_history(DATASET, repo_type="dataset", commit_message="nanochat corpus, curated")
     print(f"{DATASET} revision {api.dataset_info(DATASET).sha}", flush=True)
 

@@ -59,7 +59,7 @@ READ = [source for source in SOURCES
 
 IN_PART = ("synthetic", "text", "math")
 # Production's tokenizer's bytes per token on each source (measured on its compiled train splits and on samples of the
-# sources it did not compile: normalization_doc.md §5.1, §9), for token counts before this corpus's tokenizer exists
+# sources it did not compile: normalization_doc.md §5.1), for token counts before this corpus's tokenizer exists
 BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.638,
                    "ultradata_code_l2_python": 3.709, "stack_edu_cpp": 3.065, "ultradata_stack_v3_l2_cpp": 3.015,
                    "ultradata_code_l2_cpp": 2.935, "kaggle_notebooks": 3.459, "codeforces_cots": 3.536,

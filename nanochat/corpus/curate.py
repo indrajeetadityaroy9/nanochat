@@ -57,8 +57,7 @@ MEMORY = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2
 WINDOW = 4 * os.cpu_count()
 PLACEHOLDER = re.compile(r"<(EMAIL|KEY|NAME|PASSWORD)>")
 LEADING = re.compile(r"^[ \t]+", re.MULTILINE)
-# The recursion limit of the measurement the check reproduces (normalization_doc.md §4.2): deep enough for real
-# files, shallow enough that ast.parse does not overflow the C stack
+# ast.parse's recursion limit: deep enough for real files, shallow enough that it does not overflow the C stack
 RECURSION = 6_000
 
 
