@@ -52,8 +52,9 @@ EMPTY = hashlib.sha1(b"").hexdigest()
 # Half the machine's memory: the lower end of DuckDB's guidance, as some operations bypass the buffer manager's limit
 # (duckdb.org/docs/lts/guides/troubleshooting/oom_errors) and other jobs share the unified memory.
 MEMORY = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2
-# Row groups in flight: one per core, so a core finishing one takes up the next
-WINDOW = os.cpu_count()
+# Row groups in flight: four per core, so the cores keep working while the oldest one, whose result is written next,
+# runs long (a row group's time follows its slowest files)
+WINDOW = 4 * os.cpu_count()
 PLACEHOLDER = re.compile(r"<(EMAIL|KEY|NAME|PASSWORD)>")
 LEADING = re.compile(r"^[ \t]+", re.MULTILINE)
 # The recursion limit of the measurement the check reproduces (normalization_doc.md §4.2): deep enough for real
