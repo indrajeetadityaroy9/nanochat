@@ -150,18 +150,22 @@ def check_row_group(task: tuple[str, int, int]) -> pa.Table:
 
 def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
     """checked_path of each of a Python source's standardized files, written whole, then renamed into place (an
-    existing file is complete and kept)."""
-    for k in range(files):
+    existing file is complete and kept). The row groups of the files left are one stream, so a file of few row groups
+    does not leave the pool idle while its slowest group finishes."""
+    groups = {k: pq.ParquetFile(standardized_path(source, k)).num_row_groups for k in range(files)
+              if not checked_path(source, k).exists()}
+    tasks = [(source, k, g) for k, n in groups.items() for g in range(n)]
+    writers: dict[int, pq.ParquetWriter] = {}
+    for (_, k, g), table in zip(tasks, in_order(pool, check_row_group, tasks), strict=True):
         path = checked_path(source, k)
-        if path.exists():
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(path.name + ".partial")
-        groups = pq.ParquetFile(standardized_path(source, k)).num_row_groups
-        with pq.ParquetWriter(partial, SOURCES[source].schema, compression=COMPRESSION) as writer:
-            for table in in_order(pool, check_row_group, [(source, k, g) for g in range(groups)]):
-                writer.write_table(table)
-        partial.rename(path)
+        if g == 0:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            writers[k] = pq.ParquetWriter(partial, SOURCES[source].schema, compression=COMPRESSION)
+        writers[k].write_table(table)
+        if g == groups[k] - 1:
+            writers.pop(k).close()
+            partial.rename(path)
 
 
 # ---- 2. dedup
