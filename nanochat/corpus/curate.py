@@ -181,7 +181,7 @@ def duplicates(paths: dict[str, list[Path]]) -> dict[str, pa.Table]:
     with database() as con:
         drops = con.execute(f"SELECT source, file, row FROM (SELECT id, source, file, row, row_number() OVER "
                             f"(PARTITION BY id ORDER BY source, file, row) AS n FROM ({union})) "
-                            f"WHERE n > 1 OR id = '{EMPTY}'").fetch_arrow_table()
+                            f"WHERE n > 1 OR id = '{EMPTY}'").to_arrow_table()
     return {source: drops.filter(pc.equal(drops["source"], i)).select(["file", "row"])
             for i, source in enumerate(paths)}
 
@@ -267,11 +267,14 @@ def shard_documents(source: str, paths: list[Path], drops: pa.Table) -> None:
 
 
 def curate() -> None:
-    """Every read source's curated shards, from its standardized files (the Python repository sources' checked ones)."""
+    """Every read source's curated shards, from its standardized files (the Python repository files', synthetic files'
+    and functions' checked ones)."""
     data_crate()  # built once here, before the workers load it
     files = {source: len(list(standardized_path(source, 0).parent.iterdir())) for source in mixture.READ}
-    python = [s for s in mixture.READ if SOURCES[s].schema in (REPOSITORY_FILE, SYNTHETIC_FILE, FUNCTION)
-              and SOURCES[s].language == "Python"]
+    # a category is its schema object: EXERCISE, SYNTHETIC_FILE and NOTEBOOK have equal fields, so only `is` tells them
+    # apart (pyarrow's == and `in` compare fields)
+    python = [s for s in mixture.READ if SOURCES[s].language == "Python"
+              and any(SOURCES[s].schema is category for category in (REPOSITORY_FILE, SYNTHETIC_FILE, FUNCTION))]
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
         for source in python:
             check(source, files[source], pool)

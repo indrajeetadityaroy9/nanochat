@@ -21,6 +21,9 @@ TEXT: a web document.
 SAMPLE_FILE: a curated repository file and its import-connected sample (curate.py): the files of a sample are
 consecutive rows, in the sample's dependency order.
 
+A category is its schema object: EXERCISE, SYNTHETIC_FILE and NOTEBOOK have equal fields, and pyarrow's == compares
+fields, so code tells categories apart with `is`, never == or `in`.
+
 The split (curate.py): a document's group is val when md5_number(group) % SPLIT is 0. The group is the repository, its
 name lowercased (REPOSITORY_FILE, FUNCTION, ISSUE), the problem (CONVERSATION), else the document.
 """
