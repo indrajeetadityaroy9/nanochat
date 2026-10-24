@@ -25,7 +25,8 @@ Analysis, pre-registered, written to RESULTS/lr.json's "analysis":
   factor; arXiv 2512.22382 Table 1), its exponent (horizon_exponent_net) carried to the base model's horizon range
   (every rule in play is a power law in D), and the base model's batch growth by the same rule.
 m_D,base is the base model's tokens over d24 at SHORT's, m_D,d8 d8 at LONG's over d8 at SHORT's. Batches, token counts
-and the law's lrs are the runs' recorded plans (the base model's: nanochat/run.py base_plan at max_ratio of d24).
+and the law's lrs are the runs' recorded plans (the base model's: nanochat/run.py plan_of(RunConfig()), d24 at its
+data's max_ratio).
 
 The recorded runs (RESULTS/lr.jsonl, lr-curves.jsonl, lr.json) were made by 4ade225's ablations/harness.py, whose
 records name a run's fields "fields" (n_layer, ratio, lr_scale, seed) and its setting "setting" (depth,
@@ -36,9 +37,7 @@ import math
 
 import numpy as np
 
-from nanochat.corpus.tokenizer import get_tokenizer
-from nanochat.run import base_plan
-from nanochat.train.stages import max_ratio
+from nanochat.run import RunConfig, base_plan, plan_of
 
 # The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords
 SHORT = 5
@@ -96,7 +95,7 @@ def analysis(lines: list[dict]) -> dict:
     fits = {f"d{depth} at {ratio:g}": fit(setting(lines, depth, ratio))
             for depth, ratio in ((8, SHORT), (8, LONG), (24, SHORT))}
     d8_short, d8_long, d24_short = recorded_plan(8, SHORT), recorded_plan(8, LONG), recorded_plan(24, SHORT)
-    base = base_plan(depth=24, ratio=max_ratio(get_tokenizer(), depth=24))
+    base = plan_of(RunConfig())
     m_b_base = base.total_batch_size / d24_short["total_batch_size"]
     m_b_d8 = d8_long["total_batch_size"] / d8_short["total_batch_size"]
     m_d_base = base.num_iterations * base.total_batch_size / tokens(d24_short)

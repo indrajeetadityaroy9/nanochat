@@ -419,8 +419,9 @@ def fidelity(task: tuple[str, str]) -> dict[str, int]:
 def intrinsic() -> None:
     """Every arm's compiled val split of every source, the equal-bytes check, and RESULTS/tokenizer-intrinsic.json
     (module docstring), all in one process pool: depth invariance per program source and fidelity per arm and source
-    (which read no compiled data) beside the compiles, every split at once, each split's counts as it is compiled."""
-    seconds, start, began = {}, time.perf_counter(), provenance()
+    (which read no compiled data) beside the compiles, every split at once, each split's counts as it is compiled.
+    "seconds": "compiled", the wall time to the last compile's end (the checks overlap the compiles), and "all"."""
+    start, began = time.perf_counter(), provenance()
     programs = [s for s, spec in SOURCES.items() if spec.category in PROGRAMS]
     checks = [(arm, source) for arm in ARMS for source in SOURCES]
     with ProcessPoolExecutor(mp_context=SPAWN) as pool, ThreadPoolExecutor(len(checks)) as threads:
@@ -435,8 +436,7 @@ def intrinsic() -> None:
 
         # a val split is a few row groups: one split at a time would leave the pool idle
         splits = dict(zip(checks, threads.map(compiled, checks), strict=True))
-        seconds["compile"] = time.perf_counter() - start
-        begin = time.perf_counter()
+        compiled_seconds = time.perf_counter() - start
         counts, sizes = {}, {}
         for check, future in splits.items():
             counts[check], sizes[check] = future.result()
@@ -450,8 +450,7 @@ def intrinsic() -> None:
                 record["arms"][arm]["depth_invariance"][source] = result
         for (arm, source), future in zip(checks, fidelities, strict=True):
             record["arms"][arm]["fidelity"][source] = future.result()
-        seconds["measures"] = time.perf_counter() - begin
-    record |= {"seconds": seconds | {"all": time.perf_counter() - start}, "provenance": began}
+    record |= {"seconds": {"compiled": compiled_seconds, "all": time.perf_counter() - start}, "provenance": began}
     (RESULTS / "tokenizer-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
@@ -487,9 +486,10 @@ def document_set(run) -> dict:
 
 def data() -> None:
     """Every arm's training set, compiled and packed, and RESULTS/tokenizer-data.json (module docstring): each corpus
-    of each arm compiled, then packed, as its own job, every job at once into one process pool; the repositories
-    corpora one arm after another (each fills the cores), sa-bpe's by compile_stage, which runs beside the sources'
-    compiles and chooses the partitions."""
+    of each arm compiled, then packed, as its own job, every job into one process pool; compile_stage, beside the other
+    sources' compiles, chooses the partitions and compiles sa-bpe's repositories corpora, then the set check, then the
+    repository sources' jobs and the other arms' repositories corpora, one arm after another (each fills the cores).
+    "seconds": "compiled", the wall time to the last compile's end (packs overlap the compiles), and "all"."""
     # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
     from nanochat.run import base_plan
     from nanochat.train.stages import drawn, max_ratio, stage_rows
@@ -499,7 +499,7 @@ def data() -> None:
     shards = document_set(run)
     stages = (mixture.FILE_STAGE, mixture.REPO_STAGE)
     leading = {s: shards["file"].get(s, 0) + shards["repository"].get(s, 0) for s in SOURCES}
-    compiled = []  # each job's compile end
+    compiled = []  # each compile's end
 
     def pack(corpus: str, directory: Path) -> None:
         """A compiled corpus's packs in each stage that reads it: its train split's shards in the set, its val split
@@ -523,10 +523,10 @@ def data() -> None:
         compiled.append(time.perf_counter())
         pack(corpus, ABLATION / arm)
 
-    def repositories() -> None:
+    def repositories(parts: list[int]) -> None:
         for arm in ARMS:
             if arm != "sa-bpe":  # compile_stage compiled sa-bpe's as it chose the partitions
-                compile_repositories(ABLATION / arm, partitions.result(), pool)
+                compile_repositories(ABLATION / arm, parts, pool)
             compiled.append(time.perf_counter())
             for corpus in mixture.REPOSITORIES.values():
                 pack(corpus, ABLATION / arm)
@@ -536,16 +536,19 @@ def data() -> None:
           ThreadPoolExecutor(len(ARMS) * len(SOURCES) + 2) as threads):  # the source jobs, repositories, compile_stage
         partitions = threads.submit(compile_stage, ABLATION / "sa-bpe", pool,
                                     MARGIN * sum(shards["draws"]["32768"][c] for c in mixture.REPOSITORIES.values()))
-        jobs = [threads.submit(source, arm, corpus) for arm in ARMS for corpus in SOURCES]
-        jobs.append(threads.submit(repositories))
-        if max(shards["file"][s] for s in mixture.REPOSITORY_SOURCES) > train_parts().index(partitions.result()[0]):
+        # the sources the set check does not gate compile while compile_stage chooses the partitions
+        jobs = [threads.submit(source, arm, corpus) for arm in ARMS for corpus in SOURCES
+                if corpus not in mixture.REPOSITORY_SOURCES]
+        parts = partitions.result()
+        if max(shards["file"][s] for s in mixture.REPOSITORY_SOURCES) > train_parts().index(parts[0]):
             raise RuntimeError("the file stage's repository shards reach the repository stage's partitions")
+        jobs += [threads.submit(source, arm, corpus) for arm in ARMS for corpus in mixture.REPOSITORY_SOURCES]
+        jobs.append(threads.submit(repositories, parts))
         for job in jobs:
             job.result()
-    chosen = {"file": shards["file"], "repository": shards["repository"], "partitions": partitions.result(),
+    chosen = {"file": shards["file"], "repository": shards["repository"], "partitions": parts,
               "draws": shards["draws"]}
-    compile_seconds = max(compiled) - start
-    pack_seconds = time.perf_counter() - start - compile_seconds
+    compiled_seconds = max(compiled) - start
     arms = {}
     for arm in ARMS:
         tokenizer = get_tokenizer(ABLATION / arm)
@@ -568,7 +571,7 @@ def data() -> None:
     record = {"run": {"depth": DEPTH, "ratio": RATIO, "num_iterations": run.num_iterations,
                       "total_batch_size": run.total_batch_size, "repo_start": run.repo_start},
               "set": chosen, "arms": arms,
-              "seconds": {"compile": compile_seconds, "pack": pack_seconds, "all": time.perf_counter() - start},
+              "seconds": {"compiled": compiled_seconds, "all": time.perf_counter() - start},
               "provenance": began}
     (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
@@ -628,10 +631,13 @@ def decide(lines: list[dict]) -> dict:
 
 def adopt() -> None:
     """The decided vocabulary (RESULTS/tokenizer.json "analysis" "decision") as the corpus's tokenizer, TOKENIZER: the
-    arm of the decided pattern and score, copied, or that pair trained on the sample when no arm holds it."""
+    arm of the decided pattern and score, copied, or that pair trained on the sample when no arm holds it. It writes
+    over the provisional tokenizer (the sa-bpe arm's copy) in place: compiled and packed data are keyed by a
+    vocabulary's data key, so adopting sa-bpe reuses the provisional corpus and any other vocabulary compiles into new
+    directories (nanochat/run.py's stale guard rejects a run recorded under the replaced one)."""
     decision = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))["analysis"]["decision"]
     pattern, score = ARMS[decision["pattern"]][0], decision["score"]
-    TOKENIZER.mkdir(parents=True)
+    TOKENIZER.mkdir(parents=True, exist_ok=True)
     arm = next((arm for arm, spec in ARMS.items() if spec == (pattern, score)), None)
     if arm is None:
         docs, units, _ = sample()
