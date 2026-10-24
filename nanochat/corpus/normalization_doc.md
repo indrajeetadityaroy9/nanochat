@@ -28,7 +28,7 @@ the sources and production's packs.
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
 | Tokenizer | retrained on this corpus at the 8K stage's shares of bytes; production's vocabulary size; pattern and score decided on the GH200 | 9 |
-| Publication | the curated text in the private `iaroy/nanochat-data`; tokenizer, compile, packing and FIM run after the pull | 10 |
+| Publication | the curated text in the private `iaroy/nanochat-data` at `71c8e954`; tokenizer, compile, packing and FIM run after the pull | 10 |
 
 ## 1. Sources
 
@@ -597,7 +597,7 @@ packing cuts pieces at token offsets in rows of `seq_len` tokens, FIM encodes it
 |---|---|---|
 | Prepare: fetch, standardize, manifest | `prepare.py` | done: 18 sources (§1) |
 | Curate: Python check, deduplication, split, shards | `curate.py` | done: 178,887,291 rows, verified (§4) |
-| Publish | `publish.py` | pushing |
+| Publish | `publish.py` | done: `iaroy/nanochat-data` @ `71c8e9541a5c29c20d0014e688acf69430c6c485`, one commit, 1,812 shards, the manifest and the card (code `37cebf7`) |
 | Tokenizer: decision, sample, training | `tokenizer.py`, `ablations/tokenizer.py` | on the GH200, after the pull |
 | Compile: 8K samples, 32K repository documents | `compile.py` | on the GH200 |
 | Mixture, pack, loader | `mixture.py`, `pack.py`, `loader.py` | written; run on the GH200 |
