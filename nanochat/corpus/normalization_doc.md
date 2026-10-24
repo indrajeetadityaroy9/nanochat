@@ -67,8 +67,9 @@ splits, the benchmark's, §3.4.
   production's bytes per token, over the train split's 99 of 100 residues (§4.4), widened by 6% (`mixture.SPREAD`) for
   a retrained tokenizer's compression. Across tokenizer training mixes "the NSL on any given subset only varies by 5 to
   6 percentage points" (arXiv 2402.01035 §2.3); synthetic code and UltraData-Math L3 enter a sample that held none of
-  them, so the bound is borrowed [inference]. `tokenizer.main` reports each group's train tokens over its draw under
-  the retrained tokenizer, and `pack.fit` names a source that runs short.
+  them, so the bound is borrowed [inference]. A trial retraining (§9: production's pattern and score on this corpus's
+  sample) holds 1.096, 1.071 and 1.169 times the synthetic, text and mathematics draws (measured); `tokenizer.main`
+  reports them under the decided tokenizer, and `pack.fit` names a source that runs short.
 
   | Group | Files | Standardized text | Over the draw | Curated train text | Over the draw |
   |---|---|---|---|---|---|
@@ -552,8 +553,8 @@ one corpus. "Group by language and repo" beat "Group by repo": HumanEval(+) 17.1
 
 Production's tokenizer (`nanochat/data/tokenizer.py`): byte-level BPE scored by SA-BPE's F·ln R (a pair's frequency
 times the log of the number of authorship units holding it); 32,768 ids (256 bytes, 32,508 merges, BOS and the three
-FIM sentinels); the split pattern below (`SPLIT_PATTERN`), cl100k's with numbers in one or two digits; trained on equal
-bytes from each curated source.
+FIM sentinels); the split pattern below (`SPLIT_PATTERN`), cl100k's with numbers in one or two digits and no line break
+after a punctuation run; trained on equal bytes from each curated source.
 
 ```
 '(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]|\s+(?!\S)|\s+
@@ -565,19 +566,39 @@ the run, is not sampled).
 - Production's sample holds none of the synthetic code or UltraData-Math L3, 29.1% of the file stage, and 18.27% of
   its bytes are web mathematics this corpus does not read (measured).
 - "tokenizers should be trained on the data mix that they are expected to see during training/inference"
-  (arXiv 2402.01035 §2.3); "Leaving a language out of tokenizer training raises its BPB in every language we study"
-  (arXiv 2610.12144).
-- Authorship units: `repo_name` for repository files, the document otherwise. The sample targets 13.38 GB
-  (`SAMPLE_BYTES`), production's size.
+  (arXiv 2402.01035 §2.3), on compression alone: across its mixes a subset's compression "only varies by 5 to 6
+  percentage points". Over natural languages, equal tokenizer-training weights gave the models higher bits per byte
+  than proportional ones, and the authors recommend "proportional tokenizer-training weights as the default"
+  (arXiv 2610.12144 Table 6, §7; bits per byte, not task accuracy); "Leaving a language out of tokenizer training
+  raises its BPB in every language we study" (its abstract).
+- Authorship units (SA-BPE's R): the repository (`repo_name`, lowercased, one unit across sources) for repository files
+  and CodeXGLUE's functions; the document otherwise, as synthetic code, notebooks, web text and mathematics name no
+  author (Nemotron's rows hold no repository). SA-BPE tested repositories only; its §6 suggests documents for natural
+  language, untested. The sample targets 13.38 GB (`SAMPLE_BYTES`), production's size.
 - Every token figure in this document is in production's tokenizer; a retrained one rescales each by its bytes per
   token.
 
-**Vocabulary: 32,768, as production.** SA-BPE ran at 32,768 ids (arXiv 2604.14053 Table 5); DeepSeek-Coder uses
-32,000 (§3.2); StarCoder2 found "increasing the vocabulary size to 100K did not improve performance" (§6.2); Dagan et
-al. measured HumanEval 20.52–20.84 from 32K to 256K (§3.2). Of production's 32,508 merges, 3 never occur in its
-104.25B compiled train tokens (measured).
+**Measured on the GB10** (the sample, and a trial retraining with production's pattern and score into `/tmp`):
+- The sample: 13.44 GB, 3,988,600 documents, 3,429,396 authorship units (143,869 repositories in several sources);
+  every source within 0.99–1.05 of its byte target, the repository sources above it by their path comments, which the
+  target (Parquet footers) does not count; no empty text, CR or BOM; 53 s and 17.2 GB of memory.
+- Training: 316 s. On 400 val documents per source, tiktoken's encoding equals the trainer's merges replayed in order in
+  all 9,386,537 chunks, and every document decodes to itself: a merge the trainer refuses (its bytes already a token)
+  never splits training from encoding there. Of its 32,508 merges, 4 never occur in its own 3.71B-token sample and 28
+  occur fewer than 100 times. Per source, its val bytes per token lie within −1.9% and +1.9% of production's
+  tokenizer's.
+- The longest whitespace run of any curated document is 9,721 characters; production's pattern stops tiktoken (and the
+  trainer) on a run of 999,999 not ending in a line break, fancy-regex's backtrack limit (`ablations/tokenizer.py`
+  HYBRID_PATTERN).
 
-**Split pattern and score: decided on the GH200** by `ablations/tokenizer.py` ported to this corpus (`gh200.md`).
+**Vocabulary: 32,768, as production.** SA-BPE ran at 32,768 ids (arXiv 2604.14053 Table 5); DeepSeek-Coder uses
+32,000 (§3.2); StarCoder2, at 49,152, found in preliminary experiments that "increasing the vocabulary size to 100K did
+not improve performance" (§6.2); Dagan et al. measured HumanEval 20.52–20.84 from 32K to 256K (§3.2) on 1.5B models
+fine-tuned for 500B code tokens, not trained from scratch. Of production's 32,508 merges, 3 never occur in its 104.25B
+compiled train tokens (measured).
+
+**Split pattern and score: decided on the GH200** by `ablations/tokenizer.py`: its arms train on this corpus's sample
+and its intrinsic record reads the val splits; its runs train once training reads the corpus (`gh200.md`).
 Measured properties of the pattern, on 20,000 documents per corpus:
 - Numbers come in pairs from the left (`12345` → `12 34 5`). Digit tokens are 8.3–11.5% of UltraData-Math L3's tokens
   and 4.2–7.5% of code's; single digits would add 2.4–3.3% to UltraData-Math L3's tokens.
@@ -599,7 +620,7 @@ packing cuts pieces at token offsets in rows of `seq_len` tokens, FIM encodes it
 | Prepare: fetch, standardize, manifest | `prepare.py` | done: 18 sources (§1) |
 | Curate: Python check, deduplication, split, shards | `curate.py` | done: 178,887,291 rows, verified (§4) |
 | Publish | `publish.py` | done: `iaroy/nanochat-data` @ `a4ec1a08367ce8ca02690e2b9d79190e0afeaf6c`, one commit and one branch: `<source>/<split>/<k>.parquet` (1,812 shards), the manifest and the card (code `aa37215`); viewer off |
-| Tokenizer: decision, sample, training | `tokenizer.py`, `ablations/tokenizer.py` | on the GH200, after the pull |
+| Tokenizer: decision, sample, training | `tokenizer.py`, `ablations/tokenizer.py` | sample and a trial training measured on the GB10 (§9); the ablation and the decided tokenizer on the GH200 |
 | Compile: 8K samples, 32K repository documents | `compile.py` | on the GH200 |
 | Mixture, pack, loader | `mixture.py`, `pack.py`, `loader.py` | written; run on the GH200 |
 | Training reads the corpus; the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |

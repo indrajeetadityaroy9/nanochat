@@ -10,10 +10,9 @@ the byte mixture, so their expectation over any exchangeable prior on mixtures e
 which a tokenizer trained on the equal mixture minimizes on the assumption that a tokenizer trained on a mixture
 compresses that mixture best (arXiv 2402.01035 §2.3, qualitatively); compute is proportional to tokens
 (arXiv 2407.13623 Eq. 5, its only part in the argument). arXiv 2610.12144 §7 recommends proportional
-tokenizer-training weights instead, an open decision for production (ablations/tokenizer.py COMPOSITION). The
-tokenizer ablation's arms (ablations/tokenizer.py) train on the same sample (sample, merges) into
-TOKENIZER_ABLATION/<arm>, beside one vocabulary on the sample at the training mixture's shares; get_tokenizer loads
-production's or an arm's.
+tokenizer-training weights instead, which the corpus's tokenizer takes (nanochat/corpus/tokenizer.py), and the
+tokenizer ablation (ablations/tokenizer.py) now trains its arms on the corpus; get_tokenizer loads production's or a
+vocabulary in TOKENIZER_ABLATION/<name>.
 
 python -m nanochat.data.tokenizer
 """

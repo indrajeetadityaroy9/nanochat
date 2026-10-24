@@ -381,11 +381,12 @@ made. They share one mechanism (`ablations/harness.py`) whose runs train and eva
 | File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
 | `lr.py` | d8 at 5 and 200, d24 at 5 (1 seed each): the d24 optimum times d8's horizon trend carried to production | DeepSeek LLM's law (§3.1) × 2.3218 at production's horizon (adopted 2026-10-20 as × 2.5467; estimator amended 2026-10-22; Peak lr) | × 2 and × 4 (× 8 at d8): the law was fit for AdamW under a multi-step schedule, 8.0× below production's compute, and the transfer rules disagree on the optimum's horizon trend (d8 ratio: SDE rule × 0.354, Step-Law × 4.92); × 2 beat × 1 by 0.018 at d8 at 20 | none |
-| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, two seeds per arm: sa-bpe against sa-bpe-fused (also the positive control), the hybrid and bpe, parsing by an exact sign test over the problems; every arm's intrinsic record (TokEval's metrics) on the GH200, and sa-bpe-mixture's (the sample at the training mixture's shares: described, not trained) | SA-BPE's F·log R (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the hybrid: SA-BPE within cl100k's letter clause, the non-fusing punctuation run and whitespace by type, each run whole (arXiv 2608.18062's companion post); the fusing pattern (MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, while code bits per byte shows no association with MBPP across the post's tokenizers); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
+| `tokenizer.py` (The tokenizer experiment) | equal bytes: d16 at about 20 tokens per parameter, two seeds per arm: sa-bpe against sa-bpe-fused (also the positive control), the hybrid and bpe, all trained on the corpus tokenizer's sample, parsing by an exact sign test over the MBPP+ problems; every arm's intrinsic record (TokEval's metrics, val coverage) on the corpus's val splits, on the GH200 | SA-BPE's F·log R (arXiv 2604.14053) within the non-fusing pattern, 32,768 ids, pending this experiment (Data and stages) | the hybrid: SA-BPE within cl100k's letter clause, the non-fusing punctuation run and whitespace by type, each run whole (arXiv 2608.18062's companion post); the fusing pattern (MBPP pass@1 0.230 → 0.086 with the tokenizer corpus fixed, while code bits per byte shows no association with MBPP across the post's tokenizers); frequency BPE (SA-BPE has no downstream test, its Limitations) | equal bytes: a better compressor's run is shorter |
 
 **Results.** `lr.py` ran on 2026-10-20 at dataset revision `1e711aa` (`results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`;
 Peak lr), on the first tokenizer's data; production carries its optima to other data (Peak lr). The tokenizer
-experiment has not run, nor its vocabularies and data (`python -m ablations.tokenizer vocabularies`, `data`).
+experiment has not run, nor its vocabularies and data (`python -m ablations.tokenizer vocabularies`, `data`); its
+`runs` wait for training to read the corpus (`nanochat/corpus/gh200.md` steps 3, 4 and 5).
 
 ### Method
 
@@ -394,10 +395,10 @@ experiment has not run, nor its vocabularies and data (`python -m ablations.toke
   `train/loop.py train` (the file-level then the repository stage, the production data order by seed, τ-law weight
   decay) and `eval/suite.py evaluate`'s likelihood metrics and parse measure (the same held-out rows for every run); its
   model is production's GPT, and its tokenizer and packs production's unless `tokenizer` names an arm of
-  `ablations/tokenizer.py`, whose production arm is production's vocabulary on that experiment's documents
-  (`harness.main`'s `production` fields). Its plan (batch, steps, peak lr) is the production model's at the setting
-  (`harness.production_plan`; `harness.plan_of` at the run's lr), so arms match in hyperparameters and, unless an arm
-  sets its own `ratio` (the tokenizer experiment's equal bytes), in tokens, and every
+  `ablations/tokenizer.py`, whose sa-bpe arm is the corpus tokenizer's pattern and score on that experiment's
+  documents (`harness.main`'s `production` fields). Its plan (batch, steps, peak lr) is the production model's at the
+  setting (`harness.production_plan`; `harness.plan_of` at the run's lr), so arms match in hyperparameters and, unless
+  an arm sets its own `ratio` (the tokenizer experiment's equal bytes), in tokens, and every
   run completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
   compared before its decay, where loss curves cross and rankings flip (arXiv 2509.02046; arXiv 2405.18392). An lr arm's
   weight decay follows its lr by the τ law, λ = 1/(η τ T), as production's would: the sweep varies η at the fixed EMA
@@ -520,43 +521,26 @@ production's multiplier and lr, null while a grid needs extending).
 
 ### The tokenizer experiment
 
-`ablations/tokenizer.py`: the decision production's tokenizer waits on, as every later step trains on its tokens. Data
-and stages describes the current vocabulary (SA-BPE within the non-fusing pattern), production's until this decides.
-The arms come from TokEval (arXiv 2608.18062, its companion post "Tokenizer Code Ablations" and its library), SA-BPE
+`ablations/tokenizer.py`: the decision the corpus tokenizer's split pattern and merge score wait on
+(`nanochat/corpus/tokenizer.py` `PATTERN`, `SCORE`), as every later step trains on its tokens. Data and stages
+describes the current vocabulary (SA-BPE within the non-fusing pattern), production's until this decides. The arms
+come from TokEval (arXiv 2608.18062, its companion post "Tokenizer Code Ablations" and its library), SA-BPE
 (arXiv 2604.14053 and its repository), tiktoken's encodings and the code-tokenizer literature; every claim below was
-checked against its source on 2026-10-21 (the papers' full text, the post, the repositories at the commits cited).
-Every candidate production keeps or dismisses is trained, two seeds each: the literature's evidence is at 1.27B
-parameters and about 128K ids, on Python, and a dismissal at this scale, vocabulary and mixture rests on a run of its
-own. The sample's composition, whose effect is below what the runs resolve, is described instead.
+checked against its source on 2026-10-21 and again on 2026-10-24 (the papers' full text, the post, the repositories at
+the commits cited). Every candidate the corpus keeps or dismisses is trained, two seeds each: the literature's
+evidence is at 1.27B parameters and about 128K ids, on Python, and a dismissal at this scale, vocabulary and mixture
+rests on a run of its own.
 
-- **Arms.** Four vocabularies of 32,768 ids, trained on the tokenizer's sample (`data/tokenizer.py` `sample`) by the
-  same crate and encoded by tiktoken: sa-bpe, production's; sa-bpe-fused, the same score within karpathy/nanochat's
-  pattern (the first tokenizer's), whose punctuation clause takes the line breaks after it as cl100k's does; the
-  hybrid (below); bpe, frequency alone within production's pattern (SA-BPE's baseline, its Table 3 row F).
-- **The sample's composition,** described, not trained: sa-bpe-mixture, sa-bpe on the sample at the training
-  mixture's shares (`sample` "mixture": `config.MIXTURE`'s group shares of the equal sample's bytes, each group's
-  sources at their natural shares). Of its bytes code is 87.3% against the equal sample's 72.9%, math 2.9% against
-  18.2%, the Python corpora 60.0% against 36.3%. The evidence is on compression and language modelling, none on code
-  accuracy:
-  - more code in a tokenizer's data compresses code better: "tokenizers should be trained on the data mix that they
-    are expected to see during training/inference", the normalized sequence length of a subset varying "only … by 5
-    to 6 percentage points" over the mixes (arXiv 2402.01035 §2.3, Fig. 2; compression only);
-  - a tokenizer "trained on similar data as the model" leaves the fewest under-trained tokens (Magikarp,
-    arXiv 2405.05417 §5; observed across released models);
-  - at nanochat's d24 (1.27B parameters, about 128K ids, 30 languages), equal tokenizer-training weights raised the
-    model's 31-language mean FLORES+ bits per byte above weights proportional to its training data in all 5 pairs
-    (+0.0015 to +0.0107; 4 beyond run-to-run variation, a seed sd of 0.0012), most in the languages of the smallest
-    training shares (ρ −0.61 between a language's change and its share); the authors recommend "proportional
-    tokenizer-training weights as the default to start from" (arXiv 2610.12144 Table 6, §7);
-  - on code, the companion post's tokenizer corpora of 0, 5, 30 and 50% code (by documents; one run each, within the
-    fusing and the non-fusing pattern, at a fixed token budget) leave MBPP unordered (ρ −0.40 in each, p 0.60), beside
-    the fusing pattern's up to 0.156; math and code bits per byte fall about 0.005 from 0 to 50% and HumanEval rises
-    0.024 (endpoints, single runs).
-
-  Code holds most of the training data, as the largest languages of arXiv 2610.12144, whose change was the smallest,
-  so 72.9 against 87.3% code would move code bits per byte by less than the runs resolve (0.0067 at two seeds,
-  Decisions) [inference] and a trained arm would read equal; its intrinsic record holds the measures that literature
-  names (bytes per token, the tokens the documents hold rarely or never) beside the arms'.
+- **Arms.** Four vocabularies of 32,768 ids (32,764 mergeable tokens, BOS and the 3 FIM sentinels), trained on the
+  corpus tokenizer's sample (`nanochat/corpus/tokenizer.py` `sample`: the corpus's curated train splits at the file
+  stage's shares of bytes) by the same crate (`corpus/tokenizer.py` `train`, into
+  `artifacts/corpus/tokenizer-ablation/<arm>`) and encoded by tiktoken: sa-bpe, production's; sa-bpe-fused, the same
+  score within karpathy/nanochat's pattern (the first tokenizer's), whose punctuation clause takes the line breaks
+  after it as cl100k's does; the hybrid (below); bpe, frequency alone within production's pattern (SA-BPE's baseline,
+  its Table 3 row F).
+- **The sample's composition** is not an arm: the corpus's sample already follows the training mixture (its evidence
+  in `nanochat/corpus/normalization_doc.md` §9), and every arm trains on it. On code accuracy the companion post's
+  grid of tokenizer corpora of 0, 5, 30 and 50% code has HumanEval highest at 50% (single runs, no test).
 - **The score.** SA-BPE's §4.1 lists five priority criteria over F (the pair's frequency), R (the repositories holding
   it in the current segmentation) and L (the languages holding it). sa-bpe takes F·log R, under which a pair of one
   repository scores 0 (Table 3: compression 3.643 and 72 of 646 tested tokens verified under-trained, against BPE's
@@ -571,19 +555,19 @@ own. The sample's composition, whose effect is below what the runs resolve, is d
   - on Python and C++ it compresses less (App. G Table 10: 3.651 against 3.652, 3.239 against 3.240) and uses more of
     the vocabulary (Table 12: 16,663 against 16,289 tokens, 16,625 against 16,314); its under-trained tokens are 44
     against 72 (Table 3);
-  - §6: "the language aspect must be avoided" for natural language, a third of this sample's sources, and
+  - §6: "the language aspect must be avoided" for natural language, five of this sample's 17 sources, and
     codeforces_cots' curated rows carry no programming language;
   - on production's val documents (1.59B tokens), 31,604 of its 32,508 merged tokens occur in the Python repository
     corpora, the C++ repository corpora and the English and math ones (climbmix, opc_fineweb_math, ultradata_math_l2)
     alike (774 in two, 127 in one, most among the last merges): counted by presence, as the paper counts it, L would be
     3 for all but the vocabulary's tail [inference: val presence standing for the sample's].
 
-  bpe sits 0.55% from F·log R in compression, so a tie in the runs is likely [inference], which the documents'
-  statistics break (Decisions).
+  bpe sits 0.55% from F·log R in compression, so a tie in the runs is likely [inference], which the val documents'
+  coverage breaks (Decisions).
 - **The positive control.** The companion post deletes the trailing `[\r\n/]*` of GPT-4o's punctuation clause (its
   gpt4onl) with the tokenizer corpus held fixed and moves MBPP pass@1 from 0.086 to 0.230 (seeds 0.167, the mean of two
   seed-42 runs of 0.174 and 0.160, 0.072 and 0.018 against 0.224, 0.246, 0.220; 1.27B parameters, about 20B math and
-  code tokens, about 128K ids, prompts healed: the paper's §4.1–4.3), and across its tokenizers code bits per byte
+  code tokens, about 128K ids, prompts healed: the paper's §4.3, App. C.1), and across its tokenizers code bits per byte
   shows no association with MBPP (the post: Spearman +0.07, −0.12, −0.04, every p above 0.5). sa-bpe-fused differs
   from sa-bpe by the same clause in cl100k's form (`[\r\n]*`); it tests that the d16 parse measure detects the
   difference, and when it does not (sa-bpe-fused not parsing worse), the decision keeps production's pattern and score
@@ -594,8 +578,8 @@ own. The sample's composition, whose effect is below what the runs resolve, is d
   §3.2) or UnigramLM (whose MBPP in TokEval is 0.000 with the GPT-4o and RightAlign patterns, 0.222 with the Claude
   one). SuperBPE's two code results move apart, neither significantly (arXiv 2503.13423 Table 1, McNemar: HumanEval
   pass@10 15.9 to 13.4, MBPP pass@10 27.5 to 28.3, at 8B parameters, 200K ids and transition point t = 180k).
-  Vocabulary size: 1.5B models
-  fine-tuned with GPT-4-regex vocabularies of 32K to 256K score HumanEval pass@1 20.52 to 20.84, Pearson r −0.13
+  Vocabulary size: 1.5B models fine-tuned for 500B code tokens (not trained from scratch) with GPT-4-regex
+  vocabularies of 32K to 256K score HumanEval pass@1 20.52 to 20.84, Pearson r −0.13
   (p = 0.87; arXiv 2402.01035 §3.2, Table 3). Digit grouping and case-split identifiers have no code measurement;
   DeepSeek-V3's random splitting of its punctuation and line-break tokens (arXiv 2412.19437 §4.1) serves only a fusing
   pattern. Longer training and d24 would confirm, not decide.
@@ -609,23 +593,28 @@ concatenation of chunk sequences, the hybrid's clauses give:
 
 | Property | The hybrid's clause and its source | Production's pattern | Limitation resolved |
 |---|---|---|---|
-| (1) A line break shares a chunk only with line breaks of its kind | `\n+`, `\r+`: the post's Claude-approximate `[\n]+`, `[\r]+`, the forced break at line breaks of its MinGram cb_nl; no other clause matches one | `\s*[\r\n]` takes the spaces before a break and a whitespace-only line (`"\n    \n"`) | no token of punctuation and line break (sa-bpe-fused's `"):\n"`: a prompt ending `):` ends inside the token training saw, the token-boundary bias of arXiv 2412.19437 §4.1), and none of a line break and indentation (the post's MinGram cb: 187 such entries, 86.4% of its completions IndentationError or TabError, MBPP 0.016 against cb_nl's 0.216) |
+| (1) A line break shares a chunk only with line breaks of its kind | `\n+`, `\r+`: the post's Claude-approximate `[\n]+`, `[\r]+`, the forced break at line breaks of its MinGram cb_nl; no other clause matches one | `\s*[\r\n]` joins a line break only to the whitespace before it (a whitespace-only line `"\n    \n"` included), the convention of the post's best-scoring tokenizers (gpt4onl, clean-multi), never to the next line's indentation | no token of punctuation and line break (sa-bpe-fused's `"):\n"`: a prompt ending `):` ends inside the token training saw, the token-boundary bias of arXiv 2412.19437 §4.1), and no whitespace before a break joined to it |
 | (2) chunks(ι s) = (ι) · chunks(s) | ` +`, `\t+`: the Claude-approximate `[ ]+`, `[\t]+`; a letter run takes no tab or line break before it | `\s+(?!\S)` gives ι's last space to s: chunks(ι s) = (d − 1 spaces, ␣w, …) for s = w…, (d − 1 spaces, ␣, …) before a digit; a tab joins the word (`\tif`) | one indentation chunk per depth, and a statement cut alike at every depth (`if`, where production cuts `if` at depth 0 and ` if` below it); the Claude-approximate pattern scored MBPP 0.250, 0.234, 0.240 (gpt4onl 0.224, 0.246, 0.220; Welch's t-test p = 0.31, our computation from the post's seeds), 0.3% of its completions IndentationErrors |
 | (3) No run of letters is cut | no contraction clause: arXiv 2402.01035's Punct drops cl100k's (App. E), o200k folds contractions into the letter run | `'(?i:[sdmt]\|ll\|ve\|re)` cuts a run when the apostrophe starts a chunk (`'s` `elf` for a line's `'self'`, `'d` `type`) | identifiers whole; English contractions chunk as before (`doesn` `'t`) |
 
 Kept from cl100k: one leading punctuation character on a letter run (`.append`, `(self`), which Punct drops
 (arXiv 2402.01035 App. E: it prevents "\t or . to be encoded at the start of a letter-only token", keeping the
 optional leading space, ` ?\p{L}+`, Fig. 3, and the trailing line breaks of its punctuation clause; Table 1, code: 0.81
-against Punct's 0.86 tokens per Llama token at 32K, "an additional 5% compression", its App. E; pass@1 higher for
-Punct at 1.5B and 32K, HumanEval 21.1 against 20.5, lower at 7B and 80K, 30.40 against 30.82, untested for
-significance), and the optional leading space all three share (` foo`). From production: digit pairs
+against Punct's 0.86 tokens per Llama token at 32K; pass@1 higher for Punct at 1.5B and 32K, HumanEval 21.1 against
+20.5, lower at 7B and 80K, 30.40 against 30.82, no test reported; App. E recommends GPT-4's pattern "since it provides
+an additional 5% compression over Punct at no significant cost to performance"), and the optional leading space all
+three share (` foo`). From production: digit pairs
 (karpathy/nanochat at 32K: "2 is the sweet spot for vocab size of 32K. 1 is a bit worse, 3 was worse still") and
 punctuation runs without line breaks. `[^\S\r\n\t ]+` takes every other whitespace character, so every character
 falls in a chunk (tiktoken drops what no clause matches). The Claude-approximate pattern's full regex is unpublished
-(the post calls it an early reconstruction); the hybrid takes its whitespace clauses, and is tested because no source
-measures this combination, at 32K ids or on C++.
+(the post calls it an early reconstruction) and differs from the hybrid beyond whitespace (its letter runs take only a
+space prefix, contractions stay, digits go in threes): the hybrid takes its whitespace clauses only, so the hybrid as
+a whole is untested, at 32K ids or on C++, and is run. It has no lookahead, so it is immune to the failure of
+production's and sa-bpe-fused's patterns, whose `\s+(?!\S)` makes tiktoken panic on a run of 999,999 whitespace
+characters not ending in a line break (fancy-regex's backtrack limit); the corpus's longest whitespace run is 9,721.
 
-**Pretokenization on the data** (2026-10-21, GB10: the first 1,000 rows of each source's first curated val file, all
+**Pretokenization on the data** (2026-10-21, GB10, measured on production's data, before the corpus replaced it: the
+first 1,000 rows of each source's first curated val file, all
 of a shorter file; the Python `regex` module, whose chunk ends were token ends of production's tokenizer on every
 document and of a 3,000-merge hybrid vocabulary trained by the crate on 2,025 of them). Chunks per kB bound a
 pattern's tokens; an indentation is whole when its leading whitespace is one chunk. The `regex` module's Unicode tables
@@ -656,72 +645,78 @@ space, which the next run takes as cl100k's does (4,130; ` *` of a C++ comment),
 per kind (1,973). English and math chunk alike under production's pattern and the hybrid's (`Planck` `'s`, `20`
 `19`); sa-bpe-fused's differs at punctuation before a line break.
 
-- **Intrinsic record** (`python -m ablations.tokenizer data`, `results/tokenizer-data.json`; `ablations/tokeval.py`).
-  Per vocabulary, per corpus: bytes per token and the Rényi efficiency of order 2 (TokEval's Table 2 reports order 2 of
-  the 1, 2, 2.5 and 3 its library computes), descriptive only, as two inference-time BPE variants raise it (order 3)
-  while lowering BLEU ("Two Counterexamples to Tokenization and the Noiseless Channel", LREC-COLING 2024, Tables 1 and
-  2: 0.474 and 33.74 to 0.500 and 33.39, and to 0.594 and 32.37); its vocabulary entries holding a line break, as the
+- **Intrinsic record** (`python -m ablations.tokenizer data`, `results/tokenizer-data.json`; `ablations/tokeval.py`),
+  on every arm's compiled val splits of the corpus's 18 sources (`artifacts/corpus/tokenizer-ablation/compiled/`;
+  checked: the same bytes per document in every arm). Per vocabulary, per source: bytes per token and the Rényi
+  efficiency of order 2 (TokEval's Table 2 reports order 2 of the 1, 2, 2.5 and 3 its library computes), descriptive
+  only: two inference-time BPE variants raise it in nearly every setting while lowering BLEU ("Two Counterexamples to
+  Tokenization and the Noiseless Channel", arXiv 2402.14614, Tables 3 and 4), and TokEval's Table 2 finds its
+  correlations with code bits per byte and MBPP not significant; its vocabulary entries holding a line break, as the
   post counts them (the count correlating most strongly with MBPP, Spearman −0.719 over 58 tokenizers), fusing
-  punctuation with one, and ending in a line break and indentation (MinGram cb's entries); its merged tokens the train
-  documents hold never, under 10 and under 100 times (a proxy for SA-BPE's verified under-trained tokens). On every
+  punctuation with one, and ending in a line break and indentation (the post's MinGram pair: cb's MBPP far lower, most
+  of its completions IndentationError or TabError); its merged tokens the val documents read never, under 10 and under
+  100 times (SA-BPE's Coverage, Table 3, graded), those of them not UTF-8 on their own and the 243 byte ids UTF-8 can
+  hold counted apart (Magikarp, arXiv 2405.05417 §3.1, names both as sources of untrained tokens); its entries whose
+  text does not encode back to them (Magikarp §5's check; a token the pattern forms only in context, as a line break
+  and indentation inside a whitespace-only line, counts too). On every
   code corpus (each document of a repository corpus; each fenced Python or C++ block of kaggle_notebooks and
   codeforces_cots, whose prompt template `<your code here>` is a block of no leaves and one parse error), TokEval's AST
   boundary alignment per leaf category, identifier fragmentation and Python indentation consistency, replicated from
   its library (7d03a61) over bytes, with leaves from the data crate's grammars (`leaves.rs`); on every code and math
   corpus, its operator isolation (`metrics/math.py`: 24 operators in 6 categories, one isolated when no token covering
-  it holds a non-whitespace character outside it; the paper reports it on math, §3.5; its MBPP correlation over 20
-  tokenizers, ρ 0.28 to 0.52, is significant without the two UnigramLM models; +0.54 over the post's 27 families,
-  measured on its prose corpus). Not taken: its multilingual metrics (fertility, Gini, MorphScore) and its digit
-  metrics (every arm's pattern cuts a digit run into the same chunks of at most two digits). TokEval attributes AST
-  boundary alignment's MBPP correlation (ρ 0.65, n = 20) to line-break handling (partial ρ 0.26, n = 18, once the count
-  of tokens holding a line break is controlled; §5, §F.3); they describe, the runs decide.
+  it holds a non-whitespace character outside it; the paper reports it on math, §3.5; its MBPP correlation, §F.3, is
+  not significant after the Benjamini-Hochberg adjustment). Not taken: its multilingual metrics (fertility, Gini,
+  MorphScore) and its digit metrics (every arm's pattern cuts a digit run into the same chunks of at most two digits).
+  TokEval attributes AST boundary alignment's MBPP correlation (ρ 0.65, n = 20) to line-break handling (partial ρ 0.26,
+  n = 18, once the count of tokens holding a line break is controlled; §5, §F.3); they describe, the runs decide.
 - **Equal bytes.** Each arm reads the code documents once, as production reads its data (`max_ratio`: no document
   twice), so its tokens are their bytes over its bytes per token and each run's ratio is its `max_ratio` on the set;
   text and math are drawn by rows, so their bytes vary with an arm's compression there (about 0.2% of the total
-  [inference]). Each plan is its own (`schedule.plan` at its tokens), its context production's 8,192 and 32,768
+  [inference]). Each plan is its own (`schedule.plan` at its tokens), its context the corpus's 8,192 and 32,768
   tokens. At equal tokens a better compressor would read more data (arXiv 2402.01035 compares at equal tokens, its
   Appendix J at equal characters); the byte-offset buckets (Evaluation) show what the extra bytes of context a better
   compressor sees are worth (arXiv 2503.13423 §3.1 fixes context in bytes).
-- **Documents.** `python -m ablations.tokenizer data` compiles the same documents for every arm into
-  `artifacts/tokenizer-ablation/compiled/` and packs them for every arm: of each code corpus, the
-  leading curated train documents whose sa-bpe tokens fill what d16 at 20 tokens per scaling parameter (Chinchilla,
-  arXiv 2203.15556 Table 3: 20.2B tokens for 1B parameters) draws at the
-  file-level stage (rows from production's packs), so the code group binds every arm; of text and math the leading
-  files holding 1.25 times their draw, and of each repository corpus the trailing files holding 1.25 times the
-  repository stage's draw, so they never bind (sa-bpe takes 9.21% more tokens than the first tokenizer on
-  stack_edu_cpp's whole val split, the largest gap measured); of each val split, a systematic sample of documents whose
-  sa-bpe tokens fill at most 1/1.25 of the val sample, which every arm scores whole. Every arm's slack and val fill are
-  asserted.
-- **Decisions,** pre-registered (`results/tokenizer.json` `contrasts`, `decision`), each challenger (sa-bpe-fused, the
-  hybrid, bpe) against sa-bpe, on the seeds where both have an evaluation (a diverged run is excluded with its pair).
-  Parsing: problems are the units; per HumanEval+ and MBPP+ problem, the seeds whose healed greedy completion compiles
-  under the challenger minus those under sa-bpe, and an exact sign test over the problems where they differ (McNemar's
-  test at one seed, the companion post's test of single runs: 104 problems against 4 for its MinGram pair), better or
-  worse at p < 0.05. Code bits per byte: the difference of the arms' means over those n seeds, better or worse beyond
-  1.96 σ √(2/n), 0.0067 at two seeds, σ = 0.0034 the within-configuration spread of Against the standard regime at d8,
-  carried to d16 [inference]. A challenger qualifies iff it is worse on neither and better on one. The control gates the
-  decision: unless sa-bpe-fused parses worse, production's pattern and score are kept. Pattern: of sa-bpe-fused and the
-  hybrid, the qualifier with the lower unparsed share is adopted, else production's pattern. Score: bpe is adopted iff
-  it qualifies, or is equal on both and its documents leave fewer merged tokens never read than sa-bpe's (the proxy of
-  SA-BPE's claimed benefit, 640 verified under-trained tokens for F against 72, its Table 3), carried to the adopted
-  pattern [inference]; otherwise SA-BPE.
+- **Documents.** The runs' document set and every arm's packs are not built by `data`: the training cutover
+  (`nanochat/corpus/gh200.md` step 4) builds them with `nanochat/corpus/compile.py` and `pack.py`, each taking the
+  arm's tokenizer. The set holds, of each code corpus, the leading curated train documents whose sa-bpe tokens fill
+  what d16 at 20 tokens per scaling parameter (Chinchilla, arXiv 2203.15556 Table 3: 20.2B tokens for 1B parameters)
+  draws at the file-level stage, so the code group binds every arm's `max_ratio`; of text and math the leading shards
+  holding a margin over their draw, and of each repository corpus the trailing partitions holding a margin over the
+  repository stage's draw, so they never bind; of the val split, a systematic sample of documents every arm scores
+  whole.
+- **Decisions,** pre-registered (`results/tokenizer.json` `decision`), each challenger (sa-bpe-fused, the
+  hybrid, bpe) against sa-bpe, on the seeds where both have an evaluation (a diverged run drops its seed from its
+  arm's contrasts on both sides). Parsing: problems are the units; per MBPP+ problem, the seeds whose healed greedy
+  completion compiles under the challenger minus those under sa-bpe, and an exact sign test over the problems where
+  they differ (McNemar's exact test at one seed, the companion post's test of single runs: 104 problems against 4 for
+  its MinGram pair), better or worse at p < 0.05. MBPP+ alone: its prompts leave the function header to the model,
+  where the post's failures arise, and an evaluation "that uses HumanEval alone does not expose this type of defect"
+  (the post); HumanEval+'s outcomes stay in the runs' record. Code bits per byte: the difference of the arms' means
+  over those n seeds, better or worse beyond 1.96 σ √(2/n), 0.0067 at two seeds, σ = 0.0034 the within-configuration
+  spread of Against the standard regime at d8, carried to d16 [inference]. A challenger qualifies iff it is worse on
+  neither and better on one. The control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps its
+  pattern and score. Pattern: of sa-bpe-fused and the hybrid, the qualifier with the lower MBPP+ unparsed share is
+  adopted, else sa-bpe's. Score: bpe is adopted iff it qualifies, or is equal on both and the val documents read fewer
+  of its merged tokens under 100 times than of sa-bpe's (SA-BPE's claimed benefit, a higher coverage than BPE's: 640
+  verified under-trained tokens for F against 72, its Table 3), carried to the adopted pattern [inference]; otherwise
+  SA-BPE.
 - **Two seeds** (`SEEDS`). The seed is the measures' largest noise: the post's fusing tokenizer scored MBPP 0.167 (two
   seed-42 runs), 0.072 and 0.018 over three seeds, so one run can miss a real difference [inference], and an
   undetected one leaves production's pattern and SA-BPE. Pooling the seeds' problem pairs in one McNemar test would
   count each problem once per seed, pairs that are not independent; the sign test counts each problem once, its seeds
   in its difference. It covers the sampling of problems, the seeds training's only in part [inference].
-- **Where it runs.** Every step on the GH200 that then trains production (Hardware: GH200 or H100 SXM5), from the
-  curated store and production's tokenizer pulled at the published revision: `compile` and `pack` of production's
-  data (whose packs size the document set, checked against `data/compiled.sha256`), the vocabularies, the arms' data
-  and intrinsic record on its 64 vCPUs, the 8 runs and their evaluations on its GPU, in one `runs` call, so every arm
-  meets the same kernels and the decided tokenizer's data is built where production trains. TokEval's comparisons hold
+- **Where it runs.** On the GH200 that then trains production (Hardware: GH200 or H100 SXM5), in the order of
+  `nanochat/corpus/gh200.md`: step 3, the vocabularies and `data` (the arms' compiled val splits and intrinsic record)
+  on its 64 vCPUs; step 4, the cutover, training reading the corpus, which builds the document set and every arm's
+  packs; step 5, the 8 runs and their evaluations on its GPU and the decision, in one `runs` call, so every arm meets
+  the same kernels and the decided tokenizer's data is built where production trains. TokEval's comparisons hold
   everything but the tokenizer fixed and condition on no hardware; `CODE_SIGMA` comes from H100 runs at d8, carried to
   d16 [inference].
 - **Cost** [estimate]: per run about 35 minutes, as d16 at 20 on the H100 SXM5 (30 minutes training at 746K tokens per
-  second, 299 s evaluation), so about 4.7 h for the 8 runs; production's `compile` and `pack` took 32 and 51 minutes on
-  the GB10's 20 cores, the five vocabularies about 6.5 minutes each there, and the arms' data less, on the GH200's 64
-  vCPUs likely shorter: about 7–8 h in all, about $17 at $2.29/h. If the decision changes the tokenizer, production's
-  `compile` and `pack` run again with it before the production run. Not yet run: each step waits for approval.
+  second, 299 s evaluation), so about 4.7 h for the 8 runs; one vocabulary on the corpus sample trains in 316 s on the
+  GB10's 20 cores (2026-10-24), so the four about 21 minutes there, likely shorter on the GH200's 64 vCPUs; the arms'
+  packs come with the cutover. About 5–6 h in all, about $13 at $2.29/h. If the decision changes the tokenizer, the
+  corpus's `compile` and `pack` run again with it before the production run. Not yet run: each step waits for approval.
 
 ### Verification of the experiments' code
 
@@ -1381,8 +1376,9 @@ lists (Table 5: 110K each for the educational and package instructions).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
 - `ablations/`: the ablation experiments and their mechanism (`harness.py`): `lr.py`; `tokenizer.py`, the tokenizer
-  experiment's arms, data, runs and decision (`python -m ablations.tokenizer vocabularies|data|runs`); `tokeval.py`,
-  TokEval's intrinsic metrics replicated for it.
+  experiment's arms (trained on the corpus sample into `artifacts/corpus/tokenizer-ablation/`), val data, intrinsic
+  record, runs and decision (`python -m ablations.tokenizer vocabularies|data|runs`); `tokeval.py`, TokEval's
+  intrinsic metrics replicated for it.
 - `docker/Dockerfile`: the image.
 
 ## References

@@ -1,28 +1,32 @@
 """
 TokEval's intrinsic metrics (arXiv 2608.18062 §3; github.com/cimeister/tokenizer-intrinsic-evals at 7d03a61:
 tokenizer_analysis/metrics/code_ast.py, math.py and information_theoretic.py), replicated for the tokenizer ablation's
-arms (ablations/tokenizer.py describe) on their compiled val documents. A document's tokens are its compiled ids and
-their spans its bytes, so positions are bytes where TokEval's are characters (the same on ASCII; a byte-level token can
-end inside a character, which a character map cannot hold).
+arms (ablations/tokenizer.py describe) on their compiled val documents of the corpus (nanochat/corpus/compile.py). A
+document's tokens are its compiled ids and their spans its bytes, so positions are bytes where TokEval's are characters
+(the same on ASCII; a byte-level token can end inside a character, which a character map cannot hold).
 - AST boundary alignment, per leaf category (TokEval's five; data/crate leaves.rs): a leaf is start-aligned when a token
   starts at its first covered byte, end-aligned when one ends at its last, fully aligned when both; one leading space of
-  a token holding non-whitespace is covered by no token (_trim_word_start_space_offsets: " foo" starts at foo);
+  a token holding non-whitespace is covered by no token (_trim_word_start_space_offsets: " foo" starts at foo). The
+  one intrinsic metric whose correlation with MBPP is significant in TokEval (Table 2: rho 0.61);
 - identifier fragmentation: the identifier leaves spanning more than one token, and tokens per identifier;
 - indentation consistency (Python): the Spearman correlation, over the indented lines of a corpus, between a line's
   depth (its leading whitespace's width, tabs to 8 columns, over the GCD of its snippet's widths) and the
   whitespace-only tokens covering that whitespace, None below 3 depths;
-- operator isolation (math.py _iter_operator_scores, _build_operator_results; reported for math, §3.5, and correlated
-  with MBPP in §F.3): each of 24 operators in 6 categories found in the raw text is isolated when no token covering it
-  holds a non-whitespace character outside it (" +" isolates "+"; a compound operator cut in two still counts), and a
-  compound operator is preserved when one token holds it; micro-averaged over occurrences;
+- operator isolation (math.py _iter_operator_scores, _build_operator_results; reported for math, §3.5): each of 24
+  operators in 6 categories found in the raw text is isolated when no token covering it holds a non-whitespace
+  character outside it (" +" isolates "+"; a compound operator cut in two still counts), and a compound operator is
+  preserved when one token holds it; micro-averaged over occurrences. Its correlations with MBPP (§F.3) are not
+  significant after Benjamini-Hochberg adjustment;
 - Rényi efficiency of order 2 (TokEval's Table 2, which reports order 2 of its 1, 2, 2.5 and 3): H_2 of the documents'
-  token distribution over log2 of the vocabulary size, descriptive only: two inference-time BPE variants raise it (at
-  order 3) while lowering BLEU ("Two Counterexamples to Tokenization and the Noiseless Channel", LREC-COLING 2024,
-  Tables 1 and 2).
-The code of a corpus is each document of a repository corpus, parsed by its source's grammar, and each fenced Python or
-C++ block of the other code corpora (kaggle_notebooks' notebooks, codeforces_cots' prompts and solutions: each
-prompt's template `<your code here>` is a snippet of no leaves and one parse error); operators are counted in whole
-documents, as TokEval counts them in its code and math corpora.
+  token distribution over log2 of the vocabulary size, descriptive only: its correlations with code bits per byte and
+  MBPP are not significant (TokEval Table 2), and two inference-time BPE variants raise it (at order 3) in nearly every
+  setting while lowering BLEU ("Two Counterexamples to Tokenization and the Noiseless Channel", arXiv 2402.14614,
+  Tables 3 and 4).
+The code of a corpus is each document of a corpus of program texts (PROGRAMS: repository files, exercises, synthetic
+files, functions), parsed by its source's language, and each fenced Python or C++ block of notebooks and conversations
+(kaggle_notebooks; codeforces_cots' prompts and solutions: each prompt's template `<your code here>` is a snippet of no
+leaves and one parse error); operators are counted in whole documents, as TokEval counts them in its code and math
+corpora.
 """
 import itertools
 import math
@@ -31,10 +35,14 @@ import re
 import numpy as np
 from scipy.stats import spearmanr
 
-from nanochat.data.loader import TOKEN_DTYPE, split_path
-from nanochat.data.sources import SOURCES
+from nanochat.corpus.loader import TOKEN_DTYPE, split_path
+from nanochat.corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
+from nanochat.corpus.sources import SOURCES
 from nanochat.data.tokenizer import Tokenizer
 from nanochat.native import data_crate
+
+# The categories whose documents are whole program texts in their source's language
+PROGRAMS = (REPOSITORY_FILE, EXERCISE, SYNTHETIC_FILE, FUNCTION)
 
 CATEGORIES = ("identifier", "keyword", "operator", "literal", "delimiter")
 FENCE = re.compile(rb"```(python|py|cpp|c\+\+)[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -106,8 +114,9 @@ def code(corpus: str, tokens: dict[str, np.ndarray], docs: list[bytes], tokenize
     """{arm: {grammar: metrics}} of a code corpus's val documents (val_split)."""
     starts = np.cumsum([0, *map(len, docs)])
     # (grammar, byte offset in the split, snippet)
-    snippets = ([(SOURCES[corpus].grammar, start, doc) for start, doc in zip(starts, docs, strict=False)]
-                if SOURCES[corpus].grammar else
+    spec = SOURCES[corpus]
+    snippets = ([(spec.language, start, doc) for start, doc in zip(starts, docs, strict=False)]
+                if spec.category in PROGRAMS else
                 [(FENCE_GRAMMARS[m.group(1).lower()], start + m.start(2), m.group(2))
                  for start, doc in zip(starts, docs, strict=False) for m in FENCE.finditer(doc)])
     result = {tokenizer.name: {} for tokenizer in tokenizers}

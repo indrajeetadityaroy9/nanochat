@@ -1,11 +1,16 @@
 """
-The corpus's tokenizer (normalization_doc.md §9): production's algorithm, vocabulary size, split pattern and special
-tokens (nanochat/data/tokenizer.py: SA-BPE's F·ln R within the chunks of SPLIT_PATTERN, trained by the data crate,
-encoded by tiktoken), trained on this corpus's curated train splits at the file stage's shares of bytes: "tokenizers
-should be trained on the data mix that they are expected to see during training/inference" (arXiv 2402.01035 §2.3),
-and leaving a source out of tokenizer training or weighting sources equally raises their bits per byte
-(arXiv 2610.12144). Writes CORPUS/tokenizer/tokenizer.tiktoken and tokenizer.pattern; get_tokenizer loads it, its
-compiled and packed data in CORPUS/compiled.
+The corpus's tokenizer (normalization_doc.md §9): byte-level BPE trained by the data crate (nanochat/data/crate
+train.rs: SA-BPE's F·ln R, arXiv 2604.14053 §4.1, or frequency alone) within the chunks of a split pattern and encoded
+by tiktoken, with production's vocabulary size and special tokens (nanochat/data/tokenizer.py). Its sample is this
+corpus's curated train splits at the file stage's shares of bytes: tokenizer training data "representative of model
+training data" (arXiv 2405.05417 §5); across tokenizer training mixes a subset's compression "only varies by 5 to 6
+percentage points", better as the mix holds more of it (arXiv 2402.01035 §2.3, compression alone); over languages,
+proportional tokenizer-training weights gave lower bits per byte than equal ones (arXiv 2610.12144 Table 6, §7). Its
+pattern and score are production's until the tokenizer ablation (ablations/tokenizer.py) decides them.
+
+main writes CORPUS/tokenizer/tokenizer.tiktoken and tokenizer.pattern; get_tokenizer loads it, its compiled and packed
+data in CORPUS/compiled, or an ablation arm's (ABLATION/<arm>), every arm's data in ABLATION/compiled (an arm can be
+the corpus's tokenizer byte for byte), each keyed by its data key (loader.split_path).
 
 python -m nanochat.corpus.tokenizer
 """
@@ -14,6 +19,7 @@ import base64
 import functools
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -27,17 +33,26 @@ from nanochat.native import data_crate
 from nanochat.paths import CORPUS
 
 TOKENIZER = CORPUS / "tokenizer"
+ABLATION = CORPUS / "tokenizer-ablation"  # the tokenizer ablation's arms: <arm>/tokenizer.*, and compiled/
 # The sample's bytes: production's tokenizer sample's (its curated splits' Parquet footers)
 SAMPLE_BYTES = 13.38e9
+PATTERN, SCORE = production.SPLIT_PATTERN, "sa-bpe"
+
+Score = Literal["sa-bpe", "frequency"]
 
 
 @functools.cache
-def get_tokenizer() -> production.Tokenizer:
-    """The corpus's tokenizer, loaded once per process, its data in CORPUS/compiled."""
-    with open(TOKENIZER / "tokenizer.tiktoken", "rb") as f:
+def get_tokenizer(name: str = "corpus") -> production.Tokenizer:
+    """The corpus's tokenizer ("corpus", its data in CORPUS/compiled) or a tokenizer ablation arm's (its data in
+    ABLATION/compiled), loaded once per process."""
+    if name == "corpus":
+        directory, compiled = TOKENIZER, CORPUS / "compiled"
+    else:
+        directory, compiled = ABLATION / name, ABLATION / "compiled"
+    with open(directory / "tokenizer.tiktoken", "rb") as f:
         mergeable = [base64.b64decode(line.split()[0]) for line in f]  # line i: token i, base64, and its rank i
-    with open(TOKENIZER / "tokenizer.pattern", newline="") as f:
-        return production.Tokenizer(mergeable, f.read(), name="corpus", compiled=CORPUS / "compiled")
+    with open(directory / "tokenizer.pattern", newline="") as f:
+        return production.Tokenizer(mergeable, f.read(), name=name, compiled=compiled)
 
 
 def train_bytes(source: str) -> int:
@@ -49,7 +64,9 @@ def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str]
     """Row group g of a curated train shard: the texts (sources.texts) and authorship units of its rows that the
     source's systematic sample takes, `start` the source's rows before the group: row i when floor((i + 1) * fraction)
     exceeds floor(i * fraction). A row naming its repository (a repository file, a function) has that repository as its
-    unit, its name lowercased (one unit across the sources that hold it); any other document is its own."""
+    unit, its name lowercased (one unit across the sources that hold it); any other document is its own (synthetic
+    code, notebooks, web text and mathematics: their datasets name no author; arXiv 2604.14053 §6 suggests documents
+    as units for natural language, untested)."""
     source, path, g, start, fraction = task
     group = pq.ParquetFile(path).read_row_group(g)
     rows = np.arange(start, start + group.num_rows)
@@ -88,27 +105,45 @@ def sample() -> tuple[list[str], list[int]]:
     return docs, units
 
 
+def train(docs: list[str], units: list[int], *, pattern: str, score: Score) -> list[bytes]:
+    """The mergeable tokens, bytes in rank order: the 256 bytes, then VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 merges
+    trained on the documents (each from its authorship unit) within the chunks of `pattern`, by SA-BPE's F·ln R or by
+    frequency alone (the crate's train)."""
+    mergeable = [bytes([i]) for i in range(256)]
+    for left, right in data_crate().train(docs, units, pattern=pattern,
+                                          n_merges=VOCAB_SIZE - len(production.SPECIAL_TOKENS) - 256, score=score):
+        mergeable.append(mergeable[left] + mergeable[right])
+    return mergeable
+
+
+def val_bytes_per_token(tokenizer: production.Tokenizer, source: str) -> float:
+    """A source's bytes per token under a tokenizer on its curated val split, a row group at a time."""
+    n_bytes = n_tokens = 0
+    for path in curated_shards(source, "val"):
+        f = pq.ParquetFile(path)
+        for g in range(f.num_row_groups):
+            batch = texts(source, f.read_row_group(g))
+            n_bytes += sum(len(text.encode()) for text in batch)
+            n_tokens += sum(map(len, tokenizer.enc.encode_ordinary_batch(batch)))
+    return n_bytes / n_tokens
+
+
 def main() -> None:
     """Train, save and load the corpus's tokenizer; report each source's bytes per token on its curated val split
     under it and production's (mixture.BYTES_PER_TOKEN), and each group read in part's train tokens under it over its
     draw (the train split's text bytes at the val split's bytes per token): below 1, pack.fit runs out of its
     shards."""
+    TOKENIZER.mkdir(parents=True)
     docs, units = sample()
     print(f"sample: {len(docs):,} documents, {sum(map(len, map(str.encode, docs))) / 1e9:.2f} GB, {max(units) + 1:,} "
           f"authorship units", flush=True)
-    mergeable = [bytes([i]) for i in range(256)]
-    for left, right in data_crate().train(docs, units, pattern=production.SPLIT_PATTERN,
-                                          n_merges=VOCAB_SIZE - len(production.SPECIAL_TOKENS) - 256, score="sa-bpe"):
-        mergeable.append(mergeable[left] + mergeable[right])
-    TOKENIZER.mkdir(parents=True)
-    production.save(TOKENIZER, mergeable, production.SPLIT_PATTERN)
+    production.save(TOKENIZER, train(docs, units, pattern=PATTERN, score=SCORE), PATTERN)
+    del docs, units
     corpus = get_tokenizer()
     print(f"data key {corpus.data_key}")
     bytes_per_token = {}
     for source in SOURCES:
-        val = [text for path in curated_shards(source, "val") for text in texts(source, pq.read_table(path))]
-        bytes_per_token[source] = sum(len(text.encode()) for text in val) / sum(
-            map(len, corpus.enc.encode_ordinary_batch(val)))
+        bytes_per_token[source] = val_bytes_per_token(corpus, source)
         print(f"{source}: {bytes_per_token[source]:.3f} bytes per token, production's "
               f"{mixture.BYTES_PER_TOKEN[source]:.3f}", flush=True)
     for group in mixture.IN_PART:

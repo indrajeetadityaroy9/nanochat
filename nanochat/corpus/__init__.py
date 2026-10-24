@@ -20,6 +20,7 @@ Run in this order; everything up to publish is text, everything after it needs t
   python -m nanochat.corpus.curate
   python -m nanochat.corpus.publish push           (prints the dataset's revision)
   python -m nanochat.corpus.publish pull <revision>
+  python -m ablations.tokenizer vocabularies|data|runs  (the pattern and score: tokenizer.PATTERN, SCORE)
   python -m nanochat.corpus.tokenizer
   python -m nanochat.corpus.compile
   python -m nanochat.corpus.pack
@@ -32,6 +33,7 @@ Run in this order; everything up to publish is text, everything after it needs t
   CORPUS/curated/<source>/<split>/<k>.parquet        the source's curated shard k of a split (published)
   CORPUS/README.md                                   the published dataset's card (publish.card)
   CORPUS/tokenizer/tokenizer.{tiktoken,pattern}      the corpus's tokenizer
+  CORPUS/tokenizer-ablation/<arm>/, compiled/        the tokenizer ablation's arms and their compiled data
   CORPUS/compiled/<corpus>-<data key>/<split>.*      the compiled split (.bin, .idx, .json) and its packs
                                                      (<split>-T<seq_len>.pieces, .rows, .fim)
   CORPUS/packed.json                                 each stage's rows and corpus weights (pack.py)
