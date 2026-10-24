@@ -29,12 +29,22 @@ class Stage:
 
     @property
     def rows(self) -> int:
-        """The stage's training rows of seq_len tokens."""
+        """The base model's training rows of seq_len tokens in this stage."""
         return self.tokens // self.seq_len
+
+    @property
+    def batch_rows(self) -> int:
+        """Rows of a micro-batch."""
+        return MICRO_BATCH_TOKENS // self.seq_len
 
     @property
     def sources(self) -> list[str]:
         return [s for group in self.groups.values() for s in group.sources]
+
+    @property
+    def code(self) -> list[str]:
+        """The sources of the stage's code groups (every group but NON_CODE)."""
+        return [s for name, group in self.groups.items() if name not in NON_CODE for s in group.sources]
 
     @property
     def supply(self) -> list[str]:
@@ -54,9 +64,10 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The run: production's d24 schedule (docs/h100-pretraining.md), 86,975 steps of 12 micro-batches; its last REPO_SHARE
-# of steps (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv 2409.12186 §3.2.1-3.2.2) at 32K, placed
-# as train/schedule.plan places it
+# The base model's pre-training run: d24 (docs/h100-pretraining.md), 86,975 steps of 12 micro-batches; its last
+# REPO_SHARE of steps (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv 2409.12186 §3.2.1-3.2.2) at
+# 32K, placed as train/schedule.plan places it. A Stage's tokens are this run's; any other run draws rows by the
+# stage's shares at its own size (loader.weights)
 STEPS, STEP_TOKENS = 86_975, 12 * MICRO_BATCH_TOKENS
 REPO_STEPS = round(REPO_SHARE * STEPS)
 
@@ -92,8 +103,8 @@ REPO_STAGE = Stage(32_768, REPO_STEPS * STEP_TOKENS, {
 IN_PART = ("synthetic", "text", "math")
 # {source: its group} of every source of a group read in part (such a group has the same sources in both stages)
 PART = {source: group for group in IN_PART for source in FILE_STAGE.groups[group].sources}
-# Bytes per token of production's tokenizer on each source (normalization_doc.md §5.1), for token counts before this
-# corpus's tokenizer exists
+# Bytes per token of the reference tokenizer (SA-BPE within SPLIT_PATTERN, trained before this corpus) on each source
+# (normalization_doc.md §5.1), for token counts that precede the corpus's tokenizer (extents, the tokenizer sample)
 BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.638,
                    "ultradata_code_l2_python": 3.709, "stack_edu_cpp": 3.065, "ultradata_stack_v3_l2_cpp": 3.015,
                    "ultradata_code_l2_cpp": 2.935, "kaggle_notebooks": 3.459, "codeforces_cots": 3.536,
@@ -101,9 +112,9 @@ BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.
                    "nemotron_rewriting_python": 3.909, "nemotron_transpilation_cpp": 3.651, "codexglue_python": 4.028,
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
-# How much better a retrained tokenizer may compress a source than production's: "the NSL on any given subset only
-# varies by 5 to 6 percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035 §2.3);
-# ablations/tokenizer.py intrinsic measures each arm's margin (train_tokens_over_draw)
+# How much better a retrained tokenizer may compress a source than the reference tokenizer: "the NSL on any given
+# subset only varies by 5 to 6 percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035
+# §2.3); ablations/tokenizer.py intrinsic measures each arm's margin (train_tokens_over_draw)
 SPREAD = 0.06
 
 

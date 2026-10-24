@@ -1,10 +1,10 @@
 """
 The training loop. train() pretrains (or resumes) a run: the file-level stage, then the repo-level stage from
 repo_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
-data/pack.py). Each start resumes from the tag's newest checkpoint (weights, optimizer state, data position). What a
+corpus/pack.py). Each start resumes from the tag's newest checkpoint (weights, optimizer state, data position). What a
 step computes is this package's: the optimizers, weight decay and gradient clip (optim.py), each step's stage and lr
 (schedule.py), the stages' micro-batches in the run's data order (stages.py), the micro-batches' loss weights
-(ops/cross_entropy.py step_shares). Callers: scripts/production.py, ablations/harness.py. Metrics: metrics.py.
+(ops/cross_entropy.py step_shares). Callers: scripts/pretrain.py, ablations/harness.py. Metrics: metrics.py.
 """
 
 import gc
@@ -12,11 +12,12 @@ import math
 import time
 from dataclasses import asdict
 from functools import partial
+from pathlib import Path
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.data.tokenizer import get_tokenizer
+from nanochat.corpus.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, non_embedding_flops_per_token
 from nanochat.ops.cross_entropy import step_shares
 from nanochat.train import metrics
@@ -26,16 +27,16 @@ from nanochat.train.schedule import RunPlan, lr_multiplier
 from nanochat.train.stages import stage_batches
 
 
-def train(*, model: GPT, run: RunPlan, tokenizer_name: str, variant: dict, seed: int, checkpoints: frozenset[int],
+def train(*, model: GPT, run: RunPlan, vocabulary: Path, variant: dict, seed: int, checkpoints: frozenset[int],
           tag: str) -> GPT:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
-    (schedule.plan at the caller's peak lr) on the packed data of tokenizer `tokenizer_name` (get_tokenizer) and return
-    it: initialization and data order by `seed`, decoupled weight decay by the tau law at the run's lr
-    (optim.tau_weight_decay), each update clipped (optim.update), the stages by run.stage_at; `variant`
-    (config.run_tag's) recorded with the run. A checkpoint after each step count in `checkpoints` (run.num_iterations
-    among them: the final model); a run resumes from its newest."""
+    (schedule.plan at the caller's peak lr) on the packed data of the vocabulary in directory `vocabulary`
+    (corpus/tokenizer.py get_tokenizer) and return it: initialization and data order by `seed`, decoupled weight decay
+    by the tau law at the run's lr (optim.tau_weight_decay), each update clipped (optim.update), the stages by
+    run.stage_at; `variant` (config.run_tag's) recorded with the run. A checkpoint after each step count in
+    `checkpoints` (run.num_iterations among them: the final model); a run resumes from its newest."""
     device = torch.device("cuda")
-    tokenizer = get_tokenizer(tokenizer_name)
+    tokenizer = get_tokenizer(vocabulary)
     model.to_empty(device=device)
     model.init_weights(seed=seed)
     opts = optimizers(model, lr=run.lr, weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,

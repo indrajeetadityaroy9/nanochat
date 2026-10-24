@@ -20,7 +20,7 @@ from quack.gemm_interface import gemm
 from torch import Tensor
 from torch.autograd.function import FunctionCtx
 
-from nanochat.data.loader import PretrainingBatches
+from nanochat.corpus.loader import PretrainingBatches
 
 
 # Opaque to torch.compile: functionalizing the in-place logit gradient corrupted x's gradient.

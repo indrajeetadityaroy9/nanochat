@@ -1,4 +1,4 @@
-//! The packer (nanochat/data/pack.py): one curated shard of a compiled split at a time, its documents cut into pieces
+//! The packer (nanochat/corpus/pack.py): one curated shard of a compiled split at a time, its documents cut into pieces
 //! that fit a training row, the pieces of a train split of a repository corpus drawn fill-in-the-middle examples
 //! (context-level FIM: per piece, after cutting; arXiv 2207.14255 §3.2) whose middles AST-FIM chooses
 //! (arXiv 2506.00204v1 §3.3, §5.1), half of them widened to whole lines (line-level infilling), and the
@@ -222,7 +222,7 @@ fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) ->
 /// else PSM:
 ///   PSM: <fim_prefix> prefix <fim_suffix> suffix <fim_middle> middle
 ///   SPM: <fim_prefix> <fim_suffix> suffix <fim_middle> prefix middle
-/// The BOS before the example and its target BOS after the middle are the loader's (data/loader.py).
+/// The BOS before the example and its target BOS after the middle are the loader's (corpus/loader.py).
 fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng: ChaCha8Rng) -> Vec<u16> {
     let spm = rng.random_bool(fim.spm);
     let random = rng.random_bool(fim.random);
@@ -259,7 +259,7 @@ impl Split<'_> {
     /// document's statement_cuts, computed on first need), else after its last line-ending token, else before the last
     /// token it reaches that starts a character, so that every piece is whole characters. A piece read left to right
     /// fits its row with its BOS, and when it ends the document the BOS after it, its target (a cut piece's next BOS is
-    /// no target: data/loader.py). A piece drawn a FIM example (fim_draw) fits with its BOS, the example and the target
+    /// no target: corpus/loader.py). A piece drawn a FIM example (fim_draw) fits with its BOS, the example and the target
     /// BOS after its middle: its window first leaves room for the three sentinels; as the sections are encoded each on
     /// its own, the example's length is known once built, and an example longer than its row shrinks the window by the
     /// excess.
@@ -351,7 +351,7 @@ fn best_fit_decreasing(lengths: &[usize], targeted: &[bool], row_len: usize) -> 
 
 /// One curated shard's documents first..last packed: the pack index entry of every piece in row order (token range
 /// [start, end) of the split, then the range of its FIM example in the shard's FIM tokens, empty for a piece read left
-/// to right; data/loader.py PIECE_COLUMNS, pack.py offsets the FIM range into the split's), the pieces per row, and the
+/// to right; corpus/loader.py PIECE_COLUMNS, pack.py offsets the FIM range into the split's), the pieces per row, and the
 /// FIM examples' tokens in row order. A piece's BOS is followed by its tokens: a FIM example's when the loader reads
 /// "fim", else (reading "left_to_right", and every piece read left to right) its range; it takes the longer of the two
 /// in its row. A piece has the BOS after it as its target when it ends its document or is a FIM example (the end of its

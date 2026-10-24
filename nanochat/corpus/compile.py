@@ -109,11 +109,11 @@ def compile_split(corpus: str, split: str, vocabulary: Path, fn: Callable, tasks
     path.with_suffix(".json").write_text(json.dumps({"files": per_shard}))
 
 
-def compile_source(source: str, split: str, vocabulary: Path, pool: Executor) -> None:
-    """A source's curated split, a row group per task."""
+def compile_source(source: str, split: str, vocabulary: Path, pool: Executor, leading: int | None = None) -> None:
+    """A source's curated split, or its `leading` curated shards, a row group per task."""
     compile_split(source, split, vocabulary, row_group_documents,
                   [[(source, path, g, vocabulary) for g in range(pq.read_metadata(path).num_row_groups)]
-                   for path in curated_shards(source, split)], pool)
+                   for path in curated_shards(source, split)[:leading]], pool)
 
 
 def shard_tokens(corpus: str, split: str, vocabulary: Path) -> np.ndarray:
@@ -128,18 +128,27 @@ def train_parts() -> list[int]:
     return [int(path.stem) for path in curated_shards(mixture.REPOSITORY_SOURCES[0], "train")]
 
 
-def stage_parts(vocabulary: Path, pool: Executor) -> list[int]:
-    """The fewest trailing train partitions whose repository documents (both languages, after the path rule) hold the
-    32K stage's draw of repository code: the code share of its tokens less its supply sources' (Codeforces-CoTs), which
-    it reads whole. A partition at a time, from the last, its two languages at once: each task holds a partition of
-    its language's sources twice at peak."""
-    need = mixture.CODE_SHARE * mixture.REPO_STAGE.tokens - sum(shard_tokens(s, "train", vocabulary).sum()
-                                                               for s in mixture.REPO_STAGE.supply)
+def stage_parts(vocabulary: Path, pool: Executor, need: float) -> list[int]:
+    """The fewest trailing train partitions whose repository documents (both languages, after the path rule) hold
+    `need` tokens. A partition at a time, from the last, its two languages at once: each task holds a partition of its
+    language's sources twice at peak."""
     parts = train_parts()
     tokens = (sum(len(ids) for ids, _ in pool.map(repository_documents, [(language, "train", part, vocabulary)
                                                                          for language in mixture.REPOSITORIES]))
               for part in reversed(parts))
     return parts[-next(k + 1 for k, total in enumerate(itertools.accumulate(tokens)) if total >= need):]
+
+
+def compile_repositories(vocabulary: Path, parts: list[int], pool: Executor) -> None:
+    """The repositories corpora (mixture.REPOSITORIES) of train partitions `parts` and of val partition 0."""
+    tokenizer = get_tokenizer(vocabulary)
+    for language, corpus in mixture.REPOSITORIES.items():
+        split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
+        for split, split_parts in (("val", [0]), ("train", parts)):
+            compile_split(corpus, split, vocabulary, repository_documents,
+                          [[(language, split, part, vocabulary)] for part in split_parts], pool)
+        print(f"{corpus}: train partitions {parts[0]}..{parts[-1]}, "
+              f"{shard_tokens(corpus, 'train', vocabulary).sum():,} tokens", flush=True)
 
 
 def repository_parts(vocabulary: Path) -> list[int]:
@@ -157,14 +166,11 @@ def main() -> None:
             split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
         # every split at once: the pool runs their row groups in submission order, so no core waits on a small split
         list(threads.map(lambda job: compile_source(job[0], job[1], TOKENIZER, pool), jobs))
-        parts = stage_parts(TOKENIZER, pool)
-        for language, corpus in mixture.REPOSITORIES.items():
-            split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
-            for split, split_parts in (("val", [0]), ("train", parts)):
-                compile_split(corpus, split, TOKENIZER, repository_documents,
-                              [[(language, split, part, TOKENIZER)] for part in split_parts], pool)
-            print(f"{corpus}: train partitions {parts[0]}..{parts[-1]}, "
-                  f"{shard_tokens(corpus, 'train', TOKENIZER).sum():,} tokens", flush=True)
+        # the 32K stage's draw of repository code: the code share of its tokens less its supply sources'
+        # (Codeforces-CoTs), which it reads whole
+        need = mixture.CODE_SHARE * mixture.REPO_STAGE.tokens - sum(shard_tokens(s, "train", TOKENIZER).sum()
+                                                                   for s in mixture.REPO_STAGE.supply)
+        compile_repositories(TOKENIZER, stage_parts(TOKENIZER, pool, need), pool)
 
 
 if __name__ == "__main__":

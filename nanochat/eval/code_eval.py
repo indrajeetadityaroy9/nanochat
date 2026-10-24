@@ -29,8 +29,8 @@ Benchmarks:
   arXiv 2505.18789 (Table 1, Fig. 4: single-line one line, multi-line the reference's line count; its Table 1 also
   truncates a random-span middle's overlap with the prefix and suffix, which is not done here). FIM prompts are not
   healed: they end with a sentinel (PSM) or with the prefix encoded on its own (SPM), the training format, whose
-  character-level spans train mid-token boundaries (data/crate/pack.rs random_span). Scored by the package's entry point
-  (`python -m human_eval_infilling.evaluate_functional_correctness`: 3 s timeout, 4 workers); pass@1 by its
+  character-level spans train mid-token boundaries (corpus/crate/pack.rs random_span). Scored by the package's entry
+  point (`python -m human_eval_infilling.evaluate_functional_correctness`: 3 s timeout, 4 workers); pass@1 by its
   estimate_pass_at_k.
 
 Scores: pass@1 by three generation modes, each scored by the benchmark's evaluator. "greedy": one greedy completion per
@@ -70,7 +70,7 @@ from huggingface_hub import hf_hub_download
 from human_eval_infilling.data import read_problems
 from human_eval_infilling.evaluation import estimate_pass_at_k
 
-from nanochat.data.tokenizer import Tokenizer
+from nanochat.corpus.tokenizer import Tokenizer
 from nanochat.eval.verify import chosen, search, solution_diagnostics
 from nanochat.inference.decoder import AllOf, NativeDecoder, Request, fim_prompt, heal
 from nanochat.inference.syntax_constraint import SyntaxConstraint
@@ -167,7 +167,7 @@ def fim_lines(middle: str, lines: int | None) -> str:
 def completion(tokenizer: Tokenizer, task: Task, ids: list[int], *, special: Literal["skip", "stop"],
                healed: bytes) -> str:
     """The completion text of generated ids, cut before the task's first stop sequence (MultiPL-E stop_at_stop_token;
-    EvalPlus vLLM stop strings). Special tokens (ids >= BOS, data/tokenizer.py) are "skip"ped (EvalPlus
+    EvalPlus vLLM stop strings). Special tokens (ids >= BOS, corpus/tokenizer.py) are "skip"ped (EvalPlus
     skip_special_tokens) or "stop" the completion (MultiPL-E automodel.py:99-101); healed (StopAt) bytes dropped."""
     bos = tokenizer.bos_token_id
     ids = [t for t in ids if t < bos] if special == "skip" else list(itertools.takewhile(lambda t: t < bos, ids))

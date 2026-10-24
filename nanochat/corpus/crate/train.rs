@@ -5,7 +5,7 @@
 //! documents hold the pair in the current segmentation. A pair seen in one source scores 0: it merges only after every
 //! pair seen in several. Ties (equal f64 scores) go to the higher F, then the smaller pair (rustbpe's order). Text is
 //! split by fancy-regex, the regex engine of OpenAI's tiktoken, which encodes with the trained vocabulary
-//! (nanochat/data/tokenizer.py), so training splits text as encoding does.
+//! (nanochat/corpus/tokenizer.py), so training splits text as encoding does.
 //!
 //! The trainer is rustbpe's (github.com/karpathy/rustbpe): the documents are split into chunks by the pattern, each
 //! distinct chunk is a word of byte ids with its count, and the merge loop keeps pair frequencies up to date

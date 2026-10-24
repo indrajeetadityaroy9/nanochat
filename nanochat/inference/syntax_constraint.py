@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 from lark import Lark
 
-from nanochat.data.tokenizer import get_tokenizer
+from nanochat.corpus.tokenizer import get_tokenizer
 from nanochat.native import crate_module
 
 CRATE = Path(__file__).resolve().parent / "syntax"
@@ -64,9 +64,9 @@ def identifier_ranges(chars: str, test) -> list[tuple[int, int]]:
 
 @functools.cache
 def python_syntax():
-    """The crate's Syntax of nanochat's tokenizer (data/tokenizer.get_tokenizer), built once per process and shared by
-    every constraint and thread: Lark's LALR tables of python.lark (dense, terminals and nonterminals by sorted name),
-    the lexemes' terminals, Python's identifier classes beyond ASCII (str.isidentifier of c, of "a" + c), the
+    """The crate's Syntax of the corpus's tokenizer (corpus/tokenizer.get_tokenizer), built once per process and shared
+    by every constraint and thread: Lark's LALR tables of python.lark (dense, terminals and nonterminals by sorted
+    name), the lexemes' terminals, Python's identifier classes beyond ASCII (str.isidentifier of c, of "a" + c), the
     vocabulary's byte trie, and the per-lexer-state token groupings, filled on first use."""
     lark = Lark((CRATE / "python.lark").read_text(), parser="lalr", lexer="basic", start="file_input", strict=True)
     conf = lark.parse_interactive().parser_state.parse_conf

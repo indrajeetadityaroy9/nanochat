@@ -16,7 +16,7 @@ from typing import Literal
 
 import torch
 
-from nanochat.data.tokenizer import Tokenizer
+from nanochat.corpus.tokenizer import Tokenizer
 from nanochat.eval.bpb import likelihood
 from nanochat.eval.code_eval import fim_generation, generation, parse_generation, tasks
 from nanochat.model.gpt import GPT

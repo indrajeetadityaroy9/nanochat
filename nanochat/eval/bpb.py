@@ -25,9 +25,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from nanochat.config import FILE_STAGE, REPO_STAGE, Stage
-from nanochat.data.loader import PretrainingBatches, mixture_corpora, mixture_weights, packed_rows
-from nanochat.data.tokenizer import Tokenizer
+from nanochat.corpus.loader import PretrainingBatches, packed_rows
+from nanochat.corpus.mixture import FILE_STAGE, NON_CODE, REPO_STAGE, Stage
+from nanochat.corpus.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT
 
 # Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the
@@ -85,9 +85,8 @@ def bpb(*pooled: dict) -> float:
 
 
 def mixture_bpb(corpora: dict, weights: dict[str, float], *, buckets: slice = slice(None)) -> float:
-    """Bits per byte of val rows drawn with the mixture's row weights (data/loader.py mixture_weights): weighted bits
-    per row over weighted bytes per row of corpora {corpus: {"bits", "bytes", "rows"}}, over the context buckets
-    `buckets` (all by default)."""
+    """Bits per byte of val rows drawn with row weights {corpus: weight}: weighted bits per row over weighted bytes per
+    row of corpora {corpus: {"bits", "bytes", "rows"}}, over the context buckets `buckets` (all by default)."""
     bits = sum(w * sum(corpora[c]["bits"][buckets]) / corpora[c]["rows"] for c, w in weights.items())
     nbytes = sum(w * sum(corpora[c]["bytes"][buckets]) / corpora[c]["rows"] for c, w in weights.items())
     return bits / nbytes
@@ -100,17 +99,17 @@ def sample_rows(stage: Stage) -> int:
 
 
 def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> dict:
-    """Val evaluation of a stage's mixture {group: (share, corpora)} in its rows: {"corpora": {corpus: {"bits", "bytes",
-    "rows"}}, "bpb": {group: mixture_bpb, "all": mixture_bpb of every corpus}, "weights": the stage's mixture weights
-    {corpus: weight} mixture_bpb pools by}, each corpus's packed val split read left to right over a systematic sample
-    of its rows, weighted by the stage's mixture weights. cu_seqlens is padded to the corpora's most segments: one
-    compiled graph scores all."""
+    """Val evaluation of a stage's corpora in its rows: {"corpora": {corpus: {"bits", "bytes", "rows"}}, "bpb": {group:
+    mixture_bpb, "all": mixture_bpb of every corpus}, "weights": {corpus: weight} mixture_bpb pools by}, each corpus's
+    packed val split read left to right over a systematic sample of its rows. The weights are the stage's shares of its
+    train packed rows (Stage.shares at their total), the groups code (every code group), text and math. cu_seqlens is
+    padded to the corpora's most segments: one compiled graph scores all."""
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
     # the sample: n = min(num_rows, sample_rows) rows, row (j x num_rows) // n for j < n (the packer orders each shard's
     # rows longest first, Best-Fit-Decreasing, so a prefix would over-represent long documents), its last micro-batch
     # filled with empty rows: a split within the sample is scored whole, every row of it
     sampled, samples = {}, {}
-    for name in mixture_corpora(stage.mixture):
+    for name in stage.sources:
         num_rows = packed_rows(name, "val", tokenizer, stage.seq_len)
         n = sampled[name] = min(num_rows, sample_rows(stage))
         samples[name] = np.concatenate([np.arange(n, dtype=np.int64) * num_rows // n,
@@ -122,9 +121,10 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     corpora = {name: {**sums(losses, loader, token_bytes, steps=len(samples[name]) // stage.batch_rows,
                              num_segments=num_segments),
                       "rows": sampled[name]} for name, loader in loaders.items()}
-    weights = mixture_weights(stage.mixture, tokenizer, stage.seq_len)
-    groups_bpb = {group: mixture_bpb(corpora, {c: weights[c] for c in members})
-                  for group, (_, members) in stage.mixture.items()}
+    rows = {corpus: packed_rows(corpus, "train", tokenizer, stage.seq_len) for corpus in stage.sources}
+    weights = stage.shares(rows, sum(rows.values()))
+    groups = {"code": stage.code} | {name: stage.groups[name].sources for name in NON_CODE}
+    groups_bpb = {group: mixture_bpb(corpora, {c: weights[c] for c in members}) for group, members in groups.items()}
     return {"corpora": corpora, "bpb": groups_bpb | {"all": mixture_bpb(corpora, weights)}, "weights": weights}
 
 
@@ -161,9 +161,8 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
 
 
 def likelihood(model: GPT, tokenizer: Tokenizer, benchmarks: dict, *, device: torch.device) -> dict:
-    """{"8k": val_bits of FILE_STAGE (config.MIXTURE in file-level rows), "32k": val_bits of REPO_STAGE (null for a
-    model not at its context), "solution": solution_bits} by the compiled GPT.losses, one graph per row shape;
-    benchmarks: eval/code_eval.py tasks()."""
+    """{"8k": val_bits of FILE_STAGE, "32k": val_bits of REPO_STAGE (null for a model not at its context), "solution":
+    solution_bits} by the compiled GPT.losses, one graph per row shape; benchmarks: eval/code_eval.py tasks()."""
     losses = torch.compile(model.losses, dynamic=False, fullgraph=True)
     return {"8k": val_bits(losses, tokenizer, stage=FILE_STAGE, device=device),
             "32k": (val_bits(losses, tokenizer, stage=REPO_STAGE, device=device)

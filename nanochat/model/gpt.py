@@ -24,7 +24,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from nanochat.config import HEAD_DIM, ROPE_BASE, VOCAB_SIZE, Stage
+from nanochat.config import HEAD_DIM, ROPE_BASE, VOCAB_SIZE
+from nanochat.corpus.mixture import Stage
 from nanochat.ops.cross_entropy import lm_loss, lm_losses
 from nanochat.ops.flash_attn import flash_attn
 from nanochat.ops.linear import linear, relu2_mlp

@@ -17,7 +17,7 @@ from nanochat.config import HEAD_DIM
 from nanochat.paths import NATIVE
 
 CSRC = Path(__file__).resolve().parent / "csrc"
-DATA_CRATE = Path(__file__).resolve().parent / "data" / "crate"
+DATA_CRATE = Path(__file__).resolve().parent / "corpus" / "crate"
 
 
 def native_library(name: str, sources: list[Path], build: Callable[[Path], None], *, settings: bytes) -> Path:
@@ -75,6 +75,6 @@ def crate_module(crate: Path) -> ModuleType:
 
 
 def data_crate() -> ModuleType:
-    """The data pipeline's Rust crate (data/crate): train (data/tokenizer.py), sketch and duplicates (data/dedup.py),
-    repository_samples (data/curate.py), pack (data/pack.py)."""
+    """The corpus's Rust crate (corpus/crate): train (ablations/tokenizer.py), repository_samples (corpus/curate.py,
+    compile.py), pack (corpus/pack.py)."""
     return crate_module(DATA_CRATE)

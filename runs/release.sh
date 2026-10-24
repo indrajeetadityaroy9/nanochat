@@ -2,7 +2,7 @@
 # Publish a run as a Hugging Face model repository in the checkout's layout (nanochat/paths.py): its checkpoints
 # artifacts/checkpoints/<tag>-step<step>.pt, the run records under artifacts/ (metrics, base_eval) and results/.
 # `runs/container.sh hf download <repo> --local-dir /workspace/nanochat` restores them for train/checkpoint.load_model
-# and a resumed production run. Needs a write token (runs/container.sh hf auth login).
+# and a resumed pre-training run. Needs a write token (runs/container.sh hf auth login).
 #
 #   runs/release.sh <tag> <repo>
 set -euo pipefail

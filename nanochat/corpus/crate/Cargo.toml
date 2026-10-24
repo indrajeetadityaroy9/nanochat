@@ -13,20 +13,18 @@ bytemuck = "1.25.2"
 fancy-regex = "0.19.2"
 # the trainer's set of sources holding a pair (its R): a bitset over the sources (a dependency of petgraph)
 fixedbitset = "0.5.7"
-# the compiled tokens and offsets (pack) and the deduplication's signature and id files, read in place
+# the compiled tokens and offsets (pack), read in place
 memmap2 = "0.9.11"
 # lexical cleaning of the paths a C++ #include names (repository samples)
 path-clean = "1.0.1"
-# the dependency graph of a repository's files: strongly connected components in topological order, weak components;
-# union-find of the duplicate clusters
+# the dependency graph of a repository's files: strongly connected components in topological order, weak components
 petgraph = { version = "0.8.3", default-features = false, features = ["std"] }
 pyo3 = { version = "0.30.1", features = ["extension-module"] }
-# the draws of fill-in-the-middle (uniform and size-weighted choices from a per-piece ChaCha8 stream) and the MinHash
-# seeds (ChaCha8 under the zero key)
+# the draws of fill-in-the-middle (uniform and size-weighted choices from a per-piece ChaCha8 stream)
 rand = { version = "0.10.3", default-features = false, features = ["alloc"] }
 rand_chacha = "0.10.0"
 rayon = "1.12.0"
-# FxHash maps and sets; FxHasher is the word hash of the MinHash n-grams (rensa's token hash)
+# FxHash maps and sets
 rustc-hash = "2.1.3"
 # OpenAI tiktoken's encoder (its core, fancy-regex 0.19 as tiktoken's), for the sections of fill-in-the-middle examples
 tiktoken-rs = "0.12.1"

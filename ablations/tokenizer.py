@@ -7,19 +7,19 @@ and trained on. The sample, the val splits and the packs come from the curated s
 (mixture.py, compile.py, pack.py).
 
 Sample (sample): of each file-stage source's curated train split, its share of the stage's bytes (byte_shares: its
-share of the stage's tokens, Stage.shares, at production's bytes per token) as its share of SAMPLE_BYTES, a systematic
-sample in shard order: tokenizer training data "representative of model training data" (arXiv 2405.05417 §5); across
-tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage points", higher as the mix holds
-more of it (arXiv 2402.01035 §2.3); over languages, proportional tokenizer-training weights give lower bits per byte
-than equal ones (arXiv 2610.12144 Table 6, §7). The sample's composition is not an arm (normalization_doc.md §9). An
-authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository files and functions; any other
-document is its own.
+share of the stage's tokens, Stage.shares, at the reference tokenizer's bytes per token) as its share of SAMPLE_BYTES,
+a systematic sample in shard order: tokenizer training data "representative of model training data"
+(arXiv 2405.05417 §5); across tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage
+points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); over languages, proportional tokenizer-training
+weights give lower bits per byte than equal ones (arXiv 2610.12144 Table 6, §7). The sample's composition is not an arm
+(normalization_doc.md §9). An authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository files
+and functions; any other document is its own.
 
 Arms (ARMS):
-- sa-bpe: production's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the pair's
-  frequency, R the authorship units holding it in the current segmentation, a pair of one unit scoring 0; the natural
-  log as in pchizhov/sa-bpe scoring.py). Production's arm: of Table 3's rows, F·log R has the highest compression and
-  far fewer verified under-trained tokens than BPE. The repository as the unit is the paper's; the document as the
+- sa-bpe: the reference tokenizer's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the
+  pair's frequency, R the authorship units holding it in the current segmentation, a pair of one unit scoring 0; the
+  natural log as in pchizhov/sa-bpe scoring.py). The baseline: of Table 3's rows, F·log R has the highest compression
+  and far fewer verified under-trained tokens than BPE. The repository as the unit is the paper's; the document as the
   unit of other text follows §6 ("documents, books, or document collections"), untested there. Not the paper's best
   F·log R·L (Table 4): for natural language "the language aspect must be avoided" (§6);
 - sa-bpe-fused: FUSED_PATTERN, whose punctuation clause takes the line breaks after it, as cl100k's does. The positive
@@ -41,8 +41,8 @@ the documents, bytes and units taken) and each arm's training time.
 intrinsic: every arm's compiled val split of every source, and RESULTS/tokenizer-intrinsic.json, only the measures
 that plan the runs, gate their validity, test an arm's mechanism or break the decision's tie:
 - planning: each source's bytes per token and the file stage's over its byte shares (an arm's tokens at equal bytes;
-  production's compile and pack budgets), and each group read in part's train tokens over its draw (below 1, the
-  corpus's extent is too small for that arm: prepare.extent, mixture.SPREAD);
+  the compile and pack budgets), and each group read in part's train tokens over its draw (below 1, the corpus's extent
+  is too small for that arm: prepare.extent, mixture.SPREAD);
 - validity, asserted: every arm holds the same bytes per document; on each source's first FIDELITY_DOCUMENTS val texts
   the pattern's chunks cover the text, tiktoken's encoding equals the arm's merges replayed in training order (Hugging
   Face tokenizers' BPE model), and every text decodes back;
@@ -56,17 +56,22 @@ Not measured: TokEval's intrinsic metrics, which no decision reads: of its 14 on
 the paper attributes "to the vocabulary's line-break handling" (arXiv 2608.18062 §5), measured here directly, and
 Rényi efficiency predicts neither code bits per byte nor MBPP (Table 2).
 
-runs: every arm at d16, SEEDS seeds each, at equal bytes: each reads the code documents of the set once, as production
-reads its data (train/stages.py max_ratio), so its tokens are their bytes over its bytes per token; text and math are
-drawn by rows. Each run's plan is its own (schedule.plan at its tokens), its contexts the corpus's 8,192 and 32,768
-tokens (eval/bpb.py's byte-offset buckets: the bytes of context a better compressor sees, arXiv 2503.13423 §3.1,
-App. B.1). The set holds 20 tokens per scaling parameter of d16 for sa-bpe (arXiv 2203.15556 Table 3): of each code
-corpus the leading train documents whose sa-bpe tokens fill its file-level draw, so the code group binds every arm's
-max_ratio; of text and math the leading shards, and of each repository corpus the trailing partitions, holding a
-margin over their draws, so they never bind. The runs train through ablations/harness.py, whose stack (nanochat/train,
-nanochat/eval) reads nanochat/data; the training cutover builds the set and every arm's packs (corpus compile.py and
-pack.py, given the arm's directory; nanochat/corpus/gh200.md). RESULTS/tokenizer.json: each challenger's contrasts
-and the decision.
+data: every arm's training set, the same documents (the set) compiled and packed under each arm (corpus compile.py and
+pack.py, given the arm's directory), and RESULTS/tokenizer-data.json: the set and, per arm, its packed rows per stage,
+its d16 max_ratio and plan, and the share of each corpus's packed rows its run reads. The set holds a d16 run at RATIO
+tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3), each source at its share of the base model's
+stage (Stage.shares of the sources' train tokens), the tokens of a shard estimated from its text bytes at sa-bpe's val
+bytes per token: of each code source the leading train shards that fill its file-stage draw, so code binds every arm's
+max_ratio; of a "supply" source (notebooks, functions, traces), its draw, read whole once; of text and math the leading
+shards of each stage, and of the repositories corpora the trailing partitions (compile.stage_parts, under sa-bpe),
+holding MARGIN times their draws, so they never bind.
+
+runs: every arm at d16, SEEDS seeds each, at equal bytes: each at its max_ratio (the data record's), so it reads the
+set's code documents once and its tokens are their bytes over its bytes per token; text and math are drawn by rows.
+Each run's plan is its own (schedule.plan at its tokens), its contexts the corpus's 8,192 and 32,768 tokens
+(eval/bpb.py's byte-offset buckets: the bytes of context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1),
+trained and evaluated through ablations/harness.py with sa-bpe as the baseline. RESULTS/tokenizer.json: each
+challenger's contrasts and the decision.
 
 Decisions, pre-registered (RESULTS/tokenizer.json "decision"), each challenger (CHALLENGERS) against sa-bpe on the
 seeds where both have an evaluation (a diverged run drops its seed from the arm's contrasts on both sides):
@@ -88,7 +93,7 @@ carried to another arm's pattern, that pair trained on the sample.
 
 The comparisons, their measures and the recorded results: ablations/tokenizer.md.
 
-python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt
+python -m ablations.tokenizer vocabularies|intrinsic|data|runs|adopt
 """
 import datetime
 import functools
@@ -115,13 +120,13 @@ from tokenizers import models
 
 from nanochat.config import VOCAB_SIZE
 from nanochat.corpus import mixture
-from nanochat.corpus.compile import compile_source
-from nanochat.corpus.loader import TOKEN_DTYPE, split_path
+from nanochat.corpus.compile import compile_repositories, compile_source, stage_parts
+from nanochat.corpus.loader import TOKEN_DTYPE, mixture_rows, split_path, weights
+from nanochat.corpus.pack import packed_shards, shard_count, write
 from nanochat.corpus.parallel import SPAWN
 from nanochat.corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
 from nanochat.corpus.sources import SOURCES, curated_shards, text_bytes, texts
-from nanochat.corpus.tokenizer import TOKENIZER, get_tokenizer
-from nanochat.data.tokenizer import SPECIAL_TOKENS, SPLIT_PATTERN, save
+from nanochat.corpus.tokenizer import SPECIAL_TOKENS, SPLIT_PATTERN, TOKENIZER, get_tokenizer, save
 from nanochat.native import data_crate
 from nanochat.paths import CORPUS, RESULTS, ROOT
 
@@ -129,7 +134,7 @@ Score = Literal["sa-bpe", "frequency"]
 
 # The arms' vocabularies, ABLATION/<arm>, and their compiled data, ABLATION/compiled (corpus/tokenizer.py)
 ABLATION = CORPUS / "tokenizer-ablation"
-# The sample's bytes: production's tokenizer sample's (its curated splits' Parquet footers)
+# The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers)
 SAMPLE_BYTES = 13.38e9
 # karpathy/nanochat's split pattern (92d63d4): SPLIT_PATTERN with cl100k's punctuation clause, whose [\r\n]* takes the
 # line breaks after a punctuation run ("):\n" one chunk)
@@ -155,21 +160,26 @@ FUSED_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}|
 #     English contractions chunk as "doesn" "'t".
 # Kept from cl100k: one leading punctuation character on a letter run (".append", "(self"), which Punct drops (it keeps
 # the leading space, arXiv 2402.01035 Fig. 3), GPT-4's pattern giving "an additional 5% compression over Punct at no
-# significant cost to performance" (App. E); a leading space (" foo"); production's digit pairs and punctuation runs.
+# significant cost to performance" (App. E); a leading space (" foo"); SPLIT_PATTERN's digit pairs and punctuation runs.
 # [^\S\r\n\t ]+ puts every character in some chunk (tiktoken drops what no clause matches). No lookahead: a long
 # whitespace run costs fancy-regex no backtracking, where SPLIT_PATTERN's \s+(?!\S) beside \s*[\r\n] stops tiktoken past
 # its backtrack limit
 HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\n+|\r+|\t+| +|[^\S\r\n\t ]+"""
-# arm: (pattern, merge score); every arm is trained on, sa-bpe as the harness's production arm
+# arm: (pattern, merge score); every arm is trained on, sa-bpe as the harness's baseline
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
 DEPTH, SEEDS = 16, 2
+# The set's size: a d16 run at Chinchilla's 20 tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3)
+RATIO = 20
+# The set's margin over the draws of the corpora that must not bind (text, math, the repositories corpora): above the
+# code shards' rounding up to whole shards and the arms' spread in compression [inference]
+MARGIN = 1.5
 # The decisions' significance level, the conventional 0.05
 ALPHA = 0.05
 # The pooled seed standard deviation of a run's 8K code bits per byte (seed variances pooled over configurations): two
-# d8 configurations at 20 tokens per parameter on production's data, data seeds 0 to 2 (six runs; no results/ file
-# holds them), carried to d16 and to the corpus [inference]
+# d8 configurations at 20 tokens per parameter on the reference tokenizer's data, data seeds 0 to 2 (six runs; no
+# results/ file holds them), carried to d16 and to the corpus [inference]
 CODE_SIGMA = 0.0034
 # The benchmark of the parse test (Decisions)
 PARSED = "mbpp_plus"
@@ -440,18 +450,125 @@ def intrinsic() -> None:
     (RESULTS / "tokenizer-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
-def runs() -> None:
-    """Every arm at d16, each at its max_ratio (ablations/harness.py main); then RESULTS/tokenizer.json gains each
-    challenger's contrast with sa-bpe and the decision (module docstring)."""
-    # the training stack (torch) here alone: the sample's and the measures' spawned workers import this module
-    from ablations.harness import Setting, main
-    from nanochat.train.stages import max_ratio
+def vocabulary_name(arm: str) -> str:
+    """An arm's vocabulary directory under CORPUS, its harness Run.tokenizer."""
+    return str((ABLATION / arm).relative_to(CORPUS))
 
-    ratios = {arm: max_ratio(get_tokenizer(ABLATION / arm), depth=DEPTH) for arm in ARMS}
+
+def document_set(pool: ProcessPoolExecutor, run) -> dict:
+    """The set (module docstring) for the d16 run `run` at RATIO under sa-bpe: {"file": {source: its leading train
+    shards, the file stage's}, "repository": {source: its train shards after those, the repository stage's},
+    "partitions": the repositories corpora's train partitions, "draws": {seq_len: {corpus: its tokens in the run}}}."""
+    from nanochat.train.stages import drawn
+
+    measured = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))["arms"]["sa-bpe"]
+    estimate = {s: np.array([text_bytes(pq.read_metadata(path), "content") for path in curated_shards(s, "train")])
+                / measured["sources"][s]["bytes_per_token"] for s in SOURCES}
+
+    def shards(source: str, tokens: float, start: int) -> int:
+        """The fewest train shards of a source from shard `start` whose estimated sa-bpe tokens hold `tokens`."""
+        held = np.cumsum(estimate[source][start:])
+        if held[-1] < tokens:
+            raise RuntimeError(f"{source}: its train shards from {start} hold {held[-1]:,.0f} of {tokens:,.0f} tokens")
+        return int(np.searchsorted(held, tokens)) + 1
+
+    def draws(stage: mixture.Stage) -> dict[str, float]:
+        """Each corpus's tokens in the run: its share of the base model's stage (Stage.shares of the sources' train
+        tokens; the repositories corpora, unestimated, alike within their group) at the run's tokens in the stage."""
+        shares = stage.shares({s: estimate[s].sum() if s in SOURCES else 1.0 for s in stage.sources}, stage.tokens)
+        return {s: share * drawn(stage, run) * stage.seq_len for s, share in shares.items()}
+
+    file_draws, repo_draws = draws(mixture.FILE_STAGE), draws(mixture.REPO_STAGE)
+    file = {s: shards(s, tokens * (1 if s in mixture.FILE_STAGE.code else MARGIN), 0) for s, tokens in file_draws.items()}
+    repository = {s: shards(s, tokens * (1 if s in mixture.REPO_STAGE.supply else MARGIN), file.get(s, 0))
+                  for s, tokens in repo_draws.items() if s in SOURCES}
+    partitions = stage_parts(ABLATION / "sa-bpe", pool,
+                             MARGIN * sum(repo_draws[c] for c in mixture.REPOSITORIES.values()))
+    parts = [int(path.stem) for path in curated_shards(mixture.REPOSITORY_SOURCES[0], "train")]
+    if max(file[s] for s in mixture.REPOSITORY_SOURCES) > parts.index(partitions[0]):
+        raise RuntimeError("the file stage's repository shards reach the repository stage's partitions")
+    return {"file": file, "repository": repository, "partitions": partitions,
+            "draws": {"8192": file_draws, "32768": repo_draws}}
+
+
+def data() -> None:
+    """Every arm's training set, compiled and packed, and RESULTS/tokenizer-data.json (module docstring): every arm's
+    train splits at once into one process pool, then their repositories corpora, then every pack at once."""
+    # the training stack (the model's kernels) here and in runs alone: the measures' spawned workers import this module
+    import torch
+
+    from nanochat.model.gpt import GPT, gpt_config
+    from nanochat.train.schedule import plan
+    from nanochat.train.stages import drawn, max_ratio, stage_rows
+
+    start, began = time.perf_counter(), provenance()
+    with torch.device("meta"):
+        model = GPT(gpt_config(depth=DEPTH, stage=mixture.FILE_STAGE))
+    run = plan(model=model, ratio=RATIO)
+    stages = (mixture.FILE_STAGE, mixture.REPO_STAGE)
+    data_crate()  # built once, before the threads call it (pack.py's rule)
+    with ProcessPoolExecutor(mp_context=SPAWN) as pool, ThreadPoolExecutor(os.cpu_count()) as threads:
+        chosen = document_set(pool, run)
+        leading = {s: chosen["file"].get(s, 0) + chosen["repository"].get(s, 0) for s in SOURCES}
+        list(threads.map(lambda job: compile_source(job[1], "train", ABLATION / job[0], pool, leading=leading[job[1]]),
+                         [(arm, s) for arm in ARMS for s in SOURCES]))
+        list(threads.map(lambda arm: compile_repositories(ABLATION / arm, chosen["partitions"], pool), ARMS))
+        compiled = time.perf_counter() - start
+        packs = []
+        for arm, stage in itertools.product(ARMS, stages):
+            directory = ABLATION / arm
+            for corpus in stage.sources:
+                if corpus in mixture.REPOSITORIES.values():
+                    train = range(shard_count(corpus, "train", directory))
+                elif stage is mixture.FILE_STAGE:
+                    train = range(chosen["file"][corpus])
+                else:
+                    first = chosen["file"].get(corpus, 0)
+                    train = range(first, first + chosen["repository"][corpus])
+                packs += [(corpus, "train", directory, train, stage.seq_len),
+                          (corpus, "val", directory, range(shard_count(corpus, "val", directory)), stage.seq_len)]
+        list(threads.map(lambda job: write(job[0], job[1], job[2], packed_shards(*job), job[4]), packs))
+    packed = time.perf_counter() - start - compiled
+    arms = {}
+    for arm in ARMS:
+        tokenizer = get_tokenizer(ABLATION / arm)
+        ratio = max_ratio(tokenizer, depth=DEPTH)
+        arm_run = plan(model=model, ratio=ratio)
+        read = {}
+        for stage in stages:
+            rows, count = stage_rows(tokenizer, stage), drawn(stage, arm_run)
+            shares, _ = weights(stage, rows, count)
+            names = list(shares)
+            draws = np.bincount(mixture_rows(np.array([shares[n] for n in names]), start=0, count=count),
+                                minlength=len(names))
+            read[str(stage.seq_len)] = {n: {"rows": rows[n], "weight": shares[n], "read": int(d) / rows[n]}
+                                        for n, d in zip(names, draws, strict=True)}
+        arms[arm] = {"data_key": tokenizer.data_key, "ratio": ratio, "tokens_per_param": arm_run.tokens_per_param,
+                     "num_iterations": arm_run.num_iterations, "total_batch_size": arm_run.total_batch_size,
+                     "repo_start": arm_run.repo_start, "lr": arm_run.lr, "stages": read}
+        print(f"{arm}: ratio {ratio:.2f}, {arm_run.num_iterations:,} steps of {arm_run.total_batch_size:,} tokens",
+              flush=True)
+    record = {"run": {"depth": DEPTH, "ratio": RATIO, "num_iterations": run.num_iterations,
+                      "total_batch_size": run.total_batch_size, "repo_start": run.repo_start},
+              "set": chosen, "arms": arms,
+              "seconds": {"compile": compiled, "pack": packed, "all": time.perf_counter() - start}, "provenance": began}
+    (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+
+
+def runs() -> None:
+    """Every arm at d16, each at its max_ratio (RESULTS/tokenizer-data.json; ablations/harness.py main), sa-bpe the
+    baseline; then RESULTS/tokenizer.json gains each challenger's contrast with sa-bpe and the decision (module
+    docstring)."""
+    # the training stack (the model's kernels) here and in data alone: the measures' spawned workers import this module
+    from ablations.harness import Setting, main
+
+    ratios = {arm: measures["ratio"] for arm, measures in
+              json.loads((RESULTS / "tokenizer-data.json").read_text(encoding="utf-8"))["arms"].items()}
     main(experiment="tokenizer",
          settings=[Setting(depth=DEPTH, ratio=ratios["sa-bpe"], seeds=range(SEEDS),
-                           alternatives={arm: {"tokenizer": arm, "ratio": ratios[arm]} for arm in CHALLENGERS})],
-         production={"tokenizer": "sa-bpe"})
+                           alternatives={arm: {"tokenizer": vocabulary_name(arm), "ratio": ratios[arm]}
+                                         for arm in CHALLENGERS})],
+         baseline={"tokenizer": vocabulary_name("sa-bpe")})
     # (arm, seed) of every evaluated run (a diverged run has none): its measures and, per MBPP+ problem in the
     # benchmark's order, whether its completion compiles
     evaluated = {}
@@ -463,25 +580,25 @@ def runs() -> None:
     summary = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))
     contrasts = {}
     for arm in CHALLENGERS:
-        seeds = [seed for seed in range(SEEDS) if (arm, seed) in evaluated and ("production", seed) in evaluated]
+        seeds = [seed for seed in range(SEEDS) if (arm, seed) in evaluated and ("baseline", seed) in evaluated]
         if not seeds:
             raise RuntimeError(f"no seed evaluated under both {arm} and sa-bpe")
-        both = {name: [evaluated[name, seed] for seed in seeds] for name in (arm, "production")}
+        both = {name: [evaluated[name, seed] for seed in seeds] for name in (arm, "baseline")}
         code = {name: statistics.fmean(measures["code"] for measures, _ in runs_) for name, runs_ in both.items()}
         unparsed = {name: 1 - statistics.fmean(itertools.chain.from_iterable(parsed for _, parsed in runs_))
                     for name, runs_ in both.items()}
         # per problem, the seeds whose completion parses under the challenger minus under sa-bpe
         seeds_parsing = np.sum([parsed for _, parsed in both[arm]], axis=0) - np.sum(
-            [parsed for _, parsed in both["production"]], axis=0)
+            [parsed for _, parsed in both["baseline"]], axis=0)
         here, there = int((seeds_parsing > 0).sum()), int((seeds_parsing < 0).sum())
         p = binomtest(here, here + there).pvalue if here + there else 1.0
-        difference = code[arm] - code["production"]
+        difference = code[arm] - code["baseline"]
         margin = norm.ppf(1 - ALPHA / 2) * CODE_SIGMA * math.sqrt(2 / len(seeds))
         contrasts[arm] = {"seeds": seeds, "problems_parsing_more_here": here, "problems_parsing_more_in_sa-bpe": there,
                           "p": p, "parsing": "equal" if p >= ALPHA else "better" if here > there else "worse",
                           "code_difference": difference, "code_margin": margin,
                           "code": "better" if difference < -margin else "worse" if difference > margin else "equal",
-                          "unparsed_difference": unparsed[arm] - unparsed["production"]}
+                          "unparsed_difference": unparsed[arm] - unparsed["baseline"]}
     verdicts = {arm: (c["parsing"], c["code"]) for arm, c in contrasts.items()}
     qualified = {arm for arm, v in verdicts.items() if "worse" not in v and "better" in v}
     record = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))
@@ -521,9 +638,11 @@ if __name__ == "__main__":
             vocabularies()
         case ["intrinsic"]:
             intrinsic()
+        case ["data"]:
+            data()
         case ["runs"]:
             runs()
         case ["adopt"]:
             adopt()
         case _:
-            raise SystemExit("usage: python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt")
+            raise SystemExit("usage: python -m ablations.tokenizer vocabularies|intrinsic|data|runs|adopt")

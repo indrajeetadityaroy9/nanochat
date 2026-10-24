@@ -1,6 +1,7 @@
 """
-The corpus's compiled and packed data on disk (compile.py, pack.py), and training's reading of them: a stage's
-mixture of packed corpora, row by row (mixture_rows), assembled into micro-batches (PretrainingBatches).
+The corpus's compiled and packed data on disk (compile.py, pack.py), and training's reading of them: a run's weights
+in a stage (weights), its mixture of packed corpora row by row (mixture_rows), assembled into micro-batches
+(PretrainingBatches).
 """
 
 import itertools
@@ -15,16 +16,14 @@ import torch
 
 from nanochat.corpus import mixture
 from nanochat.corpus.sources import SOURCES
-from nanochat.data.tokenizer import Tokenizer
-from nanochat.paths import CORPUS
+from nanochat.corpus.tokenizer import Tokenizer
 
 # the Weyl sequence frac(n * GOLDEN) spreads every prefix of itself most evenly over [0, 1) (Knuth, TAOCP Vol. 3 §6.4)
 GOLDEN = (math.sqrt(5) - 1) / 2
-TOKEN_DTYPE = np.uint16  # compiled tokens, as the data crate reads them (data/crate pack.rs: &[u16])
-# a pack index entry of the data crate (data/crate pack.rs pack_shard): token range [start, end) of the compiled split,
-# then the range of the piece's FIM example in the split's FIM tokens (empty for a piece read left to right)
+TOKEN_DTYPE = np.uint16  # compiled tokens, as the data crate reads them (corpus/crate pack.rs: &[u16])
+# a pack index entry of the data crate (corpus/crate pack.rs pack_shard): token range [start, end) of the compiled
+# split, then the range of the piece's FIM example in the split's FIM tokens (empty for a piece read left to right)
 PIECE_COLUMNS = 4
-WEIGHTS = CORPUS / "packed.json"  # each stage's seq_len, rows and corpus weights (pack.py)
 
 
 def split_path(corpus: str, split: str, tokenizer: Tokenizer) -> Path:
@@ -80,9 +79,28 @@ def shard_bounds(corpus: str, split: str, tokenizer: Tokenizer) -> np.ndarray:
     return np.cumsum([0] + [file["documents"] for file in files])
 
 
-def stage_weights(seq_len: int) -> dict[str, float]:
-    """{corpus: weight} of the stage at seq_len, as pack.py fitted them to its packed rows."""
-    return json.loads(WEIGHTS.read_text())[str(seq_len)]["weights"]
+def packed_rows(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> int:
+    """The rows of a packed split (its .rows: each row's first piece, then the number of pieces)."""
+    rows = packed_path(corpus, split, tokenizer, seq_len).with_suffix(".rows")
+    return len(np.memmap(rows, dtype=np.int64, mode="r")) - 1
+
+
+def weights(stage: mixture.Stage, rows: dict[str, int], count: int) -> tuple[dict[str, float], dict[str, int]]:
+    """A run's {corpus: weight} in a stage of `count` rows given each corpus's packed rows, and {corpus: the rows it
+    draws beyond its packed rows} (empty when the run fits): the stage's shares (Stage.shares) of the packed rows,
+    replayed by mixture_rows; a "supply" corpus that draws beyond its rows weighs as many rows less, so it is read whole
+    once and never overdraws."""
+    supply, weighed = set(stage.supply), dict(rows)
+    while True:
+        shares = stage.shares(weighed, count)
+        names = list(shares)
+        draws = np.bincount(mixture_rows(np.array([shares[n] for n in names]), start=0, count=count),
+                            minlength=len(names))
+        over = {n: int(d) - rows[n] for n, d in zip(names, draws, strict=True) if d > rows[n]}
+        if not over.keys() & supply:
+            return shares, over
+        for n in over.keys() & supply:
+            weighed[n] -= over[n]
 
 
 def mixture_rows(weights: np.ndarray, *, start: int, count: int) -> np.ndarray:

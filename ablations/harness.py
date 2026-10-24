@@ -1,11 +1,10 @@
 """
-The mechanism the ablation experiments (ablations/lr.py, ablations/tokenizer.py) share. An experiment is production at
-each of its settings (Setting: depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms
-differing from production only in their Run fields, each on the same seeds. A run trains production's GPT by
-train/loop.py train and is scored by eval/suite.py evaluate (its likelihood metrics and parse measure), the
-production code paths; its plan (batch, steps, peak lr) is the production model's at its depth and ratio
-(production_plan), so arms match in hyperparameters and, unless an arm sets ratio (the tokenizer experiment's equal
-bytes), in tokens.
+The mechanism the ablation experiments (ablations/lr.py, ablations/tokenizer.py) share. An experiment is the baseline
+at each of its settings (Setting: depth, tokens per scaling parameter, seeds) and one arm per alternative, the arms
+differing from the baseline only in their Run fields, each on the same seeds. A run trains the base model's GPT at its
+depth by train/loop.py train and is scored by eval/suite.py evaluate (its likelihood metrics and parse measure), the
+pre-training code paths; its plan (batch, steps, peak lr) is the base model's at its depth and ratio (base_plan), so
+arms match in hyperparameters and, unless an arm sets ratio (the tokenizer experiment's equal bytes), in tokens.
 
 Runs train one at a time (one d8 run saturates the GPU), each in its own process (torch.compile's caches and limits are
 per process) launched with its fields, its output, a failure's traceback included, appended to LOGS/<tag>.log. A
@@ -31,11 +30,12 @@ from pathlib import Path
 
 import torch
 
-from nanochat.config import FILE_STAGE, run_tag
-from nanochat.data.tokenizer import get_tokenizer
+from nanochat.config import run_tag
+from nanochat.corpus.mixture import FILE_STAGE, REPO_STAGE
+from nanochat.corpus.tokenizer import get_tokenizer
 from nanochat.eval import bpb, suite
 from nanochat.model.gpt import GPT, gpt_config
-from nanochat.paths import BASE_EVAL, LOGS, RESULTS
+from nanochat.paths import BASE_EVAL, CORPUS, LOGS, RESULTS
 from nanochat.train import metrics
 from nanochat.train.checkpoint import checkpoint_name
 from nanochat.train.loop import train
@@ -44,34 +44,38 @@ from nanochat.train.schedule import RunPlan, plan
 
 @dataclass(frozen=True, kw_only=True)
 class Run:
-    """A run: production except these fields."""
+    """A run: the base model's recipe except these fields."""
     n_layer: int
     ratio: float         # tokens per scaling parameter
     lr_scale: float      # times the plan's peak lr (schedule.plan)
-    tokenizer: str       # data/tokenizer.get_tokenizer's: "production" or a tokenizer ablation arm (its own data)
+    tokenizer: str       # its vocabulary's directory under CORPUS: "tokenizer" (the corpus's) or an ablation arm's
     seed: int            # init and data order
+
+    @property
+    def vocabulary(self) -> Path:
+        return CORPUS / self.tokenizer
 
 
 @dataclass(frozen=True, kw_only=True)
 class Setting:
-    """An experiment's setting: production's model at `depth` trained at `ratio` tokens per scaling parameter on each
-    of `seeds`, and its alternatives {arm name: the Run fields in which the arm departs from production}."""
+    """An experiment's setting: the base model at `depth` trained at `ratio` tokens per scaling parameter on each of
+    `seeds`, and its alternatives {arm name: the Run fields in which the arm departs from the baseline}."""
     depth: int
     ratio: float
     seeds: range
     alternatives: dict[str, dict]
 
 
-def production_plan(*, depth: int, ratio: float) -> RunPlan:
-    """The production model's plan at a depth and tokens per scaling parameter (schedule.plan)."""
+def base_plan(*, depth: int, ratio: float) -> RunPlan:
+    """The base model's plan at a depth and tokens per scaling parameter (schedule.plan)."""
     with torch.device("meta"):
         return plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=ratio)
 
 
 def plan_of(run: Run) -> RunPlan:
-    """The production model's plan at the run's depth and ratio, at the run's peak lr."""
-    production = production_plan(depth=run.n_layer, ratio=run.ratio)
-    return dataclasses.replace(production, lr=run.lr_scale * production.lr)
+    """The base model's plan at the run's depth and ratio, at the run's peak lr."""
+    base = base_plan(depth=run.n_layer, ratio=run.ratio)
+    return dataclasses.replace(base, lr=run.lr_scale * base.lr)
 
 
 def tag_of(run: Run) -> str:
@@ -81,7 +85,7 @@ def tag_of(run: Run) -> str:
     return run_tag(depth=run.n_layer, ratio=run.ratio, seed=run.seed,
                    variant=dataclasses.asdict(run) | {"ratio": float(run.ratio), "lr_scale": float(run.lr_scale),
                                                       "lr": plan_of(run).lr,
-                                                      "tokenizer_data": get_tokenizer(run.tokenizer).data_key})
+                                                      "tokenizer_data": get_tokenizer(run.vocabulary).data_key})
 
 
 def evaluation_path(run: Run) -> Path:
@@ -90,15 +94,17 @@ def evaluation_path(run: Run) -> Path:
 
 
 def execute(run: Run) -> None:
-    """Train and evaluate one run: its metrics as production's (train/metrics.py), its final checkpoint's evaluation
-    as production's (eval/suite.py evaluate) without the generation benchmarks, with the parse measure."""
+    """Train and evaluate one run: its metrics as the base model's (train/metrics.py), its final checkpoint's
+    evaluation as the base model's (eval/suite.py evaluate) without the generation benchmarks, with the parse
+    measure."""
     tag, run_plan = tag_of(run), plan_of(run)
     steps = run_plan.num_iterations
     with torch.device("meta"):
         model = GPT(gpt_config(depth=run.n_layer, stage=FILE_STAGE))
-    model = train(model=model, run=run_plan, tokenizer_name=run.tokenizer, variant=dataclasses.asdict(run),
+    model = train(model=model, run=run_plan, vocabulary=run.vocabulary, variant=dataclasses.asdict(run),
                   seed=run.seed, checkpoints=frozenset({steps}), tag=tag)
-    suite.evaluate(model, get_tokenizer(run.tokenizer), name=checkpoint_name(tag, steps), step=steps, generate="parse")
+    suite.evaluate(model, get_tokenizer(run.vocabulary), name=checkpoint_name(tag, steps), step=steps,
+                   generate="parse")
 
 
 def evaluation(run: Run) -> dict[str, float]:
@@ -107,10 +113,10 @@ def evaluation(run: Run) -> dict[str, float]:
     "bpb"); solutions, the bits per byte of the HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) and HumanEval-X C++
     (arXiv 2303.17568) reference solutions given their prompts, pooled (bpb.solution_bits); repo_32k, the 32K repository
     bits per byte of the code group, and repo_beyond_8k, the same over the targets beyond the file-level context
-    (bpb.CONTEXTS' last bucket) at the evaluation's corpus weights (bpb.val_bits "weights"); unparsed, indentation and
-    syntax, the shares of HumanEval+ and MBPP+ problems, pooled, whose healed greedy completion does not compile, by an
-    IndentationError and by another SyntaxError (code_eval.parse_generation), and greedy, their base pass@1, pooled;
-    tok_per_s, the median over the file-level stage's steps of the step's tokens per second."""
+    (bpb.CONTEXTS' last bucket) at the evaluation's code corpus weights (bpb.val_bits "weights"); unparsed,
+    indentation and syntax, the shares of HumanEval+ and MBPP+ problems, pooled, whose healed greedy completion does not
+    compile, by an IndentationError and by another SyntaxError (code_eval.parse_generation), and greedy, their base
+    pass@1, pooled; tok_per_s, the median over the file-level stage's steps of the step's tokens per second."""
     tag, repo_start = tag_of(run), plan_of(run).repo_start
     result = json.loads(evaluation_path(run).read_text(encoding="utf-8"))
     rates = [r["tok_per_s"] for step, r in metrics.train_steps(tag).items() if step < repo_start]
@@ -123,8 +129,9 @@ def evaluation(run: Run) -> dict[str, float]:
     return {"code": result["8k"]["bpb"]["code"],
             "solutions": bpb.bpb(*result["solution"].values()),
             "repo_32k": result["32k"]["bpb"]["code"],
-            "repo_beyond_8k": bpb.mixture_bpb(result["32k"]["corpora"], result["32k"]["weights"],
-                                              buckets=slice(-1, None)),
+            "repo_beyond_8k": bpb.mixture_bpb(
+                result["32k"]["corpora"],
+                {c: w for c, w in result["32k"]["weights"].items() if c in REPO_STAGE.code}, buckets=slice(-1, None)),
             "text": result["8k"]["bpb"]["text"], "math": result["8k"]["bpb"]["math"],
             "unparsed": 1 - share("parses"), "indentation": share("indentation"), "syntax": share("syntax"),
             "greedy": share("base pass@1"),
@@ -137,17 +144,18 @@ def diverged(tag: str) -> int | None:
     return failures[-1] if failures else None
 
 
-def main(*, experiment: str, settings: list[Setting], production: dict) -> None:
-    """Run an experiment (its records RESULTS/<experiment>.json, .jsonl and -curves.jsonl): at each setting, production
-    and an arm per alternative, then every run's record. `production`: the Run fields in which the experiment's
-    production arm, and so its every arm, departs from production (the tokenizer ablation's: its sa-bpe vocabulary)."""
+def main(*, experiment: str, settings: list[Setting], baseline: dict) -> None:
+    """Run an experiment (its records RESULTS/<experiment>.json, .jsonl and -curves.jsonl): at each setting, the
+    baseline and an arm per alternative, then every run's record. `baseline`: the Run fields in which the experiment's
+    baseline, and so its every arm, departs from the base model's recipe (the tokenizer ablation's: its sa-bpe
+    vocabulary)."""
     cells = []
     for setting in settings:
-        # production's settings (nanochat/train/loop.py, nanochat/model/gpt.py) at this depth and ratio
-        baseline = [dataclasses.replace(Run(n_layer=setting.depth, ratio=setting.ratio, lr_scale=1.0,
-                                            tokenizer="production", seed=seed), **production) for seed in setting.seeds]
-        cells.append({"production": baseline} | {name: [dataclasses.replace(run, **changes) for run in baseline]
-                                                 for name, changes in setting.alternatives.items()})
+        # the base model's recipe (nanochat/train/loop.py, nanochat/model/gpt.py) at this depth and ratio
+        runs = [dataclasses.replace(Run(n_layer=setting.depth, ratio=setting.ratio, lr_scale=1.0,
+                                        tokenizer="tokenizer", seed=seed), **baseline) for seed in setting.seeds]
+        cells.append({"baseline": runs} | {name: [dataclasses.replace(run, **changes) for run in runs]
+                                           for name, changes in setting.alternatives.items()})
     tags = {run: tag_of(run) for arms in cells for arm in arms.values() for run in arm}
     for run, tag in tags.items():
         if evaluation_path(run).exists() or diverged(tag) is not None:
@@ -183,7 +191,7 @@ def main(*, experiment: str, settings: list[Setting], production: dict) -> None:
                         "diverged_at": stopped[tag]}, allow_nan=False) + "\n")
                     curve_lines.write(json.dumps(identity | metrics.curves(tag), allow_nan=False) + "\n")
             summaries.append({"depth": setting.depth, "tokens_per_param": setting.ratio, "seeds": len(setting.seeds),
-                              "production_runs": len(measures["production"]),
+                              "baseline_runs": len(measures["baseline"]),
                               "alternatives": {name: {"fields": changes, "runs": len(measures[name])}
                                                for name, changes in setting.alternatives.items()}})
     (RESULTS / f"{experiment}.json").write_text(json.dumps({"settings": summaries}, allow_nan=False),

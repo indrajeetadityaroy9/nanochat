@@ -3,7 +3,7 @@ FlashAttention-4 (Dao-AILab flash_attn.cute, SM90 kernels) as torch.library ops,
 each query; FA4's own autograd.Function cannot be traced by torch.compile.
 
 Document masking (ProLong, arXiv 2410.02660): FA4's varlen kernels restrict attention to the segments in
-cu_seqlens, the int32 offsets of the flattened (B*T) tokens (data/loader.py PretrainingBatches).
+cu_seqlens, the int32 offsets of the flattened (B*T) tokens (corpus/loader.py PretrainingBatches).
 """
 
 import torch

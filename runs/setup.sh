@@ -1,9 +1,8 @@
 #!/bin/bash
 # Prepare a fresh GH200 or H100 host with Docker and the NVIDIA driver (Lambda's Ubuntu image): the CDI spec for
-# runs/container.sh's `--device nvidia.com/gpu=all`, docker group membership, the nanochat image, then (nanochat/paths.py)
-# the artifacts layout and the curated store and tokenizer (the dataset at main), which
-# `python -m nanochat.data.compile` and `python -m nanochat.data.pack` then build into the training rows.
-# Idempotent: docker build cache, mkdir exist_ok, snapshot_download skips present files.
+# runs/container.sh's `--device nvidia.com/gpu=all`, docker group membership, the nanochat image, the artifacts layout
+# (nanochat/paths.py) and the curated corpus (nanochat/corpus/publish.py pull), from which the tokenizer ablation, compile
+# and pack build the training rows (nanochat/corpus/gh200.md). Idempotent: docker build cache, mkdir exist_ok.
 #
 #   HF_TOKEN=<read token> runs/setup.sh
 set -euo pipefail
@@ -14,8 +13,9 @@ sudo usermod -aG docker "$USER"
 sg docker -c "docker build -f '$ROOT/docker/Dockerfile' -t nanochat '$ROOT'"
 sg docker -c "'$ROOT/runs/container.sh' hf auth login --token $HF_TOKEN"
 sg docker -c "'$ROOT/runs/container.sh' python -m nanochat.paths"
-echo "log in again (docker group), then from the checkout: build the training rows and check them and the download"
-echo "  runs/container.sh python -m nanochat.data.compile && runs/container.sh python -m nanochat.data.pack"
-echo "  (cd artifacts && sha256sum --quiet -c data/curated.sha256 data/compiled.sha256)"
-echo "then the tokenizer experiment (docs/h100-pretraining.md) and production:"
-echo "  tmux new -d -s run 'runs/container.sh python -m scripts.production 2>&1 | tee -a artifacts/logs/production.log'"
+sg docker -c "'$ROOT/runs/container.sh' python -m nanochat.corpus.publish pull"
+echo "log in again (docker group), then from the checkout follow nanochat/corpus/gh200.md: the tokenizer ablation"
+echo "  runs/container.sh python -m ablations.tokenizer vocabularies|intrinsic|data|runs|adopt"
+echo "then compile, pack and the base model's pre-training:"
+echo "  runs/container.sh python -m nanochat.corpus.compile && runs/container.sh python -m nanochat.corpus.pack"
+echo "  tmux new -d -s run 'runs/container.sh python -m scripts.pretrain 2>&1 | tee -a artifacts/logs/pretrain.log'"

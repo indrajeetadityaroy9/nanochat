@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from nanochat.config import VOCAB_SIZE
-from nanochat.data.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX
+from nanochat.corpus.tokenizer import FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX
 from nanochat.inference import syntax_constraint
 from nanochat.model.gpt import GPT
 from nanochat.native import cuda_library
@@ -29,7 +29,7 @@ type Constraint = Reemit | AllOf | syntax_constraint.SyntaxConstraint
 
 def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm"]) -> list[int]:
     """The token ids of a fill-in-the-middle prompt for the text between prefix and suffix (strings, each encoded on its
-    own), in the layout the packer trains (nanochat/data/pack.py, loader.py; arXiv 2207.14255 §3, App. D):
+    own), in the layout the packer trains (nanochat/corpus/pack.py, loader.py; arXiv 2207.14255 §3, App. D):
         psm: BOS <fim_prefix> prefix <fim_suffix> suffix <fim_middle>
         spm: BOS <fim_prefix> <fim_suffix> suffix <fim_middle> prefix
     The model continues with the middle and ends it with BOS (NativeDecoder.run stops there)."""
