@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
-# nanochat image for the NVIDIA H100 (sm_90). Neither code nor data is baked in: runs/container.sh mounts the checkout at
-# the working directory /workspace/nanochat, nanochat/paths.py's ROOT; data, checkpoints, results and caches live in its
-# artifacts/ (created by runs/setup.sh).
+# nanochat image for the NVIDIA GH200 and H100 (sm_90). Neither code nor data is baked in: runs/container.sh mounts the
+# checkout at the working directory /workspace/nanochat, nanochat/paths.py's ROOT; data, checkpoints, results and
+# caches live in its artifacts/ (created by runs/setup.sh).
 #
 # Built on NVIDIA's NGC PyTorch image, which supplies PyTorch as NVIDIA built it: torch, everything only torch needs
 # (Triton, the CUDA libraries, nvcc for nanochat/native.py) and numpy (which the image's numba pins below 2.5), none of

@@ -8,8 +8,8 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-# the GPU at its maximum SM clock (1980 MHz on the GH200): under a power cap the driver otherwise lowers the clock, and
-# locking it shortened the d24 8K step by 3.0% (measured on the GH200); speed only, not numerics; reset by a reboot
+# the GPU at its maximum SM clock (1980 MHz on the GH200): under a power cap the driver otherwise lowers the clock
+# (ACTIONS.md E2); speed only, not numerics; reset by a reboot
 sudo nvidia-smi -lgc 1980,1980
 # the docker group applies at the next login; sg runs this script's docker commands in it
 sudo usermod -aG docker "$USER"

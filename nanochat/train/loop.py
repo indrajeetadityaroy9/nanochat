@@ -1,5 +1,5 @@
 """
-The training loop. train() pretrains (or resumes) a run: the file-level stage, then the repo-level stage from
+The training loop. train() trains (or resumes) a run: the file-level stage, then the repo-level stage from
 repo_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196 §3.1;
 corpus/pack.py). Each start resumes from the tag's newest checkpoint (weights, optimizer state, data position). What a
 step computes is this package's: the optimizers, weight decay and gradient clip (optim.py), each step's stage and lr
