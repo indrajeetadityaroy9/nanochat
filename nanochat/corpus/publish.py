@@ -60,10 +60,12 @@ def card(manifest: dict) -> str:
         "exact copies removed across sources, 1% of groups held out as val, repository files cut into",
         "import-connected samples. Nothing depends on a tokenizer: tokenizer training, compile and packing (with FIM)",
         "run after `python -m nanochat.corpus.publish pull --revision <sha>`.", "",
-        "Layout: `curated/<source>/<split>/<k>.parquet`. A repository source's shard k is the residue",
-        "`md5_number(repo_name) % 100 = k` (k = 0 is val), its rows in import-connected samples (`sample`); any other",
-        "source's train rows are in `id` order over 100 shards. `manifest.json` holds each source's Hub revision and",
-        "files, and each split's shards, rows and text bytes.", "",
+        "Layout: `curated/<source>/<split>/<k>.parquet`. A repository source's shard k holds the repositories whose",
+        "lowercased name has `md5_number(lower(repo_name)) % 100 = k`: `val/0`, `train/1` to `train/99`, each sorted by",
+        "repository and path and cut into import-connected samples (`sample`). Any other source holds out 1% of its",
+        "groups (its lowercased repository for issues and functions, the problem for Codeforces-CoTs, the document",
+        "otherwise) in `val/0`, and its train rows in `id` order over `train/0` to `train/99`. `manifest.json` holds each",
+        "source's Hub revision and files, and each split's shards, rows and text bytes.", "",
         "| Source | Origin (revision) | License | Columns | Train shards / rows | Val rows |",
         "|---|---|---|---|---|---|", *rows, ""])
 
