@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from nanochat.data.schema import REPOSITORY_FILE
 from nanochat.data.sources import SOURCES
 
-# The published data (the curated store and the tokenizer, data/publish.py) at its Hub revision: `python -m
-# nanochat.paths` downloads it, and every run records it (train/metrics.py)
-DATASET, DATASET_REVISION = "iaroy/nanochat-data", "7a210ed3eb204cea61e7c7d473970f4075d148fb"
+# The published data: `python -m nanochat.paths` downloads it
+DATASET = "iaroy/nanochat-data"
 
 # Ids including special tokens: nanochat's 2^15 (karpathy/nanochat 92d63d4 scripts/tok_train.py:19)
 VOCAB_SIZE = 2**15
@@ -53,11 +52,10 @@ ROPE_BASE = 1_000_000
 
 
 def run_tag(*, depth: int, ratio: float, seed: int, variant: dict) -> str:
-    """Name for a run's checkpoints, metrics and evaluations: depth, ratio and seed, then a hash of those, `variant`
-    (an ablation run's fields, ablations/harness.py; production's lr scale, scripts/production.py) and
-    DATASET_REVISION, so runs of different settings or data never share artifacts."""
+    """Name for a run's checkpoints, metrics and evaluations: depth, ratio and seed, then a hash of those and `variant`
+    (an ablation run's fields, ablations/harness.py; production's lr scale, scripts/production.py), so runs of different
+    settings never share artifacts."""
     # float(ratio): JSON writes int 20 as "20" but float 20.0 as "20.0", so one run would get two names
-    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "variant": variant,
-                "dataset_revision": DATASET_REVISION}
+    identity = {"depth": depth, "ratio": float(ratio), "seed": seed, "variant": variant}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return f"d{depth}-r{ratio:g}-s{seed}-{digest}"

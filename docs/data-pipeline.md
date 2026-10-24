@@ -20,7 +20,7 @@ GitHub issue discussions and 1.7B of Kaggle notebooks). Finally, **general Engli
 by [ClimbMix-400B-Shuffle](https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle), providing English-language
 text to complement the code, mathematics and reasoning datasets.
 
-Sizes are the dataset cards' (read 2026-10-22 at `main` and at the revisions `nanochat/data/sources.py` pins; both
+Sizes are the dataset cards' (read 2026-10-22 at `main` and at the revisions in the table below; both
 state the same figures). Token counts are in each publisher's tokenizer.
 
 ### The sources
@@ -41,7 +41,8 @@ state the same figures). Token counts are in each publisher's tokenizer.
 
 ### What the pipeline takes
 
-`nanochat/data/sources.py` pins each dataset at a Hub revision and reads the files of its Python and C++ subsets (code),
+`nanochat/data/sources.py` reads each dataset at main (the table's revisions: `main` on 2026-10-22) and the files of
+its Python and C++ subsets (code),
 its English text or its math; the rows below are counted from the Parquet footers (Hub), the normalized store and the
 curated store (`data/manifest.json`), 2026-10-22.
 
@@ -148,8 +149,8 @@ statement; adopting it would be a mid-training experiment with its own contamina
 ## Source catalog
 
 The 19 sources of `nanochat/corpus/sources.py`, by Hub dataset: every column of the files a source reads, its type, its
-meaning and what standardization keeps (`nanochat/corpus/prepare.py`). `prepare.py` reads each dataset at its latest
-revision (and prints it); each is catalogued at the revision in its heading. Meanings quote the dataset's card at that
+meaning and what standardization keeps (`nanochat/corpus/prepare.py`). `prepare.py` reads each dataset at main;
+each is catalogued at the revision in its heading. Meanings quote the dataset's card at that
 revision, or the cards and papers it defers to (named); `[inference]` marks a meaning read from the type and the
 values. Every standardized document also gets an `id`, the sha1 of its text, computed locally; a row whose text column
 is null is dropped. Rows and nulls are counted from the Parquet footers. Each sample is the first row of the source's

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Prepare a fresh GH200 or H100 host with Docker and the NVIDIA driver (Lambda's Ubuntu image): the CDI spec for
 # runs/container.sh's `--device nvidia.com/gpu=all`, docker group membership, the nanochat image, then (nanochat/paths.py)
-# the artifacts layout and the curated store and tokenizer at the dataset revision nanochat/config.py pins, which
+# the artifacts layout and the curated store and tokenizer (the dataset at main), which
 # `python -m nanochat.data.compile` and `python -m nanochat.data.pack` then build into the training rows.
 # Idempotent: docker build cache, mkdir exist_ok, snapshot_download skips present files.
 #

@@ -17,7 +17,7 @@ the sources and production's packs.
 
 | Area | Decision | § |
 |---|---|---|
-| Sources | 18 read, each at its latest Hub revision, recorded in the manifest; only the columns standardization reads are fetched | 1 |
+| Sources | 18 read, recorded in the manifest; only the columns standardization reads are fetched | 1 |
 | Schema | one Parquet schema per document category; `id` is the SHA-1 of the document's text | 2 |
 | Text | LF line ends and no leading byte-order mark; otherwise as published; Codeforces-CoTs finished traces only | 3 |
 | Filters | every Python file parses as Python 3, after repair; no generated, vendored or C++ syntax filter | 4.1, 4.2 |
@@ -28,29 +28,27 @@ the sources and production's packs.
 | Sequences | Best-Fit-Decreasing packing, document masking, cuts between statements; 32K documents per (repository, language) | 7 |
 | Dynamics | 102.6B tokens; one switch, to 32K; linear decay to zero; no document read twice | 8 |
 | Tokenizer | retrained on this corpus at the 8K stage's shares of bytes; production's vocabulary size; pattern and score decided on the GH200 | 9 |
-| Publication | the curated text in the private `iaroy/nanochat-data` at `a4ec1a08`, one folder per source; tokenizer, compile, packing and FIM run after the pull | 10 |
+| Publication | the curated text in the private `iaroy/nanochat-data`, one commit, one folder per source; tokenizer, compile, packing and FIM run after the pull | 10 |
 
 ## 1. Sources
 
-| Source (`sources.py`) | Hub dataset @ revision | Category (§2) | Text | Files read | Standardized rows |
+| Source (`sources.py`) | Hub dataset | Category (§2) | Text | Files read | Standardized rows |
 |---|---|---|---|---|---|
-| `stack_edu_python`, `stack_edu_cpp` | HuggingFaceTB/stack-edu @ `eeec5caa` | REPOSITORY_FILE | the Software Heritage blob | 5 of 5, 4 of 4 | 25,285,896, 16,246,723 |
-| `ultradata_stack_v3_l2_python`, `_cpp` | openbmb/UltraData-Stack-v3-L2 @ `62077439` | REPOSITORY_FILE | `content` | 45 of 45, 30 of 30 | 24,671,724, 17,990,102 |
-| `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | REPOSITORY_FILE | `content` | 119 of 119, 31 of 31 | 72,844,227, 23,290,266 |
-| `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code @ `b20cabcf` | EXERCISE | `content` | 28 of 147, 32 of 167 | 3,952,421, 4,330,659 |
-| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` (`synthetic-rewriting`, `synthetic-transpilation`) | nvidia/Nemotron-Pretraining-Code-v2 @ `7b1a453d` | SYNTHETIC_FILE | `content` | 13 of 64, 13 of 64 | 20,292,444, 5,972,251 |
-| `codexglue_python` (code-to-text, `python/train-*`) | google/code_x_glue_ct_code_to_text @ `2678080e` | FUNCTION | `code` | 2 of 2 | 251,820 |
-| `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | openbmb/UltraData-Math @ `fe10db8e` | TEXT | `content` | 2, 2, 3 and 2 of 50 | 1,084,548, 675,242, 686,726, 1,040,216 |
-| `codeforces_cots` (`solutions_py_decontaminated`, `solutions_short_and_long_decontaminated`) | open-r1/codeforces-cots @ `39ac85c1` | CONVERSATION | `prompt`, then `generation` | 9 of 9 | 22,914 |
-| `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks @ `ef882ad1` | NOTEBOOK | `text` | 11 of 11 | 580,195 |
-| `climbmix` | karpathy/climbmix-400b-shuffle @ `915333b4` | TEXT | `text` | 187 of 6,543 | 15,814,656 |
+| `stack_edu_python`, `stack_edu_cpp` | HuggingFaceTB/stack-edu | REPOSITORY_FILE | the Software Heritage blob | 5 of 5, 4 of 4 | 25,285,896, 16,246,723 |
+| `ultradata_stack_v3_l2_python`, `_cpp` | openbmb/UltraData-Stack-v3-L2 | REPOSITORY_FILE | `content` | 45 of 45, 30 of 30 | 24,671,724, 17,990,102 |
+| `ultradata_code_l2_python`, `_cpp` | openbmb/UltraData-Code | REPOSITORY_FILE | `content` | 119 of 119, 31 of 31 | 72,844,227, 23,290,266 |
+| `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code | EXERCISE | `content` | 28 of 147, 32 of 167 | 3,952,421, 4,330,659 |
+| `nemotron_rewriting_python`, `nemotron_transpilation_cpp` (`synthetic-rewriting`, `synthetic-transpilation`) | nvidia/Nemotron-Pretraining-Code-v2 | SYNTHETIC_FILE | `content` | 13 of 64, 13 of 64 | 20,292,444, 5,972,251 |
+| `codexglue_python` (code-to-text, `python/train-*`) | google/code_x_glue_ct_code_to_text | FUNCTION | `code` | 2 of 2 | 251,820 |
+| `ultradata_math_l3_qa`, `_conversation`, `_multi_style`, `_textbook_exercise` | openbmb/UltraData-Math | TEXT | `content` | 2, 2, 3 and 2 of 50 | 1,084,548, 675,242, 686,726, 1,040,216 |
+| `codeforces_cots` (`solutions_py_decontaminated`, `solutions_short_and_long_decontaminated`) | open-r1/codeforces-cots | CONVERSATION | `prompt`, then `generation` | 9 of 9 | 22,914 |
+| `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks | NOTEBOOK | `text` | 11 of 11 | 580,195 |
+| `climbmix` | karpathy/climbmix-400b-shuffle | TEXT | `text` | 187 of 6,543 | 15,814,656 |
 
 Not read: web mathematics (UltraData-Math L1, OPC FineWeb Math) and StarCoder2's GitHub issues, §5.2;
 Nemotron-Pretraining-Code-v2's GitHub metadata and dialogue subsets, §3.3; CodeXGLUE's Python validation and test
 splits, the benchmark's, §3.4.
 
-- **Revision:** each source is read at its latest revision, resolved once by `prepare` (`dataset_info(repo).sha`) and
-  recorded with its files and rows in `CORPUS/manifest.json`.
 - **Rows:** every raw file holds exactly the rows of its Hub file's Parquet footer (all 18 sources). Standardization
   drops two sets:
   - Stack-Edu's 146 rows (of 25,286,019 and 16,246,746) whose blob Software Heritage's bucket does not hold:
@@ -107,7 +105,7 @@ One standardized Parquet file per Hub file, `CORPUS/standardized/<source>/<k>.pa
 - **Not stored:** publisher and blob ids; quality scores; timestamps, sizes and counts; serialized duplicates
   (`full_content`, `raw_content`, `messages`); L3's `task`, `analysis`, `solution` and `test`; Nemotron's `prompts`
   and seed fields; Codeforces-CoTs' statement fields, tests and `finish_reason`.
-- **Records:** `CORPUS/manifest.json` holds each source's repo, revision, Hub files and rows (`prepare.py`), and at
+- **Records:** `CORPUS/manifest.json` holds each source's repo, Hub files and rows (`prepare.py`), and at
   publication the code's commit and each split's shards, rows and text bytes (`publish.push`); `CORPUS/packed.json`
   holds each stage's rows and weights (`pack.py`).
 
@@ -619,7 +617,7 @@ packing cuts pieces at token offsets in rows of `seq_len` tokens, FIM encodes it
 |---|---|---|
 | Prepare: fetch, standardize, manifest | `prepare.py` | done: 18 sources (§1) |
 | Curate: Python check, deduplication, split, shards | `curate.py` | done: 178,887,291 rows, verified (§4) |
-| Publish | `publish.py` | done: `iaroy/nanochat-data` @ `a4ec1a08367ce8ca02690e2b9d79190e0afeaf6c`, one commit and one branch: `<source>/<split>/<k>.parquet` (1,812 shards), the manifest and the card (code `aa37215`); viewer off |
+| Publish | `publish.py` | done: `iaroy/nanochat-data`, one commit and one branch: `<source>/<split>/<k>.parquet` (1,812 shards), the manifest and the card (code `aa37215`); viewer off; constant |
 | Tokenizer: decision, sample, training | `tokenizer.py`, `ablations/tokenizer.py` | sample and a trial training measured on the GB10 (§9); the ablation and the decided tokenizer on the GH200 |
 | Compile: 8K samples, 32K repository documents | `compile.py` | on the GH200 |
 | Mixture, pack, loader | `mixture.py`, `pack.py`, `loader.py` | written; run on the GH200 |

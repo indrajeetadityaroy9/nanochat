@@ -169,9 +169,9 @@ PARSED = "mbpp_plus"
 
 def vocabularies() -> None:
     """Each arm's tokenizer.tiktoken and tokenizer.pattern in ABLATION/<arm>, on one draw of the corpus tokenizer's
-    sample. The arms train at once: the crate releases the GIL, and each training's merge loop is mostly serial (one heap
-    pop and one pass over the merged pair's words per merge), so the others take the idle cores; every merge is an argmax
-    with fixed tie-breaks, so an arm's vocabulary does not depend on the others."""
+    sample. The arms train at once: the crate releases the GIL, and each training's merge loop is mostly serial (one
+    heap pop and one pass over the merged pair's words per merge), so the others take the idle cores; every merge is an
+    argmax with fixed tie-breaks, so an arm's vocabulary does not depend on the others."""
     for arm in ARMS:
         (ABLATION / arm).mkdir(parents=True)
     docs, units = sample()

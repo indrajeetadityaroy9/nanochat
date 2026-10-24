@@ -87,7 +87,7 @@ attention windows.
 
 The data pipeline (`nanochat/data/`, one module per step) prepares the corpora and trains the tokenizer on the data
 host; `publish.py` uploads the curated store and the tokenizer to the Hugging Face dataset `iaroy/nanochat-data`,
-pulled at the revision `config.DATASET_REVISION` pins by the training host (the GH200), which compiles the documents
+pulled at main by the training host (the GH200), which compiles the documents
 and packs them into rows itself, for whichever tokenizer it trains with.
 
 - **Mixture** (`config.MIXTURE`): code:text:math = 87:10:3 (DeepSeek-Coder's code share); code is 8 Python and C++
@@ -114,7 +114,7 @@ and packs them into rows itself, for whichever tokenizer it trains with.
 **Pipeline** (`nanochat/data/__init__.py`; each step `runs/container.sh python -m nanochat.data.<step>`, reading the
 previous step's output under `paths.DATA`):
 
-1. `prepare`: fetches every source (`sources.py`) at its pinned Hub revision and normalizes it into a Parquet store
+1. `prepare`: fetches every source (`sources.py`) at its Hub main and normalizes it into a Parquet store
    (`prepare.py`): the code group whole, text and math up to Qwen2.5-Coder's 7:2:1 shares of its horizon; then curates
    it (`curate.py`, DuckDB at half the machine's memory, the lower end of the 50–60% its out-of-memory guide
    recommends): exact and near duplicates dropped across all corpora and splits (`dedup.py`: StarCoder2's MinHash
@@ -498,8 +498,8 @@ kernels (QuACK GEMMs, FlashAttention-4) at ≥ 93% GPU occupancy; d8's 7% idle i
 at d24 (98% busy), so no kernel or graph work is spent on the experiments. Their cost lever is the number and size of
 runs.
 
-**Records.** A run's tag is production's `config.run_tag` over its fields (its peak lr and the dataset revision
-hashed with them), and a rerun experiment resumes: a run with an evaluation or a divergence is not trained again, a
+**Records.** A run's tag is production's `config.run_tag` over its fields (its peak lr hashed with them), and a rerun
+experiment resumes: a run with an evaluation or a divergence is not trained again, a
 stopped one trains again from its start (its one checkpoint is its final model); each run is launched from its fields
 (`python -m ablations.harness '<fields>'`). Per run, in production's schemas: `artifacts/metrics/<tag>.jsonl`
 (`nanochat/train/metrics.py`: every step and attempt, the learning curve and gradient norms included; the run record
@@ -821,7 +821,7 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   Retrained, the runs agree on their first 5 steps bitwise and then drift by the backward's atomics
   (Reproducibility): last-5% train loss 1.69657 vs 1.69695 (× 1), 1.65248 vs 1.65172 (× 2); code 0.63008 vs 0.63015,
   0.61311 vs 0.61251.
-- *Real data* (screen run 0, `d8-r20-s0-d0-2449fca0cf29`): the data on disk is the pinned Hub revision
+- *Real data* (screen run 0, `d8-r20-s0-d0-2449fca0cf29`): the data on disk is the Hub revision then downloaded
   (`6744e406…`, the download's recorded commit); the run record's mixture is the 11 production corpora at their
   weights; the first training micro-batch, rebuilt as `train` reads it (data seed 0), decodes to real C++ files and
   a FIM example (arXiv 2207.14255); the loss evaluation reads the held-out val splits (stack_edu_python's first
@@ -982,9 +982,8 @@ Runs train one at a time. Concurrent d8 training processes, 2026-10-20 (file-lev
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
 - **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seed plus a hash of those, its variant
   (an ablation run's fields, its ratio and lr scale as floats, its tokenizer's data key and its peak lr; production's
-  lr scale) and the dataset revision `config.DATASET_REVISION` (`python -m nanochat.paths` downloads it), so runs of
-  different settings or data never share artifacts. Each run's metrics record its full configuration (model, plan,
-  seed, lr, weight decay, clip threshold) and the dataset revision.
+  lr scale), so runs of different settings never share artifacts. Each run's metrics record its full configuration
+  (model, plan, seed, lr, weight decay, clip threshold).
 - **Data order.** Each corpus's rows are permuted once by the run's seed (NumPy `RandomState`; `train/stages.py`
   `stage_batches`), which also seeds its initialization.
 
@@ -1317,7 +1316,7 @@ the solution's tokens and BOS alone; `eval/code_eval.py` then scores the fine-tu
 base model on. The tokenizer has no chat tokens (`data/tokenizer.py` `SPECIAL_TOKENS`: BOS and the three FIM sentinels);
 a chat format would need them and EvalPlus's instruct prompts.
 
-**Data candidates on the Hub** (pinned revisions, 2026-10-21; rows from the Hub's dataset viewer, languages from its
+**Data candidates on the Hub** (revisions at main on 2026-10-21; rows from the Hub's dataset viewer, languages from its
 column statistics, content from sampled rows):
 
 | Dataset (revision; license) | Config | Rows | Python / C++ rows | Content | Fit for completion SFT |
@@ -1350,7 +1349,7 @@ lists (Table 5: 110K each for the educational and package instructions).
 - *Cost:* phi-1's fine-tuning schedule (6,000 steps of 256 × 2,048 tokens: 3.1B tokens, peak lr 1e-4, weight decay 0.01,
   the best of the checkpoints saved every 1,000 steps; arXiv 2306.11644 §2.3) takes about 2.8 h at the d24 step's 315K
   tokens per second [derived; measured at 8K rows], 3% of production's 91 h.
-- *Code to write:* the Hub fetch at the pinned revisions, the conversion to the completion format, decontamination,
+- *Code to write:* the Hub fetch (at main), the conversion to the completion format, decontamination,
   tokenization (`data/tokenizer.py`), a loss mask over the prompt's tokens and a fine-tuning entry point that starts
   from the final checkpoint (`train/checkpoint.py`).
 
@@ -1367,7 +1366,7 @@ lists (Table 5: 110K each for the educational and package instructions).
   the post-generation checks (`verify.py`).
 - `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
-- `nanochat/data/`: the data pipeline (Pipeline, above), one module per step: `sources.py` (the pinned sources, the
+- `nanochat/data/`: the data pipeline (Pipeline, above), one module per step: `sources.py` (the sources, the
   store's paths, a document's text), `prepare.py` (fetch, normalize), `dedup.py`, `curate.py`, `tokenizer.py`,
   `compile.py`, `pack.py`, `publish.py`; `loader.py` reads the packs into micro-batches; `crate/`, its Rust crate
   (`native.data_crate`): the SA-BPE (arXiv 2604.14053) trainer (and frequency BPE, a tokenizer ablation arm),

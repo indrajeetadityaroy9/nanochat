@@ -1,7 +1,7 @@
 """
 The corpus's sources (normalization_doc.md §1) and its files under paths.CORPUS.
 
-A source is a Hub dataset read at a revision (prepare.py), the Hub files it reads per language (a Linguist name for
+A source is a Hub dataset (prepare.py), the Hub files it reads per language (a Linguist name for
 code; for Codeforces-CoTs, the language of each subset's solutions), its category (schema.py) and the column of a
 fetched file that holds a document's text. SOURCES is in deduplication's keep-first order (curate.py).
 - Stack-Edu (arXiv 2502.02737): The Stack v2's educational files, by Software Heritage blob id (prepare.fetch).
@@ -91,7 +91,7 @@ SOURCES = {
     "climbmix": Source(TEXT, "karpathy/climbmix-400b-shuffle", {"English": "shard_*.parquet"}, "text"),
 }
 
-# Each source's repo, revision, files and rows (prepare.py); at publication, the code's commit and each curated split's
+# Each source's repo, files and rows (prepare.py); at publication, the code's commit and each curated split's
 # shards, rows and text bytes (publish.push)
 MANIFEST = CORPUS / "manifest.json"
 

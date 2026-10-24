@@ -18,8 +18,8 @@ Run in this order; everything up to publish is text, everything after it needs t
 
   python -m nanochat.corpus.prepare
   python -m nanochat.corpus.curate
-  python -m nanochat.corpus.publish push           (prints the dataset's revision)
-  python -m nanochat.corpus.publish pull <revision>
+  python -m nanochat.corpus.publish push
+  python -m nanochat.corpus.publish pull
   python -m ablations.tokenizer vocabularies|data|runs  (the pattern and score: tokenizer.PATTERN, SCORE)
   python -m nanochat.corpus.tokenizer
   python -m nanochat.corpus.compile
@@ -27,7 +27,7 @@ Run in this order; everything up to publish is text, everything after it needs t
 
   CORPUS/raw/<source>/<Hub path>                     the Hub files' columns the standardizer reads (prepare.fetch)
   CORPUS/standardized/<source>/<k>.parquet           fetched Hub file k of the source, in its category's schema
-  CORPUS/manifest.json                               each source's repo, revision, files and rows (prepare.py);
+  CORPUS/manifest.json                               each source's repo, files and rows (prepare.py);
                                                      the code's commit and the curated shards' rows (publish.push)
   CORPUS/checked/<source>/<k>.parquet                a Python source's standardized file k, every file parsing
   CORPUS/curated/<source>/<split>/<k>.parquet        the source's curated shard k of a split (published)

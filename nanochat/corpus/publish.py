@@ -7,11 +7,11 @@ rows of a fixed number of tokens, and FIM encodes prefix, suffix and middle sepa
 
 The dataset (config.DATASET, private) holds CORPUS/curated's tree at its root, <source>/<split>/<k>.parquet, beside
 manifest.json (prepare's sources, the code's commit and the curated shards' rows) and its card. push replaces the
-dataset's whole tree and squashes its history into one commit, whose sha it prints; pull downloads a revision's shards
-into CORPUS/curated and its manifest into CORPUS.
+dataset's whole tree and squashes its history into one commit; pull downloads its shards into CORPUS/curated and its
+manifest into CORPUS.
 
 python -m nanochat.corpus.publish push
-python -m nanochat.corpus.publish pull <revision>
+python -m nanochat.corpus.publish pull
 """
 
 import json
@@ -133,21 +133,20 @@ def push() -> None:
             group, size = [], 0
     api.create_commit(DATASET, repo_type="dataset", operations=additions, commit_message="nanochat corpus, curated")
     api.super_squash_history(DATASET, repo_type="dataset", commit_message="nanochat corpus, curated")
-    print(f"{DATASET} revision {api.dataset_info(DATASET).sha}", flush=True)
 
 
-def pull(revision: str) -> None:
-    """The revision's shards into CORPUS/curated, its manifest into CORPUS."""
-    snapshot_download(DATASET, repo_type="dataset", revision=revision, local_dir=CORPUS / "curated",
+def pull() -> None:
+    """The dataset's shards into CORPUS/curated, its manifest into CORPUS."""
+    snapshot_download(DATASET, repo_type="dataset", local_dir=CORPUS / "curated",
                       allow_patterns=[f"{source}/**" for source in SOURCES])
-    hf_hub_download(DATASET, "manifest.json", repo_type="dataset", revision=revision, local_dir=CORPUS)
+    hf_hub_download(DATASET, "manifest.json", repo_type="dataset", local_dir=CORPUS)
 
 
 if __name__ == "__main__":
     match sys.argv[1:]:
         case ["push"]:
             push()
-        case ["pull", revision]:
-            pull(revision)
+        case ["pull"]:
+            pull()
         case _:
-            raise SystemExit("usage: python -m nanochat.corpus.publish push | pull <revision>")
+            raise SystemExit("usage: python -m nanochat.corpus.publish push | pull")

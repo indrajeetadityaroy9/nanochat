@@ -12,8 +12,8 @@ packs them there (compile.py, pack.py) for the tokenizer it trains with, the tok
   download and a rebuild on the host;
 - ARTIFACTS/README.md, the dataset card, written from the manifest.
 Each curated split is uploaded in a commit of its own, then the tokenizer, manifest, checksums and card in one; files on
-the Hub outside this tree (an earlier revision's) are removed; each uploaded file's SHA-256 is checked against the local
-file's; then the history is squashed to one commit, the revision config.DATASET_REVISION pins (printed). The code is
+the Hub outside this tree (an earlier commit's) are removed; each uploaded file's SHA-256 is checked against the local
+file's; then the history is squashed to one commit, which training reads at main. The code is
 the checkout's HEAD, committed (a modified tracked file stops publishing).
 
 python -m nanochat.data.publish
@@ -79,7 +79,7 @@ def manifest(tokenizer: Tokenizer) -> dict:
     return {
         "code": commit(),
         "tokenizer": {"data_key": tokenizer.data_key, "vocab_size": tokenizer.vocab_size, "pattern": tokenizer.pattern},
-        "sources": {name: {"repo": s.repo, "revision": s.revision, "files": s.files, "text": s.text,
+        "sources": {name: {"repo": s.repo, "files": s.files, "text": s.text,
                            "grammar": s.grammar} for name, s in SOURCES.items()},
         "curated": {source: {split: curated_record(source, split) for split in ("train", "val")} for source in SOURCES},
         "stages": {"file": {"seq_len": FILE_STAGE.seq_len, "mixture": FILE_STAGE.mixture},
@@ -105,14 +105,14 @@ def card(record: dict, licenses: dict[str, str | None]) -> str:
                         f"{train['content_bytes'] / 1e9:.2f} GB | {val['rows']:,} | {built['files']} | "
                         f"{built['tokens'] / 1e9:.2f}B | {built['packs'][f'T{file_seq}']['rows']:,} | "
                         f"{'' if long is None else f'{long['rows']:,} (files [{long['files'][0]}, {long['files'][1]}))'} |")
-    sources = [f"| {name} | `{s['repo']}` @ `{s['revision'][:7]}` | {licenses[name] or 'not declared'} |"
+    sources = [f"| {name} | `{s['repo']}` | {licenses[name] or 'not declared'} |"
                for name, s in record["sources"].items()]
     p = record["packed"]
     return "\n".join([
         "---", "license: other", "pretty_name: nanochat pretraining data", "viewer: false", "---", "",
         "# nanochat pretraining data", "",
         ("The curated pretraining documents of nanochat's Python and C++ code model and its tokenizer, pulled to the "
-         "training host by `python -m nanochat.paths` at the revision `nanochat/config.py` pins, then compiled and "
+         "training host by `python -m nanochat.paths`, then compiled and "
          "packed there (`python -m nanochat.data.compile`, `python -m nanochat.data.pack`) for the tokenizer it "
          f"trains with. Published at commit `{record['code']}`; each step's output checked against that commit's "
          "code: `docs/h100-pretraining.md`, Data lineage. `data/manifest.json` holds every number below."), "",
@@ -136,7 +136,7 @@ def card(record: dict, licenses: dict[str, str | None]) -> str:
         "|---|---|---|---|---|---|---|---|---|---|", *rows, "",
         "## Sources", "",
         "Licenses as each source's dataset card declares them.", "",
-        "| Corpus | Hub dataset @ revision | License |", "|---|---|---|", *sources, "",
+        "| Corpus | Hub dataset | License |", "|---|---|---|", *sources, "",
     ])
 
 
@@ -156,7 +156,7 @@ def main() -> None:
     tokenizer = get_tokenizer()
     record = manifest(tokenizer)
     api = HfApi()
-    licenses = {name: getattr(api.dataset_info(s.repo, revision=s.revision).card_data, "license", None)
+    licenses = {name: getattr(api.dataset_info(s.repo).card_data, "license", None)
                 for name, s in SOURCES.items()}
     MANIFEST.write_text(json.dumps(record, indent=1))
     CARD.write_text(card(record, licenses))
@@ -180,7 +180,7 @@ def main() -> None:
     remote = {f.path: f for f in api.list_repo_tree(DATASET, repo_type="dataset", recursive=True, expand=True)
               if hasattr(f, "size")}
     stale = sorted(set(remote) - published - {".gitattributes"})
-    if stale:  # files of an earlier revision (another tokenizer's compiled splits)
+    if stale:  # files of an earlier publication (another tokenizer's compiled splits)
         api.create_commit(DATASET, repo_type="dataset", commit_message="Files not in the published tree",
                           operations=[CommitOperationDelete(path_in_repo=path) for path in stale])
     hashes |= {path: sha256(path) for path in local if path not in hashes}
@@ -193,7 +193,6 @@ def main() -> None:
     print(f"{len(local)} files on the Hub equal the local files; {len(stale)} others removed")
     api.super_squash_history(repo_id=DATASET, repo_type="dataset",
                              commit_message=f"nanochat pretraining data at {record['code'][:7]}")
-    print(f"DATASET_REVISION = {api.dataset_info(DATASET).sha}")
 
 
 if __name__ == "__main__":

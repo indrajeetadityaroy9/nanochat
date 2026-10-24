@@ -1,8 +1,7 @@
 """
 Every location the code reads or writes: ROOT, the repository (located from this file), and ARTIFACTS = ROOT/artifacts
-(gitignored), whose directories `python -m nanochat.paths` (runs/setup.sh) creates once, with the curated store and
-the tokenizer at the dataset revision config.py pins (data/publish.py; compile.py and pack.py then build the compiled
-and packed data on the host); code never creates them, so a missing one fails at first use. RESULTS, the data the
+(gitignored), whose directories `python -m nanochat.paths` (runs/setup.sh) creates once, with the published data
+(config.DATASET); code never creates them, so a missing one fails at first use. RESULTS, the data the
 paper's tables and figures are drawn from, is tracked.
 """
 from pathlib import Path
@@ -26,8 +25,8 @@ RESULTS = ROOT / "results"               # eval/suite.py export, ablations/harne
 if __name__ == "__main__":
     from huggingface_hub import snapshot_download
 
-    from nanochat.config import DATASET, DATASET_REVISION
+    from nanochat.config import DATASET
 
     for directory in (DATA, CORPUS, TOKENIZER, CHECKPOINTS, METRICS, BASE_EVAL, LOGS, CACHE, NATIVE):
         directory.mkdir(parents=True, exist_ok=True)
-    snapshot_download(DATASET, repo_type="dataset", revision=DATASET_REVISION, local_dir=ARTIFACTS)
+    snapshot_download(DATASET, repo_type="dataset", local_dir=ARTIFACTS)

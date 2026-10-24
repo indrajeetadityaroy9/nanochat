@@ -3,7 +3,7 @@ The pretraining data of nanochat, one module per stage. The tokenizer (tokenizer
 native.data_crate: the SA-BPE trainer, arXiv 2604.14053; curation's deduplication and repository samples; the packer;
 the tokenizer ablation's parse-tree leaves) are shared by the stages, the loader, evaluation and the ablations.
 
-    HF Hub, Software Heritage (pinned)       sources.py: the sources, one mixture component each
+    HF Hub, Software Heritage                sources.py: the sources, one mixture component each
         │  prepare.py, the only network step: fetch the code group whole and every other group up to its share of the
         │  longest run that repeats no code (config.MIXTURE); normalize every raw file to its category's schema
         │  (schema.py: repository file, notebook, text) with a local id, keeping Python 3 repository files
@@ -19,7 +19,7 @@ the tokenizer ablation's parse-tree leaves) are shared by the stages, the loader
         │  tokenizer.py: SA-BPE trained on a sample of the curated train documents of every source
         │  publish.py: the curated store and the tokenizer to the Hub dataset config.DATASET with a manifest,
         │  checksums and card, one squashed commit; the training host (the GH200) pulls them at
-        │  config.DATASET_REVISION (`python -m nanochat.paths`) and runs the steps below itself
+        │  main (`python -m nanochat.paths`) and runs the steps below itself
         │  compile.py: tokenize every document once (a repository sample: its files after their path comments),
         │  unpadded and without BOS (any sequence length)
         ▼

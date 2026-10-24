@@ -16,7 +16,6 @@ from functools import partial
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from nanochat.config import DATASET_REVISION
 from nanochat.data.tokenizer import get_tokenizer
 from nanochat.model.gpt import GPT, non_embedding_flops_per_token
 from nanochat.ops.cross_entropy import step_shares
@@ -75,7 +74,7 @@ def train(*, model: GPT, run: RunPlan, tokenizer_name: str, variant: dict, seed:
                          "model": asdict(model.config), "variant": variant,
                          "params": sum(p.numel() for p in model.parameters()),
                          "flops_per_token": non_embedding_flops_per_token(model),
-                         "max_norm": MAX_NORM, "dataset_revision": DATASET_REVISION,
+                         "max_norm": MAX_NORM,
                          "lr": opts[0].param_groups[0]["initial_lr"],
                          "weight_decay": opts[0].param_groups[0]["weight_decay"],
                          "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)

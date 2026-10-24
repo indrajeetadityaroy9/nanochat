@@ -4,7 +4,7 @@ Prepare every pretraining source (sources.py): fetch, normalize into the Parquet
   raw/<source>/                               the Hub files at their Hub paths (Stack-Edu: with Software Heritage text)
   normalized/<source>/<k>.parquet             one file per raw file, in its category's schema (schema.py) + val group
 
-Fetch, the only network step, downloads a source's Hub files in sorted order at its pinned revision. Stack-Edu's Hub
+Fetch, the only network step, downloads a source's Hub files in sorted order at main. Stack-Edu's Hub
 files are metadata: its raw file adds each blob's text, fetched from Software Heritage's public S3 bucket by blob ID
 (obstore) and decoded with its src_encoding (The Stack v2 dataset card, download_contents); a blob the bucket does not
 hold or that does not decode has no text.
@@ -85,10 +85,10 @@ def fetch(source: str, file: str) -> Path:
     only, so its workers hold no memory beside normalize's."""
     spec = SOURCES[source]
     directory = DATA / "raw" / source
-    if spec.repo != EDU[0]:
-        return Path(hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision, local_dir=directory))
+    if spec.repo != EDU:
+        return Path(hf_hub_download(spec.repo, file, repo_type="dataset", local_dir=directory))
     path = directory / file
-    meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=spec.revision)
+    meta = hf_hub_download(spec.repo, file, repo_type="dataset")
     with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
           pq.ParquetWriter(path, pq.read_schema(meta).append(pa.field("text", pa.string()))) as writer):
         for table in pool.map(blob_texts, [(meta, g) for g in range(pq.ParquetFile(meta).num_row_groups)]):
@@ -213,7 +213,7 @@ def prepare() -> None:
         held = 0
         for source in sources:
             spec = SOURCES[source]
-            files = sorted(f for f in list_repo_files(spec.repo, repo_type="dataset", revision=spec.revision)
+            files = sorted(f for f in list_repo_files(spec.repo, repo_type="dataset")
                            if any(fnmatch.fnmatchcase(f, glob) for glob in spec.files.values()))
             normalized_path(source, 0).parent.mkdir(parents=True)
             for directory in sorted({(DATA / "raw" / source / file).parent for file in files}):

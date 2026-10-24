@@ -8,7 +8,7 @@ run (each process start): step (the first step it trains), plan (schedule.RunPla
     order), model (model/gpt.py GPTConfig as the model was built), variant (an ablation run's fields,
     ablations/harness.py; production's lr scale), params (the model's parameters), flops_per_token (model/gpt.py
     non_embedding_flops_per_token at the stage it starts in: DeepSeek LLM's M, arXiv 2401.02954 §3.2 Eq. 2), max_norm
-    (the gradient clip threshold), dataset_revision (config.DATASET_REVISION), lr and weight_decay (as the optimizers
+    (the gradient clip threshold), lr and weight_decay (as the optimizers
     hold them; a resumed process's come from its checkpoint), stage (config.Stage as the model runs it, mixture as
     {corpus: row weight}).
 stage (switch to the repo-level stage): step, stage.

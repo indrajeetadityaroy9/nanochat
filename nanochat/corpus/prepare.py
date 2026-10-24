@@ -1,11 +1,11 @@
 """
-Prepare every source (sources.py): fetch the Hub files it reads at its revision, standardize each into its category's
-schema (schema.py), one standardized file per fetched Hub file, and record the source in CORPUS/manifest.json.
+Prepare every source (sources.py): fetch the Hub files it reads, standardize each into its category's schema
+(schema.py), one standardized file per fetched Hub file, and record the source in CORPUS/manifest.json.
 
-The manifest pins each source: its revision is its dataset's latest when first prepared, and a source is prepared
-again only when its extent differs from the recorded files (a changed mixture); its standardized and checked files are
-then rebuilt, while fetched files are kept. A fetch reads only the columns the standardizer reads, by ranged reads of
-the Hub's Parquet file, several files at once. A source the mixture reads whole is fetched whole; one it reads in part
+The manifest records each source's files, and a source is prepared again only when its extent differs from them (a
+changed mixture); its standardized and checked files are then rebuilt, while fetched files are kept. A fetch reads only
+the columns the standardizer reads, by ranged reads of the Hub's Parquet file, several files at once. A source the
+mixture reads whole is fetched whole; one it reads in part
 (mixture.IN_PART), only the Hub files that hold its share of the draw (extent).
 
 Stack-Edu's Hub files are metadata: its raw file adds each blob's text, fetched from Software Heritage's public S3
@@ -36,7 +36,7 @@ import obstore
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from huggingface_hub import HfFileSystem, dataset_info, hf_hub_download, list_repo_files
+from huggingface_hub import HfFileSystem, hf_hub_download, list_repo_files
 from obstore.store import S3Store
 
 from nanochat.corpus import mixture
@@ -66,24 +66,17 @@ def manifest() -> dict[str, dict]:
 
 
 @functools.cache
-def revision(source: str) -> str:
-    """The source's pinned revision: the manifest's, else its dataset's latest (its main's commit)."""
-    recorded = manifest()["sources"].get(source)
-    return recorded["revision"] if recorded else dataset_info(SOURCES[source].repo).sha
-
-
-@functools.cache
 def hub_files(source: str) -> list[str]:
-    """The source's Hub files, every file its globs match at its revision, sorted."""
+    """The source's Hub files, every file its globs match, sorted."""
     spec = SOURCES[source]
-    return sorted(f for f in list_repo_files(spec.repo, repo_type="dataset", revision=revision(source))
+    return sorted(f for f in list_repo_files(spec.repo, repo_type="dataset")
                   if any(fnmatch.fnmatchcase(f, glob) for glob in spec.files.values()))
 
 
 def hub_text_bytes(source: str, file: str) -> int:
     """The text bytes of one of the source's Hub files, from its Parquet footer."""
     spec = SOURCES[source]
-    with HfFileSystem().open(f"datasets/{spec.repo}@{revision(source)}/{file}", "rb") as remote:
+    with HfFileSystem().open(f"datasets/{spec.repo}/{file}", "rb") as remote:
         return text_bytes(pq.ParquetFile(remote).metadata, spec.text)
 
 
@@ -146,7 +139,7 @@ def blob_texts(task: tuple[Path, int]) -> pa.Table:
 
 
 def fetch(source: str, file: str) -> Path:
-    """The local path of one of the source's Hub files at its revision: a Parquet file of the columns its standardizer
+    """The local path of one of the source's Hub files: a Parquet file of the columns its standardizer
     reads, or for Stack-Edu its metadata and each blob's text, written whole, then renamed into place (a writer closed
     by an error still writes a valid footer, so only the rename marks a file complete; an existing file is kept).
     Stack-Edu's blobs are fetched by a pool that lives for that file only."""
@@ -158,14 +151,14 @@ def fetch(source: str, file: str) -> Path:
     partial = path.with_name(path.name + ".partial")
     if spec.repo != EDU:
         read = columns(spec)
-        with HfFileSystem().open(f"datasets/{spec.repo}@{revision(source)}/{file}", "rb") as remote:
+        with HfFileSystem().open(f"datasets/{spec.repo}/{file}", "rb") as remote:
             hub = pq.ParquetFile(remote)
             with pq.ParquetWriter(partial, pa.schema([hub.schema_arrow.field(c) for c in read]),
                                   compression=COMPRESSION) as writer:
                 for g in range(hub.num_row_groups):
                     writer.write_table(hub.read_row_group(g, columns=read))
     else:
-        meta = hf_hub_download(spec.repo, file, repo_type="dataset", revision=revision(source))
+        meta = hf_hub_download(spec.repo, file, repo_type="dataset")
         with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
               pq.ParquetWriter(partial, pq.read_schema(meta).append(pa.field("text", pa.string())),
                                compression=COMPRESSION) as writer):
@@ -267,11 +260,9 @@ def prepare(source: str, files: list[str]) -> None:
         list(pool.map(standardize, [(source, k, path) for k, path in enumerate(paths)]))
     rows = sum(pq.read_metadata(standardized_path(source, k)).num_rows for k in range(len(files)))
     record = manifest()
-    record["sources"][source] = {"repo": spec.repo, "revision": revision(source), "hub_files": len(hub_files(source)),
-                                 "files": files, "rows": rows}
+    record["sources"][source] = {"repo": spec.repo, "hub_files": len(hub_files(source)), "files": files, "rows": rows}
     MANIFEST.write_text(json.dumps(record, indent=1))
-    print(f"{source}: {len(files)} of {len(hub_files(source))} files, {rows:,} rows, "
-          f"{spec.repo}@{revision(source)}", flush=True)
+    print(f"{source}: {len(files)} of {len(hub_files(source))} files of {spec.repo}, {rows:,} rows", flush=True)
 
 
 def main() -> None:
