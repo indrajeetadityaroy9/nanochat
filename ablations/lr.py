@@ -25,18 +25,19 @@ Analysis, pre-registered, written to RESULTS/lr.json's "analysis":
   factor; arXiv 2512.22382 Table 1), its exponent (horizon_exponent_net) carried to the base model's horizon range
   (every rule in play is a power law in D), and the base model's batch growth by the same rule.
 m_D,base is the base model's tokens over d24 at SHORT's, m_D,d8 d8 at LONG's over d8 at SHORT's. Batches, token counts
-and the law's lrs are the runs' recorded plans (the base model's: harness.base_plan at max_ratio of d24).
+and the law's lrs are the runs' recorded plans (the base model's: nanochat/run.py base_plan at max_ratio of d24).
 
-    python -m ablations.lr    (ablations/harness.py)
+The recorded runs (RESULTS/lr.jsonl, lr-curves.jsonl, lr.json) were made by 4ade225's ablations/harness.py, whose
+records name a run's fields "fields" (n_layer, ratio, lr_scale, seed) and its setting "setting" (depth,
+tokens_per_param, seeds); its grids: d8 at SHORT x1, 2, 4, 8, d8 at LONG x1, 2, 4, 8, d24 at SHORT x1, 2, 4, one seed
+each. The estimate is the base experiment's lr_scale (conf/experiment/base.yaml, nanochat/run.py lr_multiplier).
 """
-import json
 import math
 
 import numpy as np
 
-from ablations.harness import Setting, base_plan, main
 from nanochat.corpus.tokenizer import get_tokenizer
-from nanochat.paths import RESULTS
+from nanochat.run import base_plan
 from nanochat.train.stages import max_ratio
 
 # The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords
@@ -117,24 +118,3 @@ def analysis(lines: list[dict]) -> dict:
         out["base_multiplier"] = d24 * m_d_base ** out["horizon_exponent_net"] * math.sqrt(m_b_base)
         out["base_lr"] = out["base_multiplier"] * base.lr
     return out
-
-
-if __name__ == "__main__":
-    # multipliers of the law's lr per (depth, tokens per parameter), the cheap settings first; a grid the rule extends
-    # (fit) gains the next factor of 2 and the experiment runs again (harness.main skips evaluated runs)
-    grids = {(8, SHORT): [1, 2, 4], (8, LONG): [1, 2, 4, 8], (24, SHORT): [1, 2, 4]}
-    while True:
-        main(experiment="lr", settings=[Setting(depth=depth, ratio=ratio, seeds=range(1),
-                                                alternatives={f"lr x{s:g}": {"lr_scale": float(s)}
-                                                              for s in scales if s != 1})
-                                        for (depth, ratio), scales in grids.items()], baseline={})
-        lines = [json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
-        extend = {(depth, ratio): fit(setting(lines, depth, ratio))["extend"] for depth, ratio in grids}
-        if not any(extend.values()):
-            break
-        for key, direction in extend.items():
-            if direction is not None:
-                grids[key].append(min(grids[key]) / 2 if direction == "down" else max(grids[key]) * 2)
-    summary = json.loads((RESULTS / "lr.json").read_text(encoding="utf-8"))
-    (RESULTS / "lr.json").write_text(json.dumps(summary | {"analysis": analysis(lines)}, allow_nan=False),
-                                     encoding="utf-8")

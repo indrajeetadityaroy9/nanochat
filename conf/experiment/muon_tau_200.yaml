@@ -1,0 +1,17 @@
+# @package _global_
+# D7 at 200 tokens per parameter (ablations/recipe.py muon_tau_law; ACTIONS.md §8): Muon's decay timescale x 1/2 and
+# x 2 against the tau law, d8, 2 seeds; then the decision with muon_tau_20's m. On the corpus's packs (tokenizer
+# corpus): d8 at 200 reads 2.94B tokens, beyond the tokenizer ablation's set (a d16 run at 20 under sa-bpe).
+depth: 8
+ratio: 200.0
+tokenizer: corpus
+
+hydra:
+  sweeper:
+    params:
+      muon_tau_scale: 0.5,1.0,2.0
+      seed: range(2)
+  callbacks:
+    records:
+      _target_: ablations.records.Records
+      analysis: ablations.recipe.muon_tau_law

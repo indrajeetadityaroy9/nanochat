@@ -11,9 +11,10 @@ arXiv 2309.14322 §3.2.5; a fixed scale costs 0.11% of loss in nGPT, arXiv 2410.
   MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6; nanochat e85db6b, whose gate read the stream's first 32 channels);
   FlashAttention-4 with document masking.
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
-- Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy.
-Not taken from 92d63d4: its smear, backout and logit softcap, its QK order (RoPE, norm, x 1.2) and its init
-(init_weights states this model's).
+- Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy; an output-logit
+  cap c tanh(z / c) only as the softcap ablation's arm (GPTConfig.softcap; ACTIONS.md §8 D5).
+Not taken from 92d63d4: its smear, backout and logit softcap (an ablation arm here), its QK order (RoPE, norm, x 1.2)
+and its init (init_weights states this model's).
 fp32 parameters, bf16 activations; the ops round weights to bf16. Gradient reductions use the fastest kernels, not a
 fixed order (FA4's and the embedding backward's atomics: faster per step).
 """
@@ -41,6 +42,9 @@ class GPTConfig:
     sequence_len: int
     n_layer: int
     n_embd: int
+    # Output logits capped as softcap tanh(z / softcap) in every loss and sample (ops/cross_entropy.py,
+    # csrc/decode.cu); None: uncapped
+    softcap: float | None = None
 
 
 def gpt_config(*, depth: int, stage: Stage) -> GPTConfig:
@@ -187,11 +191,13 @@ class GPT(nn.Module):
 
     def forward(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
         """Mean next-token loss over the non-padding targets, fp32."""
-        return lm_loss(self.hidden(idx, cu_seqlens, segments), self.lm_head.weight, targets.flatten())[0]
+        return lm_loss(self.hidden(idx, cu_seqlens, segments), self.lm_head.weight, targets.flatten(),
+                       self.config.softcap)[0]
 
     def losses(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
         """Per-position next-token loss (B*T,) fp32, 0 at padding targets."""
-        return lm_losses(self.hidden(idx, cu_seqlens, segments), self.lm_head.weight, targets.flatten())
+        return lm_losses(self.hidden(idx, cu_seqlens, segments), self.lm_head.weight, targets.flatten(),
+                         self.config.softcap)
 
 
 def scaling_params(model: GPT) -> int:

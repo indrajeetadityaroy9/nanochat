@@ -66,14 +66,15 @@ max_ratio; of a "supply" source (notebooks, functions, traces), its draw, read w
 shards of each stage, and of the repositories corpora the trailing partitions (compile.stage_parts, under sa-bpe),
 holding MARGIN times their draws, so they never bind.
 
-runs: every arm at d16, SEEDS seeds each, at equal bytes: each at its max_ratio (the data record's), so it reads the
-set's code documents once and its tokens are their bytes over its bytes per token; text and math are drawn by rows.
-Each run's plan is its own (schedule.plan at its tokens), its contexts the corpus's 8,192 and 32,768 tokens
-(eval/bpb.py's byte-offset buckets: the bytes of context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1),
-trained and evaluated through ablations/harness.py with sa-bpe as the baseline. RESULTS/tokenizer.json: each
-challenger's contrasts and the decision.
+runs (conf/experiment/tokenizer.yaml: `python -m nanochat.run experiment=tokenizer`): every arm at d16, SEEDS seeds
+each, at equal bytes: each at its max_ratio (ratio null), so it reads the set's code documents once and its tokens are
+their bytes over its bytes per token; text and math are drawn by rows. Each run's plan is its own (schedule.plan at
+its tokens), its contexts the corpus's 8,192 and 32,768 tokens (eval/bpb.py's byte-offset buckets: the bytes of
+context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1), trained and evaluated through nanochat/run.py,
+the records by ablations/records.py. RESULTS/tokenizer.json "analysis" (decide): each challenger's contrasts with
+sa-bpe, the baseline, and the decision.
 
-Decisions, pre-registered (RESULTS/tokenizer.json "decision"), each challenger (CHALLENGERS) against sa-bpe on the
+Decisions, pre-registered (decide), each challenger (CHALLENGERS) against sa-bpe on the
 seeds where both have an evaluation (a diverged run drops its seed from the arm's contrasts on both sides):
 - parsing: per MBPP+ problem, the seeds whose healed greedy completion compiles under the challenger minus under
   sa-bpe; the exact sign test over the problems whose difference is not 0 (McNemar's exact test at one seed, the
@@ -88,12 +89,12 @@ seeds where both have an evaluation (a diverged run drops its seed from the arm'
   on both and the val documents read fewer of its merged tokens under 100 times than of sa-bpe's (SA-BPE's claimed
   benefit, a higher coverage than BPE's), carried to the adopted pattern [inference]; otherwise SA-BPE.
 
-adopt: the decided vocabulary as the corpus's tokenizer: the arm of the decided pattern and score, or, bpe's score
-carried to another arm's pattern, that pair trained on the sample.
+adopt: the decided vocabulary (RESULTS/tokenizer.json "analysis" "decision") as the corpus's tokenizer: the arm of
+the decided pattern and score, or, bpe's score carried to another arm's pattern, that pair trained on the sample.
 
 The comparisons, their measures and the recorded results: ablations/tokenizer.md.
 
-python -m ablations.tokenizer vocabularies|intrinsic|data|runs|adopt
+python -m ablations.tokenizer vocabularies|intrinsic|data|adopt
 """
 import datetime
 import functools
@@ -126,14 +127,12 @@ from nanochat.corpus.pack import packed_shards, shard_count, write
 from nanochat.corpus.parallel import SPAWN
 from nanochat.corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
 from nanochat.corpus.sources import SOURCES, curated_shards, text_bytes, texts
-from nanochat.corpus.tokenizer import SPECIAL_TOKENS, SPLIT_PATTERN, TOKENIZER, get_tokenizer, save
+from nanochat.corpus.tokenizer import ABLATION, SPECIAL_TOKENS, SPLIT_PATTERN, TOKENIZER, get_tokenizer, save
 from nanochat.native import data_crate
-from nanochat.paths import CORPUS, RESULTS, ROOT
+from nanochat.paths import RESULTS, ROOT
 
 Score = Literal["sa-bpe", "frequency"]
 
-# The arms' vocabularies, ABLATION/<arm>, and their compiled data, ABLATION/compiled (corpus/tokenizer.py)
-ABLATION = CORPUS / "tokenizer-ablation"
 # The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers)
 SAMPLE_BYTES = 13.38e9
 # karpathy/nanochat's split pattern (92d63d4): SPLIT_PATTERN with cl100k's punctuation clause, whose [\r\n]* takes the
@@ -165,10 +164,11 @@ FUSED_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}|
 # whitespace run costs fancy-regex no backtracking, where SPLIT_PATTERN's \s+(?!\S) beside \s*[\r\n] stops tiktoken past
 # its backtrack limit
 HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\n+|\r+|\t+| +|[^\S\r\n\t ]+"""
-# arm: (pattern, merge score); every arm is trained on, sa-bpe as the harness's baseline
+# arm: (pattern, merge score); every arm is trained on, sa-bpe the runs' baseline (decide)
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
+# The runs' depth, which the set is sized for, and seeds per arm (conf/experiment/tokenizer.yaml)
 DEPTH, SEEDS = 16, 2
 # The set's size: a d16 run at Chinchilla's 20 tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3)
 RATIO = 20
@@ -446,11 +446,6 @@ def intrinsic() -> None:
     (RESULTS / "tokenizer-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
-def vocabulary_name(arm: str) -> str:
-    """An arm's vocabulary directory under CORPUS, its harness Run.tokenizer."""
-    return str((ABLATION / arm).relative_to(CORPUS))
-
-
 def document_set(pool: ProcessPoolExecutor, run) -> dict:
     """The set (module docstring) for the d16 run `run` at RATIO under sa-bpe: {"file": {source: its leading train
     shards, the file stage's}, "repository": {source: its train shards after those, the repository stage's},
@@ -490,7 +485,7 @@ def document_set(pool: ProcessPoolExecutor, run) -> dict:
 def data() -> None:
     """Every arm's training set, compiled and packed, and RESULTS/tokenizer-data.json (module docstring): every arm's
     train splits at once into one process pool, then their repositories corpora, then every pack at once."""
-    # the training stack (the model's kernels) here and in runs alone: the measures' spawned workers import this module
+    # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
     import torch
 
     from nanochat.model.gpt import GPT, gpt_config
@@ -551,50 +546,38 @@ def data() -> None:
     (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
-def runs() -> None:
-    """Every arm at d16, each at its max_ratio (RESULTS/tokenizer-data.json; ablations/harness.py main), sa-bpe the
-    baseline; then RESULTS/tokenizer.json gains each challenger's contrast with sa-bpe and the decision (module
-    docstring)."""
-    # the training stack (the model's kernels) here and in data alone: the measures' spawned workers import this module
-    from ablations.harness import Setting, main
-
-    ratios = {arm: measures["ratio"] for arm, measures in
-              json.loads((RESULTS / "tokenizer-data.json").read_text(encoding="utf-8"))["arms"].items()}
-    main(experiment="tokenizer",
-         settings=[Setting(depth=DEPTH, ratio=ratios["sa-bpe"], seeds=range(SEEDS),
-                           alternatives={arm: {"tokenizer": vocabulary_name(arm), "ratio": ratios[arm]}
-                                         for arm in CHALLENGERS})],
-         baseline={"tokenizer": vocabulary_name("sa-bpe")})
+def decide(lines: list[dict]) -> dict:
+    """The runs' analysis (RESULTS/tokenizer.json "analysis", ablations/records.py): each challenger's contrast with
+    sa-bpe and the decision (module docstring), over RESULTS/tokenizer.jsonl's records."""
     # (arm, seed) of every evaluated run (a diverged run has none): its measures and, per MBPP+ problem in the
     # benchmark's order, whether its completion compiles
     evaluated = {}
-    for line in (RESULTS / "tokenizer.jsonl").read_text(encoding="utf-8").splitlines():
-        run = json.loads(line)
+    for run in lines:
         if run["measures"] is not None:
             outcomes = run["evaluations"][-1]["parse"][PARSED]["outcomes"]
-            evaluated[run["arm"], run["fields"]["seed"]] = (run["measures"], [o == "parses" for o in outcomes])
-    summary = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))
+            evaluated[run["config"]["tokenizer"], run["config"]["seed"]] = (run["measures"],
+                                                                            [o == "parses" for o in outcomes])
     contrasts = {}
     for arm in CHALLENGERS:
-        seeds = [seed for seed in range(SEEDS) if (arm, seed) in evaluated and ("baseline", seed) in evaluated]
+        seeds = [seed for seed in range(SEEDS) if (arm, seed) in evaluated and ("sa-bpe", seed) in evaluated]
         if not seeds:
             raise RuntimeError(f"no seed evaluated under both {arm} and sa-bpe")
-        both = {name: [evaluated[name, seed] for seed in seeds] for name in (arm, "baseline")}
+        both = {name: [evaluated[name, seed] for seed in seeds] for name in (arm, "sa-bpe")}
         code = {name: statistics.fmean(measures["code"] for measures, _ in runs_) for name, runs_ in both.items()}
         unparsed = {name: 1 - statistics.fmean(itertools.chain.from_iterable(parsed for _, parsed in runs_))
                     for name, runs_ in both.items()}
         # per problem, the seeds whose completion parses under the challenger minus under sa-bpe
         seeds_parsing = np.sum([parsed for _, parsed in both[arm]], axis=0) - np.sum(
-            [parsed for _, parsed in both["baseline"]], axis=0)
+            [parsed for _, parsed in both["sa-bpe"]], axis=0)
         here, there = int((seeds_parsing > 0).sum()), int((seeds_parsing < 0).sum())
         p = binomtest(here, here + there).pvalue if here + there else 1.0
-        difference = code[arm] - code["baseline"]
+        difference = code[arm] - code["sa-bpe"]
         margin = norm.ppf(1 - ALPHA / 2) * CODE_SIGMA * math.sqrt(2 / len(seeds))
         contrasts[arm] = {"seeds": seeds, "problems_parsing_more_here": here, "problems_parsing_more_in_sa-bpe": there,
                           "p": p, "parsing": "equal" if p >= ALPHA else "better" if here > there else "worse",
                           "code_difference": difference, "code_margin": margin,
                           "code": "better" if difference < -margin else "worse" if difference > margin else "equal",
-                          "unparsed_difference": unparsed[arm] - unparsed["baseline"]}
+                          "unparsed_difference": unparsed[arm] - unparsed["sa-bpe"]}
     verdicts = {arm: (c["parsing"], c["code"]) for arm, c in contrasts.items()}
     qualified = {arm for arm, v in verdicts.items() if "worse" not in v and "better" in v}
     record = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))
@@ -607,14 +590,13 @@ def runs() -> None:
     decision = {"pattern": pattern if control else "sa-bpe",
                 "score": "frequency" if control and frequency else "sa-bpe",
                 "control_detected": control}
-    (RESULTS / "tokenizer.json").write_text(
-        json.dumps(summary | {"contrasts": contrasts, "decision": decision}, allow_nan=False), encoding="utf-8")
+    return {"contrasts": contrasts, "decision": decision}
 
 
 def adopt() -> None:
-    """The decided vocabulary (RESULTS/tokenizer.json "decision") as the corpus's tokenizer, TOKENIZER: the arm of the
-    decided pattern and score, copied, or that pair trained on the sample when no arm holds it."""
-    decision = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))["decision"]
+    """The decided vocabulary (RESULTS/tokenizer.json "analysis" "decision") as the corpus's tokenizer, TOKENIZER: the
+    arm of the decided pattern and score, copied, or that pair trained on the sample when no arm holds it."""
+    decision = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))["analysis"]["decision"]
     pattern, score = ARMS[decision["pattern"]][0], decision["score"]
     TOKENIZER.mkdir(parents=True)
     arm = next((arm for arm, spec in ARMS.items() if spec == (pattern, score)), None)
@@ -636,9 +618,7 @@ if __name__ == "__main__":
             intrinsic()
         case ["data"]:
             data()
-        case ["runs"]:
-            runs()
         case ["adopt"]:
             adopt()
         case _:
-            raise SystemExit("usage: python -m ablations.tokenizer vocabularies|intrinsic|data|runs|adopt")
+            raise SystemExit("usage: python -m ablations.tokenizer vocabularies|intrinsic|data|adopt")

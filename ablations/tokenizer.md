@@ -307,8 +307,9 @@ Every arm passed every validity check. 3,600 val texts per arm were checked chun
 ## Runs (pre-registered, pending the training cutover)
 
 **Design:**
-- Every arm at d16, two seeds each: 8 runs through `ablations/harness.py`, each with production's code paths and its
-  own plan (`schedule.plan` at its tokens).
+- Every arm at d16, two seeds each (0 and 1): 8 runs through `python -m nanochat.run experiment=tokenizer`
+  (`conf/experiment/tokenizer.yaml`), each with the base model's code paths and its own plan (`schedule.plan` at its
+  tokens); the decision is `ablations.tokenizer.decide` over the records grouped by `config.tokenizer`.
 - **Equal bytes:** each run reads the set's code documents once, so an arm's tokens are their bytes over its bytes per
   token. Text and math are drawn by rows. At equal bytes, the arm that compresses better trains on fewer tokens and
   fewer steps [arithmetic].
@@ -373,7 +374,7 @@ Inside the project image on the GH200 (64 Neoverse-V2 cores, 525 GB; Python 3.12
 ```bash
 python -m ablations.tokenizer vocabularies   # sample, then the four arms at once
 python -m ablations.tokenizer intrinsic      # 72 val compiles and every measure, one process pool
-python -m ablations.tokenizer runs           # after the training cutover
+python -m nanochat.run experiment=tokenizer  # the 8 runs and the decision
 python -m ablations.tokenizer adopt
 ```
 

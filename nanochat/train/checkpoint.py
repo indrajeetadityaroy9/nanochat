@@ -1,7 +1,8 @@
 """
-Checkpoints: CHECKPOINTS/<tag>-step<step>.pt, a run's full state after `step` steps ({"model", "optimizers",
-"model_config", "stage_rows"}), each written to a temp file then renamed, so a run killed mid-save never leaves a
-partial one. Every checkpoint is both a resume point (a run resumes from its newest) and a model to evaluate.
+Checkpoints: RUNS/<tag>/step<step>.pt (tag: the run's key, nanochat/run.py), a run's full state after `step` steps
+({"model", "optimizers", "model_config", "stage_rows"}), each written to a temp file then renamed, so a run killed
+mid-save never leaves a partial one. Every checkpoint is both a resume point (a run resumes from its newest) and a
+model to evaluate.
 """
 
 from pathlib import Path
@@ -9,16 +10,11 @@ from pathlib import Path
 import torch
 
 from nanochat.model.gpt import GPT, GPTConfig
-from nanochat.paths import CHECKPOINTS
-
-
-def checkpoint_name(tag: str, step: int) -> str:
-    """<tag>-step<step>; a checkpoint's evaluation (eval/suite.py evaluate) is named the same."""
-    return f"{tag}-step{step}"
+from nanochat.paths import RUNS
 
 
 def checkpoint_path(tag: str, step: int) -> Path:
-    return CHECKPOINTS / f"{checkpoint_name(tag, step)}.pt"
+    return RUNS / tag / f"step{step}.pt"
 
 
 def save_checkpoint(path: Path, checkpoint: dict) -> None:
@@ -28,7 +24,7 @@ def save_checkpoint(path: Path, checkpoint: dict) -> None:
 
 
 def load_model(tag: str, step: int, *, device: torch.device) -> GPT:
-    """A checkpoint's model, at the context its weights trained in."""
+    """A checkpoint's model, at the context its weights trained in (its GPTConfig, the output-logit cap included)."""
     checkpoint = torch.load(checkpoint_path(tag, step), map_location=device)
     with torch.device("meta"):
         model = GPT(GPTConfig(**checkpoint["model_config"]))

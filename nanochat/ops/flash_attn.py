@@ -6,8 +6,8 @@ Document masking (ProLong, arXiv 2410.02660): FA4's varlen kernels restrict atte
 cu_seqlens, the int32 offsets of the flattened (B*T) tokens (corpus/loader.py PretrainingBatches). cu_seqlens has a
 fixed length per loader (one compiled shape), its unused entries empty segments; `segments`, a 0-dim int32 tensor on
 the host (no device synchronization), is how many are not, and the ops pass FA4 only those: FA4 schedules work for
-every segment it is given, and the loader's padding (2,796 entries for about 94 segments at 8K) cost a d24 step's
-attention 849 vs 630 ms, the outputs the same.
+every segment it is given, empty or not (padded cu_seqlens slow varlen attention, outputs unchanged: McCormick,
+"Optimizing Training with FlashAttention varlen", 2026).
 """
 
 import torch

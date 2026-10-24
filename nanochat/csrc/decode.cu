@@ -201,6 +201,9 @@ typedef struct {
     const int32_t *pos, *first;      /* [B]: the input's position and the first generated token's (i = pos - first) */
     float *logits;                   /* [B][rows]: a nucleus-sampled slot's logits, -inf outside its allowed rows */
     float *probs;                    /* [B][rows]: k_nucleus's exp(s / T - max) */
+    float softcap;                   /* the model's output-logit cap c (GPTConfig.softcap): a sampled slot's logits
+                                      * are c tanh(s / c); 0 none. A greedy choice needs none: tanh is increasing, so
+                                      * the argmax is the uncapped logits' (but for fp32 ties of saturated caps) */
 } Choice;
 
 static __device__ __forceinline__ void mma16816(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
@@ -307,13 +310,15 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
                 if constexpr (CHOICE) {
                     const bool allowed = !live(a.active + MASK_WORDS, b) ||
                         ((c.allow[(size_t)b * (a.rows / WORD_BITS) + row / WORD_BITS] >> (row % WORD_BITS)) & 1u);
+                    const float z = c.softcap > 0.f && c.temperature[b] > 0.f
+                        ? __fmul_rn(c.softcap, tanhf(__fdiv_rn(s, c.softcap))) : s;
                     if (c.temperature[b] > 0.f && c.top_p[b] < 1.f) {
-                        c.logits[at] = allowed ? s : -INFINITY;
+                        c.logits[at] = allowed ? z : -INFINITY;
                         continue;
                     }
                     if (!allowed) continue;
                     if (c.temperature[b] > 0.f)
-                        score = __fadd_rn(__fdiv_rn(s, c.temperature[b]),
+                        score = __fadd_rn(__fdiv_rn(z, c.temperature[b]),
                                           gumbel(c.seed[b], c.pos[b] - c.first[b], row));
                 }
                 const unsigned long long key = choice_key(score, row);
@@ -642,6 +647,7 @@ typedef struct {
     float *top_p;             /* [B] */
     unsigned long long *seed; /* [B] */
     float *logits, *probs;    /* [B][vocab]: k_nucleus's inputs (Choice) */
+    float softcap;            /* the output-logit cap (Choice), 0 none */
     uint32_t *allow;          /* [B][vocab / WORD_BITS]: each masked slot's allowed tokens */
     uint32_t *host_allow;     /* pinned host, as allow: written by the caller (dec_masks), copied by dec_set_active */
     unsigned long long *active;  /* device [2][MASK_WORDS]: the active slots' mask, then the masked slots' */
@@ -696,7 +702,7 @@ static void launch_norm(Decoder *d, int kind, const bf16 *in, const bf16 *in2, f
 }
 
 static Choice choice(const Decoder *d) {
-    return {d->allow, d->temperature, d->top_p, d->seed, d->pos, d->first, d->logits, d->probs};
+    return {d->allow, d->temperature, d->top_p, d->seed, d->pos, d->first, d->logits, d->probs, d->softcap};
 }
 
 /* A one-warp block per (slot group, row tile); groups without an active slot exit at once. */
@@ -783,7 +789,7 @@ extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
  * ptrs: GLOBAL_PTRS pointers wte, cos, sin (the fp32 rotary table [context][HALF] of every layer), lm_head; then
  *       LAYER_PTRS per layer: qkv, o, fc, proj, value-embedding table (0 if none), value-embedding gate (0 if none),
  *       q gain, k gain.
- * scal: per layer: resid lambda, x0 lambda (bf16 values).
+ * scal: per layer: resid lambda, x0 lambda (bf16 values); then the output-logit cap (GPTConfig.softcap, 0 none).
  * window: per layer, the keys before each query that it attends (FlashAttention's window_size left).
  * stream: the caller's stream (not the legacy default stream: it is captured), alive past dec_destroy.
  */
@@ -797,6 +803,7 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     d->wte = (const bf16 *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
     d->lm_head = (const bf16 *)ptrs[3]; d->stream = (cudaStream_t)stream;
     const int L = d->L;
+    d->softcap = scal[2 * L];
     d->layer = (Layer *)calloc(L, sizeof(Layer));
     for (int l = 0; l < L; l++) {
         const uint64_t *p = ptrs + GLOBAL_PTRS + LAYER_PTRS * l;

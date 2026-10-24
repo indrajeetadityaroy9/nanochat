@@ -1,0 +1,19 @@
+# The run app's root config (nanochat/run.py): the base model's recipe, RunConfig's defaults, then an experiment's
+# fields and sweep (conf/experiment/<name>.yaml, selected by experiment=<name>) and the command line's overrides.
+defaults:
+  - run_schema
+  - _self_
+  - experiment: null
+  - override hydra/job_logging: none
+
+hydra:
+  # every invocation a sweep: one job without sweep parameters
+  mode: MULTIRUN
+  sweep:
+    dir: ${runs:}
+    subdir: ${run_key:}
+  job:
+    chdir: false
+  sweeper:
+    # one job per batch: the first failed job stops the sweep
+    max_batch_size: 1

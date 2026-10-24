@@ -18,6 +18,9 @@ import tiktoken
 from nanochat.paths import CORPUS
 
 TOKENIZER = CORPUS / "tokenizer"
+# The tokenizer ablation's arms' vocabularies, ABLATION/<arm>, and their compiled data, ABLATION/compiled
+# (ablations/tokenizer.py)
+ABLATION = CORPUS / "tokenizer-ablation"
 
 BOS = "<|bos|>"  # starts every piece of a packed row (loader.py); as a target it ends a document or a FIM middle
 # Fill-in-the-middle sentinels (StarCoder's names; arXiv 2207.14255 §3): a FIM example is

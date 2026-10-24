@@ -1,0 +1,17 @@
+# @package _global_
+# D6, the AdamW groups' lr at their decay timescale (ablations/recipe.py adamw_lr; ACTIONS.md §8): x 1/4 and x 4
+# against x 1, d16 on the sa-bpe arm's data at its max_ratio, 2 seeds; the x 1 runs are the tokenizer ablation's sa-bpe
+# runs of seeds 0 and 1 (the same keys), so after its runs only the arms train.
+depth: 16
+ratio: null
+tokenizer: sa-bpe
+
+hydra:
+  sweeper:
+    params:
+      adamw_lr_scale: 0.25,1.0,4.0
+      seed: range(2)
+  callbacks:
+    records:
+      _target_: ablations.records.Records
+      analysis: ablations.recipe.adamw_lr

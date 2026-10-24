@@ -4,7 +4,7 @@ repo_start; next-token loss with the packs' FIM pieces read as FIM examples (Dee
 corpus/pack.py). Each start resumes from the tag's newest checkpoint (weights, optimizer state, data position). What a
 step computes is this package's: the optimizers, weight decay and gradient clip (optim.py), each step's stage and lr
 (schedule.py), the stages' micro-batches in the run's data order (stages.py), the micro-batches' loss weights
-(ops/cross_entropy.py step_shares). Callers: scripts/pretrain.py, ablations/harness.py. Metrics: metrics.py.
+(ops/cross_entropy.py step_shares). Caller: nanochat/run.py. Metrics: metrics.py.
 """
 
 import gc
@@ -27,20 +27,22 @@ from nanochat.train.schedule import RunPlan, lr_multiplier
 from nanochat.train.stages import stage_batches
 
 
-def train(*, model: GPT, run: RunPlan, vocabulary: Path, variant: dict, seed: int, checkpoints: frozenset[int],
-          tag: str) -> GPT:
+def train(*, model: GPT, run: RunPlan, vocabulary: Path, seed: int, muon_tau_scale: float, adamw_lr_scale: float,
+          checkpoints: frozenset[int], tag: str, config: dict) -> None:
     """Train (or resume) run `tag` of `model` (shapes on the meta device, at FILE_STAGE's context) by the plan `run`
     (schedule.plan at the caller's peak lr) on the packed data of the vocabulary in directory `vocabulary`
-    (corpus/tokenizer.py get_tokenizer) and return it: initialization and data order by `seed`, decoupled weight decay
-    by the tau law at the run's lr (optim.tau_weight_decay), each update clipped (optim.update), the stages by
-    run.stage_at; `variant` (config.run_tag's) recorded with the run. A checkpoint after each step count in
-    `checkpoints` (run.num_iterations among them: the final model); a run resumes from its newest."""
+    (corpus/tokenizer.py get_tokenizer): initialization and data order by `seed`, decoupled weight decay by the tau
+    law at the run's lr (optim.tau_weight_decay; Muon's and AdamW's by optim.optimizers' scales), each update clipped
+    (optim.update), the stages by run.stage_at; `config` (nanochat/run.py RunConfig as a dict) and the vocabulary's
+    data key recorded with the run. A checkpoint after each step count in `checkpoints` (run.num_iterations among
+    them: the final model); a run resumes from its newest."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer(vocabulary)
     model.to_empty(device=device)
     model.init_weights(seed=seed)
     opts = optimizers(model, lr=run.lr, weight_decay=tau_weight_decay(lr=run.lr, steps=run.num_iterations,
-                                                                      tokens_per_param=run.tokens_per_param))
+                                                                      tokens_per_param=run.tokens_per_param),
+                      muon_tau_scale=muon_tau_scale, adamw_lr_scale=adamw_lr_scale)
     saved = [s for s in sorted(checkpoints) if checkpoint_path(tag, s).exists()]
     start_step = stage_rows = 0
     if saved:  # resume: weights into the optimizers' parameters, then optimizer state
@@ -59,8 +61,8 @@ def train(*, model: GPT, run: RunPlan, vocabulary: Path, variant: dict, seed: in
     # A checkpoint holds the context its weights trained in; stage_rows counts that stage's consumed rows
     stage = run.stage_at(start_step - 1)
     model.set_stage(stage)
-    if start_step == run.num_iterations:  # finished: the final checkpoint's model
-        return model
+    if start_step == run.num_iterations:  # finished
+        return
     compiled = torch.compile(model, dynamic=False, fullgraph=True)
     read = partial(stage_batches, tokenizer, run=run, seed=seed, device=device)
 
@@ -71,13 +73,15 @@ def train(*, model: GPT, run: RunPlan, vocabulary: Path, variant: dict, seed: in
     # the attempt this process is (the run's process starts before it); lr and weight decay as the optimizers hold them
     # (a resumed run's come from its checkpoint)
     attempt = sum(r["kind"] == "run" for r in metrics.records(tag))
-    metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed,
-                         "model": asdict(model.config), "variant": variant,
+    metrics.append(tag, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "config": config,
+                         "data_key": tokenizer.data_key, "model": asdict(model.config),
                          "params": sum(p.numel() for p in model.parameters()),
                          "flops_per_token": non_embedding_flops_per_token(model),
                          "max_norm": MAX_NORM,
-                         "lr": opts[0].param_groups[0]["initial_lr"],
-                         "weight_decay": opts[0].param_groups[0]["weight_decay"],
+                         "lr": {name: [g["initial_lr"] for g in opt.param_groups]
+                                for name, opt in zip(("adamw", "muon"), opts, strict=True)},
+                         "weight_decay": {name: [g["weight_decay"] for g in opt.param_groups]
+                                          for name, opt in zip(("adamw", "muon"), opts, strict=True)},
                          "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
 
     while True:
@@ -91,7 +95,7 @@ def train(*, model: GPT, run: RunPlan, vocabulary: Path, variant: dict, seed: in
         if step == run.num_iterations:
             metrics.append(tag, {"kind": "end", "step": step, "peak_memory_bytes": torch.cuda.max_memory_allocated()},
                            attempt=attempt)
-            return model
+            return
         if run.stage_at(step) is not stage:
             # repo-level stage: new context and compiled graph; its batches were read the step before
             stage, stage_rows = run.stage_at(step), 0

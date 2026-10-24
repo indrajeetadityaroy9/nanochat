@@ -180,7 +180,7 @@ Each step's output against the code that produced it (2026-10-21; local copy of 
 | Setting | Value | Source |
 |---|---|---|
 | Batch | 1,179,648 tokens (12 micro-batches of 98,304) | DeepSeek LLM laws, B = 0.2920·C^0.3271, C = M·D (`train/schedule.py`) |
-| Peak lr | 2.1590e-3, every group: 2.3218 × the law's 9.2989e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured, carried to production's horizon (`scripts/production.py` applies `lr.py`'s `analysis`; Peak lr, below) |
+| Peak lr | 2.1590e-3, every group: 2.3218 × the law's 9.2989e-4 | DeepSeek LLM, η = 0.3118·C^-0.125, times the multiplier `ablations/lr.py` measured, carried to production's horizon (`conf/experiment/base.yaml`'s `lr_scale` applies `lr.py`'s `analysis`; Peak lr, below) |
 | Steps | 86,975 (102.60B tokens, 525.89 per scaling parameter); repository stage from step 82,231 | `schedule.plan` |
 | Warmup | 40 steps, linear (47M tokens, 0.05% of the run) | 2/(1−β2) (arXiv 1910.04209) |
 | Decay | linear to zero | arXiv 2502.15938 (its gain over 10× decay grows with tokens per parameter; it beat WSD at 610M and 80 tokens per parameter, and cosine at 20) |
@@ -234,14 +234,14 @@ the same widths. The multiplier adopted on 2026-10-20, × 2.5467 = 2.0235 · 0.9
 (2.3887e-3), came from the pre-registered estimator, which raised d8's batch growth (inside r) with its horizon trend
 and then corrected for production's batch growth again, counting d8's 2^((L − 1)/2) too often, L = ln m_D,prod /
 ln m_D,d8 (amended 2026-10-22 from the same measurements, Analysis): 2.0235 · (0.9105/√2)^(ln 98.17 / ln 40.05) · 2
-= × 2.3410 at `1e711aa`. Other data carries the optima, not measured again: `scripts/production.py` applies the
+= × 2.3410 at `1e711aa`. Other data carries the optima, not measured again: `experiment=base` applies the
 estimator (`lr.py` `analysis`) at its data's horizon, × 2.3218 on the retrained tokenizer's at `7a210ed` (2.1590e-3,
 weight decay 0.1334; the unamended estimator's × 2.5423 is 9.5% higher), where the measurement's own uncertainty is
 about ±33% (Power) and a 30% error costs 0.0006 bits per byte at d24 at 5; no source makes the optimum depend on the
 tokenizer at one vocabulary size [inference].
 
-- *d8 at 20* (`harness.main`, production vs × 2, seeds 0 and 1, 2026-10-20; GPU shared, so throughput is not
-  comparable): code bits per byte 0.6323 and 0.6324 at the law's lr, 0.6144 and 0.6137 at × 2 (paired differences
+- *d8 at 20* (4ade225's ablation driver, production vs × 2, seeds 0 and 1, 2026-10-20; GPU shared, so throughput is
+  not comparable): code bits per byte 0.6323 and 0.6324 at the law's lr, 0.6144 and 0.6137 at × 2 (paired differences
   −0.0179, −0.0187); solutions −0.014, 32K repository −0.018, text −0.030, math −0.033. The law's lr is below the
   optimum at this horizon; `lr.py`'s grids start at × 1 where they look upward.
 - *`lr.py`* (2026-10-20, dataset revision `1e711aa`, seed 0; `results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`): code
@@ -282,11 +282,11 @@ tokenizer at one vocabulary size [inference].
 Paired comparison, d8 at 20 tokens per parameter, three seed pairs (seed = data seed ∈ {0, 1, 2}; same initialization
 and data order within a pair). This configuration's arm is `60138de`'s baseline: linear decay to zero, τ-law weight
 decay, one RoPE base and no clipping, which production has since added
-(`d8-r20-s{0,1,2}-d{0,1,2}-{d69671850bea, ca426bc7cec9, ccd433c30eb2}`, tags reproduced from `60138de`'s `run_tag`).
+(`d8-r20-s{0,1,2}-d{0,1,2}-{d69671850bea, ca426bc7cec9, ccd433c30eb2}`, tags reproduced from `60138de`'s tag function).
 The standard regime is commit `c00d2f6`'s default (WSD, weight decay 0.1, clip 1.0, RoPE base 10^4 → 10^6), trained in
 its own worktree (`d8-r20-s{0,1,2}`). Both arms are evaluated by `60138de`'s `loss_evaluation` on the same held-out
-rows (`artifacts/evals/<tag>.json`; training records `artifacts/metrics/<tag>.jsonl`). Held-out bits per byte, new
-minus standard (paired t-test, df = 2; 95% CI from the t distribution):
+rows (`evals/<tag>.json` under `artifacts/`; training records `metrics/<tag>.jsonl`, the layout then). Held-out bits
+per byte, new minus standard (paired t-test, df = 2; 95% CI from the t distribution):
 
 | Metric | new s0 | std s0 | new s1 | std s1 | new s2 | std s2 | Mean difference | 95% CI | p |
 |---|---|---|---|---|---|---|---|---|---|
@@ -322,7 +322,8 @@ resumed run's repeated steps counted once):
 
 No non-finite loss or gradient; median gradient norm over steps 1,000–2,824 1.49 (0.77–0.86 for the previous runs,
 whose weight decay is 0.1 against the baseline's 0.548 at this scale); throughput 2.3M tokens/s. Held-out bits per
-byte (`artifacts/base_eval/<tag>.json`; the `-g1`/`-ginf` files in the earlier evaluator's format):
+byte (`base_eval/<tag>.json` under `artifacts/`, the layout then; the `-g1`/`-ginf` files in the earlier evaluator's
+format):
 
 | Validation split (8K rows) | `60138de` (seed 0) | Previous, clip 1.0 (`-g1`) | Previous, no clip (`-ginf`) |
 |---|---|---|---|
@@ -365,7 +366,8 @@ the τ law at this 423-step horizon (production's at this lr: 0.317). Per tenth 
 | 381–422 | 2.287 | 0.282 | 0.384 | 2.449e-6 | 314,405 |
 
 No non-finite loss or gradient; the gradient norm exceeds 1.9 only during warmup. Held-out bits per byte at 8K
-(`artifacts/evals/<tag>.json`): code 0.7485, text 1.4555, math 1.4454, all 0.8512: worse than the d8 run of 2,987
+(`evals/<tag>.json` under `artifacts/`, the layout then): code 0.7485, text 1.4555, math 1.4454, all 0.8512: worse
+than the d8 run of 2,987
 steps (code 0.6354), a model 13× smaller on fewer tokens. Per optimizer step d24 is lower at every step after the
 first (2.274 vs 3.332 over steps 400–420); per token it is higher (3.508 vs 2.024 over 250–270M tokens, both in the
 file-level stage): at the production batch 0.5B tokens is 423 optimizer steps. A proxy cut from the production plan
@@ -376,7 +378,8 @@ sets its scaling runs' by the same laws).
 
 Pre-registered experiments, one per decision this document records whose outcome the literature does not settle
 (value embeddings: Basis; the lr optima under other data: Peak lr); every other decision states its basis where it is
-made. They share one mechanism (`ablations/harness.py`) whose runs train and evaluate through the production code.
+made. They share one mechanism, Hydra (hydra-core 1.3.7: `nanochat/run.py`, `conf/run.yaml`,
+`conf/experiment/<name>.yaml`, `ablations/records.py`), whose runs train and evaluate through the production code.
 
 | File | Settings | Production (the recorded decision) | Alternative | Production cost if adopted |
 |---|---|---|---|---|
@@ -386,18 +389,20 @@ made. They share one mechanism (`ablations/harness.py`) whose runs train and eva
 **Results.** `lr.py` ran on 2026-10-20 at dataset revision `1e711aa` (`results/lr.json`, `lr.jsonl`, `lr-curves.jsonl`;
 Peak lr), on the first tokenizer's data; production carries its optima to other data (Peak lr). The tokenizer
 experiment has not run, nor its vocabularies and intrinsic record (`python -m ablations.tokenizer vocabularies`,
-`intrinsic`); its `runs` wait for training to read the corpus (`nanochat/corpus/gh200.md` steps 3, 4 and 5).
+`intrinsic`); its runs (`python -m nanochat.run experiment=tokenizer`) wait for training to read the corpus
+(`nanochat/corpus/gh200.md` steps 3, 4 and 5).
 
 ### Method
 
 - **Arms.** An experiment is production and one arm per alternative at each of its settings, each on the same seeds; an
-  arm differs from production only in the fields of `harness.Run`. Every run goes through production's code:
+  arm differs from production only in the fields of `nanochat.run.RunConfig` (its experiment's yaml sweeps them).
+  Every run goes through production's code:
   `train/loop.py train` (the file-level then the repository stage, the production data order by seed, τ-law weight
   decay) and `eval/suite.py evaluate`'s likelihood metrics and parse measure (the same held-out rows for every run); its
   model is production's GPT, and its tokenizer and packs production's unless `tokenizer` names an arm of
   `ablations/tokenizer.py`, whose sa-bpe arm is the corpus tokenizer's pattern and score on that experiment's
-  documents (`harness.main`'s `production` fields). Its plan (batch, steps, peak lr) is the production model's at the
-  setting (`harness.production_plan`; `harness.plan_of` at the run's lr), so arms match in hyperparameters and, unless
+  documents (the experiment's baseline fields). Its plan (batch, steps, peak lr) is the production model's at the
+  setting (`nanochat.run.base_plan`; `plan_of` at the run's `lr_scale`), so arms match in hyperparameters and, unless
   an arm sets its own `ratio` (the tokenizer experiment's equal bytes), in tokens, and every
   run completes its own schedule (warmup, then linear decay to zero over its length): a longer run cut short would be
   compared before its decay, where loss curves cross and rankings flip (arXiv 2509.02046; arXiv 2405.18392). An lr arm's
@@ -420,12 +425,14 @@ experiment has not run, nor its vocabularies and intrinsic record (`python -m ab
   exponent width-independent, our assumption (arXiv 2409.19913 §4 finds it size-independent only from 760M parameters,
   larger at 50M and 125M), which only a d24 run at 525.9 could check. The tokenizer experiment's settings and
   documents: The tokenizer experiment, below.
-- **Order.** `lr.py` first; its multiplier sets production's peak lr (`scripts/production.py`, hashed into production's
-  tag). The tokenizer experiment's arms train at the law's lr, which `lr.py` puts 2.0 to 3.5 times below each measured
-  optimum, every arm alike. A run's tag hashes its peak lr, so runs at a superseded lr are never reused.
-- **Measures** (`harness.evaluation`, bits per byte unless stated). *code*: 8K validation of the code group, its
-  corpora weighted by the run's packed train rows (about their train bytes, whatever the tokenizer), the decision
-  measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
+- **Order.** `lr.py` first; its multiplier sets production's peak lr (`conf/experiment/base.yaml`'s `lr_scale`, the
+  `lr_multiplier` resolver over `results/lr.jsonl`). The tokenizer experiment's arms run at the law's lr, which `lr.py`
+  puts 2.0 to 3.5 times below each measured optimum, every arm alike. A run's recorded plan holds its peak lr, and a
+  run recorded under a different plan stops its experiment ("recipe changed"), so runs at a superseded lr are never
+  reused.
+- **Measures** (`ablations/records.py measures`, bits per byte unless stated). *code*: 8K validation of the code
+  group, its corpora weighted by the run's packed train rows (about their train bytes, whatever the tokenizer), the
+  decision measure. *solutions*: the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled (the benchmarks' pass@1 is near zero at this size). *repo_32k*: 32K
   repository rows of the code group; *repo_beyond_8k*: the same rows' positions past 8,192, the context only the
   repository stage trains. *text*, *math*. *unparsed*, *indentation*, *syntax*: the shares of HumanEval+ and MBPP+
@@ -457,11 +464,11 @@ experiment has not run, nor its vocabularies and intrinsic record (`python -m ab
   Complete^(d)P's √m_B). Amended 2026-10-22 from r^(ln m_D,prod / ln m_D,d8) · √(m_B,prod / m_B,d8), which raised
   d8's batch growth with its trend (+9.5% at 105.2); the measurements and the rest of the analysis are unchanged, and
   `results/lr.json`'s `analysis` is the amended one at `7a210ed`. m_B and m_D come from the
-  runs' recorded plans and production's (`harness.production_plan` at `max_ratio` of d24). Weight decay follows each
+  runs' recorded plans and production's (`base_plan` at `max_ratio` of d24). Weight decay follows each
   run's lr by the τ law (Power Lines' fit for single-epoch pretraining), not Complete^(d)P's λ ∝ √(m_B / m_D).
-  *Comparisons*: the harness computes none; `results/<experiment>.json` holds, per setting, each alternative's fields
-  and its evaluated runs, and each experiment adds its own pre-registered analysis (`lr.py`'s `analysis`, the
-  tokenizer experiment's decision in `runs`). *Tokenizer*: The tokenizer experiment, below.
+  *Comparisons*: the mechanism computes none; each experiment's pre-registered analysis (its yaml's `analysis`:
+  `ablations.tokenizer.decide`, `ablations/recipe.py`'s) writes `results/<experiment>.json` = {"analysis": ...};
+  `lr.json` (4ade225's format) holds `lr.py`'s. *Tokenizer*: The tokenizer experiment, below.
 - **Equal tokens.** The production run's length is set by its data (no document read twice), not by time.
 
 **Power.** The paired comparison's six runs (Against the standard regime) give a within-configuration σ of 0.0034
@@ -496,25 +503,29 @@ kernels (QuACK GEMMs, FlashAttention-4) at ≥ 93% GPU occupancy; d8's 7% idle i
 at d24 (98% busy), so no kernel or graph work is spent on the experiments. Their cost lever is the number and size of
 runs.
 
-**Records.** A run's tag is production's `config.run_tag` over its fields (its peak lr hashed with them), and a rerun
-experiment resumes: a run with an evaluation or a divergence is not trained again, a
-stopped one trains again from its start (its one checkpoint is its final model); each run is launched from its fields
-(`python -m ablations.harness '<fields>'`). Per run, in production's schemas: `artifacts/metrics/<tag>.jsonl`
-(`nanochat/train/metrics.py`: every step and attempt, the learning curve and gradient norms included; the run record
-holds the model config, the run's fields as `variant`, parameters, FLOPs per token, the clip threshold, the plan, lr
-and weight decay; the end record the peak memory; a failure record the step a run diverged at),
-`artifacts/base_eval/<tag>-step<steps>.json` (`eval/suite.py evaluate`, likelihood metrics and the parse measure) and
-`artifacts/logs/<tag>.log` (the run's output, a failure's traceback included). Each experiment gathers every tracked
-metric of its runs into `results/`, so tables and figures need no rerun and no `artifacts/`: `<experiment>.jsonl`, a
-record per run (arm, tag, setting, fields; `eval/suite.py record`: its metrics records but the per-step ones: run,
-stage, end, failure; its evaluation verbatim: per corpus and context bucket bits, bytes and rows at 8K and 32K, per
-benchmark solution bits and bytes; the compared measures; efficiency; the step it diverged at, measures and
-efficiency null then); `<experiment>-curves.jsonl`, per run its per-step train records as columns (step, tokens,
-loss, lr, gradient norm before clipping, tokens per second, attempt, time; 2,987 steps of d8 at 20 take 360 KB, so all
-runs about 48 MB); and `<experiment>.json`, per setting depth, tokens per parameter, seeds, production's evaluated
-runs, and per alternative its fields and evaluated runs; `lr.json` adds the Analysis (`analysis`: per setting runs,
-curvature, vertex and grid extension; m_B, m_D, the law's fall, both predictions, the measured d8 ratio, the horizon
-exponent and its net of d8's batch growth, production's multiplier and lr, null while a grid needs extending).
+**Records.** A run's key is its `RunConfig` fields that differ from the defaults (`conf/run.yaml`, the base model's
+recipe), sorted, `k=v` joined by `,` (e.g. `depth=16,seed=1,tokenizer=sa-bpe`; `defaults` if none), so a run two
+experiments share is one run. A rerun experiment resumes: a run with a final evaluation or a divergence is not trained
+again, a stopped one trains again from its start; a run whose recorded plan or tokenizer data key differs from the
+current stops the experiment until its directory is deleted. Training and each checkpoint's evaluation run in fresh
+spawned processes; a diverged training ends its job, any other failure stops the sweep. Per run, in
+`artifacts/runs/<key>/`: `.hydra/` (the composed config), `metrics.jsonl` (`nanochat/train/metrics.py`: every step and
+attempt, the learning curve and gradient norms included; the run record holds the model config, the `RunConfig` as
+`config`, the `data_key`, parameters, FLOPs per token, the clip threshold, the plan, lr and weight decay per AdamW and
+Muon group; the end record the peak memory; a failure record the step a run diverged at), `step<N>.pt`,
+`eval-step<N>.json` (`eval/suite.py evaluate`, likelihood metrics and the parse measure) and `run.log` (the run's
+output, a failure's traceback included). When its sweep ends, each experiment gathers every tracked metric of its runs
+into `results/` (`ablations/records.py`'s `Records` callback), so tables and figures need no rerun and no
+`artifacts/`: `<experiment>.jsonl`, a record per run (`eval/suite.py record`: its metrics records but the per-step
+ones: run, stage, end, failure; its evaluation verbatim: per corpus and context bucket bits, bytes and rows at 8K and
+32K, per benchmark solution bits and bytes; its `config`; the compared measures; efficiency; the step it diverged at,
+measures and efficiency null then); `<experiment>-curves.jsonl`, per run its per-step train records as columns (step,
+tokens, loss, lr, gradient norm before clipping, tokens per second, attempt, time; 2,987 steps of d8 at 20 take
+360 KB); and, with an analysis, `<experiment>.json`. `lr.json`, `lr.jsonl` and `lr-curves.jsonl` were written by
+4ade225's ablation driver in its earlier format (hashed tags, the run's fields as `variant`; `lr.json` per setting
+depth, tokens per parameter, seeds, production's evaluated runs, per alternative its fields and evaluated runs, and
+the Analysis: per setting runs, curvature, vertex and grid extension; m_B, m_D, the law's fall, both predictions, the
+measured d8 ratio, the horizon exponent and its net of d8's batch growth, production's multiplier and lr).
 
 ### The tokenizer experiment
 
@@ -702,7 +713,8 @@ per kind (1,973). English and math chunk alike under production's pattern and th
 - **Where it runs.** On the GH200 that then trains production (Hardware: GH200 or H100 SXM5), in the order of
   `nanochat/corpus/gh200.md`: step 3, the vocabularies and `intrinsic` (the arms' compiled val splits and intrinsic
   record) on its 64 vCPUs; step 4, the cutover, training reading the corpus, which builds the document set and every
-  arm's packs; step 5, the 8 runs and their evaluations on its GPU and the decision, in one `runs` call, so every arm
+  arm's packs; step 5, the 8 runs and their evaluations on its GPU and the decision, in one
+  `python -m nanochat.run experiment=tokenizer` sweep, so every arm
   meets the same kernels and the decided tokenizer's data is built where production trains. TokEval's comparisons hold
   everything but the tokenizer fixed and condition on no hardware; `CODE_SIGMA` comes from H100 runs at d8, carried to
   d16 [inference].
@@ -733,11 +745,12 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   copies), repository samples and leaves (300 repositories and 300 snippets each of stack_edu_python and
   stack_edu_cpp), the packs of stack_edu_python's first train file (FIM) and of climbmix's first val file; a grammar or
   score it does not know raises ValueError. `tokeval.code` (codeforces_cots, kaggle_notebooks; production's tokenizer
-  and the first's), `documents`, the token lengths bits per byte reads and the data key are equal; `harness.main`
-  launches the same runs with the same fields and tags in the same order (`lr.py`'s 10, a tokenizer setting's 4) and
-  writes the same records. Against production's files: `compile_split` (codeforces_cots and ultradata_math_l2, train
-  and val) and `pack_split` (their val splits at 8K) byte for byte, `prepare.normalize_file` (codeforces_cots file 0,
-  ultradata_stack_v3_l2_python file 0: 508,348 rows) table for table; the loader's rows start with BOS.
+  and the first's), `documents`, the token lengths bits per byte reads and the data key are equal; 4ade225's
+  ablation driver launched the same runs with the same fields and tags in the same order (`lr.py`'s 10, a tokenizer
+  setting's 4) and wrote the same records. Against production's files: `compile_split` (codeforces_cots and
+  ultradata_math_l2, train and val) and `pack_split` (their val splits at 8K) byte for byte, `prepare.normalize_file`
+  (codeforces_cots file 0, ultradata_stack_v3_l2_python file 0: 508,348 rows) table for table; the loader's rows start
+  with BOS.
 - *The tokenizer experiment against its sources* (2026-10-21): every number and quotation of `ablations/tokenizer.py`,
   `tokeval.py` and The tokenizer experiment read again in its source (the papers' full text, the companion post,
   tiktoken, karpathy/nanochat at 92d63d4, pchizhov/sa-bpe, TokEval at 7d03a61); `FUSED_PATTERN` equals nanochat's
@@ -754,8 +767,8 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   stack_edu_python, stack_edu_cpp, kaggle_notebooks and codeforces_cots (472 snippets): every leaf, every alignment
   rate, the identifier statistics and the indentation correlation equal. The hybrid's pattern through the crate's
   trainer (3,000 merges) and tiktoken on 2,025 documents of the 11 sources: every document decodes to itself and every
-  chunk end of the `regex` module is a token end. `runs`' contrasts and decision on synthetic results (2026-10-22, two
-  seeds, 542 problems): with the control detected, the hybrid's pattern and the frequency score when both qualify;
+  chunk end of the `regex` module is a token end. `decide`'s contrasts and decision on synthetic results (2026-10-22,
+  two seeds, 542 problems): with the control detected, the hybrid's pattern and the frequency score when both qualify;
   undetected, production's pattern and score although both qualify; a diverged hybrid seed leaves its contrast seed 0
   alone (bound 0.0094); the sign test's counts at one seed equal McNemar's, and a problem parsing at one seed under
   each arm counts 0. On the first 200 val documents of
@@ -783,15 +796,15 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   HumanEval+ and MBPP+ prompt under production's vocabulary and cl100k (single-step healing: 85 of 164 HumanEval+
   under cl100k), and its first-step masks equal the single step's on production's 542 prompts; `parse_outcome` scores
   a parser overflow (`compile` of 12,288 dashes: MemoryError) as a SyntaxError. `lr.analysis` on `results/lr.jsonl`
-  is unchanged, and `harness.compare` equals the textbook pooled t-test.
-- *lr.py's plans* (`harness.plan_of`, τ-law weight decay at each arm's lr): d8 at 5, 746 steps of 98,304 tokens
+  is unchanged, and 4ade225's `compare` equals the textbook pooled t-test.
+- *lr.py's plans* (4ade225's `plan_of`, τ-law weight decay at each arm's lr): d8 at 5, 746 steps of 98,304 tokens
   (`repo_start` 705), law lr 3.2509e-3, weight decay 0.8878 / 0.4439 / 0.2219 at × 1 / 2 / 4; d8 at 200, 14,937 steps
   of 196,608 (14,122), 2.0500e-3, 0.4916 / 0.2458 / 0.1229 / 0.0614 at × 1 / 2 / 4 / 8; d24 at 5, 3,307 steps of
   294,912 (3,127), 1.6641e-3, 0.3914 / 0.1957 / 0.0979. From the plans: m_B 4 (production) and 2 (d8), m_D 98.18
   (production at `1e711aa`; 105.20 at `7a210ed`) and 40.05 (d8), the law's fall 0.6306; predictions for the d8 ratio
   × 0.3544 (SDE rule) and × 4.9231 (Step-Law).
-- *Analysis* (planted code, `lr.py` through `harness.main` over planted records, optima × 2.4 and × 3.0 at d8 over 5
-  and 200, × 1.8 at d24 over 5; before the 2026-10-20 amendment): a quadratic in u is recovered exactly (vertices
+- *Analysis* (planted code, `lr.py` through 4ade225's driver over planted records, optima × 2.4 and × 3.0 at d8 over
+  5 and 200, × 1.8 at d24 over 5; before the 2026-10-20 amendment): a quadratic in u is recovered exactly (vertices
   × 2.4000, 3.0000, 1.8000; r × 1.2500, horizon exponent 0.060472, production's multiplier × 3.359307 = 1.8 ·
   1.25^(ln 98.18 / ln 40.05) · √2, lr 3.1509e-3; the estimator as amended 2026-10-22 gives 1.8 · (1.25 /
   √2)^(ln 98.18 / ln 40.05) · 2 = × 3.088), also with d8 over 200's × 8 diverged (its 3 other runs); an optimum
@@ -800,18 +813,21 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   × 2.795 against 3.359). The amended fit (synthetic records): an optimum × 2.4 on a symmetric curve read × 2.4000
   from × 1–8; × 3.0 on a curve four times steeper below read × 3.72 (one quadratic: × 3.95); a lowest run at either
   end of the grid extends it; a diverged run above the lowest gives the lowest run's multiplier.
-- *Production's arm, run 0 at 20 tokens per parameter* (whole run through `harness.evaluation` and its efficiency,
+- *Production's arm, run 0 at 20 tokens per parameter* (whole run through 4ade225's evaluation and its efficiency,
   2026-10-22, 248 s, unclipped): code 0.6354, solutions 0.6964, repo_32k 0.6201, repo_beyond_8k 0.4048, text 1.3619,
   math 1.3498; 2.28M tokens per second; peak memory 14.0 GB. The same run clipped at 1.0, launched from its fields
   (`d8-r20-s0-d0-73e955e0631c`, 237 s): code 0.6320, solutions 0.6958, repo_32k 0.6158, repo_beyond_8k 0.3938, text
   1.3614, math 1.3473, 2.27M tokens per second; 75.4% of its steps clipped (one seed each, under σ's resolution).
-- *Divergence* (planted failure records, `harness.main`): diverged runs are skipped on rerun, written with their step
-  and null measures, and dropped from the comparisons (an arm left without runs is reported with 0 evaluated runs).
-- *Export* (`d8-r20-s0-d0-73e955e0631c` through `harness.main`): its record holds the run, stage and end records, the
-  evaluation verbatim (11 corpora at 8K, 6 at 32K, 3 benchmarks) and the measures; its curve 8 columns of 2,987 steps.
-- *Harness end to end* (a scratch experiment through `harness.main`: d8 at 20, seed 3, production and × 2, before and
-  after the harness's consolidation): both runs trained, evaluated and exported; the current harness over the earlier
-  run's artifacts writes the same `.json` bytes, the same curves and the same records less the dropped `probes` field.
+- *Divergence* (planted failure records, 4ade225's driver): diverged runs are skipped on rerun, written with their
+  step and null measures, and dropped from the comparisons (an arm left without runs is reported with 0 evaluated
+  runs).
+- *Export* (`d8-r20-s0-d0-73e955e0631c` through 4ade225's driver): its record holds the run, stage and end records,
+  the evaluation verbatim (11 corpora at 8K, 6 at 32K, 3 benchmarks) and the measures; its curve 8 columns of 2,987
+  steps.
+- *Ablation driver end to end* (a scratch experiment through 4ade225's driver: d8 at 20, seed 3, production and × 2,
+  before and after the driver's consolidation): both runs trained, evaluated and exported; the consolidated driver over
+  the earlier run's artifacts writes the same `.json` bytes, the same curves and the same records less the dropped
+  `probes` field.
   Retrained, the runs agree on their first 5 steps bitwise and then drift by the backward's atomics
   (Reproducibility): last-5% train loss 1.69657 vs 1.69695 (× 1), 1.65248 vs 1.65172 (× 2); code 0.63008 vs 0.63015,
   0.61311 vs 0.61251.
@@ -974,10 +990,11 @@ Runs train one at a time. Concurrent d8 training processes, 2026-10-20 (file-lev
   bound a failure's loss to a tenth.
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
-- **Run identity.** A run's tag (`config.run_tag`) is its depth, ratio and seed plus a hash of those, its variant
-  (an ablation run's fields, its ratio and lr scale as floats, its tokenizer's data key and its peak lr; production's
-  lr scale), so runs of different settings never share artifacts. Each run's metrics record its full configuration
-  (model, plan, seed, lr, weight decay, clip threshold).
+- **Run identity.** A run's key (`nanochat.run.key`) is its `RunConfig` fields that differ from the defaults
+  (`conf/run.yaml`), sorted, `k=v` joined by `,` (`defaults` if none), so runs of different settings never share
+  artifacts and two experiments' runs of the same fields are one run. Each run's metrics record its full configuration
+  (`config`, the tokenizer's `data_key`, model, plan, seed, lr, weight decay, clip threshold); a run recorded under a
+  different plan or data key stops its experiment until `artifacts/runs/<key>/` is deleted.
 - **Data order.** Each corpus's rows are permuted once by the run's seed (NumPy `RandomState`; `train/stages.py`
   `stage_batches`), which also seeds its initialization.
 
@@ -992,19 +1009,20 @@ HF_TOKEN=<read token> runs/setup.sh   # CDI spec, docker group, image, artifacts
 runs/container.sh python -m nanochat.data.compile && runs/container.sh python -m nanochat.data.pack
 (cd artifacts && sha256sum --quiet -c data/curated.sha256 data/compiled.sha256)
 # the tokenizer experiment (The tokenizer experiment), then, if it changes the tokenizer, compile and pack again
-tmux new -d -s run 'runs/container.sh python -m scripts.production 2>&1 | tee -a artifacts/logs/production.log'
+tmux new -d -s run 'runs/container.sh python -m nanochat.run experiment=base'
 ```
 
 Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
-`runs/setup.sh`) holds `data/`, `tokenizer/`, `checkpoints/<tag>-step<step>.pt` (each a run's full state),
-`metrics/<tag>.jsonl`, `base_eval/<tag>-step<step>.json`, `logs/` (`production.log`, the launch's output; `<tag>.log`
-per ablation run) and `cache/`; `results/` (tracked) holds the data the paper's tables and figures are drawn from.
+`runs/setup.sh`) holds `data/`, `tokenizer/`, `runs/<key>/` (per run: `.hydra/`, its composed config;
+`step<step>.pt`, each a run's full state; `metrics.jsonl`; `eval-step<step>.json`; `run.log`, its output) and
+`cache/`; `results/` (tracked) holds the data the paper's tables and figures are drawn from.
 
-`scripts/production.py` derives the ratio and the tag (`d24-r525.898-s0-<hash>`), trains both stages with a checkpoint
+`python -m nanochat.run experiment=base` (`conf/experiment/base.yaml`: d24, ratio null, the data's max_ratio; seed 0;
+lr_scale `lr.py`'s `analysis` multiplier; generate benchmarks) trains both stages with a checkpoint
 (the run's full state: weights, optimizer state and data position, ~5.6 GB) at each tenth of the steps and at the
 repository stage's start, then evaluates every checkpoint (`evaluate`: the curve over training, and the final model)
-and exports the run's tracked metrics (`eval/suite.py export`): `results/<tag>.jsonl` (its records and every
-evaluation) and `results/<tag>-curves.jsonl` (its per-step records). Training and each evaluation run in a fresh
+and writes the run's tracked metrics (`ablations/records.py`): `results/base.jsonl` (its records and every
+evaluation) and `results/base-curves.jsonl` (its per-step records). Training and each evaluation run in a fresh
 process (torch.compile's recompile limit and the CUDA caching allocator's reservations are per process). Rerunning
 continues a stopped run from its newest checkpoint and evaluates every checkpoint again. The evaluation (Evaluation,
 below) reports the likelihood metrics and the benchmarks' pass@1, each scored by its official tools.
@@ -1116,8 +1134,8 @@ documents), the compiled evaluation losses and the native decoder:
 |---|---|
 | Resume (the H100, `60138de`, packed rows): d8 at 20 tokens per parameter (`d8-r20-s0-d0-d69671850bea`), killed with `docker kill` at step 991 and relaunched | continued from its step-900 checkpoint, switched to the 32K stage at step 2,824 (`repo_start`), finished at step 2,987; the step-2,824 checkpoint kept |
 | Checkpoints and lineage (2026-10-20, NVIDIA GB10; the image of this `uv.lock`; `train` on synthetic token rows, d8, 74 steps, checkpoints at 20, 40, 70 and 74) | a run killed after its step-40 checkpoint resumed there (attempt 1), switched to the 32K stage at step 70 and ended at 74; the final checkpoint reloaded reproduces the live model's loss bitwise; against the code of `results/lr.json` (`8caecb9`) the lr is bitwise equal at every step and the loss bitwise through step 5, then within 5.1e-6 relative, as an uninterrupted and a resumed run of the same code differ (4.8e-6: the backward's atomics) |
-| End to end (2026-10-20, through the `base_train` and `base_eval` command lines `scripts/production.py` has since replaced with direct calls in spawned processes): training with lr scale 2.5 (d8, 74 steps), the evaluation (loss, reference solutions, EvalPlus (arXiv 2305.01210), MultiPL-E, infilling (arXiv 2207.14255); greedy and filtered; d8 in 46 minutes), the harness's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
-| Run identity (`60138de`) | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
+| End to end (2026-10-20, through the `base_train` and `base_eval` command lines since replaced by direct calls in spawned processes): training with lr scale 2.5 (d8, 74 steps), the evaluation (loss, reference solutions, EvalPlus (arXiv 2305.01210), MultiPL-E, infilling (arXiv 2207.14255); greedy and filtered; d8 in 46 minutes), 4ade225's ablation driver's train-evaluate-export | all complete; the recorded lr is the scale times the law's; the loss evaluation matches the pre-consolidation code to 7 decimals in bits per byte |
+| Run identity (`60138de`, its hashed tags) | the production tag stable across calls; tags of the same fields differ only by dataset revision and lr scale |
 
 ## Evaluation
 
@@ -1349,7 +1367,7 @@ lists (Table 5: 110K each for the educational and package instructions).
 
 ## Layout
 
-- `nanochat/config.py`: vocabulary, head width, mixture, micro-batch, stages, RoPE base, run tag.
+- `nanochat/config.py`: vocabulary, head width, mixture, micro-batch, stages, RoPE base.
 - `nanochat/model/gpt.py`: the model, scaling parameters and FLOPs per token.
 - `nanochat/ops/`, `nanochat/csrc/`: the ops above and the decoder.
 - `nanochat/train/`: `loop.py` (the training loop: setup, resume, the steps, checkpoints and records), `optim.py`
@@ -1365,13 +1383,15 @@ lists (Table 5: 110K each for the educational and package instructions).
   `compile.py`, `pack.py`, `publish.py`; `loader.py` reads the packs into micro-batches; `crate/`, its Rust crate
   (`native.data_crate`): the SA-BPE (arXiv 2604.14053) trainer (and frequency BPE, a tokenizer ablation arm),
   deduplication, repository samples and the packer.
-- `scripts/`: `production.py` (the production run end to end, a checkpoint's evaluation included).
+- `nanochat/run.py`, `conf/`: a run's configuration (Hydra: `RunConfig`, its key, plan and job; `conf/run.yaml`, the
+  base model's recipe; `conf/experiment/<name>.yaml`, each experiment's sweep).
 - `runs/`: `setup.sh`, `container.sh`, `release.sh`.
 - `results/`: the data the paper's tables and figures are drawn from.
-- `ablations/`: the ablation experiments and their mechanism (`harness.py`): `lr.py`; `tokenizer.py`, the tokenizer
+- `ablations/`: the ablation experiments: `records.py` (an experiment's records in `results/`), `recipe.py` (the
+  softcap, AdamW lr and Muon τ analyses), `lr.py`; `tokenizer.py`, the tokenizer
   experiment's sample and arms (trained on the corpus into `artifacts/corpus/tokenizer-ablation/`), val data, intrinsic
-  record, runs, decision and adoption into `artifacts/corpus/tokenizer`
-  (`python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt`).
+  record, decision and adoption into `artifacts/corpus/tokenizer`
+  (`python -m ablations.tokenizer vocabularies|intrinsic|data|adopt`).
 - `docker/Dockerfile`: the image.
 
 ## References

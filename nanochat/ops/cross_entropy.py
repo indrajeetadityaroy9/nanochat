@@ -11,6 +11,12 @@ is not faster at any chunk size.
 nanochat::lm_losses (evaluation): QuACK's lse_target_epi GEMM epilogue (quack/epilogue/library.py) reduces each row's
 logsumexp and gathers the target logit from the fp32 accumulators without storing z: faster and more accurate than
 bf16 logits and cross entropy.
+
+With an output-logit cap c (model/gpt.py GPTConfig.softcap; 92d63d4 gpt.py:511-515, Gemma 2's final-logit
+softcapping, arXiv 2408.00118 §2) z becomes c tanh(z / c), computed in fp32 from z in row chunks of CHUNK: lm_loss runs
+QuACK's cross entropy on the capped logits (bf16) and multiplies its logit gradient by the cap's derivative
+1 - tanh(z / c)^2 (bf16) before the two gradient GEMMs; lm_losses takes logsumexp minus the target logit of the
+capped fp32 logits of each chunk's GEMM, as lse_target_epi has no tanh epilogue. Without a cap both run as above.
 """
 
 import torch
@@ -22,36 +28,49 @@ from torch.autograd.function import FunctionCtx
 
 from nanochat.corpus.loader import PretrainingBatches
 
+# Rows of the capped paths' fp32 temporaries: 8,192 x 2^15 x 4 bytes = 1 GiB
+CHUNK = 8192
+
 
 # Opaque to torch.compile: functionalizing the in-place logit gradient corrupted x's gradient.
 @torch.library.custom_op("nanochat::lm_loss", mutates_args=(), device_types="cuda")
-def lm_loss(x: Tensor, weight: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+def lm_loss(x: Tensor, weight: Tensor, target: Tensor, softcap: float | None) -> tuple[Tensor, Tensor, Tensor]:
     """x (M, C) bf16, fp32 weight (V, C), target (M,) int64 -> (mean loss fp32, dloss/dx in x's dtype, dloss/dW
     fp32)."""
     w = weight.to(x.dtype)
     logits = x @ w.t()
     scale = 1 / (target != PretrainingBatches.PAD).sum().float()
     loss = torch.empty(target.shape, device=x.device, dtype=torch.float32)
-    cross_entropy_fwd_out(logits, target, target_logit=None, loss=loss, lse=None, dx=logits, weight=None,
+    if softcap is None:
+        grad = logits
+    else:  # grad: the capped logits; logits: the cap's derivative
+        grad = torch.empty_like(logits)
+        for z, capped in zip(logits.split(CHUNK), grad.split(CHUNK), strict=True):
+            t = torch.tanh(z.float() / softcap)
+            capped.copy_(softcap * t)
+            z.copy_(1 - t.square())
+    cross_entropy_fwd_out(grad, target, target_logit=None, loss=loss, lse=None, dx=grad, weight=None,
                           ignore_index=PretrainingBatches.PAD)
-    return (loss.sum() * scale, gemm(logits, w, alpha=scale, out_dtype=x.dtype),
-            torch.mm(logits.t(), x, out_dtype=weight.dtype) * scale)
+    if softcap is not None:
+        grad.mul_(logits)
+    return (loss.sum() * scale, gemm(grad, w, alpha=scale, out_dtype=x.dtype),
+            torch.mm(grad.t(), x, out_dtype=weight.dtype) * scale)
 
 
 @lm_loss.register_fake
-def lm_loss_fake(x: Tensor, weight: Tensor, target: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+def lm_loss_fake(x: Tensor, weight: Tensor, target: Tensor, softcap: float | None) -> tuple[Tensor, Tensor, Tensor]:
     return x.new_empty((), dtype=torch.float32), x.new_empty(x.shape), weight.new_empty(weight.shape)
 
 
-def lm_loss_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor],
+def lm_loss_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor, float | None],
                  output: tuple[Tensor, Tensor, Tensor]) -> None:
     ctx.save_for_backward(output[1], output[2])
 
 
-def lm_loss_grad(ctx: FunctionCtx, dloss: Tensor, ddx: Tensor, ddw: Tensor) -> tuple[Tensor, Tensor, None]:
+def lm_loss_grad(ctx: FunctionCtx, dloss: Tensor, ddx: Tensor, ddw: Tensor) -> tuple[Tensor, Tensor, None, None]:
     """Saved gradients times dloss; dx's product in fp32, rounded once to bf16."""
     dx, dw = ctx.saved_tensors
-    return (dx.float() * dloss).to(dx.dtype), dw * dloss, None
+    return (dx.float() * dloss).to(dx.dtype), dw * dloss, None, None
 
 
 lm_loss.register_autograd(lm_loss_grad, setup_context=lm_loss_save)
@@ -65,12 +84,20 @@ def step_shares(targets: list[Tensor]) -> Tensor:
 
 
 @torch.library.custom_op("nanochat::lm_losses", mutates_args=(), device_types="cuda")
-def lm_losses(x: Tensor, weight: Tensor, target: Tensor) -> Tensor:
+def lm_losses(x: Tensor, weight: Tensor, target: Tensor, softcap: float | None) -> Tensor:
     """Per-position loss (M,) fp32, 0 at PAD targets; no gradient. QuACK's default tile config (tuned=False)."""
-    res = lse_target_epi(x, weight.to(x.dtype).t(), store_d=False, target=target, tuned=False)
-    return torch.where(target != PretrainingBatches.PAD, res["lse"] - res["target_logit"], 0.0)
+    valid = target != PretrainingBatches.PAD
+    if softcap is None:
+        res = lse_target_epi(x, weight.to(x.dtype).t(), store_d=False, target=target, tuned=False)
+        return torch.where(valid, res["lse"] - res["target_logit"], 0.0)
+    w, rows = weight.to(x.dtype).t(), torch.where(valid, target, 0)
+    losses = []
+    for xc, tc in zip(x.split(CHUNK), rows.split(CHUNK), strict=True):
+        z = softcap * torch.tanh(torch.mm(xc, w, out_dtype=torch.float32) / softcap)
+        losses.append(torch.logsumexp(z, dim=1) - z.gather(1, tc[:, None]).squeeze(1))
+    return torch.where(valid, torch.cat(losses), 0.0)
 
 
 @lm_losses.register_fake
-def lm_losses_fake(x: Tensor, weight: Tensor, target: Tensor) -> Tensor:
+def lm_losses_fake(x: Tensor, weight: Tensor, target: Tensor, softcap: float | None) -> Tensor:
     return x.new_empty(target.shape, dtype=torch.float32)

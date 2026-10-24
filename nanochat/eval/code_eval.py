@@ -58,7 +58,7 @@ import sys
 import tempfile
 import warnings
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -237,24 +237,25 @@ def filtered_middles(decoder: NativeDecoder, tokenizer: Tokenizer, problems: lis
                     language="python", count=len(problems))
 
 
-@functools.cache
 def sanitizers() -> ProcessPoolExecutor:
-    """evalplus_check's sanitize workers, a process per CPU (sanitize parses every line span of a program: run
+    """evalplus_solution's sanitize workers, a process per CPU (sanitize parses every line span of a program: run
     serially, the evaluation's bottleneck), from a forkserver (never a fork of this torch/CUDA process), SyntaxWarnings
-    of generated code ignored; started once per process."""
+    of generated code ignored. The caller shuts the pool down (suite.evaluate's `with`): in a spawned process
+    (nanochat/run.py's phases), multiprocessing's exit handler joins the pool's workers before concurrent.futures'
+    exit handler would stop them, so a pool left open never lets the process exit."""
     return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("forkserver"),
                                initializer=warnings.filterwarnings, initargs=("ignore", "", SyntaxWarning))
 
 
-def evalplus_solution(task: Task, text: str) -> str:
+def evalplus_solution(pool: ProcessPoolExecutor, task: Task, text: str) -> str:
     """The solution EvalPlus scores for a completion text: its tabs replaced by four spaces, sanitize(prompt +
-    completion, entry point), computed by a sanitizers process (callers parallelize by threads)."""
-    return sanitizers().submit(sanitize, task.prompt + text.replace("\t", "    "), task.entry).result()
+    completion, entry point), computed by a sanitizers process of `pool` (callers parallelize by threads)."""
+    return pool.submit(sanitize, task.prompt + text.replace("\t", "    "), task.entry).result()
 
 
-def evalplus_check(task: Task, text: str) -> tuple[str, str, list[str]]:
+def evalplus_check(pool: ProcessPoolExecutor, task: Task, text: str) -> tuple[str, str, list[str]]:
     """(prompt, solution, verify.solution_diagnostics) of a completion text, the solution evalplus_solution's."""
-    solution = evalplus_solution(task, text)
+    solution = evalplus_solution(pool, task, text)
     return task.prompt, solution, solution_diagnostics(task.prompt + text.replace("\t", "    "), solution, task.entry)
 
 
@@ -265,7 +266,7 @@ def multipl_e_check(task: Task, text: str) -> tuple[str, str, list[str]]:
     return task.prompt, task.prompt + text + "\n}", []
 
 
-def evalplus(name: str, items: list[Task], samples: list[list[str]]) -> dict:
+def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: list[list[str]]) -> dict:
     """EvalPlus's evaluation of each task's completions (evalplus_solution's solutions, as many per task as it has):
     {"base pass@1", "plus pass@1" (its estimate_pass_at_k over each task's samples, plus: base and plus tests passed),
     "ids", "base_status", "plus_status" (per task, per sample)}."""
@@ -273,8 +274,9 @@ def evalplus(name: str, items: list[Task], samples: list[list[str]]) -> dict:
     pairs = [(t, s) for t, task_samples in zip(items, samples, strict=True) for s in task_samples]
     with tempfile.TemporaryDirectory() as tmp:
         path, scored = Path(tmp, "samples.jsonl"), Path(tmp, "results.json")
-        with path.open("w", encoding="utf-8") as f, ThreadPoolExecutor(os.cpu_count()) as pool:
-            for (t, _), solution in zip(pairs, pool.map(lambda pair: evalplus_solution(*pair), pairs), strict=True):
+        with path.open("w", encoding="utf-8") as f, ThreadPoolExecutor(os.cpu_count()) as threads:
+            for (t, _), solution in zip(pairs, threads.map(lambda pair: evalplus_solution(pool, *pair), pairs),
+                                        strict=True):
                 f.write(json.dumps({"task_id": t.id, "solution": solution}) + "\n")
         subprocess.run([sys.executable, "-I", "-m", "evalplus.evaluate", "--dataset", dataset, "--samples", path,
                         "--output_file", scored], cwd=tmp, check=True)
@@ -325,11 +327,12 @@ def infilling(name: str, problems: list[dict], middles: list[str]) -> dict:
             "ids": [s["task_id"] for s in scored], "completions": middles, "result": [s["result"] for s in scored]}
 
 
-def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]]) -> dict[str, dict[str, dict]]:
+def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
+               pool: ProcessPoolExecutor) -> dict[str, dict[str, dict]]:
     """{benchmark: {"greedy": its evaluator's scores of the greedy completions and the completions, "sampled": of
     SAMPLES samples per problem (module docstring), "filtered": of filtered_completions' completions, the completions
-    and their search record}} of the EvalPlus and MultiPL-E benchmarks. Sample k of problem i draws with seed
-    SAMPLES i + k."""
+    and their search record}} of the EvalPlus and MultiPL-E benchmarks, EvalPlus's solutions sanitized by `pool`
+    (sanitizers). Sample k of problem i draws with seed SAMPLES i + k."""
     bos = tokenizer.bos_token_id
     runs = {}
     for name in (*EVALPLUS, *MULTIPL_E_BENCHMARKS):
@@ -337,7 +340,8 @@ def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task
         if name in EVALPLUS:
             prompts = [[bos, *tokenizer.enc.encode_ordinary(t.prompt)] for t in items]
             budgets = [EVALPLUS_MAX_NEW_TOKENS] * len(items)
-            runs[name] = items, prompts, budgets, "skip", evalplus_check, "python", functools.partial(evalplus, name)
+            runs[name] = (items, prompts, budgets, "skip", functools.partial(evalplus_check, pool), "python",
+                          functools.partial(evalplus, pool, name))
         else:
             prompts = [[bos, *tokenizer.enc.encode_ordinary(t.prompt.strip())] for t in items]
             # MultiPL-E: at most 1024 tokens of prompt and completion (multipl_e/completions.py --max-tokens,
@@ -388,13 +392,24 @@ def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
     return "parses"
 
 
-def parse_generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]]) -> dict[str, dict]:
+def parse_scores(pool: ProcessPoolExecutor, name: str, items: list[Task], completions: list[str],
+                 outcomes: list[str]) -> dict:
+    """parse_generation's record of a benchmark's completions and their parse_outcome outcomes."""
+    shares = {kind: outcomes.count(kind) / len(outcomes) for kind in ("parses", "indentation", "syntax")}
+    return (shares | evalplus(pool, name, items, [[c] for c in completions])
+            | {"outcomes": outcomes, "completions": completions})
+
+
+def parse_generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
+                     pool: ProcessPoolExecutor, scorers: ThreadPoolExecutor) -> dict[str, Future[dict]]:
     """{benchmark: {"parses", "indentation", "syntax" (shares of its problems: how prompt + completion compiles,
-    parse_outcome), "outcomes", "completions"} | EvalPlus's base and plus pass@1 of the completions} of HumanEval+ and
-    MBPP+: one greedy completion per problem, unconstrained, of the healed prompt (decoder.heal), TokEval's protocol
-    (BOS, healing, greedy), so the failures a vocabulary's line-break tokens cause (SyntaxError when punctuation fuses
-    with a line break, IndentationError when a line break fuses with the indentation after it, in arXiv 2608.18062's
-    models) show where pass@1 is near zero."""
+    parse_outcome), "outcomes", "completions"} | EvalPlus's base and plus pass@1 of the completions, sanitized by
+    `pool` (sanitizers)} of HumanEval+ and MBPP+: one greedy completion per problem, unconstrained, of the healed prompt
+    (decoder.heal), TokEval's protocol (BOS, healing, greedy), so the failures a vocabulary's line-break tokens cause
+    (SyntaxError when punctuation fuses with a line break, IndentationError when a line break fuses with the
+    indentation after it, in arXiv 2608.18062's models) show where pass@1 is near zero. Each benchmark's EvalPlus
+    scoring, CPU work, runs on `scorers` once its completions exist, so the GPU decodes the next benchmark (and the
+    caller's GPU work runs) meanwhile: the futures of the records."""
     bos = tokenizer.bos_token_id
     runs = {name: [[bos, *tokenizer.enc.encode_ordinary(t.prompt)] for t in benchmarks[name]] for name in EVALPLUS}
     budget = EVALPLUS_MAX_NEW_TOKENS + 1  # and a token for the bytes heal drops
@@ -411,9 +426,7 @@ def parse_generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, lis
         completions = [completion(tokenizer, t, ids, special="skip", healed=d)
                        for t, ids, (_, _, d) in zip(items, generated, healed, strict=True)]
         outcomes = [parse_outcome(t.prompt + c) for t, c in zip(items, completions, strict=True)]
-        shares = {kind: outcomes.count(kind) / len(outcomes) for kind in ("parses", "indentation", "syntax")}
-        results[name] = (shares | evalplus(name, items, [[c] for c in completions])
-                         | {"outcomes": outcomes, "completions": completions})
+        results[name] = scorers.submit(parse_scores, pool, name, items, completions, outcomes)
     return results
 
 

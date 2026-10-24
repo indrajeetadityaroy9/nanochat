@@ -47,7 +47,8 @@ def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm
 class Request:
     """A continuation of prompt (BOS and at least one more token) by at most max_tokens tokens. stop: None or a
     predicate of the generated ids, true once the sequence is done. temperature 0: the greedy argmax (ties to the lowest
-    id); > 0: a sample of softmax(logits / temperature) whose draw at generated position i depends only on (seed, i),
+    id); > 0: a sample of softmax(logits / temperature), the logits capped by the model's GPTConfig.softcap if it has
+    one, whose draw at generated position i depends only on (seed, i),
     not on the slot or the batch (decode.cu gumbel), and with top_p < 1 from the fewest most likely tokens holding top_p
     of that probability (nucleus sampling, arXiv 1904.09751, §3.1; decode.cu k_nucleus).
     constraint: the tokens allowed at each step."""
@@ -206,8 +207,10 @@ class NativeDecoder:
                         model.value_embeds[str(i)].weight.bfloat16() if ve else None,
                         attn.ve_gate.weight.clone() if ve else None, attn.q_gain.clone(), attn.k_gain.clone()]
         self.weights = weights  # referenced while the decoder reads them through pointers
-        # per layer (resid, x0), rounded to bf16: a 0-dim fp32 tensor times a bf16 tensor computes in bf16
-        scal = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).to(torch.bfloat16).float().cpu().numpy()
+        # per layer (resid, x0), rounded to bf16: a 0-dim fp32 tensor times a bf16 tensor computes in bf16; then the
+        # output-logit cap (0: none)
+        lambdas = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).to(torch.bfloat16).float().flatten().cpu()
+        scal = np.append(lambdas.numpy(), np.float32(cfg.softcap or 0.0))
         # F: c_fc is (F, C)
         config = np.array([L, C, model.blocks[0].mlp.c_fc.weight.size(0), VOCAB_SIZE, max_len, T, prompt_store],
                           dtype=np.int32)

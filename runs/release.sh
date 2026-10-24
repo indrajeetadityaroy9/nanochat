@@ -1,14 +1,14 @@
 #!/bin/bash
-# Publish a run as a Hugging Face model repository in the checkout's layout (nanochat/paths.py): its checkpoints
-# artifacts/checkpoints/<tag>-step<step>.pt, the run records under artifacts/ (metrics, base_eval) and results/.
+# Publish a run as a Hugging Face model repository in the checkout's layout (nanochat/paths.py): its run directory
+# artifacts/runs/<key>/ (step<step>.pt, metrics.jsonl, eval-step<step>.json, .hydra) and results/.
 # `runs/container.sh hf download <repo> --local-dir /workspace/nanochat` restores them for train/checkpoint.load_model
 # and a resumed pre-training run. Needs a write token (runs/container.sh hf auth login).
 #
-#   runs/release.sh <tag> <repo>
+#   runs/release.sh <key> <repo>          (key: the run's directory name under artifacts/runs)
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-TAG=$1 REPO=$2
+KEY=$1 REPO=$2
 # /workspace/nanochat: the checkout inside the container (runs/container.sh)
 "$ROOT"/runs/container.sh hf upload "$REPO" /workspace/nanochat . --repo-type model \
-  --include "artifacts/checkpoints/$TAG-step*.pt" \
-  --include "artifacts/metrics/*" --include "artifacts/base_eval/*" --include "results/*"
+  --include "artifacts/runs/$KEY/step*.pt" --include "artifacts/runs/$KEY/metrics.jsonl" \
+  --include "artifacts/runs/$KEY/eval-step*.json" --include "artifacts/runs/$KEY/.hydra/*" --include "results/*"
