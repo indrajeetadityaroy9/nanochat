@@ -65,7 +65,8 @@ def fit(lines: list[dict]) -> dict:
     lowest-code run itself when the neighbour above it
     diverged."""
     runs = sorted(lines, key=lambda line: line["fields"]["lr_scale"])
-    assert len({line["fields"]["lr_scale"] for line in runs}) == len(runs), "one run per lr_scale"
+    if len({line["fields"]["lr_scale"] for line in runs}) != len(runs):
+        raise RuntimeError("a setting holds two runs at one lr_scale")
     u = [math.log(line["fields"]["lr_scale"]) for line in runs]
     code = [math.inf if line["measures"] is None else line["measures"]["code"] for line in runs]
     best = int(np.argmin(code))
@@ -74,7 +75,8 @@ def fit(lines: list[dict]) -> dict:
         return {"runs": evaluated, "curvature": None, "vertex": None, "extend": "down" if best == 0 else "up"}
     if not math.isfinite(code[best + 1]):
         return {"runs": evaluated, "curvature": None, "vertex": math.exp(u[best]), "extend": None}
-    assert math.isfinite(code[best - 1]), "the lowest-code run's lower neighbour diverged"
+    if not math.isfinite(code[best - 1]):
+        raise RuntimeError("the lowest-code run's lower neighbour diverged: extend the grid down by hand")
     a, b, _ = np.polyfit(u[best - 1:best + 2], code[best - 1:best + 2], 2)
     return {"runs": evaluated, "curvature": float(a), "vertex": math.exp(-b / (2 * a)), "extend": None}
 

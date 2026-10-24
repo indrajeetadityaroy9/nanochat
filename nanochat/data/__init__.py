@@ -1,7 +1,7 @@
 """
 The pretraining data of nanochat, one module per stage. The tokenizer (tokenizer.py) and the data crate crate/ (Rust,
-native.data_crate: the SA-BPE trainer, arXiv 2604.14053; curation's deduplication and repository samples; the packer;
-the tokenizer ablation's parse-tree leaves) are shared by the stages, the loader, evaluation and the ablations.
+native.data_crate: the SA-BPE trainer, arXiv 2604.14053; curation's deduplication and repository samples; the packer)
+are shared by the stages, the loader, evaluation and the ablations.
 
     HF Hub, Software Heritage                sources.py: the sources, one mixture component each
         │  prepare.py, the only network step: fetch the code group whole and every other group up to its share of the

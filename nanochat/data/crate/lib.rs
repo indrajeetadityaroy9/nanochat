@@ -1,11 +1,9 @@
 //! The data crate, Python module nanochat_crate (built by nanochat/native.py data_crate()): SA-BPE (arXiv 2604.14053)
 //! tokenizer training (train.rs; nanochat/data/tokenizer.py), deduplication (dedup.rs; nanochat/data/dedup.py) and
-//! repository samples (repository.rs; nanochat/data/curate.py) of curation, the packer of training rows (pack.rs;
-//! nanochat/data/pack.py) and the parse-tree leaves of the tokenizer ablation's code metrics (leaves.rs;
-//! ablations/tokeval.py).
+//! repository samples (repository.rs; nanochat/data/curate.py) of curation, and the packer of training rows (pack.rs;
+//! nanochat/data/pack.py).
 
 mod dedup;
-mod leaves;
 mod pack;
 mod repository;
 mod train;
@@ -50,6 +48,5 @@ fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dedup::sketch, m)?)?;
     m.add_function(wrap_pyfunction!(dedup::duplicates, m)?)?;
     m.add_function(wrap_pyfunction!(repository::repository_samples, m)?)?;
-    m.add_function(wrap_pyfunction!(pack::pack, m)?)?;
-    m.add_function(wrap_pyfunction!(leaves::leaves, m)?)
+    m.add_function(wrap_pyfunction!(pack::pack, m)?)
 }

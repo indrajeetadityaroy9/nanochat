@@ -76,5 +76,5 @@ def crate_module(crate: Path) -> ModuleType:
 
 def data_crate() -> ModuleType:
     """The data pipeline's Rust crate (data/crate): train (data/tokenizer.py), sketch and duplicates (data/dedup.py),
-    repository_samples (data/curate.py), pack (data/pack.py), leaves (ablations/tokeval.py)."""
+    repository_samples (data/curate.py), pack (data/pack.py)."""
     return crate_module(DATA_CRATE)

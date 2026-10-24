@@ -12,20 +12,17 @@ per process) launched with its fields, its output, a failure's traceback include
 rerun experiment resumes: a run whose evaluation exists is not trained again, nor is one that diverged (its
 train/metrics.py failure record: a non-finite loss or gradient norm, an outcome of a lr sweep's high end,
 arXiv 2309.14322); any other failure stops the experiment, and a stopped run trains again from its start (its one
-checkpoint is its final model; train/metrics.py attempts keep both traceable). Then each alternative is compared with
-production over the runs that did not diverge; the experiment writes every tracked metric of every run,
-RESULTS/<experiment>.jsonl (a record per run: eval/suite.py record, setting, fields, the compared measures,
-efficiency, the step it diverged at) and RESULTS/<experiment>-curves.jsonl (per run, train/metrics.py curves), and
-RESULTS/<experiment>.json (per setting, each alternative's fields, its evaluated runs and, per measure, its difference
-from production, p and confidence interval; null where one run per arm leaves them undefined), the data of the paper's
-decisions and figures.
+checkpoint is its final model; train/metrics.py attempts keep both traceable). The experiment then writes every
+tracked metric of every run, RESULTS/<experiment>.jsonl (a record per run: eval/suite.py record, setting, fields, the
+compared measures, efficiency, the step it diverged at) and RESULTS/<experiment>-curves.jsonl (per run,
+train/metrics.py curves), and RESULTS/<experiment>.json (per setting, each alternative's fields and its evaluated
+runs), to which the experiment adds its own pre-registered analysis (lr.py analysis, tokenizer.py runs' decision).
 
-    python -m ablations.<experiment>       (every missing run, each in a child process, then the comparison: main)
+    python -m ablations.<experiment>       (every missing run, each in a child process, then the records: main)
     python -m ablations.harness '<fields>'  (one run: harness.Run's fields as JSON)
 """
 import dataclasses
 import json
-import math
 import statistics
 import subprocess
 import sys
@@ -33,7 +30,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from scipy.stats import ttest_ind
 
 from nanochat.config import FILE_STAGE, run_tag
 from nanochat.data.tokenizer import get_tokenizer
@@ -44,10 +40,6 @@ from nanochat.train import metrics
 from nanochat.train.checkpoint import checkpoint_name
 from nanochat.train.loop import train
 from nanochat.train.schedule import RunPlan, plan
-
-# The conventional significance level ("Statistical Methods for Research Workers" (1925), §20): the confidence
-# intervals' 1 - ALPHA
-ALPHA = 0.05
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -139,22 +131,6 @@ def evaluation(run: Run) -> dict[str, float]:
             "tok_per_s": statistics.median(rates)}
 
 
-def compare(alternative: list[dict[str, float]],
-            baseline: list[dict[str, float]]) -> dict[str, dict[str, float | None]]:
-    """{statistic: {measure: value}} over two arms' runs (each a measure dict): the alternative's mean minus the
-    baseline's, the two-sided pooled t-test's p and the difference's 1 - ALPHA confidence interval (scipy ttest_ind);
-    None where one run per arm leaves them undefined."""
-    stats = {"difference": {}, "p": {}, "ci_low": {}, "ci_high": {}}
-    for m in baseline[0]:
-        a, b = [r[m] for r in alternative], [r[m] for r in baseline]
-        test = ttest_ind(a, b)
-        interval = test.confidence_interval(confidence_level=1 - ALPHA)
-        stats["difference"][m] = statistics.fmean(a) - statistics.fmean(b)
-        for k, v in (("p", test.pvalue), ("ci_low", interval.low), ("ci_high", interval.high)):
-            stats[k][m] = None if math.isnan(v) else float(v)
-    return stats
-
-
 def diverged(tag: str) -> int | None:
     """The step at which run `tag` stopped on a non-finite loss or gradient norm (its failure record), or None."""
     failures = [r["step"] for r in metrics.records(tag) if r["kind"] == "failure"]
@@ -163,9 +139,8 @@ def diverged(tag: str) -> int | None:
 
 def main(*, experiment: str, settings: list[Setting], production: dict) -> None:
     """Run an experiment (its records RESULTS/<experiment>.json, .jsonl and -curves.jsonl): at each setting, production
-    and an arm per alternative; then compare each alternative with production at each setting. `production`: the Run
-    fields in which the experiment's production arm, and so its every arm, departs from production (the tokenizer
-    ablation's: production's vocabulary on its documents)."""
+    and an arm per alternative, then every run's record. `production`: the Run fields in which the experiment's
+    production arm, and so its every arm, departs from production (the tokenizer ablation's: its sa-bpe vocabulary)."""
     cells = []
     for setting in settings:
         # production's settings (nanochat/train/loop.py, nanochat/model/gpt.py) at this depth and ratio
@@ -210,9 +185,6 @@ def main(*, experiment: str, settings: list[Setting], production: dict) -> None:
             summaries.append({"depth": setting.depth, "tokens_per_param": setting.ratio, "seeds": len(setting.seeds),
                               "production_runs": len(measures["production"]),
                               "alternatives": {name: {"fields": changes, "runs": len(measures[name])}
-                                               | (compare([*measures[name].values()],
-                                                          [*measures["production"].values()])
-                                                  if measures[name] and measures["production"] else {})
                                                for name, changes in setting.alternatives.items()}})
     (RESULTS / f"{experiment}.json").write_text(json.dumps({"settings": summaries}, allow_nan=False),
                                                 encoding="utf-8")
