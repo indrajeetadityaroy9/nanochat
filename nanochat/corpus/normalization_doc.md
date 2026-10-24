@@ -837,6 +837,7 @@ tree and history; `publish.pull` fetches a revision where the tokenizer is train
 | Nemotron-Pretraining-Code-v2's rewriting and transpilation in the synthetic group; SYNTHETIC_FILE | `corpus/sources.py`, `corpus/schema.py`, `corpus/mixture.py`, `corpus/prepare.py`, `corpus/curate.py` | done (2d6bcc0) |
 | CodeXGLUE code-to-text's Python train split as a supply group; FUNCTION; the stages' supply sources from the mixture | `corpus/sources.py`, `corpus/schema.py`, `corpus/mixture.py`, `corpus/prepare.py`, `corpus/curate.py`, `corpus/pack.py`, `corpus/compile.py` | done (6e11acf) |
 | Synthetic code at 30% of code (26.1% of the file stage), from 10%; its four sources re-prepared at the larger extent | `corpus/mixture.py` | done |
+| The Python check selects its sources by schema identity: EXERCISE, SYNTHETIC_FILE and NOTEBOOK have equal fields, so `in` had also checked UltraData-Code L3 Python and the Kaggle notebooks | `corpus/curate.py`, `corpus/schema.py` | done (65dd168) |
 | Every read source prepared and curated on the GB10; the curated shards published | `prepare`, `curate`, `publish` | running |
 | The tokenizer decided and trained, the corpus compiled and packed, after the pull | `tokenizer`, `compile`, `pack` | after the pull |
 | Training reads the corpus (`config.py`, `train/`, `eval/`, `inference/`); the crate moves to `nanochat/corpus`; `nanochat/data` retired | outside `nanochat/corpus` | when `nanochat/data` is retired |

@@ -272,9 +272,10 @@ def curate() -> None:
     data_crate()  # built once here, before the workers load it
     files = {source: len(list(standardized_path(source, 0).parent.iterdir())) for source in mixture.READ}
     # a category is its schema object: EXERCISE, SYNTHETIC_FILE and NOTEBOOK have equal fields, so only `is` tells them
-    # apart (pyarrow's == and `in` compare fields)
-    python = [s for s in mixture.READ if SOURCES[s].language == "Python"
-              and any(SOURCES[s].schema is category for category in (REPOSITORY_FILE, SYNTHETIC_FILE, FUNCTION))]
+    # apart (pyarrow's == and `in` compare fields); a source of two languages has no single language to compare
+    checked = (REPOSITORY_FILE, SYNTHETIC_FILE, FUNCTION)
+    python = [s for s in mixture.READ
+              if any(SOURCES[s].schema is category for category in checked) and SOURCES[s].language == "Python"]
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
         for source in python:
             check(source, files[source], pool)
