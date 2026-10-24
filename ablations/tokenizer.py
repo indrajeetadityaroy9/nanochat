@@ -94,6 +94,7 @@ import itertools
 import json
 import math
 import statistics
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import regex
@@ -168,13 +169,17 @@ PARSED = "mbpp_plus"
 
 def vocabularies() -> None:
     """Each arm's tokenizer.tiktoken and tokenizer.pattern in ABLATION/<arm>, on one draw of the corpus tokenizer's
-    sample."""
+    sample. The arms train at once: the crate releases the GIL, and each training's merge loop is mostly serial (one heap
+    pop and one pass over the merged pair's words per merge), so the others take the idle cores; every merge is an argmax
+    with fixed tie-breaks, so an arm's vocabulary does not depend on the others."""
     for arm in ARMS:
         (ABLATION / arm).mkdir(parents=True)
     docs, units = sample()
-    for arm, (pattern, score) in ARMS.items():
-        save(ABLATION / arm, train(docs, units, pattern=pattern, score=score), pattern)
-        print(f"{arm}: data key {get_tokenizer(arm).data_key}", flush=True)
+    with ThreadPoolExecutor(len(ARMS)) as pool:
+        trained = pool.map(lambda spec: train(docs, units, pattern=spec[0], score=spec[1]), ARMS.values())
+        for (arm, (pattern, _)), mergeable in zip(ARMS.items(), trained, strict=True):
+            save(ABLATION / arm, mergeable, pattern)
+            print(f"{arm}: data key {get_tokenizer(arm).data_key}", flush=True)
 
 
 def reads(counts: np.ndarray) -> dict[str, int]:
