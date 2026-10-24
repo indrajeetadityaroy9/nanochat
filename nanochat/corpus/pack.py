@@ -43,9 +43,10 @@ from nanochat.native import data_crate
 
 # Fill-in-the-middle, without line widening (normalization_doc.md §6): FIM rate 0.5 (DeepSeek-Coder, arXiv 2401.14196
 # §3.1.2: "an FIM rate of 0.5"; arXiv 2207.14255 §3: p = 0.5); of FIM, 90% AST middles and 10% random character spans,
-# 50% PSM and 50% SPM (AST-FIM, arXiv 2506.00204v1 §5.1); AST middles "an equal mix" of Single-Node and Aligned-Span
-# masking (§3.3). The crate draws each piece's FIM from ChaCha8 keyed by its document and piece, so the packs do not
-# depend on the order of work
+# 50% PSM and 50% SPM, joint training matching or beating either mode alone (arXiv 2207.14255 §3.1, §4.3 Table 1,
+# §8.1; SPM as App. D's variant 2), the split AST-FIM trains with (arXiv 2506.00204v1 §5.1); AST middles "an equal mix"
+# of Single-Node and Aligned-Span masking (§3.3). The crate draws each piece's FIM from ChaCha8 keyed by its document
+# and piece, so the packs do not depend on the order of work
 FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5, 0.5
 # Pack calls in flight: one per core (the crate releases the GIL)
 WINDOW = os.cpu_count()

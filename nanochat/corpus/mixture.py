@@ -78,7 +78,8 @@ REPOSITORY_SOURCES = ("stack_edu_python", "ultradata_stack_v3_l2_python", "ultra
 MATH_SOURCES = ("ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultradata_math_l3_multi_style",
                 "ultradata_math_l3_textbook_exercise")
 # Synthetic code: UltraData-Code L3's exercises and Nemotron's rewritten Python and Python transpiled into C++, 30% of
-# code: good mixtures' share of rephrased synthetic data, "converging to ~30%" (Kang et al., arXiv 2510.01631 §1)
+# code: good mixtures' share of rephrased synthetic data, "converging to ~30%" (Kang et al., arXiv 2510.01631 §1), a
+# finding on rephrased web text carried to code [inference]
 SYNTHETIC_SOURCES = ("ultradata_code_l3_python", "ultradata_code_l3_cpp", "nemotron_rewriting_python",
                      "nemotron_transpilation_cpp")
 # The repository stage's documents per (repository, language) across REPOSITORY_SOURCES (compile.py), a corpus per
