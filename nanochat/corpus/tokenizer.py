@@ -55,9 +55,19 @@ def get_tokenizer(name: str = "corpus") -> production.Tokenizer:
         return production.Tokenizer(mergeable, f.read(), name=name, compiled=compiled)
 
 
+@functools.cache
 def train_bytes(source: str) -> int:
     """The text bytes of the source's curated train split (Parquet footers)."""
     return sum(text_bytes(pq.read_metadata(path), "content") for path in curated_shards(source, "train"))
+
+
+def byte_shares() -> dict[str, float]:
+    """Each file-stage source's share of the stage's bytes: its share of the stage's tokens (Stage.shares, tokens
+    counted at production's bytes per token) at its bytes per token."""
+    sources, per_token = mixture.FILE_STAGE.sources, mixture.BYTES_PER_TOKEN
+    shares = mixture.FILE_STAGE.shares({s: train_bytes(s) / per_token[s] for s in sources}, mixture.FILE_STAGE.tokens)
+    stage_bytes = sum(shares[s] * per_token[s] for s in sources)
+    return {s: shares[s] * per_token[s] / stage_bytes for s in sources}
 
 
 def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str], list[str]]:
@@ -78,40 +88,46 @@ def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str]
     return texts(source, batch), units
 
 
-def sample() -> tuple[list[str], list[int]]:
-    """The training sample (texts, unit ids): of each file-stage source's curated train split, its share of the stage's
-    bytes as its share of SAMPLE_BYTES; the share of bytes is its share of the stage's tokens (Stage.shares, tokens
-    counted at production's bytes per token) at its bytes per token. A systematic sample in shard order, row groups
-    read in parallel, the sample kept in order."""
-    sources = mixture.FILE_STAGE.sources
-    sizes = {s: train_bytes(s) for s in sources}
-    shares = mixture.FILE_STAGE.shares({s: sizes[s] / mixture.BYTES_PER_TOKEN[s] for s in sources},
-                                       mixture.FILE_STAGE.tokens)
-    stage_bytes = sum(shares[s] * mixture.BYTES_PER_TOKEN[s] for s in sources)
-    tasks = []
-    for s in sources:
-        fraction, at = shares[s] * mixture.BYTES_PER_TOKEN[s] / stage_bytes * SAMPLE_BYTES / sizes[s], 0
-        print(f"{s}: {fraction:.4f} of its {sizes[s] / 1e9:.2f} GB", flush=True)
+def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
+    """The training sample (texts, unit ids) and its composition per source (its target bytes, the fraction of its rows
+    taken, and the documents, bytes and authorship units taken): of each file-stage source's curated train split, its
+    byte share as its share of SAMPLE_BYTES. A systematic sample in shard order, row groups read in parallel, the
+    sample kept in order."""
+    tasks, composition = [], {}
+    for s, share in byte_shares().items():
+        fraction, at = share * SAMPLE_BYTES / train_bytes(s), 0
+        composition[s] = {"target_bytes": share * SAMPLE_BYTES, "fraction": fraction}
+        print(f"{s}: {fraction:.4f} of its {train_bytes(s) / 1e9:.2f} GB", flush=True)
         for path in curated_shards(s, "train"):
             md = pq.read_metadata(path)
             for g in range(md.num_row_groups):
                 tasks.append((s, path, g, at, fraction))
                 at += md.row_group(g).num_rows
-    docs, units, ids = [], [], {}
+    docs, units, ids, held = [], [], {}, {s: set() for s in composition}
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
-        for batch, names in pool.map(sample_row_group, tasks):
+        for (s, *_), (batch, names) in zip(tasks, pool.map(sample_row_group, tasks), strict=True):
             docs += batch
             units += [ids.setdefault(name, len(ids)) for name in names]
-    return docs, units
+            held[s].update(names)
+            composition[s]["documents"] = composition[s].get("documents", 0) + len(batch)
+            composition[s]["bytes"] = composition[s].get("bytes", 0) + sum(len(text.encode()) for text in batch)
+    for s, names in held.items():
+        composition[s]["units"] = len(names)
+    return docs, units, composition
 
 
-def train(docs: list[str], units: list[int], *, pattern: str, score: Score) -> list[bytes]:
-    """The mergeable tokens, bytes in rank order: the 256 bytes, then VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 merges
-    trained on the documents (each from its authorship unit) within the chunks of `pattern`, by SA-BPE's F·ln R or by
-    frequency alone (the crate's train)."""
+def train(docs: list[str], units: list[int], *, pattern: str, score: Score) -> list[tuple[int, int]]:
+    """VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 merges (merge i makes token 256 + i) trained on the documents (each from
+    its authorship unit) within the chunks of `pattern`, by SA-BPE's F·ln R or by frequency alone (the crate's
+    train)."""
+    return data_crate().train(docs, units, pattern=pattern, n_merges=VOCAB_SIZE - len(production.SPECIAL_TOKENS) - 256,
+                              score=score)
+
+
+def vocabulary(merges: list[tuple[int, int]]) -> list[bytes]:
+    """The mergeable tokens of merges, bytes in rank order: the 256 bytes, then each merge's."""
     mergeable = [bytes([i]) for i in range(256)]
-    for left, right in data_crate().train(docs, units, pattern=pattern,
-                                          n_merges=VOCAB_SIZE - len(production.SPECIAL_TOKENS) - 256, score=score):
+    for left, right in merges:
         mergeable.append(mergeable[left] + mergeable[right])
     return mergeable
 
@@ -134,10 +150,10 @@ def main() -> None:
     draw (the train split's text bytes at the val split's bytes per token): below 1, pack.fit runs out of its
     shards."""
     TOKENIZER.mkdir(parents=True)
-    docs, units = sample()
+    docs, units, _ = sample()
     print(f"sample: {len(docs):,} documents, {sum(map(len, map(str.encode, docs))) / 1e9:.2f} GB, {max(units) + 1:,} "
           f"authorship units", flush=True)
-    production.save(TOKENIZER, train(docs, units, pattern=PATTERN, score=SCORE), PATTERN)
+    production.save(TOKENIZER, vocabulary(train(docs, units, pattern=PATTERN, score=SCORE)), PATTERN)
     del docs, units
     corpus = get_tokenizer()
     print(f"data key {corpus.data_key}")

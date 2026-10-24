@@ -53,18 +53,28 @@ train through ablations/harness.py, whose stack (nanochat/train, nanochat/eval) 
 reads the corpus (nanochat/corpus/gh200.md); that cutover builds the set and every arm's packs (corpus compile.py and
 pack.py, each taking the arm's tokenizer).
 
-RESULTS/tokenizer-data.json holds each vocabulary's intrinsic record on the corpus's val splits (describe), per
-source: bytes per token and Rényi efficiency; its vocabulary entries holding a line break (the count correlating most
-strongly with MBPP in the companion post), fusing punctuation with one, and ending in a line break and indentation (the
-post's MinGram pair: the first's MBPP far lower, most of its completions IndentationError or TabError); the merged
-tokens the val documents read never, under 10 and under 100 times (SA-BPE's Coverage, Table 3, graded), those of them
-not UTF-8 on their own and the 243 byte ids UTF-8 can hold counted apart (Magikarp, arXiv 2405.05417 §3.1, names both
-as sources of untrained tokens); the entries whose text does not encode back to them (Magikarp §5's check; a token
-the pattern forms only in context, as a line break and indentation inside a whitespace-only line, counts too);
-TokEval's AST boundary alignment, identifier fragmentation and Python indentation consistency on the code corpora, its
-operator isolation on the code and math corpora (ablations/tokeval.py). Not taken from TokEval: its multilingual
-metrics (fertility, Gini, MorphScore) and its digit metrics (every arm's pattern cuts a digit run into the same chunks
-of at most two digits).
+RESULTS/tokenizer-vocabularies.json records the sample's composition per source (its target bytes, the fraction of its
+rows taken, the documents, bytes and authorship units taken), its totals and each arm's training seconds; each arm's
+merges, in training order, sit beside its vocabulary (merges.json). RESULTS/tokenizer-data.json holds each arm's
+intrinsic record on the corpus's val splits (describe), per source: its bytes, tokens, bytes per token, Rényi
+efficiency at TokEval's four orders (tokeval.RENYI_ORDERS) and its documents' bytes per token (mean and QUANTILES);
+bytes per token over the file stage's byte shares, overall and per group, and each group read in part's train tokens
+over its draw (corpus/tokenizer.py main's check); its vocabulary entries per byte length and per class (CLASSES, else
+mixed or not UTF-8), holding a line break (the count correlating most strongly with MBPP in the companion post),
+fusing punctuation with one, ending in a line break and indentation (the post's MinGram pair: the first's MBPP far
+lower, most of its completions IndentationError or TabError), and whose text does not encode back to them (Magikarp,
+arXiv 2405.05417 §5; a token the pattern forms only in context, as a line break and indentation inside a
+whitespace-only line, counts too); the val documents' reads of every token in rank order, and how many merged tokens
+they read never, under 10 and under 100 times (SA-BPE's Coverage, Table 3, graded), those not UTF-8 on their own and
+the 243 byte ids UTF-8 can hold counted apart (Magikarp §3.1 names both as sources of untrained tokens); depth
+invariance: of each program source's first indented val lines (INDENTED_LINES), those whose tokens are the
+indentation's then the statement's at depth 0 (HYBRID_PATTERN (2)); fidelity: on each source's first val texts
+(FIDELITY_DOCUMENTS), the chunks whose tiktoken encoding differs from the arm's merges replayed in training order, the
+texts that do not decode back, the bytes its chunks leave uncovered, chunks per kB and the longest chunk; TokEval's AST
+boundary alignment, identifier fragmentation and Python indentation consistency on the code corpora, its operator
+isolation on the code and math corpora (ablations/tokeval.py). Between arms: the Jaccard similarity of their first
+1,024, 4,096, 16,384 and all merged tokens. Not taken from TokEval: its multilingual metrics (fertility, Gini,
+MorphScore) and its digit metrics (every arm's pattern cuts a digit run into the same chunks of at most two digits).
 
 Decisions, pre-registered (RESULTS/tokenizer.json "decision"), each challenger (sa-bpe-fused, hybrid, bpe) against
 sa-bpe on the seeds where both have an evaluation (a diverged run, ablations/harness.py, drops its seed from its
@@ -94,9 +104,11 @@ import itertools
 import json
 import math
 import statistics
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
+import pyarrow.parquet as pq
 import regex
 from scipy.stats import binomtest, norm
 
@@ -105,10 +117,20 @@ from ablations.harness import ALPHA, Setting, main
 from nanochat.corpus import mixture
 from nanochat.corpus.compile import compile_source
 from nanochat.corpus.loader import TOKEN_DTYPE, split_path
+from nanochat.corpus.parallel import SPAWN
 from nanochat.corpus.schema import TEXT
-from nanochat.corpus.sources import SOURCES
-from nanochat.corpus.tokenizer import ABLATION, Score, get_tokenizer, sample, train
-from nanochat.data.tokenizer import SPLIT_PATTERN, Tokenizer, save
+from nanochat.corpus.sources import SOURCES, curated_shards, texts
+from nanochat.corpus.tokenizer import (
+    ABLATION,
+    Score,
+    byte_shares,
+    get_tokenizer,
+    sample,
+    train,
+    train_bytes,
+    vocabulary,
+)
+from nanochat.data.tokenizer import SPLIT_PATTERN, save
 from nanochat.paths import RESULTS
 from nanochat.train.stages import max_ratio
 
@@ -165,21 +187,51 @@ CODE_SIGMA = 0.0034
 NOT_UTF8 = frozenset([0xC0, 0xC1, *range(0xF5, 0x100)])
 # The benchmark of the parse test (Decisions)
 PARSED = "mbpp_plus"
+# The quantiles of a source's documents' bytes per token
+QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+# The fidelity check's texts: the first of each source's val split
+FIDELITY_DOCUMENTS = 200
+# The depth-invariance check's lines: the first indented lines of each program source's val split
+INDENTED_LINES = 50_000
+# The merges compared between arms: the first 1,024, 4,096, 16,384 and all
+OVERLAP_PREFIXES = (1_024, 4_096, 16_384, None)
+# A vocabulary entry's class, the first whose pattern its whole text matches (else mixed; not UTF-8 apart)
+CLASSES = {"whitespace": regex.compile(r"\s+"), "word": regex.compile(r" ?\p{L}+"),
+           "number": regex.compile(r" ?\p{N}+"), "punctuation": regex.compile(r" ?[^\s\p{L}\p{N}]+")}
+# An indented line: its leading spaces and tabs, then its statement
+INDENTED = regex.compile(r"([ \t]+)(\S.*)")
 
 
 def vocabularies() -> None:
-    """Each arm's tokenizer.tiktoken and tokenizer.pattern in ABLATION/<arm>, on one draw of the corpus tokenizer's
-    sample. The arms train at once: the crate releases the GIL, and each training's merge loop is mostly serial (one
-    heap pop and one pass over the merged pair's words per merge), so the others take the idle cores; every merge is an
-    argmax with fixed tie-breaks, so an arm's vocabulary does not depend on the others."""
+    """Each arm's tokenizer.tiktoken, tokenizer.pattern and merges.json in ABLATION/<arm>, on one draw of the corpus
+    tokenizer's sample, and RESULTS/tokenizer-vocabularies.json (module docstring). The arms train at once: the crate
+    releases the GIL, and each training's merge loop is mostly serial (one heap pop and one pass over the merged pair's
+    words per merge), so the others take the idle cores; every merge is an argmax with fixed tie-breaks, so an arm's
+    vocabulary does not depend on the others."""
     for arm in ARMS:
         (ABLATION / arm).mkdir(parents=True)
-    docs, units = sample()
+    start = time.perf_counter()
+    docs, units, composition = sample()
+    sampled = time.perf_counter() - start
+
+    def timed(spec: tuple[str, Score]) -> tuple[list[tuple[int, int]], float]:
+        begin = time.perf_counter()
+        merges = train(docs, units, pattern=spec[0], score=spec[1])
+        return merges, time.perf_counter() - begin
+
+    arms = {}
     with ThreadPoolExecutor(len(ARMS)) as pool:
-        trained = pool.map(lambda spec: train(docs, units, pattern=spec[0], score=spec[1]), ARMS.values())
-        for (arm, (pattern, _)), mergeable in zip(ARMS.items(), trained, strict=True):
-            save(ABLATION / arm, mergeable, pattern)
-            print(f"{arm}: data key {get_tokenizer(arm).data_key}", flush=True)
+        for (arm, (pattern, score)), (merges, seconds) in zip(ARMS.items(), pool.map(timed, ARMS.values()),
+                                                              strict=True):
+            save(ABLATION / arm, vocabulary(merges), pattern)
+            (ABLATION / arm / "merges.json").write_text(json.dumps(merges))
+            arms[arm] = {"pattern": pattern, "score": score, "merges": len(merges), "seconds": seconds,
+                         "data_key": get_tokenizer(arm).data_key}
+            print(f"{arm}: {len(merges):,} merges in {seconds:.0f} s, data key {arms[arm]['data_key']}", flush=True)
+    record = {"sample": {"documents": len(docs), "bytes": sum(c["bytes"] for c in composition.values()),
+                         "units": max(units) + 1, "seconds": sampled, "sources": composition},
+              "arms": arms, "seconds": time.perf_counter() - start}
+    (RESULTS / "tokenizer-vocabularies.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
 def reads(counts: np.ndarray) -> dict[str, int]:
@@ -188,47 +240,172 @@ def reads(counts: np.ndarray) -> dict[str, int]:
             "under 100": int((counts < 100).sum())}
 
 
-def describe(tokenizer: Tokenizer) -> dict:
-    """An arm's intrinsic record on the corpus's val splits (module docstring): bytes per token and Rényi efficiency
-    (tokeval.py) of each source and of all of them; its vocabulary entries below BOS holding a line break, fusing
-    punctuation with one and ending in a line break and indentation; how many of its merged tokens (ids 256 to BOS) the
-    val documents read never, under 10 and under 100 times, of them those not UTF-8 on their own, and the same of the
-    243 byte ids UTF-8 can hold; the entries whose text does not encode back to them."""
+def describe(arm: str) -> dict:
+    """An arm's intrinsic record on the corpus's val splits (module docstring): per source and over the file stage,
+    its compression; its vocabulary; the val documents' reads of its tokens."""
+    tokenizer = get_tokenizer(arm)
     held = np.zeros(tokenizer.bos_token_id, dtype=np.int64)
     lengths = tokenizer.token_lengths[:tokenizer.bos_token_id]
-    bytes_per_token, renyi = {}, {}
+    sources = {}
     for corpus in SOURCES:
-        tokens = np.memmap(split_path(corpus, "val", tokenizer).with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r")
+        path = split_path(corpus, "val", tokenizer)
+        tokens = np.memmap(path.with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r")
+        offsets = np.fromfile(path.with_suffix(".idx"), dtype=np.int64)
         counts = np.bincount(tokens, minlength=tokenizer.bos_token_id)
         held += counts
-        bytes_per_token[corpus] = float(counts @ lengths / len(tokens))
-        renyi[corpus] = tokeval.renyi_efficiency(counts, tokenizer.vocab_size)
-    renyi["all"] = tokeval.renyi_efficiency(held, tokenizer.vocab_size)
+        # every document holds a token (no curated text is empty), so reduceat sums each document's bytes
+        per_document = np.add.reduceat(lengths[tokens], offsets[:-1]) / np.diff(offsets)
+        sources[corpus] = {
+            "bytes": int(counts @ lengths), "tokens": len(tokens),
+            "bytes_per_token": float(counts @ lengths / len(tokens)),
+            "renyi_efficiency": {str(o): tokeval.renyi_efficiency(counts, tokenizer.vocab_size, o)
+                                 for o in tokeval.RENYI_ORDERS},
+            "document_bytes_per_token": {"mean": float(per_document.mean())} | {
+                f"q{round(100 * q):02d}": float(v) for q, v in zip(QUANTILES, np.quantile(per_document, QUANTILES),
+                                                                  strict=True)}}
+    shares = byte_shares()
+
+    def mixed(members: tuple[str, ...] | list[str]) -> float:
+        """Bytes per token over the members' file-stage byte shares."""
+        return sum(shares[s] for s in members) / sum(shares[s] / sources[s]["bytes_per_token"] for s in members)
+
     entries = tokenizer.token_bytes[:tokenizer.bos_token_id]
-    texts = [b.decode("utf-8", "ignore") for b in entries]
-    utf8 = np.array([b.decode("utf-8", "ignore").encode() == b for b in entries])
+    text = [b.decode("utf-8", "ignore") for b in entries]
+    utf8 = np.array([t.encode() == b for t, b in zip(text, entries, strict=True)])
+    classes = dict.fromkeys([*CLASSES, "mixed", "not_utf8"], 0)
+    for t, valid in zip(text[256:], utf8[256:], strict=True):
+        classes[next((name for name, p in CLASSES.items() if p.fullmatch(t)), "mixed") if valid else "not_utf8"] += 1
     # a line break and the indentation after it ending the token (\Z: $ also matches before a final line break)
     fused, indented = regex.compile(r"[^\s\p{L}\p{N}][\r\n]"), regex.compile(r"[\r\n][ \t]+\Z")
     merged = held[256:]
-    return {"data_key": tokenizer.data_key, "bytes_per_token": bytes_per_token, "renyi_efficiency": renyi,
-            "line_break_tokens": sum("\n" in t or "\r" in t for t in texts),
-            "punctuation_line_break_tokens": sum(bool(fused.search(t)) for t in texts),
-            "line_break_indentation_tokens": sum(bool(indented.search(t)) for t in texts),
-            "val_reads": {"merged": reads(merged), "merged_not_utf8": reads(merged[~utf8[256:]]),
-                          "bytes": reads(held[[b for b in range(256) if b not in NOT_UTF8]])},
+    return {
+        "data_key": tokenizer.data_key, "sources": sources,
+        "file_stage_bytes_per_token": {"all": mixed(mixture.FILE_STAGE.sources)}
+        | {name: mixed(group.sources) for name, group in mixture.FILE_STAGE.groups.items()},
+        "renyi_efficiency": {str(o): tokeval.renyi_efficiency(held, tokenizer.vocab_size, o)
+                             for o in tokeval.RENYI_ORDERS},
+        "train_tokens_over_draw": {
+            group: sum(train_bytes(s) / sources[s]["bytes_per_token"] for s, g in mixture.PART.items() if g == group)
+            / mixture.draw(group) for group in mixture.IN_PART},
+        "vocabulary": {
+            "entry_bytes": np.bincount(lengths[256:]).tolist(), "classes": classes,
+            "line_break_tokens": sum("\n" in t or "\r" in t for t in text),
+            "punctuation_line_break_tokens": sum(bool(fused.search(t)) for t in text),
+            "line_break_indentation_tokens": sum(bool(indented.search(t)) for t in text),
             "not_encoding_back": sum(tokenizer.enc.encode_ordinary(t) != [i]
-                                     for i, t in enumerate(texts) if utf8[i] and i >= 256)}
+                                     for i, t in enumerate(text) if utf8[i] and i >= 256)},
+        "val_reads": {"merged": reads(merged), "merged_not_utf8": reads(merged[~utf8[256:]]),
+                      "bytes": reads(held[[b for b in range(256) if b not in NOT_UTF8]])},
+        "rank_frequency": np.sort(held)[::-1].tolist()}
+
+
+def indented_lines(source: str) -> list[tuple[str, str]]:
+    """The first INDENTED_LINES indented lines of a source's val texts: (indentation, statement)."""
+    def lines():
+        for path in curated_shards(source, "val"):
+            f = pq.ParquetFile(path)
+            for g in range(f.num_row_groups):
+                for doc in texts(source, f.read_row_group(g)):
+                    for line in doc.split("\n"):
+                        if m := INDENTED.fullmatch(line):
+                            yield m.group(1), m.group(2)
+    return list(itertools.islice(lines(), INDENTED_LINES))
+
+
+def depth_invariance(source: str) -> dict[str, dict[str, float]]:
+    """{arm: lines, invariant, rate} of a program source: its indented lines (indented_lines) whose tokens are the
+    indentation's, then the statement's as at depth 0."""
+    lines = indented_lines(source)
+    result = {}
+    for arm in ARMS:
+        enc = get_tokenizer(arm).enc
+        whole = enc.encode_ordinary_batch([indent + statement for indent, statement in lines])
+        indents = enc.encode_ordinary_batch([indent for indent, _ in lines])
+        statements = enc.encode_ordinary_batch([statement for _, statement in lines])
+        invariant = sum(w == i + s for w, i, s in zip(whole, indents, statements, strict=True))
+        result[arm] = {"lines": len(lines), "invariant": invariant, "rate": invariant / len(lines)}
+    return result
+
+
+def replay(chunk: bytes, merges: list[tuple[int, int]], rank: dict[tuple[int, int], int]) -> list[int]:
+    """A chunk's training segmentation: the merges in their order, each over every non-overlapping occurrence from the
+    left (data/crate train.rs merge_pair)."""
+    ids = list(chunk)
+    while len(ids) > 1:
+        best = min((rank.get(pair, len(merges)) for pair in itertools.pairwise(ids)), default=len(merges))
+        if best == len(merges):
+            break
+        (a, b), out, i = merges[best], [], 0
+        while i < len(ids):
+            if i + 1 < len(ids) and ids[i] == a and ids[i + 1] == b:
+                out.append(256 + best)
+                i += 2
+            else:
+                out.append(ids[i])
+                i += 1
+        ids = out
+    return ids
+
+
+def fidelity(task: tuple[str, str]) -> dict[str, float]:
+    """An arm's fidelity on a source's first FIDELITY_DOCUMENTS val texts: their bytes, those its pattern's chunks
+    (Python regex, whose chunks fancy-regex's equal) leave uncovered, the chunks, per kB and the longest, the chunks
+    whose tiktoken encoding differs from the arm's merges replayed in training order (replay), and the texts whose
+    encoding does not decode back."""
+    arm, source = task
+    tokenizer = get_tokenizer(arm)
+    merges = [tuple(pair) for pair in json.loads((ABLATION / arm / "merges.json").read_text())]
+    rank = {pair: i for i, pair in enumerate(merges)}
+    pattern = regex.compile(tokenizer.pattern)
+    first = pq.ParquetFile(curated_shards(source, "val")[0]).read_row_group(0)
+    docs = texts(source, first.slice(0, FIDELITY_DOCUMENTS))
+    n_bytes = covered = chunks = longest = differing = failures = 0
+    for doc in docs:
+        encoded = doc.encode()
+        n_bytes += len(encoded)
+        failures += tokenizer.enc.decode_bytes(tokenizer.enc.encode_ordinary(doc)) != encoded
+        for m in pattern.finditer(doc):
+            piece = m.group().encode()
+            covered, chunks, longest = covered + len(piece), chunks + 1, max(longest, len(piece))
+            differing += tokenizer.enc._encode_single_piece(piece) != replay(piece, merges, rank)
+    return {"documents": len(docs), "bytes": n_bytes, "uncovered_bytes": n_bytes - covered, "chunks": chunks,
+            "chunks_per_kb": 1000 * chunks / n_bytes, "longest_chunk_bytes": longest, "differing_chunks": differing,
+            "roundtrip_failures": failures}
+
+
+def corpus_metrics(task: tuple[str, bool]) -> tuple[str, dict, dict | None]:
+    """TokEval's metrics of one corpus's val documents under every arm: operator isolation, and the code metrics of a
+    code corpus."""
+    corpus, code = task
+    tokenizers = [get_tokenizer(arm) for arm in ARMS]
+    tokens, docs = tokeval.val_split(corpus, tokenizers)
+    return (corpus, tokeval.operator_isolation(tokens, docs, tokenizers),
+            tokeval.code(corpus, tokens, docs, tokenizers) if code else None)
+
+
+def overlap() -> dict[str, dict[str, dict[str, float]]]:
+    """{prefix: {arm: {arm: Jaccard similarity}}} of the arms' first OVERLAP_PREFIXES merged tokens."""
+    merged = {arm: get_tokenizer(arm).token_bytes[256:get_tokenizer(arm).bos_token_id] for arm in ARMS}
+    result = {}
+    for prefix in OVERLAP_PREFIXES:
+        sets = {arm: set(tokens[:prefix]) for arm, tokens in merged.items()}
+        result[str(prefix or "all")] = {a: {b: len(sets[a] & sets[b]) / len(sets[a] | sets[b]) for b in ARMS}
+                                        for a in ARMS}
+    return result
 
 
 def data() -> None:
     """Every arm's compiled val split of every source, checked to hold the same bytes per document in each, and
-    RESULTS/tokenizer-data.json: each arm's intrinsic record (describe) and TokEval's metrics (tokeval.code of every
-    code corpus, tokeval.operator_isolation of every code and math corpus)."""
+    RESULTS/tokenizer-data.json (module docstring). Every measure runs in one process pool at once: TokEval's metrics
+    per corpus, each arm's record, depth invariance per program source, fidelity per arm and source."""
+    seconds, start = {}, time.perf_counter()
     tokenizers = [get_tokenizer(arm) for arm in ARMS]
     for tokenizer in tokenizers:
+        begin = time.perf_counter()
         for corpus in SOURCES:
             split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
             compile_source(corpus, "val", tokenizer)
+        seconds[f"compile {tokenizer.name}"] = time.perf_counter() - begin
     for corpus in SOURCES:
         sizes = []
         for tokenizer in tokenizers:
@@ -237,16 +414,32 @@ def data() -> None:
             ends = np.concatenate([[0], np.cumsum(tokenizer.token_lengths[tokens])])
             sizes.append(np.diff(ends[np.fromfile(path.with_suffix(".idx"), dtype=np.int64)]))
         assert all(np.array_equal(sizes[0], other) for other in sizes[1:]), corpus
-    record = {tokenizer.name: describe(tokenizer) | {"code": {}, "operator_isolation": {}} for tokenizer in tokenizers}
     code = [s for s, spec in SOURCES.items() if spec.category != TEXT]
-    for corpus in code + list(mixture.FILE_STAGE.groups["math"].sources):
-        tokens, docs = tokeval.val_split(corpus, tokenizers)
-        operators = tokeval.operator_isolation(tokens, docs, tokenizers)
-        metrics = tokeval.code(corpus, tokens, docs, tokenizers) if corpus in code else None
-        for arm in record:
-            record[arm]["operator_isolation"][corpus] = operators[arm]
-            if metrics is not None:
-                record[arm]["code"][corpus] = metrics[arm]
+    programs = [s for s, spec in SOURCES.items() if spec.category in tokeval.PROGRAMS]
+    checks = [(arm, source) for arm in ARMS for source in SOURCES]
+    begin = time.perf_counter()
+    math_corpora = list(mixture.FILE_STAGE.groups["math"].sources)
+    with ProcessPoolExecutor(mp_context=SPAWN) as pool:  # every map submits at once; the longest first
+        corpora = pool.map(corpus_metrics, [(c, c in code) for c in code + math_corpora])
+        described = pool.map(describe, ARMS)
+        invariance = pool.map(depth_invariance, programs)
+        fidelities = pool.map(fidelity, checks)
+        record = {"arms": dict(zip(ARMS, described, strict=True))}
+        for arm in ARMS:
+            record["arms"][arm] |= {"depth_invariance": {}, "fidelity": {}, "code": {}, "operator_isolation": {}}
+        for source, by_arm in zip(programs, invariance, strict=True):
+            for arm, result in by_arm.items():
+                record["arms"][arm]["depth_invariance"][source] = result
+        for (arm, source), result in zip(checks, fidelities, strict=True):
+            record["arms"][arm]["fidelity"][source] = result
+        for corpus, operators, metrics in corpora:
+            for arm in ARMS:
+                record["arms"][arm]["operator_isolation"][corpus] = operators[arm]
+                if metrics is not None:
+                    record["arms"][arm]["code"][corpus] = metrics[arm]
+    seconds["measures"] = time.perf_counter() - begin
+    record["overlap"] = overlap()
+    record["seconds"] = seconds | {"all": time.perf_counter() - start}
     (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
@@ -290,7 +483,7 @@ def runs() -> None:
     verdicts = {arm: (c["parsing"], c["code"]) for arm, c in contrasts.items()}
     qualified = {arm for arm, v in verdicts.items() if "worse" not in v and "better" in v}
     rare = {arm: r["val_reads"]["merged"]["under 100"]
-            for arm, r in json.loads((RESULTS / "tokenizer-data.json").read_text(encoding="utf-8")).items()}
+            for arm, r in json.loads((RESULTS / "tokenizer-data.json").read_text(encoding="utf-8"))["arms"].items()}
     frequency = "bpe" in qualified or (verdicts["bpe"] == ("equal", "equal") and rare["bpe"] < rare["sa-bpe"])
     # the positive control gates the decision: undetected, the corpus keeps its pattern and score
     control = verdicts["sa-bpe-fused"][0] == "worse"

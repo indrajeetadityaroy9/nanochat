@@ -17,11 +17,12 @@ document's tokens are its compiled ids and their spans its bytes, so positions a
   character outside it (" +" isolates "+"; a compound operator cut in two still counts), and a compound operator is
   preserved when one token holds it; micro-averaged over occurrences. Its correlations with MBPP (§F.3) are not
   significant after Benjamini-Hochberg adjustment;
-- Rényi efficiency of order 2 (TokEval's Table 2, which reports order 2 of its 1, 2, 2.5 and 3): H_2 of the documents'
-  token distribution over log2 of the vocabulary size, descriptive only: its correlations with code bits per byte and
-  MBPP are not significant (TokEval Table 2), and two inference-time BPE variants raise it (at order 3) in nearly every
-  setting while lowering BLEU ("Two Counterexamples to Tokenization and the Noiseless Channel", arXiv 2402.14614,
-  Tables 3 and 4).
+- Rényi efficiency at TokEval's orders (RENYI_ORDERS, its constants.py DEFAULT_RENYI_ALPHAS; its Table 2 reports
+  order 2): H_alpha of the documents' token distribution, Shannon's entropy at order 1, over log2 of the declared
+  vocabulary size (information_theoretic.py, after arXiv 2306.16842), descriptive only: its correlations with code bits
+  per byte and MBPP are not significant (TokEval Table 2), and two inference-time BPE variants raise it (at order 3) in
+  nearly every setting while lowering BLEU ("Two Counterexamples to Tokenization and the Noiseless Channel",
+  arXiv 2402.14614, Tables 3 and 4).
 The code of a corpus is each document of a corpus of program texts (PROGRAMS: repository files, exercises, synthetic
 files, functions), parsed by its source's language, and each fenced Python or C++ block of notebooks and conversations
 (kaggle_notebooks; codeforces_cots' prompts and solutions: each prompt's template `<your code here>` is a snippet of no
@@ -47,6 +48,7 @@ PROGRAMS = (REPOSITORY_FILE, EXERCISE, SYNTHETIC_FILE, FUNCTION)
 CATEGORIES = ("identifier", "keyword", "operator", "literal", "delimiter")
 FENCE = re.compile(rb"```(python|py|cpp|c\+\+)[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 FENCE_GRAMMARS = {b"python": "Python", b"py": "Python", b"cpp": "C++", b"c++": "C++"}
+RENYI_ORDERS = (1.0, 2.0, 2.5, 3.0)
 # math.py _OPERATOR_SPAN and _OPERATOR_CATEGORIES (a match outside the categories, a lone "!", is skipped)
 OPERATOR = re.compile(rb"(?:\*\*|//|<<|>>|<=|>=|=>|==|!=|&&|\|\||\?:|[+\-*/=<>!&|^~%])")
 OPERATOR_CATEGORIES = {"arithmetic": ("+", "-", "*", "/", "//", "%", "**"),
@@ -56,10 +58,12 @@ OPERATOR_CATEGORIES = {"arithmetic": ("+", "-", "*", "/", "//", "%", "**"),
 WHITESPACE = np.array([b < 128 and chr(b).isspace() for b in range(256)])
 
 
-def renyi_efficiency(counts: np.ndarray, vocab_size: int) -> float:
-    """H_2 of the token counts' distribution over log2 of the vocabulary size."""
+def renyi_efficiency(counts: np.ndarray, vocab_size: int, order: float) -> float:
+    """H_order of the token counts' distribution (Shannon's at order 1) over log2 of the vocabulary size
+    (information_theoretic.py compute_renyi_entropy, compute_renyi_efficiency_analysis)."""
     p = counts[counts > 0] / counts.sum()
-    return float(-np.log2(p @ p) / np.log2(vocab_size))
+    entropy = -(p @ np.log2(p)) if order == 1 else np.log2(np.sum(p**order)) / (1 - order)
+    return float(entropy / np.log2(vocab_size))
 
 
 def val_split(corpus: str, tokenizers: list[Tokenizer]) -> tuple[dict[str, np.ndarray], list[bytes]]:
