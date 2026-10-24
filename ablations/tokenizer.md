@@ -1,9 +1,9 @@
 # Tokenizer ablation
 
 The experiment decides the split pattern and the merge score of the corpus's tokenizer, the vocabulary every later
-step of pretraining reads. The code is `ablations/tokenizer.py`, which also holds the pre-registered rules. The records
+step of pre-training reads. The code is `ablations/tokenizer.py`, which also holds the pre-registered rules. The records
 are in `results/tokenizer-*.json`. Every figure below comes from those records unless it is marked [arithmetic] (derived
-from them) or [inference].
+from them), [inference] or [unverified] (measured, record not kept).
 
 ## Status
 
@@ -11,7 +11,8 @@ from them) or [inference].
 |---|---|---|---|---|
 | `vocabularies` | done, 2026-10-24 | `results/tokenizer-vocabularies.json` | `5ba5025` | GH200, 737 s |
 | `intrinsic` | done, 2026-10-24 | `results/tokenizer-intrinsic.json` | `ebd8058` | GH200, 114 s |
-| `runs` | blocked on the training cutover (`nanochat/corpus/gh200.md` step 4) | `results/tokenizer.json`, `.jsonl` | | |
+| `data` | done, 2026-10-24 | `results/tokenizer-data.json` | `ba01bb5` | GH200, 3,002 s |
+| `runs` | ready; waits for the user's approval | `results/tokenizer.json`, `.jsonl` | | |
 | `adopt` | after `runs` | `artifacts/corpus/tokenizer` | | |
 
 The arms' vocabularies are in `artifacts/corpus/tokenizer-ablation/<arm>/` (`tokenizer.tiktoken`, `tokenizer.pattern`,
@@ -21,19 +22,21 @@ The arms' vocabularies are in `artifacts/corpus/tokenizer-ablation/<arm>/` (`tok
 ## Fixed across arms
 
 - **Vocabulary size:** 32,768 ids: the 256 bytes, 32,508 merges, BOS and three FIM sentinels (`<fim_prefix>`,
-  `<fim_suffix>`, `<fim_middle>`). SA-BPE ran at this size (arXiv 2604.14053 App. B, Table 5).
-- **Trainer:** the data crate's byte-level BPE, within the chunks of the arm's split pattern. Every merge is an argmax
-  with fixed tie-breaks, so the arms are trained concurrently and independently. Training is deterministic: a second
-  training of the four arms gave identical vocabularies.
+  `<fim_suffix>`, `<fim_middle>`); the reason for the size is in `nanochat/corpus/normalization_doc.md` §9.
+- **Trainer:** the corpus crate's byte-level BPE (`nanochat/corpus/crate/train.rs`), within the chunks of the arm's
+  split pattern. Every merge is an argmax with fixed tie-breaks, so the arms are trained concurrently and
+  independently. Training is deterministic: a second training of the four arms gave identical vocabularies
+  [unverified].
 - **Encoder:** tiktoken, whose regex engine (fancy-regex) the trainer shares.
 - **Sample:** one draw, shared by every arm (below).
 - **Evaluation text:** the val splits of the corpus's 18 sources, 6.21 GB of text [arithmetic].
 
 ### Sample
 
-Each of the file stage's 17 sources contributes its share of the stage's bytes as its share of 13.38 GB. A source's
-share of the stage's bytes is its share of the stage's tokens (`mixture.FILE_STAGE.shares`) at production's bytes per
-token. Within a source the sample is systematic, in shard order: row i is taken when floor((i + 1)·f) > floor(i·f),
+Each of the file stage's 17 sources contributes its share of the stage's bytes as its share of 13.38 GB
+(`SAMPLE_BYTES`). A source's share of the stage's bytes is its share of the stage's tokens (`mixture.FILE_STAGE`) at
+the reference tokenizer's bytes per token (`mixture.BYTES_PER_TOKEN`). Within a source the sample is systematic, in
+shard order: row i is taken when floor((i + 1)·f) > floor(i·f),
 where f is the fraction of the source's rows taken.
 
 Rationale:
@@ -80,7 +83,7 @@ The repository sources' sampled bytes exceed their targets by the path comment p
 
 | Arm | Split pattern | Merge score | Role |
 |---|---|---|---|
-| sa-bpe | `SPLIT_PATTERN` (production) | SA-BPE, F·ln R | baseline: production's tokenizer recipe on this corpus |
+| sa-bpe | `SPLIT_PATTERN` (the reference tokenizer's) | SA-BPE, F·ln R | baseline: the reference tokenizer's recipe on this corpus |
 | sa-bpe-fused | `FUSED_PATTERN` | F·ln R | positive control: line breaks fused to punctuation |
 | hybrid | `HYBRID_PATTERN` | F·ln R | whitespace: line breaks and indentation as chunks of their own |
 | bpe | `SPLIT_PATTERN` | frequency F | score: SA-BPE against plain BPE |
@@ -197,7 +200,7 @@ Each measure plans the runs, gates their validity, tests an arm's mechanism or b
 - **Bytes per token** of a source: its val bytes over its val tokens.
   - File stage's: Σ_s w_s / Σ_s (w_s / b_s) over the stage's byte shares w_s, so it compares arms at equal bytes. Also
     computed per group.
-  - It sets an arm's token budget in the runs and production's compile and pack budgets.
+  - It sets an arm's token budget in the runs and the corpus's compile and pack budgets.
 - **Train tokens over draw (extent margin):** per group read in part (synthetic code, text, math), the train tokens of
   its sources under the arm over the group's draw. Below 1, the corpus's extent is too small for that arm.
 - **Validity, asserted** (a failure stops the step):
@@ -304,7 +307,7 @@ Every arm passed every validity check. 3,600 val texts per arm were checked chun
 | nemotron_transpilation_cpp | 0.0 | 0.0 | 97.9 | 0.0 |
 | codexglue_python | 0.0 | 0.0 | 100.0 | 0.0 |
 
-## Runs (pre-registered, pending the training cutover)
+## Runs (pre-registered; wait for the user's approval)
 
 **Design:**
 - Every arm at d16, two seeds each (0 and 1): 8 runs through `python -m nanochat.run experiment=tokenizer`
@@ -315,9 +318,11 @@ Every arm passed every validity check. 3,600 val texts per arm were checked chun
   fewer steps [arithmetic].
 - **Contexts:** the corpus's 8,192 and 32,768 tokens. Bits per byte is also reported by byte offset, the bytes of
   context a better compressor sees (arXiv 2503.13423 §3.1, App. B.1).
-- **Size of the set:** 20 tokens per scaling parameter of d16 under sa-bpe (arXiv 2203.15556 Table 3). For each code
-  corpus, the leading train documents whose sa-bpe tokens fill its file-level draw, so code binds every arm's
-  `max_ratio`. Text, math and the repository corpora hold a margin over their draws.
+- **Size of the set** (`document_set`): 20 tokens per scaling parameter of d16 under sa-bpe (arXiv 2203.15556
+  Table 3; d16 at 20 is 4,552 steps of 294,912 tokens). Each code corpus takes the fewest leading train shards whose
+  estimated sa-bpe tokens hold its file-stage draw; text, math and the repository corpora hold `MARGIN` (1.5) times
+  their draws. Whole shards hold more than the draw: every arm's `max_ratio` on the set is 29.5–31.5 (sa-bpe 31.42,
+  sa-bpe-fused 29.48, hybrid 31.49, bpe 31.42), 6,710–7,167 steps of 3 micro-batches (`results/tokenizer-data.json`).
 
 **Measures:**
 - **Parsing:** per MBPP+ problem, whether the healed greedy completion compiles. MBPP+ alone, because its prompts leave
@@ -331,8 +336,9 @@ seed from both sides):
   exact sign test over the problems whose difference is non-zero (McNemar's exact test at one seed, the post's App. D).
   Better or worse at p < 0.05, else equal.
 - **Code bits per byte:** the difference of the arms' seed means. Better or worse beyond 1.96·σ·√(2/n), else equal.
-  - σ = 0.0034 is the pooled seed standard deviation of 8K code bits per byte, from six d8 runs at 20 tokens per
-    parameter on production's data, carried to d16 and to this corpus [inference].
+  - σ = 0.0034 (`CODE_SIGMA`) is the pooled seed standard deviation of 8K code bits per byte, from six d8 runs at 20
+    tokens per parameter on the reference tokenizer's data (records not in `results/` [unverified]), carried to d16
+    and to this corpus [inference].
   - At n = 2 the margin is 0.0067 bits per byte [arithmetic].
 
 **Decision** (`results/tokenizer.json` `"analysis"` `"decision"`):
@@ -361,7 +367,7 @@ untested].
 - Two seeds at d16. The literature's evidence is from one 24-layer model of about 1.27B parameters with 128K–131K
   ids, mostly on one Python benchmark (the post, *What we trained*, *Scope and limitations*), so a dismissal here rests
   on these runs alone.
-- σ comes from d8 runs on production's data [inference].
+- σ comes from d8 runs on the reference tokenizer's data [unverified, inference].
 - The positive control's effect is documented at tokenizer corpora of up to 50% code; this sample is 85.6% code.
 - The document as the authorship unit of non-repository text is untested in SA-BPE (arXiv 2604.14053 §6).
 - The hybrid changes three clauses at once.
@@ -369,7 +375,8 @@ untested].
 ## Reproduction
 
 Inside the project image on the GH200 (64 Neoverse-V2 cores, 525 GB; Python 3.12.3, tiktoken 0.14.0, tokenizers
-0.23.2, numpy 2.1.0, scipy 1.18.1, pyarrow 26.0.0, regex 2026.9.29), after `python -m nanochat.corpus.publish pull`:
+0.23.2 as the records' provenance states, numpy 2.1.0, scipy 1.18.1, pyarrow 26.0.0, regex 2026.9.29), after
+`python -m nanochat.corpus.publish pull`:
 
 ```bash
 python -m ablations.tokenizer vocabularies   # sample, then the four arms at once
@@ -385,3 +392,4 @@ python -m ablations.tokenizer adopt
 | training, concurrent: sa-bpe / sa-bpe-fused / hybrid / bpe | 690 / 683 / 687 / 624 s |
 | val compiles, 4 arms × 18 sources | 53 s |
 | measures | 19 s |
+| `data`: compile and pack of the d16 set under every arm | 2,767 s and 235 s |
