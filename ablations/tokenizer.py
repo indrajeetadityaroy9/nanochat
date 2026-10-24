@@ -111,6 +111,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import regex
 from scipy.stats import binomtest, norm
+from tokenizers import models
 
 from ablations import tokeval
 from ablations.harness import ALPHA, Setting, main
@@ -327,35 +328,28 @@ def depth_invariance(source: str) -> dict[str, dict[str, float]]:
     return result
 
 
-def replay(chunk: bytes, merges: list[tuple[int, int]], rank: dict[tuple[int, int], int]) -> list[int]:
-    """A chunk's training segmentation: the merges in their order, each over every non-overlapping occurrence from the
-    left (data/crate train.rs merge_pair)."""
-    ids = list(chunk)
-    while len(ids) > 1:
-        best = min((rank.get(pair, len(merges)) for pair in itertools.pairwise(ids)), default=len(merges))
-        if best == len(merges):
-            break
-        (a, b), out, i = merges[best], [], 0
-        while i < len(ids):
-            if i + 1 < len(ids) and ids[i] == a and ids[i + 1] == b:
-                out.append(256 + best)
-                i += 2
-            else:
-                out.append(ids[i])
-                i += 1
-        ids = out
-    return ids
+def byte_alphabet() -> list[str]:
+    """GPT-2's reversible map of the 256 bytes to printable characters, the byte-level alphabet of Hugging Face
+    tokenizers' ByteLevel: a printable byte stands for itself, every other takes the next code point from 256."""
+    printable = {*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)}
+    beyond = iter(range(256, 512))
+    return [chr(b) if b in printable else chr(next(beyond)) for b in range(256)]
 
 
 def fidelity(task: tuple[str, str]) -> dict[str, float]:
     """An arm's fidelity on a source's first FIDELITY_DOCUMENTS val texts: their bytes, those its pattern's chunks
     (Python regex, whose chunks fancy-regex's equal) leave uncovered, the chunks, per kB and the longest, the chunks
-    whose tiktoken encoding differs from the arm's merges replayed in training order (replay), and the texts whose
-    encoding does not decode back."""
+    whose tiktoken encoding (by the rank of the joined bytes) differs from the arm's training segmentation, and the
+    texts whose encoding does not decode back. The training segmentation is Hugging Face tokenizers' BPE model over
+    the arm's merges: listed pairs merged by rank, each over every occurrence from the left (data/crate train.rs
+    merge_pair), never a pair whose bytes another pair made."""
     arm, source = task
     tokenizer = get_tokenizer(arm)
-    merges = [tuple(pair) for pair in json.loads((ABLATION / arm / "merges.json").read_text())]
-    rank = {pair: i for i, pair in enumerate(merges)}
+    alphabet = byte_alphabet()
+    entries = tokenizer.token_bytes[:tokenizer.bos_token_id]
+    spelled = ["".join(alphabet[b] for b in entry) for entry in entries]
+    merges = json.loads((ABLATION / arm / "merges.json").read_text())
+    bpe = models.BPE(vocab={s: i for i, s in enumerate(spelled)}, merges=[(spelled[a], spelled[b]) for a, b in merges])
     pattern = regex.compile(tokenizer.pattern)
     first = pq.ParquetFile(curated_shards(source, "val")[0]).read_row_group(0)
     docs = texts(source, first.slice(0, FIDELITY_DOCUMENTS))
@@ -367,7 +361,8 @@ def fidelity(task: tuple[str, str]) -> dict[str, float]:
         for m in pattern.finditer(doc):
             piece = m.group().encode()
             covered, chunks, longest = covered + len(piece), chunks + 1, max(longest, len(piece))
-            differing += tokenizer.enc._encode_single_piece(piece) != replay(piece, merges, rank)
+            trained = [t.id for t in bpe.tokenize("".join(alphabet[b] for b in piece))]
+            differing += tokenizer.enc._encode_single_piece(piece) != trained
     return {"documents": len(docs), "bytes": n_bytes, "uncovered_bytes": n_bytes - covered, "chunks": chunks,
             "chunks_per_kb": 1000 * chunks / n_bytes, "longest_chunk_bytes": longest, "differing_chunks": differing,
             "roundtrip_failures": failures}
