@@ -148,6 +148,10 @@ schema (`schema.py`):
   and encoding. Measured on the raw files: 152,139 CR LF files and 2,157 leading marks in Stack-Edu Python's first
   file, 866 of Kaggle's 580,195 notebooks with a CR (863 CR LF), 80 of 847,872 ClimbMix rows in 10 files, 7 of
   UltraData-Code L3's 2.76M rows and 7 of UltraData-Math L3's; Kaggle's carry Python into the code group.
+  - Every leading mark is dropped, not one: 19 Stack-Edu Python files and 44 C++ files begin with two or three
+    (measured after one was dropped), a file encoded again with a mark without its first dropped. Both languages drop
+    one mark and reject a second, so with one dropped the 19 Python files failed the check and the 44 C++ files kept
+    a mark (found by the invariant check).
 - Stack-Edu's `relative_path` is its `path` without the leading "/".
 - **Otherwise every text is verbatim.** Kaggle notebooks are the publisher's Markdown: "we start with the notebook
   title, dataset description when available and put the notebook (converted to a Python script) in a code block"

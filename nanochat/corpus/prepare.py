@@ -172,10 +172,12 @@ def sha1(texts: pa.ChunkedArray) -> pa.Array:
 
 
 def lines(texts: pa.ChunkedArray) -> pa.ChunkedArray:
-    """texts with CR LF and a lone CR as LF and a leading U+FEFF dropped: a source file as Python and C++ read it
+    """texts with CR LF and a lone CR as LF and every leading U+FEFF dropped: a source file as Python and C++ read it
     (Python Language Reference §2.1.2 "Physical lines" and §2.1.4 "Encoding declarations"; C++23 [lex.phases] phases 1
-    and 2), and any other text, whose CR and leading byte-order mark come from its platform and encoding."""
-    texts = pc.replace_substring_regex(texts, "^\ufeff", "")
+    and 2), and any other text, whose CR and leading byte-order marks come from its platform and encoding. A file can
+    begin with more than one mark, encoded again with one without its first dropped: both languages drop one mark and
+    reject a second."""
+    texts = pc.replace_substring_regex(texts, "^\ufeff+", "")
     return pc.replace_substring(pc.replace_substring(texts, "\r\n", "\n"), "\r", "\n")
 
 
