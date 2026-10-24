@@ -93,16 +93,20 @@ Evidence:
   Nemotron's rewriting and transpilation) and UltraData-Math L3 enter a sample that held none of them, so the bound is
   borrowed [inference]. `tokenizer.main` reports each group's train tokens under the retrained tokenizer over its
   draw, and `pack.fit` names a source that runs short.
-  Measured on the files fetched (standardized text bytes at production's bytes per token, before the val split):
+  Measured on the files fetched (text bytes at production's bytes per token): standardized, before the val split, and
+  the curated train split, after the Python check and deduplication:
 
-  | Group | Files | Text | Held over the draw |
-  |---|---|---|---|
-  | Synthetic code | UltraData-Code L3: 28 of 147 (Python), 32 of 167 (C++); Nemotron: 13 of 64 (rewriting), 13 of 64 (transpilation) | 109.67 GB | 1.136 |
-  | ClimbMix | 187 of 6,543 | 47.13 GB | 1.075 |
-  | UltraData-Math L3 | 2, 2, 3 and 2 of 50 per format | 11.57 GB | 1.185 |
+  | Group | Files | Standardized text | Held over the draw | Curated train text | Its train over the draw |
+  |---|---|---|---|---|---|
+  | Synthetic code | UltraData-Code L3: 28 of 147 (Python), 32 of 167 (C++); Nemotron: 13 of 64 (rewriting), 13 of 64 (transpilation) | 109.67 GB | 1.136 | 107.17 GB | 1.110 |
+  | ClimbMix | 187 of 6,543 | 47.13 GB | 1.075 | 46.61 GB | 1.063 |
+  | UltraData-Math L3 | 2, 2, 3 and 2 of 50 per format | 11.57 GB | 1.185 | 11.45 GB | 1.173 |
 
   A source's few files make its sample random at the granularity of files: one Nemotron file is 1.56% of its subset,
   so the synthetic group holds 13.6% more than its draw, where the widening and the split ask 7.1% [arithmetic].
+  Curation keeps every group above the 6% widening: Nemotron's copies are short files. They are 9.61% of rewriting's
+  rows (§4.3), yet its curated train text is 98.5% of its standardized text (64.54 of 65.53 GB, the 1% val split
+  included).
 
 ## 2. Schema
 
@@ -358,6 +362,16 @@ Measured on the first Hub file of the other two Python corpora, fetched through 
 Stack-Edu's text comes from Software Heritage without Stack v3's placeholders, and its Python 2 files are the largest
 share: repair keeps 98.05% of its rows against 88.81%.
 
+Measured on this corpus (`curate`, every standardized row of the five Python sources):
+
+| Source | Standardized rows | Kept, as is or repaired | Dropped |
+|---|---|---|---|
+| Stack-Edu Python | 25,285,896 | 24,792,202 (98.05%) | 493,694 (1.95%) |
+| UltraData-Stack-v3-L2 Python | 24,671,724 | 24,298,490 (98.49%) | 373,234 (1.51%) |
+| UltraData-Code L2 Python | 72,844,227 | 72,194,279 (99.11%) | 649,948 (0.89%) |
+| Nemotron rewriting | 20,292,444 | 20,237,191 (99.73%) | 55,253 (0.27%) |
+| CodeXGLUE Python | 251,820 | 251,728 (99.96%) | 92 (0.04%) |
+
 The cumulative order rewrote more than a file needed: of the files 2to3 repaired, in 15,000 rows each of
 UltraData-Stack-v3-L2 and UltraData-Code L2 Python, 103 of 539 and 93 of 424 also had their leading tabs expanded,
 including tabs inside triple-quoted strings, and 94 and 25 their placeholders rewritten, while 514 and 397 parse after
@@ -416,6 +430,28 @@ six repository corpora after `nanochat/data`'s normalization: 172,953,953 rows h
 - **Repetition is what exact deduplication prevents:** "performance of an 800M parameter model can be degraded to that
   of a 2x smaller model (400M params) by repeating 0.1% of the data 100 times" (arXiv 2205.10487).
 
+**Measured on this corpus** (`curate`, after the Python check): 233,460,809 rows hold 54,573,518 copies (23.38%) and
+178,887,291 distinct texts; the six repository corpora's 178,812,062 rows hold 51,805,152 copies (28.97%, against
+R5's 29.0%).
+
+| Source | Rows | Copies of an earlier row | Kept |
+|---|---|---|---|
+| Stack-Edu Python | 24,792,202 | 22,274 (0.09%) | 24,769,928 |
+| Stack-Edu C++ | 16,246,723 | 9,447 (0.06%) | 16,237,276 |
+| UltraData-Stack-v3-L2 Python | 24,298,490 | 6,567,995 (27.03%) | 17,730,495 |
+| UltraData-Stack-v3-L2 C++ | 17,990,102 | 5,494,464 (30.54%) | 12,495,638 |
+| UltraData-Code L2 Python | 72,194,279 | 29,690,879 (41.13%) | 42,503,400 |
+| UltraData-Code L2 C++ | 23,290,266 | 10,020,093 (43.02%) | 13,270,173 |
+| UltraData-Code L3 Python | 3,952,421 | 35 (0.00%) | 3,952,386 |
+| UltraData-Code L3 C++ | 4,330,659 | 14 (0.00%) | 4,330,645 |
+| Nemotron rewriting | 20,237,191 | 1,945,778 (9.61%) | 18,291,413 |
+| Nemotron transpilation | 5,972,251 | 790,924 (13.24%) | 5,181,327 |
+| CodeXGLUE Python | 251,728 | 497 (0.20%) | 251,231 |
+| UltraData-Math L3, four formats | 3,486,732 | 0 | 3,486,732 |
+| Codeforces-CoTs | 22,914 | 0 | 22,914 |
+| Kaggle notebooks | 580,195 | 0 | 580,195 |
+| ClimbMix | 15,814,656 | 31,118 (0.20%) | 15,783,538 |
+
 **Which copy is kept.** The literature keeps the copy with the most stars. OpenCoder keeps "the code files with the
 highest star count as well as the latest commit time" (arXiv 2411.04905 §2.1.1), and StarCoder2 does the same in
 near-deduplication "to preserve repository context" (§3.1). Only UltraData-Stack-v3-L2 carries stars (in
@@ -453,6 +489,10 @@ case-insensitive, and of 4,146,969 names shared by UltraData-Stack-v3-L2 Python 
 63 differ only in case, 2 of them on both sides of production's case-sensitive split (measured). Otherwise this is
 production's split; no paper sets its size. Deduplication runs over both splits first, so no validation text has an
 exact copy in training.
+
+Measured on the curated shards: 0.92–1.04% of each source's rows are validation rows, CodeXGLUE's 0.71% (its
+validation holds whole repositories); no repository of the seven sources that name one and no Codeforces problem is
+on both sides, and no text is in both (178,887,291 rows, as many distinct texts).
 
 ## 5. Mixture
 
