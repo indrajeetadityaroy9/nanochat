@@ -109,8 +109,8 @@ def train(*, model: GPT, run: RunPlan, vocabulary: Path, variant: dict, seed: in
             mixture, train_iter = read(stage=run.stage_at(step + 1), start=0)
         lr = schedulers[0].get_last_lr()[0]
         losses, upcoming = [], []
-        for (x, y, cu_seqlens), share in zip(batches, step_shares([y for _, y, _ in batches]), strict=True):
-            loss = compiled(x, y, cu_seqlens) * share
+        for (x, y, cu_seqlens, segments), share in zip(batches, step_shares([b[1] for b in batches]), strict=True):
+            loss = compiled(x, y, cu_seqlens, segments) * share
             losses.append(loss.detach())
             loss.backward()
             if reading:

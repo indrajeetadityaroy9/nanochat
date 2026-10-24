@@ -53,18 +53,19 @@ def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, step
     """{"bits", "bytes"} per context bucket (bucket i: contexts in (CONTEXTS[i-1], CONTEXTS[i]]) and {"offset_bits",
     "offset_bytes"} per byte-offset bucket (bucket i: targets after [OFFSETS[i-1], OFFSETS[i]) bytes of their segment)
     of the targets of the first `steps` batches under losses (GPT.losses). token_bytes: bytes per token, 0 for special
-    tokens. cu_seqlens is padded to num_segments by repeating its last offset (one compiled shape across corpora);
-    searchsorted(right) maps a position to its segment."""
+    tokens. cu_seqlens is padded to num_segments by repeating its last offset (one compiled shape across corpora; the
+    attention reads only each batch's segments, corpus/loader.py PretrainingBatches); searchsorted(right) maps a
+    position to its segment."""
     device = token_bytes.device
     edges = torch.tensor(CONTEXTS, dtype=torch.int32, device=device)
     offset_edges = torch.tensor(OFFSETS, dtype=torch.int64, device=device)
     total = torch.zeros(2, len(CONTEXTS) + 1, dtype=torch.float64, device=device)
     offset_total = torch.zeros(2, len(OFFSETS) + 1, dtype=torch.float64, device=device)
-    for x, y, cu_seqlens in islice(batches, steps):
+    for x, y, cu_seqlens, segments in islice(batches, steps):
         cu_seqlens = torch.cat([cu_seqlens, cu_seqlens[-1:].expand(num_segments + 1 - cu_seqlens.numel())])
         y = y.flatten()
         nbytes = torch.where(y == PretrainingBatches.PAD, 0, token_bytes[y.clamp_min(0)])
-        nats = torch.where(nbytes > 0, losses(x, y.view_as(x), cu_seqlens), 0.0)
+        nats = torch.where(nbytes > 0, losses(x, y.view_as(x), cu_seqlens, segments), 0.0)
         t = torch.arange(y.numel(), dtype=torch.int32, device=device)
         start = cu_seqlens[torch.searchsorted(cu_seqlens, t, right=True) - 1]
         context = t - start + 1
@@ -140,6 +141,7 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
     bos = tokenizer.bos_token_id
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
     cu_seqlens = torch.arange(0, batch_rows * seq_len + 1, seq_len, dtype=torch.int32, device=device)
+    segments = torch.tensor(batch_rows, dtype=torch.int32)
     results = {}
     for name in SOLUTION_BENCHMARKS:
         seqs = []
@@ -155,7 +157,7 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
             for r, (ids, first) in enumerate(seqs[g:g + batch_rows]):
                 x[r, :len(ids) - 1] = torch.tensor(ids[:-1])
                 y[r, first - 1:len(ids) - 1] = torch.tensor(ids[first:])
-            batches.append((x.to(device), y.to(device), cu_seqlens))
+            batches.append((x.to(device), y.to(device), cu_seqlens, segments))
         results[name] = sums(losses, batches, token_bytes, steps=len(batches), num_segments=batch_rows)
     return results
 

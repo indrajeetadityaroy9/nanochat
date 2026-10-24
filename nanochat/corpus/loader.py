@@ -115,7 +115,8 @@ def mixture_rows(weights: np.ndarray, *, start: int, count: int) -> np.ndarray:
 
 
 class PretrainingBatches:
-    """Re-iterable micro-batches (inputs, targets, cu_seqlens) of a mixture {corpus: weight} of packed corpora.
+    """Re-iterable micro-batches (inputs, targets, cu_seqlens, segments) of a mixture {corpus: weight} of packed
+    corpora.
     orders: {corpus: row ids in read order, -1 an empty row (all padding)}; start: the run rows already consumed
     (resume), whose rows of each corpus (mixture_rows) are skipped; iteration stops when a
     corpus's order is exhausted, without the partial micro-batch. reading: "fim" reads the packed fill-in-the-middle
@@ -125,7 +126,10 @@ class PretrainingBatches:
       batch_rows x seq_len inputs (FA4's varlen layout) on the device: each piece (its BOS and its tokens: a document,
       a document's cut part, or a fill-in-the-middle example) and each row's padding is a segment. Their number is
       fixed per loader, so a compiled model sees one shape: num_segments, the unused entries repeating the last offset
-      (empty segments)."""
+      (empty segments).
+    - segments: the micro-batch's segments, a 0-dim int32 tensor on the host: the attention reads cu_seqlens'
+      first segments + 1 entries only (ops/flash_attn.py), as FA4 spends time on every segment it is given, empty or
+      not."""
 
     PAD = -1  # an assembled row's padding: the loss's ignore index as a target, BOS as an input
 
@@ -167,7 +171,7 @@ class PretrainingBatches:
             out[at] = self.bos
         return [*starts, at]
 
-    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         consumed = np.bincount(mixture_rows(self.weights, start=0, count=self.start), minlength=len(self.names))
         orders = [iter(order[skip:]) for order, skip in zip(self.orders, consumed, strict=True)]
         for position in itertools.count(self.start, self.batch_rows):
@@ -187,4 +191,5 @@ class PretrainingBatches:
             cu[:len(bounds)] = bounds
             cu_seqlens = torch.from_numpy(cu).pin_memory().to(self.device, non_blocking=True)
             inputs = batch[:, :-1]
-            yield inputs.masked_fill(inputs == self.PAD, self.bos), batch[:, 1:].to(torch.int64), cu_seqlens
+            yield (inputs.masked_fill(inputs == self.PAD, self.bos), batch[:, 1:].to(torch.int64), cu_seqlens,
+                   torch.tensor(len(bounds), dtype=torch.int32))
