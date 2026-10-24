@@ -1,4 +1,4 @@
-"""Run settings shared by training and evaluation: the published dataset, vocabulary, head width, micro-batch, the
+"""Settings shared across the code: the published dataset (corpus/publish.py), vocabulary, head width, micro-batch, the
 repo-level share of steps, RoPE base. The stages and their mixture are the corpus's (corpus/mixture.py)."""
 
 # The published corpus (corpus/publish.py)

@@ -38,7 +38,7 @@
  *             softmax(s / T) (head only)
  *   k_commit  the prompt's next token, or once past the prompt the choice, becomes each active slot's next input
  *
- * Numerics follow the eager forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary table, q/k
+ * Numerics follow model/gpt.py's forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary table, q/k
  * gains and value-embedding gate (no contraction), the gate's mix rounded once to bf16; resid/x0 lambdas as bf16 values
  * on bf16 tensors (PyTorch's 0-dim fp32 x bf16 promotion), each product and sum rounded; ReLU^2 from the fp32
  * accumulators as QuACK's gemm_act relu_sq (quack/activation.py), one bf16 rounding; F.rms_norm's fp32 epsilon; the
@@ -634,9 +634,9 @@ typedef struct {
 } Layer;
 
 typedef struct {
-    /* max_len: a slot's cache positions (the caller's longest sequence); context: the model's sequence_len, which sets
-     * the rotary table and attn_run. optin: the opt-in shared memory per block. store: the prompt store's positions */
-    int B, L, H, C, F, vocab, max_len, context, sms, optin, attn_wave, attn_run, store;
+    /* max_len: a slot's cache positions (the caller's longest sequence). optin: the opt-in shared memory per block.
+     * store: the prompt store's positions */
+    int B, L, H, C, F, vocab, max_len, optin, attn_wave, attn_run, store;
     const bf16 *wte, *lm_head;
     const float *cos, *sin;   /* the fp32 rotary table [context][HALF] */
     Layer *layer;
@@ -797,8 +797,8 @@ constexpr int GLOBAL_PTRS = 4, LAYER_PTRS = 8;
 
 extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *scal, const int *window, void *stream) {
     Decoder *d = (Decoder *)calloc(1, sizeof(Decoder));
-    d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->context = cfg[5];
-    d->store = cfg[6];
+    d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->store = cfg[6];
+    const int context = cfg[5];  /* the model's sequence_len: the rotary table's rows, and attn_run's */
     d->H = d->C / HEAD_DIM;
     d->wte = (const bf16 *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
     d->lm_head = (const bf16 *)ptrs[3]; d->stream = (cudaStream_t)stream;
@@ -811,9 +811,9 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
                        (const bf16 *)p[4], (const float *)p[5], (const float *)p[6], (const float *)p[7], scal[2 * l],
                        scal[2 * l + 1], window[l]};
     }
-    int device;
+    int device, sms;
     cudaGetDevice(&device);
-    cudaDeviceGetAttribute(&d->sms, cudaDevAttrMultiProcessorCount, device);
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device);
     cudaDeviceGetAttribute(&d->optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
     for (const void *kernel : {(const void *)k_gemv<false>, (const void *)k_gemv<true>})
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, d->optin);
@@ -822,10 +822,10 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
      * context, not max_len, so a position's splits, and the order its keys are summed in, do not depend on max_len */
     int resident;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, 0);
-    d->attn_wave = d->sms * resident / d->H;
+    d->attn_wave = sms * resident / d->H;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, d->attn_wave * sizeof(float));
-    d->attn_wave = d->sms * resident / d->H;
-    d->attn_run = (d->context - 1 + d->attn_wave - 1) / d->attn_wave;
+    d->attn_wave = sms * resident / d->H;
+    d->attn_run = (context - 1 + d->attn_wave - 1) / d->attn_wave;
     /* B: the most slots (at most MAX_BATCH) that fit free memory */
     size_t slot = 0, free_bytes, total_bytes;
     slot_buffers(d, [&](void **, size_t bytes) { slot += bytes; });

@@ -1,6 +1,6 @@
 /*
- * Value-embedding gate and mix of model/gpt.py Attention (ResFormer's value residual behind a per-head gate), forward
- * and backward, one pass over each row's memory:
+ * Value-embedding gate and mix of model/gpt.py Attention (per-layer token-indexed value embeddings behind a per-head
+ * gate), forward and backward, one pass over each row's memory:
  *   z = n W^T (fp32; W the gate's (H, C) fp32 weight), gate = 2 sigmoid(z),
  *   ve = bf16(table[idx]), out = bf16(v + gate[head] ve).
  * Backward from dout (dv = dout, passed through by the op):
@@ -11,7 +11,8 @@
  *
  * Layout: n, v, out, dout, dn contiguous (rows, C), C = H * HEAD_DIM; idx (rows,) int32; table, dtable (V, C) fp32;
  * gate, dz (rows, H) fp32. A row is one warp; lane l holds the VEC-wide chunks l, l + WARP, ... of the row, each inside
- * one head (HEAD_DIM is a multiple of VEC). H is a template parameter, so per-head arrays stay in registers.
+ * one head (HEAD_DIM is a multiple of VEC). H is a template parameter, so per-head arrays stay in registers: the
+ * depths run, d8, d16, d24 (model/gpt.py gpt_config; conf/experiment), have H = 2, 4, 6.
  *
  * Deterministic dW without atomics: ve_dw's blocks each sum dz x n over a fixed range of rows per column (one thread
  * per column) into a per-block partial, and ve_dw_sum adds the partials in block order.
@@ -206,7 +207,7 @@ template <int H> static void backward(const void *dout, const void *n, const voi
     ve_dw_sum_kernel<<<(H * C + THREADS - 1) / THREADS, THREADS, 0, s>>>((const float *)part, nb, H * C, (float *)dw);
 }
 
-/* H: heads per row (C = H * HEAD_DIM); 0 when H is not compiled. */
+/* H: heads per row (C = H * HEAD_DIM); 0 when H is not compiled (2, 4, 6). */
 extern "C" int ve_forward(const void *n, const void *v, const void *idx, const void *table, const void *w, void *out,
                           void *gate, long long rows, int H, void *stream) {
     const cudaStream_t s = (cudaStream_t)stream;
@@ -214,7 +215,6 @@ extern "C" int ve_forward(const void *n, const void *v, const void *idx, const v
         case 2: forward<2>(n, v, idx, table, w, out, gate, rows, s); return 1;
         case 4: forward<4>(n, v, idx, table, w, out, gate, rows, s); return 1;
         case 6: forward<6>(n, v, idx, table, w, out, gate, rows, s); return 1;
-        case 8: forward<8>(n, v, idx, table, w, out, gate, rows, s); return 1;
         default: return 0;
     }
 }
@@ -228,7 +228,6 @@ extern "C" int ve_backward(const void *dout, const void *n, const void *idx, con
         case 2: backward<2>(dout, n, idx, table, w, gate, dn, dtable, table_rows, dw, dz, part, rows, s); return 1;
         case 4: backward<4>(dout, n, idx, table, w, gate, dn, dtable, table_rows, dw, dz, part, rows, s); return 1;
         case 6: backward<6>(dout, n, idx, table, w, gate, dn, dtable, table_rows, dw, dz, part, rows, s); return 1;
-        case 8: backward<8>(dout, n, idx, table, w, gate, dn, dtable, table_rows, dw, dz, part, rows, s); return 1;
         default: return 0;
     }
 }

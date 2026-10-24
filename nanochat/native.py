@@ -1,4 +1,5 @@
-"""Native libraries (CUDA kernels, the Rust crates' Python modules), built on first use, cached under NATIVE."""
+"""Native libraries (CUDA kernels, the Rust crates' Python modules), built on first use, cached under NATIVE; pointer
+and stream, the ctypes arguments of csrc's entry points."""
 
 import ctypes
 import functools
@@ -32,6 +33,15 @@ def native_library(name: str, sources: list[Path], build: Callable[[Path], None]
         build(tmp)
         tmp.replace(path)
     return path
+
+
+def pointer(t: torch.Tensor) -> ctypes.c_void_p:
+    return ctypes.c_void_p(t.data_ptr())
+
+
+def stream() -> ctypes.c_void_p:
+    """The current CUDA stream, which the kernels launch on."""
+    return ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
 
 
 @functools.cache

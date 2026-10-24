@@ -1,7 +1,8 @@
 """
 Value-embedding gate and mix of model/gpt.py Attention (csrc/ve_gate.cu), one launch forward and one pass backward:
-v + 2 sigmoid(n W^T) per head x bf16(table[idx]) (ResFormer's value residual, arXiv 2410.17897, behind a per-head gate;
-nanochat e85db6b), the gate's logits in fp32 and the mix rounded once to bf16, as the PyTorch expressions it replaces.
+v + 2 sigmoid(n W^T) per head x bf16(table[idx]) (per-layer token-indexed value embeddings: modded-nanogpt record #14,
+MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6, behind a per-head gate; nanochat e85db6b), the gate's logits in fp32 and
+the mix rounded once to bf16, as the PyTorch expressions it replaces.
 The embedding lookup is the op's, so its backward writes the table's gradient (fp32, atomics as F.embedding's backward)
 and the gate weight's (fp32, a fixed summation order).
 """
@@ -12,22 +13,14 @@ import torch
 from torch import Tensor
 from torch.autograd.function import FunctionCtx
 
-from nanochat.native import cuda_library
-
-
-def pointer(t: Tensor) -> ctypes.c_void_p:
-    return ctypes.c_void_p(t.data_ptr())
-
-
-def stream() -> ctypes.c_void_p:
-    return ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
+from nanochat.native import cuda_library, pointer, stream
 
 
 @torch.library.custom_op("nanochat::ve_mix", mutates_args=(), device_types="cuda")
 def ve_mix(n: Tensor, v: Tensor, idx: Tensor, table: Tensor, w: Tensor) -> tuple[Tensor, Tensor]:
-    """n (B, T, C) bf16 normed stream, v (B, T, H, HEAD_DIM) bf16, idx (B, T) int32 token ids, table (V, C) fp32 value
-    embeddings, w (H, C) fp32 gate weight -> (mixed v like v, gate (B*T, H) fp32, saved for the backward)."""
-    n, v, idx = n.contiguous(), v.contiguous(), idx.contiguous()
+    """n (B, T, C) bf16 normed stream, v (B, T, H, HEAD_DIM) bf16, idx (B, T) int32 token ids (all contiguous), table
+    (V, C) fp32 value embeddings, w (H, C) fp32 gate weight -> (mixed v like v, gate (B*T, H) fp32, saved for the
+    backward)."""
     out, gate = torch.empty_like(v), v.new_empty((idx.numel(), w.size(0)), dtype=torch.float32)
     if not cuda_library("ve_gate").ve_forward(pointer(n), pointer(v), pointer(idx), pointer(table), pointer(w),
                                               pointer(out), pointer(gate), ctypes.c_longlong(idx.numel()), w.size(0),
@@ -44,8 +37,7 @@ def ve_mix_fake(n: Tensor, v: Tensor, idx: Tensor, table: Tensor, w: Tensor) -> 
 @torch.library.custom_op("nanochat::ve_mix_backward", mutates_args=(), device_types="cuda")
 def ve_mix_backward(dout: Tensor, n: Tensor, idx: Tensor, table: Tensor, w: Tensor,
                     gate: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """(dn like n, dtable like table, dw like w); dv is dout itself."""
-    dout, n, idx = dout.contiguous(), n.contiguous(), idx.contiguous()
+    """(dn like n, dtable like table, dw like w); dv is dout itself. dout contiguous."""
     lib = cuda_library("ve_gate")
     dn, dtable, dw, dz = torch.empty_like(n), torch.empty_like(table), torch.empty_like(w), torch.empty_like(gate)
     part = w.new_empty((lib.ve_dw_blocks(), *w.shape))  # per-block partial gate-weight gradients

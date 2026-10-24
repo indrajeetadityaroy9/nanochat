@@ -34,7 +34,7 @@ from nanochat.ops.linear import linear, relu2_mlp
 from nanochat.ops.qk_prologue import qk_norm_rope
 from nanochat.ops.ve_gate import ve_mix
 
-# Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 §2.2.2, Fig. 4)
+# Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 Table 9)
 ASPECT_RATIO = 960 // 32
 
 

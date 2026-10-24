@@ -41,8 +41,10 @@ from nanochat.run import RunConfig, base_plan, plan_of
 
 # The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords
 SHORT = 5
-# d8's long horizon: the shortest at which d8's law batch grows to 2 micro-batches (schedule.plan's rounding), so the
-# trend is measured under batch co-scaling as the base model trains, its batch growth netted out by the square-root rule
+# d8's long horizon, the recorded runs': its law batch is 2 micro-batches there (schedule.plan's rounding; chosen as the
+# shortest such horizon before D1, 2 micro-batches from 77.7 tokens per parameter on under DeepSeek LLM Eq. 2's M), so
+# the trend is measured under batch co-scaling as the base model trains, its batch growth netted out by the
+# square-root rule
 LONG = 200
 # Step-Law's token exponent of the optimal lr (arXiv 2503.04715 §1 Eq. 1: eta = 1.79 N^-0.713 D^0.307)
 STEP_LAW_D = 0.307

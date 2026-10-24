@@ -13,10 +13,11 @@ logsumexp and gathers the target logit from the fp32 accumulators without storin
 bf16 logits and cross entropy.
 
 With an output-logit cap c (model/gpt.py GPTConfig.softcap; 92d63d4 gpt.py:511-515, Gemma 2's final-logit
-softcapping, arXiv 2408.00118 §2) z becomes c tanh(z / c) (tanh in fp32), in kernels Inductor fuses (capped,
-capped_losses): lm_loss runs QuACK's cross entropy on the capped logits (bf16) and multiplies its logit gradient by
-the cap's derivative 1 - tanh(z / c)^2 (bf16) before the two gradient GEMMs; lm_losses takes logsumexp minus the
-target logit of the capped fp32 logits of each row chunk's GEMM (CHUNK rows), as lse_target_epi has no tanh epilogue.
+softcapping, arXiv 2408.00118 §2) z becomes c tanh(z / c) (tanh in fp32), in kernels Inductor fuses (cap_,
+capped_losses): lm_loss caps z in place (bf16) beside the cap's derivative 1 - tanh(z / c)^2 (bf16), two logits-sized
+buffers, runs QuACK's cross entropy on the capped logits and multiplies its logit gradient by the derivative before
+the two gradient GEMMs; lm_losses takes logsumexp minus the target logit of the capped fp32 logits of each row chunk's
+GEMM (CHUNK rows), as lse_target_epi has no tanh epilogue.
 Without a cap both run as above.
 """
 
@@ -34,10 +35,12 @@ CHUNK = 8192
 
 
 @torch.compile(dynamic=False, fullgraph=True)
-def capped(z: Tensor, softcap: float) -> tuple[Tensor, Tensor]:
-    """(softcap tanh(z / softcap), its derivative 1 - tanh(z / softcap)^2), each in z's dtype."""
+def cap_(z: Tensor, softcap: float) -> Tensor:
+    """z = softcap tanh(z / softcap) in place, one kernel; returns its derivative 1 - tanh(z / softcap)^2; each in z's
+    dtype."""
     t = torch.tanh(z.float() / softcap)
-    return (softcap * t).to(z.dtype), (1 - t.square()).to(z.dtype)
+    z.copy_((softcap * t).to(z.dtype))
+    return (1 - t.square()).to(z.dtype)
 
 
 @torch.compile(dynamic=False, fullgraph=True)
@@ -45,7 +48,6 @@ def capped_losses(z: Tensor, target: Tensor, softcap: float) -> Tensor:
     """logsumexp minus the target's entry of the rows of softcap tanh(z / softcap), z fp32."""
     z = softcap * torch.tanh(z / softcap)
     return torch.logsumexp(z, dim=1) - z.gather(1, target[:, None]).squeeze(1)
-
 
 
 # Opaque to torch.compile: functionalizing the in-place logit gradient corrupted x's gradient.
@@ -57,16 +59,13 @@ def lm_loss(x: Tensor, weight: Tensor, target: Tensor, softcap: float | None) ->
     logits = x @ w.t()
     scale = 1 / (target != PretrainingBatches.PAD).sum().float()
     loss = torch.empty(target.shape, device=x.device, dtype=torch.float32)
-    if softcap is None:
-        grad = logits
-    else:  # grad: the capped logits; logits: the cap's derivative
-        grad, logits = capped(logits, softcap)
-    cross_entropy_fwd_out(grad, target, target_logit=None, loss=loss, lse=None, dx=grad, weight=None,
+    derivative = None if softcap is None else cap_(logits, softcap)
+    cross_entropy_fwd_out(logits, target, target_logit=None, loss=loss, lse=None, dx=logits, weight=None,
                           ignore_index=PretrainingBatches.PAD)
-    if softcap is not None:
-        grad.mul_(logits)
-    return (loss.sum() * scale, gemm(grad, w, alpha=scale, out_dtype=x.dtype),
-            torch.mm(grad.t(), x, out_dtype=weight.dtype) * scale)
+    if derivative is not None:
+        logits.mul_(derivative)
+    return (loss.sum() * scale, gemm(logits, w, alpha=scale, out_dtype=x.dtype),
+            torch.mm(logits.t(), x, out_dtype=weight.dtype) * scale)
 
 
 @lm_loss.register_fake

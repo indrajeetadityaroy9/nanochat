@@ -11,14 +11,13 @@ import torch
 from torch import Tensor
 from torch.autograd.function import FunctionCtx
 
-from nanochat.native import cuda_library
+from nanochat.native import cuda_library, pointer, stream
 
 
 def launch(kernel: Callable[..., int], *tensors: Tensor) -> None:
     """kernel(tensor pointers, rows and heads of tensors[0] = q, sequence length, current stream)."""
     q = tensors[0]
-    kernel(*(ctypes.c_void_p(t.data_ptr()) for t in tensors), ctypes.c_longlong(q.numel() // q.size(-1)), q.size(2),
-           q.size(1), ctypes.c_void_p(torch.cuda.current_stream().cuda_stream))
+    kernel(*map(pointer, tensors), ctypes.c_longlong(q.numel() // q.size(-1)), q.size(2), q.size(1), stream())
 
 
 @torch.library.custom_op("nanochat::qk_norm_rope", mutates_args=(), device_types="cuda")

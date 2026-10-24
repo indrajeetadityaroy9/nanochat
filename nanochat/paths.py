@@ -13,10 +13,10 @@ CORPUS = ARTIFACTS / "corpus"    # the corpus pipeline's stages (nanochat/corpus
 # RUNS/<key>/ per run (nanochat/run.py): .hydra/, metrics.jsonl (train/metrics.py), step<step>.pt
 # (train/checkpoint.py), eval-step<step>.json (eval/suite.py evaluate), run.log (its phases' output)
 RUNS = ARTIFACTS / "runs"
-CACHE = ARTIFACTS / "cache"      # compiler and dataset caches (docker/Dockerfile)
-NATIVE = CACHE / "native"        # native libraries and their build directories (native.py)
+# native libraries and their build directories (native.py), beside docker/Dockerfile's compiler caches in artifacts/cache
+NATIVE = ARTIFACTS / "cache" / "native"
 RESULTS = ROOT / "results"       # an experiment's records (ablations/records.py; tracked; results/.gitkeep)
 
 if __name__ == "__main__":
-    for directory in (CORPUS, RUNS, NATIVE):  # NATIVE's parents: CACHE
+    for directory in (CORPUS, RUNS, NATIVE):
         directory.mkdir(parents=True, exist_ok=True)
