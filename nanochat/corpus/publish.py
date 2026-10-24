@@ -22,6 +22,7 @@ from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, da
 
 from nanochat.config import DATASET
 from nanochat.corpus import mixture
+from nanochat.corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
 from nanochat.corpus.sources import SOURCES, curated_dir
 from nanochat.paths import CORPUS
 
@@ -47,15 +48,20 @@ def curated() -> dict[str, dict[str, dict[str, int]]]:
 
 
 def card(manifest: dict) -> str:
-    """The dataset card: what the dataset holds, its layout, and per source its Hub origin, license and rows."""
+    """The dataset card: what the dataset holds, its layout, and per source its Hub origin, license, curated columns and
+    rows. The Hub's viewer is off: its Parquet converter would copy every shard into one configuration of mixed
+    schemas."""
     rows = []
     for source, splits in manifest["curated"].items():
         origin = manifest["sources"][source]
         license_ = (dataset_info(origin["repo"]).card_data or {}).get("license", "not declared")
+        columns = (SAMPLE_FILE if SOURCES[source].schema is REPOSITORY_FILE else SOURCES[source].schema).names
         rows.append(f"| `{source}` | [{origin['repo']}](https://huggingface.co/datasets/{origin['repo']}) "
-                    f"`{origin['revision'][:8]}` | {license_} | {SOURCES[source].schema.names} | "
+                    f"`{origin['revision'][:8]}` | {', '.join(license_) if isinstance(license_, list) else license_} | "
+                    f"{', '.join(f'`{c}`' for c in columns)} | "
                     f"{splits['train']['shards']} / {splits['train']['rows']:,} | {splits['val']['rows']:,} |")
     return "\n".join([
+        "---", "pretty_name: nanochat pretraining corpus, curated", "viewer: false", "---", "",
         "# nanochat pretraining corpus, curated", "",
         "The curated text of the nanochat pretraining corpus (`nanochat/corpus`, specified by",
         "`nanochat/corpus/normalization_doc.md`) at code commit "
@@ -66,8 +72,8 @@ def card(manifest: dict) -> str:
         "Layout: `curated/<source>/<split>/<k>.parquet`. A repository source's shard k holds the repositories whose",
         "lowercased name has `md5_number(lower(repo_name)) % 100 = k`: `val/0`, `train/1` to `train/99`, each",
         "sorted by repository and path and cut into import-connected samples (`sample`). Any other source holds out",
-        "1% of its groups (its lowercased repository for issues and functions, the problem for Codeforces-CoTs, the",
-        "document otherwise) in `val/0`, and its train rows in `id` order over `train/0` to `train/99`.",
+        "1% of its groups (its lowercased repository for functions, the problem for Codeforces-CoTs, the document",
+        "otherwise) in `val/0`, and its train rows in `id` order over `train/0` to `train/99`.",
         "`manifest.json` holds each source's Hub revision and files, and each split's shards, rows and text bytes.", "",
         "| Source | Origin (revision) | License | Columns | Train shards / rows | Val rows |",
         "|---|---|---|---|---|---|", *rows, ""])
