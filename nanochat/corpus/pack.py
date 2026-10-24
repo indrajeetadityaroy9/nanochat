@@ -100,6 +100,12 @@ def shard_count(corpus: str, split: str, vocabulary: Path) -> int:
     return len(shard_bounds(corpus, split, get_tokenizer(vocabulary))) - 1
 
 
+def write_val(corpus: str, vocabulary: Path, seq_len: int) -> int:
+    """A corpus's val split packed whole (write)."""
+    shards = range(shard_count(corpus, "val", vocabulary))
+    return write(corpus, "val", vocabulary, packed_shards(corpus, "val", vocabulary, shards, seq_len), seq_len)
+
+
 def take(corpus: str, more: Iterator[Shard]) -> Shard:
     """The next packed shard of a corpus read in part; it has one while its rows fall short of its draw."""
     shard = next(more, None)
@@ -148,25 +154,26 @@ def pack_stage(stage: mixture.Stage, vocabulary: Path, whole: dict[str, list[int
 
 
 def main() -> None:
-    """The corpus's tokenizer's packs for the base model's pre-training run."""
+    """The corpus's tokenizer's packs for the base model's pre-training run; the val splits in threads beside the
+    stages, so a val shard's longest document does not hold up the cores."""
     data_crate()  # built once, before the threads call it
     stages = (mixture.FILE_STAGE, mixture.REPO_STAGE)
-    for stage in stages:
-        for corpus in stage.sources:
-            write(corpus, "val", TOKENIZER,
-                  packed_shards(corpus, "val", TOKENIZER, range(shard_count(corpus, "val", TOKENIZER)), stage.seq_len),
-                  stage.seq_len)
-    trailing = set(repository_parts(TOKENIZER))
-    file_whole = {s: [i for i, path in enumerate(curated_shards(s, "train")) if int(path.stem) not in trailing]
-                  for s in mixture.REPOSITORY_SOURCES}
-    file_whole |= {s: list(range(shard_count(s, "train", TOKENIZER))) for s in mixture.FILE_STAGE.supply}
-    _, taken = pack_stage(mixture.FILE_STAGE, TOKENIZER, file_whole,
-                          {s: list(range(shard_count(s, "train", TOKENIZER))) for s in mixture.PART})
-    repo_whole = {c: list(range(shard_count(c, "train", TOKENIZER)))
-                  for c in [*mixture.REPOSITORIES.values(), *mixture.REPO_STAGE.supply]}
-    pack_stage(mixture.REPO_STAGE, TOKENIZER, repo_whole,
-               {s: list(range(taken[s], shard_count(s, "train", TOKENIZER)))
-                for s in mixture.PART if s in mixture.REPO_STAGE.sources})
+    with ThreadPoolExecutor() as threads:
+        vals = [threads.submit(write_val, corpus, TOKENIZER, stage.seq_len)
+                for stage in stages for corpus in stage.sources]
+        trailing = set(repository_parts(TOKENIZER))
+        file_whole = {s: [i for i, path in enumerate(curated_shards(s, "train")) if int(path.stem) not in trailing]
+                      for s in mixture.REPOSITORY_SOURCES}
+        file_whole |= {s: list(range(shard_count(s, "train", TOKENIZER))) for s in mixture.FILE_STAGE.supply}
+        _, taken = pack_stage(mixture.FILE_STAGE, TOKENIZER, file_whole,
+                              {s: list(range(shard_count(s, "train", TOKENIZER))) for s in mixture.PART})
+        repo_whole = {c: list(range(shard_count(c, "train", TOKENIZER)))
+                      for c in [*mixture.REPOSITORIES.values(), *mixture.REPO_STAGE.supply]}
+        pack_stage(mixture.REPO_STAGE, TOKENIZER, repo_whole,
+                   {s: list(range(taken[s], shard_count(s, "train", TOKENIZER)))
+                    for s in mixture.PART if s in mixture.REPO_STAGE.sources})
+        for val in vals:
+            val.result()
     held = sum(shard_tokens(c, "train", TOKENIZER).sum() for c in mixture.REPOSITORIES.values())
     print(f"repository partitions of the 32K stage: {sorted(trailing)}; its repositories hold {held:,} tokens",
           flush=True)

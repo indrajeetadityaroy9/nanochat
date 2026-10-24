@@ -160,11 +160,6 @@ def repository_window() -> int:
     return max(1, MEMORY // (PEAK * largest))
 
 
-def repository_pool() -> ProcessPoolExecutor:
-    """A pool of repository_window() workers, so idle workers hold no more than the tasks in flight."""
-    return ProcessPoolExecutor(repository_window(), mp_context=SPAWN)
-
-
 def write_repositories(vocabulary: Path, parts: list[int], results: Iterator[Documents]) -> None:
     """The repositories corpora's splits from results, per language (mixture.REPOSITORIES order) the documents of val
     partition 0, then of train partitions `parts`."""
@@ -217,7 +212,8 @@ def repository_parts(vocabulary: Path) -> list[int]:
 
 def main() -> None:
     """The corpus's tokenizer's compiled corpus: the sources' splits in a pool of a worker per core, then the 32K
-    stage's repositories corpora in a repository_pool()."""
+    stage's repositories corpora in a pool of repository_window() workers, so idle workers hold no more than the tasks
+    in flight."""
     tokenizer = get_tokenizer(TOKENIZER)
     jobs = list(itertools.product(SOURCES, ("val", "train")))
     with ProcessPoolExecutor(mp_context=SPAWN) as pool, ThreadPoolExecutor(len(jobs)) as threads:
@@ -230,7 +226,7 @@ def main() -> None:
     # (Codeforces-CoTs), which it reads whole
     need = mixture.CODE_SHARE * mixture.REPO_STAGE.tokens - sum(shard_tokens(s, "train", TOKENIZER).sum()
                                                                for s in mixture.REPO_STAGE.supply)
-    with repository_pool() as pool:
+    with ProcessPoolExecutor(repository_window(), mp_context=SPAWN) as pool:
         compile_stage(TOKENIZER, pool, need)
 
 

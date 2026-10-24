@@ -64,10 +64,11 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The base model's pre-training run: d24 (docs/h100-pretraining.md), 86,975 steps of 12 micro-batches; its last
-# REPO_SHARE of steps (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv 2409.12186 §3.2.1-3.2.2) at
-# 32K, placed as train/schedule.plan places it. A Stage's tokens are this run's; any other run draws rows by the
-# stage's shares at its own size (loader.weights)
+# The base model's pre-training run: d24 (docs/h100-pretraining.md), 102.6B tokens, written as 86,975 steps of 12
+# micro-batches (train/schedule.plan's D1 batch reads them as 69,580 steps of 15); its last REPO_SHARE of steps
+# (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv 2409.12186 §3.2.1-3.2.2) at 32K, placed as
+# train/schedule.plan places it. A Stage's tokens are this run's; any other run draws rows by the stage's shares at its
+# own size (loader.weights)
 STEPS, STEP_TOKENS = 86_975, 12 * MICRO_BATCH_TOKENS
 REPO_STEPS = round(REPO_SHARE * STEPS)
 
