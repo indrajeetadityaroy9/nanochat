@@ -36,6 +36,8 @@ use pyo3::pybacked::PyBackedStr;
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
+use crate::PerWorker;
+
 type Pair = (u32, u32);
 
 /// A distinct chunk of the documents: its token ids, its number of occurrences, and the sorted distinct sources of the
@@ -114,8 +116,9 @@ impl PartialEq for Job {
 impl Eq for Job {}
 
 /// The distinct chunks of the documents (document d from source sources[d]) as words of byte ids. Documents are split in
-/// parallel into one chunk table per worker and hash shard; each shard's tables are then merged in parallel.
-fn count_words<'a>(texts: &'a [PyBackedStr], sources: &[u32], pattern: &Regex) -> Vec<Word> {
+/// parallel, each worker by its own regex, into one chunk table per worker and hash shard; each shard's tables are then
+/// merged in parallel.
+fn count_words<'a>(texts: &'a [PyBackedStr], sources: &[u32], pattern: &PerWorker<Regex>) -> Vec<Word> {
     struct Chunk {
         count: i64,
         sources: Vec<u32>,
@@ -127,7 +130,7 @@ fn count_words<'a>(texts: &'a [PyBackedStr], sources: &[u32], pattern: &Regex) -
         .fold(
             || (0..shards).map(|_| FxHashMap::default()).collect::<Vec<_>>(),
             |mut tables, doc| {
-                for piece in pattern.find_iter(texts[doc].as_str()) {
+                for piece in pattern.get().find_iter(texts[doc].as_str()) {
                     let piece = piece.unwrap().as_str();
                     let chunk = tables[FxBuildHasher.hash_one(piece) as usize % shards]
                         .entry(piece)
@@ -239,7 +242,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Score {
 
 /// The merge loop: pops the lazy heap until its top entry's F and R are exact, then merges that pair in the words that
 /// hold it and queues the pairs the merge creates.
-fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merges: usize, score: Score) -> Vec<Pair> {
+fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &PerWorker<Regex>, n_merges: usize, score: Score) -> Vec<Pair> {
     let n_sources = *sources.iter().max().unwrap() as usize + 1;
     let mut words = count_words(texts, sources, pattern);
     let incidences: usize = words.iter().map(|w| w.sources.len()).sum();
@@ -318,6 +321,6 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &Regex, n_merge
 #[pyo3(signature = (texts, sources, *, pattern, n_merges, score))]
 pub(crate) fn train(py: Python<'_>, texts: Vec<PyBackedStr>, sources: Vec<u32>, pattern: &str, n_merges: usize,
                     score: Score) -> Vec<Pair> {
-    let pattern = Regex::new(pattern).unwrap();
+    let pattern = PerWorker::new(|| Regex::new(pattern).unwrap());
     py.detach(|| train_merges(&texts, &sources, &pattern, n_merges, score))
 }

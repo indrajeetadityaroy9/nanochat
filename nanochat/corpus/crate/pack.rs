@@ -7,7 +7,6 @@ use std::cell::OnceCell;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::sync::OnceLock;
 
 use memmap2::Mmap;
 use pyo3::prelude::*;
@@ -20,7 +19,7 @@ use rustc_hash::FxHashSet;
 use tiktoken_rs::CoreBPE;
 use tree_sitter::{Language, Node, Parser, Tree};
 
-use crate::Lang;
+use crate::{Lang, PerWorker};
 
 /// A source language's tree-sitter grammar and its containers: the node kinds whose named children are a sequence of
 /// whole statements or declarations, so that a position between two of them cuts no statement. Python
@@ -217,24 +216,9 @@ fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng:
 /// A piece of a document: its token range, and as a FIM example its tokens (fim_example).
 type Piece = ([usize; 2], Option<Vec<u16>>);
 
-/// The tokenizer's encoder (tiktoken-rs's CoreBPE) of each rayon worker, built on the worker's first FIM example:
-/// clones of one CoreBPE share fancy-regex's pool of matching scratch space, which the workers would contend for.
-struct Encoders<'a> {
-    token_bytes: &'a [Vec<u8>],
-    pattern: &'a str,
-    workers: Vec<OnceLock<CoreBPE>>,
-}
-
-impl Encoders<'_> {
-    fn get(&self) -> &CoreBPE {
-        self.workers[rayon::current_thread_index().unwrap()].get_or_init(|| {
-            CoreBPE::new(self.token_bytes.iter().enumerate().map(|(rank, token)| (token.clone(), rank as u32)).collect(), Default::default(), self.pattern).unwrap()
-        })
-    }
-}
-
 /// What a document's pieces are cut from: the split's tokens, each token's bytes and whether it ends a line or starts a
-/// character, the row length, the grammar of a repository corpus and, in its train split, fill-in-the-middle.
+/// character, the row length, the grammar of a repository corpus and, in its train split, fill-in-the-middle with the
+/// tokenizer's encoder of each worker.
 struct Split<'a> {
     tokens: &'a [u16],
     token_bytes: &'a [Vec<u8>],
@@ -242,7 +226,7 @@ struct Split<'a> {
     starts_char: &'a [bool],
     row_len: usize,
     grammar: Option<&'a Grammar>,
-    fim: Option<(&'a Fim, &'a Encoders<'a>)>,
+    fim: Option<(&'a Fim, &'a PerWorker<'a, CoreBPE>)>,
 }
 
 impl Split<'_> {
@@ -395,7 +379,7 @@ pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, 
     // a token starts a character unless its first byte is a UTF-8 continuation byte 10xxxxxx (RFC 3629 §3)
     let starts_char: Vec<bool> = token_bytes.iter().map(|token| token[0] & 0xC0 != 0x80).collect();
     let grammar = grammar.map(Grammar::new);
-    let encoders = Encoders { token_bytes: &token_bytes, pattern, workers: (0..rayon::current_num_threads()).map(|_| OnceLock::new()).collect() };
+    let encoders = PerWorker::new(|| CoreBPE::new(token_bytes.iter().enumerate().map(|(rank, token)| (token.clone(), rank as u32)).collect(), Default::default(), pattern).unwrap());
     let (index, counts, fim_tokens) = py.detach(|| {
         let split = Split { tokens: bytemuck::cast_slice(&tokens), token_bytes: &token_bytes, ends_line: &ends_line, starts_char: &starts_char, row_len,
                             grammar: grammar.as_ref(), fim: fim.as_ref().map(|fim| (fim, &encoders)) };
