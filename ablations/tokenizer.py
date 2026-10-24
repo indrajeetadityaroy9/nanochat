@@ -86,6 +86,8 @@ seeds where both have an evaluation (a diverged run drops its seed from the arm'
 adopt: the decided vocabulary as the corpus's tokenizer: the arm of the decided pattern and score, or, bpe's score
 carried to another arm's pattern, that pair trained on the sample.
 
+The comparisons, their measures and the recorded results: ablations/tokenizer.md.
+
 python -m ablations.tokenizer vocabularies|intrinsic|runs|adopt
 """
 import datetime
