@@ -208,7 +208,7 @@ def filtered_completions(decoder: NativeDecoder, tokenizer: Tokenizer, items: li
     def request(i: int) -> Request:
         prompt, constraint, _ = heal(tokenizer, prompts[i])  # a fresh constraint per candidate
         if language == "python":
-            constraint = AllOf(constraint, SyntaxConstraint(tokenizer.enc.decode(prompt[1:]), suffix=""))
+            constraint = AllOf(constraint, SyntaxConstraint(tokenizer, tokenizer.enc.decode(prompt[1:]), suffix=""))
         return Request(prompt=prompt, max_tokens=budgets[i] + 1, constraint=constraint,
                        stop=StopAt(tokenizer, items[i].stops, healed=dropped[i]))
 
@@ -230,7 +230,7 @@ def filtered_middles(decoder: NativeDecoder, tokenizer: Tokenizer, problems: lis
     prefix)."""
     return filtered(decoder, lambda i: dataclasses.replace(
                         middle_request(tokenizer, prompts[i], lines[i], max_tokens=max_tokens),
-                        constraint=SyntaxConstraint(problems[i]["prompt"], suffix=problems[i]["suffix"])),
+                        constraint=SyntaxConstraint(tokenizer, problems[i]["prompt"], suffix=problems[i]["suffix"])),
                     lambda i, ids: fim_lines(tokenizer.enc.decode(ids), lines[i]),
                     lambda i, middle: (problems[i]["prompt"], problems[i]["prompt"] + middle + problems[i]["suffix"],
                                        []),

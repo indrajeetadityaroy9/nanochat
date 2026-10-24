@@ -10,7 +10,7 @@ literature, citing exact sections, or, when only a measurement can settle it, de
 | TrainModel (refactor: model, ops, csrc, train, config, paths, native) | done | §2 |
 | ArchitectureCheck (model and regime vs papers) | done | §1, §5 |
 | CorpusCuration (refactor: schema, sources, parallel, prepare, curate, publish) | done | §2, §6 |
-| CorpusTokens (refactor: tokenizer, mixture, compile, pack, loader, data crate) | running | pending |
+| CorpusTokens (refactor: tokenizer, mixture, compile, pack, loader, data crate) | done | §2 |
 | EfficiencyResearch (GH200 throughput) | running | §3 (partial) |
 | RegimeAnswers (D1, D2, D10, D11, Muon warmup, d8@20 record) | running | §8 |
 | OptimizerAnswers (D3, D6, D7) | running | §8 |
@@ -61,11 +61,15 @@ reference's own spread, CUDA SASS/PTX identical, no interface or record-format c
   `safe.directory={ROOT}`, stale references (`nanochat/data`, `packed.json`), `fissix` imported at module level.
   Verified identical: `texts`/`text_bytes`/`curated_shards` on all 1,812 shards and 2.1M rows; `curate.main()` end to
   end on synthetic standardized files for all 18 sources (1,822 output files byte-identical); `prepare` on one real Hub
-  file per category (raw, standardized, manifest, extent identical; the extent matches the published file list);
+  file per category (raw, standardized, extent identical; the extent matches the published file list);
   `publish` push/pull with the Hub faked. Kept on purpose: `Category.name`, `push`'s `if old:`, resumable raw/checked
   files, the repair `except` set, the sample-cut loop.
-- Pending: CorpusTokens. Then a second independent audit pass over every slice, ruff and the 120-char check on the
-  GH200, one commit pushed from the GH200.
+- CorpusTokens: the data crate's FIM line widening removed (the only caller passed `line=0.0`, the corpus decides "no
+  line widening", §6; `random_bool(0.0)` was each piece's last draw, so no ChaCha8 draw moves), a dict literal,
+  stale comments. Verified byte-identical: compile (val of 6 sources, FIM train shards with both grammars, the
+  repositories corpora's val), packs at both contexts, `PretrainingBatches` (both readings, nonzero starts), `weights`,
+  `mixture_rows`, the crate's `train` (both scores) and `repository_samples`: 141 files, 6.15 GB.
+- Committed and pushed from the GH200: `4ade225`.
 - Verification hazard (fixed): ref and new shared `artifacts/cache/native`, and cargo's single fingerprint let a new
   build reuse the reference library; the poisoned data-crate `.so` was deleted, comparisons redone with private caches.
 
@@ -104,15 +108,9 @@ ArchitectureCheck (no code effect):
 
 ## 6. Dataset `iaroy/nanochat-data`
 
-No change required for training or the ablation: 1,812 shards + manifest (identical to the pulled copy, code
-`aa37215`, an ancestor) + a data-only card; nothing computational reads the manifest's `bytes` or `revision`
-(`prepare` compares each source's file list, the card reads `repo` and `rows`).
-- **M1 (decision)** the published manifest is not what the current `publish.py` writes: its split `bytes` are
-  `text_bytes + 4 × rows` (the publishing commit's count, e.g. stack_edu_python train 66,812,305,784 vs 66,714,195,924,
-  gap exactly 4 × 24,527,465), and its sources carry `revision` fields the current `prepare` no longer writes (revision
-  pinning removed in `69c198e`). A future `publish push` rewrites both. Options: leave the published manifest as the
-  publishing commit's record / upload a regenerated `manifest.json` alone (one small commit) so the Hub matches the
-  code.
+**Resolved (user decision): no manifest.** `manifest.json` is not needed for the research and is gone: `prepare`
+prepares every source (fetching keeps raw files), `publish` writes shards and card only, `pull` fetches shards. The Hub
+dataset holds the 1,812 shards, the regenerated card and `.gitattributes` (commit `b091cb47`).
 - Trigger for a data change: a §1 decision that raises the base run's token budget (`mixture.STEPS`) or a mixture share
   (D8) beyond the extents' margins → extend on the GB10, prepare, curate, `publish push`.
 
@@ -126,3 +124,29 @@ then `runs` (8 d16 runs, decision), then `adopt`, compile, pack, pre-training.
 One entry per open item of §1-§6: the question, then either the literature answer (paper id, exact section, table or
 equation, the decisive sentence) or an ablation design (hypothesis, arms, fixed configuration, scale, seeds, measures,
 pre-registered decision rule, GH200 cost). Filled in as the research agents report.
+
+### D8 synthetic-code share (DataAnswers): ablation needed; keep 0.30, marked [inference]
+- No paper fixes the share for this mixture. Kang et al. (arXiv 2510.01631) measure rephrased web text, and its
+  Limitations say the findings "may not directly apply to … synthetic code". Code papers only bound it: To Code
+  (arXiv 2408.10914 §3.4) 10% synthetic helps from scratch at 470M; UltraData-Code (arXiv 2610.23960 Table 6) 1:1 real
+  and synthetic helps in continued pretraining; CodeAlchemy (arXiv 2606.10087 §3, RQ1/RQ3) rewritten-only code drops
+  MBPP to 5.6 against 58.7 for raw, a 50-50 mix keeps 60.3. Positive results span about 4-50% of code.
+- Extents: the curated corpus holds a share up to ≈0.329 (≈0.305 under sa-bpe-fused); lower shares need only the
+  constant (repository code holds 1.44× the draw at 0%); above 0.329 the corpus must be extended on the GB10.
+- Design: d16 at 20 tokens per parameter, shares 0, 0.15, 0.50 against 0.30, 2 seeds, a new `Run.synthetic` field kept
+  out of the run tag at its default; evaluation weights held at the baseline mixture. Primary: reference-solution bits
+  per byte (`solutions`); guards: bits per byte on non-synthetic code (a new measure) and the MBPP+ parse sign test. An
+  arm replaces 0.30 iff better on the primary and worse on neither guard. Cost ≈8.5 GPU-hours of training plus
+  evaluation. Runs after the tokenizer ablation's adopt, compile and pack (its own d16 data), before the d24 run.
+
+### FIM configuration (DataAnswers): answered by the literature; keep rate 0.5 per piece, PSM/SPM 50/50, AST-FIM
+- SPM share: Bavarian et al. (arXiv 2207.14255 §4.3, Table 1) is the one controlled PSM/SPM/joint comparison: at the
+  same 0.9 rate joint training matches or beats both single modes in every cell but one near-tie; a pure-SPM model
+  cannot infill in PSM (0.023), pure PSM loses SPM random-span infilling (0.274); §8.1 recommends joint training; App. D
+  "variant 2" is the layout `pack.rs` writes. AST-FIM (arXiv 2506.00204 §5.1) uses 50/50 without testing it.
+- Rate: Bavarian §4.1-4.2, no left-to-right cost up to 0.9 from scratch at 50M-6.9B; DeepSeek-Coder (arXiv 2401.14196
+  §3.1.2) chose 0.5, 100% gave the weakest completion; AST-FIM Table 1, at 0.7 AST middles kept HumanEval+/MBPP+ at the
+  no-FIM baseline. Ours is 29.7% of file-stage tokens (StarCoder2 ≈25%, Code Llama 90%).
+- Fixes: citations only (`pack.py` 50/50 → Bavarian §3.1, §4.3, §8.1; normalization_doc §6: App. D supports the layout,
+  not the probability; h100 doc: StarCoder2 ≈25%, DeepSeek-Coder PSM only, its line-widening text is stale). Not
+  covered by any paper: FIM over whole multi-file repository texts in the 32K stage; the harness measures no infilling.

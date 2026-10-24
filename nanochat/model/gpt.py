@@ -1,13 +1,15 @@
 """
 The GPT: karpathy/nanochat 92d63d4 nanochat/gpt.py (a Block applies pre-norm attention and MLP, each added back; GPT's
 layer loop mixes in x0 and looks up value embeddings) with the wins of its experiment log (dev/LOG.md, "LOG") and
-Qwen3's QK norm with learnable gains (arXiv 2505.09388 §2).
+learnable per-dimension QK-norm gains (transformers modeling_qwen3.py; per-head QK norm with learnable parameters,
+arXiv 2309.14322 §3.2.5; a fixed scale costs 0.11% of loss in nGPT, arXiv 2410.01131 App. A.9 Table 5).
 - Normed token embedding, no positional embedding; RoPE over the full head (92d63d4 gpt.py:57-65).
 - Per layer x = resid_lambda x + x0_lambda x0, x0 the normed embedding (LOG 2026-01-11).
 - Attention: MHA, head_dim config.HEAD_DIM; per-head RMS norm, a per-dim gain shared across heads, then RoPE
   (transformers modeling_qwen3.py Qwen3Attention.forward); SSSL windows; value embeddings on alternating layers behind a
-  per-head gate 2 sigmoid(.) of the normed stream, zero init (ResFormer, arXiv 2410.17897; nanochat e85db6b, whose gate
-  read the stream's first 32 channels); FlashAttention-4 with document masking.
+  per-head gate 2 sigmoid(.) of the normed stream, zero init (modded-nanogpt record #14's per-layer value embeddings,
+  MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6; nanochat e85db6b, whose gate read the stream's first 32 channels);
+  FlashAttention-4 with document masking.
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
 - Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy.
 Not taken from 92d63d4: its smear, backout and logit softcap, its QK order (RoPE, norm, x 1.2) and its init
@@ -78,7 +80,7 @@ class Attention(nn.Module):
         self.ve_gate = nn.Linear(C, C // HEAD_DIM, bias=False) if has_ve(layer_idx, n_layer=config.n_layer) else None
 
     def forward(self, n: Tensor, ve: Tensor | None, *, cos_sin: tuple[Tensor, Tensor], window_size: int,
-                cu_seqlens: Tensor) -> Tensor:
+                cu_seqlens: Tensor, segments: Tensor) -> Tensor:
         """n: normed stream; ve: this layer's value embeddings or None."""
         B, T, C = n.size()
         q, k, v = (linear(n, w).view(B, T, -1, HEAD_DIM) for w in (self.c_q.weight, self.c_k.weight, self.c_v.weight))
@@ -88,7 +90,7 @@ class Attention(nn.Module):
             gate = 2 * torch.sigmoid((n.float().unsqueeze(-2) * self.ve_gate.weight).sum(-1))
             v = (v.float() + gate.unsqueeze(-1) * ve.view_as(v).float()).to(v.dtype)
         q, k = qk_norm_rope(q, k, self.q_gain, self.k_gain, *cos_sin)
-        return linear(flash_attn(q, k, v, window_size, cu_seqlens)[0].view(B, T, C), self.c_o.weight)
+        return linear(flash_attn(q, k, v, window_size, cu_seqlens, segments)[0].view(B, T, C), self.c_o.weight)
 
 
 class MLP(nn.Module):
@@ -111,8 +113,9 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x: Tensor, ve: Tensor | None, *, cos_sin: tuple[Tensor, Tensor], window_size: int,
-                cu_seqlens: Tensor) -> Tensor:
-        x = x + self.attn(norm(x), ve, cos_sin=cos_sin, window_size=window_size, cu_seqlens=cu_seqlens)
+                cu_seqlens: Tensor, segments: Tensor) -> Tensor:
+        x = x + self.attn(norm(x), ve, cos_sin=cos_sin, window_size=window_size, cu_seqlens=cu_seqlens,
+                          segments=segments)
         return x + self.mlp(norm(x))
 
 
@@ -137,9 +140,9 @@ class GPT(nn.Module):
     @torch.no_grad()
     def init_weights(self, *, seed: int) -> None:
         """Stream-reading matrices and tables: uniform, std C^-0.5 ("Efficient BackProp" §4.6).
-        Zero: c_o, c_proj, lm_head (blocks start as identity, modded-nanogpt record #5), VE gates (gate 1), x0_lambdas.
-        One: resid_lambdas, gains (LOG 2026-01-11). Each random tensor draws from a generator seeded by `seed` and its
-        name."""
+        Zero: c_o, c_proj (blocks start as identity, modded-nanogpt record #5), lm_head (record #8), VE gates (gate 1),
+        x0_lambdas. One: resid_lambdas (LOG 2026-01-11), gains (transformers Qwen3RMSNorm). Each random tensor draws
+        from a generator seeded by `seed` and its name."""
         bound = (3 / self.config.n_embd) ** 0.5
         zero = ("attn.c_o.weight", "mlp.c_proj.weight", "lm_head.weight", "attn.ve_gate.weight", "x0_lambdas")
         one = ("q_gain", "k_gain", "resid_lambdas")
@@ -169,24 +172,26 @@ class GPT(nn.Module):
         self.window_sizes = layer_windows(self.config)
         self.init_buffers()
 
-    def hidden(self, idx: Tensor, cu_seqlens: Tensor) -> Tensor:
-        """Final normed hidden states (B*T, C) of idx (B, T); cu_seqlens: int32 document bounds in flattened idx."""
+    def hidden(self, idx: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
+        """Final normed hidden states (B*T, C) of idx (B, T); cu_seqlens: int32 document bounds in flattened idx, the
+        first segments + 1 of them in use (segments: 0-dim int32 on the host; corpus/loader.py PretrainingBatches)."""
         x = x0 = norm(F.embedding(idx, self.wte.weight).to(torch.bfloat16))
         for i, block in enumerate(self.blocks):
             # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 without fp32 copies of the mix
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = (F.embedding(idx, self.value_embeds[str(i)].weight).to(torch.bfloat16) if str(i) in self.value_embeds
                   else None)
-            x = block(x, ve, cos_sin=(self.cos, self.sin), window_size=self.window_sizes[i], cu_seqlens=cu_seqlens)
+            x = block(x, ve, cos_sin=(self.cos, self.sin), window_size=self.window_sizes[i], cu_seqlens=cu_seqlens,
+                      segments=segments)
         return norm(x).flatten(0, 1)
 
-    def forward(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor) -> Tensor:
+    def forward(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
         """Mean next-token loss over the non-padding targets, fp32."""
-        return lm_loss(self.hidden(idx, cu_seqlens), self.lm_head.weight, targets.flatten())[0]
+        return lm_loss(self.hidden(idx, cu_seqlens, segments), self.lm_head.weight, targets.flatten())[0]
 
-    def losses(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor) -> Tensor:
+    def losses(self, idx: Tensor, targets: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
         """Per-position next-token loss (B*T,) fp32, 0 at padding targets."""
-        return lm_losses(self.hidden(idx, cu_seqlens), self.lm_head.weight, targets.flatten())
+        return lm_losses(self.hidden(idx, cu_seqlens, segments), self.lm_head.weight, targets.flatten())
 
 
 def scaling_params(model: GPT) -> int:
@@ -195,7 +200,9 @@ def scaling_params(model: GPT) -> int:
 
 
 def non_embedding_flops_per_token(model: GPT) -> int:
-    """DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2): 6 per block matrix weight + 12 C l_seq per layer, l_seq the
-    layer's window (92d63d4 gpt.py:319-339)."""
-    matrices = sum(p.numel() for p in model.blocks.parameters() if p.ndim == 2)
-    return 6 * matrices + sum(12 * model.config.n_embd * w for w in model.window_sizes)
+    """DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72 n_layer d_model² + 12 n_layer d_model l_seq: full attention
+    over the model's context l_seq, the count the batch and lr laws' constants were fit with (§3.1-3.2; every Table 3
+    model at l_seq 4,096), for windowed layers too, as a near-lossless windowed model takes its full-attention twin's
+    hyperparameters [inference]."""
+    n, d = model.config.n_layer, model.config.n_embd
+    return 72 * n * d * d + 12 * n * d * model.config.sequence_len

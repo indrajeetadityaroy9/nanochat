@@ -76,12 +76,18 @@ def fit(lines: list[dict]) -> dict:
 
 def analysis(lines: list[dict]) -> dict:
     """The pre-registered estimator over RESULTS/lr.jsonl's records (module docstring); the derived values are None
-    while any setting's grid needs extending."""
+    while any setting's grid needs extending. The vertices are multipliers of the law's lr the runs recorded; they are
+    re-based onto the current law's lr (base_plan), whose batch and steps must be the recorded runs'."""
     def recorded_plan(depth, ratio):
-        """The setting's plan at the law's lr (every arm's batch and steps are the same)."""
+        """The setting's current plan (every arm's batch and steps are the same), with the law's lr its runs
+        recorded."""
         line = setting(lines, depth, ratio)[0]
         recorded = next(r for r in line["records"] if r["kind"] == "run")["plan"]
-        return recorded | {"lr": recorded["lr"] / line["fields"]["lr_scale"]}
+        current = base_plan(depth=depth, ratio=ratio)
+        if (recorded["total_batch_size"], recorded["num_iterations"]) != (current.total_batch_size,
+                                                                          current.num_iterations):
+            raise RuntimeError(f"d{depth} at {ratio:g}: the recorded runs' batch and steps are not the current plan's")
+        return recorded | {"lr": current.lr, "recorded_lr": recorded["lr"] / line["fields"]["lr_scale"]}
 
     def tokens(p):
         return p["num_iterations"] * p["total_batch_size"]
@@ -102,7 +108,8 @@ def analysis(lines: list[dict]) -> dict:
            "measured_d8_ratio": None, "horizon_exponent": None, "horizon_exponent_net": None,
            "base_multiplier": None, "base_lr": None}
     if all(f["extend"] is None for f in fits.values()):
-        short, long, d24 = (fits[k]["vertex"] for k in fits)
+        short, long, d24 = (fits[k]["vertex"] * p["recorded_lr"] / p["lr"]
+                            for k, p in zip(fits, (d8_short, d8_long, d24_short), strict=True))
         ratio = long / short
         out["measured_d8_ratio"] = ratio
         out["horizon_exponent"] = math.log(ratio) / math.log(m_d_d8)

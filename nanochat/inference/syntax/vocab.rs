@@ -123,7 +123,7 @@ impl Syntax {
         let Some(terms) = self.lexicon.partial(&state.lex, &mut ev) else { return false };
         match self.feed_all(&state.parse, &ev) {
             Some(parse) => self.tables.viable(&self.lexicon, &parse, terms),
-            None => self.lexicon.terms[terms as usize].is_empty(),
+            None => false, // the events before the partial token do not parse: nothing can continue (as `allowed`)
         }
     }
 

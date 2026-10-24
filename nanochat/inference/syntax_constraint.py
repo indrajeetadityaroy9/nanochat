@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 from lark import Lark
 
-from nanochat.corpus.tokenizer import get_tokenizer
+from nanochat.corpus.tokenizer import Tokenizer
 from nanochat.native import crate_module
 
 CRATE = Path(__file__).resolve().parent / "syntax"
@@ -63,11 +63,11 @@ def identifier_ranges(chars: str, test) -> list[tuple[int, int]]:
 
 
 @functools.cache
-def python_syntax():
-    """The crate's Syntax of the corpus's tokenizer (corpus/tokenizer.get_tokenizer), built once per process and shared
-    by every constraint and thread: Lark's LALR tables of python.lark (dense, terminals and nonterminals by sorted
-    name), the lexemes' terminals, Python's identifier classes beyond ASCII (str.isidentifier of c, of "a" + c), the
-    vocabulary's byte trie, and the per-lexer-state token groupings, filled on first use."""
+def python_syntax(tokenizer: Tokenizer):
+    """The crate's Syntax of a vocabulary, built once per process and tokenizer and shared by every constraint and
+    thread: Lark's LALR tables of python.lark (dense, terminals and nonterminals by sorted name), the lexemes'
+    terminals, Python's identifier classes beyond ASCII (str.isidentifier of c, of "a" + c), the vocabulary's byte trie,
+    and the per-lexer-state token groupings, filled on first use."""
     lark = Lark((CRATE / "python.lark").read_text(), parser="lalr", lexer="basic", start="file_input", strict=True)
     conf = lark.parse_interactive().parser_state.parse_conf
     rows = conf.states
@@ -88,7 +88,6 @@ def python_syntax():
             else:
                 goto[s, nid[t]] = arg
     chars = "".join(map(chr, range(0x80, sys.maxunicode + 1)))
-    tokenizer = get_tokenizer()
     bos = tokenizer.bos_token_id
     return crate_module(CRATE).Syntax(
         keywords=[(w, [tid[terminal[w]]]) for w in keyword.kwlist],
@@ -121,9 +120,9 @@ class SyntaxConstraint:
     BOS is allowed iff prefix + generated + suffix parses (suffix: a FIM middle's suffix). Raises ValueError when prefix
     is not a prefix of any Python 3.12 module."""
 
-    def __init__(self, prefix: str, *, suffix: str):
-        self.suffix = suffix
-        self.native = python_syntax().constraint(prefix.encode(), bool(suffix))
+    def __init__(self, tokenizer: Tokenizer, prefix: str, *, suffix: str):
+        self.suffix, self.bos = suffix, tokenizer.bos_token_id
+        self.native = python_syntax(tokenizer).constraint(prefix.encode(), bool(suffix))
 
     def parses(self) -> bool:
         """Whether the text (valid UTF-8) and suffix parse."""
@@ -140,10 +139,10 @@ class SyntaxConstraint:
 def masks(constraints: list[SyntaxConstraint]) -> np.ndarray:
     """The next masks of constraints (rows, in order), computed by the crate in parallel without the GIL, BOS's bit set
     for a BOS candidate; then ast.parse decides each candidate (SyntaxConstraint.parses)."""
-    word, bit = divmod(get_tokenizer().bos_token_id, 32)
     data = crate_module(CRATE).masks([c.native for c in constraints])
     rows = np.frombuffer(data, dtype="<u4").reshape(len(constraints), -1).copy()
     for c, row in zip(constraints, rows, strict=True):
+        word, bit = divmod(c.bos, 32)
         if row[word] >> bit & 1 and not c.parses():
             row[word] &= ~np.uint32(1 << bit)
     return rows
