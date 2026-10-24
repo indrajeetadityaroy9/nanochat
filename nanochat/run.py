@@ -13,7 +13,9 @@ non-finite loss or gradient norm, an outcome of a lr sweep's high end, arXiv 230
 each checkpoint's evaluation, each in a fresh process (torch.compile's recompile limit and the CUDA caching
 allocator's reservations are per process), their output appended to RUNS/<key>/run.log. A training process that fails
 without a failure record raises; one that diverged ends the job, recorded as diverged. A stopped run resumes from its
-newest checkpoint. This process plans on the meta device and never initializes CUDA.
+newest checkpoint. This process plans on the meta device and never initializes CUDA. The module's top level imports no
+torch, model, training or evaluation code (the functions import what they run): every worker of an evaluation's
+sanitize pool (eval/code_eval.py sanitizers, a forkserver) imports this module, the phases' main module.
 
     python -m nanochat.run experiment=<name>               (conf/experiment/<name>.yaml)
     python -m nanochat.run depth=8 ratio=0.5 tokenizer=sa-bpe   (one run)
@@ -25,22 +27,18 @@ import warnings
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import hydra
-import torch
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
-from nanochat.corpus.mixture import FILE_STAGE
 from nanochat.corpus.tokenizer import ABLATION, TOKENIZER, get_tokenizer
-from nanochat.eval import suite
-from nanochat.model.gpt import GPT, gpt_config
 from nanochat.paths import RESULTS, ROOT, RUNS
 from nanochat.train import metrics
-from nanochat.train.checkpoint import load_model
-from nanochat.train.loop import train
-from nanochat.train.schedule import RunPlan, plan
-from nanochat.train.stages import max_ratio
+
+if TYPE_CHECKING:
+    from nanochat.train.schedule import RunPlan
 
 
 @dataclass
@@ -72,20 +70,28 @@ def vocabulary(config: RunConfig) -> Path:
     return TOKENIZER if config.tokenizer == "corpus" else ABLATION / config.tokenizer
 
 
-def base_plan(*, depth: int, ratio: float) -> RunPlan:
+def base_plan(*, depth: int, ratio: float) -> "RunPlan":
     """The base model's plan at a depth and tokens per scaling parameter (schedule.plan)."""
+    import torch
+
+    from nanochat.corpus.mixture import FILE_STAGE
+    from nanochat.model.gpt import GPT, gpt_config
+    from nanochat.train.schedule import plan
+
     with torch.device("meta"):
         return plan(model=GPT(gpt_config(depth=depth, stage=FILE_STAGE)), ratio=ratio)
 
 
-def plan_of(config: RunConfig) -> RunPlan:
+def plan_of(config: RunConfig) -> "RunPlan":
     """The base model's plan at the run's depth and ratio (its data's max_ratio if None), at the run's peak lr."""
+    from nanochat.train.stages import max_ratio
+
     ratio = max_ratio(get_tokenizer(vocabulary(config)), depth=config.depth) if config.ratio is None else config.ratio
     base = base_plan(depth=config.depth, ratio=ratio)
     return replace(base, lr=config.lr_scale * base.lr)
 
 
-def checkpoint_steps(config: RunConfig, run: RunPlan) -> frozenset[int]:
+def checkpoint_steps(config: RunConfig, run: "RunPlan") -> frozenset[int]:
     """config.checkpoints evenly spaced step counts, the last the final model's; with more than one, also repo_start
     (the model before the repository stage)."""
     n = config.checkpoints
@@ -93,7 +99,13 @@ def checkpoint_steps(config: RunConfig, run: RunPlan) -> frozenset[int]:
     return frozenset(steps | {run.repo_start} if n > 1 else steps)
 
 
-def training(config: RunConfig, run: RunPlan) -> None:
+def training(config: RunConfig, run: "RunPlan") -> None:
+    import torch
+
+    from nanochat.corpus.mixture import FILE_STAGE
+    from nanochat.model.gpt import GPT, gpt_config
+    from nanochat.train.loop import train
+
     with torch.device("meta"):
         model = GPT(replace(gpt_config(depth=config.depth, stage=FILE_STAGE), softcap=config.softcap))
     train(model=model, run=run, vocabulary=vocabulary(config), seed=config.seed,
@@ -102,6 +114,11 @@ def training(config: RunConfig, run: RunPlan) -> None:
 
 
 def evaluation(config: RunConfig, step: int) -> None:
+    import torch
+
+    from nanochat.eval import suite
+    from nanochat.train.checkpoint import load_model
+
     # SyntaxWarnings of ast.parse on generated code (eval/verify.py, inference/)
     warnings.filterwarnings("ignore", category=SyntaxWarning)
     tag = key(config)
@@ -127,11 +144,13 @@ def phase(log: Path, target: Callable[..., None], **kwargs: object) -> int:
 
 def job(config: RunConfig) -> None:
     """A run's job (module docstring)."""
+    from nanochat.eval.suite import evaluation_path
+
     tag, run = key(config), plan_of(config)
     data_key = get_tokenizer(vocabulary(config)).data_key
     if any(r["plan"] != asdict(run) or r["data_key"] != data_key for r in metrics.records(tag) if r["kind"] == "run"):
         raise RuntimeError(f"recipe changed since {tag} ran: delete {RUNS / tag}")
-    if suite.evaluation_path(tag, run.num_iterations).exists() or metrics.diverged(tag) is not None:
+    if evaluation_path(tag, run.num_iterations).exists() or metrics.diverged(tag) is not None:
         return
     log = RUNS / tag / "run.log"
     if phase(log, training, config=config, run=run):
@@ -139,7 +158,7 @@ def job(config: RunConfig) -> None:
             return
         raise ChildProcessError(f"{tag}: training failed ({log})")
     for step in sorted(checkpoint_steps(config, run)):
-        if not suite.evaluation_path(tag, step).exists() and phase(log, evaluation, config=config, step=step):
+        if not evaluation_path(tag, step).exists() and phase(log, evaluation, config=config, step=step):
             raise ChildProcessError(f"{tag}: evaluation of step {step} failed ({log})")
 
 

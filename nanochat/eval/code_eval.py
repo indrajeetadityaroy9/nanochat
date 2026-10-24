@@ -240,9 +240,10 @@ def filtered_middles(decoder: NativeDecoder, tokenizer: Tokenizer, problems: lis
 def sanitizers() -> ProcessPoolExecutor:
     """evalplus_solution's sanitize workers, a process per CPU (sanitize parses every line span of a program: run
     serially, the evaluation's bottleneck), from a forkserver (never a fork of this torch/CUDA process), SyntaxWarnings
-    of generated code ignored. The caller shuts the pool down (suite.evaluate's `with`): in a spawned process
-    (nanochat/run.py's phases), multiprocessing's exit handler joins the pool's workers before concurrent.futures'
-    exit handler would stop them, so a pool left open never lets the process exit."""
+    of generated code ignored. Each worker imports the main module (nanochat/run.py, whose top level is light for this
+    reason). The caller shuts the pool down (suite.evaluate's `with`): in a spawned process (nanochat/run.py's phases),
+    multiprocessing's exit handler joins the pool's workers before concurrent.futures' exit handler would stop them, so
+    a pool left open never lets the process exit."""
     return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("forkserver"),
                                initializer=warnings.filterwarnings, initargs=("ignore", "", SyntaxWarning))
 
