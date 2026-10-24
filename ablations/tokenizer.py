@@ -137,6 +137,7 @@ from nanochat.corpus.tokenizer import (
     vocabulary,
 )
 from nanochat.data.tokenizer import SPLIT_PATTERN, save
+from nanochat.native import data_crate
 from nanochat.paths import RESULTS, ROOT
 from nanochat.train.stages import max_ratio
 
@@ -241,6 +242,7 @@ def vocabularies() -> None:
         return merges, time.perf_counter() - begin
 
     arms = {}
+    data_crate()  # built once, before the threads call it (pack.py's rule)
     with ThreadPoolExecutor(len(ARMS)) as pool:
         for (arm, (pattern, score)), (merges, seconds) in zip(ARMS.items(), pool.map(timed, ARMS.values()),
                                                               strict=True):
@@ -459,7 +461,7 @@ def data() -> None:
     seconds["measures"] = time.perf_counter() - begin
     record["overlap"] = overlap()
     record["seconds"] = seconds | {"all": time.perf_counter() - start}
-    record["provenance"] = began | {"document_bins": DOCUMENT_BINS[:-1].tolist() + ["inf"]}
+    record["provenance"] = began | {"document_bins": [*DOCUMENT_BINS[:-1].tolist(), "inf"]}
     (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
