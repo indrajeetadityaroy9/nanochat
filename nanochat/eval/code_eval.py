@@ -9,7 +9,7 @@ Benchmarks:
   extra_eos_for_direct_completion(dataset) (provider/vllm.py:41-42), special tokens skipped in decoding
   (provider/hf.py:96 skip_special_tokens), the completion cut at its first stop and its tabs replaced by four spaces
   (provider/hf.py:104-105, vllm.py:76), solution sanitize(prompt + completion, entry point) (codegen.py:79-82); scored
-  by `python -m evalplus.evaluate` (base and plus pass@1, its estimate_pass_at_k).
+  by evalplus.evaluate (EVALPLUS_EVALUATE; base and plus pass@1, its estimate_pass_at_k).
 - humaneval_cpp (161) and mbpp_cpp (397): MultiPL-E (arXiv 2208.08227), each row's prompt, tests and
   stop_tokens. Generation as MultiPL-E's Hugging Face generator (automodel.py @3025a53): from prompt.strip() (:119), at
   most 1024 tokens of prompt and completion (:67 generate(max_length=...); :56 truncates the prompt), the completion
@@ -267,6 +267,18 @@ def multipl_e_check(task: Task, text: str) -> tuple[str, str, list[str]]:
     return task.prompt, task.prompt + text + "\n}", []
 
 
+# `python -m evalplus.evaluate` as a function call (its entry point, Fire(evaluate)) in a fresh isolated process, all
+# CPUs testing (its default: half), ended by os._exit once evaluate has written its output file: its stall warner
+# (evaluate.py stucking_checker, a non-daemon thread sleeping 20 s per check) would hold the exit up to 20 s
+EVALPLUS_EVALUATE = """
+import os, sys
+from evalplus.evaluate import evaluate
+evaluate(dataset=sys.argv[1], samples=sys.argv[2], output_file=sys.argv[3], parallel=os.cpu_count())
+sys.stdout.flush()
+os._exit(0)
+"""
+
+
 def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: list[list[str]]) -> dict:
     """EvalPlus's evaluation of each task's completions (evalplus_solution's solutions, as many per task as it has):
     {"base pass@1", "plus pass@1" (its estimate_pass_at_k over each task's samples, plus: base and plus tests passed),
@@ -279,8 +291,7 @@ def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: l
             for (t, _), solution in zip(pairs, threads.map(lambda pair: evalplus_solution(pool, *pair), pairs),
                                         strict=True):
                 f.write(json.dumps({"task_id": t.id, "solution": solution}) + "\n")
-        subprocess.run([sys.executable, "-I", "-m", "evalplus.evaluate", "--dataset", dataset, "--samples", path,
-                        "--output_file", scored], cwd=tmp, check=True)
+        subprocess.run([sys.executable, "-I", "-c", EVALPLUS_EVALUATE, dataset, path, scored], cwd=tmp, check=True)
         result = json.loads(scored.read_text(encoding="utf-8"))
     evaluated = [result["eval"][t.id] for t in items]
     return {"base pass@1": result["pass_at_k"]["base"]["pass@1"], "plus pass@1": result["pass_at_k"]["plus"]["pass@1"],
