@@ -63,7 +63,7 @@ tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3), each sourc
 stage (Stage.shares of the sources' train tokens), the tokens of a shard estimated from its text bytes at sa-bpe's val
 bytes per token: of each code source the leading train shards that fill its file-stage draw, so code binds every arm's
 max_ratio; of a "supply" source (notebooks, functions, traces), its draw, read whole once; of text and math the leading
-shards of each stage, and of the repositories corpora the trailing partitions (compile.stage_parts, under sa-bpe),
+shards of each stage, and of the repositories corpora the trailing partitions (compile.compile_stage, under sa-bpe),
 holding MARGIN times their draws, so they never bind.
 
 runs (conf/experiment/tokenizer.yaml: `python -m nanochat.run experiment=tokenizer`): every arm at d16, seeds 0 and 1,
@@ -122,7 +122,7 @@ from tokenizers import models
 
 from nanochat.config import VOCAB_SIZE
 from nanochat.corpus import mixture
-from nanochat.corpus.compile import compile_repositories, compile_source, stage_parts, train_parts
+from nanochat.corpus.compile import compile_repositories, compile_source, compile_stage, train_parts
 from nanochat.corpus.loader import TOKEN_DTYPE, mixture_rows, split_path, weights
 from nanochat.corpus.pack import packed_shards, shard_count, write
 from nanochat.corpus.parallel import SPAWN
@@ -488,7 +488,8 @@ def document_set(run) -> dict:
 def data() -> None:
     """Every arm's training set, compiled and packed, and RESULTS/tokenizer-data.json (module docstring): each corpus
     of each arm compiled, then packed, as its own job, every job at once into one process pool; the repositories
-    corpora once stage_parts, which runs beside the sources' compiles, has chosen their partitions."""
+    corpora one arm after another (each fills the cores), sa-bpe's by compile_stage, which runs beside the sources'
+    compiles and chooses the partitions."""
     # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
     from nanochat.run import base_plan
     from nanochat.train.stages import drawn, max_ratio, stage_rows
@@ -522,19 +523,21 @@ def data() -> None:
         compiled.append(time.perf_counter())
         pack(corpus, ABLATION / arm)
 
-    def repositories(arm: str) -> None:
-        compile_repositories(ABLATION / arm, partitions.result(), pool)
-        compiled.append(time.perf_counter())
-        for corpus in mixture.REPOSITORIES.values():
-            pack(corpus, ABLATION / arm)
+    def repositories() -> None:
+        for arm in ARMS:
+            if arm != "sa-bpe":  # compile_stage compiled sa-bpe's as it chose the partitions
+                compile_repositories(ABLATION / arm, partitions.result(), pool)
+            compiled.append(time.perf_counter())
+            for corpus in mixture.REPOSITORIES.values():
+                pack(corpus, ABLATION / arm)
 
     data_crate()  # built once, before the threads call it (pack.py's rule)
     with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
           ThreadPoolExecutor(len(ARMS) * (len(SOURCES) + 1) + 1) as threads):
-        partitions = threads.submit(stage_parts, ABLATION / "sa-bpe", pool,
+        partitions = threads.submit(compile_stage, ABLATION / "sa-bpe", pool,
                                     MARGIN * sum(shards["draws"]["32768"][c] for c in mixture.REPOSITORIES.values()))
         jobs = [threads.submit(source, arm, corpus) for arm in ARMS for corpus in SOURCES]
-        jobs += [threads.submit(repositories, arm) for arm in ARMS]
+        jobs.append(threads.submit(repositories))
         if max(shards["file"][s] for s in mixture.REPOSITORY_SOURCES) > train_parts().index(partitions.result()[0]):
             raise RuntimeError("the file stage's repository shards reach the repository stage's partitions")
         for job in jobs:

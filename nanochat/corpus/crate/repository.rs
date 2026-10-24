@@ -15,6 +15,7 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::unionfind::UnionFind;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
@@ -148,67 +149,84 @@ fn cpp(node: Node, pattern: usize, path: &str, text: &str, index: &Index, target
     }
 }
 
-/// The samples of one repository (DeepSeek-Coder §2.2): files paths[i] with contents texts[i] (sorted by path and content
-/// id; repository-relative, '/'-separated paths, which may repeat) of a grammar ("Python", "C++"). File f depends on g
-/// (g != f) when an import or include of f names g (Python, C++; every import node of f's tree, also of a tree with
-/// syntax errors, whose error recovery keeps the nodes it parsed). A sample is a weakly connected component of the
-/// dependency graph, samples in the order of their smallest index; within a sample the files in a topological order of
-/// the condensation of its strongly connected components, each file after the files it depends on (petgraph's
-/// kosaraju_scc, iterative, returns the components in reverse topological order), the files of one component in index
-/// order (DeepSeek-Coder's Algorithm 1 orders a cycle by least remaining in-degree instead). Each sample as its file
-/// indices; a single file is one sample, without parsing.
-#[pyfunction]
-#[pyo3(signature = (paths, texts, *, grammar))]
-pub(crate) fn repository_samples(py: Python<'_>, paths: Vec<String>, texts: Vec<PyBackedStr>, grammar: Lang) -> Vec<Vec<usize>> {
-    py.detach(|| {
-        let n = paths.len();
-        if n == 1 {
-            return vec![vec![0]];
+/// The samples of one repository (DeepSeek-Coder §2.2) from the dependencies of its files: `dependencies[f]` the files
+/// f depends on (g != f, ascending). A sample is a weakly connected component of the dependency graph, samples in the
+/// order of their smallest index; within a sample the files in a topological order of the condensation of its strongly
+/// connected components, each file after the files it depends on (petgraph's kosaraju_scc, iterative, returns the
+/// components in reverse topological order), the files of one component in index order (DeepSeek-Coder's Algorithm 1
+/// orders a cycle by least remaining in-degree instead). Each sample as its file indices.
+fn samples(dependencies: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = dependencies.len();
+    let mut graph = DiGraph::<(), ()>::with_capacity(n, 0);
+    for _ in 0..n {
+        graph.add_node(());
+    }
+    let mut weak = UnionFind::new(n);
+    for (f, targets) in dependencies.iter().enumerate() {
+        for &g in targets {
+            graph.add_edge(NodeIndex::new(f), NodeIndex::new(g), ());
+            weak.union(f, g);
         }
+    }
+    let mut sample_of: Vec<Option<usize>> = vec![None; n];
+    let mut samples: Vec<Vec<usize>> = Vec::new();
+    for i in 0..n {
+        let root = weak.find(i);
+        if sample_of[root].is_none() {
+            sample_of[root] = Some(samples.len());
+            samples.push(Vec::new());
+        }
+    }
+    for scc in kosaraju_scc(&graph) {
+        let mut files: Vec<usize> = scc.iter().map(|v| v.index()).collect();
+        files.sort_unstable();
+        samples[sample_of[weak.find(files[0])].unwrap()].extend(files);
+    }
+    samples
+}
+
+/// The samples (samples()) of the repositories of a partition: repository r holds files ends[r - 1]..ends[r] (from 0),
+/// paths[i] with contents texts[i] (within a repository sorted by path and content id; repository-relative,
+/// '/'-separated paths, which may repeat) of a grammar ("Python", "C++"). File f depends on file g of its repository
+/// (g != f) when an import or include of f names g (Python, C++; every import node of f's tree, also of a tree with
+/// syntax errors, whose error recovery keeps the nodes it parsed); the file of a single-file repository is one sample,
+/// without parsing. Each sample as its files' indices into paths, the repositories' samples in repository order. The
+/// files are parsed, and the repositories' samples found, in parallel (rayon), which leaves the samples as they are.
+#[pyfunction]
+#[pyo3(signature = (paths, texts, ends, *, grammar))]
+pub(crate) fn repository_samples(py: Python<'_>, paths: Vec<String>, texts: Vec<PyBackedStr>, ends: Vec<usize>, grammar: Lang) -> Vec<Vec<usize>> {
+    py.detach(|| {
+        let repositories: Vec<(usize, usize)> = std::iter::once(0).chain(ends.iter().copied()).zip(ends.iter().copied()).collect();
+        let repository: Vec<usize> = repositories.iter().enumerate().flat_map(|(r, &(a, b))| std::iter::repeat_n(r, b - a)).collect();
         let (source, imports): (&str, Imports) = match grammar {
             Lang::Python => (PYTHON, python),
             Lang::Cpp => (CPP, cpp),
         };
         let language = grammar.language();
         let query = Query::new(&language, source).unwrap();
-        let mut parser = Parser::new();
-        parser.set_language(&language).unwrap();
-        let mut cursor = QueryCursor::new();
-        let index = Index::new(&paths);
-        let mut graph = DiGraph::<(), ()>::with_capacity(n, 0);
-        for _ in 0..n {
-            graph.add_node(());
-        }
-        let mut weak = UnionFind::new(n);
-        let mut targets = Vec::new();
-        for (f, (path, text)) in paths.iter().zip(&texts).enumerate() {
-            let tree = parser.parse(text.as_bytes(), None).unwrap();
-            let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
-            while let Some(m) = matches.next() {
-                imports(m.captures()[0].node, m.pattern_index, path, text, &index, &mut targets);
+        let indexes: Vec<Index> = repositories.par_iter().map(|&(a, b)| Index::new(&paths[a..b])).collect();
+        let parser = || {
+            let mut parser = Parser::new();
+            parser.set_language(&language).unwrap();
+            (parser, QueryCursor::new())
+        };
+        // each file's dependencies, as indices within its repository
+        let dependencies: Vec<Vec<usize>> = (0..paths.len()).into_par_iter().map_init(parser, |(parser, cursor), file| {
+            let (r, mut targets) = (repository[file], Vec::new());
+            let (a, b) = repositories[r];
+            if b - a > 1 {
+                let (path, text) = (&paths[file], &*texts[file]);
+                let tree = parser.parse(text.as_bytes(), None).unwrap();
+                let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+                while let Some(m) = matches.next() {
+                    imports(m.captures()[0].node, m.pattern_index, path, text, &indexes[r], &mut targets);
+                }
+                targets.sort_unstable();
+                targets.dedup();
+                targets.retain(|&g| g != file - a);
             }
-            targets.sort_unstable();
-            targets.dedup();
-            for &g in targets.iter().filter(|&&g| g != f) {
-                graph.add_edge(NodeIndex::new(f), NodeIndex::new(g), ());
-                weak.union(f, g);
-            }
-            targets.clear();
-        }
-        let mut sample_of: Vec<Option<usize>> = vec![None; n];
-        let mut samples: Vec<Vec<usize>> = Vec::new();
-        for i in 0..n {
-            let root = weak.find(i);
-            if sample_of[root].is_none() {
-                sample_of[root] = Some(samples.len());
-                samples.push(Vec::new());
-            }
-        }
-        for scc in kosaraju_scc(&graph) {
-            let mut files: Vec<usize> = scc.iter().map(|v| v.index()).collect();
-            files.sort_unstable();
-            samples[sample_of[weak.find(files[0])].unwrap()].extend(files);
-        }
-        samples
+            targets
+        }).collect();
+        repositories.par_iter().flat_map_iter(|&(a, b)| samples(&dependencies[a..b]).into_iter().map(move |sample| sample.into_iter().map(|f| a + f).collect())).collect()
     })
 }

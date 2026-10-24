@@ -501,7 +501,7 @@ a corpus per language (`repositories_python`, `repositories_cpp`).
   DeepSeek-Coder: "a comment indicating the file's path is added at the beginning of each file" (arXiv 2401.14196
   §2.2). A line break in a path is written `\n` or `\r`; a file without a final line end gets one, and a C++ file
   ending in a backslash an empty line too, so the next comment starts its own line.
-- The stage reads the fewest trailing partitions whose documents hold its draw (`compile.stage_parts`).
+- The stage reads the fewest trailing partitions whose documents hold its draw (`compile.compile_stage`).
 
 Against production's samples, import-connected components within one corpus (R3):
 
@@ -582,7 +582,7 @@ The pipeline splits at the tokenizer. Everything through curation is text and ru
 the manifest and a card go to the private Hub dataset `iaroy/nanochat-data` (`publish.push` replaces its tree and
 squashes its history). Everything after needs the tokenizer and runs on the GH200 from `publish.pull` (`gh200.md`):
 packing cuts pieces at token offsets in rows of `seq_len` tokens, FIM encodes its parts around sentinel ids, and the
-32K stage's partitions are counted in tokens (`compile.stage_parts`).
+32K stage's partitions are counted in tokens (`compile.compile_stage`).
 
 | Stage | Module | Status |
 |---|---|---|

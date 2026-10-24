@@ -38,7 +38,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from fissix import refactor
 
-from nanochat.corpus.parallel import SPAWN, ordered
+from nanochat.corpus.parallel import MEMORY, SPAWN, ordered
 from nanochat.corpus.prepare import COMPRESSION, sha1
 from nanochat.corpus.schema import REPOSITORY_FILE, SAMPLE_FILE, SPLIT
 from nanochat.corpus.sources import SOURCES, checked_path, curated_dir, standardized_path
@@ -47,9 +47,6 @@ from nanochat.paths import CORPUS
 
 # The id of an empty text
 EMPTY = hashlib.sha1(b"").hexdigest()
-# Half the machine's memory: the lower end of DuckDB's guidance, as some operations bypass the buffer manager's limit
-# (duckdb.org/docs/lts/guides/troubleshooting/oom_errors) and other jobs share the unified memory
-MEMORY = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 2
 # Row groups in flight: four per core, so the cores keep working while the oldest one, whose result is written next,
 # runs long (a row group's time follows its slowest files)
 WINDOW = 4 * os.cpu_count()
@@ -68,7 +65,7 @@ def residue(group: str) -> str:
 
 
 def database() -> duckdb.DuckDBPyConnection:
-    """DuckDB in MEMORY, spilling to CORPUS/spill, without insertion order (the guide cited at MEMORY)."""
+    """DuckDB in MEMORY, spilling to CORPUS/spill, without insertion order (the guide cited at parallel.MEMORY)."""
     return duckdb.connect(config={"memory_limit": f"{MEMORY}B", "temp_directory": str(CORPUS / "spill"),
                                   "preserve_insertion_order": False})
 
@@ -209,12 +206,9 @@ def curate_partition(task: tuple[str, int]) -> None:
                                             ("content", pa.large_string()), ("id", pa.string())]))
     table = table.append_column("repository", pc.utf8_lower(table["repo_name"]))
     table = table.sort_by([(key, "ascending") for key in ("repository", "relative_path", "id")]).combine_chunks()
-    paths, contents = table["relative_path"], table["content"]
-    runs = [0, *pc.run_end_encode(table["repository"].chunk(0)).run_ends.to_numpy()]
-    groups = [np.add(group, a) for a, b in itertools.pairwise(runs)
-              for group in data_crate().repository_samples(paths.slice(a, b - a).to_pylist(),
-                                                           contents.slice(a, b - a).to_pylist(),
-                                                           grammar=SOURCES[source].language)]
+    ends = pc.run_end_encode(table["repository"].chunk(0)).run_ends.to_numpy().tolist()
+    groups = data_crate().repository_samples(table["relative_path"].to_pylist(), table["content"].to_pylist(), ends,
+                                             grammar=SOURCES[source].language)
     order, samples = np.concatenate(groups), np.repeat(np.arange(len(groups)), [len(group) for group in groups])
     cuts = [0]
     for start in np.flatnonzero(np.diff(samples, prepend=-1)).tolist():
