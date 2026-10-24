@@ -533,7 +533,7 @@ def data() -> None:
 
     data_crate()  # built once, before the threads call it (pack.py's rule)
     with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
-          ThreadPoolExecutor(len(ARMS) * (len(SOURCES) + 1) + 1) as threads):
+          ThreadPoolExecutor(len(ARMS) * len(SOURCES) + 2) as threads):  # the source jobs, repositories, compile_stage
         partitions = threads.submit(compile_stage, ABLATION / "sa-bpe", pool,
                                     MARGIN * sum(shards["draws"]["32768"][c] for c in mixture.REPOSITORIES.values()))
         jobs = [threads.submit(source, arm, corpus) for arm in ARMS for corpus in SOURCES]
