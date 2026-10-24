@@ -17,13 +17,13 @@ tokenizer ablation's d16 or d8 recipe, and their pre-registered analyses (conf/e
 - muon_tau (D7, conf/experiment/muon_tau_20.yaml then muon_tau_200.yaml): Muon's decay timescale x 1/2 and x 2 (its
   weight decay x 2 and x 1/2) under the tau law (train/optim.py tau_weight_decay: Power Lines, arXiv 2505.13738, fit
   with AdamW; its App. B extends the EMA view to decoupled-decay optimizers), AdamW's untouched, d8 at 20 tokens per
-  parameter on the sa-bpe arm's data (4 seeds) and at 200 on the corpus's (2 seeds; beyond the arm's set). Per
-  setting m: the vertex of the exact 3-point quadratic in ln m over
-  {1/2, 1, 2}, clamped to [1/2, 2], or 1 unless the better arm is better on code than the baseline and not worse on
-  parsing (scaled). If m_20 = m_200 = 1 the law stays for Muon; else Muon's own law through both points,
-  tau* = c TPP^e with c = 1.084 m_20 20^-D, e = -0.527 + D, D = ln(m_200 / m_20) / ln 10 (muon_tau_law).
+  parameter on the sa-bpe arm's data (2 seeds) and at 200 on the corpus's (2 seeds; beyond the arm's set). Per setting
+  m: the vertex of the exact 3-point quadratic in ln m over {1/2, 1, 2}, clamped to [1/2, 2], or 1 unless the better
+  arm is better on code than the baseline and not worse on parsing (scaled). If m_20 = m_200 = 1 the law stays for
+  Muon; else Muon's own law through both points, tau* = c TPP^e with c = TAU_C m_20 20^-D, e = TAU_E + D,
+  D = ln(m_200 / m_20) / ln 10 (muon_tau_law; TAU_C, TAU_E the law's, train/optim.py).
 
-contrast: the tokenizer ablation's tests (ablations/tokenizer.py decide) of an arm against the baseline on the seeds
+contrast: the tokenizer ablation's tests (ablations/tokenizer.py contrast) of an arm against the baseline on the seeds
 where both have an evaluation: code bits per byte better or worse beyond 1.96 CODE_SIGMA sqrt(2 / n), n the seeds per
 arm; MBPP+ parsing by the exact sign test over the problems whose parsing seeds differ, at ALPHA.
 """
@@ -32,36 +32,10 @@ import math
 import statistics
 
 import numpy as np
-from scipy.stats import binomtest, norm
 
-from ablations.tokenizer import ALPHA, CODE_SIGMA, PARSED
+from ablations.tokenizer import contrast, evaluated
 from nanochat.paths import RESULTS
-
-
-def evaluated(lines: list[dict], field: str) -> dict[tuple, tuple[float, list[bool]]]:
-    """{(the run's `field`, seed): (code bits per byte, per MBPP+ problem whether its completion compiles)} of every
-    evaluated run (a diverged run has none)."""
-    return {(line["config"][field], line["config"]["seed"]): (
-        line["measures"]["code"], [o == "parses" for o in line["evaluations"][-1]["parse"][PARSED]["outcomes"]])
-        for line in lines if line["measures"] is not None}
-
-
-def contrast(runs: dict[tuple, tuple[float, list[bool]]], arm: object, baseline: object) -> dict:
-    """The arm against the baseline (module docstring), over the seeds where both have an evaluation."""
-    seeds = sorted(seed for value, seed in runs if value == arm and (baseline, seed) in runs)
-    if not seeds:
-        raise RuntimeError(f"no seed evaluated under both {arm} and {baseline}")
-    code = {v: statistics.fmean(runs[v, seed][0] for seed in seeds) for v in (arm, baseline)}
-    seeds_parsing = (np.sum([runs[arm, seed][1] for seed in seeds], axis=0)
-                     - np.sum([runs[baseline, seed][1] for seed in seeds], axis=0))
-    here, there = int((seeds_parsing > 0).sum()), int((seeds_parsing < 0).sum())
-    p = binomtest(here, here + there).pvalue if here + there else 1.0
-    difference = code[arm] - code[baseline]
-    margin = norm.ppf(1 - ALPHA / 2) * CODE_SIGMA * math.sqrt(2 / len(seeds))
-    return {"seeds": seeds, "problems_parsing_more_here": here, "problems_parsing_more_in_baseline": there, "p": p,
-            "parsing": "equal" if p >= ALPHA else "better" if here > there else "worse",
-            "code_difference": difference, "code_margin": margin,
-            "code": "better" if difference < -margin else "worse" if difference > margin else "equal"}
+from nanochat.train.optim import TAU_C, TAU_E
 
 
 def adopted(c: dict) -> bool:
@@ -108,4 +82,4 @@ def muon_tau_law(lines: list[dict]) -> dict:
     if m_20 == m_200["scale"] == 1.0:
         return m_200 | {"decision": "law"}
     d = math.log(m_200["scale"] / m_20) / math.log(200 / 20)
-    return m_200 | {"decision": {"c_tau": 1.084 * m_20 * 20 ** -d, "m_tau": -0.527 + d}}
+    return m_200 | {"decision": {"c_tau": TAU_C * m_20 * 20 ** -d, "m_tau": TAU_E + d}}

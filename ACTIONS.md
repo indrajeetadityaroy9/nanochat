@@ -45,22 +45,23 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | Model-generated sources | stay in the mixture as designed (user) | none |
 | D8 synthetic-code share | keep 0.30 of code (user: LLM-generated code is valid data; no ablation, no literature study); Kang et al.'s ~30% marked [inference] for code | `679e7d9` |
 | Tokenizer `data` step | the d16 set under every arm; max_ratio sa-bpe 31.42, sa-bpe-fused 29.48, hybrid 31.49, bpe 31.42, every arm 3 micro-batches (one train shard per repository source exceeds d16 at 20's draw) | `679e7d9` |
-| Run configuration | Hydra (`hydra-core==1.3.7`) replaces the custom ablation driver (user); contract `local://HYDRA.md` | done (§8) |
+| Run configuration | Hydra (`hydra-core==1.3.7`) run app `nanochat/run.py` replaces the harness and `scripts/pretrain.py`; d8 run vs HEAD's harness bitwise-equal (records, evaluation); knob and sweep checks follow post-commit | `247067d` |
+| Eval-exit deadlock | `code_eval.sanitizers()`'s cached forkserver pool was joined by a spawned phase's exit before `concurrent.futures`' shutdown (every job hung after its first evaluation); the pool now lives for `suite.evaluate`'s call | `247067d` |
+| Step throughput (EfficiencyResearch) | items 1, 2, 4 applied; FP8 (loss penalty), MPS/concurrent runs (−8%/+1.6%), items 5-8 (≤1% each) rejected; the step's GEMMs run at the 700 W cap's ceiling | `a81410c`, `7ad594f` |
+| E1 GPU power cap | not liftable from the guest: `nvidia-smi -pl 900` is accepted (power.limit 900 W) but the enforced limit stays 700 W (set outside the VM); and the GH200 module (Grace + Hopper + memory) draws 888-910 W against its 1,000 W limit (its maximum) with the CPU busy, so a 900 W GPU would exceed the module budget except with an idle CPU. Closed as a hardware constraint (user: Lambda may not lift it). Rule: no heavy CPU jobs beside measured runs (`tok_per_s`), as they draw from the same module budget | none |
 
 ### Open (remaining)
 
 | Item | Next action | Waits on |
 |---|---|---|
-| Hydra migration | code done, image rebuilt, lint clean; HydraRuns runs the HEAD-equivalence check (d8, 200 steps, real sa-bpe packs), knob checks, sweep mechanics; then I commit | HydraRuns |
-| Eval-exit deadlock | every `nanochat.run` job hung after its first evaluation: `code_eval.sanitizers()`'s cached forkserver executor is joined by a spawned child's exit before `concurrent.futures` shuts it down (RunUtilization's repro); fix: the executor scoped to `suite.evaluate`; lands with the Hydra commit | RunUtilization |
-| Provisional corpus tokenizer | sa-bpe copied to `CORPUS/tokenizer` (SHA-256-equal), full corpus compile + pack running (`corpus-sabpe`, cores 8-63): D7's 200 half needs ~2.94B tokens, the ablation set holds ~1.3B; the base model's data if sa-bpe is adopted, else replaced at `adopt` | running (CPU) |
-| D7 Muon τ | `muon_tau_20.yaml` (d8 at 20, sa-bpe set, 4 seeds) and `muon_tau_200.yaml` (d8 at 200, `tokenizer=corpus`, 2 seeds); ×½, ×1, ×2 | Hydra commit; the provisional corpus for the 200 half; user approval |
-| D5 softcap | `softcap.yaml`: d16 at ratio 20.0 on the sa-bpe set, lr ×2.7972 (the D1-rebased base multiplier; `results/lr.json`'s stored analysis predates D1 and is regenerated at `adopt`), cap 15 vs none, 4 seeds | Hydra commit; user approval |
+| Ablations audit (critical path) | AblationsAudit edits `ablations/` against `247067d`, verifies on real data, then a reviewer's second audit; the ablation queue starts after it, with the user's permission | AblationsAudit |
+| Provisional corpus tokenizer | sa-bpe copied to `CORPUS/tokenizer` (SHA-256-equal); the full compile's per-source splits are done (319 GB), then `corpus-sabpe` was OOM-killed in `stage_parts` at 23:16 (RAM 476/525 GB under concurrent verification jobs); CorpusParallel resumes `stage_parts` → `compile_repositories` → pack memory-bounded (RAM budgets per agent, `docker --memory`). D7's 200 half needs ~2.94B tokens, the ablation set holds ~1.3B; the base model's data if sa-bpe is adopted, else replaced at `adopt` | CorpusParallel |
+| D7 Muon τ | `muon_tau_20.yaml` (d8 at 20, sa-bpe set, 2 seeds: user, 4 judged wasteful) and `muon_tau_200.yaml` (d8 at 200, `tokenizer=corpus`, 2 seeds); ×½, ×1, ×2; 12 runs | the provisional corpus for the 200 half; AblationsAudit; user approval |
+| D5 softcap | `softcap.yaml`: d16 at ratio 20.0 on the sa-bpe set, lr ×2.7972 (the D1-rebased base multiplier; `results/lr.json`'s stored analysis predates D1 and is regenerated at `adopt`), cap 15 vs none, 4 seeds | AblationsAudit; user approval |
 | Tokenizer ablation | 8 d16 runs at each arm's max_ratio (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer`), decision, `adopt`, compile, pack | D5 and D7 decided; user approval |
 | D6 AdamW-group lr | `adamw_lr.yaml`: d16 on the sa-bpe set at its max_ratio, ×¼ and ×4, 2 seeds; its ×1 arm is the tokenizer ablation's sa-bpe baseline (same run key), so 4 runs train | the tokenizer runs; user approval |
-| Throughput items 4-8 | fused kernels (value-embedding gate: written, not bitwise, accepted if its fp64 error ≤ Inductor's and a d16 loss curve stays within the reference's two-run spread; FA4 backward pre/post, q/k norm + RoPE, RMSNorm, weight-gradient accumulation), each verified and committed | EfficiencyResearch |
+| Item 4 commit | done: fused VE gate (`csrc/ve_gate.cu`, `ops/ve_gate.py`, `gpt.py` wiring); EfficiencyResearch finished (`local://EfficiencyResearch.md`: d24 8K 3,696 → ~3,490 ms, −5.6%; d16 270.8 → ~240 ms, −11%; the remaining lever is the host's 700 W cap) | `7ad594f` |
 | Run-lifecycle utilization | RunUtilization measures a real proof-of-concept job's GPU timeline (compile, steady state, checkpoint, each evaluation part, gaps between jobs) and removes idle time with records unchanged; each fix verified, then committed | RunUtilization |
-| E1 GPU power cap | Lambda raises the host's 700 W cap to 900 W (request text in `ANS-EngineeringAnswers.md`); not changed between an ablation's runs | the user (provider) |
 | Base model pre-training | `experiment=base` (d24, the decided recipe and tokenizer) | every ablation above; user approval |
 | Docs consolidation (§5) | the four docs from the final code, with §5's corrections, D10 and warmup wording, the d8@20 records, FIM citations, stale line-widening/manifest text, `mixture.py`'s "86,975 steps of 12 micro-batches" (the D1 plan: 69,580 of 15, same tokens) | final code |
 | Second-pass audit | KISS audit of the final code | final code |
@@ -221,9 +222,9 @@ The law's form carries to Muon (Power Lines App. B; arXiv 2512.05620 App. H.5 re
 do not (no Muon fit; doubling Muon's decay cost 0.010-0.019 loss in arXiv 2509.02046). Design:
 `RunConfig.muon_tau_scale` (Muon weight decay / s; `conf/experiment/muon_tau_20.yaml` on the sa-bpe arm's data, then
 `muon_tau_200.yaml` on the corpus's packs, as d8 at 200 reads 2.94B tokens, beyond the arm's set) ×½ and ×2 on Muon
-matrices only, d8 at 20 (4 seeds) and at 200 (2 seeds); keep the law
-unless an arm clears its margin, else fit Muon's own law through the two horizons (`ablations/recipe.py`
-`muon_tau_law`); ~3.2 GPU-h.
+matrices only, d8 at 20 and at 200, 2 seeds each (user: 4 seeds at 20 judged wasteful; the code margin widens from
+0.0047 to 0.0067, so a smaller effect keeps the law); keep the law unless an arm clears its margin, else fit Muon's
+own law through the two horizons (`ablations/recipe.py` `muon_tau_law`); ~2.8 GPU-h.
 
 ### D9 RoPE base (ArchitectureAnswers): answered; keep 10^6 from the start
 Barbero et al. (arXiv 2410.06205 Table 2) Gemma 2B at 8K, 10k vs 500k: differences under 0.3%, mixed sign; Llama 3,

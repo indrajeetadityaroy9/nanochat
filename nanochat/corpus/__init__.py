@@ -20,7 +20,7 @@ Run in this order; everything up to publish is text, everything after it needs t
   python -m nanochat.corpus.curate
   python -m nanochat.corpus.publish push
   python -m nanochat.corpus.publish pull
-  python -m ablations.tokenizer vocabularies|intrinsic|data|runs|adopt  (adopt: the decided arm to CORPUS/tokenizer)
+  python -m ablations.tokenizer vocabularies|intrinsic|data|adopt  (adopt: the decided arm to CORPUS/tokenizer)
   python -m nanochat.corpus.compile
   python -m nanochat.corpus.pack
 

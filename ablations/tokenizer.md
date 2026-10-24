@@ -335,14 +335,14 @@ seed from both sides):
     parameter on production's data, carried to d16 and to this corpus [inference].
   - At n = 2 the margin is 0.0067 bits per byte [arithmetic].
 
-**Decision** (`results/tokenizer.json` `"decision"`):
+**Decision** (`results/tokenizer.json` `"analysis"` `"decision"`):
 
 ```mermaid
 flowchart TD
   G{"sa-bpe-fused parses worse than sa-bpe?"}
   G -- "no: the parse test cannot decide" --> K["keep sa-bpe: SPLIT_PATTERN, F·ln R"]
   G -- yes --> Q["a challenger qualifies iff it is worse on neither measure and better on one"]
-  Q --> P["pattern: the qualifier among sa-bpe-fused and hybrid with the lower MBPP+ unparsed share, else SPLIT_PATTERN"]
+  Q --> P["pattern: hybrid's iff it qualifies (the detected control parses worse, so it cannot), else SPLIT_PATTERN"]
   Q --> S["score: frequency iff bpe qualifies, or ties on both and leaves fewer merged tokens read under 100 times; else F·ln R"]
 ```
 
@@ -374,6 +374,7 @@ Inside the project image on the GH200 (64 Neoverse-V2 cores, 525 GB; Python 3.12
 ```bash
 python -m ablations.tokenizer vocabularies   # sample, then the four arms at once
 python -m ablations.tokenizer intrinsic      # 72 val compiles and every measure, one process pool
+python -m ablations.tokenizer data           # the d16 set compiled and packed under every arm
 python -m nanochat.run experiment=tokenizer  # the 8 runs and the decision
 python -m ablations.tokenizer adopt
 ```

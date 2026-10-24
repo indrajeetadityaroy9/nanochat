@@ -1,7 +1,7 @@
 # @package _global_
 # The tokenizer ablation's runs (ablations/tokenizer.py): every arm at d16 (tokenizer.DEPTH, the depth its data step
-# sized the set for), each at its max_ratio (ratio null: equal bytes), 2 seeds each (tokenizer.SEEDS); sa-bpe the
-# baseline of ablations.tokenizer.decide.
+# sized the set for), each at its max_ratio (ratio null: equal bytes), 2 seeds each; sa-bpe the baseline of
+# ablations.tokenizer.decide, whose contrasts pair the seeds both arms evaluated.
 depth: 16
 ratio: null
 

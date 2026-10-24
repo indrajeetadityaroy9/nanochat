@@ -66,8 +66,8 @@ max_ratio; of a "supply" source (notebooks, functions, traces), its draw, read w
 shards of each stage, and of the repositories corpora the trailing partitions (compile.stage_parts, under sa-bpe),
 holding MARGIN times their draws, so they never bind.
 
-runs (conf/experiment/tokenizer.yaml: `python -m nanochat.run experiment=tokenizer`): every arm at d16, SEEDS seeds
-each, at equal bytes: each at its max_ratio (ratio null), so it reads the set's code documents once and its tokens are
+runs (conf/experiment/tokenizer.yaml: `python -m nanochat.run experiment=tokenizer`): every arm at d16, seeds 0 and 1,
+at equal bytes: each at its max_ratio (ratio null), so it reads the set's code documents once and its tokens are
 their bytes over its bytes per token; text and math are drawn by rows. Each run's plan is its own (schedule.plan at
 its tokens), its contexts the corpus's 8,192 and 32,768 tokens (eval/bpb.py's byte-offset buckets: the bytes of
 context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1), trained and evaluated through nanochat/run.py,
@@ -84,10 +84,11 @@ seeds where both have an evaluation (a diverged run drops its seed from the arm'
 - code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal bound
   1.96 CODE_SIGMA √(1 / n + 1 / n), n the contrast's seeds per arm, else equal;
 - the positive control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps sa-bpe's pattern and
-  score. Else a challenger qualifies iff it is worse on neither and better on one. Pattern: of sa-bpe-fused and the
-  hybrid, the qualifier with the lower MBPP+ unparsed share, else sa-bpe's. Score: bpe iff it qualifies, or is equal
-  on both and the val documents read fewer of its merged tokens under 100 times than of sa-bpe's (SA-BPE's claimed
-  benefit, a higher coverage than BPE's), carried to the adopted pattern [inference]; otherwise SA-BPE.
+  score. Else a challenger qualifies iff it is worse on neither and better on one; sa-bpe-fused, worse on parsing,
+  never qualifies (the control detects, it is not a candidate). Pattern: the hybrid's iff it qualifies, else sa-bpe's.
+  Score: bpe iff it qualifies, or is equal on both and the val documents read fewer of its merged tokens under 100
+  times than of sa-bpe's (SA-BPE's claimed benefit, a higher coverage than BPE's), carried to the adopted pattern
+  [inference]; otherwise SA-BPE.
 
 adopt: the decided vocabulary (RESULTS/tokenizer.json "analysis" "decision") as the corpus's tokenizer: the arm of
 the decided pattern and score, or, bpe's score carried to another arm's pattern, that pair trained on the sample.
@@ -109,7 +110,7 @@ import statistics
 import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -121,7 +122,7 @@ from tokenizers import models
 
 from nanochat.config import VOCAB_SIZE
 from nanochat.corpus import mixture
-from nanochat.corpus.compile import compile_repositories, compile_source, stage_parts
+from nanochat.corpus.compile import compile_repositories, compile_source, stage_parts, train_parts
 from nanochat.corpus.loader import TOKEN_DTYPE, mixture_rows, split_path, weights
 from nanochat.corpus.pack import packed_shards, shard_count, write
 from nanochat.corpus.parallel import SPAWN
@@ -168,8 +169,8 @@ HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]+
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
-# The runs' depth, which the set is sized for, and seeds per arm (conf/experiment/tokenizer.yaml)
-DEPTH, SEEDS = 16, 2
+# The runs' depth, which the set is sized for (conf/experiment/tokenizer.yaml)
+DEPTH = 16
 # The set's size: a d16 run at Chinchilla's 20 tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3)
 RATIO = 20
 # The set's margin over the draws of the corpora that must not bind (text, math, the repositories corpora): above the
@@ -199,25 +200,22 @@ def shard_bytes(source: str) -> list[int]:
     return [text_bytes(pq.read_metadata(path), "content") for path in curated_shards(source, "train")]
 
 
-def train_bytes(source: str) -> int:
-    """The text bytes of the source's curated train split."""
-    return sum(shard_bytes(source))
-
-
 def byte_shares() -> dict[str, float]:
     """Each file-stage source's share of the stage's bytes: its share of the stage's tokens (Stage.shares, tokens
     counted at the reference tokenizer's bytes per token) at its bytes per token."""
     sources, per_token = mixture.FILE_STAGE.sources, mixture.BYTES_PER_TOKEN
-    shares = mixture.FILE_STAGE.shares({s: train_bytes(s) / per_token[s] for s in sources}, mixture.FILE_STAGE.tokens)
+    shares = mixture.FILE_STAGE.shares({s: sum(shard_bytes(s)) / per_token[s] for s in sources},
+                                       mixture.FILE_STAGE.tokens)
     stage_bytes = sum(shares[s] * per_token[s] for s in sources)
     return {s: shares[s] * per_token[s] / stage_bytes for s in sources}
 
 
-def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str], list[str]]:
-    """Row group g of a curated train shard: the texts (sources.texts) and authorship units of its rows that the
-    source's systematic sample takes, `start` the source's rows before the group: row i when floor((i + 1) * fraction)
-    exceeds floor(i * fraction). A row naming its repository (a repository file, a function) has that repository as its
-    unit, its name lowercased (one unit across the sources that hold it); any other document is its own."""
+def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str], list[str], int]:
+    """Row group g of a curated train shard: the texts (sources.texts), authorship units and total UTF-8 bytes of its
+    rows that the source's systematic sample takes, `start` the source's rows before the group: row i when
+    floor((i + 1) * fraction) exceeds floor(i * fraction). A row naming its repository (a repository file, a function)
+    has that repository as its unit, its name lowercased (one unit across the sources that hold it); any other document
+    is its own."""
     source, path, g, start, fraction = task
     group = pq.ParquetFile(path).read_row_group(g)
     rows = np.arange(start, start + group.num_rows)
@@ -226,7 +224,8 @@ def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str]
         units = ["repo:" + name.lower() for name in batch["repo_name"].to_pylist()]
     else:
         units = ["doc:" + id for id in batch["id"].to_pylist()]
-    return texts(source, batch), units
+    docs = texts(source, batch)
+    return docs, units, sum(len(text.encode()) for text in docs)
 
 
 def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
@@ -235,7 +234,7 @@ def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
     order (module docstring)."""
     tasks, composition = [], {}
     for s, share in byte_shares().items():
-        fraction, at = share * SAMPLE_BYTES / train_bytes(s), 0
+        fraction, at = share * SAMPLE_BYTES / sum(shard_bytes(s)), 0
         composition[s] = {"target_bytes": share * SAMPLE_BYTES, "fraction": fraction, "documents": 0, "bytes": 0}
         for path in curated_shards(s, "train"):
             md = pq.read_metadata(path)
@@ -244,12 +243,12 @@ def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
                 at += md.row_group(g).num_rows
     docs, units, ids, held = [], [], {}, {s: set() for s in composition}
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
-        for (s, *_), (batch, names) in zip(tasks, pool.map(sample_row_group, tasks), strict=True):
+        for (s, *_), (batch, names, size) in zip(tasks, pool.map(sample_row_group, tasks), strict=True):
             docs += batch
             units += [ids.setdefault(name, len(ids)) for name in names]
             held[s].update(names)
             composition[s]["documents"] += len(batch)
-            composition[s]["bytes"] += sum(len(text.encode()) for text in batch)
+            composition[s]["bytes"] += size
     for s, names in held.items():
         composition[s]["units"] = len(names)
     return docs, units, composition
@@ -314,19 +313,29 @@ def vocabularies() -> None:
     (RESULTS / "tokenizer-vocabularies.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
-def describe(arm: str) -> dict:
-    """An arm's planning, mechanism and tie-break measures on the corpus's val splits (module docstring)."""
+def val_split(task: tuple[str, str]) -> tuple[np.ndarray, np.ndarray]:
+    """An arm's compiled val split of a source: each mergeable token's count and each document's bytes."""
+    arm, corpus = task
+    tokenizer = get_tokenizer(ABLATION / arm)
+    path = split_path(corpus, "val", tokenizer)
+    tokens = np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE)
+    ends = np.concatenate([[0], np.cumsum(tokenizer.token_lengths[tokens])])
+    return (np.bincount(tokens, minlength=tokenizer.bos_token_id),
+            np.diff(ends[np.fromfile(path.with_suffix(".idx"), dtype=np.int64)]))
+
+
+def describe(arm: str, counts: dict[str, np.ndarray]) -> dict:
+    """An arm's planning, mechanism and tie-break measures from its token counts on each source's val split
+    (val_split; module docstring)."""
     tokenizer = get_tokenizer(ABLATION / arm)
     lengths = tokenizer.token_lengths[:tokenizer.bos_token_id]
     held = np.zeros(tokenizer.bos_token_id, dtype=np.int64)
     sources = {}
     for corpus in SOURCES:
-        path = split_path(corpus, "val", tokenizer)
-        tokens = np.memmap(path.with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r")
-        counts = np.bincount(tokens, minlength=tokenizer.bos_token_id)
-        held += counts
-        sources[corpus] = {"bytes": int(counts @ lengths), "tokens": len(tokens),
-                           "bytes_per_token": float(counts @ lengths / len(tokens))}
+        held += counts[corpus]
+        tokens = int(counts[corpus].sum())
+        sources[corpus] = {"bytes": int(counts[corpus] @ lengths), "tokens": tokens,
+                           "bytes_per_token": float(counts[corpus] @ lengths / tokens)}
     shares = byte_shares()
 
     def mixed(members: tuple[str, ...] | list[str]) -> float:
@@ -341,7 +350,7 @@ def describe(arm: str) -> dict:
             "file_stage_bytes_per_token": {"all": mixed(mixture.FILE_STAGE.sources)}
             | {name: mixed(group.sources) for name, group in mixture.FILE_STAGE.groups.items()},
             "train_tokens_over_draw": {
-                group: sum(train_bytes(s) / sources[s]["bytes_per_token"] for s, g in mixture.PART.items()
+                group: sum(sum(shard_bytes(s)) / sources[s]["bytes_per_token"] for s, g in mixture.PART.items()
                            if g == group) / mixture.draw(group) for group in mixture.IN_PART},
             "line_break_entries": {"line_break": sum("\n" in t or "\r" in t for t in entries),
                                    "punctuation_line_break": sum(bool(fused.search(t)) for t in entries),
@@ -409,47 +418,47 @@ def fidelity(task: tuple[str, str]) -> dict[str, int]:
 
 def intrinsic() -> None:
     """Every arm's compiled val split of every source, the equal-bytes check, and RESULTS/tokenizer-intrinsic.json
-    (module docstring): the compiles, every split at once, then each arm's measures, depth invariance per program
-    source and fidelity per arm and source, all in one process pool."""
+    (module docstring), all in one process pool: depth invariance per program source and fidelity per arm and source
+    (which read no compiled data) beside the compiles, every split at once, each split's counts as it is compiled."""
     seconds, start, began = {}, time.perf_counter(), provenance()
     programs = [s for s, spec in SOURCES.items() if spec.category in PROGRAMS]
     checks = [(arm, source) for arm in ARMS for source in SOURCES]
     with ProcessPoolExecutor(mp_context=SPAWN) as pool, ThreadPoolExecutor(len(checks)) as threads:
         for arm, corpus in checks:
             split_path(corpus, "val", get_tokenizer(ABLATION / arm)).parent.mkdir(parents=True)
+        invariance = [pool.submit(depth_invariance, source) for source in programs]
+        fidelities = [pool.submit(fidelity, check) for check in checks]
+
+        def compiled(check: tuple[str, str]) -> Future:
+            compile_source(check[1], "val", ABLATION / check[0], pool)
+            return pool.submit(val_split, check)
+
         # a val split is a few row groups: one split at a time would leave the pool idle
-        list(threads.map(lambda check: compile_source(check[1], "val", ABLATION / check[0], pool), checks))
+        splits = dict(zip(checks, threads.map(compiled, checks), strict=True))
         seconds["compile"] = time.perf_counter() - start
-        for corpus in SOURCES:
-            sizes = []
-            for arm in ARMS:
-                tokenizer = get_tokenizer(ABLATION / arm)
-                path = split_path(corpus, "val", tokenizer)
-                tokens = np.fromfile(path.with_suffix(".bin"), dtype=TOKEN_DTYPE)
-                ends = np.concatenate([[0], np.cumsum(tokenizer.token_lengths[tokens])])
-                sizes.append(np.diff(ends[np.fromfile(path.with_suffix(".idx"), dtype=np.int64)]))
-            if not all(np.array_equal(sizes[0], other) for other in sizes[1:]):
-                raise RuntimeError(f"{corpus}: the arms' compiled val documents differ in bytes")
         begin = time.perf_counter()
-        described = pool.map(describe, ARMS)  # every map submits at once
-        invariance = pool.map(depth_invariance, programs)
-        fidelities = pool.map(fidelity, checks)
-        record = {"arms": {arm: result | {"depth_invariance": {}, "fidelity": {}}
-                           for arm, result in zip(ARMS, described, strict=True)}}
-        for source, by_arm in zip(programs, invariance, strict=True):
-            for arm, result in by_arm.items():
+        counts, sizes = {}, {}
+        for check, future in splits.items():
+            counts[check], sizes[check] = future.result()
+        for corpus in SOURCES:
+            if not all(np.array_equal(sizes["sa-bpe", corpus], sizes[arm, corpus]) for arm in CHALLENGERS):
+                raise RuntimeError(f"{corpus}: the arms' compiled val documents differ in bytes")
+        record = {"arms": {arm: describe(arm, {corpus: counts[arm, corpus] for corpus in SOURCES})
+                           | {"depth_invariance": {}, "fidelity": {}} for arm in ARMS}}
+        for source, future in zip(programs, invariance, strict=True):
+            for arm, result in future.result().items():
                 record["arms"][arm]["depth_invariance"][source] = result
-        for (arm, source), result in zip(checks, fidelities, strict=True):
-            record["arms"][arm]["fidelity"][source] = result
+        for (arm, source), future in zip(checks, fidelities, strict=True):
+            record["arms"][arm]["fidelity"][source] = future.result()
         seconds["measures"] = time.perf_counter() - begin
     record |= {"seconds": seconds | {"all": time.perf_counter() - start}, "provenance": began}
     (RESULTS / "tokenizer-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
-def document_set(pool: ProcessPoolExecutor, run) -> dict:
-    """The set (module docstring) for the d16 run `run` at RATIO under sa-bpe: {"file": {source: its leading train
-    shards, the file stage's}, "repository": {source: its train shards after those, the repository stage's},
-    "partitions": the repositories corpora's train partitions, "draws": {seq_len: {corpus: its tokens in the run}}}."""
+def document_set(run) -> dict:
+    """The set's shards (module docstring) for the d16 run `run` at RATIO under sa-bpe: {"file": {source: its leading
+    train shards, the file stage's}, "repository": {source: its train shards after those, the repository stage's},
+    "draws": {seq_len: {corpus: its tokens in the run}}}; the repositories corpora's partitions: data."""
     from nanochat.train.stages import drawn
 
     measured = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))["arms"]["sa-bpe"]
@@ -473,58 +482,72 @@ def document_set(pool: ProcessPoolExecutor, run) -> dict:
             for s, tokens in file_draws.items()}
     repository = {s: shards(s, tokens * (1 if s in mixture.REPO_STAGE.supply else MARGIN), file.get(s, 0))
                   for s, tokens in repo_draws.items() if s in SOURCES}
-    partitions = stage_parts(ABLATION / "sa-bpe", pool,
-                             MARGIN * sum(repo_draws[c] for c in mixture.REPOSITORIES.values()))
-    parts = [int(path.stem) for path in curated_shards(mixture.REPOSITORY_SOURCES[0], "train")]
-    if max(file[s] for s in mixture.REPOSITORY_SOURCES) > parts.index(partitions[0]):
-        raise RuntimeError("the file stage's repository shards reach the repository stage's partitions")
-    return {"file": file, "repository": repository, "partitions": partitions,
-            "draws": {"8192": file_draws, "32768": repo_draws}}
+    return {"file": file, "repository": repository, "draws": {"8192": file_draws, "32768": repo_draws}}
 
 
 def data() -> None:
-    """Every arm's training set, compiled and packed, and RESULTS/tokenizer-data.json (module docstring): every arm's
-    train splits at once into one process pool, then their repositories corpora, then every pack at once."""
+    """Every arm's training set, compiled and packed, and RESULTS/tokenizer-data.json (module docstring): each corpus
+    of each arm compiled, then packed, as its own job, every job at once into one process pool; the repositories
+    corpora once stage_parts, which runs beside the sources' compiles, has chosen their partitions."""
     # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
-    import torch
-
-    from nanochat.model.gpt import GPT, gpt_config
-    from nanochat.train.schedule import plan
+    from nanochat.run import base_plan
     from nanochat.train.stages import drawn, max_ratio, stage_rows
 
     start, began = time.perf_counter(), provenance()
-    with torch.device("meta"):
-        model = GPT(gpt_config(depth=DEPTH, stage=mixture.FILE_STAGE))
-    run = plan(model=model, ratio=RATIO)
+    run = base_plan(depth=DEPTH, ratio=RATIO)
+    shards = document_set(run)
     stages = (mixture.FILE_STAGE, mixture.REPO_STAGE)
+    leading = {s: shards["file"].get(s, 0) + shards["repository"].get(s, 0) for s in SOURCES}
+    compiled = []  # each job's compile end
+
+    def pack(corpus: str, directory: Path) -> None:
+        """A compiled corpus's packs in each stage that reads it: its train split's shards in the set, its val split
+        whole."""
+        for stage in stages:
+            if corpus not in stage.sources:
+                continue
+            if corpus in mixture.REPOSITORIES.values():
+                train = range(shard_count(corpus, "train", directory))
+            elif stage is mixture.FILE_STAGE:
+                train = range(shards["file"][corpus])
+            else:
+                first = shards["file"].get(corpus, 0)
+                train = range(first, first + shards["repository"][corpus])
+            for split, listed in (("train", train), ("val", range(shard_count(corpus, "val", directory)))):
+                write(corpus, split, directory, packed_shards(corpus, split, directory, listed, stage.seq_len),
+                      stage.seq_len)
+
+    def source(arm: str, corpus: str) -> None:
+        compile_source(corpus, "train", ABLATION / arm, pool, leading=leading[corpus])
+        compiled.append(time.perf_counter())
+        pack(corpus, ABLATION / arm)
+
+    def repositories(arm: str) -> None:
+        compile_repositories(ABLATION / arm, partitions.result(), pool)
+        compiled.append(time.perf_counter())
+        for corpus in mixture.REPOSITORIES.values():
+            pack(corpus, ABLATION / arm)
+
     data_crate()  # built once, before the threads call it (pack.py's rule)
-    with ProcessPoolExecutor(mp_context=SPAWN) as pool, ThreadPoolExecutor(os.cpu_count()) as threads:
-        chosen = document_set(pool, run)
-        leading = {s: chosen["file"].get(s, 0) + chosen["repository"].get(s, 0) for s in SOURCES}
-        list(threads.map(lambda job: compile_source(job[1], "train", ABLATION / job[0], pool, leading=leading[job[1]]),
-                         [(arm, s) for arm in ARMS for s in SOURCES]))
-        list(threads.map(lambda arm: compile_repositories(ABLATION / arm, chosen["partitions"], pool), ARMS))
-        compiled = time.perf_counter() - start
-        packs = []
-        for arm, stage in itertools.product(ARMS, stages):
-            directory = ABLATION / arm
-            for corpus in stage.sources:
-                if corpus in mixture.REPOSITORIES.values():
-                    train = range(shard_count(corpus, "train", directory))
-                elif stage is mixture.FILE_STAGE:
-                    train = range(chosen["file"][corpus])
-                else:
-                    first = chosen["file"].get(corpus, 0)
-                    train = range(first, first + chosen["repository"][corpus])
-                packs += [(corpus, "train", directory, train, stage.seq_len),
-                          (corpus, "val", directory, range(shard_count(corpus, "val", directory)), stage.seq_len)]
-        list(threads.map(lambda job: write(job[0], job[1], job[2], packed_shards(*job), job[4]), packs))
-    packed = time.perf_counter() - start - compiled
+    with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
+          ThreadPoolExecutor(len(ARMS) * (len(SOURCES) + 1) + 1) as threads):
+        partitions = threads.submit(stage_parts, ABLATION / "sa-bpe", pool,
+                                    MARGIN * sum(shards["draws"]["32768"][c] for c in mixture.REPOSITORIES.values()))
+        jobs = [threads.submit(source, arm, corpus) for arm in ARMS for corpus in SOURCES]
+        jobs += [threads.submit(repositories, arm) for arm in ARMS]
+        if max(shards["file"][s] for s in mixture.REPOSITORY_SOURCES) > train_parts().index(partitions.result()[0]):
+            raise RuntimeError("the file stage's repository shards reach the repository stage's partitions")
+        for job in jobs:
+            job.result()
+    chosen = {"file": shards["file"], "repository": shards["repository"], "partitions": partitions.result(),
+              "draws": shards["draws"]}
+    compile_seconds = max(compiled) - start
+    pack_seconds = time.perf_counter() - start - compile_seconds
     arms = {}
     for arm in ARMS:
         tokenizer = get_tokenizer(ABLATION / arm)
         ratio = max_ratio(tokenizer, depth=DEPTH)
-        arm_run = plan(model=model, ratio=ratio)
+        arm_run = base_plan(depth=DEPTH, ratio=ratio)
         read = {}
         for stage in stages:
             rows, count = stage_rows(tokenizer, stage), drawn(stage, arm_run)
@@ -542,52 +565,59 @@ def data() -> None:
     record = {"run": {"depth": DEPTH, "ratio": RATIO, "num_iterations": run.num_iterations,
                       "total_batch_size": run.total_batch_size, "repo_start": run.repo_start},
               "set": chosen, "arms": arms,
-              "seconds": {"compile": compiled, "pack": packed, "all": time.perf_counter() - start}, "provenance": began}
+              "seconds": {"compile": compile_seconds, "pack": pack_seconds, "all": time.perf_counter() - start},
+              "provenance": began}
     (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+
+
+def evaluated(lines: list[dict], field: str) -> dict[tuple, tuple[float, list[bool]]]:
+    """{(the run's `field`, seed): (code bits per byte, per PARSED problem in the benchmark's order whether its healed
+    greedy completion compiles)} of every evaluated run in an experiment's records (a diverged run has none)."""
+    return {(line["config"][field], line["config"]["seed"]): (
+        line["measures"]["code"], [o == "parses" for o in line["evaluations"][-1]["parse"][PARSED]["outcomes"]])
+        for line in lines if line["measures"] is not None}
+
+
+def contrast(runs: dict[tuple, tuple[float, list[bool]]], arm: object, baseline: object) -> dict:
+    """An arm against the baseline (module docstring, Decisions; evaluated's runs) over the seeds where both have an
+    evaluation: parsing by the exact sign test, code bits per byte by the difference of the means beyond its bound."""
+    seeds = sorted(seed for value, seed in runs if value == arm and (baseline, seed) in runs)
+    if not seeds:
+        raise RuntimeError(f"no seed evaluated under both {arm} and {baseline}")
+    code = {v: statistics.fmean(runs[v, seed][0] for seed in seeds) for v in (arm, baseline)}
+    # per problem, the seeds whose completion parses under the arm minus under the baseline
+    seeds_parsing = (np.sum([runs[arm, seed][1] for seed in seeds], axis=0)
+                     - np.sum([runs[baseline, seed][1] for seed in seeds], axis=0))
+    here, there = int((seeds_parsing > 0).sum()), int((seeds_parsing < 0).sum())
+    p = binomtest(here, here + there).pvalue if here + there else 1.0
+    difference = code[arm] - code[baseline]
+    margin = norm.ppf(1 - ALPHA / 2) * CODE_SIGMA * math.sqrt(2 / len(seeds))
+    return {"seeds": seeds, "problems_parsing_more_here": here, "problems_parsing_more_in_baseline": there, "p": p,
+            "parsing": "equal" if p >= ALPHA else "better" if here > there else "worse",
+            "code_difference": difference, "code_margin": margin,
+            "code": "better" if difference < -margin else "worse" if difference > margin else "equal"}
 
 
 def decide(lines: list[dict]) -> dict:
     """The runs' analysis (RESULTS/tokenizer.json "analysis", ablations/records.py): each challenger's contrast with
-    sa-bpe and the decision (module docstring), over RESULTS/tokenizer.jsonl's records."""
-    # (arm, seed) of every evaluated run (a diverged run has none): its measures and, per MBPP+ problem in the
-    # benchmark's order, whether its completion compiles
-    evaluated = {}
-    for run in lines:
-        if run["measures"] is not None:
-            outcomes = run["evaluations"][-1]["parse"][PARSED]["outcomes"]
-            evaluated[run["config"]["tokenizer"], run["config"]["seed"]] = (run["measures"],
-                                                                            [o == "parses" for o in outcomes])
+    sa-bpe, with the difference of the arms' MBPP+ unparsed shares, and the decision (module docstring), over
+    RESULTS/tokenizer.jsonl's records."""
+    runs = evaluated(lines, "tokenizer")
     contrasts = {}
     for arm in CHALLENGERS:
-        seeds = [seed for seed in range(SEEDS) if (arm, seed) in evaluated and ("sa-bpe", seed) in evaluated]
-        if not seeds:
-            raise RuntimeError(f"no seed evaluated under both {arm} and sa-bpe")
-        both = {name: [evaluated[name, seed] for seed in seeds] for name in (arm, "sa-bpe")}
-        code = {name: statistics.fmean(measures["code"] for measures, _ in runs_) for name, runs_ in both.items()}
-        unparsed = {name: 1 - statistics.fmean(itertools.chain.from_iterable(parsed for _, parsed in runs_))
-                    for name, runs_ in both.items()}
-        # per problem, the seeds whose completion parses under the challenger minus under sa-bpe
-        seeds_parsing = np.sum([parsed for _, parsed in both[arm]], axis=0) - np.sum(
-            [parsed for _, parsed in both["sa-bpe"]], axis=0)
-        here, there = int((seeds_parsing > 0).sum()), int((seeds_parsing < 0).sum())
-        p = binomtest(here, here + there).pvalue if here + there else 1.0
-        difference = code[arm] - code["sa-bpe"]
-        margin = norm.ppf(1 - ALPHA / 2) * CODE_SIGMA * math.sqrt(2 / len(seeds))
-        contrasts[arm] = {"seeds": seeds, "problems_parsing_more_here": here, "problems_parsing_more_in_sa-bpe": there,
-                          "p": p, "parsing": "equal" if p >= ALPHA else "better" if here > there else "worse",
-                          "code_difference": difference, "code_margin": margin,
-                          "code": "better" if difference < -margin else "worse" if difference > margin else "equal",
-                          "unparsed_difference": unparsed[arm] - unparsed["sa-bpe"]}
+        c = contrast(runs, arm, "sa-bpe")
+        unparsed = {v: 1 - statistics.fmean(itertools.chain.from_iterable(runs[v, seed][1] for seed in c["seeds"]))
+                    for v in (arm, "sa-bpe")}
+        contrasts[arm] = c | {"unparsed_difference": unparsed[arm] - unparsed["sa-bpe"]}
     verdicts = {arm: (c["parsing"], c["code"]) for arm, c in contrasts.items()}
     qualified = {arm for arm, v in verdicts.items() if "worse" not in v and "better" in v}
     record = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))
     rare = {arm: measures["merged_reads"]["under 100"] for arm, measures in record["arms"].items()}
     frequency = "bpe" in qualified or (verdicts["bpe"] == ("equal", "equal") and rare["bpe"] < rare["sa-bpe"])
-    # the positive control gates the decision: undetected, the corpus keeps sa-bpe's pattern and score
+    # the positive control gates the decision: undetected, the corpus keeps sa-bpe's pattern and score; detected, it
+    # parses worse, so it never qualifies and the hybrid is the only pattern that can
     control = verdicts["sa-bpe-fused"][0] == "worse"
-    pattern = min(qualified & {"sa-bpe-fused", "hybrid"}, key=lambda arm: contrasts[arm]["unparsed_difference"],
-                  default="sa-bpe")
-    decision = {"pattern": pattern if control else "sa-bpe",
+    decision = {"pattern": "hybrid" if control and "hybrid" in qualified else "sa-bpe",
                 "score": "frequency" if control and frequency else "sa-bpe",
                 "control_detected": control}
     return {"contrasts": contrasts, "decision": decision}

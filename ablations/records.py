@@ -10,7 +10,6 @@ import json
 import statistics
 from typing import Any
 
-from hydra.core.hydra_config import HydraConfig
 from hydra.core.utils import JobReturn
 from hydra.experimental.callback import Callback
 from hydra.utils import get_method
@@ -84,7 +83,8 @@ class Records(Callback):
         self.configs.append(OmegaConf.to_object(job_return.cfg))
 
     def on_multirun_end(self, config: DictConfig, **kwargs: Any) -> None:
-        experiment = HydraConfig.get().runtime.choices["experiment"]
+        # the sweep's config (run_job restores HydraConfig to its pre-job state, unset in a multirun)
+        experiment = config.hydra.runtime.choices.experiment
         lines = [record(c, experiment) for c in self.configs]
         (RESULTS / f"{experiment}.jsonl").write_text(
             "".join(json.dumps(line, allow_nan=False) + "\n" for line in lines), encoding="utf-8")

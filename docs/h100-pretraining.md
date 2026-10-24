@@ -689,8 +689,8 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   holding a margin over their draw, and of each repository corpus the trailing partitions holding a margin over the
   repository stage's draw, so they never bind; of the val split, a systematic sample of documents every arm scores
   whole.
-- **Decisions,** pre-registered (`results/tokenizer.json` `decision`), each challenger (sa-bpe-fused, the
-  hybrid, bpe) against sa-bpe, on the seeds where both have an evaluation (a diverged run drops its seed from its
+- **Decisions,** pre-registered (`results/tokenizer.json` `analysis` `decision`), each challenger (sa-bpe-fused,
+  the hybrid, bpe) against sa-bpe, on the seeds where both have an evaluation (a diverged run drops its seed from its
   arm's contrasts on both sides). Parsing: problems are the units; per MBPP+ problem, the seeds whose healed greedy
   completion compiles under the challenger minus those under sa-bpe, and an exact sign test over the problems where
   they differ (McNemar's exact test at one seed, the companion post's test of single runs: 104 problems against 4 for
@@ -700,16 +700,17 @@ per kind (1,973). English and math chunk alike under production's pattern and th
   over those n seeds, better or worse beyond 1.96 σ √(2/n), 0.0067 at two seeds, σ = 0.0034 the within-configuration
   spread of Against the standard regime at d8, carried to d16 [inference]. A challenger qualifies iff it is worse on
   neither and better on one. The control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps its
-  pattern and score. Pattern: of sa-bpe-fused and the hybrid, the qualifier with the lower MBPP+ unparsed share is
-  adopted, else sa-bpe's. Score: bpe is adopted iff it qualifies, or is equal on both and the val documents read fewer
+  pattern and score; a detected control parses worse, so it never qualifies. Pattern: the hybrid's iff it qualifies,
+  else sa-bpe's. Score: bpe is adopted iff it qualifies, or is equal on both and the val documents read fewer
   of its merged tokens under 100 times than of sa-bpe's (SA-BPE's claimed benefit, a higher coverage than BPE's: 640
   verified under-trained tokens for F against 72, its Table 3), carried to the adopted pattern [inference]; otherwise
   SA-BPE.
-- **Two seeds** (`SEEDS`). The seed is the measures' largest noise: the post's fusing tokenizer scored MBPP 0.167 (two
-  seed-42 runs), 0.072 and 0.018 over three seeds, so one run can miss a real difference [inference], and an
-  undetected one leaves production's pattern and SA-BPE. Pooling the seeds' problem pairs in one McNemar test would
-  count each problem once per seed, pairs that are not independent; the sign test counts each problem once, its seeds
-  in its difference. It covers the sampling of problems, the seeds training's only in part [inference].
+- **Two seeds** (`conf/experiment/tokenizer.yaml`). The seed is the measures' largest noise: the post's fusing
+  tokenizer scored MBPP 0.167 (two seed-42 runs), 0.072 and 0.018 over three seeds, so one run can miss a real
+  difference [inference], and an undetected one leaves production's pattern and SA-BPE. Pooling the seeds' problem
+  pairs in one McNemar test would count each problem once per seed, pairs that are not independent; the sign test
+  counts each problem once, its seeds in its difference. It covers the sampling of problems, the seeds training's only
+  in part [inference].
 - **Where it runs.** On the GH200 that then trains production (Hardware: GH200 or H100 SXM5), in the order of
   `nanochat/corpus/gh200.md`: step 3, the vocabularies and `intrinsic` (the arms' compiled val splits and intrinsic
   record) on its 64 vCPUs; step 4, the cutover, training reading the corpus, which builds the document set and every

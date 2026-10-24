@@ -1,6 +1,6 @@
 # @package _global_
 # D7 at 20 tokens per parameter (ablations/recipe.py muon_tau; ACTIONS.md §8): Muon's decay timescale x 1/2 and x 2
-# against the tau law, d8 on the sa-bpe arm's data, 4 seeds. Before muon_tau_200, whose analysis reads this one's.
+# against the tau law, d8 on the sa-bpe arm's data, 2 seeds. Before muon_tau_200, whose analysis reads this one's.
 depth: 8
 ratio: 20.0
 tokenizer: sa-bpe
@@ -9,7 +9,7 @@ hydra:
   sweeper:
     params:
       muon_tau_scale: 0.5,1.0,2.0
-      seed: range(4)
+      seed: range(2)
   callbacks:
     records:
       _target_: ablations.records.Records

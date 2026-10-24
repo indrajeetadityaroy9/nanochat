@@ -17,12 +17,14 @@ BETAS = (0.9, 0.95)
 # its norm (torch/optim/_muon.py _zeropower_via_newtonschulz, after KellerJordan/Muon), so under a slowly varying
 # gradient scale the clip damps only spikes
 MAX_NORM = 1.0
+# AdamW's EMA timescale law tau* = TAU_C TPP^TAU_E of the run's steps (Power Lines, arXiv 2505.13738 App. E.3.1)
+TAU_C, TAU_E = 1.084, -0.527
 
 
 def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float:
-    """Weight decay whose EMA timescale 1 / (lr wd) is tau* = 1.084 TPP^-0.527 of the run's steps (Power Lines,
+    """Weight decay whose EMA timescale 1 / (lr wd) is tau* = TAU_C TPP^TAU_E of the run's steps (Power Lines,
     arXiv 2505.13738 Finding 3; arXiv 2405.13698)."""
-    return 1 / (lr * 1.084 * tokens_per_param ** -0.527 * steps)
+    return 1 / (lr * TAU_C * tokens_per_param ** TAU_E * steps)
 
 
 class Muon(torch.optim.Muon):
