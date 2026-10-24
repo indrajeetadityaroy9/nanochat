@@ -85,7 +85,8 @@ def push() -> None:
     if old:
         api.create_commit(DATASET, repo_type="dataset", operations=[CommitOperationDelete(f) for f in old],
                           commit_message="Delete the previous corpus")
-    api.upload_large_folder(repo_id=DATASET, repo_type="dataset", folder_path=CORPUS, allow_patterns=PATTERNS)
+    api.upload_folder(repo_id=DATASET, repo_type="dataset", folder_path=CORPUS, allow_patterns=PATTERNS,
+                      commit_message="nanochat corpus, curated")
     api.super_squash_history(DATASET, repo_type="dataset", commit_message="nanochat corpus, curated")
     print(f"{DATASET} revision {api.dataset_info(DATASET).sha}", flush=True)
 
