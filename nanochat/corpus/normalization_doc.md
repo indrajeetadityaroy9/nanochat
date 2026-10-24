@@ -1,7 +1,7 @@
 # Pretraining corpus for Python and C++ code generation: specification
 
 This document specifies `nanochat/corpus`, which replaces `nanochat/data`: pretraining from scratch for code
-generation in Python and C++, from the 21 sources of `nanochat/corpus/sources.py`, 18 of them read. Every rule is a
+generation in Python and C++, from the 18 sources of `nanochat/corpus/sources.py`. Every rule is a
 decision. Every number is quoted from a paper, read from the code, or measured on the GB10; `[inference]` marks a step
 no source states, `[arithmetic]` a figure derived from others.
 
@@ -45,7 +45,7 @@ the sources and production's packs.
 | `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks @ `ef882ad1` | NOTEBOOK | `text` | 11 of 11 | 580,195 |
 | `climbmix` | karpathy/climbmix-400b-shuffle @ `915333b4` | TEXT | `text` | 187 of 6,543 | 15,814,656 |
 
-Not read: web mathematics (`ultradata_math_l1`, `opc_fineweb_math`) and GitHub issues (`github_issues`), §5.2;
+Not read: web mathematics (UltraData-Math L1, OPC FineWeb Math) and StarCoder2's GitHub issues, §5.2;
 Nemotron-Pretraining-Code-v2's GitHub metadata and dialogue subsets, §3.3; CodeXGLUE's Python validation and test
 splits, the benchmark's, §3.4.
 
@@ -92,7 +92,6 @@ One standardized Parquet file per Hub file, `CORPUS/standardized/<source>/<k>.pa
 | SYNTHETIC_FILE | `id`, `content`, `language` | `id` |
 | FUNCTION | `id`, `repo_name`, `content`, `language` | `repo_name` |
 | CONVERSATION | `id`, `problem_id`, `content` | `problem_id` |
-| ISSUE | `id`, `repo_name`, `content` | `repo_name` |
 | NOTEBOOK | `id`, `content`, `language` | `id` |
 | TEXT | `id`, `content` | `id` |
 
@@ -102,12 +101,12 @@ One standardized Parquet file per Hub file, `CORPUS/standardized/<source>/<k>.pa
   each), and no problem's `id` appears among any row's `aliases` (measured), so `id` alone keeps a problem on one side
   of the split.
 - **`language` is the source's,** a Linguist name for code.
-- **A category is its schema object:** EXERCISE, SYNTHETIC_FILE and NOTEBOOK have equal fields, and pyarrow's `==`
-  compares fields, so the code tells categories apart with `is`.
+- **A category** (`schema.Category`) also fixes the split's group and whether its content is one whole program text
+  (`code`: repository files, synthetic files and functions), which in Python must parse (§4.2).
 - **Not stored:** publisher and blob ids; quality scores; timestamps, sizes and counts; serialized duplicates
   (`full_content`, `raw_content`, `messages`); L3's `task`, `analysis`, `solution` and `test`; Nemotron's `prompts`
   and seed fields; Codeforces-CoTs' statement fields, tests and `finish_reason`.
-- **Records:** `CORPUS/manifest.json` holds each source's repo, revision, Hub files and rows (`prepare.record`), and at
+- **Records:** `CORPUS/manifest.json` holds each source's repo, revision, Hub files and rows (`prepare.py`), and at
   publication the code's commit and each split's shards, rows and text bytes (`publish.push`); `CORPUS/packed.json`
   holds each stage's rows and weights (`pack.py`).
 
@@ -228,10 +227,12 @@ documentation is shorter than 3 or longer than 256 tokens, holds special tokens 
 ## 4. Curation
 
 `curate` runs the Python 3 check with repair, exact deduplication, the split and the shards
-(`CORPUS/curated/<source>/<split>/<k>.parquet`). The curated corpus is verified on every row before publication:
-178,887,291 rows; no empty text, CR or leading U+FEFF; every `id` its text's sha1; no text twice across all sources
-and splits; a parse sample of 101,528 checked Python files, all parsing; one schema per source; each source's rows its
-input less its duplicates.
+(`CORPUS/curated/<source>/<split>/<k>.parquet`); every output, the shards' row groups included, is a function of the
+standardized files. A repository shard's row group holds whole samples, at least 65,536 files (`curate.SAMPLE_ROWS`;
+the published shards', the same rows in the same order, followed the shuffle's files instead). The curated corpus is
+verified on every row before publication: 178,887,291 rows; no empty text, CR or leading U+FEFF; every `id` its
+text's sha1; no text twice across all sources and splits; a parse sample of 101,528 checked Python files, all
+parsing; one schema per source; each source's rows its input less its duplicates.
 
 ### 4.1 No generated, vendored or C++ syntax filter
 
@@ -365,7 +366,7 @@ both sides.
   (arXiv 2411.04905 §2.2), and To Code keeps "10% of code in text mixture data … to avoid a full distribution shift"
   (arXiv 2408.10914, footnote 5). On production's runs, after its switch to code alone the step-to-step spread of the
   training loss grows 1.15–2.26 times (measured, `results/lr-curves.jsonl`).
-- **Within a group,** sources weigh by their packed rows (`mixture_weights`), which follow their tokens. The 32K stage
+- **Within a group,** sources weigh by their packed rows (`pack.fit`), which follow their tokens. The 32K stage
   reads the trailing residue partitions of the repository sources, the file stage the rest, as import-connected
   samples (production's 8K unit).
 - **A group read in part** reads its rows in `id` order, a uniform sample of its extent; a document source's train

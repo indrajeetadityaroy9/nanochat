@@ -1,90 +1,52 @@
 """
-The document categories of the corpus's sources: every standardized file holds one. id is computed locally, the sha1
-of the document's text; no publisher's identifier is kept as id.
+The document categories of the corpus's sources (normalization_doc.md §2). Every standardized file holds one
+category's rows in its schema; id is the sha1 of the document's text, computed locally.
 
-REPOSITORY_FILE: a source file of a code repository, with its path in the repository and its language (Linguist
-name).
-EXERCISE: a synthetic programming exercise as the publisher serializes its task and solution (content: the task as a
-code comment, unfenced text or Markdown, then the solution), with its language.
-SYNTHETIC_FILE: a source file an LLM wrote from a repository file (rewritten in its language, or transpiled into
-another), with its language; no repository or path.
-FUNCTION: a function of a repository file with its docstring, as the publisher extracted it (CodeSearchNet), with its
-repository and language.
-CONVERSATION: a codeforces_cots record as one document, the R1 prompt (the problem and its instructions) followed by
-its generation (a reasoning trace and a solution), with its problem's id (problem_id), which every generation of the
-problem shares.
-ISSUE: a GitHub issue thread as one document (its title, the question and the answers, each by an anonymized user,
-and its status), with its repository.
-NOTEBOOK: a Kaggle notebook as one document, in Markdown (its title, the description of the datasets it reads, its
-code converted to a script in code blocks), with the code's language.
-TEXT: a web document.
-SAMPLE_FILE: a curated repository file and its import-connected sample (curate.py): the files of a sample are
-consecutive rows, in the sample's dependency order.
+REPOSITORY_FILE  a source file of a code repository, with its path in the repository and its language
+EXERCISE         a synthetic programming exercise as its publisher serializes it: the task (a code comment, unfenced
+                 text or Markdown), then the solution
+SYNTHETIC_FILE   a source file an LLM wrote from a repository file (rewritten in its language, or transpiled)
+FUNCTION         a function of a repository file with its docstring (CodeSearchNet), with its repository
+CONVERSATION     a Codeforces-CoTs record: the R1 prompt, then its generation (reasoning and solution), with the problem
+NOTEBOOK         a Kaggle notebook in Markdown: its title, its datasets' description, its code as a script
+TEXT             a web document
 
-A category is its schema object: EXERCISE, SYNTHETIC_FILE and NOTEBOOK have equal fields, and pyarrow's == compares
-fields, so code tells categories apart with `is`, never == or `in`.
+A category fixes the split's group: a document is val when md5_number(group) % SPLIT = 0 (curate.py), a repository
+by its lowercased name, GitHub's names being case-insensitive. Its `code` flag marks a content that is one whole
+program text in its source's language, which must parse when that language is Python (curate.check).
 
-The split (curate.py): a document's group is val when md5_number(group) % SPLIT is 0. The group is the repository, its
-name lowercased (REPOSITORY_FILE, FUNCTION, ISSUE), the problem (CONVERSATION), else the document.
+SAMPLE_FILE is a repository source's curated layout: its files cut into import-connected samples, a sample's files
+consecutive rows in its dependency order, numbered by `sample` within their shard.
 """
+
+from dataclasses import dataclass
 
 import pyarrow as pa
 
-SPLIT = 100  # production's split (nanochat/data/curate.py): 1% of groups held out
+SPLIT = 100  # 1% of groups held out, production's split (nanochat/data/curate.py)
 
-REPOSITORY_FILE = pa.schema([
-    pa.field("id", pa.string(), nullable=False),
-    pa.field("repo_name", pa.string(), nullable=False),
-    pa.field("relative_path", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-    pa.field("language", pa.string(), nullable=False),
-])
 
-EXERCISE = pa.schema([
-    pa.field("id", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-    pa.field("language", pa.string(), nullable=False),
-])
+def strings(*names: str) -> list[pa.Field]:
+    return [pa.field(name, pa.string(), nullable=False) for name in names]
 
-SYNTHETIC_FILE = pa.schema([
-    pa.field("id", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-    pa.field("language", pa.string(), nullable=False),
-])
 
-FUNCTION = pa.schema([
-    pa.field("id", pa.string(), nullable=False),
-    pa.field("repo_name", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-    pa.field("language", pa.string(), nullable=False),
-])
+@dataclass(frozen=True)
+class Category:
+    name: str
+    schema: pa.Schema
+    group: str  # the split's group, a DuckDB expression over the schema's columns
+    code: bool
 
-TEXT = pa.schema([
-    pa.field("id", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-])
 
-CONVERSATION = pa.schema([
-    pa.field("id", pa.string(), nullable=False),
-    pa.field("problem_id", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-])
+REPOSITORY_FILE = Category("repository file", pa.schema(strings("id", "repo_name", "relative_path", "content",
+                                                                "language")), "lower(repo_name)", code=True)
+EXERCISE = Category("exercise", pa.schema(strings("id", "content", "language")), "id", code=False)
+SYNTHETIC_FILE = Category("synthetic file", pa.schema(strings("id", "content", "language")), "id", code=True)
+FUNCTION = Category("function", pa.schema(strings("id", "repo_name", "content", "language")), "lower(repo_name)",
+                    code=True)
+CONVERSATION = Category("conversation", pa.schema(strings("id", "problem_id", "content")), "problem_id", code=False)
+NOTEBOOK = Category("notebook", pa.schema(strings("id", "content", "language")), "id", code=False)
+TEXT = Category("text", pa.schema(strings("id", "content")), "id", code=False)
 
-ISSUE = pa.schema([
-    pa.field("id", pa.string(), nullable=False),
-    pa.field("repo_name", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-])
-
-NOTEBOOK = pa.schema([
-    pa.field("id", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-    pa.field("language", pa.string(), nullable=False),
-])
-
-SAMPLE_FILE = pa.schema([
-    pa.field("repo_name", pa.string(), nullable=False),
-    pa.field("relative_path", pa.string(), nullable=False),
-    pa.field("content", pa.string(), nullable=False),
-    pa.field("sample", pa.int64(), nullable=False),  # the sample's number in its curated file
-])
+SAMPLE_FILE = pa.schema([*strings("repo_name", "relative_path", "content"),
+                         pa.field("sample", pa.int64(), nullable=False)])

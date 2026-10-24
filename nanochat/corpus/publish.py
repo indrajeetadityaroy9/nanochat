@@ -11,20 +11,19 @@ dataset's whole tree and squashes its history into one commit, whose sha it prin
 into CORPUS/curated and its manifest into CORPUS.
 
 python -m nanochat.corpus.publish push
-python -m nanochat.corpus.publish pull --revision <sha>
+python -m nanochat.corpus.publish pull <revision>
 """
 
-import argparse
 import json
 import subprocess
+import sys
 
 import pyarrow.parquet as pq
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, hf_hub_download, snapshot_download
 
 from nanochat.config import DATASET
-from nanochat.corpus import mixture
 from nanochat.corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
-from nanochat.corpus.sources import SOURCES, curated_dir
+from nanochat.corpus.sources import MANIFEST, SOURCES, curated_dir, text_bytes
 from nanochat.paths import CORPUS
 
 # Bytes per preupload call: an upload URL the Hub's LFS batch call returns expires 15 minutes after the call
@@ -65,15 +64,12 @@ COLUMNS = {
 def curated() -> dict[str, dict[str, dict[str, int]]]:
     """{source: {split: shards, rows, content bytes (Parquet footers)}} of every read source."""
     summary = {}
-    for source in mixture.READ:
+    for source in SOURCES:
         summary[source] = {}
         for split in ("train", "val"):
             metadata = [pq.read_metadata(path) for path in curated_dir(source, split).iterdir()]
-            column = metadata[0].schema.to_arrow_schema().get_field_index("content")
-            summary[source][split] = {
-                "shards": len(metadata), "rows": sum(md.num_rows for md in metadata),
-                "bytes": sum(md.row_group(g).column(column).total_uncompressed_size
-                             for md in metadata for g in range(md.num_row_groups))}
+            summary[source][split] = {"shards": len(metadata), "rows": sum(md.num_rows for md in metadata),
+                                      "bytes": sum(text_bytes(md, "content") for md in metadata)}
     return summary
 
 
@@ -84,7 +80,8 @@ def card(manifest: dict) -> str:
     folders = []
     for source, splits in manifest["curated"].items():
         repo = manifest["sources"][source]["repo"]
-        columns = (SAMPLE_FILE if SOURCES[source].schema is REPOSITORY_FILE else SOURCES[source].schema).names
+        category = SOURCES[source].category
+        columns = (SAMPLE_FILE if category == REPOSITORY_FILE else category.schema).names
         folders.append(f"| `{source}` | {CONTENTS[source]} | {', '.join(f'`{c}`' for c in columns)} | "
                        f"[{repo}](https://huggingface.co/datasets/{repo}) | {splits['train']['rows']:,} | "
                        f"{splits['val']['rows']:,} |")
@@ -113,12 +110,11 @@ def push() -> None:
     one commit deleting every file it holds, the files' upload in groups of at most PREUPLOAD bytes (the Hub skips an
     object it holds, so a rerun uploads only the rest), one commit adding them all, and a squash of the history into
     one commit."""
-    path = CORPUS / "manifest.json"
-    manifest = json.loads(path.read_text())
+    manifest = json.loads(MANIFEST.read_text())
     manifest["code"] = subprocess.run(["git", "-c", f"safe.directory={CORPUS.parent.parent}", "rev-parse", "HEAD"],
                                       capture_output=True, text=True, check=True).stdout.strip()
     manifest["curated"] = curated()
-    path.write_text(json.dumps(manifest, indent=1))
+    MANIFEST.write_text(json.dumps(manifest, indent=1))
     (CORPUS / "README.md").write_text(card(manifest))
     api = HfApi()
     old = [f for f in api.list_repo_files(DATASET, repo_type="dataset") if f != ".gitattributes"]
@@ -127,7 +123,7 @@ def push() -> None:
                           commit_message="Delete the previous corpus")
     additions = [CommitOperationAdd(path_in_repo=f.relative_to(CORPUS / "curated").as_posix(), path_or_fileobj=f)
                  for f in sorted((CORPUS / "curated").glob("*/*/*.parquet"))]
-    additions += [CommitOperationAdd(path_in_repo=f.name, path_or_fileobj=f) for f in (path, CORPUS / "README.md")]
+    additions += [CommitOperationAdd(path_in_repo=f.name, path_or_fileobj=f) for f in (MANIFEST, CORPUS / "README.md")]
     group, size = [], 0
     for addition in additions:
         group.append(addition)
@@ -143,13 +139,15 @@ def push() -> None:
 def pull(revision: str) -> None:
     """The revision's shards into CORPUS/curated, its manifest into CORPUS."""
     snapshot_download(DATASET, repo_type="dataset", revision=revision, local_dir=CORPUS / "curated",
-                      allow_patterns=[f"{source}/**" for source in mixture.READ])
+                      allow_patterns=[f"{source}/**" for source in SOURCES])
     hf_hub_download(DATASET, "manifest.json", repo_type="dataset", revision=revision, local_dir=CORPUS)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog="python -m nanochat.corpus.publish")
-    parser.add_argument("step", choices=("push", "pull"))
-    parser.add_argument("--revision")
-    args = parser.parse_args()
-    push() if args.step == "push" else pull(args.revision)
+    match sys.argv[1:]:
+        case ["push"]:
+            push()
+        case ["pull", revision]:
+            pull(revision)
+        case _:
+            raise SystemExit("usage: python -m nanochat.corpus.publish push | pull <revision>")

@@ -74,12 +74,7 @@ def packed(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Packe
                        if fim_packed(corpus, split) else None)
 
 
-def packed_rows(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> int:
-    """The number of rows of a packed split."""
-    return len(packed(corpus, split, tokenizer, seq_len).rows) - 1
-
-
-def shard_documents(corpus: str, split: str, tokenizer: Tokenizer) -> np.ndarray:
+def shard_bounds(corpus: str, split: str, tokenizer: Tokenizer) -> np.ndarray:
     """Each curated shard's first document in a compiled split, then the number of documents (compiled <split>.json:
     each shard's documents, in order)."""
     files = json.loads(split_path(corpus, split, tokenizer).with_suffix(".json").read_text())["files"]

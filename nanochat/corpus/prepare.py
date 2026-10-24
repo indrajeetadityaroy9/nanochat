@@ -1,22 +1,23 @@
 """
-Prepare sources (sources.py): fetch Hub files a source's globs match at the dataset's latest revision (its main's
-commit, resolved once per source, so the listing and every file are one snapshot), then standardize each into its
-category's schema (schema.py), one standardized file per fetched Hub file, and record the source in the manifest. A
-fetch reads only the columns the source's standardizer reads (columns), by ranged reads of the Hub's Parquet file,
-several files at once. A source the mixture reads whole is fetched whole; one it reads in part (mixture.IN_PART), only
-the Hub files that hold its share of the draw (extent).
+Prepare every source (sources.py): fetch the Hub files it reads at its revision, standardize each into its category's
+schema (schema.py), one standardized file per fetched Hub file, and record the source in CORPUS/manifest.json.
+
+The manifest pins each source: its revision is its dataset's latest when first prepared, and a source is prepared
+again only when its extent differs from the recorded files (a changed mixture); its standardized and checked files are
+then rebuilt, while fetched files are kept. A fetch reads only the columns the standardizer reads, by ranged reads of
+the Hub's Parquet file, several files at once. A source the mixture reads whole is fetched whole; one it reads in part
+(mixture.IN_PART), only the Hub files that hold its share of the draw (extent).
 
 Stack-Edu's Hub files are metadata: its raw file adds each blob's text, fetched from Software Heritage's public S3
-bucket by blob ID (obstore) and decoded with its src_encoding (The Stack v2 dataset card, download_contents); a blob
+bucket by blob id (obstore) and decoded with its src_encoding (The Stack v2 dataset card, download_contents); a blob
 the bucket does not hold or that does not decode has no text.
 
-Standardize keeps the rows with text, gives each a local id (the sha1 of the document's text) and keeps a repository
-file's text as its language reads it (standardize_file); of Codeforces-CoTs it keeps the finished traces only.
+Standardization keeps the rows with text, normalizes each text's line ends and byte-order marks (lines), gives each
+document its sha1 as id, and of Codeforces-CoTs keeps the finished traces only.
 
-python -m nanochat.corpus.prepare <source> ...
+python -m nanochat.corpus.prepare
 """
 
-import argparse
 import asyncio
 import fnmatch
 import functools
@@ -24,8 +25,9 @@ import gzip
 import hashlib
 import itertools
 import json
-import multiprocessing
 import resource
+import shutil
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -38,23 +40,36 @@ from huggingface_hub import HfFileSystem, dataset_info, hf_hub_download, list_re
 from obstore.store import S3Store
 
 from nanochat.corpus import mixture
-from nanochat.corpus.schema import CONVERSATION, ISSUE, NOTEBOOK, REPOSITORY_FILE, SPLIT
-from nanochat.corpus.sources import EDU, SOURCES, Source, raw_dir, standardized_path
-from nanochat.paths import CORPUS
+from nanochat.corpus.parallel import SPAWN
+from nanochat.corpus.schema import CONVERSATION, FUNCTION, REPOSITORY_FILE, SPLIT
+from nanochat.corpus.sources import (
+    EDU,
+    MANIFEST,
+    SOURCES,
+    Source,
+    checked_path,
+    raw_dir,
+    standardized_path,
+    text_bytes,
+)
 
-SPAWN = multiprocessing.get_context("spawn")
-# Parquet codec of the files prepare writes: zstd, smaller than pyarrow's default snappy at the same speed (measured
+# Parquet codec of the files the corpus writes: zstd, smaller than pyarrow's default snappy at the same speed (measured
 # on an UltraData-Code L3 raw file)
 COMPRESSION = "zstd"
-# Hub files fetched at once: throughput rises from one connection to a few and falls beyond (measured; the corpus
-# design document, normalization_doc.md §1)
+# Hub files fetched at once: throughput rises from one connection to a few and falls beyond (measured,
+# normalization_doc.md §1)
 FETCHES = 4
+
+
+def manifest() -> dict[str, dict]:
+    return json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {"sources": {}}
 
 
 @functools.cache
 def revision(source: str) -> str:
-    """The latest revision of the source's dataset, its main's commit, resolved once per process."""
-    return dataset_info(SOURCES[source].repo).sha
+    """The source's pinned revision: the manifest's, else its dataset's latest (its main's commit)."""
+    recorded = manifest()["sources"].get(source)
+    return recorded["revision"] if recorded else dataset_info(SOURCES[source].repo).sha
 
 
 @functools.cache
@@ -65,23 +80,19 @@ def hub_files(source: str) -> list[str]:
                   if any(fnmatch.fnmatchcase(f, glob) for glob in spec.files.values()))
 
 
-def text_bytes(source: str, file: str) -> int:
-    """The text bytes of one of the source's Hub files, from its Parquet footer: the text column's uncompressed size
-    less each value's 4-byte length prefix."""
+def hub_text_bytes(source: str, file: str) -> int:
+    """The text bytes of one of the source's Hub files, from its Parquet footer."""
     spec = SOURCES[source]
     with HfFileSystem().open(f"datasets/{spec.repo}@{revision(source)}/{file}", "rb") as remote:
-        md = pq.ParquetFile(remote).metadata
-    column = md.schema.to_arrow_schema().get_field_index(spec.text)
-    chunks = sum(md.row_group(g).column(column).total_uncompressed_size for g in range(md.num_row_groups))
-    return chunks - 4 * md.num_rows
+        return text_bytes(pq.ParquetFile(remote).metadata, spec.text)
 
 
 @functools.cache
-def supply(source: str) -> dict[str, int]:
+def file_bytes(source: str) -> dict[str, int]:
     """{Hub file: its text bytes} of every Hub file of the source."""
     files = hub_files(source)
     with ThreadPoolExecutor(FETCHES) as pool:
-        return dict(zip(files, pool.map(functools.partial(text_bytes, source), files), strict=True))
+        return dict(zip(files, pool.map(functools.partial(hub_text_bytes, source), files), strict=True))
 
 
 def extent(source: str) -> list[str]:
@@ -93,11 +104,12 @@ def extent(source: str) -> list[str]:
     if source not in mixture.PART:
         return hub_files(source)
     group = mixture.PART[source]
-    tokens = sum(sum(supply(s).values()) / mixture.BYTES_PER_TOKEN[s] for s, g in mixture.PART.items() if g == group)
+    tokens = sum(sum(file_bytes(s).values()) / mixture.BYTES_PER_TOKEN[s]
+                 for s, g in mixture.PART.items() if g == group)
     need = (mixture.draw(group) / tokens * (1 + mixture.SPREAD) * SPLIT / (SPLIT - 1)
-            * sum(supply(source).values()))
+            * sum(file_bytes(source).values()))
     order = sorted(hub_files(source), key=lambda f: hashlib.sha1(f.encode()).digest())
-    held = itertools.accumulate(supply(source)[f] for f in order)
+    held = itertools.accumulate(file_bytes(source)[f] for f in order)
     return order[:next(k + 1 for k, total in enumerate(held) if total >= need)]
 
 
@@ -127,18 +139,17 @@ def blob_texts(task: tuple[Path, int]) -> pa.Table:
         except (FileNotFoundError, UnicodeDecodeError):  # not in the bucket, or not text in its src_encoding
             return None
 
-    async def texts() -> list[str | None]:
+    async def fetched() -> list[str | None]:
         return await asyncio.gather(*map(blob, rows["blob_id"].to_pylist(), rows["src_encoding"].to_pylist()))
 
-    return rows.append_column("text", pa.array(asyncio.run(texts()), pa.string()))
+    return rows.append_column("text", pa.array(asyncio.run(fetched()), pa.string()))
 
 
 def fetch(source: str, file: str) -> Path:
-    """The local path of one of the source's Hub files at the revision: a Parquet file of the columns its standardizer
+    """The local path of one of the source's Hub files at its revision: a Parquet file of the columns its standardizer
     reads, or for Stack-Edu its metadata and each blob's text, written whole, then renamed into place (a writer closed
     by an error still writes a valid footer, so only the rename marks a file complete; an existing file is kept).
-    Stack-Edu's blobs are fetched by a pool that lives for that file only, so its workers hold no memory beside
-    standardize's."""
+    Stack-Edu's blobs are fetched by a pool that lives for that file only."""
     spec = SOURCES[source]
     path = raw_dir(source) / file
     if path.exists():
@@ -146,7 +157,7 @@ def fetch(source: str, file: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.name + ".partial")
     if spec.repo != EDU:
-        read = columns(source)
+        read = columns(spec)
         with HfFileSystem().open(f"datasets/{spec.repo}@{revision(source)}/{file}", "rb") as remote:
             hub = pq.ParquetFile(remote)
             with pq.ParquetWriter(partial, pa.schema([hub.schema_arrow.field(c) for c in read]),
@@ -164,7 +175,7 @@ def fetch(source: str, file: str) -> Path:
     return path
 
 
-# ---- standardize: one function per category, raw table -> its schema
+# ---- standardize: a raw table into its category's schema
 
 def sha1(texts: pa.ChunkedArray) -> pa.Array:
     """The hex sha1 of each text's UTF-8 bytes."""
@@ -181,116 +192,94 @@ def lines(texts: pa.ChunkedArray) -> pa.ChunkedArray:
     return pc.replace_substring(pc.replace_substring(texts, "\r\n", "\n"), "\r", "\n")
 
 
+def document(spec: Source, content: pa.ChunkedArray, **fields: pa.ChunkedArray) -> pa.Table:
+    """A table of the source's category: content with its line ends normalized (lines), its sha1 as id, the given
+    fields, and the source's language where the category records one."""
+    content = lines(content)
+    fields |= {"id": sha1(content), "content": content}
+    if "language" in spec.category.schema.names:
+        fields["language"] = pa.repeat(spec.language, len(content))
+    return pa.table({name: fields[name] for name in spec.category.schema.names}, schema=spec.category.schema)
+
+
 def repository_file(t: pa.Table, spec: Source) -> pa.Table:
-    content = lines(t["content"])
-    return pa.table({"id": sha1(content), "repo_name": t["repo_name"], "relative_path": t["relative_path"],
-                     "content": content, "language": pa.repeat(spec.language, t.num_rows)}, schema=REPOSITORY_FILE)
+    return document(spec, t["content"], repo_name=t["repo_name"], relative_path=t["relative_path"])
 
 
 def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
     """A Stack-Edu file: its metadata path, which begins with "/", taken relative to the repository's root."""
-    content = lines(t["text"])
-    return pa.table({"id": sha1(content), "repo_name": t["repo_name"],
-                     "relative_path": pc.utf8_ltrim(t["path"], characters="/"), "content": content,
-                     "language": pa.repeat(spec.language, t.num_rows)}, schema=REPOSITORY_FILE)
-
-
-def synthetic(t: pa.Table, spec: Source) -> pa.Table:
-    """An exercise or a synthetic source file: its content and language (the two schemas share their fields)."""
-    content = lines(t["content"])
-    return pa.table({"id": sha1(content), "content": content, "language": pa.repeat(spec.language, t.num_rows)},
-                    schema=spec.schema)
-
-
-def text(t: pa.Table, spec: Source) -> pa.Table:
-    content = lines(t[spec.text])
-    return pa.table({"id": sha1(content), "content": content}, schema=spec.schema)
+    return document(spec, t["text"], repo_name=t["repo_name"],
+                    relative_path=pc.utf8_ltrim(t["path"], characters="/"))
 
 
 def conversation(t: pa.Table, spec: Source) -> pa.Table:
-    """A finished codeforces_cots trace (finish_reason "stop"; a truncated one mostly ends before its code): the R1
+    """A finished Codeforces-CoTs trace (finish_reason "stop"; a truncated one mostly ends before its code): the R1
     prompt (ending with a line end) followed by its generation, and the problem's id."""
     t = t.filter(pc.equal(t["finish_reason"], "stop"))
-    content = lines(pc.binary_join_element_wise(t["prompt"], t[spec.text], ""))
-    return pa.table({"id": sha1(content), "problem_id": t["id"], "content": content}, schema=CONVERSATION)
-
-
-def issue(t: pa.Table, spec: Source) -> pa.Table:
-    content = lines(t["text"])
-    return pa.table({"id": sha1(content), "repo_name": t["repo_name"], "content": content}, schema=ISSUE)
-
-
-def notebook(t: pa.Table, spec: Source) -> pa.Table:
-    content = lines(t["text"])
-    return pa.table({"id": sha1(content), "content": content, "language": pa.repeat(spec.language, t.num_rows)},
-                    schema=NOTEBOOK)
+    return document(spec, pc.binary_join_element_wise(t["prompt"], t[spec.text], ""), problem_id=t["id"])
 
 
 def function(t: pa.Table, spec: Source) -> pa.Table:
     """A CodeSearchNet function: its code, which holds its docstring, and its repository."""
-    content = lines(t["code"])
-    return pa.table({"id": sha1(content), "repo_name": t["repo"], "content": content,
-                     "language": pa.repeat(spec.language, t.num_rows)}, schema=spec.schema)
+    return document(spec, t["code"], repo_name=t["repo"])
 
 
-STANDARDIZE = {"stack_edu_python": stack_edu, "stack_edu_cpp": stack_edu,
-               "ultradata_stack_v3_l2_python": repository_file, "ultradata_stack_v3_l2_cpp": repository_file,
-               "ultradata_code_l2_python": repository_file, "ultradata_code_l2_cpp": repository_file,
-               "ultradata_code_l3_python": synthetic, "ultradata_code_l3_cpp": synthetic,
-               "nemotron_rewriting_python": synthetic, "nemotron_transpilation_cpp": synthetic,
-               "codexglue_python": function,
-               "ultradata_math_l1": text, "ultradata_math_l3_qa": text, "ultradata_math_l3_conversation": text,
-               "ultradata_math_l3_multi_style": text, "ultradata_math_l3_textbook_exercise": text,
-               "codeforces_cots": conversation, "github_issues": issue, "kaggle_notebooks": notebook,
-               "climbmix": text, "opc_fineweb_math": text}
+def text_only(t: pa.Table, spec: Source) -> pa.Table:
+    """An exercise, a synthetic file, a notebook or a web document: its text alone."""
+    return document(spec, t[spec.text])
 
 
-def columns(source: str) -> list[str]:
+def standardizer(spec: Source) -> Callable[[pa.Table, Source], pa.Table]:
+    if spec.repo == EDU:
+        return stack_edu
+    return {REPOSITORY_FILE: repository_file, CONVERSATION: conversation, FUNCTION: function}.get(
+        spec.category, text_only)
+
+
+def columns(spec: Source) -> list[str]:
     """The Hub columns a source's standardizer reads (Stack-Edu's metadata is fetched whole)."""
-    spec = SOURCES[source]
-    return {repository_file: ["repo_name", "relative_path", "content"], synthetic: ["content"], text: [spec.text],
-            conversation: ["id", "prompt", "generation", "finish_reason"], issue: ["repo_name", "text"],
-            notebook: ["text"], function: ["repo", "code"]}[STANDARDIZE[source]]
+    return {repository_file: ["repo_name", "relative_path", "content"],
+            conversation: ["id", "prompt", "generation", "finish_reason"], function: ["repo", "code"],
+            text_only: [spec.text]}[standardizer(spec)]
 
 
-def standardize_file(task: tuple[str, int, Path]) -> None:
-    """Standardize one raw file into its standardized file: the rows with text, each text's line ends normalized
-    (lines)."""
+def standardize(task: tuple[str, int, Path]) -> None:
+    """One raw file into its standardized file: the rows with text, in the source's category's schema."""
     source, k, path = task
     spec = SOURCES[source]
     pf = pq.ParquetFile(path)
-    with pq.ParquetWriter(standardized_path(source, k), spec.schema, compression=COMPRESSION) as writer:
+    with pq.ParquetWriter(standardized_path(source, k), spec.category.schema, compression=COMPRESSION) as writer:
         for g in range(pf.num_row_groups):
             raw = pf.read_row_group(g)
-            writer.write_table(STANDARDIZE[source](raw.filter(pc.is_valid(raw[spec.text])), spec))
+            writer.write_table(standardizer(spec)(raw.filter(pc.is_valid(raw[spec.text])), spec))
 
 
-def record(source: str, entry: dict) -> None:
-    """The source's entry in CORPUS/manifest.json, which is rewritten whole."""
-    path = CORPUS / "manifest.json"
-    manifest = json.loads(path.read_text()) if path.exists() else {"sources": {}}
-    manifest["sources"][source] = entry
-    path.write_text(json.dumps(manifest, indent=1))
+def prepare(source: str, files: list[str]) -> None:
+    """Fetch the source's files, standardize them in parallel into a fresh standardized directory (its checked files,
+    derived from them, removed), and record the source."""
+    spec = SOURCES[source]
+    shutil.rmtree(standardized_path(source, 0).parent, ignore_errors=True)
+    shutil.rmtree(checked_path(source, 0).parent, ignore_errors=True)
+    standardized_path(source, 0).parent.mkdir(parents=True)
+    with ThreadPoolExecutor(1 if spec.repo == EDU else FETCHES) as pool:
+        paths = list(pool.map(functools.partial(fetch, source), files))
+    with ProcessPoolExecutor(mp_context=SPAWN) as pool:
+        list(pool.map(standardize, [(source, k, path) for k, path in enumerate(paths)]))
+    rows = sum(pq.read_metadata(standardized_path(source, k)).num_rows for k in range(len(files)))
+    record = manifest()
+    record["sources"][source] = {"repo": spec.repo, "revision": revision(source), "hub_files": len(hub_files(source)),
+                                 "files": files, "rows": rows}
+    MANIFEST.write_text(json.dumps(record, indent=1))
+    print(f"{source}: {len(files)} of {len(hub_files(source))} files, {rows:,} rows, "
+          f"{spec.repo}@{revision(source)}", flush=True)
 
 
-def prepare(sources: list[str]) -> None:
-    """Fetch each source's extent at its dataset's latest revision, standardize its files in parallel, and record it."""
-    for source in sources:
-        spec, files = SOURCES[source], extent(source)
-        standardized_path(source, 0).parent.mkdir(parents=True)
-        with ThreadPoolExecutor(1 if spec.repo == EDU else FETCHES) as pool:
-            paths = list(pool.map(functools.partial(fetch, source), files))
-        with ProcessPoolExecutor(mp_context=SPAWN) as pool:
-            list(pool.map(standardize_file, [(source, k, path) for k, path in enumerate(paths)]))
-        rows = sum(pq.read_metadata(standardized_path(source, k)).num_rows for k in range(len(files)))
-        record(source, {"repo": spec.repo, "revision": revision(source), "hub_files": len(hub_files(source)),
-                        "files": files, "rows": rows})
-        print(f"{source}: {len(files)} of {len(hub_files(source))} files, {rows:,} rows, "
-              f"{spec.repo}@{revision(source)}")
+def main() -> None:
+    for source in SOURCES:
+        files = extent(source)
+        if manifest()["sources"].get(source, {}).get("files") != files:
+            prepare(source, files)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog="python -m nanochat.corpus.prepare",
-                                     description="fetch and standardize sources of the corpus")
-    parser.add_argument("sources", nargs="+", choices=SOURCES)
-    prepare(parser.parse_args().sources)
+    main()

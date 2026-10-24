@@ -7,22 +7,20 @@ fill-in-the-middle examples in repository code's train splits (§6). Per corpus 
 
 A stage's train packs hold exactly the rows it may read, so no document is read twice:
 - file stage: the repository sources' partitions before the repository stage's (compile.repository_parts) and the
-  notebooks, whole; a source read in part (mixture.IN_PART), its leading shards;
+  supply sources, whole; a source read in part (mixture.IN_PART), its leading shards;
 - repository stage: the repositories corpora and Codeforces-CoTs, whole; ClimbMix and UltraData-Math L3, the shards
   after the file stage's.
-A stage's weights are its mixture's shares over its packed rows (mixture.source_shares), replayed through the loader's
-mixture_rows over the stage's rows: a source read in part takes its next shard while its draw exceeds its rows; a
-"supply" source whose draw exceeds its rows by the replay's discrepancy weighs that many rows less, the "rest" group
-taking them. The weights go to loader.WEIGHTS. Val splits are packed whole at the seq_len of each stage that reads
-them.
+A stage's weights are its shares (Stage.shares) over its packed rows, replayed through the loader's mixture_rows over
+the stage's rows: a source read in part takes its next shard while its draw exceeds its rows; a "supply" source whose
+draw exceeds its rows by the replay's discrepancy weighs that many rows less, the "rest" group taking them. The
+weights go to loader.WEIGHTS. Val splits are packed whole at the seq_len of each stage that reads them.
 
 python -m nanochat.corpus.pack
 """
 
 import json
 import os
-from collections import deque
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -37,10 +35,11 @@ from nanochat.corpus.loader import (
     grammar,
     mixture_rows,
     packed_path,
-    shard_documents,
+    shard_bounds,
     split_path,
 )
-from nanochat.corpus.sources import curated_dir
+from nanochat.corpus.parallel import ordered
+from nanochat.corpus.sources import curated_shards
 from nanochat.corpus.tokenizer import get_tokenizer
 from nanochat.data.tokenizer import FIM_TOKENS
 from nanochat.native import data_crate
@@ -48,20 +47,23 @@ from nanochat.native import data_crate
 # Fill-in-the-middle as production's (nanochat/data/pack.py), without its line widening (normalization_doc.md §6):
 # DeepSeek-Coder's rate (arXiv 2401.14196 §3.1.2: "an FIM rate of 0.5") and arXiv 2207.14255's 50% FIM; AST-FIM's
 # middles (arXiv 2506.00204v1 §5.1: of FIM, 90% AST-FIM and 10% random character spans, 50% PSM and 50% SPM; §3.3: "an
-# equal mix" of Single-Node and Aligned-Span masking)
+# equal mix" of Single-Node and Aligned-Span masking). The crate draws each piece's FIM from ChaCha8 keyed by its
+# document and piece, so the packs do not depend on the order of work
 FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5, 0.5
-# Pack calls in flight: one per core, so a core finishing its share of one shard's documents takes up another's
+# Pack calls in flight: one per core, so a core finishing its share of one shard's documents takes up another's (the
+# crate releases the GIL)
 WINDOW = os.cpu_count()
 
 Shard = tuple[np.ndarray, np.ndarray, np.ndarray]
 
 
-def pack_shard(corpus: str, split: str, i: int, *, seq_len: int) -> Shard:
+def pack_shard(task: tuple[str, str, int, int]) -> Shard:
     """Curated shard i of a compiled split packed into rows of seq_len + 1 tokens: its pieces (PIECE_COLUMNS int64
     each, the FIM range within the shard's FIM tokens), the pieces of each row, the shard's FIM tokens."""
+    corpus, split, i, seq_len = task
     tokenizer = get_tokenizer()
     compiled = split_path(corpus, split, tokenizer)
-    bounds = shard_documents(corpus, split, tokenizer)
+    bounds = shard_bounds(corpus, split, tokenizer)
     fim = (dict(rate=FIM_RATE, random=RANDOM_SHARE, single=SINGLE_NODE_SHARE, line=0.0, spm=SPM_SHARE,
                 sentinels=[tokenizer.special_tokens[name] for name in FIM_TOKENS])
            if fim_packed(corpus, split) else None)
@@ -73,19 +75,13 @@ def pack_shard(corpus: str, split: str, i: int, *, seq_len: int) -> Shard:
             np.frombuffer(tokens, TOKEN_DTYPE))
 
 
-def in_order(corpus: str, split: str, shards: Iterable[int], *, seq_len: int) -> Generator[Shard]:
-    """pack_shard of each shard, WINDOW in flight, in order (the crate releases the GIL)."""
+def packed_shards(corpus: str, split: str, shards: Iterable[int], seq_len: int) -> Generator[Shard]:
+    """pack_shard of each shard, in order, WINDOW in flight; a shard is packed only as the window reaches it."""
     with ThreadPoolExecutor(WINDOW) as pool:
-        pending = deque()
-        for i in shards:
-            pending.append(pool.submit(pack_shard, corpus, split, i, seq_len=seq_len))
-            if len(pending) == WINDOW:
-                yield pending.popleft().result()
-        while pending:
-            yield pending.popleft().result()
+        yield from ordered(pool, pack_shard, [(corpus, split, i, seq_len) for i in shards], WINDOW)
 
 
-def write(corpus: str, split: str, shards: Iterable[Shard], *, seq_len: int) -> int:
+def write(corpus: str, split: str, shards: Iterable[Shard], seq_len: int) -> int:
     """Packed shards, in order, as <split>-T<seq_len>.pieces, .rows and .fim; returns the rows written."""
     path = packed_path(corpus, split, get_tokenizer(), seq_len)
     placed, fim_tokens, rows = 0, 0, 0
@@ -103,27 +99,29 @@ def write(corpus: str, split: str, shards: Iterable[Shard], *, seq_len: int) -> 
 
 
 def shard_count(corpus: str, split: str) -> int:
-    return len(shard_documents(corpus, split, get_tokenizer())) - 1
+    return len(shard_bounds(corpus, split, get_tokenizer())) - 1
 
 
-def take(corpus: str, more: Generator[Shard]) -> Shard:
+def take(corpus: str, more: Iterator[Shard]) -> Shard:
     """The next packed shard of a corpus read in part; it has one while its rows fall short of its draw."""
     shard = next(more, None)
-    assert shard is not None, f"{corpus} holds fewer rows than its draw: its extent is too small (prepare.extent)"
+    if shard is None:
+        raise RuntimeError(f"{corpus} holds fewer rows than its draw: its extent is too small (prepare.extent; raise "
+                           f"mixture.SPREAD)")
     return shard
 
 
-def fit(stage: dict[str, tuple[mixture.Share, list[str]]], n_rows: int, rows: dict[str, int],
-        more: dict[str, Generator[Shard]], held: dict[str, list[Shard]]) -> dict[str, float]:
-    """The stage's weights once every corpus holds its draw: replay mixture_rows over the stage's n_rows; a corpus read
+def fit(stage: mixture.Stage, rows: dict[str, int], more: dict[str, Generator[Shard]],
+        held: dict[str, list[Shard]]) -> dict[str, float]:
+    """The stage's weights once every corpus holds its draw: replay mixture_rows over the stage's rows; a corpus read
     in part (more) packs its next shard into held while it draws more rows than it holds; a "supply" corpus that draws
-    more weighs as many rows less."""
-    supply = {s for share, sources in stage.values() if share == "supply" for s in sources}
+    more weighs as many rows less. Shares are of the stage's rows here: each corpus's packed rows over the stage's."""
+    supply = set(stage.supply)
     weighed: dict[str, float] = dict(rows)
     while True:
-        shares = mixture.source_shares(stage, n_rows, weighed)
+        shares = stage.shares(weighed, stage.rows)
         names = list(shares)
-        draws = np.bincount(mixture_rows(np.array([shares[n] for n in names]), start=0, count=n_rows),
+        draws = np.bincount(mixture_rows(np.array([shares[n] for n in names]), start=0, count=stage.rows),
                             minlength=len(names))
         over = {name: int(draw) - rows[name] for name, draw in zip(names, draws, strict=True) if draw > rows[name]}
         if not over:
@@ -134,58 +132,53 @@ def fit(stage: dict[str, tuple[mixture.Share, list[str]]], n_rows: int, rows: di
                 held[name].append(shard)
                 rows[name] += len(shard[1])
                 weighed[name] = rows[name]
-            else:
-                assert name in supply, f"{name} holds fewer rows than its draw"
+            elif name in supply:
                 weighed[name] -= excess
+            else:
+                raise RuntimeError(f"{name}, read whole, holds {rows[name]:,} rows of the {rows[name] + excess:,} "
+                                   f"its stage draws")
 
 
-def stage(stage_groups: dict[str, tuple[mixture.Share, list[str]]], *, seq_len: int, n_rows: int,
-          whole: dict[str, list[int]], part: dict[str, list[int]]) -> tuple[dict[str, float], dict[str, int]]:
+def pack_stage(stage: mixture.Stage, whole: dict[str, list[int]], part: dict[str, list[int]]
+               ) -> tuple[dict[str, float], dict[str, int]]:
     """Pack a stage's train splits: the whole corpora's listed shards, written as packed; the corpora read in part,
     their listed shards in order until they hold their draw (fit), written then. Returns the weights and, of each
     corpus read in part, the shards it took."""
-    rows = {corpus: write(corpus, "train", in_order(corpus, "train", shards, seq_len=seq_len), seq_len=seq_len)
+    rows = {corpus: write(corpus, "train", packed_shards(corpus, "train", shards, stage.seq_len), stage.seq_len)
             for corpus, shards in whole.items()}
-    more = {corpus: in_order(corpus, "train", shards, seq_len=seq_len) for corpus, shards in part.items()}
-    held = {corpus: [] for corpus in part}
-    for corpus in part:  # one shard each, then fit takes more as their draws need
-        held[corpus].append(take(corpus, more[corpus]))
-        rows[corpus] = len(held[corpus][0][1])
-    weights = fit(stage_groups, n_rows, rows, more, held)
+    more = {corpus: packed_shards(corpus, "train", shards, stage.seq_len) for corpus, shards in part.items()}
+    held = {corpus: [take(corpus, more[corpus])] for corpus in part}  # one shard each; fit takes more as draws need
+    rows |= {corpus: len(shards[0][1]) for corpus, shards in held.items()}
+    weights = fit(stage, rows, more, held)
     for corpus, shards in held.items():
         more[corpus].close()
-        write(corpus, "train", shards, seq_len=seq_len)
+        write(corpus, "train", shards, stage.seq_len)
     for corpus, count in rows.items():
-        print(f"T{seq_len} {corpus}: {count:,} rows, weight {weights[corpus]:.4f}", flush=True)
+        print(f"T{stage.seq_len} {corpus}: {count:,} rows, weight {weights[corpus]:.4f}", flush=True)
     return weights, {corpus: len(shards) for corpus, shards in held.items()}
 
 
 def main() -> None:
     data_crate()  # built once, before the threads call it
-    file_corpora = [s for _, sources in mixture.FILE_STAGE.values() for s in sources]
-    repo_corpora = [s for _, sources in mixture.REPO_STAGE.values() for s in sources]
-    for corpus in dict.fromkeys(file_corpora + repo_corpora):
-        for seq_len in [s for s, corpora in ((mixture.FILE_SEQ, file_corpora), (mixture.REPO_SEQ, repo_corpora))
-                        if corpus in corpora]:
-            write(corpus, "val", in_order(corpus, "val", range(shard_count(corpus, "val")), seq_len=seq_len),
-                  seq_len=seq_len)
+    stages = (mixture.FILE_STAGE, mixture.REPO_STAGE)
+    for stage in stages:
+        for corpus in stage.sources:
+            write(corpus, "val", packed_shards(corpus, "val", range(shard_count(corpus, "val")), stage.seq_len),
+                  stage.seq_len)
     trailing = set(repository_parts())
-    part_sources = list(mixture.PART)
-    file_whole = {s: [i for i, p in enumerate(sorted(int(f.stem) for f in curated_dir(s, "train").iterdir()))
-                      if p not in trailing] for s in mixture.REPOSITORY_SOURCES}
-    file_whole |= {s: list(range(shard_count(s, "train"))) for s in mixture.supply(mixture.FILE_STAGE)}
-    file_weights, taken = stage(mixture.FILE_STAGE, seq_len=mixture.FILE_SEQ, n_rows=mixture.FILE_ROWS,
-                                whole=file_whole,
-                                part={s: list(range(shard_count(s, "train"))) for s in part_sources})
+    file_whole = {s: [i for i, path in enumerate(curated_shards(s, "train")) if int(path.stem) not in trailing]
+                  for s in mixture.REPOSITORY_SOURCES}
+    file_whole |= {s: list(range(shard_count(s, "train"))) for s in mixture.FILE_STAGE.supply}
+    file_weights, taken = pack_stage(mixture.FILE_STAGE, file_whole,
+                                     {s: list(range(shard_count(s, "train"))) for s in mixture.PART})
     repo_whole = {c: list(range(shard_count(c, "train")))
-                  for c in [*mixture.REPOSITORIES.values(), *mixture.supply(mixture.REPO_STAGE)]}
-    repo_weights, _ = stage(mixture.REPO_STAGE, seq_len=mixture.REPO_SEQ, n_rows=mixture.REPO_ROWS,
-                            whole=repo_whole,
-                            part={s: list(range(taken[s], shard_count(s, "train")))
-                                  for s in part_sources if s in repo_corpora})
-    WEIGHTS.write_text(json.dumps({
-        str(mixture.FILE_SEQ): {"rows": mixture.FILE_ROWS, "weights": file_weights},
-        str(mixture.REPO_SEQ): {"rows": mixture.REPO_ROWS, "weights": repo_weights}}, indent=1))
+                  for c in [*mixture.REPOSITORIES.values(), *mixture.REPO_STAGE.supply]}
+    repo_weights, _ = pack_stage(mixture.REPO_STAGE, repo_whole,
+                                 {s: list(range(taken[s], shard_count(s, "train")))
+                                  for s in mixture.PART if s in mixture.REPO_STAGE.sources})
+    WEIGHTS.write_text(json.dumps({str(stage.seq_len): {"rows": stage.rows, "weights": weights}
+                                   for stage, weights in zip(stages, (file_weights, repo_weights), strict=True)},
+                                  indent=1))
     print(f"repository partitions of the 32K stage: {sorted(trailing)}; "
           f"its repositories hold {sum(shard_tokens(c, 'train').sum() for c in mixture.REPOSITORIES.values()):,} "
           f"tokens", flush=True)

@@ -1,38 +1,36 @@
 """
-The corpus's sources: a Hub dataset each, read at its latest revision (prepare.prepare), the files it reads, its
-document category (schema.py) and the column of a fetched file that holds a document's text.
+The corpus's sources (normalization_doc.md §1) and its files under paths.CORPUS.
 
-files maps a language to the glob of the Hub files holding it (Linguist names for code; the language of a text corpus;
-for codeforces_cots, the language of the R1 solutions each subset holds). Stack-Edu (arXiv 2502.02737) holds The Stack
-v2's educational files by Software Heritage blob ID, their text fetched from Software Heritage (prepare.fetch).
-UltraData-Stack-v3-L2 holds The Stack v3's files that UltraData's L2 classifiers select. UltraData-Code
-(arXiv 2610.23960) releases L2, selected source files, and L3, exercises written from L2's algorithmic files; both per
-language. UltraData-Math (arXiv 2602.09003) releases L1, Common Crawl's math pages cleaned and deduplicated, one folder
-per crawl snapshot, and L3, documents synthesized in four formats, a source each. Codeforces-CoTs holds DeepSeek-R1's
-reasoning traces and solutions to Codeforces problems: of its decontaminated subsets, the Python solutions and the C++
-solutions (short and long). issues-kaggle-notebooks holds StarCoder2's GitHub issues and Kaggle notebooks
-(arXiv 2402.19173) reformatted as text, a source each. opc-fineweb-math-corpus holds the math pages OpenCoder's
-fastText classifiers recalled from FineWeb (arXiv 2411.04905). Nemotron-Pretraining-Code-v2 (arXiv 2512.20848 §2.2)
-holds, of its synthetic code, every Python file of NVIDIA's GitHub corpus rewritten by Qwen3-32B (SGCR and SCOR prompts,
-arXiv 2505.02881, and NVIDIA's own) and Python files transpiled into C++, a source each. CodeXGLUE's code-to-text
-(arXiv 2102.04664) holds CodeSearchNet's GitHub functions with their docstrings (arXiv 1909.09436); its Python train
-split is read, not the benchmark's validation and test splits.
+A source is a Hub dataset read at a revision (prepare.py), the Hub files it reads per language (a Linguist name for
+code; for Codeforces-CoTs, the language of each subset's solutions), its category (schema.py) and the column of a
+fetched file that holds a document's text. SOURCES is in deduplication's keep-first order (curate.py).
+- Stack-Edu (arXiv 2502.02737): The Stack v2's educational files, by Software Heritage blob id (prepare.fetch).
+- UltraData-Stack-v3-L2: The Stack v3's files that UltraData's L2 classifiers select.
+- UltraData-Code (arXiv 2610.23960): L2, selected source files; L3, exercises written from L2's algorithmic files.
+- Nemotron-Pretraining-Code-v2 (arXiv 2512.20848 §2.2): every Python file of NVIDIA's GitHub corpus rewritten by
+  Qwen3-32B, and Python files transpiled into C++.
+- CodeXGLUE code-to-text (arXiv 2102.04664): CodeSearchNet's functions with their docstrings; its train split only.
+- UltraData-Math L3 (arXiv 2602.09003): synthesized mathematics in four formats.
+- Codeforces-CoTs: DeepSeek-R1's reasoning traces and Python or C++ solutions to Codeforces problems.
+- issues-kaggle-notebooks: StarCoder2's Kaggle notebooks (arXiv 2402.19173) as text.
+- ClimbMix: English web text.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from nanochat.corpus.schema import (
     CONVERSATION,
     EXERCISE,
     FUNCTION,
-    ISSUE,
     NOTEBOOK,
     REPOSITORY_FILE,
     SYNTHETIC_FILE,
     TEXT,
+    Category,
 )
 from nanochat.paths import CORPUS
 
@@ -42,10 +40,10 @@ COMMENTS = {"Python": "#", "C++": "//"}
 
 @dataclass(frozen=True)
 class Source:
-    schema: pa.Schema
+    category: Category
     repo: str
-    files: dict[str, str]
-    text: str
+    files: dict[str, str]  # language -> glob of the Hub files holding it
+    text: str  # the fetched column holding the document's text
 
     @property
     def language(self) -> str:
@@ -56,10 +54,8 @@ class Source:
 EDU = "HuggingFaceTB/stack-edu"
 STACK_V3 = "openbmb/UltraData-Stack-v3-L2"
 CODE = "openbmb/UltraData-Code"
-MATH = "openbmb/UltraData-Math"
-ISSUES_KAGGLE = "HuggingFaceTB/issues-kaggle-notebooks"
 NEMOTRON = "nvidia/Nemotron-Pretraining-Code-v2"
-CODEXGLUE = "google/code_x_glue_ct_code_to_text"
+MATH = "openbmb/UltraData-Math"
 
 SOURCES = {
     "stack_edu_python": Source(REPOSITORY_FILE, EDU, {"Python": "Python/*.parquet"}, "text"),
@@ -77,8 +73,8 @@ SOURCES = {
                                         {"Python": "Synthetic-Code/synthetic-rewriting/*.parquet"}, "content"),
     "nemotron_transpilation_cpp": Source(SYNTHETIC_FILE, NEMOTRON,
                                          {"C++": "Synthetic-Code/synthetic-transpilation/*.parquet"}, "content"),
-    "codexglue_python": Source(FUNCTION, CODEXGLUE, {"Python": "python/train-*.parquet"}, "code"),
-    "ultradata_math_l1": Source(TEXT, MATH, {"English": "data/UltraData-Math-L1/*/*.parquet"}, "content"),
+    "codexglue_python": Source(FUNCTION, "google/code_x_glue_ct_code_to_text", {"Python": "python/train-*.parquet"},
+                               "code"),
     "ultradata_math_l3_qa": Source(TEXT, MATH, {"English": "data/UltraData-Math-L3/QA-Synthetic/*.parquet"},
                                    "content"),
     "ultradata_math_l3_conversation": Source(
@@ -90,35 +86,48 @@ SOURCES = {
     "codeforces_cots": Source(CONVERSATION, "open-r1/codeforces-cots",
                               {"Python": "solutions_py_decontaminated/*.parquet",
                                "C++": "solutions_short_and_long_decontaminated/*.parquet"}, "generation"),
-    "github_issues": Source(ISSUE, ISSUES_KAGGLE, {"English": "issues/*.parquet"}, "text"),
-    "kaggle_notebooks": Source(NOTEBOOK, ISSUES_KAGGLE, {"Python": "kaggle/*.parquet"}, "text"),
-    "climbmix": Source(TEXT, "karpathy/climbmix-400b-shuffle", {"English": "shard_*.parquet"}, "text"),
-    "opc_fineweb_math": Source(TEXT, "OpenCoder-LLM/opc-fineweb-math-corpus", {"English": "data/train-*.parquet"},
+    "kaggle_notebooks": Source(NOTEBOOK, "HuggingFaceTB/issues-kaggle-notebooks", {"Python": "kaggle/*.parquet"},
                                "text"),
+    "climbmix": Source(TEXT, "karpathy/climbmix-400b-shuffle", {"English": "shard_*.parquet"}, "text"),
 }
+
+# Each source's repo, revision, files and rows (prepare.py); at publication, the code's commit and each curated split's
+# shards, rows and text bytes (publish.push)
+MANIFEST = CORPUS / "manifest.json"
 
 
 def raw_dir(source: str) -> Path:
-    """CORPUS/raw/<source>: the source's Hub files at their Hub paths, the columns standardization reads
-    (prepare.fetch)."""
+    """The source's fetched Hub files at their Hub paths (prepare.fetch)."""
     return CORPUS / "raw" / source
 
 
 def standardized_path(source: str, k: int) -> Path:
-    """CORPUS/standardized/<source>/<k>.parquet: the source's fetched Hub file k in the order prepare.extent gives, in
-    its schema (prepare.standardize_file)."""
+    """The source's fetched Hub file k (prepare.extent's order) in its category's schema (prepare.standardize)."""
     return CORPUS / "standardized" / source / f"{k}.parquet"
 
 
 def checked_path(source: str, k: int) -> Path:
-    """CORPUS/checked/<source>/<k>.parquet: a Python repository source's standardized file k with every file parsing as
-    Python 3, repaired where it did not (curate.check)."""
+    """A Python source's standardized file k with every file parsing as Python 3, repaired where it did not
+    (curate.check)."""
     return CORPUS / "checked" / source / f"{k}.parquet"
 
 
 def curated_dir(source: str, split: str) -> Path:
-    """CORPUS/curated/<source>/<split>: the source's curated shards of a split, <k>.parquet (curate.py)."""
+    """The source's curated shards of a split, <k>.parquet (curate.py)."""
     return CORPUS / "curated" / source / split
+
+
+def curated_shards(source: str, split: str) -> list[Path]:
+    """The source's curated shards of a split in the order of their number k."""
+    return sorted(curated_dir(source, split).iterdir(), key=lambda path: int(path.stem))
+
+
+def text_bytes(metadata: pq.FileMetaData, column: str) -> int:
+    """The bytes of a Parquet file's string column, from its footer: the column's uncompressed size less each value's
+    4-byte length prefix."""
+    index = metadata.schema.to_arrow_schema().get_field_index(column)
+    return sum(metadata.row_group(g).column(index).total_uncompressed_size
+               for g in range(metadata.num_row_groups)) - 4 * metadata.num_rows
 
 
 def texts(source: str, table: pa.Table) -> list[str]:
@@ -131,7 +140,7 @@ def texts(source: str, table: pa.Table) -> list[str]:
     which would join the next file's comment to that line."""
     contents = table["content"].to_pylist()
     spec = SOURCES[source]
-    if spec.schema is not REPOSITORY_FILE:
+    if spec.category != REPOSITORY_FILE:
         return contents
     comment = COMMENTS[spec.language]
     bodies = [text.removesuffix("\n") for text in contents]
