@@ -23,7 +23,7 @@ python -m nanochat.corpus.compile
 import itertools
 import json
 from collections.abc import Callable
-from concurrent.futures import Executor, ProcessPoolExecutor
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -150,12 +150,13 @@ def repository_parts(vocabulary: Path) -> list[int]:
 def main() -> None:
     """The corpus's tokenizer's compiled corpus, one process pool for every split."""
     tokenizer = get_tokenizer(TOKENIZER)
-    with ProcessPoolExecutor(mp_context=SPAWN) as pool:
+    jobs = list(itertools.product(SOURCES, ("val", "train")))
+    with ProcessPoolExecutor(mp_context=SPAWN) as pool, ThreadPoolExecutor(len(jobs)) as threads:
         for corpus in SOURCES:
             # a new output directory per corpus and tokenizer: compile does not resume
             split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
-            for split in ("val", "train"):
-                compile_source(corpus, split, TOKENIZER, pool)
+        # every split at once: the pool runs their row groups in submission order, so no core waits on a small split
+        list(threads.map(lambda job: compile_source(job[0], job[1], TOKENIZER, pool), jobs))
         parts = stage_parts(TOKENIZER, pool)
         for language, corpus in mixture.REPOSITORIES.items():
             split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)

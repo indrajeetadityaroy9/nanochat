@@ -1,47 +1,44 @@
 """
 The tokenizer ablation: it trains every candidate vocabulary of the corpus's tokenizer, measures them on the corpus,
 decides the split pattern and merge score, and adopts the decided vocabulary as the corpus's tokenizer
-(nanochat/corpus/tokenizer.py TOKENIZER), the tokenizer every later step of pretraining reads. Each candidate is a
-vocabulary of 32,768 ids (32,764 mergeable tokens, BOS and 3 FIM sentinels) trained on the same sample by the same
-trainer (train: the data crate's) and encoded by tiktoken, and each is trained on, so every candidate the corpus keeps
-or dismisses has runs of its own. Its data are the corpus's: the sample, the val splits and the packs come from the
-curated shards through nanochat/corpus (mixture.py, compile.py, pack.py).
+(nanochat/corpus/tokenizer.py TOKENIZER). Each candidate is a vocabulary of 32,768 ids (32,764 mergeable tokens, BOS
+and 3 FIM sentinels) trained on the same sample by the same trainer (train: the data crate's), encoded by tiktoken,
+and trained on. The sample, the val splits and the packs come from the curated shards through nanochat/corpus
+(mixture.py, compile.py, pack.py).
 
 Sample (sample): of each file-stage source's curated train split, its share of the stage's bytes (byte_shares: its
 share of the stage's tokens, Stage.shares, at production's bytes per token) as its share of SAMPLE_BYTES, a systematic
 sample in shard order: tokenizer training data "representative of model training data" (arXiv 2405.05417 §5); across
-tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage points", better as the mix holds
-more of it (arXiv 2402.01035 §2.3, compression alone); over languages, proportional tokenizer-training weights gave
-lower bits per byte than equal ones (arXiv 2610.12144 Table 6, §7). The sample's composition is not an arm
-(normalization_doc.md §9). An authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository
-files and functions; any other document is its own.
+tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage points", higher as the mix holds
+more of it (arXiv 2402.01035 §2.3); over languages, proportional tokenizer-training weights give lower bits per byte
+than equal ones (arXiv 2610.12144 Table 6, §7). The sample's composition is not an arm (normalization_doc.md §9). An
+authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository files and functions; any other
+document is its own.
 
 Arms (ARMS):
-- sa-bpe: production's pattern (SPLIT_PATTERN) and score, SA-BPE's F·log R (arXiv 2604.14053 §4.1: F the pair's
-  frequency, R the authorship units holding it in the current segmentation, a pair of one unit scoring 0; the paper's
-  code takes the natural log, pchizhov/sa-bpe scoring.py). Table 3: the highest compression of its rows and far fewer
-  tokens verified under-trained than BPE's (one tokenizer each, no seeds). The repository as the unit is the paper's;
-  the document, as §6 suggests for natural language ("documents, books, or document collections"), is untested there.
-  Not the paper's recommended F·log R·L (§6, Table 4): §6 says the language aspect "must be avoided" for natural
-  language, five of the sample's 17 sources, and with Python, C++ and English L takes three values;
+- sa-bpe: production's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the pair's
+  frequency, R the authorship units holding it in the current segmentation, a pair of one unit scoring 0; the natural
+  log as in pchizhov/sa-bpe scoring.py). Production's arm: of Table 3's rows, F·log R has the highest compression and
+  far fewer verified under-trained tokens than BPE. The repository as the unit is the paper's; the document as the
+  unit of other text follows §6 ("documents, books, or document collections"), untested there. Not the paper's best
+  F·log R·L (Table 4): for natural language "the language aspect must be avoided" (§6);
 - sa-bpe-fused: FUSED_PATTERN, whose punctuation clause takes the line breaks after it, as cl100k's does. The positive
-  control: arXiv 2608.18062's companion post deletes those trailing line breaks from GPT-4o's clause, the tokenizer
-  corpus held fixed, and MBPP pass@1 rises with non-overlapping seed ranges (three seeds each; healed prompts, the
-  paper's §4.3 and App. C.1), while code bits per byte shows no association with MBPP over its tokenizers; if the
-  parse test misses it at d16, it cannot decide the other arms;
+  control: in arXiv 2608.18062's companion post, deleting those trailing line breaks from GPT-4o's clause, the
+  tokenizer corpus held fixed, raises MBPP pass@1 with non-overlapping seed ranges (three seeds each; healed prompts,
+  the paper's §4.3 and App. C.1). If the parse test misses it at d16, it cannot decide the other arms;
 - hybrid: HYBRID_PATTERN, whose statement chunks are the same at every indentation depth (its comment);
 - bpe: frequency alone (Table 3's F row, SA-BPE's baseline) within SPLIT_PATTERN, close to F·log R in compression,
   so a tie in the runs is likely [inference], which the val coverage breaks.
 Not run: tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (arXiv 2409.04599
-Alg. 2) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.2); SuperBPE's code results moved HumanEval and MBPP pass@10
-in opposite directions, neither significantly (arXiv 2503.13423 Table 1).
+Alg. 2) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.2); SuperBPE moved HumanEval and MBPP pass@10 in opposite
+directions, neither significantly (arXiv 2503.13423 Table 1).
 
-vocabularies: every arm on one draw of the sample, at once (the crate releases the GIL and each training's merge loop
-is mostly serial; every merge is an argmax with fixed tie-breaks, so an arm does not depend on the others); its
-vocabulary and merges in ABLATION/<arm>; RESULTS/tokenizer-vocabularies.json: the sample's composition per source
-(target bytes, the fraction of rows taken, the documents, bytes and units taken) and each arm's training time.
+vocabularies: every arm trained at once on one draw of the sample (every merge is an argmax with fixed tie-breaks, so
+an arm does not depend on the others); ABLATION/<arm>: its vocabulary, pattern and merges;
+RESULTS/tokenizer-vocabularies.json: the sample's composition per source (target bytes, the fraction of rows taken,
+the documents, bytes and units taken) and each arm's training time.
 
-intrinsic: every arm's compiled val splits of the 18 sources, and RESULTS/tokenizer-intrinsic.json, only the measures
+intrinsic: every arm's compiled val split of every source, and RESULTS/tokenizer-intrinsic.json, only the measures
 that plan the runs, gate their validity, test an arm's mechanism or break the decision's tie:
 - planning: each source's bytes per token and the file stage's over its byte shares (an arm's tokens at equal bytes;
   production's compile and pack budgets), and each group read in part's train tokens over its draw (below 1, the
@@ -50,33 +47,34 @@ that plan the runs, gate their validity, test an arm's mechanism or break the de
   the pattern's chunks cover the text, tiktoken's encoding equals the arm's merges replayed in training order (Hugging
   Face tokenizers' BPE model), and every text decodes back;
 - mechanism: the vocabulary entries holding a line break (the companion post's strongest MBPP correlate), fusing
-  punctuation with one, and ending in a line break and indentation (its MinGram pair: most of the fusing tokenizer's
-  completions IndentationError or TabError); depth invariance, the hybrid's clause (2): of each program source's first
-  INDENTED_LINES indented val lines, those whose tokens are the indentation's, then the statement's as at depth 0;
+  punctuation with one, and ending in a line break and indentation (the post's MinGram cb, whose MBPP completions
+  mostly fail with IndentationError or TabError); depth invariance, the hybrid's clause (2): of each program source's
+  first INDENTED_LINES indented val lines, those whose tokens are the indentation's, then the statement's as at depth 0;
 - the tie-break: how many merged tokens the val documents read never, under 10 and under 100 times (SA-BPE's Coverage,
-  Table 3, graded).
-Not measured: TokEval's intrinsic metrics, which no decision reads; of its 14 only AST alignment predicts MBPP, which
-it attributes "to the vocabulary's line-break handling" (arXiv 2608.18062 §5), measured here directly, and Rényi
-efficiency predicts neither code bits per byte nor MBPP (Table 2).
+  arXiv 2604.14053 Table 3, graded).
+Not measured: TokEval's intrinsic metrics, which no decision reads: of its 14 only AST alignment predicts MBPP, which
+the paper attributes "to the vocabulary's line-break handling" (arXiv 2608.18062 §5), measured here directly, and
+Rényi efficiency predicts neither code bits per byte nor MBPP (Table 2).
 
 runs: every arm at d16, SEEDS seeds each, at equal bytes: each reads the code documents of the set once, as production
 reads its data (train/stages.py max_ratio), so its tokens are their bytes over its bytes per token; text and math are
 drawn by rows. Each run's plan is its own (schedule.plan at its tokens), its contexts the corpus's 8,192 and 32,768
-tokens (eval/bpb.py's byte-offset buckets show the bytes of context a better compressor sees, arXiv 2503.13423 §3.1).
-The set holds 20 tokens per scaling parameter of d16 for sa-bpe (arXiv 2203.15556 Table 3): of each code corpus the
-leading train documents whose sa-bpe tokens fill its file-level draw, so the code group binds every arm's max_ratio;
-of text and math the leading shards, and of each repository corpus the trailing partitions, holding a margin over
-their draws, so they never bind. The runs train through ablations/harness.py, whose stack (nanochat/train,
-nanochat/eval) reads nanochat/data until training reads the corpus; that cutover builds the set and every arm's packs
-(corpus compile.py and pack.py, given the arm's directory; nanochat/corpus/gh200.md).
+tokens (eval/bpb.py's byte-offset buckets: the bytes of context a better compressor sees, arXiv 2503.13423 §3.1,
+App. B.1). The set holds 20 tokens per scaling parameter of d16 for sa-bpe (arXiv 2203.15556 Table 3): of each code
+corpus the leading train documents whose sa-bpe tokens fill its file-level draw, so the code group binds every arm's
+max_ratio; of text and math the leading shards, and of each repository corpus the trailing partitions, holding a
+margin over their draws, so they never bind. The runs train through ablations/harness.py, whose stack (nanochat/train,
+nanochat/eval) reads nanochat/data; the training cutover builds the set and every arm's packs (corpus compile.py and
+pack.py, given the arm's directory; nanochat/corpus/gh200.md). RESULTS/tokenizer.json: each challenger's contrasts
+and the decision.
 
 Decisions, pre-registered (RESULTS/tokenizer.json "decision"), each challenger (CHALLENGERS) against sa-bpe on the
 seeds where both have an evaluation (a diverged run drops its seed from the arm's contrasts on both sides):
 - parsing: per MBPP+ problem, the seeds whose healed greedy completion compiles under the challenger minus under
   sa-bpe; the exact sign test over the problems whose difference is not 0 (McNemar's exact test at one seed, the
-  companion post's test); better or worse at p < ALPHA, else equal. MBPP+ alone: its prompts leave the function header
-  to the model, where the post's failures arise, and an evaluation "that uses HumanEval alone does not expose this
-  type of defect" (the post);
+  companion post's test, its App. D); better or worse at p < ALPHA, else equal. MBPP+ alone: its prompts leave the
+  function header to the model, and "an evaluation that uses HumanEval alone does not expose this type of defect"
+  (the post), where code bits per byte "shows no association with MBPP at any level";
 - code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal bound
   1.96 CODE_SIGMA √(1 / n + 1 / n), n the contrast's seeds per arm, else equal;
 - the positive control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps sa-bpe's pattern and
@@ -131,56 +129,45 @@ Score = Literal["sa-bpe", "frequency"]
 ABLATION = CORPUS / "tokenizer-ablation"
 # The sample's bytes: production's tokenizer sample's (its curated splits' Parquet footers)
 SAMPLE_BYTES = 13.38e9
-# karpathy/nanochat's split pattern (92d63d4), the first tokenizer's: SPLIT_PATTERN with cl100k's punctuation clause,
-# whose [\r\n]* takes the line breaks after a run of punctuation ("):\n" one chunk)
+# karpathy/nanochat's split pattern (92d63d4): SPLIT_PATTERN with cl100k's punctuation clause, whose [\r\n]* takes the
+# line breaks after a punctuation run ("):\n" one chunk)
 FUSED_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]"""
                  r"""|\s+(?!\S)|\s+""")
-# The hybrid's pattern. A pattern cuts a text into chunks, its matches from left to right; BPE merges, trained and
-# applied within chunks (tiktoken encodes chunk by chunk), never cross a chunk's end, so every chunk end is a token end
-# under every vocabulary trained with the pattern: a property of the chunks holds whatever the merges. No clause looks
-# behind, so the chunks after a chunk end j are the chunks of the text from j alone. Its clauses give:
-# (1) a line break shares a chunk only with line breaks of its kind (\n+, \r+: the post's Claude-approximate [\n]+,
-#     [\r]+; no other clause matches one), the forced break at line breaks of the post's MinGram cb_nl. So no token
-#     joins a line break to the punctuation before it, where FUSED_PATTERN's [\r\n]* makes "):\n" one chunk and a
-#     prompt ending "):" ends inside the token training saw (the token-boundary bias DeepSeek-V3 names for multi-line
-#     prompts without a terminal line break, arXiv 2412.19437 §4.1); production's pattern, the post's gpt4onl edit
-#     (the punctuation clause without its trailing line breaks), shares this. Neither joins a line break to the next
-#     line's indentation, as the post's MinGram cb does; production's \s*[\r\n] joins it to the whitespace before it
-#     (trailing spaces, a whitespace-only line "\n    \n"), the convention of the post's best-scoring tokenizers
-#     (gpt4onl, clean-multi), which the hybrid keeps apart;
-# (2) a run of spaces, of tabs or of other whitespace is one chunk ( +, \t+: the Claude-approximate [ ]+, [\t]+), and a
-#     letter run takes no tab or line break before it: an indentation of d >= 2 spaces or d >= 1 tabs ends at a chunk
-#     end, so, no clause looking behind, the statement s after it is cut as at depth 0: chunks(indent + s) =
-#     (indent,) + chunks(s), one indentation chunk per depth and the statement's chunks the same at every depth.
-#     Production's \s+(?!\S) gives the indentation's last space to the statement's first chunk (" if", " (") or to a
-#     chunk of its own (before a digit): chunks = (" " * (d - 1), " " + w, ...), the depth carried by d - 1 spaces and
-#     a space inside a statement chunk that differs from its depth-0 form ("if" against " if"); its letter clause
-#     [^\r\n\p{L}\p{N}]?+ admits a tab, so a tab-indented statement starts "\tif". A single space before a letter run
-#     stays its prefix (" foo"), as in prose. The Claude-approximate pattern, an early reconstruction in the post,
-#     scored MBPP on par with gpt4onl over seeds, few of its completions IndentationErrors; it differs from the hybrid
-#     beyond whitespace (a letter run takes only a space before it, contractions stay, digits come in threes), so the
-#     hybrid as a whole is untested;
-# (3) no contraction clause (2402.01035's Punct drops cl100k's, its App. E and Fig. 3; o200k folds contractions into
-#     the letter run): the letter clause takes a whole run of letters, which '(?i:[sdmt]|ll|ve|re) cuts where an
-#     apostrophe starts a chunk ("'s" "elf" for a line's 'self'); English contractions chunk as before ("doesn" "'t").
+# The hybrid's pattern. BPE merges, trained and applied within chunks (tiktoken encodes chunk by chunk), never cross a
+# chunk's end, so every chunk end is a token end under every vocabulary trained with the pattern. No clause looks
+# behind, so the chunks after a chunk end j are the chunks of the text from j alone. Its clauses:
+# (1) \n+, \r+: a line break shares a chunk only with line breaks of its kind (the companion post's Claude
+#     approximation's [\n]+, [\r]+; the forced break at line breaks of its MinGram cb_nl). No token joins a line break
+#     to the punctuation before it (FUSED_PATTERN's "):\n"), so a prompt ending "):" ends at a token end: no
+#     token-boundary bias for multi-line prompts without a terminal line break (arXiv 2412.19437 §4.1). Nor to the
+#     indentation after it (the post's MinGram cb), nor to the whitespace before it (SPLIT_PATTERN's \s*[\r\n], the
+#     post's gpt4onl and clean-multi);
+# (2)  +, \t+, [^\S\r\n\t ]+: a run of spaces, of tabs or of other whitespace is one chunk (the Claude approximation's
+#     [ ]+, [\t]+), and a letter run takes no tab or line break before it, so an indentation of d >= 2 spaces or d >= 1
+#     tabs ends at a chunk end and chunks(indent + s) = (indent,) + chunks(s): one indentation chunk per depth, the
+#     statement's chunks the same at every depth. SPLIT_PATTERN's \s+(?!\S) gives the indentation's last space to the
+#     statement (" if" against "if" at depth 0) and its [^\r\n\p{L}\p{N}]?+ a tab ("\tif"). A single space before a
+#     letter run stays its prefix (" foo"), as in prose;
+# (3) no contraction clause (Punct drops cl100k's, arXiv 2402.01035 App. E, Fig. 3): the letter clause takes a whole
+#     letter run, which '(?i:[sdmt]|ll|ve|re) cuts where an apostrophe starts a chunk ("'s" "elf" for 'self');
+#     English contractions chunk as "doesn" "'t".
 # Kept from cl100k: one leading punctuation character on a letter run (".append", "(self"), which Punct drops (it keeps
-# the leading space, " ?\p{L}+", 2402.01035 Fig. 3), the paper recommending GPT-4's pattern "since it provides an
-# additional 5% compression over Punct at no significant cost to performance" (App. E), and a leading space (" foo");
-# production's digit pairs (karpathy/nanochat: "2 is the sweet spot for vocab size of 32K") and punctuation runs. And
-# [^\S\r\n\t ]+ takes every other whitespace character, so every character falls in some chunk: tiktoken drops what no
-# clause matches. Without a lookahead, a long whitespace run costs fancy-regex no backtracking, where production's and
-# FUSED_PATTERN's \s+(?!\S) beside \s*[\r\n] stop tiktoken past its backtrack limit (no corpus document comes near it)
+# the leading space, arXiv 2402.01035 Fig. 3), GPT-4's pattern giving "an additional 5% compression over Punct at no
+# significant cost to performance" (App. E); a leading space (" foo"); production's digit pairs and punctuation runs.
+# [^\S\r\n\t ]+ puts every character in some chunk (tiktoken drops what no clause matches). No lookahead: a long
+# whitespace run costs fancy-regex no backtracking, where SPLIT_PATTERN's \s+(?!\S) beside \s*[\r\n] stops tiktoken past
+# its backtrack limit
 HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\n+|\r+|\t+| +|[^\S\r\n\t ]+"""
 # arm: (pattern, merge score); every arm is trained on, sa-bpe as the harness's production arm
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
 DEPTH, SEEDS = 16, 2
-# The decisions' significance level, the conventional one ("Statistical Methods for Research Workers" (1925), §20)
+# The decisions' significance level, the conventional 0.05
 ALPHA = 0.05
-# The spread of a run's 8K code bits per byte over seeds (pooled within each configuration): the six runs at d8 at 20 of
-# the standard-regime comparison (60138de's baseline and c00d2f6's default, data seeds 0 to 2), on production's data,
-# carried to d16 and to the corpus [inference]
+# The pooled seed standard deviation of a run's 8K code bits per byte (seed variances pooled over configurations): two
+# d8 configurations at 20 tokens per parameter on production's data, data seeds 0 to 2 (six runs; no results/ file
+# holds them), carried to d16 and to the corpus [inference]
 CODE_SIGMA = 0.0034
 # The benchmark of the parse test (Decisions)
 PARSED = "mbpp_plus"
@@ -414,18 +401,17 @@ def fidelity(task: tuple[str, str]) -> dict[str, int]:
 
 def intrinsic() -> None:
     """Every arm's compiled val split of every source, the equal-bytes check, and RESULTS/tokenizer-intrinsic.json
-    (module docstring): the compiles and then each arm's measures, depth invariance per program source and fidelity per
-    arm and source, all in one process pool."""
+    (module docstring): the compiles, every split at once, then each arm's measures, depth invariance per program
+    source and fidelity per arm and source, all in one process pool."""
     seconds, start, began = {}, time.perf_counter(), provenance()
     programs = [s for s, spec in SOURCES.items() if spec.category in PROGRAMS]
     checks = [(arm, source) for arm in ARMS for source in SOURCES]
-    with ProcessPoolExecutor(mp_context=SPAWN) as pool:
-        for arm in ARMS:
-            begin = time.perf_counter()
-            for corpus in SOURCES:
-                split_path(corpus, "val", get_tokenizer(ABLATION / arm)).parent.mkdir(parents=True)
-                compile_source(corpus, "val", ABLATION / arm, pool)
-            seconds[f"compile {arm}"] = time.perf_counter() - begin
+    with ProcessPoolExecutor(mp_context=SPAWN) as pool, ThreadPoolExecutor(len(checks)) as threads:
+        for arm, corpus in checks:
+            split_path(corpus, "val", get_tokenizer(ABLATION / arm)).parent.mkdir(parents=True)
+        # a val split is a few row groups: one split at a time would leave the pool idle
+        list(threads.map(lambda check: compile_source(check[1], "val", ABLATION / check[0], pool), checks))
+        seconds["compile"] = time.perf_counter() - start
         for corpus in SOURCES:
             sizes = []
             for arm in ARMS:
