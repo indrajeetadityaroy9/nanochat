@@ -60,8 +60,14 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lang {
     }
 }
 
+/// The module, with rayon's global pool built here first: workers with 64 MiB stacks, not std's 2 MiB
+/// (std::thread::Builder::stack_size; the shell's stack ulimit does not apply). A worker waiting in a join runs stolen
+/// jobs on its own stack, so nesting deepens with concurrent pack calls from Python threads, and a job's first
+/// PerWorker get compiles fancy-regex patterns there (CoreBPE::new), which recurse: at 2 MiB that overflowed.
 #[pymodule]
 fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    rayon::ThreadPoolBuilder::new().stack_size(64 << 20).build_global()
+        .map_err(|e| PyValueError::new_err(format!("rayon's global pool: {e}")))?;
     m.add_function(wrap_pyfunction!(train::train, m)?)?;
     m.add_function(wrap_pyfunction!(repository::topological_sort, m)?)?;
     m.add_function(wrap_pyfunction!(pack::pack, m)?)
