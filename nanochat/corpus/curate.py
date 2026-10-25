@@ -1,5 +1,5 @@
 """
-Curate every source (sources.py) from its standardized files (prepare.py), in the steps of normalization_doc.md §4:
+Curate every source (sources.py) from its standardized files (prepare.py), in the steps of docs/corpus.md §4:
 
 1. check (§4.2): every Python file, a repository's, a synthetic one or a function (a category whose content is code),
    must parse with ast.parse (Python 3.12). A file that does not is repaired by the smallest set of steps that makes it

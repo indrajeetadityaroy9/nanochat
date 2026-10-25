@@ -12,8 +12,8 @@ a systematic sample in shard order: tokenizer training data "representative of m
 (arXiv 2405.05417 §5); across tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage
 points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); over languages, proportional tokenizer-training
 weights give lower bits per byte than equal ones (arXiv 2610.12144 Table 6, §7). The sample's composition is not an arm
-(normalization_doc.md §9). An authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository files
-and functions; any other document is its own.
+(docs/corpus.md §9). An authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository files and
+functions; any other document is its own.
 
 Arms (ARMS):
 - sa-bpe: the reference tokenizer's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the
@@ -93,7 +93,7 @@ seeds where both have an evaluation (a diverged run drops its seed from the arm'
 adopt: the decided vocabulary (RESULTS/tokenizer.json "analysis" "decision") as the corpus's tokenizer: the arm of
 the decided pattern and score, or, bpe's score carried to another arm's pattern, that pair trained on the sample.
 
-The comparisons, their measures and the recorded results: ablations/tokenizer.md.
+The comparisons, their measures and the recorded results: docs/tokenizer-ablation.md.
 
 python -m ablations.tokenizer vocabularies|intrinsic|data|adopt
 """

@@ -1,5 +1,5 @@
 """
-The training mixture (normalization_doc.md §5): the run's tokens, its two stages, and each stage's groups of sources.
+The training mixture (docs/corpus.md §5): the run's tokens, its two stages, and each stage's groups of sources.
 A group's share is its fraction of the stage's tokens, "supply" for a group read whole once (its share is its tokens
 over the stage's), or "rest" for the code group that takes what the stage's other code groups leave of CODE_SHARE.
 Within a group, sources weigh in by their tokens.
@@ -64,7 +64,7 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The base model's pre-training run: d24 (docs/h100-pretraining.md), 102.6B tokens, written as 86,975 steps of 12
+# The base model's pre-training run: d24 (docs/pretraining.md), 102.6B tokens, written as 86,975 steps of 12
 # micro-batches (train/schedule.plan's D1 batch reads them as 69,580 steps of 15); its last REPO_SHARE of steps
 # (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv 2409.12186 §3.2.1-3.2.2) at 32K, placed as
 # train/schedule.plan places it. A Stage's tokens are this run's; any other run draws rows by the stage's shares at its
@@ -106,7 +106,7 @@ IN_PART = ("synthetic", "text", "math")
 # {source: its group} of every source of a group read in part (such a group has the same sources in both stages)
 PART = {source: group for group in IN_PART for source in FILE_STAGE.groups[group].sources}
 # Bytes per token of the reference tokenizer (SA-BPE within SPLIT_PATTERN, trained before this corpus) on each source
-# (normalization_doc.md §5.1), for token counts that precede the corpus's tokenizer (extents, the tokenizer sample)
+# (docs/corpus.md §5.1), for token counts that precede the corpus's tokenizer (extents, the tokenizer sample)
 BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.638,
                    "ultradata_code_l2_python": 3.709, "stack_edu_cpp": 3.065, "ultradata_stack_v3_l2_cpp": 3.015,
                    "ultradata_code_l2_cpp": 2.935, "kaggle_notebooks": 3.459, "codeforces_cots": 3.536,

@@ -1,5 +1,5 @@
 """
-The document categories of the corpus's sources (normalization_doc.md §2). Every standardized file holds one
+The document categories of the corpus's sources (docs/corpus.md §2). Every standardized file holds one
 category's rows in its schema; id is the sha1 of the document's text, computed locally.
 
 REPOSITORY_FILE  a source file of a code repository, with its path in the repository and its language
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 
-SPLIT = 100  # 1% of groups held out, production's split (normalization_doc.md §4.4)
+SPLIT = 100  # 1% of groups held out, production's split (docs/corpus.md §4.4)
 
 
 def strings(*names: str) -> list[pa.Field]:

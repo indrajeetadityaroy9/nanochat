@@ -7,7 +7,7 @@ shard or partition (<split>.json; pack.py packs each one's documents together).
 
 A corpus is a source, its documents its curated rows: a repository source's are its import-connected samples, each
 file after a comment with its path (sources.texts). The 32K stage reads two more, mixture.REPOSITORIES: per language,
-one document per repository across that language's repository sources (normalization_doc.md §7.2), from the fewest
+one document per repository across that language's repository sources (docs/corpus.md §7.2), from the fewest
 trailing partitions whose repository documents hold the stage's draw of repository code (compile_stage), and from
 partition 0 for val. Of a path that several sources hold in one repository, the first source's file is kept
 (mixture.REPOSITORY_SOURCES order, deduplication's), and of a path one source holds twice, its first row; a

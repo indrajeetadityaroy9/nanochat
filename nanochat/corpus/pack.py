@@ -1,7 +1,7 @@
 """
 Pack the compiled corpus (compile.py) into training rows of seq_len + 1 tokens, stage by stage (mixture.py): the data
 crate's pack, one curated shard per call (Best-Fit-Decreasing, every piece its own attention segment, long documents
-cut between whole statements; normalization_doc.md §7.1), with fill-in-the-middle examples in repository code's train
+cut between whole statements; docs/corpus.md §7.1), with fill-in-the-middle examples in repository code's train
 splits (§6). Per corpus and stage, <split>-T<seq_len>.pieces, .rows and .fim beside its compiled split (loader.py).
 
 A stage's train packs hold exactly the rows the base model's pre-training run reads (mixture.py STEPS), so no document
@@ -41,7 +41,7 @@ from nanochat.corpus.sources import curated_shards
 from nanochat.corpus.tokenizer import FIM_TOKENS, TOKENIZER, get_tokenizer
 from nanochat.native import data_crate
 
-# Fill-in-the-middle, without line widening (normalization_doc.md §6): FIM rate 0.5 (DeepSeek-Coder, arXiv 2401.14196
+# Fill-in-the-middle, without line widening (docs/corpus.md §6): FIM rate 0.5 (DeepSeek-Coder, arXiv 2401.14196
 # §3.1.2: "an FIM rate of 0.5"; arXiv 2207.14255 §3: p = 0.5); of FIM, 90% AST middles and 10% random character spans,
 # 50% PSM and 50% SPM, joint training matching or beating either mode alone (arXiv 2207.14255 §3.1, §4.3 Table 1,
 # §8.1; SPM as App. D's variant 2), the split AST-FIM trains with (arXiv 2506.00204v1 §5.1); AST middles "an equal mix"

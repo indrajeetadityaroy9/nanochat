@@ -22,7 +22,7 @@ The arms' vocabularies are in `artifacts/corpus/tokenizer-ablation/<arm>/` (`tok
 ## Fixed across arms
 
 - **Vocabulary size:** 32,768 ids: the 256 bytes, 32,508 merges, BOS and three FIM sentinels (`<fim_prefix>`,
-  `<fim_suffix>`, `<fim_middle>`); the reason for the size is in `nanochat/corpus/normalization_doc.md` §9.
+  `<fim_suffix>`, `<fim_middle>`); the reason for the size is in `docs/corpus.md` §9.
 - **Trainer:** the corpus crate's byte-level BPE (`nanochat/corpus/crate/train.rs`), within the chunks of the arm's
   split pattern. Every merge is an argmax with fixed tie-breaks, so the arms are trained concurrently and
   independently. Training is deterministic: a second training of the four arms gave identical vocabularies

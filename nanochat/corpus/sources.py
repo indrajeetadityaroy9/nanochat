@@ -1,5 +1,5 @@
 """
-The corpus's sources (normalization_doc.md §1) and its files under paths.CORPUS.
+The corpus's sources (docs/corpus.md §1) and its files under paths.CORPUS.
 
 A source is a Hub dataset (prepare.py), the Hub files it reads per language (a Linguist name for
 code; for Codeforces-CoTs, the language of each subset's solutions), its category (schema.py) and the column of a

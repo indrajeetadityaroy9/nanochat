@@ -63,8 +63,8 @@ splits, the benchmark's, §3.4.
   (`mixture.SPREAD`) for a retrained tokenizer's compression: across tokenizer training mixes "the NSL on any given
   subset only varies by 5 to 6 percentage points" (arXiv 2402.01035 §2.3). Synthetic code and UltraData-Math L3 were in
   no tokenizer sample, so the bound is borrowed [inference]. The tokenizer ablation's intrinsic record measures each
-  arm's margin over these draws (`ablations/tokenizer.md`, Extent margins: every arm above 1), and `pack.fit` names a
-  source that runs short.
+  arm's margin over these draws (`docs/tokenizer-ablation.md`, Extent margins: every arm above 1), and `pack.fit` names
+  a source that runs short.
 
   | Group | Files | Standardized text | Over the draw | Curated train text | Over the draw |
   |---|---|---|---|---|---|
@@ -540,19 +540,19 @@ sources. Every token figure in this document is in the reference tokenizer; a re
 bytes per token.
 
 **Retrained on this corpus, at the file stage's shares of bytes** (`ablations/tokenizer.py` `sample`; the sample, its
-rationale, authorship units and draw are in `ablations/tokenizer.md`, Sample). The reference tokenizer's sample holds
-none of the synthetic code or UltraData-Math L3, 29.1% of the file stage, and 18.27% of its bytes are web mathematics
-this corpus does not read. The longest whitespace run of any curated document is 9,721 characters; `SPLIT_PATTERN`'s
-`\s+(?!\S)` stops tiktoken (and the trainer) on a run of 999,999 not ending in a line break, fancy-regex's backtrack
-limit (`ablations/tokenizer.py` HYBRID_PATTERN).
+rationale, authorship units and draw are in `docs/tokenizer-ablation.md`, Sample). The reference tokenizer's sample
+holds none of the synthetic code or UltraData-Math L3, 29.1% of the file stage, and 18.27% of its bytes are web
+mathematics this corpus does not read. The longest whitespace run of any curated document is 9,721 characters;
+`SPLIT_PATTERN`'s `\s+(?!\S)` stops tiktoken (and the trainer) on a run of 999,999 not ending in a line break,
+fancy-regex's backtrack limit (`ablations/tokenizer.py` HYBRID_PATTERN).
 
 **Vocabulary: 32,768** (`config.VOCAB_SIZE`). SA-BPE ran at 32,768 ids (arXiv 2604.14053 App. B, Table 5);
 DeepSeek-Coder uses 32,000 (arXiv 2401.14196 §3.2); StarCoder2, at 49,152, found in preliminary experiments that
 "increasing the vocabulary size to 100K did not improve performance" (arXiv 2402.19173 §6.2); Dagan et al. measured
 HumanEval pass@1 20.52–20.84 from 32K to 256K on a 1.5B model (arXiv 2402.01035 §3.2, Table 3).
 
-**Split pattern and score: decided on the GH200** by the tokenizer ablation (`ablations/tokenizer.md`). Properties of
-`SPLIT_PATTERN`, on 20,000 documents per corpus:
+**Split pattern and score: decided on the GH200** by the tokenizer ablation (`docs/tokenizer-ablation.md`).
+Properties of `SPLIT_PATTERN`, on 20,000 documents per corpus:
 - Numbers come in pairs from the left (`12345` → `12 34 5`). Digit tokens are 8.3–11.5% of UltraData-Math L3's tokens
   and 4.2–7.5% of code's; single digits would add 2.4–3.3% to UltraData-Math L3's tokens.
 - A space before a number is its own token: 3.4–4.8% of UltraData-Math L3's tokens, 0.77–1.89% of repository code's.
@@ -564,7 +564,8 @@ HumanEval pass@1 20.52–20.84 from 32K to 256K on a 1.5B model (arXiv 2402.0103
 
 The pipeline splits at the tokenizer. Everything through curation is text and runs on the GB10; the curated shards
 and a card go to the private Hub dataset `iaroy/nanochat-data` (`publish.push` replaces its tree and squashes its
-history). Everything after needs the tokenizer and runs on the GH200 from `publish.pull` (`gh200.md`): packing cuts
+history). Everything after needs the tokenizer and runs on the GH200 from `publish.pull` (the steps:
+`docs/pretraining.md`, Reproducing the run): packing cuts
 pieces at token offsets in rows of `seq_len` tokens, FIM encodes its parts around sentinel ids, and the 32K stage's
 partitions are counted in tokens (`compile.compile_stage`).
 
@@ -573,6 +574,6 @@ partitions are counted in tokens (`compile.compile_stage`).
 | Prepare: fetch, standardize | `prepare.py` | done: 18 sources (§1) |
 | Curate: Python check, deduplication, split, shards | `curate.py` | done: 178,887,291 rows (§4) |
 | Publish | `publish.py` | done: `iaroy/nanochat-data`, one commit: `<source>/<split>/<k>.parquet` (1,812 shards) and the card |
-| Tokenizer: sample, arms, decision, adoption | `ablations/tokenizer.py` (trains, decides, adopts), `tokenizer.py` (loads) | `vocabularies`, `intrinsic`, `data` done; runs, decision and adoption wait for the user's approval (`ablations/tokenizer.md`) |
+| Tokenizer: sample, arms, decision, adoption | `ablations/tokenizer.py` (trains, decides, adopts), `tokenizer.py` (loads) | `vocabularies`, `intrinsic`, `data` done; runs, decision and adoption wait for the user's approval (`docs/tokenizer-ablation.md`) |
 | Compile: 8K samples, 32K repository documents | `compile.py` | after adoption |
 | Mixture, pack, loader | `mixture.py`, `pack.py`, `loader.py` | pack after compile; training reads the loader (`train/stages.py`) |

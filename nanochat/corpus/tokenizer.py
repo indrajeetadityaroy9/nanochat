@@ -32,7 +32,7 @@ SPECIAL_TOKENS = (BOS, *FIM_TOKENS)  # ids after the mergeable tokens, in this o
 
 # The reference tokenizer's split pattern (the tokenizer ablation's sa-bpe arm): cl100k's with digits in runs of one or
 # two (\p{N}{1,2}, karpathy/nanochat's) and no line break after a punctuation run, so no token joins "):" to the line
-# break after it (ablations/tokenizer.md); a run of whitespace up to its last line break is one chunk
+# break after it (docs/tokenizer-ablation.md); a run of whitespace up to its last line break is one chunk
 SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]"""
                  r"""|\s+(?!\S)|\s+""")
 

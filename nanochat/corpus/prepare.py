@@ -50,7 +50,7 @@ from nanochat.corpus.sources import (
 
 # Parquet codec of the files the corpus writes
 COMPRESSION = "zstd"
-# Hub files fetched at once (normalization_doc.md §1)
+# Hub files fetched at once (docs/corpus.md §1)
 FETCHES = 4
 
 

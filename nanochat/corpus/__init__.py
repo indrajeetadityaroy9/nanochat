@@ -1,5 +1,5 @@
 """
-The pretraining corpus, as its design document specifies (normalization_doc.md), one module per stage, under
+The pretraining corpus, as its design document specifies (docs/corpus.md), one module per stage, under
 paths.CORPUS:
 
   schema.py     the document categories: each one's schema, split group and whether its content is code
