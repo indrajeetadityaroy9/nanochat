@@ -72,43 +72,42 @@
  "arms": {
   "sa-bpe": {
    "data_key": "054a5beebb0fbcb3e21b5f62f2545e49b79d8620ba75322c1804f5a004283e3a",
-   "ratio": 31.415705656232838,
    "tokens_per_param": 31.415705656232838,
-   "num_iterations": 7151,
-   "total_batch_size": 294912,
-   "repo_start": 6761,
-   "lr": 0.001577014654713806,
+   "max_steps": 7151,
+   "batch_size": 294912,
+   "repo_level_start": 6761,
+   "learning_rate": 0.001577014654713806,
    "stages": {
     "8192": {
      "stack_edu_python": {
       "rows": 22765,
-      "weight": 0.09004693268903229,
+      "weight": 0.0900475332501488,
       "read": 0.962749835273446
      },
      "ultradata_stack_v3_l2_python": {
       "rows": 27501,
-      "weight": 0.10878017552739191,
-      "read": 0.9627649903639868
+      "weight": 0.10878090102843586,
+      "read": 0.9628013526780844
      },
      "ultradata_code_l2_python": {
       "rows": 47824,
-      "weight": 0.18916777987789501,
-      "read": 0.9627592840414855
+      "weight": 0.1891690415179054,
+      "read": 0.9627383740381399
      },
      "stack_edu_cpp": {
       "rows": 17937,
-      "weight": 0.07094978395094102,
-      "read": 0.9627027931092156
+      "weight": 0.0709502571450876,
+      "read": 0.9627585437921614
      },
      "ultradata_stack_v3_l2_cpp": {
       "rows": 19052,
-      "weight": 0.07536016523573218,
+      "weight": 0.07536066784457875,
       "read": 0.9627860592063825
      },
      "ultradata_code_l2_cpp": {
-      "rows": 14860,
-      "weight": 0.05877871380448143,
-      "read": 0.9627187079407806
+      "rows": 14859,
+      "weight": 0.05877515029931743,
+      "read": 0.9627161989366714
      },
      "ultradata_code_l3_python": {
       "rows": 6457,
@@ -212,12 +211,11 @@
   },
   "sa-bpe-fused": {
    "data_key": "523ebb0f5530865b1dfdef077200a8f3960a8df871e5753b9e35111d0b967330",
-   "ratio": 29.47977301848801,
    "tokens_per_param": 29.478308621636465,
-   "num_iterations": 6710,
-   "total_batch_size": 294912,
-   "repo_start": 6344,
-   "lr": 0.0015896026005707223,
+   "max_steps": 6710,
+   "batch_size": 294912,
+   "repo_level_start": 6344,
+   "learning_rate": 0.0015896026005707223,
    "stages": {
     "8192": {
      "stack_edu_python": {
@@ -352,12 +350,11 @@
   },
   "hybrid": {
    "data_key": "9fa2093b2699c5177603869b39b163f8a4262f317543cf92dae75d3efd4e3ca1",
-   "ratio": 31.48892549881018,
    "tokens_per_param": 31.485996705107084,
-   "num_iterations": 7167,
-   "total_batch_size": 294912,
-   "repo_start": 6776,
-   "lr": 0.0015765558172007301,
+   "max_steps": 7167,
+   "batch_size": 294912,
+   "repo_level_start": 6776,
+   "learning_rate": 0.0015765558172007301,
    "stages": {
     "8192": {
      "stack_edu_python": {
@@ -492,12 +489,11 @@
   },
   "bpe": {
    "data_key": "ada659e9364eafaea2a5881b712d6f927de32202fdc83c6613d753a1681985bf",
-   "ratio": 31.418634449935933,
    "tokens_per_param": 31.415705656232838,
-   "num_iterations": 7151,
-   "total_batch_size": 294912,
-   "repo_start": 6761,
-   "lr": 0.0015769962781235717,
+   "max_steps": 7151,
+   "batch_size": 294912,
+   "repo_level_start": 6761,
+   "learning_rate": 0.0015769962781235717,
    "stages": {
     "8192": {
      "stack_edu_python": {
@@ -634,7 +630,8 @@
  "seconds": {
   "compile": 2767.2765371299993,
   "pack": 234.72798823700214,
-  "all": 3002.290974851998
+  "all": 3002.290974851998,
+  "repacked": 175.56698873900314
  },
  "provenance": {
   "commit": "ba01bb59b70cf05cf66d382bfc5d7d11adf5ca05",

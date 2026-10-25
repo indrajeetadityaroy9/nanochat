@@ -8,7 +8,7 @@ approval. The corpus and its dataset: `docs/corpus.md`.
 | Experiment | Decides | Setting | Runs | State |
 |---|---|---|---|---|
 | `peak_lr` | the base model's peak lr multiplier | d8 at 5 and 200, d24 at 5 | 11 | done |
-| `muon_wd_timescale_20tpp` | Muon's weight-decay timescale (at 20) | d8 at 20, sa-bpe data | 3 × 2 seeds | waits |
+| `muon_wd_timescale_20tpp` | Muon's weight-decay timescale (at 20) | d16 at 20, sa-bpe data | 3 × 2 seeds | waits |
 | `logit_softcap` | output-logit softcap | d16 at 20, sa-bpe data | 2 × 4 seeds | waits |
 | `muon_wd_timescale_200tpp` | Muon's timescale law (with the 20 result) | d8 at 200, corpus tokenizer's data | 3 × 2 seeds | waits |
 | `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | intrinsic and data done; runs wait |
@@ -124,14 +124,15 @@ the vertices, which `fit` computes from the `.jsonl`.
 (`train/optim.py` `tau_weight_decay`; Power Lines, arXiv 2505.13738, fit with AdamW; its App. B extends the EMA view to
 decoupled-decay optimizers), AdamW's untouched (`muon_tau_scale`).
 
-**Arms.** {½, 1, 2} × seeds 0, 1, d8, in two experiments:
-- `muon_wd_timescale_20tpp`: at 20 tokens per parameter on the sa-bpe arm's data;
-- `muon_wd_timescale_200tpp`: at 200 on the corpus tokenizer's data (d8 at 200 reads 2.94B tokens, beyond the sa-bpe
-  set's 2.11B; `ACTIONS.md` §0).
+**Arms.** {½, 1, 2} × seeds 0, 1, in two experiments:
+- `muon_wd_timescale_20tpp`: d16 at 20 tokens per parameter on the sa-bpe arm's data;
+- `muon_wd_timescale_200tpp`: d8 at 200 on the corpus tokenizer's data (d8 at 200 reads 2.94B tokens, beyond the
+  sa-bpe set's 2.11B; d16 at 200 would read 13.4B, six runs ~29 GPU-h against ~2 h; `ACTIONS.md` §0).
 
 **Rule.** Per setting, m = `scaled` over {½, 1, 2} (`analysis`). `law` (the 200 half): if m_20 = m_200 = 1 the τ law
 stays for Muon; else Muon's own law through both points, τ* = c·TPP^e with c = `TAU_C`·m_20·20^-D, e = `TAU_E` + D,
-D = ln(m_200/m_20)/ln 10.
+D = ln(m_200/m_20)/ln 10. The two points' depths differ, so the law takes m as independent of depth between d8 and d16
+(Power Lines' τ is a function of TPP alone, arXiv 2505.13738 §2.3).
 
 **State.** Waits.
 
@@ -151,7 +152,7 @@ corpus tokenizer; the cap's published effect is a high-lr one).
 ## tokenizer_split_merge
 
 Decides the split pattern and merge score of the corpus's tokenizer. Code: `ablations/tokenizer_split_merge.py`
-(`python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|adopt`, then the runs), over
+(`python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack|adopt`, then the runs), over
 `corpus/train_tokenizer.py` (sample, trainer). Each step's record holds its provenance (commit, host, packages) and
 timings.
 
@@ -160,6 +161,7 @@ timings.
 | `vocabularies` | `CORPUS/tokenizer-ablation/<arm>/`; `results/tokenizer_split_merge-vocabularies.json` | done (`5ba5025`) |
 | `intrinsic` | the arms' tokenized val splits; `results/tokenizer_split_merge-intrinsic.json` | done (`ebd8058`) |
 | `data` | each arm's tokenized and packed training set; `results/tokenizer_split_merge-data.json` | done (`ba01bb5`) |
+| `repack` | each arm's packs again from its tokenized splits (after a packer change); the data record's arms | done with FIM's line-start rule |
 | runs | `results/tokenizer_split_merge.{jsonl,json}` | waits |
 | `adopt` | `CORPUS/tokenizer` | after the runs |
 

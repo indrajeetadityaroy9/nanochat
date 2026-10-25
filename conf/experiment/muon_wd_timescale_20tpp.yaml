@@ -1,7 +1,7 @@
 # @package _global_
-# Muon weight-decay EMA timescale at 20 tokens per parameter: x 1/2 and x 2 against the tau law (x 1); d8 on the
+# Muon weight-decay EMA timescale at 20 tokens per parameter: x 1/2 and x 2 against the tau law (x 1); d16 on the
 # sa-bpe arm's data, seeds 0 and 1. Analysis: ablations.muon_wd_timescale.analysis.
-num_hidden_layers: 8
+num_hidden_layers: 16
 tokens_per_param: 20.0
 tokenizer: sa-bpe
 

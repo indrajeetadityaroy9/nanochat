@@ -77,11 +77,14 @@ Decisions, pre-registered (analysis), each challenger (CHALLENGERS) against sa-b
   times than of sa-bpe's (SA-BPE's claimed benefit, a higher coverage than BPE's), carried to the adopted pattern
   (assumed); otherwise SA-BPE.
 
+repack: every arm's set packed again from its tokenized splits, the set data recorded, after a change to the packer
+(corpus/pack.py, the corpus crate's pack.rs); the data record's arms rewritten.
+
 adopt: the decided vocabulary (RESULTS/tokenizer_split_merge.json "analysis" "decision") as the corpus's tokenizer:
 the arm of the decided pattern and score, or, bpe's score carried to another arm's pattern, that pair trained on the
 sample.
 
-python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|adopt
+python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack|adopt
 """
 import argparse
 import datetime
@@ -423,6 +426,50 @@ def document_set(run) -> dict:
     return {"file": file, "repository": repository, "draws": {"8192": file_draws, "32768": repo_draws}}
 
 
+def pack_corpus(corpus: str, directory: Path, shards: dict) -> None:
+    """A tokenized corpus's packs in each stage that reads it (shards: the set, data's "set" record): its train split's
+    shards in the set, its val split whole."""
+    for stage in (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE):
+        if corpus not in stage.sources:
+            continue
+        if corpus in mixture.REPOSITORIES.values():
+            train = range(shard_count(corpus, "train", directory))
+        elif stage is mixture.FILE_LEVEL_STAGE:
+            train = range(shards["file"][corpus])
+        else:
+            first = shards["file"].get(corpus, 0)
+            train = range(first, first + shards["repository"][corpus])
+        for split, listed in (("train", train), ("val", range(shard_count(corpus, "val", directory)))):
+            write(corpus, split, directory, packed_shards(corpus, split, directory, listed, stage.seq_len),
+                  stage.seq_len)
+
+
+def arm_record() -> dict:
+    """Each arm's run and data at its max_tokens_per_param: data key, plan, and per stage each corpus's packed rows,
+    weight and the share of its rows the run reads."""
+    from run import base_plan
+    from train.stages import drawn, max_tokens_per_param
+
+    arms = {}
+    for arm in ARMS:
+        tokenizer = get_tokenizer(ABLATION / arm)
+        tokens_per_param = max_tokens_per_param(tokenizer, num_hidden_layers=NUM_HIDDEN_LAYERS)
+        arm_run = base_plan(num_hidden_layers=NUM_HIDDEN_LAYERS, tokens_per_param=tokens_per_param)
+        read = {}
+        for stage in (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE):
+            rows, count = stage_rows(tokenizer, stage), drawn(stage, arm_run)
+            shares, draws, _ = weights(stage, rows, count)
+            read[str(stage.seq_len)] = {n: {"rows": rows[n], "weight": shares[n], "read": d / rows[n]}
+                                        for n, d in draws.items()}
+        arms[arm] = {"data_key": tokenizer.data_key, "tokens_per_param": arm_run.tokens_per_param,
+                     "max_steps": arm_run.max_steps, "batch_size": arm_run.batch_size,
+                     "repo_level_start": arm_run.repo_level_start, "learning_rate": arm_run.learning_rate,
+                     "stages": read}
+        print(f"{arm}: tokens_per_param {tokens_per_param:.2f}, {arm_run.max_steps:,} steps of "
+              f"{arm_run.batch_size:,} tokens", flush=True)
+    return arms
+
+
 def data() -> None:
     """Every arm's training set, tokenized and packed, and RESULTS/<EXPERIMENT>-data.json (module docstring): each
     corpus of each arm tokenized, then packed, as its own job, every job into one process pool;
@@ -432,36 +479,17 @@ def data() -> None:
     job's end (packs overlap them), and "all"."""
     # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
     from run import base_plan
-    from train.stages import drawn, max_tokens_per_param
 
     start, began = time.perf_counter(), provenance()
     run = base_plan(num_hidden_layers=NUM_HIDDEN_LAYERS, tokens_per_param=TOKENS_PER_PARAM)
     shards = document_set(run)
-    stages = (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE)
     leading = {s: shards["file"].get(s, 0) + shards["repository"].get(s, 0) for s in SOURCES}
     tokenized = []  # each tokenize job's end
-
-    def pack(corpus: str, directory: Path) -> None:
-        """A tokenized corpus's packs in each stage that reads it: its train split's shards in the set, its val split
-        whole."""
-        for stage in stages:
-            if corpus not in stage.sources:
-                continue
-            if corpus in mixture.REPOSITORIES.values():
-                train = range(shard_count(corpus, "train", directory))
-            elif stage is mixture.FILE_LEVEL_STAGE:
-                train = range(shards["file"][corpus])
-            else:
-                first = shards["file"].get(corpus, 0)
-                train = range(first, first + shards["repository"][corpus])
-            for split, listed in (("train", train), ("val", range(shard_count(corpus, "val", directory)))):
-                write(corpus, split, directory, packed_shards(corpus, split, directory, listed, stage.seq_len),
-                      stage.seq_len)
 
     def source(arm: str, corpus: str) -> None:
         tokenize_source(corpus, "train", ABLATION / arm, pool, leading=leading[corpus])
         tokenized.append(time.perf_counter())
-        pack(corpus, ABLATION / arm)
+        pack_corpus(corpus, ABLATION / arm, shards)
 
     def repositories(parts: list[int]) -> None:
         for arm in ARMS:
@@ -469,7 +497,7 @@ def data() -> None:
                 tokenize_repositories(ABLATION / arm, parts, pool)
             tokenized.append(time.perf_counter())
             for corpus in mixture.REPOSITORIES.values():
-                pack(corpus, ABLATION / arm)
+                pack_corpus(corpus, ABLATION / arm, shards)
 
     corpus_crate()  # built once, before the threads call it (pack.py's rule)
     with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
@@ -489,30 +517,31 @@ def data() -> None:
     chosen = {"file": shards["file"], "repository": shards["repository"], "partitions": parts,
               "draws": shards["draws"]}
     tokenized_seconds = max(tokenized) - start
-    arms = {}
-    for arm in ARMS:
-        tokenizer = get_tokenizer(ABLATION / arm)
-        tokens_per_param = max_tokens_per_param(tokenizer, num_hidden_layers=NUM_HIDDEN_LAYERS)
-        arm_run = base_plan(num_hidden_layers=NUM_HIDDEN_LAYERS, tokens_per_param=tokens_per_param)
-        read = {}
-        for stage in stages:
-            rows, count = stage_rows(tokenizer, stage), drawn(stage, arm_run)
-            shares, draws, _ = weights(stage, rows, count)
-            read[str(stage.seq_len)] = {n: {"rows": rows[n], "weight": shares[n], "read": d / rows[n]}
-                                        for n, d in draws.items()}
-        arms[arm] = {"data_key": tokenizer.data_key, "tokens_per_param": arm_run.tokens_per_param,
-                     "max_steps": arm_run.max_steps, "batch_size": arm_run.batch_size,
-                     "repo_level_start": arm_run.repo_level_start, "learning_rate": arm_run.learning_rate,
-                     "stages": read}
-        print(f"{arm}: tokens_per_param {tokens_per_param:.2f}, {arm_run.max_steps:,} steps of "
-              f"{arm_run.batch_size:,} tokens", flush=True)
     record = {"run": {"num_hidden_layers": NUM_HIDDEN_LAYERS, "tokens_per_param": TOKENS_PER_PARAM,
                       "max_steps": run.max_steps, "batch_size": run.batch_size,
                       "repo_level_start": run.repo_level_start},
-              "set": chosen, "arms": arms,
+              "set": chosen, "arms": arm_record(),
               "seconds": {"tokenized": tokenized_seconds, "all": time.perf_counter() - start},
               "provenance": began}
     (RESULTS / f"{EXPERIMENT}-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+
+
+def repack() -> None:
+    """Every arm's set packed again from its tokenized splits (the set RESULTS/<EXPERIMENT>-data.json records), after a
+    change to the packer (corpus/pack.py, the corpus crate's pack.rs), each corpus of each arm a job (the crate releases
+    the GIL); the record's arms and its "seconds" "repacked" rewritten."""
+    start = time.perf_counter()
+    path = RESULTS / f"{EXPERIMENT}-data.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    corpora = sorted({c for stage in (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE) for c in stage.sources})
+    corpus_crate()  # built once, before the threads call it
+    with ThreadPoolExecutor(len(ARMS) * len(corpora)) as threads:
+        for job in [threads.submit(pack_corpus, corpus, ABLATION / arm, record["set"])
+                    for arm in ARMS for corpus in corpora]:
+            job.result()
+    record["arms"] = arm_record()
+    record["seconds"]["repacked"] = time.perf_counter() - start
+    path.write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
 def analysis(lines: list[dict]) -> dict:
@@ -564,7 +593,7 @@ def adopt() -> None:
 
 
 if __name__ == "__main__":
-    steps = {"vocabularies": vocabularies, "intrinsic": intrinsic, "data": data, "adopt": adopt}
+    steps = {"vocabularies": vocabularies, "intrinsic": intrinsic, "data": data, "repack": repack, "adopt": adopt}
     parser = argparse.ArgumentParser(prog="python -m ablations.tokenizer_split_merge",
                                      description="A step of the tokenizer ablation.")
     parser.add_argument("step", choices=steps)

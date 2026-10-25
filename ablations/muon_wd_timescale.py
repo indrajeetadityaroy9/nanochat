@@ -2,11 +2,12 @@
 The muon_wd_timescale ablation (conf/experiment/muon_wd_timescale_20tpp.yaml, then muon_wd_timescale_200tpp.yaml):
 Muon's weight-decay EMA timescale x 1/2 and x 2 (its weight decay x 2 and x 1/2) under the tau law (train/optim.py
 tau_weight_decay: Power Lines, arXiv 2505.13738, fit with AdamW; its App. B extends the EMA view to decoupled-decay
-optimizers), AdamW's untouched, d8 at 20 tokens per parameter on the sa-bpe arm's data (2 seeds) and at 200 on the
-corpus tokenizer's (2 seeds). Its pre-registered analysis: per setting, m the scale sweep over {1/2, 1, 2}
-(ablations/contrast.py scaled; analysis); if m_20 = m_200 = 1 the law stays for Muon, else Muon's own law through both
-points, tau* = c TPP^e with c = TAU_C m_20 20^-D, e = TAU_E + D, D = ln(m_200 / m_20) / ln 10 (law; TAU_C, TAU_E the
-law's, train/optim.py).
+optimizers), AdamW's untouched, d16 at 20 tokens per parameter on the sa-bpe arm's data (2 seeds) and d8 at 200 on the
+corpus tokenizer's (2 seeds; d16 at 200 reads 13.4B tokens, six runs ~29 GPU-h). Its pre-registered analysis: per
+setting, m the scale sweep over {1/2, 1, 2} (ablations/contrast.py scaled; analysis); if m_20 = m_200 = 1 the law stays
+for Muon, else Muon's own law through both points, tau* = c TPP^e with c = TAU_C m_20 20^-D, e = TAU_E + D,
+D = ln(m_200 / m_20) / ln 10 (law; TAU_C, TAU_E the law's, train/optim.py), which takes the multiplier as independent of
+depth between d8 and d16 (Power Lines' tau is a function of TPP alone, arXiv 2505.13738 §2.3).
 """
 import json
 import math
