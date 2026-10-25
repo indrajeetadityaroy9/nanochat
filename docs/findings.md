@@ -172,11 +172,15 @@ steps) vs baseline ~338K; 32K 276,001 vs 274,554; loss check pending.
 
 ### 5.13 Value embeddings and cross entropy (VeCeKernel) — in progress
 
-### 5.14 Fused FP8 (FP8Fused) — in progress
-Outputs so far: cuTile 1.7.0 runs on sm_90 (FP8 e4m3 GEMM correct, rel. err 6.8e-4 vs the bf16 product); a naive
-cuTile GEMM reaches 434 TFLOP/s vs cuBLAS FP8 1,020 on the d24 up-projection (FP8 GEMMs alone 1.3–2.0× bf16);
-Transformer Engine LayerNormMLP with delayed scaling −21% for one d24 MLP forward+backward (current scaling −1%,
-block scaling slower); TE attention projections slower in every recipe. d24 end-to-end runs pending.
+### 5.14 Fused FP8 (FP8Fused) — closing
+Outputs: cuTile 1.7.0 runs on sm_90 (FP8 e4m3 GEMM correct, rel. err 6.8e-4 vs the bf16 product); a naive cuTile
+GEMM reaches 434 TFLOP/s vs cuBLAS FP8 1,020 on the d24 up-projection (FP8 GEMMs alone 1.3–2.0× bf16). Transformer
+Engine LayerNormMLP with delayed scaling is −21% for one isolated d24 MLP forward+backward (current scaling −1%, block
+scaling slower), but end to end at d24 8K (40 steps) every TE variant is slower than the bf16 QuACK baseline
+(340,283 tok/s, 69.3 GB): MLP delayed 327,018 (−3.9%, 77.1 GB), MLP current 306,165 (−10.0%), all linears delayed
+323,765 (−4.9%, 79.3 GB); torchao float8 was already negative (§5.10). Conclusion: FP8 does not pay at this model
+size (K = 768: quantization cost comparable to the GEMM time saved); one last check caches the FP8 weights across the
+15 gradient-accumulation micro-batches (TE `is_first_microbatch`).
 
 ### 5.15 Optimizer screen (OptScreen) — in progress
 d16 at 20 tokens/param, 1 seed each (user-approved): baselines seeds 0 and 1, NorMuon (arXiv 2510.05491), cautious
