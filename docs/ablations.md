@@ -112,10 +112,10 @@ the adopted tokenizer's `max_tokens_per_param`; no copy is stored):
 
 No run diverged. The best arm beats the law by 0.1253, 0.0118 and 0.0044. The d8 ratio is × 0.9105 (horizon exponent
 −0.0254, −0.1193 net of the batch): the optimum barely moves with the horizon, against both rules. The base model's
-multiplier is × 2.7972 at 102.6B tokens (`conf/experiment/logit_softcap.yaml` fixes it). The records were written in
-an earlier format (a run's fields under `fields`: `n_layer`, `ratio`, `lr_scale`, `seed`; its setting under `setting`),
-on data no longer published (`docs/corpus.md`); `results/peak_lr.json` holds that format's paired differences, not
-the vertices, which `fit` computes from the `.jsonl`.
+multiplier is × 2.7970 at 102.6B tokens (`pretrain.yaml` and `logit_softcap.yaml` read it as `${lr_multiplier:}`).
+The records were written in an earlier format (a run's fields under `fields`: `n_layer`, `ratio`, `lr_scale`, `seed`;
+its setting under `setting`), on data no longer published (`docs/corpus.md`); `results/peak_lr.json` holds that
+format's paired differences, not the vertices, which `fit` computes from the `.jsonl`.
 
 ## muon_wd_timescale
 
@@ -141,8 +141,8 @@ D = ln(m_200/m_20)/ln 10. The two points' depths differ, so the law takes m as i
 modded-nanogpt record #18 "lowers that to 15") against none.
 
 **Arms.** {none, 15} × seeds 0–3, d16 at 20 tokens per parameter (Chinchilla, arXiv 2203.15556 Table 3) on the sa-bpe
-arm's data, `learning_rate_scale` 2.7972 (the base model's multiplier, fixed because `${lr_multiplier:}` needs the
-corpus tokenizer; the cap's published effect is a high-lr one).
+arm's data, `learning_rate_scale` `${lr_multiplier:}` (the base model's multiplier, `peak_lr.analysis` at the corpus
+tokenizer's `max_tokens_per_param`, as `pretrain` resolves it; the cap's published effect is a high-lr one).
 
 **Rule.** Adopt c = 15 iff `adopted`; else no cap (equal keeps none: the cap costs the loss, eval and decoder paths).
 
