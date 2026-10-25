@@ -152,7 +152,7 @@ Ops in `model/ops/`, CUDA sources in `model/kernels/` (built on first use by `na
 | Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them; the softcap arm's capped loss fused in the same op (`model/ops/cross_entropy.py`) |
 | Attention | FlashAttention-4 varlen over the micro-batch's real document segments only (`model/ops/flash_attn.py`), its default backward |
 | q/k norm + gain + RoPE | `model/kernels/qk_prologue.cu`: one pass per direction; gain gradient without atomics (row math shared with the decoder, `model/kernels/qk_row.cuh`) |
-| Value-embedding gate and mix | `model/kernels/ve_gate.cu` (`model/ops/ve_gate.py`): one launch forward, one pass backward, the gate's logits in fp32 |
+| Value-embedding gate and mix | `model/kernels/ve_gate.cu` (`model/ops/ve_gate.py`): one launch forward, the gate's logits in fp32; backward in token order (one sort of `input_ids` per micro-batch, shared by the layers), one atomic per run of equal tokens, added straight into the table's `.grad` (no zeroed buffer, no autograd add); the gate weight's gradient a cuBLAS GEMM from bf16 dz |
 | Muon | Newton–Schulz batched over same-shape matrices (`optim.Muon`) |
 | Embeddings | `F.embedding`, bf16 cast fused by Inductor; backward adds rows with atomics |
 | Decoding | `model/kernels/decode.cu` (`inference/decoder.py`): batched native decoder for the code benchmarks |
@@ -175,7 +175,9 @@ Measured choices [unverified: `torch.profiler` and CUDA-graph timings, records n
 - **Ours over QuACK's chunked linear cross entropy** for the LM-head loss (29.2 against ≥ 31.4 ms at d8); per-position
   evaluation losses by QuACK's `lse_target_epi` (no logits).
 - **The value-embedding gate kernel** is not bitwise to the PyTorch expressions it replaced (its fp32 reduction order
-  moves about 15% of elements by one bf16 ulp).
+  moves about 15% of elements by one bf16 ulp). Its token-ordered backward against the per-row-atomics one (d24 8K,
+  GH200 at 700 W): ve_gate 162 → 93 ms per step plus the table's memset and autograd add (−19 ms), the gate-weight
+  GEMM +13 ms; 344,768 → 350,185 tok/s (+1.6%; 32K +1.1%), peak memory unchanged.
 - **Rejected:** FP8 MLP GEMMs (e4m3 rowwise, d16 on real rows: mean loss over steps 250–299 +0.0048 over bf16 against
   a bf16 two-run spread of 0.0014, growing); two concurrent runs (−8% aggregate; one run saturates the GPU); Liger and
   Cut Cross-Entropy losses, fused RMSNorm/RoPE libraries, DCP checkpointing.
