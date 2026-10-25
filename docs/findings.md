@@ -374,7 +374,7 @@ dX epilogue not pursued (it replaces part of a 178 µs/call preprocess).
   (paper 0.348; transformers 5 drops BOS), MBPP 0.466 (paper 0.462); our EvalPlus scorer agrees on 163/164 problems.
 - **d16 reference** (RefModelTrain): code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050 at 20 tokens/param.
 
-### 5.19 GEMMs (GemmDeep, DeepGemmStudy, GemmOwner) — C1+C2, postact committed; split-K dW rejected
+### 5.19 GEMMs (GemmDeep, DeepGemmStudy, GemmOwner) — C1+C2, postact committed; split-K, global cuBLASLt rejected
 Outputs: DeepGEMM on the d24 shapes (TFLOP/s, sequential bench): forward q/k/v/o QuACK 828, torch 705, DeepGEMM 710;
 up-projection without epilogue QuACK 652, torch 543, DeepGEMM 779 — a lead an interleaved rerun attributes to drift
 (per-shape interleaved table queued); dW C×C torch.mm fp32 662, DeepGEMM with fp32 accumulation 295–315, DeepGEMM
@@ -404,9 +404,11 @@ micro-batch, about −55 ms of the 4.16 s step [estimate]). DeepGEMM's wrapper (
 kCublasLtWorkspaceSize; csrc/jit_kernels/impls/smxx_cublaslt.hpp) asks the heuristic with a 16 MiB workspace and the
 reduction schemes NONE | COMPUTE_TYPE; torch's cuBLASLt path in this image has 1 MiB (cuBLAS 32 MiB; measured with
 `torch._C._cuda_getCublasLtWorkspaceSize`), and a split-K dW into a 768 × 768 fp32 output needs ~2.4 MB of partials
-per split, so `preferred_blas_library("cublaslt")` alone cannot reach DeepGEMM's times. Candidate: every torch matmul
-on cuBLASLt with a 16 MiB workspace (set in `train/loop.py`); its d24 exclusive A/B against master is running; a
-process-global setting, so the A/B also measures Muon's batched Newton–Schulz and the gate's weight gradient.
+per split, so `preferred_blas_library("cublaslt")` alone cannot reach DeepGEMM's times. With a 16 MiB workspace torch
+matches DeepGEMM per shape on the 4C dW (4C×C 0.723 → 0.706 ms, C×4C 0.735 → 0.709; C×C no gain), but as a
+process-global setting (every torch matmul, Muon's batched Newton–Schulz included) the d24 exclusive A/B lost: 8K
+361,284 → 359,376 tok/s (−0.53%, two alternated pairs), 32K 285,115 → 283,969 (−0.40%): rejected. Open: DeepGEMM's
+cuBLASLt call at the two 4C dW sites only (~15.5 ms/step, ~0.38% [estimate]).
 
 ### 5.20 Code audit (user specification; one auditor per file) — in progress
 Specification: every parameter, literal, branch and dependency justified by mathematics, the data, model or hardware
