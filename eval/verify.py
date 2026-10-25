@@ -8,9 +8,10 @@ eval/code_eval.py: filtered pass@1, one candidate selected by these checks among
   generated text's syntax error, an entry function without a returned value;
 - cpp_diagnostics: g++ -std=c++17 -fsyntax-only's failure (its error lines), the MultiPL-E judge's compiler and
   standard (evaluation/src/eval_cpp.py) without code generation;
-- examples_pass: the prompt's own examples. Selection reads only the prompt, but the prompts' examples overlap the
-  scored base tests (MBPP+: nearly every prompt assert calls the entry function on a base input, tuples compared as
-  lists; HumanEval+: many tasks share a doctest input with the base tests), so it favours base over plus pass@1;
+- examples_pass: the prompt's own examples, run under EvalPlus's reliability_guard. Selection reads only the prompt,
+  but the prompts' examples overlap the scored base tests (MBPP+: nearly every prompt assert calls the entry function
+  on a base input, tuples compared as lists; HumanEval+: many tasks share a doctest input with the base tests), so it
+  favours base over plus pass@1;
 - search: per task a greedy candidate, then seeded samples, until one has no diagnostics and passes its prompt's
   examples (Codex, arXiv 2107.03374 §3.5: filtering by the first sample which passes the public unit tests; AlphaCode's
   filtering by the problem's example tests, arXiv 2203.07814 §4.5).
@@ -28,12 +29,12 @@ import sys
 import tempfile
 import time
 import tokenize
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
-from inference.decoder import NativeDecoder, Request
+from inference.decoder import Request
 from inference.syntax_constraint import syntax_error
 from metrics import latency
 
@@ -55,17 +56,22 @@ TEMPERATURE = 0.8
 # candidates per task, the greedy one included: pass@10, the intermediate budget Codex (Table 1) and EvalPlus
 # (arXiv 2305.01210 Table 3) report
 ATTEMPTS = 10
-# examples_pass's child process: runs the program as a module named "program", then each example (stdin JSON source/want
-# pairs) in a copy of its namespace plus the modules the example names but the program does not bind (MBPP+ prompt
-# asserts call math.isclose, imported by the original MBPP's test_imports); a failing example raises (exit status 1);
-# EXAMPLES_DONE, printed after the last example, marks a run that was not ended early (exit(), sys.exit()).
+# examples_pass's child process: reads its stdin JSON (program and source/want pairs), takes EvalPlus's reliability_guard
+# as EvalPlus's own test runs do (evalplus/eval/__init__.py unsafe_execute: destructive os, shutil and subprocess
+# functions disabled, its memory limit), then runs the program as a module named "program", then each example in a
+# copy of its namespace plus the modules the example names but the program does not bind (MBPP+ prompt asserts call
+# math.isclose, imported by the original MBPP's test_imports); a failing example raises (exit status 1); EXAMPLES_DONE,
+# printed after the last example, marks a run that was not ended early (exit(), sys.exit()).
 # Values, not doctest's output text: HumanEval writes some wants in an equal but differently printed form ("21" for
 # '21', a list split over lines; HumanEval/65, /113) and some examples as bare comparisons without output (/108, /145):
 # an example with a want passes iff its value equals the want's; one without, iff an expression's value is None or
 # True, a statement (assert) iff it runs.
 RUN_EXAMPLES = """
 import ast, builtins, importlib, importlib.util, json, sys
+from evalplus.eval import query_maximum_memory_bytes
+from evalplus.eval.utils import reliability_guard
 data = json.load(sys.stdin)
+reliability_guard(maximum_memory_bytes=query_maximum_memory_bytes())
 program = {"__name__": "program"}
 exec(compile(data["program"], "program.py", "exec"), program)
 for source, want in data["examples"]:
@@ -173,8 +179,9 @@ def examples(prompt: str) -> list[tuple[str, str]]:
 
 
 def examples_pass(prompt: str, program: str) -> bool:
-    """Whether the Python program passes the prompt's examples (RUN_EXAMPLES: by value, to the end), run in a fresh
-    isolated interpreter in an empty directory within EXAMPLES_TIMEOUT. True without examples."""
+    """Whether the Python program passes the prompt's examples (RUN_EXAMPLES: by value, to the end, under EvalPlus's
+    reliability_guard), run in a fresh isolated interpreter in an empty directory within EXAMPLES_TIMEOUT. True without
+    examples."""
     found = examples(prompt)
     if not found:
         return True
@@ -203,6 +210,18 @@ def verdicts(checks: list[tuple[str, str, list[str]]], *,
     return list(zip(diagnostics, passed, strict=True))
 
 
+class Generator(Protocol):
+    """A generation engine, requests (inference.decoder.Request) in, token ids out, with NativeDecoder.generate's
+    contract: generate yields (request index, generated ids) in completion order, a continuation ending at BOS
+    (excluded), after max_new_tokens or once its stopping_criteria holds (that token included), drawn as the Request's
+    temperature, top_p, seed and constraint define; timings: {request index: (start, first, end)} (time.perf_counter
+    seconds: the request's start, its first generated token, its end) of the last generate call's requests yielded so
+    far."""
+    timings: dict[int, tuple[float, float, float]]
+
+    def generate(self, requests: Iterable[Request]) -> Iterator[tuple[int, list[int]]]: ...
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Candidate:
     """A generated candidate: a task's candidates[0] is greedy, candidates[a] for a > 0 a sample with seed a at
@@ -216,14 +235,14 @@ class Candidate:
         return not self.diagnostics and self.examples
 
 
-def search(decoder: NativeDecoder, request: Callable[[int], Request],
+def search(generator: Generator, request: Callable[[int], Request],
            check: Callable[[int, list[int]], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
            count: int) -> tuple[list[list[Candidate]], dict]:
-    """The candidates of tasks 0..count-1 in attempt order, and metrics.latency of the decoder's requests over every
+    """The candidates of tasks 0..count-1 in attempt order, and metrics.latency of the generator's requests over every
     round (duration: the rounds' decoding): request(i) is task i's greedy request (a fresh constraint each call),
     check(i, ids) the (prompt, program, diagnostics) that verdicts checks for generated ids. Each round decodes every
     task without an accepted candidate yet (attempt a: request(i) at temperature 0 for a = 0, TEMPERATURE with seed a
-    after), at most ATTEMPTS rounds, each candidate's check built by a thread as it completes (while the decoder runs
+    after), at most ATTEMPTS rounds, each candidate's check built by a thread as it completes (while the generator runs
     the round's others), then checks the round's candidates at once (verdicts)."""
     tried = [[] for _ in range(count)]
     pending = list(range(count))
@@ -233,10 +252,10 @@ def search(decoder: NativeDecoder, request: Callable[[int], Request],
             sampling = {"temperature": 0.0 if attempt == 0 else TEMPERATURE, "seed": attempt}
             generated, checks = {}, {}
             begin = time.perf_counter()
-            for k, ids in decoder.generate(dataclasses.replace(request(i), **sampling) for i in pending):
+            for k, ids in generator.generate(dataclasses.replace(request(i), **sampling) for i in pending):
                 generated[pending[k]], checks[pending[k]] = ids, pool.submit(check, pending[k], ids)
             duration += time.perf_counter() - begin
-            stamps += [(*decoder.timings[k], len(generated[i])) for k, i in enumerate(pending)]
+            stamps += [(*generator.timings[k], len(generated[i])) for k, i in enumerate(pending)]
             results = verdicts([checks[i].result() for i in pending], language=language)
             for i, (diagnostics, passed) in zip(pending, results, strict=True):
                 tried[i].append(Candidate(ids=generated[i], diagnostics=diagnostics, examples=passed))

@@ -302,7 +302,10 @@ on the GB10 (sm_121) and an H100 (SM90); relative error:
 
 Every metric is a published one, computed as its source computes it. `eval/suite.py evaluate` scores a checkpoint:
 the base model's checkpoints take everything (`generate="benchmarks"`), the ablation runs the likelihood metrics and
-the parse measure (`generate="parse"`).
+the parse measure (`generate="parse"`). The GPU work runs back to back (the unconstrained decodes, the likelihood
+metrics, then the filtered searches) while each benchmark's scoring, CPU work in its official evaluator, runs on a
+scorer thread as soon as its completions exist; the generation code takes an engine (requests in, token ids out;
+`NativeDecoder` here), so another decoder can replace it.
 
 **Likelihood metrics** (`eval/bpb.py`, by `metrics.bpb`), in bits per byte (The Pile, arXiv 2101.00027: summed bits
 over summed UTF-8 bytes, tokenizer-independent):
@@ -342,9 +345,12 @@ infilling (arXiv 2207.14255; PSM and SPM), each scored by its official evaluator
   leaderboard 50: the same estimate, with more variance per problem. HumanEval infilling is greedy, not arXiv
   2207.14255's sampling. The prompts' examples overlap the scored base tests, so the filtered mode favours base over
   plus pass@1. EvalPlus's verdicts are timed, so heavy CPU load can fail a slow correct solution.
-- **Infilling** (human-eval-infilling): each middle is cut to the reference middle's line count, a single-line middle
-  to its first line (arXiv 2505.18789 Table 1, Fig. 4); random-span middles end at BOS, uncut. Both orders are scored
-  greedy; the filtered mode runs SPM.
+- **Infilling** (human-eval-infilling): the middle is scored as generated, up to BOS or the budget (the package's
+  protocol); `greedy_reference_lines` also scores the greedy single- and multi-line middles cut to the reference
+  middle's line count (arXiv 2505.18789 Table 1, Fig. 4), a separate metric since it reads the reference. Both orders
+  are scored greedy; the filtered mode runs SPM, its middles ending at BOS.
+- **MultiPL-E data:** the dataset revision MultiPL-E's own generator pins (`multipl_e/completions.py`
+  `DATASET_REVISION`).
 - **Contamination.** The training corpora were not decontaminated against the benchmarks: a benchmark problem in the
   training data inflates its score.
 
@@ -378,7 +384,8 @@ trust_remote_code=True)` run `modeling_nanochat.py`, copied into the directory. 
 the model's own pieces are PyTorch expressions at the training kernels' precision: the rotation by −θ with fp32
 tables (vLLM's and transformers' rotary embeddings rotate by +θ from bf16 tables), the value embeddings (they read
 `input_ids` in every layer) and the residual mix. `LinesStop` (a vLLM logits processor) ends a FIM middle at its
-reference's line count, as `LinesStoppingCriteria`. Checked on a d16 checkpoint: `tokenizer.json` encodes 108,026
+reference's line count, as `code_eval.fim_lines` cuts it. Checked on a d16 checkpoint: `tokenizer.json` encodes
+108,026
 benchmark and corpus val texts exactly as tiktoken; vLLM's logits against the training forward on 207K real positions
 (benchmarks, FIM, val documents to 32K): top-1 agreement 97.9–99.3%, mean KL 2.5–5.8·10⁻⁴ nats (the training forward
 against itself at another row offset: 99.4%, 1.8·10⁻⁴), next-token loss within 0.002 nats; greedy HumanEval+
@@ -400,12 +407,12 @@ token) are not re-emitted, only tokens that re-emit them; FIM sentinels never; a
 Python 3.12 raises `ValueError`. Ends are decided once chosen: a chosen BOS stands iff the grammar ends a module after
 the text and suffix and `ast.parse` accepts them (`ends`), else the slot takes the step's best other allowed token,
 which the head computes beside its choice (the same choice as masking BOS beforehand, greedy or Gumbel-max; a
-nucleus-sampled slot's BOS is decided before the step). A FIM middle cut to `lines` lines (single- and multi-line
-infilling, `fim_lines`) ends at its `lines`-th line end: a token holding it is allowed iff the grammar ends a module
-after the text up to that line end and the suffix, and stands iff `ast.parse` accepts them (else the slot's head runs
-again without it); a BOS-ended cut middle gets its final newline before the check, as `fim_lines` scores it; a line
-that no line end can end validly and only a line end continues (after a backslash) ends unchecked. Layers: CPython
-3.12.3's tokenizer
+nucleus-sampled slot's BOS is decided before the step). A generation cut to `lines` lines (`code_eval.fim_lines`; the
+evaluation's middles are uncut) ends at its `lines`-th line end: a token holding it is allowed iff the grammar ends a
+module after the text up to that line end and the suffix, and stands iff `ast.parse` accepts them (else the slot's
+head runs again without it); a BOS-ended cut middle gets its final newline before the check, as `fim_lines` scores
+it; a line that no line end can end validly and only a line end continues (after a backslash) ends unchecked. Layers:
+CPython 3.12.3's tokenizer
 (`Parser/tokenizer.c`) as a character-level state machine (`lexer.rs`); INDENT/DEDENT and the tab-consistency check;
 an LALR(1) grammar (`python.lark`) built by Lark at load and read by the crate (`parser.rs`), the soft keywords read
 both ways until one fails; per lexer state, the vocabulary's events over its byte trie (`vocab.rs`). Where it is looser
@@ -420,7 +427,8 @@ constrained; it is checked after generation by `g++ -std=c++17 -fsyntax-only`, t
 
 **Post-generation checks** (`eval/verify.py`): Python — the prompt plus completion parses, the EvalPlus entry function
 exists and returns a value, and a static type checker (basedpyright, batched) limited to definite failures; then the
-prompt's own examples (docstring `>>>` lines, MBPP+ `assert` lines) run by value in a subprocess with a timeout.
+prompt's own examples (docstring `>>>` lines, MBPP+ `assert` lines) run by value in a subprocess with a timeout, under
+EvalPlus's `reliability_guard` (as its own test runs).
 C++ — `g++ -fsyntax-only`.
 
 **Not used:** speculative decoding (lossless by construction; its gains target large-model serving); self-correction
