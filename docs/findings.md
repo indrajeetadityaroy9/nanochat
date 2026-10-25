@@ -83,6 +83,18 @@ d24 step at 8K (4,355 ms GPU, busy 99.4%): GEMM 60.5% (~680 TFLOP/s), FlashAtten
 window-512 layers at 283–336 TFLOP/s against 511–600 for full attention), memory-bound kernels 19.8%, optimizer 0.6%.
 Base-model pre-training ≈ 85 h at these rates.
 
+Kernel commits since, each against its parent in one session (d24, 8K / 32K tok/s): post-attention norm in the GEMM
+epilogues `373b549` 338,039 → 341,919 (+1.15%) / +0.5%; value-embedding gate `eaf14d0` 344,768 → 350,185 (+1.57%) /
+277,238 → 280,201 (+1.07%), step 4,290 → 4,223 ms; weight gradients into the fp32 `.grad` and one bf16 weight copy
+`f499be7` 344,925 → 347,634 (+0.79%) / 275,613 → 277,383 (+0.64%). Master as a whole is not re-measured yet (≈ 353K
+at 8K by composition [inference]).
+
+Sharing the GPU (d16 training, 150 steps): one run 808.7K tok/s; two time-sliced processes 743.9K together (−8.0%);
+two MPS clients 825.0K (+2.0%). Under MPS an illegal memory access in one client kills every client (a device-side
+assert does not); time-sliced processes stay isolated. So throughput is measured with the GPU alone, stable non-timing
+jobs (loss runs, evaluations) share it as MPS clients within a memory budget, and new kernels' first runs stay
+time-sliced.
+
 ## 5. Execution log
 
 ### 5.1 Ablation cost (AblationTime)
@@ -161,20 +173,41 @@ diagnostics committed (`7e77833`): per-corpus training loss, logsumexp max and m
 loss/grad-norm spike flags and a clipped flag, per-group update RMS and parameter norm every 10th step (from optimizer
 state); +0.4 GiB peak at d24; the interval held-out evaluation was removed (it added ~2.1 GiB and 0.24% of step time).
 
-### 5.11 Attention kernels (AttnKernel) — in progress
-Outputs so far: every FA4 forward/backward tile and scheduling variant tried is slower than the defaults; static
-persistent schedules lose to the hardware scheduler on varlen tiles; a persistent window-layer forward 0.422 → 0.373
-ms per call (~0.3%, d24 confirmation running). Per micro-batch at 8K: window layers 1.50 ms (fwd 285, bwd 389 TFLOP/s),
-full layers 3.13 ms; backward pre/post 0.30 ms per call (20% of a window layer); real segments: median 746 tokens.
+### 5.11 Attention kernels (AttnKernel, AttnKernel2) — in progress
+Outputs: every FA4 forward/backward tile and scheduling variant tried is slower than the defaults; static persistent
+schedules lose to the hardware scheduler on varlen tiles. Per micro-batch at 8K: window layers 1.50 ms (fwd 285, bwd
+389 TFLOP/s), full layers 3.13 ms; backward pre/post 0.30 ms per call (20% of a window layer); real segments: median
+746 tokens. Hand CUDA kernels against FA4 on real d24 segments, ms per call at 8K (32K): window forward 0.369 (0.364)
+vs FA4 0.413 and persistent FA4 0.359 (0.355); forward with QK-norm + RoPE fused 0.985 (1.029) vs prologue + forward
+0.546 (0.556), each K block being transformed ~5 times; window backward 1.193 (1.294) vs FA4 0.771 (0.828); a prologue
+backward reading FA4's fp32 dq accumulator 0.823 vs 0.405 for the dq post-process plus the plain prologue backward, so
+the combined prologue + attention op is −0.90% at d24 8K. PDL in the qk prologue +0.02%. Closed: hand attention
+kernels and QK-norm + RoPE inside attention (measured); FA3 not pursued (user). Open: the persistent FA4 window forward
+(~+0.3%) and bf16 dQ accumulation in the window layers only (−0.17 ms per call; at most 5 partial sums per dQ row
+there, while full layers keep fp32 accumulation as FA3 does: 64–256 sums at 8K–32K), one d24 A/B queued.
 Architecture levers ranked (GQA, more local layers, sinks, gated attention); the user approved one arm, GQA at a 2:1
-query:KV ratio (d16 4:2, d24 6:3), screened against the optimizer screen's baselines.
+query:KV ratio (d16 4:2, d24 6:3), screened against the optimizer screen's baselines (d16 run queued).
 
-### 5.12 Norm folded into GEMMs (NormFusion) — in progress
+### 5.12 Norm folded into GEMMs, fused QKV (NormFusion) — B1 committed, C3 open
 Method: norm(x)Wᵀ = diag(rstd)·xWᵀ for the gain-free RMS norm, rstd applied as a row scale in QuACK epilogues; fused
-ops have lower error vs fp64 than the bf16 path (y 2.6e-3 vs 3.2e-3). Outputs so far: d24 8K 342,010 tok/s (200
-steps) vs baseline ~338K; 32K 276,001 vs 274,554; loss check pending.
+ops have lower error vs fp64 than the bf16 path (y 2.6e-3 vs 3.2e-3). Outputs: `373b549`, d24 8K 341,919 vs 338,039
+tok/s (+1.15%), 32K +0.5%, 200-step loss last-20 Δ −0.0071, peak 65.6 vs 69.3 GB. The rstd-scaled dact epilogue costs
++200 µs per layer and micro-batch over plain QuACK gemm_dact (~72 ms/step; §5.19). Norm statistics from the producing
+epilogue (B2) dropped by analysis: the remaining Inductor norm/mix (231 ms/step: norm1 + mix backward 155 ms, forward
+58 ms) already runs at ~3.6 TB/s, and deferring norm1 into the down-projection epilogue moves a scaling pass elsewhere
+(net ≈ 0). Fused QKV (C3, one (M, 3C) projection, q/k/v as strided views): loss identical, gradients within 6e-3
+relative; +0.89% at d24 8K against the same attention op without C3, that op being the combined one (−0.90%, §5.11),
+so the port onto master's attention path is open.
 
-### 5.13 Value embeddings and cross entropy (VeCeKernel) — in progress
+### 5.13 Value embeddings and cross entropy (VeCeKernel) — gate committed
+Method (TileKernels' Engram gate and weight-gradient reduce, in CUDA): the backward visits rows in token order (one sort
+of the input ids per micro-batch, shared by every layer); a run of equal tokens reads its table row once and adds its
+summed gradient straight into the table's `.grad` (no zeroed 100 MB gradient, no autograd add); dz in bf16, the
+gate-weight gradient one cuBLAS GEMM. Outputs (`eaf14d0`): d24 8K 344,768 → 350,185 tok/s (+1.57%), 32K 277,238 →
+280,201 (+1.07%); ve_gate 161.9 → 92.6 ms/step; 200-step loss last-20 +0.0095 (seed spread 0.035). Open: QuACK's
+scaled-exp linear cross entropy, lm_head path 399 → 379 ms/step (+0.46%) and peak −5 GiB (Cut Cross-Entropy, arXiv
+2411.09009, is at best as fast as torch.compile; its gain is memory); a two-rows-per-warp gate forward 199 → 168 µs per
+call (identical output); one fused clip-grad norm and optimizer pass (~13 ms/step).
 
 ### 5.14 Fused FP8 (FP8Fused) — closed, negative
 Outputs: cuTile 1.7.0 runs on sm_90 (FP8 e4m3 GEMM correct, rel. err 6.8e-4 vs the bf16 product); a naive cuTile
@@ -189,11 +222,27 @@ which at K = 768 outweigh the faster GEMMs); +8–10 GB from TE saving both the 
 likely lost Inductor fusion around TE's graph breaks [inference]. Conclusion: FP8 does not pay at this model size.
 
 ### 5.15 Optimizer screen (OptScreen) — in progress
-d16 at 20 tokens/param, 1 seed each (user-approved): baselines seeds 0 and 1, NorMuon (arXiv 2510.05491), cautious
-weight decay (arXiv 2510.12402), Polar Express (arXiv 2505.16932), and all three stacked; default-off knobs.
+d16 at 20 tokens/param, 1 seed each (user-approved), each arm paired with base seed 0 (same data order). Outputs: base
+s0 matches the FimFix run within mean |Δloss| 0.0015 (median 832,695 tok/s); s1 − s0 last-200 train loss −0.0076, code
+bpb −0.0014 (8K) / −0.0016 (32K). NorMuon (arXiv 2510.05491): paired Δ train loss −0.0027 at 50% and −0.0030 at 75%,
+negative since step ~500 against paired noise ~0.001; stopped at 75% by an early-stop rule that used the seed spread
+instead of the paired noise, now rerun to the end. Cautious weight decay (arXiv 2510.12402): lower loss mid-run
+(−0.022 near 50%), worse at the end (last-200 +0.0108, code bpb +0.0023 / +0.0043; HumanEval+ 0.073/0.067 and MBPP+
+0.090/0.077 vs 0.067/0.055 and 0.074/0.061, within noise): closed (the paper finds the best λ unchanged under CWD).
+d16 tok/s: base 828.8K, NorMuon 827.5K (−0.15%), Polar Express (arXiv 2505.16932) 825.9K (−0.35%), CWD 818.5K
+(−1.25%). All three set modded-nanogpt records (NorMuon −15 steps, Polar Express −10 steps, CWD with an lr-tied
+schedule). Open: Polar Express and the NorMuon rerun (an MPS pair), then the stack of adopted arms.
 
-### 5.16 Decoder at d24 (DecoderD24) — in progress
-Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise.
+### 5.16 Decoder at d24 (DecoderD24) — measured, not yet committed
+Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise. Profile (1,024
+slots, positions 256–320): GEMV ~22 of a ~35 ms step (each 16-slot group re-read the weights from L2), attention ~7.8
+ms. Changes: a TMA-fed WGMMA GEMM over the slots keeping every epilogue (greedy and sampled choice, syntax masks, the
+BOS alternative), asynchronous key loads in attention, PDL, an e4m3 KV cache with one fp32 scale per position and
+head. d24 random init, 1,024 slots, prompt 256, 512 steps: main 34.8 ms/step, 29.4K tok/s (prefill 5.89 s) → bf16
+WGMMA 16.5 ms, 62.1K (1.68 s) → FP8 KV 11.83 ms, 86.6K (1.47 s); PDL neutral at 1,024 slots, ~2% at 1–16 slots. At
+FP8, attention is 6.4 ms (FP8 unpacking on CUDA cores, ~1.7 TB/s), GEMMs 2.4 ms. FP8 KV costs ≤ 1–2 points of pass@1
+with per-tensor scales (vLLM, 2026), small sliding-window layers being the known exception. Open: agreement per layer
+type, the benchmark, the d16 evaluation, the commit.
 
 ### 5.17 DeepSeek's open kernel libraries as guidance (user-provided repositories)
 Sources: DeepGEMM, FlashMLA (Hopper deep-dive at commit `ba89a34`; the 2026.09.30 release dropped Hopper), DeepEP,
@@ -215,6 +264,9 @@ embedding gate and its backward (VeCeKernel); the mHC norm kernels (partial sums
 kernel, a small reduce finishing the RMS statistics forward and backward) the design for removing the norm pass
 (NormFusion); programmatic dependent launch on every kernel. Implemented in CUDA C++ (user: all implementations in
 CUDA), the TileLang sources serving as reference.
+The user made DeepGEMM and TileKernels the reference for all kernel work (Oct 25; clones at DeepGEMM `5081f85`,
+TileKernels `c1cf914`): DeepGemmStudy owns the GEMM area (§5.19); each TileKernels design is ported only where the
+op's measured bandwidth leaves headroom or the design removes bytes.
 
 ### 5.18 Earlier executions (summary)
 - **Metrics** (MetricsValidation): edit similarity by difflib as cceval (rapidfuzz, thefuzz and torchmetrics disagree
@@ -226,3 +278,14 @@ CUDA), the TileLang sources serving as reference.
 - **Reference validation** (ReferenceModelEval): deepseek-coder-1.3b-base through DeepSeek's harness HumanEval 0.305
   (paper 0.348; transformers 5 drops BOS), MBPP 0.466 (paper 0.462); our EvalPlus scorer agrees on 163/164 problems.
 - **d16 reference** (RefModelTrain): code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050 at 20 tokens/param.
+
+### 5.19 GEMMs: weight gradients, DeepGEMM, hand kernels (GemmDeep, DeepGemmStudy) — C1+C2 committed
+Outputs: DeepGEMM on the d24 shapes (TFLOP/s): forward q/k/v/o QuACK 828, torch 705, DeepGEMM 710; up-projection
+without epilogue QuACK 652, torch 543, DeepGEMM 779; dW C×C torch.mm fp32 662, DeepGEMM with fp32 accumulation
+295–315, DeepGEMM through cuBLASLt 643: not adopted as a library. C1, dW added into the fp32 `.grad` by cuBLAS addmm
+with β = 1 (Megatron-LM's gradient-accumulation fusion), and C2, one bf16 copy of each q/k/v/o/up/down weight refreshed
+per weight change instead of 12 casts per layer and micro-batch (`f499be7`): d24 8K 344,925 → 347,634 tok/s (+0.79%),
+32K 275,613 → 277,383 (+0.64%), peak 61.6 → 62.0 GiB; numerically neutral, the 200-step loss check confirming after
+landing. Open: a hand sm_90a dact GEMM after DeepGEMM's SM90 design (first version bitwise-correct, 1.15 ms vs QuACK
+B1's 1.076 ms) with the MLP postact saved in the forward (+14.5 GB; −110 to −135 ms/step [estimate]), and the
+up-projection forward with relu² fused.
