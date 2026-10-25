@@ -30,9 +30,9 @@ def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float
 class Muon(torch.optim.Muon):
     """torch.optim.Muon (torch/optim/_muon.py _single_tensor_muon: momentum lerp, Nesterov, bf16 Newton-Schulz,
     decoupled weight decay, adjusted lr) with each step's Newton-Schulz batched over a group's same-shape matrices: one
-    bmm/baddbmm chain per shape instead of one mm/addmm chain per matrix (torch.optim.Muon has no foreach path), whose
-    launches made the update host-bound. The same state (momentum_buffer) and state_dict as torch.optim.Muon; the
-    batched GEMMs may round differently from the per-matrix ones."""
+    bmm/baddbmm chain per shape instead of one mm/addmm chain per matrix (torch.optim.Muon has no foreach path). The
+    same state (momentum_buffer) and state_dict as torch.optim.Muon; the batched GEMMs may round differently from the
+    per-matrix ones."""
 
     @torch.no_grad()
     def step(self, closure: Callable[[], torch.Tensor] | None = None) -> torch.Tensor | None:
@@ -72,11 +72,10 @@ class Muon(torch.optim.Muon):
 def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float, muon_tau_scale: float,
                adamw_lr_scale: float) -> tuple[torch.optim.Optimizer, ...]:
     """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, not 1-D parameters (karpathy/nanoGPT
-    model.py configure_optimizers). The ablations' departures from one (lr, weight decay) for every group, each the
-    identity at 1: Muon's weight decay / muon_tau_scale, its EMA timescale 1 / (lr wd) times muon_tau_scale (ACTIONS.md
-    §8 D7: the tau law was fit with AdamW, Power Lines arXiv 2505.13738 App. B); AdamW's lr x adamw_lr_scale and its
-    weight decay / adamw_lr_scale, its timescale held (D6: Moonlight's one lr and weight decay for every group,
-    arXiv 2502.16982 §2.2, matches Muon's update RMS, not the AdamW groups' lr)."""
+    model.py configure_optimizers). Two scales, each the identity at 1: muon_tau_scale divides Muon's weight decay, so
+    its EMA timescale 1 / (lr wd) grows by it (the tau law was fit with AdamW; Power Lines, arXiv 2505.13738 App. B);
+    adamw_lr_scale multiplies AdamW's lr and divides its weight decay, holding its timescale (Moonlight's one lr and
+    weight decay for every group, arXiv 2502.16982 §2.2, matches Muon's update RMS, not the AdamW groups' lr)."""
     tables = [model.wte.weight, model.lm_head.weight, *model.value_embeds.parameters()]
     table_ids = {id(p) for p in tables}
     vectors = [p for p in model.parameters() if p.ndim == 1]
