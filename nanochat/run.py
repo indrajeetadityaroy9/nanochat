@@ -49,9 +49,9 @@ class RunConfig:
     seed: int = 0                   # initialization and data order
     tokenizer: str = "corpus"       # "corpus": CORPUS/tokenizer; else an arm: CORPUS/tokenizer-ablation/<arm>
     lr_scale: float = 1.0           # times the law's peak lr (schedule.plan)
-    muon_tau_scale: float = 1.0     # D7: Muon matrices' tau x scale (their weight decay / scale; train/optim.py)
-    adamw_lr_scale: float = 1.0     # D6: AdamW groups' lr x scale, their weight decay / scale (decay timescale held)
-    softcap: float | None = None    # D5: output logits cap * tanh(logits / cap); None: no cap (model/gpt.py)
+    muon_tau_scale: float = 1.0     # Muon matrices' tau x scale (their weight decay / scale; train/optim.py)
+    adamw_lr_scale: float = 1.0     # AdamW groups' lr x scale, their weight decay / scale (decay timescale held)
+    softcap: float | None = None    # output logits cap * tanh(logits / cap); None: no cap (model/gpt.py)
     checkpoints: int = 1            # evenly spaced checkpoints, the final among them; > 1 adds repo_start
     generate: str = "parse"         # suite.evaluate's generate: "parse" (ablations) or "benchmarks" (base)
 
