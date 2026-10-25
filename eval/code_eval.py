@@ -47,8 +47,10 @@ plus pass@1. Every evaluator runs as a fresh process (exec), never a fork of thi
 """
 
 import codecs
+import csv
 import dataclasses
 import functools
+import io
 import itertools
 import json
 import multiprocessing
@@ -315,10 +317,14 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
         with ThreadPoolExecutor(os.cpu_count()) as pool:
             list(pool.map(lambda file: subprocess.run([sys.executable, main, "--file", file, "--output-dir", tmp],
                                                       cwd=tmp, check=True), files))
-        # pass_k.py's pass@1 line (one line: pass_k.py takes temperature 0.2 when a file has none, as ours):
-        # Dataset,Pass@k,Estimate,NumProblems,MinCompletions,MaxCompletions
-        pass_at_1 = float(subprocess.run([sys.executable, root / "pass_k.py", "--suppress-header", tmp],
-                                         cwd=tmp, capture_output=True, text=True, check=True).stdout.split(",")[2])
+        # pass_k.py's CSV (Dataset,Pass@k,Estimate,NumProblems,MinCompletions,MaxCompletions): at temperature 0.2,
+        # which it takes when a file has none, as ours, one row, k = 1; none when a directory mixes temperatures
+        out = subprocess.run([sys.executable, root / "pass_k.py", tmp], cwd=tmp, capture_output=True, text=True,
+                             check=True).stdout
+        rows = [r for r in csv.DictReader(io.StringIO(out)) if r["Pass@k"] == "1"]
+        if len(rows) != 1:
+            raise RuntimeError(f"pass_k.py printed {len(rows)} pass@1 rows: {out!r}")
+        pass_at_1 = float(rows[0]["Estimate"])
         status = [[r["status"] for r in json.loads(Path(tmp, f"{t.id}.results.json").read_text(encoding="utf-8"))
                    ["results"]] for t in items]
     return {"pass@1": pass_at_1, "ids": [t.id for t in items], "status": status}

@@ -85,7 +85,7 @@ seeds where both have an evaluation (a diverged run drops its seed from the arm'
   function header to the model, and "an evaluation that uses HumanEval alone does not expose this type of defect"
   (the post, which finds that code bits per byte "shows no association with MBPP at any level");
 - code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal bound
-  1.96 CODE_SIGMA √(1 / n + 1 / n), n the contrast's seeds per arm, else equal;
+  z CODE_SIGMA √(1 / n + 1 / n), z = scipy.stats.norm.ppf(1 - ALPHA / 2), n the contrast's seeds per arm, else equal;
 - the positive control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps sa-bpe's pattern and
   score. Else a challenger qualifies iff it is worse on neither and better on one; sa-bpe-fused, worse on parsing,
   never qualifies (the control detects, it is not a candidate). Pattern: the hybrid's iff it qualifies, else sa-bpe's.
@@ -99,6 +99,7 @@ sample.
 
 python -m ablations.tokenizer vocabularies|intrinsic|data|adopt
 """
+import argparse
 import datetime
 import functools
 import importlib.metadata
@@ -110,7 +111,6 @@ import platform
 import shutil
 import statistics
 import subprocess
-import sys
 import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
@@ -657,14 +657,8 @@ def adopt() -> None:
 
 
 if __name__ == "__main__":
-    match sys.argv[1:]:
-        case ["vocabularies"]:
-            vocabularies()
-        case ["intrinsic"]:
-            intrinsic()
-        case ["data"]:
-            data()
-        case ["adopt"]:
-            adopt()
-        case _:
-            raise SystemExit("usage: python -m ablations.tokenizer vocabularies|intrinsic|data|adopt")
+    steps = {"vocabularies": vocabularies, "intrinsic": intrinsic, "data": data, "adopt": adopt}
+    parser = argparse.ArgumentParser(prog="python -m ablations.tokenizer",
+                                     description="A step of the tokenizer ablation.")
+    parser.add_argument("step", choices=steps)
+    steps[parser.parse_args().step]()

@@ -6,7 +6,7 @@ push replaces the whole tree and squashes the history into one commit; pull down
 python -m corpus.publish push | pull
 """
 
-import sys
+import argparse
 
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, snapshot_download
 
@@ -120,10 +120,8 @@ def pull() -> None:
 
 
 if __name__ == "__main__":
-    match sys.argv[1:]:
-        case ["push"]:
-            push()
-        case ["pull"]:
-            pull()
-        case _:
-            raise SystemExit("usage: python -m corpus.publish push | pull")
+    steps = {"push": push, "pull": pull}
+    parser = argparse.ArgumentParser(prog="python -m corpus.publish",
+                                     description="The curated corpus to the Hub and back.")
+    parser.add_argument("step", choices=steps)
+    steps[parser.parse_args().step]()

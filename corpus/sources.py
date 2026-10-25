@@ -121,8 +121,9 @@ def curated_shards(source: str, split: str) -> list[Path]:
 
 
 def text_bytes(metadata: pq.FileMetaData, column: str) -> int:
-    """The bytes of a Parquet file's string column, from its footer: the column's uncompressed size less each value's
-    4-byte length prefix."""
+    """An estimate of the text bytes of a Parquet file's string column, from its footer: the column's uncompressed size
+    less each value's 4-byte length prefix (page headers, and dictionary and level data where present, still counted;
+    pyarrow exposes no exact unencoded size, and an exact count scans the column)."""
     index = metadata.schema.to_arrow_schema().get_field_index(column)
     return sum(metadata.row_group(g).column(index).total_uncompressed_size
                for g in range(metadata.num_row_groups)) - 4 * metadata.num_rows
