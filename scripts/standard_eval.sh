@@ -30,7 +30,7 @@ RUN=(docker run --rm --device nvidia.com/gpu=all --ipc=host --init --ulimit meml
     python -m evalplus.codegen --model /model --dataset \$dataset --backend vllm --greedy --trust_remote_code True \
       --root /out/evalplus
   done
-  mkdir /tmp/MultiPL-E && curl -sL https://github.com/nuprl/MultiPL-E/archive/$MULTIPL_E_REV.tar.gz |
+  mkdir -p /tmp/MultiPL-E /out/multipl-e && curl -sL https://github.com/nuprl/MultiPL-E/archive/$MULTIPL_E_REV.tar.gz |
     tar xz --strip-components=1 -C /tmp/MultiPL-E
   for dataset in humaneval mbpp; do
     (cd /tmp/MultiPL-E && python automodel_vllm.py --name /model --root-dataset \$dataset \
