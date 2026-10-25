@@ -1,16 +1,11 @@
 """
-Prepare every source (sources.py): fetch the Hub files it reads, standardize each into its category's schema
-(schema.py), one standardized file per fetched Hub file. Its standardized and checked files are rebuilt; a fetched file
-is kept, and fetching skips it. A fetch reads only the columns the standardizer reads, by ranged reads of the Hub's
-Parquet file, several files at once. A source the mixture reads whole is fetched whole; one it reads in part
-(mixture.IN_PART), only the Hub files that hold its share of the draw (extent).
-
-Stack-Edu's Hub files are metadata: its raw file adds each blob's text, fetched from Software Heritage's public S3
-bucket by blob id (obstore) and decoded with its src_encoding (The Stack v2 dataset card, download_contents); a blob
-the bucket does not hold or that does not decode has no text.
-
-Standardization keeps the rows with text, normalizes each text's line ends and byte-order marks (lines), gives each
-document its sha1 as id, and of Codeforces-CoTs keeps the finished traces only.
+Prepare every source (GB10): fetch the Hub files it reads, then standardize each into its category's schema, one
+standardized file per fetched file. Fetching reads only the standardizer's columns (ranged reads, several files at
+once) and keeps fetched files; standardized and checked files are rebuilt. A source read in part (mixture.IN_PART)
+fetches only the files that hold its share of the draw (extent). Stack-Edu's Hub files are metadata: each blob's text
+comes from Software Heritage's public S3 bucket by blob id, decoded with its src_encoding (The Stack v2 dataset card);
+a blob the bucket lacks or that does not decode has no text. Standardization keeps rows with text, normalizes line
+ends and byte-order marks (lines), sets id to the text's SHA-1, and of Codeforces-CoTs keeps finished traces only.
 
 python -m nanochat.corpus.prepare
 """
@@ -78,10 +73,9 @@ def file_bytes(source: str) -> dict[str, int]:
 
 
 def extent(source: str) -> list[str]:
-    """The Hub files prepare fetches: all of them in sorted order, or, of a source the mixture reads in part, the
-    fewest in the order of their paths' sha1 (a uniformly random order whose prefixes nest as the extent grows) whose
-    text bytes hold the group's fraction of the source. The fraction is the group's draw over its sources' tokens at
-    production's bytes per token, widened by mixture.SPREAD for a retrained tokenizer's compression and over the train
+    """The Hub files prepare fetches: all, sorted; of a source read in part, the fewest in the order of their paths'
+    SHA-1 (a uniform order whose prefixes nest as the extent grows) whose text bytes hold the group's fraction of the
+    source: its draw over its sources' tokens at mixture.BYTES_PER_TOKEN, widened by mixture.SPREAD and by the train
     split's share of groups (schema.SPLIT)."""
     if source not in mixture.PART:
         return hub_files(source)
@@ -97,10 +91,8 @@ def extent(source: str) -> list[str]:
 
 @functools.cache
 def swh_store() -> S3Store:
-    """This process's client of Software Heritage's bucket, created once so its connections are reused across row
-    groups; the file-descriptor limit is raised to its hard limit, as a row group's requests are in flight at once.
-    A request retries for up to 15 minutes, its waits doubling from a second to a minute, so a reset connection does
-    not fail the source."""
+    """This process's client of Software Heritage's bucket, created once so connections are reused; the file-descriptor
+    limit raised to its hard limit (a row group's requests are in flight at once); retries for up to 15 minutes."""
     resource.setrlimit(resource.RLIMIT_NOFILE, (resource.getrlimit(resource.RLIMIT_NOFILE)[1],) * 2)
     return S3Store("softwareheritage", region="us-east-1", skip_signature=True,
                    retry_config={"max_retries": 15, "retry_timeout": timedelta(minutes=15),
@@ -128,10 +120,8 @@ def blob_texts(task: tuple[Path, int]) -> pa.Table:
 
 
 def fetch(source: str, file: str) -> Path:
-    """The local path of one of the source's Hub files: a Parquet file of the columns its standardizer
-    reads, or for Stack-Edu its metadata and each blob's text, written whole, then renamed into place (a writer closed
-    by an error still writes a valid footer, so only the rename marks a file complete; an existing file is kept).
-    Stack-Edu's blobs are fetched by a pool that lives for that file only."""
+    """The local path of one of the source's Hub files: its standardizer's columns (Stack-Edu: metadata and each blob's
+    text), written to a .partial file and renamed, so only a complete file exists; an existing file is kept."""
     spec = SOURCES[source]
     path = raw_dir(source) / file
     if path.exists():
@@ -165,11 +155,9 @@ def sha1(texts: pa.Array | pa.ChunkedArray) -> pa.Array:
 
 
 def lines(texts: pa.ChunkedArray) -> pa.ChunkedArray:
-    """texts with CR LF and a lone CR as LF and every leading U+FEFF dropped: a source file as Python and C++ read it
-    (Python Language Reference §2.1.2 "Physical lines" and §2.1.4 "Encoding declarations"; C++23 [lex.phases] phases 1
-    and 2), and any other text, whose CR and leading byte-order marks come from its platform and encoding. A file can
-    begin with more than one mark, encoded again with one without its first dropped: both languages drop one mark and
-    reject a second."""
+    """texts with CR LF and a lone CR as LF and every leading U+FEFF dropped, as Python and C++ read a source file
+    (Python Language Reference §2.1.2, §2.1.4; C++23 [lex.phases] phases 1-2). A file may begin with several marks
+    (re-encoded once per mark); both languages drop one and reject a second."""
     texts = pc.replace_substring_regex(texts, "^\ufeff+", "")
     return pc.replace_substring(pc.replace_substring(texts, "\r\n", "\n"), "\r", "\n")
 

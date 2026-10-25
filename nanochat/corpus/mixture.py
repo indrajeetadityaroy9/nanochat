@@ -1,11 +1,8 @@
 """
-The training mixture (docs/corpus.md §5): the run's tokens, its two stages, and each stage's groups of sources.
-A group's share is its fraction of the stage's tokens, "supply" for a group read whole once (its share is its tokens
-over the stage's), or "rest" for the code group that takes what the stage's other code groups leave of CODE_SHARE.
-Within a group, sources weigh in by their amounts: tokens before packing, packed rows after (Stage.shares).
-
-The groups read in part (IN_PART) read the same fraction of each of their sources; prepare fetches only the Hub files
-that hold it (prepare.extent).
+The training mixture (docs/corpus.md §5): the run's tokens, its two stages, each stage's groups of sources. A group's
+share is a fixed fraction of the stage's tokens, "supply" (read whole once), or "rest" (the code group taking what the
+other code groups leave of CODE_SHARE). Within a group, sources weigh by their amounts: tokens before packing, packed
+rows after. Groups read in part (IN_PART) read the same fraction of each source (prepare.extent fetches only that).
 """
 
 from collections.abc import Mapping
@@ -64,10 +61,9 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The base model's pre-training run: d24 (docs/pretraining.md), 102.6B tokens, train/schedule.plan's 69,580 steps of 15
-# micro-batches; its last REPO_SHARE of steps (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv
-# 2409.12186 §3.2.1-3.2.2) at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run
-# draws rows by the stage's shares at its own size (loader.weights)
+# The base model's run (docs/pretraining.md): schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens), its
+# last REPO_SHARE of steps at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run
+# draws by the stage's shares at its own size (loader.weights)
 STEPS, STEP_TOKENS = 69_580, 15 * MICRO_BATCH_TOKENS
 REPO_STEPS = round(REPO_SHARE * STEPS)
 

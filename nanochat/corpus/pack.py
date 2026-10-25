@@ -1,18 +1,16 @@
 """
-Pack the compiled corpus (compile.py) into training rows of seq_len + 1 tokens, stage by stage (mixture.py): the data
-crate's pack, one curated shard per call (Best-Fit-Decreasing, every piece its own attention segment, long documents
-cut between whole statements; docs/corpus.md §7.1), with fill-in-the-middle examples in repository code's train
-splits (§6). Per corpus and stage, <split>-T<seq_len>.pieces, .rows and .fim beside its compiled split (loader.py).
+Pack the compiled corpus into training rows of seq_len + 1 tokens, stage by stage: the crate's pack, one curated shard
+per call (Best-Fit-Decreasing, each piece its own attention segment, long documents cut between statements;
+docs/corpus.md §7.1), with FIM examples in repository code's train splits (§6). Output per corpus and stage:
+<split>-T<seq_len>.pieces, .rows and .fim beside the compiled split (loader.py).
 
-A stage's train packs hold at least the rows the base model's pre-training run reads (mixture.py STEPS), each document
-at most once:
-- file stage: the repository sources' partitions before the repository stage's (compile.repository_parts) and the
-  supply sources, whole; a source read in part (mixture.IN_PART), its leading shards;
+A stage's train packs hold at least the rows the base model's run reads (mixture.STEPS), each document at most once:
+- file stage: the repository partitions before the 32K stage's, and the supply sources, whole; a source read in part
+  (mixture.IN_PART), its leading shards;
 - repository stage: the repositories corpora and Codeforces-CoTs, whole; ClimbMix and UltraData-Math L3, the shards
   after the file stage's.
-A source read in part takes its next shard while the run's stage weights (loader.weights over the stage's rows) draw
-more of it than it holds. Training fits the same weights to any run's size (train/stages.py). Val splits are packed
-whole at the seq_len of each stage that reads them.
+A source read in part takes shards until the stage's weights (loader.weights) draw no more than it holds. Val splits
+are packed whole at each reading stage's seq_len.
 
 python -m nanochat.corpus.pack
 """
@@ -41,12 +39,11 @@ from nanochat.corpus.sources import curated_shards
 from nanochat.corpus.tokenizer import FIM_TOKENS, TOKENIZER, get_tokenizer
 from nanochat.native import data_crate
 
-# Fill-in-the-middle, without line widening (docs/corpus.md §6): FIM rate 0.5 (DeepSeek-Coder, arXiv 2401.14196
-# §3.1.2: "an FIM rate of 0.5"; arXiv 2207.14255 §3: p = 0.5); of FIM, 90% AST middles and 10% random character spans,
-# 50% PSM and 50% SPM, joint training matching or beating either mode alone (arXiv 2207.14255 §3.1, §4.3 Table 1,
-# §8.1; SPM as App. D's variant 2), the split AST-FIM trains with (arXiv 2506.00204v1 §5.1); AST middles "an equal mix"
-# of Single-Node and Aligned-Span masking (§3.3). The crate draws each piece's FIM from ChaCha8 keyed by its document
-# and piece, so the packs do not depend on the order of work
+# FIM (docs/corpus.md §6), no line widening: rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv 2207.14255 §3);
+# 90% AST middles, 10% random character spans; PSM/SPM 50/50, as joint training matches or beats either mode alone
+# (arXiv 2207.14255 §3.1, §4.3 Table 1, §8.1; SPM as App. D's variant 2) and AST-FIM trains (arXiv 2506.00204v1 §5.1);
+# AST middles an equal mix of Single-Node and Aligned-Span masking (§3.3). The crate draws each piece's FIM from ChaCha8
+# keyed by document and piece, so packs do not depend on the order of work
 FIM_RATE, RANDOM_SHARE, SINGLE_NODE_SHARE, SPM_SHARE = 0.5, 0.1, 0.5, 0.5
 # Pack calls in flight: one per core (the crate releases the GIL)
 WINDOW = os.cpu_count()
@@ -154,8 +151,8 @@ def pack_stage(stage: mixture.Stage, vocabulary: Path, whole: dict[str, list[int
 
 
 def main() -> None:
-    """The corpus's tokenizer's packs for the base model's pre-training run; the val splits in threads beside the
-    stages, so a val shard's longest document does not hold up the cores."""
+    """The corpus tokenizer's packs for the base model's run; val splits in threads beside the stages, so a val
+    shard's longest document does not hold up the cores."""
     data_crate()  # built once, before the threads call it
     stages = (mixture.FILE_STAGE, mixture.REPO_STAGE)
     with ThreadPoolExecutor() as threads:

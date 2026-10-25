@@ -1,9 +1,7 @@
 """
-The corpus's sources (docs/corpus.md §1) and its files under paths.CORPUS.
-
-A source is a Hub dataset (prepare.py), the Hub files it reads per language (a Linguist name for
-code; for Codeforces-CoTs, the language of each subset's solutions), its category (schema.py) and the column of a
-fetched file that holds a document's text. SOURCES is in deduplication's keep-first order (curate.py).
+The corpus's sources (docs/corpus.md §1) and its file paths under paths.CORPUS. A source: a Hub dataset, its files per
+language (a Linguist name for code), its category (schema.py) and the column holding a document's text. SOURCES is in
+deduplication's keep-first order (curate.py).
 - Stack-Edu (arXiv 2502.02737): The Stack v2's educational files, by Software Heritage blob id (prepare.fetch).
 - UltraData-Stack-v3-L2: The Stack v3's files that UltraData's L2 classifiers select.
 - UltraData-Code (arXiv 2610.23960): L2, selected source files; L3, exercises written from L2's algorithmic files.
@@ -127,13 +125,10 @@ def text_bytes(metadata: pq.FileMetaData, column: str) -> int:
 
 
 def texts(source: str, table: pa.Table) -> list[str]:
-    """The text of each row of a curated table: its content; for a repository file, the content after a line comment
-    with the file's path (DeepSeek-Coder arXiv 2401.14196 §2.2: "a comment indicating the file's path is added at the
-    beginning of each file"), with a line end appended when it does not end with one, as a non-empty source file is
-    read (C++23 [lex.phases] phase 2; Python Language Reference §2.1.2: the end of input terminates the last line). A
-    path's line breaks are written as the escapes \\r and \\n, so the comment stays one line; a C++ file whose last
-    line ends in a backslash gets an empty line after it, as phase 2 splices a backslash and the line end after it,
-    which would join the next file's comment to that line."""
+    """Each curated row's text: its content; a repository file's is preceded by a line comment with its path
+    (DeepSeek-Coder, arXiv 2401.14196 §2.2) and ends with a line end (C++23 [lex.phases] phase 2; Python Language
+    Reference §2.1.2). A path's line breaks are escaped (\\r, \\n) so the comment stays one line; a C++ file ending in
+    a backslash gets an empty line, so phase 2 does not splice the next file's comment onto it."""
     contents = table["content"].to_pylist()
     spec = SOURCES[source]
     if spec.category != REPOSITORY_FILE:

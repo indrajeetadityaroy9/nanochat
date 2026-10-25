@@ -1,16 +1,9 @@
 """
-Publish the curated corpus (curate.py) to the Hub, and pull it where the tokenizer is trained. The curated shards are
-text: normalized, checked, deduplicated, split and sharded, the repository files cut into import-connected samples;
-nothing in them depends on a tokenizer. Tokenization, compile and pack run after the pull: packing places documents in
-rows of a fixed number of tokens, and FIM encodes prefix, suffix and middle separately around sentinel ids
-(nanochat/corpus/crate/pack.rs), so both need the tokenizer.
+The curated corpus to the Hub and back. The shards are text, independent of any tokenizer (compile and pack run after
+the pull). The dataset (config.DATASET, private) holds CORPUS/curated's tree, <source>/<split>/<k>.parquet, beside its
+card; push replaces the whole tree and squashes the history into one commit; pull downloads the shards.
 
-The dataset (config.DATASET, private) holds CORPUS/curated's tree at its root, <source>/<split>/<k>.parquet, beside its
-card. push replaces the dataset's whole tree and squashes its history into one commit; pull downloads its shards into
-CORPUS/curated.
-
-python -m nanochat.corpus.publish push
-python -m nanochat.corpus.publish pull
+python -m nanochat.corpus.publish push | pull
 """
 
 import sys

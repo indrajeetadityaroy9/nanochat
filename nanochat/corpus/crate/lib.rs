@@ -1,6 +1,6 @@
-//! The data crate, Python module nanochat_crate (built by nanochat/native.py data_crate()): SA-BPE (arXiv 2604.14053)
-//! tokenizer training (train.rs; ablations/tokenizer.py), repository samples (repository.rs; nanochat/corpus/curate.py
-//! and compile.py) and the packer of training rows (pack.rs; nanochat/corpus/pack.py).
+//! The corpus crate, Python module nanochat_crate (built by nanochat/native.py): SA-BPE (arXiv 2604.14053) tokenizer
+//! training (train.rs; ablations/tokenizer.py), repository samples (repository.rs; curate.py, compile.py) and the packer
+//! of training rows (pack.rs; pack.py).
 
 mod pack;
 mod repository;

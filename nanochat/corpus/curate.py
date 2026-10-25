@@ -1,21 +1,18 @@
 """
-Curate every source (sources.py) from its standardized files (prepare.py), in the steps of docs/corpus.md §4:
+Curate every source from its standardized files (GB10), the steps of docs/corpus.md §4:
 
-1. check (§4.2): every Python file, a repository's, a synthetic one or a function (a category whose content is code),
-   must parse with ast.parse (Python 3.12). A file that does not is repaired by the smallest set of steps that makes it
-   parse (repaired): Stack v3's placeholders <EMAIL>, <KEY>, <NAME> and <PASSWORD> become the bare word;
-   leading-indentation tabs are expanded to 8 columns, Python 2's rule (Python 2 Language Reference §2.1.8); every
-   2to3 fixer of fissix (the maintained fork of lib2to3, which Python 3.12 lacks) is applied. The repaired text is kept
-   and its id recomputed; a file that never parses is dropped (checked_path).
-2. dedup (§4.3): one row per id over every source and both splits, the first in SOURCES's order, then file and row;
-   an empty text is dropped.
-3. split (§4.4): a document is val when md5_number(group) % SPLIT = 0, its category's group (schema.py).
-4. shards (curated_dir): a repository source's files as the partitions of that residue (partition 0 val, 1..SPLIT-1
-   train), each sorted by (repository, path, id) and cut into import-connected samples by the data crate's
-   repository_samples (SAMPLE_FILE); any other source's train rows in id order, a uniform order as id is a hash, over
-   SPLIT shards (1% of the source each, as a repository partition), and its val rows in one shard.
+1. check (§4.2): every Python file (a category whose content is code) must parse with ast.parse (Python 3.12); one that
+   does not is repaired by the smallest set of steps that makes it parse (repaired): Stack v3's placeholders <EMAIL>,
+   <KEY>, <NAME>, <PASSWORD> become the bare word; leading tabs expand to 8 columns (Python 2 Language Reference
+   §2.1.8); fissix's 2to3 fixers. The repaired text is kept with its id recomputed; a file that never parses is dropped.
+2. dedup (§4.3): one row per id over every source and split, the first in SOURCES order, then file and row; empty
+   texts dropped.
+3. split (§4.4): val iff md5_number(group) % SPLIT = 0 (schema.py).
+4. shards: a repository source's files by that residue's partitions (0 val, 1..SPLIT-1 train), each sorted by
+   (repository, path, id) and cut into import-connected samples (the crate's repository_samples; SAMPLE_FILE); any
+   other source's train rows in id order (a uniform order, id being a hash) over SPLIT shards, its val rows in one.
 
-Every output is a function of the standardized files: the shards' rows, their order and their row groups.
+Every output, rows, order and row groups, is a function of the standardized files.
 
 python -m nanochat.corpus.curate
 """
@@ -136,9 +133,8 @@ def check_row_group(task: tuple[str, int, int]) -> pa.Table:
 
 
 def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
-    """checked_path of each of a Python source's standardized files, written whole, then renamed into place (an
-    existing file is complete and kept). The row groups of the files left are one stream, so a file of few row groups
-    does not leave the pool idle while its slowest group finishes."""
+    """checked_path of each of a Python source's standardized files (written to .partial, then renamed; an existing
+    file is kept), the remaining files' row groups as one stream so no file's slowest group idles the pool."""
     groups = {k: pq.ParquetFile(standardized_path(source, k)).num_row_groups for k in range(files)
               if not checked_path(source, k).exists()}
     tasks = [(source, k, g) for k, n in groups.items() for g in range(n)]
@@ -196,10 +192,9 @@ def shuffle(source: str, paths: list[Path], drops: pa.Table) -> None:
 
 
 def curate_partition(task: tuple[str, int]) -> None:
-    """One partition as a curated shard (partition 0 is val): its files sorted by (repository, path, id) into one
-    chunk, the repository its lowercased name, so a repository is a zero-copy slice (large_string: 64-bit offsets hold
-    a partition beyond 2 GiB), cut into samples (repository_samples) and written in sample order, a row group per
-    SAMPLE_ROWS files or more of whole samples."""
+    """One partition as a curated shard (partition 0 is val): its files sorted by (lowercased repository, path, id),
+    cut into samples (repository_samples) and written in sample order, a row group per SAMPLE_ROWS files or more of
+    whole samples (large_string: 64-bit offsets hold a partition beyond 2 GiB)."""
     source, part = task
     table = pq.read_table(shuffle_dir(source) / f"part={part}",
                           schema=pa.schema([("repo_name", pa.string()), ("relative_path", pa.string()),

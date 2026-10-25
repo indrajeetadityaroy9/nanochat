@@ -1,23 +1,18 @@
 """
-Compile the curated corpus (curate.py) into tokens of a vocabulary, named by its directory (tokenizer.get_tokenizer:
-the corpus's tokenizer or a tokenizer ablation arm): per corpus and split, in <tokenizer.compiled>/<corpus>-<data key>/,
-the tokens of every document in curated order, without padding or BOS (<split>.bin, loader.TOKEN_DTYPE), the offset of
-each document's first token followed by the total (<split>.idx, int64), and the number of documents of each curated
-shard or partition (<split>.json; pack.py packs each one's documents together).
+Compile the curated corpus into tokens of a vocabulary (tokenizer.get_tokenizer: the corpus's or an arm's): per corpus
+and split, in <tokenizer.compiled>/<corpus>-<data key>/, every document's tokens in curated order, no padding or BOS
+(<split>.bin), each document's first offset then the total (<split>.idx, int64), and each curated shard's or
+partition's document count (<split>.json; pack.py packs each one's documents together).
 
-A corpus is a source, its documents its curated rows: a repository source's are its import-connected samples, each
-file after a comment with its path (sources.texts). The 32K stage reads two more, mixture.REPOSITORIES: per language,
-one document per repository across that language's repository sources (docs/corpus.md §7.2), from the fewest
-trailing partitions whose repository documents hold the stage's draw of repository code (compile_stage), and from
-partition 0 for val. Of a path that several sources hold in one repository, the first source's file is kept
-(mixture.REPOSITORY_SOURCES order, deduplication's), and of a path one source holds twice, its first row; a
-repository's files, in path order, are cut into import-connected components (the data crate's repository_samples),
-each in dependency order, and the components follow one another in the order of their first file.
+A source's documents are its curated rows (a repository source's: its import-connected samples, each file after a path
+comment, sources.texts). The 32K stage adds mixture.REPOSITORIES: per language, one document per repository across that
+language's repository sources (docs/corpus.md §7.2), from the fewest trailing partitions holding the stage's draw
+(compile_stage), and partition 0 for val. A path several sources hold in one repository keeps the first source's file
+(mixture.REPOSITORY_SOURCES order), a path one source holds twice its first row; a repository's files are cut into
+import-connected components (the crate's repository_samples), each in dependency order, in order of their first file.
 
-Row groups (a source's) and partitions (repositories', per language) are the unit of parallel work in a process pool;
-a partition's samples are cut and its documents encoded on every core (the crate's rayon, tiktoken in threads), and
-as many partitions are in flight as MEMORY holds. The parent writes the tokens in task order, so the output does not
-depend on the number of workers.
+Row groups and partitions are the units of parallel work; as many partitions are in flight as MEMORY holds. The parent
+writes tokens in task order, so the output does not depend on the number of workers.
 
 python -m nanochat.corpus.compile
 """
@@ -49,10 +44,8 @@ PEAK = 10
 
 
 def encode(documents: list[str], vocabulary: Path, threads: ThreadPoolExecutor | None = None) -> Documents:
-    """(tokens, document lengths) of documents under the vocabulary in directory `vocabulary`, on `threads` if given
-    (tiktoken releases the GIL as it encodes), longest first so the longest does not start last (LPT scheduling). A
-    special token's text encodes as ordinary text (compiled data hold no special id); the tokenizer comes from
-    get_tokenizer's per-process cache."""
+    """(tokens, document lengths) of documents under the vocabulary in `vocabulary`, on `threads` if given (tiktoken
+    releases the GIL), longest first (LPT scheduling). A special token's text encodes as ordinary text."""
     enc = get_tokenizer(vocabulary).enc
     order = sorted(range(len(documents)), key=lambda i: -len(documents[i]))
     ids = [np.zeros(0, TOKEN_DTYPE)] * len(documents)

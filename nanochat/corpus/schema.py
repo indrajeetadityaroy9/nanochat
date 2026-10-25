@@ -1,29 +1,24 @@
 """
-The document categories of the corpus's sources (docs/corpus.md §2). Every standardized file holds one
-category's rows in its schema; id is the sha1 of the document's text, computed locally.
+Document categories (docs/corpus.md §2). A standardized file holds one category's rows; id is the SHA-1 of the text.
 
-REPOSITORY_FILE  a source file of a code repository, with its path in the repository and its language
-EXERCISE         a synthetic programming exercise as its publisher serializes it: the task (a code comment, unfenced
-                 text or Markdown), then the solution
-SYNTHETIC_FILE   a source file an LLM wrote from a repository file (rewritten in its language, or transpiled)
-FUNCTION         a function of a repository file with its docstring (CodeSearchNet), with its repository
-CONVERSATION     a Codeforces-CoTs record: the R1 prompt, then its generation (reasoning and solution), with the problem
-NOTEBOOK         a Kaggle notebook in Markdown: its title, its datasets' description, its code as a script
+REPOSITORY_FILE  a repository's source file, with its path and language
+EXERCISE         a synthetic exercise as published: the task, then the solution
+SYNTHETIC_FILE   a source file an LLM wrote from a repository file (rewritten, or transpiled)
+FUNCTION         a function with its docstring (CodeSearchNet), with its repository
+CONVERSATION     a Codeforces-CoTs record: the prompt, then the generation, with the problem
+NOTEBOOK         a Kaggle notebook in Markdown
 TEXT             a web document
 
-A category fixes the split's group: a document is val when md5_number(group) % SPLIT = 0 (curate.py), a repository
-by its lowercased name, GitHub's names being case-insensitive. Its `code` flag marks a content that is one whole
-program text in its source's language, which must parse when that language is Python (curate.check).
-
-SAMPLE_FILE is a repository source's curated layout: its files cut into import-connected samples, a sample's files
-consecutive rows in its dependency order, numbered by `sample` within their shard.
+A category's group decides the split: val iff md5_number(group) % SPLIT = 0 (curate.py); repository names lowercased,
+as GitHub's are case-insensitive. `code`: the content is one whole program, which must parse when it is Python.
+SAMPLE_FILE: a repository source's curated rows, cut into import-connected samples, numbered by `sample` per shard.
 """
 
 from dataclasses import dataclass
 
 import pyarrow as pa
 
-SPLIT = 100  # 1% of groups held out, production's split (docs/corpus.md §4.4)
+SPLIT = 100  # 1% of groups held out (docs/corpus.md §4.4)
 
 
 def strings(*names: str) -> list[pa.Field]:
@@ -32,7 +27,7 @@ def strings(*names: str) -> list[pa.Field]:
 
 @dataclass(frozen=True)
 class Category:
-    name: str
+    name: str  # keeps categories with equal schemas, groups and flags distinct
     schema: pa.Schema
     group: str  # the split's group, a DuckDB expression over the schema's columns
     code: bool
