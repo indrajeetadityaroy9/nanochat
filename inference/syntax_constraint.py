@@ -33,9 +33,8 @@ Masks (vocab.rs): for each lexer state, every vocabulary token's events (tokens 
 whitespace) and end state are computed once over a byte trie of the vocabulary, the subtrie after each first byte
 shared by the lexer states that byte takes to one state; a step then runs the parser once per distinct event sequence
 and maps the verdicts back to tokens. masks() computes a batch of constraints' masks in parallel, without the GIL,
-into the decoder's mask rows. A healed prompt's dropped bytes (decoder.heal_tokens) are owed: until the generated
-tokens re-emit them, a mask also holds only the tokens that are a non-empty proper prefix of the bytes still owed or
-start with them (decoder.Reemit's), BOS excluded.
+into the decoder's mask rows. A healed prompt's constraint holds its decoder.Reemit (decoder.heal_tokens): until the
+generated tokens re-emit the dropped bytes, masks() intersects each mask with the Reemit's (BOS excluded).
 """
 
 import ast
@@ -44,12 +43,16 @@ import keyword
 import sys
 import token as pytoken
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from lark import Lark
 
 from corpus.tokenizer import Tokenizer
 from native import crate_module
+
+if TYPE_CHECKING:
+    from inference.decoder import Reemit
 
 CRATE = Path(__file__).resolve().parent / "syntax"
 OPERATORS = (*pytoken.EXACT_TOKEN_TYPES, "<>")  # tokenizer.c _PyToken_TwoChars: "<>" is NOTEQUAL (PEP 401)
@@ -91,7 +94,6 @@ def python_syntax(tokenizer: Tokenizer):
                 actions[s, tid[t]] = arg if action.name == "Shift" else ~rule_index[arg]
             else:
                 goto[s, nid[t]] = arg
-    bos = tokenizer.bos_token_id
     return crate_module(CRATE).Syntax(
         keywords=[(w, [tid[terminal[w]]]) for w in keyword.kwlist],
         soft=[(w, [tid["NAME"], tid[t]]) for w, t in SOFT_KEYWORDS.items()],
@@ -103,7 +105,7 @@ def python_syntax(tokenizer: Tokenizer):
         start=conf.start_state, end=conf.end_state,
         xid_start=identifier_ranges(str.isidentifier),
         xid_continue=identifier_ranges(lambda c: ("a" + c).isidentifier()),
-        token_bytes=tokenizer.token_bytes[:bos], vocab_size=tokenizer.vocab_size, bos_token_id=bos)
+        token_bytes=tokenizer.token_bytes[:tokenizer.bos_token_id])
 
 
 def syntax_error(source: str) -> list[str]:
@@ -120,54 +122,39 @@ def syntax_error(source: str) -> list[str]:
 
 class SyntaxConstraint:
     """decoder.Constraint for the tokens generated after prefix (the program's UTF-8 bytes before them), its masks by
-    masks(). suffix: the bytes after the generation (a FIM middle's suffix; b"": none); owed: the bytes the generation
-    re-emits first (decoder.heal_tokens's dropped bytes; b"": none); lines: the generation is cut after its lines-th
-    line end (eval/code_eval.py fim_lines; None: uncut), so the token holding that line end ends it (the text up to
-    the line end and the suffix must parse: line_end), and a generation ended earlier by BOS gets a final "\\n" if it
-    has none. A BOS candidate stands iff ends() holds for it. Raises ValueError when prefix is not a prefix of any
-    Python 3.12 module."""
+    masks(). suffix: the bytes after the generation (a FIM middle's suffix; b"": none); healing: a healed prompt's
+    decoder.Reemit (decoder.heal_tokens; None: an unhealed prompt), whose mask each mask is intersected with. A BOS
+    candidate stands iff ends() holds for it. Raises ValueError when prefix is not a prefix of any Python 3.12
+    module."""
 
-    def __init__(self, tokenizer: Tokenizer, prefix: bytes, *, suffix: bytes, owed: bytes = b"",
-                 lines: int | None = None):
-        self.suffix, self.bos = suffix, tokenizer.bos_token_id
-        self.newlines = newline_tokens(tokenizer) if lines is not None else frozenset()
-        self.native = python_syntax(tokenizer).constraint(prefix, suffix=suffix, owed=owed, lines=lines)
+    def __init__(self, tokenizer: Tokenizer, prefix: bytes, *, suffix: bytes, healing: "Reemit | None" = None):
+        self.suffix, self.bos, self.healing = suffix, tokenizer.bos_token_id, healing
+        self.native = python_syntax(tokenizer).constraint(prefix, suffix=suffix)
 
     def push(self, token: int) -> None:
         self.native.push(token)
-
-    def line_end(self, token: int) -> bool | None:
-        """None if token holds no cut's line end, else whether ast.parse accepts the text up to it and the suffix
-        (the grammar's check is the mask's)."""
-        text = self.native.line_end(token) if token in self.newlines else None
-        return None if text is None else parses(text + self.suffix)
-
-
-@functools.cache
-def newline_tokens(tokenizer: Tokenizer) -> frozenset[int]:
-    """The mergeable tokens holding a "\\n" (the only ones that can end a cut generation's line)."""
-    return frozenset(t for t in range(tokenizer.bos_token_id) if b"\n" in tokenizer.token_bytes[t])
-
-
-def parses(source: bytes) -> bool:
-    """Whether source is valid UTF-8 that ast.parse accepts (syntax_error)."""
-    try:
-        return not syntax_error(source.decode())
-    except UnicodeDecodeError:
-        return False
+        if self.healing is not None:
+            self.healing.push(token)
 
 
 def ends(constraints: list[SyntaxConstraint]) -> list[bool]:
-    """Whether each constraint's end text (the text, and a cut generation's final "\\n") and suffix are a module: the
-    grammar ends one (the crate, in parallel without the GIL), then ast.parse accepts them."""
+    """Whether each BOS candidate's text and suffix are a module (masks() proposes no BOS while a healing Reemit owes
+    bytes): the grammar ends one (the crate, in parallel without the GIL), then ast.parse accepts them (the grammar's
+    end implies valid UTF-8: the lexer rejects any other)."""
     grammar = crate_module(CRATE).grammar_ends([c.native for c in constraints])
-    return [ok and parses(c.native.end_text + c.suffix) for c, ok in zip(constraints, grammar, strict=True)]
+    return [ok and not syntax_error((c.native.text + c.suffix).decode())
+            for c, ok in zip(constraints, grammar, strict=True)]
 
 
-def masks(constraints: list[SyntaxConstraint], out: np.ndarray, rows: list[int]) -> list[tuple[bool, bool]]:
+def masks(constraints: list[SyntaxConstraint], out: np.ndarray, rows: list[int]) -> list[bool]:
     """Writes the next masks of constraints into rows of out (C-contiguous uint32 words, a row per mask; bit t % 32 of
     word t // 32 set iff token t is allowed), computed by the crate in parallel without the GIL, BOS's bit set for a
-    candidate end (ends decides it), a cut generation's line end's iff the grammar ends the program there (line_end
-    decides it); whether each row allows some token, and whether it is a dead end (its line ends stand unchecked)."""
-    assert out.dtype == np.uint32 and out.flags.c_contiguous and out.ndim == 2 and max(rows, default=0) < len(out)
-    return crate_module(CRATE).masks([c.native for c in constraints], out.ctypes.data, rows, out.shape[1])
+    candidate end (ends decides it), then each intersected with its healing Reemit's mask while that owes bytes;
+    whether each row allows some token. The assertion is the crate's row writes' precondition: every row within out."""
+    assert out.dtype == np.uint32 and out.flags.c_contiguous and out.ndim == 2 and max(rows) < len(out)
+    allowed = crate_module(CRATE).masks([c.native for c in constraints], out.ctypes.data, rows, out.shape[1])
+    for i, (c, row) in enumerate(zip(constraints, rows, strict=True)):
+        if c.healing is not None and (healing := c.healing.mask()) is not None:
+            out[row] &= healing
+            allowed[i] = bool(out[row].any())
+    return allowed

@@ -61,15 +61,13 @@ fn by_index(keys: FxHashMap<Key, u32>) -> Vec<Key> {
 pub struct Syntax {
     lexicon: Lexicon,
     tables: Tables,
-    pub vocab_size: usize,
+    /// BOS's id: the number of mergeable tokens (corpus/tokenizer.py)
     pub bos: u32,
     pub token_bytes: Vec<Vec<u8>>,
     trie: Vec<Node>,
     groupings: Memo<Lex, Grouping>,
     /// keyed by the trie node of the first byte
     subtrees: Memo<(u32, Lex), Subtree>,
-    /// the tokens holding a "\n": (id, the offsets of their "\n" bytes)
-    newline_tokens: Vec<(u32, Vec<usize>)>,
 }
 
 /// A constraint's state: its text's lexer and parser states.
@@ -80,9 +78,8 @@ pub struct State {
 }
 
 impl Syntax {
-    /// token_bytes: the mergeable tokens' bytes (ids below bos, each distinct); vocab_size counts the special tokens
-    /// too.
-    pub fn new(lexicon: Lexicon, tables: Tables, token_bytes: Vec<Vec<u8>>, vocab_size: usize, bos: u32) -> Syntax {
+    /// token_bytes: the mergeable tokens' bytes (the ids below BOS's, each distinct).
+    pub fn new(lexicon: Lexicon, tables: Tables, token_bytes: Vec<Vec<u8>>) -> Syntax {
         let mut trie = vec![Node { children: Vec::new(), id: None }];
         for (id, bytes) in token_bytes.iter().enumerate() {
             let mut node = 0usize;
@@ -99,45 +96,10 @@ impl Syntax {
             }
             trie[node].id = Some(id as u32);
         }
-        let newline_tokens = token_bytes.iter().enumerate()
-            .map(|(id, b)| (id as u32, b.iter().enumerate().filter(|&(_, &c)| c == b'\n').map(|(i, _)| i).collect()))
-            .filter(|(_, at): &(u32, Vec<usize>)| !at.is_empty()).collect();
         Syntax {
-            lexicon, tables, vocab_size, bos, token_bytes, trie,
-            groupings: RwLock::default(), subtrees: RwLock::default(), newline_tokens,
+            lexicon, tables, bos: token_bytes.len() as u32, token_bytes, trie,
+            groupings: RwLock::default(), subtrees: RwLock::default(),
         }
-    }
-
-    /// The bytes of token up to its lines-th "\n" (lines > 0), None if it holds fewer (or lines is 0).
-    pub fn cut(&self, token: u32, lines: u32) -> Option<&[u8]> {
-        let bytes = self.token_bytes.get(token as usize)?;
-        let n = (lines as usize).checked_sub(1)?;
-        bytes.iter().enumerate().filter(|&(_, &c)| c == b'\n').nth(n).map(|(i, _)| &bytes[..=i])
-    }
-
-    /// For each token holding a lines-th "\n" (lines > 0): sets its bit (t % 8 of bits[t / 8]) iff its bytes up to
-    /// that line end keep the text viable and, if check, the grammar ends a module after them and suffix; else clears
-    /// it. Whether some bit was set. The cuts that leave one state (line ends after whitespace) share a verdict.
-    pub fn line_ends(&self, state: &State, lines: u32, suffix: &[u8], bits: &mut [u8], check: bool) -> bool {
-        let mut verdicts: FxHashMap<(Lex, Parse), bool> = FxHashMap::default();
-        let mut any = false;
-        for (id, at) in &self.newline_tokens {
-            let Some(&end) = at.get(lines as usize - 1) else { continue };
-            let ok = self.extend(state, &self.token_bytes[*id as usize][..=end]).is_ok_and(|s| if check {
-                let key = (s.lex.clone(), s.parse.clone());
-                *verdicts.entry(key).or_insert_with(|| self.complete_with(&s, suffix, true))
-            } else {
-                self.viable_end(&s)
-            });
-            let (byte, bit) = (*id as usize / 8, 1u8 << (id % 8));
-            if ok {
-                bits[byte] |= bit;
-                any = true;
-            } else {
-                bits[byte] &= !bit;
-            }
-        }
-        any
     }
 
     pub fn start(&self) -> State {
@@ -281,51 +243,6 @@ impl Syntax {
             if k != NO_GROUP && ok[k as usize] {
                 bits[t / 8] |= 1 << (t % 8);
             }
-        }
-    }
-
-    /// Whether the state followed by suffix ends a module (complete over the text and suffix; text_ends_line: the
-    /// text before the suffix ends with a line end).
-    pub fn complete_with(&self, state: &State, suffix: &[u8], text_ends_line: bool) -> bool {
-        if suffix.is_empty() {
-            return self.complete(state, text_ends_line);
-        }
-        match self.extend(state, suffix) {
-            Ok(end) => self.complete(&end, matches!(suffix.last(), Some(b'\n' | b'\r'))),
-            Err(_) => false,
-        }
-    }
-
-    /// Clears bit t % 8 of bits[t / 8] for each mergeable token t that neither is a non-empty proper prefix of owed
-    /// nor starts with owed (decoder.Reemit's tokens: owed's bytes re-emitted over one or more tokens).
-    pub fn reemit(&self, owed: &[u8], bits: &mut [u8]) {
-        let mut keep = vec![0u8; bits.len()];
-        let mut set = |id: u32| keep[id as usize / 8] |= 1 << (id % 8);
-        let mut node = 0usize;
-        let mut whole = true;
-        for (i, &b) in owed.iter().enumerate() {
-            if i > 0 && let Some(id) = self.trie[node].id {
-                set(id);
-            }
-            match self.trie[node].children.iter().find(|&&(c, _)| c == b) {
-                Some(&(_, child)) => node = child as usize,
-                None => {
-                    whole = false;
-                    break;
-                }
-            }
-        }
-        if whole {
-            let mut stack = vec![node];
-            while let Some(n) = stack.pop() {
-                if let Some(id) = self.trie[n].id {
-                    set(id);
-                }
-                stack.extend(self.trie[n].children.iter().map(|&(_, c)| c as usize));
-            }
-        }
-        for (b, k) in bits.iter_mut().zip(&keep) {
-            *b &= k;
         }
     }
 }

@@ -375,7 +375,7 @@ prefill rows, graphs, store) at a fraction of the device's total (the evaluation
 prompt's `input_ids`, `max_new_tokens`, `stopping_criteria`,
 `temperature` (0 = argmax, ties to the lowest id), `top_p` (the nucleus, arXiv 1904.09751 §3.1, as Hugging Face's
 `TopPLogitsWarper` keeps it), `seed` (the sample at position *i* depends only on seed and *i*) and an optional
-constraint (`heal_tokens()`'s `Reemit`, or the Python syntax constraint, which owes the healed bytes itself), whose
+constraint (`heal_tokens()`'s `Reemit`, or the Python syntax constraint, which holds a healed prompt's `Reemit`), whose
 masks are written while the step's body runs: the syntax constraints' in one parallel call straight into the
 decoder's pinned mask rows, each constraint's last token applied in the same call.
 
@@ -425,20 +425,16 @@ checked), so the model's distribution of program files lies inside the constrain
 Types are checked after generation instead.
 
 **`SyntaxConstraint`** (`inference/syntax_constraint.py`, the Rust crate `inference/syntax/`):
-`SyntaxConstraint(tokenizer, prefix, *, suffix, owed=b"", lines=None)` (bytes); `masks(constraints, out, rows)` writes a
-batch of constraints' next masks in parallel (rayon) without the GIL. Token *t* is allowed iff `prefix + generated + t`
-can still become a valid Python 3.12 module, the text ending anywhere; while `owed` bytes (a healed prompt's dropped
-token) are not re-emitted, only tokens that re-emit them; FIM sentinels never; a prefix that cannot become valid
-Python 3.12 raises `ValueError`. Ends are decided once chosen: a chosen BOS stands iff the grammar ends a module after
-the text and suffix and `ast.parse` accepts them (`ends`), else the slot takes the step's best other allowed token,
-which the head computes beside its choice (the same choice as masking BOS beforehand, greedy or Gumbel-max; a
-nucleus-sampled slot's BOS is decided before the step). A generation cut to `lines` lines (`code_eval.fim_lines`; the
-evaluation's middles are uncut) ends at its `lines`-th line end: a token holding it is allowed iff the grammar ends a
-module after the text up to that line end and the suffix, and stands iff `ast.parse` accepts them (else the slot's
-head runs again without it); a BOS-ended cut middle gets its final newline before the check, as `fim_lines` scores
-it; a line that no line end can end validly and only a line end continues (after a backslash) ends unchecked. Layers:
-CPython 3.12.3's tokenizer
-(`Parser/tokenizer.c`) as a character-level state machine (`lexer.rs`); INDENT/DEDENT and the tab-consistency check;
+`SyntaxConstraint(tokenizer, prefix, *, suffix, healing=None)` (bytes; `healing`: a healed prompt's `Reemit`);
+`masks(constraints, out, rows)` writes a batch of constraints' next masks in parallel (rayon) without the GIL. Token
+*t* is allowed iff `prefix + generated + t` can still become a valid Python 3.12 module, the text ending anywhere;
+while the healed prompt's dropped bytes are not re-emitted, only tokens that re-emit them (the mask intersected with
+the `Reemit`'s); FIM sentinels never; a prefix that cannot become valid Python 3.12 raises `ValueError`. Ends are
+decided once chosen: a chosen BOS stands iff the grammar ends a module after the text and suffix and `ast.parse`
+accepts them (`ends`), else the slot takes the step's best other allowed token, which the head computes beside its
+choice (the same choice as masking BOS beforehand, greedy or Gumbel-max; a nucleus-sampled slot's BOS is decided
+before the step). Layers: CPython 3.12.3's tokenizer (`Parser/tokenizer.c`) as a character-level state machine
+(`lexer.rs`); INDENT/DEDENT and the tab-consistency check;
 an LALR(1) grammar (`python.lark`) built by Lark at load and read by the crate (`parser.rs`), the soft keywords read
 both ways until one fails; per lexer state, the vocabulary's events over its byte trie (`vocab.rs`). Where it is looser
 than CPython it accepts rather than rejects. Checks: 0 false rejections over 11.4M token steps of 3,000 Python files

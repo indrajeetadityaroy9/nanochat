@@ -232,7 +232,7 @@ def filtered_completions(generator: NativeDecoder, tokenizer: Tokenizer, items: 
                          language: Literal["python", "cpp"]) -> tuple[list[str], dict]:
     """filtered of left-to-right prompts (BOS and the prompt's tokens): candidates of the healed prompt
     (decoder.heal_tokens; one more token of budget, the dropped token's bytes re-emitted: Reemit, or the syntax
-    constraint of the healed prompt's bytes owing them for Python tasks); each candidate checked as check(task,
+    constraint of the healed prompt's bytes holding it for Python tasks); each candidate checked as check(task,
     completion): the program its evaluator scores."""
     dropped = [heal_tokens(tokenizer, p)[2] for p in prompts]
 
@@ -240,7 +240,7 @@ def filtered_completions(generator: NativeDecoder, tokenizer: Tokenizer, items: 
         input_ids, constraint, _ = heal_tokens(tokenizer, prompts[i])  # a fresh constraint per candidate
         if language == "python":
             constraint = SyntaxConstraint(tokenizer, tokenizer.enc.decode_bytes(input_ids[1:]), suffix=b"",
-                                          owed=dropped[i])
+                                          healing=constraint)
         return Request(input_ids=input_ids, max_new_tokens=budgets[i] + 1, constraint=constraint,
                        stopping_criteria=KeywordsStoppingCriteria(tokenizer, items[i].stopwords, healed=dropped[i]))
 

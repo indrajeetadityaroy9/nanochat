@@ -27,7 +27,7 @@ pub struct Tables {
 
 /// A parser state: the LR stacks (bottom first), bracket depth, indentation stack of (column, alt column), whether the
 /// line has tokens, the line's column and alt column so far, the column of the line's first backslash (0: none).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub struct Parse {
     pub stacks: Vec<Vec<u32>>,
     pub depth: i32,
@@ -44,9 +44,7 @@ impl Tables {
     }
 
     fn goto(&self, state: u32, lhs: u32) -> u32 {
-        let g = self.goto[state as usize * self.nonterminals + lhs as usize];
-        debug_assert!(g >= 0);
-        g as u32
+        self.goto[state as usize * self.nonterminals + lhs as usize] as u32
     }
 
     pub fn start(&self) -> Parse {

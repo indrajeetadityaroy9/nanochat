@@ -74,8 +74,8 @@ def prefix_index(tokenizer) -> tuple[list[bytes], np.ndarray]:
 
 class Reemit:
     """heal_tokens's constraint: while bytes of the dropped token are owed, each token's bytes are a non-empty proper
-    prefix of them or start with them (BOS excluded); once they are re-emitted, no restriction. (A SyntaxConstraint
-    given the owed bytes applies the same restriction itself.)"""
+    prefix of them or start with them (BOS excluded); once they are re-emitted, no restriction. (A healed Python
+    prompt's SyntaxConstraint holds it: syntax_constraint.masks intersects its masks with this one's.)"""
 
     def __init__(self, tokenizer, owed: bytes):
         self.tokenizer, self.owed = tokenizer, owed
@@ -104,25 +104,22 @@ def heal_tokens(tokenizer, input_ids: list[int]) -> tuple[list[int], Reemit, byt
     """Token healing (Guidance, "The Art of Prompt Design: Prompt Boundaries and Token Healing", 2023), constrained
     until the dropped token's bytes are re-emitted (TokEval, arXiv 2608.18062 App. C; Guidance constrains one token,
     which forbids splitting those bytes over two): the prompt without its last token, its Reemit constraint, and the
-    dropped bytes (a SyntaxConstraint's owed bytes). input_ids: BOS and at least two more tokens."""
+    dropped bytes. input_ids: BOS and at least two more tokens."""
     dropped = tokenizer.token_bytes[input_ids[-1]]
     return input_ids[:-1], Reemit(tokenizer, dropped), dropped
 
 
-def step_masks(out: np.ndarray, constrained: list[tuple[int, Constraint, bool]]
-               ) -> tuple[list[int], list[int], set[int]]:
+def step_masks(out: np.ndarray, constrained: list[tuple[int, Constraint, bool]]) -> tuple[list[int], list[int]]:
     """Writes each (slot, constraint, eager)'s next mask into the slot's row of out (the decoder's mask rows): the
     syntax constraints' by one syntax_constraint.masks call (in parallel, without the GIL, straight into the rows), a
     BOS candidate decided there (syntax_constraint.ends) only if eager, else by the caller once BOS is chosen. The
-    slots whose rows restrict their choice, those whose rows allow no token, and the dead ends among them (a cut
-    generation's line ends that stand unchecked: syntax_constraint.masks)."""
+    slots whose rows restrict their choice, and those whose rows allow no token."""
     syntax = [(b, c, eager) for b, c, eager in constrained if isinstance(c, SyntaxConstraint)]
-    masked, empty, dead = [], [], set()
+    masked, empty = [], []
     if syntax:
         verdicts = syntax_constraint.masks([c for _, c, _ in syntax], out, [b for b, _, _ in syntax])
         masked += [b for b, _, _ in syntax]
-        empty += [b for (b, _, _), (ok, _) in zip(syntax, verdicts, strict=True) if not ok]
-        dead |= {b for (b, _, _), (_, end) in zip(syntax, verdicts, strict=True) if end}
+        empty += [b for (b, _, _), ok in zip(syntax, verdicts, strict=True) if not ok]
         candidates = [(b, c) for b, c, eager in syntax if eager and out[b, c.bos // 32] >> (c.bos % 32) & 1]
         if candidates:
             for (b, c), ok in zip(candidates, syntax_constraint.ends([c for _, c in candidates]), strict=True):
@@ -140,7 +137,7 @@ def step_masks(out: np.ndarray, constrained: list[tuple[int, Constraint, bool]]
         masked.append(b)
         if not mask.any():
             empty.append(b)
-    return masked, empty, dead
+    return masked, empty
 
 
 # the prompt store's page in positions: a stored prompt takes whole pages anywhere in the store (vLLM's PagedAttention,
@@ -208,7 +205,6 @@ class NativeDecoder:
         lib.dec_destroy.argtypes = [ctypes.c_void_p]
         lib.dec_tokens.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         lib.dec_take_alt.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        lib.dec_rehead.argtypes = [ctypes.c_void_p]
         self.lib = lib
         cfg = model.config
         L, C, T = cfg.num_hidden_layers, cfg.hidden_size, cfg.max_position_embeddings
@@ -309,38 +305,22 @@ class NativeDecoder:
             self.lib.dec_save_prompt(self.handle, b, i * PAGE, page * PAGE, min(PAGE, n - i * PAGE))
         self.stored[key] = Stored(pages, self.runs)
 
-    def confirm(self, slots: list[Slot | None], chosen: list[int], *, eager: set[int], dead: set[int]) -> list[int]:
-        """The slots among chosen (syntax-constrained, their step's tokens in self.tokens) whose choices do not stand,
-        to choose again by their masks without them: a chosen BOS candidate that does not end the program
-        (syntax_constraint.ends; the eager slots' decided before the step) gives way to the step's alternative
-        (dec_take_alt: the same choice as BOS masked), and a chosen line end of a cut generation whose text does not
-        parse (SyntaxConstraint.line_end; a dead end's stand unchecked) is masked out. Raises ValueError when a slot's
-        mask allows no token left."""
+    def confirm(self, slots: list[Slot | None], chosen: list[int], *, eager: set[int]) -> None:
+        """Among chosen (syntax-constrained slots, their step's tokens in self.tokens), a chosen BOS candidate that does
+        not end the program (syntax_constraint.ends; the eager slots' decided before the step) gives way to the step's
+        alternative (dec_take_alt: the same choice as BOS masked). Raises ValueError when such a slot's mask allows no
+        other token."""
         B, bos = self.batch, self.bos
-
-        def exhausted(b: int) -> ValueError:
-            return ValueError(f"request {slots[b].index}: its constraint allows no token at position "
-                              f"{len(slots[b].out)}")
-
         lazy = [b for b in chosen if self.tokens[b] == bos and b not in eager]
         if lazy:
             for b, ok in zip(lazy, syntax_constraint.ends([slots[b].request.constraint for b in lazy]), strict=True):
                 if ok:
                     continue
                 if self.tokens[B + b] < 0:
-                    raise exhausted(b)
-                self.masks[b, bos // 32] &= ~np.uint32(1 << (bos % 32))
+                    raise ValueError(f"request {slots[b].index}: its constraint allows no token at position "
+                                     f"{len(slots[b].out)}")
                 self.tokens[b] = self.tokens[B + b]
                 self.lib.dec_take_alt(self.handle, b)
-        again = []
-        for b in chosen:
-            t = int(self.tokens[b])
-            if t != bos and b not in dead and slots[b].request.constraint.line_end(t) is False:
-                self.masks[b, t // 32] &= ~np.uint32(1 << (t % 32))
-                if not self.masks[b].any():
-                    raise exhausted(b)
-                again.append(b)
-        return again
 
     @torch.no_grad()
     def generate(self, requests: Iterable[Request]) -> Iterator[tuple[int, list[int]]]:
@@ -353,7 +333,7 @@ class NativeDecoder:
         choice by mask and temperature; other steps launch the whole greedy step. A syntax constraint's ends are
         confirmed only once chosen (confirm): a rejected BOS gives way to the step's best other allowed token
         (decode.cu's alternative: the same choice as BOS masked; a nucleus-sampled slot's BOS is decided before the
-        step), a rejected line end of a cut generation is masked out and the slot's head runs again (dec_rehead).
+        step).
         Raises ValueError when len(input_ids) + max_new_tokens - 1 > max_length or a constraint allows no token (not
         even BOS).
         timings: {request index: (start, first, end)} of this call's requests yielded so far (time.perf_counter
@@ -405,9 +385,9 @@ class NativeDecoder:
             stopping = []
             if choosing:
                 # a stopped slot's next token is dropped
-                masked, empty, dead = step_masks(self.masks, [(b, r.constraint, nucleus(r)) for b in active
-                                                              if (r := slots[b].request).constraint is not None
-                                                              and b not in finished])
+                masked, empty = step_masks(self.masks, [(b, r.constraint, nucleus(r)) for b in active
+                                                        if (r := slots[b].request).constraint is not None
+                                                        and b not in finished])
                 for b in empty:
                     raise ValueError(f"request {slots[b].index}: its constraint allows no token at position "
                                      f"{len(slots[b].out)}")
@@ -419,16 +399,7 @@ class NativeDecoder:
             if choosing:
                 syntax = [b for b in active if b not in finished
                           and isinstance(slots[b].request.constraint, SyntaxConstraint)]
-                eager = {b for b in syntax if nucleus(slots[b].request)}
-                while again := self.confirm(slots, syntax, eager=eager, dead=dead):
-                    # the slots whose choices were rejected choose again, by their masks without them
-                    rows = np.zeros_like(flags)
-                    rows[:, again] = True
-                    lib.dec_set_active(handle, np.packbits(rows, axis=1, bitorder="little").view("<u8").ctypes.data)
-                    lib.dec_rehead(handle)
-                    lib.dec_tokens(handle, self.tokens.ctypes.data)
-                    syntax = again
-                    set_active()
+                self.confirm(slots, syntax, eager={b for b in syntax if nucleus(slots[b].request)})
             now = time.perf_counter()
             for b, s in enumerate(slots):
                 if s is None or b in finished:

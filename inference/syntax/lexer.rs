@@ -19,7 +19,7 @@ const FSTRING_END: Lexeme = 4;
 
 /// What the lexer emits: lexemes, line ends outside brackets' concern (NL; the parser decides NEWLINE), a backslash
 /// continuation (CONT), and the whitespace characters at a line's start (indentation).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ev {
     Lex(Lexeme),
     Nl,
@@ -31,7 +31,7 @@ pub enum Ev {
 
 /// A number literal's sub-state: what was read last (tokenizer.c, Number); an underscore state ends in U, a digit
 /// state in D.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Num {
     Zero1,
     Zero,
@@ -60,7 +60,7 @@ pub enum Num {
 }
 
 /// A string's kind after its prefix: plain, bytes (ASCII only), f-string, raw f-string.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     S,
     B,
@@ -70,7 +70,7 @@ pub enum Kind {
 
 /// What an f-string's literal text waits for: "{" after "{", "}" after "}", the character after a backslash, "{" after
 /// "\N", the end of "\N{...}".
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pend {
     No,
     Lb,
@@ -83,7 +83,7 @@ pub enum Pend {
 /// NONE: a name that spells no keyword, soft keyword or string prefix.
 const NONE: u16 = u16::MAX;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Sub {
     /// between tokens at a line's start (true: after a backslash continuation)
     Bol(bool),
@@ -108,7 +108,7 @@ pub enum Sub {
 /// An open replacement field: its bracket depth, and whether it is in its format spec.
 pub type Field = (i32, bool);
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Frame {
     pub quote: u8,
     pub size: u8,
@@ -117,7 +117,7 @@ pub struct Frame {
 }
 
 /// A lexer state: pending UTF-8 bytes, after "\r", the open f-strings (innermost last), the sub-state.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Lex {
     pub pend: [u8; 3],
     pub npend: u8,
@@ -227,7 +227,6 @@ fn first_in(ranges: &[(u32, u32)], lo: u32, hi: u32) -> Option<u32> {
 impl Lexicon {
     /// keywords, soft keywords and operators with their terminals (Lark's names resolved to indices by the caller),
     /// the terminals of NAME, NUMBER, STRING, FSTRING_START and FSTRING_END, and the identifier classes.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(keywords: Vec<(String, Vec<u16>)>, soft: Vec<(String, Vec<u16>)>, operators: Vec<(String, Vec<u16>)>,
                basic: [u16; 5], xid_start: Vec<(u32, u32)>, xid_continue: Vec<(u32, u32)>) -> Lexicon {
         let mut lexemes: Vec<Vec<u16>> = basic.iter().map(|&t| vec![t]).collect();
@@ -259,7 +258,7 @@ impl Lexicon {
         // words whose spelling decides a token: keywords, soft keywords, string prefixes (any case)
         let mut spelled_words: Vec<String> = keywords.iter().chain(&soft).map(|(w, _)| w.clone()).collect();
         for p in STRING_PREFIXES {
-            for m in 0..4u32 {
+            for m in 0..1u32 << p.len() {
                 spelled_words.push(p.chars().enumerate()
                     .map(|(i, c)| if m >> i & 1 == 1 { c.to_ascii_uppercase() } else { c }).collect());
             }
@@ -288,9 +287,7 @@ impl Lexicon {
         }
 
         // operator prefixes, ".." of "..." included
-        let mut op_all = op_words.clone();
-        op_all.push("...".to_string());
-        let (ops, op_next, op_first) = prefix_trie(&op_all);
+        let (ops, op_next, op_first) = prefix_trie(&op_words);
         let op_extensible: Vec<bool> = ops.iter()
             .map(|p| ops.iter().any(|q| q != p && q.starts_with(p.as_str()))).collect();
         let op_lexeme: Vec<Option<Lexeme>> = ops.iter().map(|p| op_lex.get(p).copied()).collect();
