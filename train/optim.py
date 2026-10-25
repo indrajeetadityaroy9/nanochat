@@ -32,7 +32,9 @@ class Muon(torch.optim.Muon):
     decoupled weight decay, adjusted lr) with each step's Newton-Schulz batched over a group's same-shape matrices: one
     bmm/baddbmm chain per shape instead of one mm/addmm chain per matrix (torch.optim.Muon has no foreach path). The
     same state (momentum_buffer) and state_dict as torch.optim.Muon; the batched GEMMs may round differently from the
-    per-matrix ones."""
+    per-matrix ones. After each step, update_square holds the squared Frobenius norm of the step's orthogonalized
+    updates times their adjusted lr, summed over the matrices (the update without its decoupled weight decay), on the
+    device."""
 
     @torch.no_grad()
     def step(self, closure: Callable[[], torch.Tensor] | None = None) -> torch.Tensor | None:
@@ -40,6 +42,7 @@ class Muon(torch.optim.Muon):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
+        squares = []
         for group in self.param_groups:
             lr, momentum = group["lr"], group["momentum"]
             a, b, c = group["ns_coefficients"]
@@ -65,7 +68,10 @@ class Muon(torch.optim.Muon):
                 if tall:
                     x = x.mT
                 torch._foreach_mul_(params, 1 - lr * group["weight_decay"])
-                torch._foreach_add_(params, x.unbind(0), alpha=-_adjust_lr(lr, group["adjust_lr_fn"], shape))
+                adjusted = _adjust_lr(lr, group["adjust_lr_fn"], shape)
+                torch._foreach_add_(params, x.unbind(0), alpha=-adjusted)
+                squares.append(torch.linalg.vector_norm(x, dtype=torch.float32).square() * adjusted**2)
+        self.update_square = torch.stack(squares).sum()
         return loss
 
 

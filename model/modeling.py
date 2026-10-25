@@ -194,10 +194,14 @@ class CausalLM(nn.Module):
                                   window_size=self.window_sizes[i], cu_seqlens=cu_seqlens, segments=segments)
         return norm(hidden_states).flatten(0, 1)
 
-    def forward(self, input_ids: Tensor, labels: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-        """Mean next-token loss over the non-padding labels, fp32."""
-        return lm_loss(self.hidden(input_ids, cu_seqlens, segments), self.lm_head.weight, labels.flatten(),
-                       self.config.final_logit_softcapping)[0]
+    def forward(self, input_ids: Tensor, labels: Tensor, cu_seqlens: Tensor,
+                segments: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """(mean next-token loss over the non-padding labels fp32; per-position loss (B*T,) fp32, 0 at padding labels;
+        per-position logsumexp of the logits (B*T,) fp32), the last two without gradient (model/ops/cross_entropy.py
+        lm_loss)."""
+        loss, _, _, losses, lse = lm_loss(self.hidden(input_ids, cu_seqlens, segments), self.lm_head.weight,
+                                          labels.flatten(), self.config.final_logit_softcapping)
+        return loss, losses, lse
 
     def losses(self, input_ids: Tensor, labels: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
         """Per-position next-token loss (B*T,) fp32, 0 at padding labels."""

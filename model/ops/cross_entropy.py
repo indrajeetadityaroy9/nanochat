@@ -4,8 +4,8 @@ LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z 
     loss = sum over rows with label t != IGNORE_INDEX of (logsumexp(z) - z[t]), divided by the valid count n.
 
 nanochat::lm_loss (training): a GEMM writes bf16 z; QuACK's cross_entropy_fwd_out (quack/cross_entropy.py, dx = z as
-with inplace_backward) writes each row's loss and overwrites z with softmax(z) - onehot(t); dx = (1/n) z W on QuACK
-(bf16), dW = (1/n) z^T x by torch.mm in fp32 (as model/ops/linear.py's weight gradients).
+with inplace_backward) writes each row's loss and logsumexp and overwrites z with softmax(z) - onehot(t); dx = (1/n) z W
+on QuACK (bf16), dW = (1/n) z^T x by torch.mm in fp32 (as model/ops/linear.py's weight gradients).
 
 nanochat::lm_losses (evaluation): QuACK's lse_target_epi GEMM epilogue (quack/epilogue/library.py) reduces each row's
 logsumexp and gathers the label's logit from the fp32 accumulators without storing z, so no bf16 rounding of the
@@ -51,34 +51,38 @@ def capped_losses(z: Tensor, labels: Tensor, c: float) -> Tensor:
 # Opaque to torch.compile: its functionalization of the in-place logit gradient (dx = z) gives x a wrong gradient.
 @torch.library.custom_op("nanochat::lm_loss", mutates_args=(), device_types="cuda")
 def lm_loss(x: Tensor, weight: Tensor, labels: Tensor,
-            final_logit_softcapping: float | None) -> tuple[Tensor, Tensor, Tensor]:
+            final_logit_softcapping: float | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """x (M, C) bf16, fp32 weight (V, C), labels (M,) int64 -> (mean loss fp32, dloss/dx in x's dtype, dloss/dW
-    fp32)."""
+    fp32, per-position loss (M,) fp32 (0 at IGNORE_INDEX labels), per-position logsumexp of the (capped) logits (M,)
+    fp32); the last two are QuACK's per-row outputs, without gradient."""
     w = weight.to(x.dtype)
     logits = x @ w.t()
     scale = 1 / (labels != IGNORE_INDEX).sum().float()
     loss = torch.empty(labels.shape, device=x.device, dtype=torch.float32)
+    lse = torch.empty(labels.shape, device=x.device, dtype=torch.float32)
     derivative = None if final_logit_softcapping is None else cap_(logits, final_logit_softcapping)
-    cross_entropy_fwd_out(logits, labels, target_logit=None, loss=loss, lse=None, dx=logits, weight=None,
+    cross_entropy_fwd_out(logits, labels, target_logit=None, loss=loss, lse=lse, dx=logits, weight=None,
                           ignore_index=IGNORE_INDEX)
     if derivative is not None:
         logits.mul_(derivative)
     return (loss.sum() * scale, gemm(logits, w, alpha=scale, out_dtype=x.dtype),
-            torch.mm(logits.t(), x, out_dtype=weight.dtype) * scale)
+            torch.mm(logits.t(), x, out_dtype=weight.dtype) * scale, loss, lse)
 
 
 @lm_loss.register_fake
 def lm_loss_fake(x: Tensor, weight: Tensor, labels: Tensor,
-                 final_logit_softcapping: float | None) -> tuple[Tensor, Tensor, Tensor]:
-    return x.new_empty((), dtype=torch.float32), x.new_empty(x.shape), weight.new_empty(weight.shape)
+                 final_logit_softcapping: float | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    return (x.new_empty((), dtype=torch.float32), x.new_empty(x.shape), weight.new_empty(weight.shape),
+            x.new_empty(labels.shape, dtype=torch.float32), x.new_empty(labels.shape, dtype=torch.float32))
 
 
 def lm_loss_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor, float | None],
-                 output: tuple[Tensor, Tensor, Tensor]) -> None:
+                 output: tuple[Tensor, Tensor, Tensor, Tensor, Tensor]) -> None:
     ctx.save_for_backward(output[1], output[2])
 
 
-def lm_loss_grad(ctx: FunctionCtx, dloss: Tensor, ddx: Tensor, ddw: Tensor) -> tuple[Tensor, Tensor, None, None]:
+def lm_loss_grad(ctx: FunctionCtx, dloss: Tensor, ddx: Tensor, ddw: Tensor, dlosses: Tensor,
+                 dlse: Tensor) -> tuple[Tensor, Tensor, None, None]:
     """Saved gradients times dloss; dx's product in fp32, rounded once to bf16."""
     dx, dw = ctx.saved_tensors
     return (dx.float() * dloss).to(dx.dtype), dw * dloss, None, None

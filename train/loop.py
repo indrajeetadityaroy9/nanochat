@@ -4,7 +4,8 @@ repo_level_start; next-token loss with the packs' FIM pieces read as FIM example
 §3.1; corpus/pack.py). Each start resumes from the run's newest checkpoint (weights, optimizer state, data position).
 What a step computes is this package's: the optimizers, weight decay and gradient clip (optim.py), each step's stage
 and learning rate (schedule.py), the stages' micro-batches in the run's data order (stages.py), the micro-batches'
-loss weights (model/ops/cross_entropy.py step_shares). Caller: run.py. Metrics: metrics.py.
+loss weights (model/ops/cross_entropy.py step_shares). Caller: run.py. Metrics: metrics.py; the step's diagnostics:
+diagnostics.py.
 """
 
 import gc
@@ -21,6 +22,7 @@ from corpus.tokenizer import get_tokenizer
 from model.modeling import CausalLM, non_embedding_flops_per_token, num_matmul_params
 from model.ops.cross_entropy import step_shares
 from train.checkpoint import checkpoint_path, save_checkpoint
+from train.diagnostics import Diagnostics
 from train.optim import MAX_GRAD_NORM, optimizers, tau_weight_decay, update
 from train.schedule import RunPlan, lr_lambda
 from train.stages import stage_batches
@@ -70,6 +72,8 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
     first = run.stage_at(start_step)
     mixture, train_iter = read(stage=first, start=stage_rows if first is stage else 0)
     batches = [next(train_iter) for _ in range(run.gradient_accumulation_steps)]
+    diagnostics = Diagnostics(model, opts, gradient_accumulation_steps=run.gradient_accumulation_steps)
+    diagnostics.set_stage(first, mixture)
     # the attempt this process is (the run's process starts before it); learning rate and weight decay as the
     # optimizers hold them (a resumed run's come from its checkpoint)
     attempt = sum(r["kind"] == "run" for r in metrics.records(run_name))
@@ -93,19 +97,19 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
                                                for name, opt in zip(("adamw", "muon"), opts, strict=True)},
                               "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
 
-    # A step's loss and grad norm are copied to the host without blocking and read after the next step is launched, so
-    # the device always has the next step queued (no per-step drain); a step's time runs between CUDA events at the
-    # previous step's end and its own. pending: the last step's (step, learning rate, model FLOPs, host values, start
-    # event, end event).
-    host = torch.empty((2, 2), dtype=torch.float64, pin_memory=True)
+    # A step's values (loss, grad norm, diagnostics.py's) are copied to the host without blocking and read after the next
+    # step is launched, so the device always has the next step queued (no per-step drain); a step's time runs between
+    # CUDA events at the previous step's end and its own. pending: the last step's (step, learning rate, model FLOPs,
+    # host values, their layout, start event, end event).
     pending, previous_end = None, torch.cuda.Event(enable_timing=True)
     previous_end.record()
 
-    def log(step: int, learning_rate: float, model_flops: int, values: torch.Tensor, start: torch.cuda.Event,
-            end: torch.cuda.Event) -> None:
+    def log(step: int, learning_rate: float, model_flops: int, values: torch.Tensor, layout: dict,
+            start: torch.cuda.Event, end: torch.cuda.Event) -> None:
         """A step's train record once its values reach the host, or its failure record (raising)."""
         end.synchronize()
-        loss_value, grad_norm_value = values.tolist()
+        values = values.tolist()
+        loss_value, grad_norm_value = values[:2]
         if not (math.isfinite(loss_value) and math.isfinite(grad_norm_value)):
             metrics.append(run_name, {"kind": "failure", "step": step, "loss": None, "grad_norm": None},
                            attempt=attempt)
@@ -114,7 +118,8 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
         metrics.append(run_name, {"kind": "train", "step": step, "num_input_tokens_seen": (step + 1) * run.batch_size,
                                   "loss": loss_value, "learning_rate": learning_rate, "grad_norm": grad_norm_value,
                                   "step_seconds": dt, "tokens_per_second": run.batch_size / dt,
-                                  "model_flops": model_flops, "mfu": metrics.mfu(model_flops, dt)}, attempt=attempt)
+                                  "model_flops": model_flops, "mfu": metrics.mfu(model_flops, dt)}
+                       | diagnostics.record(values, layout), attempt=attempt)
 
     while True:
         if pending is not None and (step in checkpoints or step == run.max_steps):
@@ -138,6 +143,7 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
             stage, stage_rows = run.stage_at(step), 0
             model.set_stage(stage)
             compiled = torch.compile(model, dynamic=False, fullgraph=True)
+            diagnostics.set_stage(stage, mixture)
             metrics.append(run_name, {"kind": "stage", "step": step, "stage": asdict(stage) | {"mixture": mixture},
                                       "model_flops_per_token": model_flops_per_token(),
                                       "peak_memory_bytes": torch.cuda.max_memory_allocated(),
@@ -150,29 +156,32 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
         if reading and run.stage_at(step + 1) is not stage:
             mixture, train_iter = read(stage=run.stage_at(step + 1), start=0)
         learning_rate = schedulers[0].get_last_lr()[0]
+        diagnostics.begin_step(step, stage_rows)
         losses, upcoming, model_flops = [], [], 0
         for (input_ids, labels, cu_seqlens, segments, lengths), share in zip(
                 batches, step_shares([b[1] for b in batches]), strict=True):
-            loss = compiled(input_ids, labels, cu_seqlens, segments) * share
+            loss, token_losses, lse = compiled(input_ids, labels, cu_seqlens, segments)
+            loss = loss * share
             losses.append(loss.detach())
+            diagnostics.micro_batch(labels, token_losses, lse)
             loss.backward()
             model_flops += metrics.executed_model_flops(lengths, matmul_params=matmul_params, hidden_size=hidden_size,
                                                         windows=model.window_sizes)
             if reading:
                 upcoming.append(next(train_iter))
         grad_norm = update(model, opts)
+        diagnostics.after_update()
         for scheduler in schedulers:
             scheduler.step()
         stage_rows += len(batches) * stage.micro_batch_size
         batches = upcoming
-        # loss and grad norm to the host without blocking; the previous step is logged while this one runs
-        values = host[step % 2]
-        values.copy_(torch.stack([torch.stack(losses).double().sum(), grad_norm.double()]), non_blocking=True)
+        # the step's values to the host without blocking; the previous step is logged while this one runs
+        values, layout = diagnostics.end_step(step, torch.stack(losses).sum(), grad_norm)
         end = torch.cuda.Event(enable_timing=True)
         end.record()
         if pending is not None:
             log(*pending)
-        pending, previous_end = (step, learning_rate, model_flops, values, previous_end, end), end
+        pending, previous_end = (step, learning_rate, model_flops, values, layout, previous_end, end), end
         if step == start_step:
             # no cyclic garbage per step: keep the collector off after setup (its scans are slow) except after saves
             gc.collect()
