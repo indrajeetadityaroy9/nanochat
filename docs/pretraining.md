@@ -287,7 +287,7 @@ On the GB10, once (the dataset is constant afterwards):
    fetched files are kept, so a rerun downloads only what it lacks; a source read in part fetches its extent
    (`prepare.extent`).
 2. **Curate**: `python -m nanochat.corpus.curate`: the Python 3 check with repair, exact deduplication, the split, the
-   curated shards (`CORPUS/curated/<source>/<split>/<k>.parquet`; `docs/corpus.md` §4, invariants checked on every row).
+   curated shards (`CORPUS/curated/<source>/<split>/<k>.parquet`; `docs/corpus.md` §4, its invariants by construction).
 3. **Publish**: `python -m nanochat.corpus.publish push` writes the card, replaces the dataset's tree and squashes its
    history into one commit (the card turns the Hub's viewer off).
 

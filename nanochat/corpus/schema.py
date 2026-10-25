@@ -14,15 +14,23 @@ as GitHub's are case-insensitive. `code`: the content is one whole program, whic
 SAMPLE_FILE: a repository source's curated rows, cut into import-connected samples, numbered by `sample` per shard.
 """
 
+import hashlib
 from dataclasses import dataclass
 
 import pyarrow as pa
 
 SPLIT = 100  # 1% of groups held out (docs/corpus.md §4.4)
+# Parquet codec of the files the corpus writes
+COMPRESSION = "zstd"
 
 
 def strings(*names: str) -> list[pa.Field]:
     return [pa.field(name, pa.string(), nullable=False) for name in names]
+
+
+def sha1(texts: pa.Array | pa.ChunkedArray) -> pa.Array:
+    """The hex sha1 of each text's UTF-8 bytes: a row's id."""
+    return pa.array([hashlib.sha1(b).hexdigest() for b in texts.cast(pa.large_binary()).to_pylist()], pa.string())
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 """Native libraries (CUDA kernels, the Rust crates' Python modules), built on first use, cached under NATIVE; pointer
-and stream, the ctypes arguments of csrc's entry points."""
+and stream, the ctypes arguments of csrc's entry points. torch is imported by the CUDA paths alone, so the corpus's
+spawned workers, which load only the crates, import none."""
 
 import ctypes
 import functools
@@ -11,14 +12,16 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-
-import torch
+from typing import TYPE_CHECKING
 
 from nanochat.config import HEAD_DIM
 from nanochat.paths import NATIVE
 
+if TYPE_CHECKING:
+    import torch
+
 CSRC = Path(__file__).resolve().parent / "csrc"
-DATA_CRATE = Path(__file__).resolve().parent / "corpus" / "crate"
+CORPUS_CRATE = Path(__file__).resolve().parent / "corpus" / "crate"
 
 
 def native_library(name: str, sources: list[Path], build: Callable[[Path], None], *, settings: bytes) -> Path:
@@ -35,12 +38,14 @@ def native_library(name: str, sources: list[Path], build: Callable[[Path], None]
     return path
 
 
-def pointer(t: torch.Tensor) -> ctypes.c_void_p:
+def pointer(t: "torch.Tensor") -> ctypes.c_void_p:
     return ctypes.c_void_p(t.data_ptr())
 
 
 def stream() -> ctypes.c_void_p:
     """The current CUDA stream, which the kernels launch on."""
+    import torch
+
     return ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
 
 
@@ -48,6 +53,8 @@ def stream() -> ctypes.c_void_p:
 def cuda_library(name: str) -> ctypes.CDLL:
     """csrc/<name>.cu and qk_row.cuh built by nvcc for the current device's architecture with config.HEAD_DIM, keyed by
     the nvcc command and version, loaded by ctypes once per process."""
+    import torch
+
     major, minor = torch.cuda.get_device_capability()
     arch = f"sm_{major}{minor}"
     source = CSRC / f"{name}.cu"
@@ -84,7 +91,7 @@ def crate_module(crate: Path) -> ModuleType:
     return module
 
 
-def data_crate() -> ModuleType:
+def corpus_crate() -> ModuleType:
     """The corpus's Rust crate (corpus/crate): train (ablations/tokenizer.py), repository_samples (corpus/curate.py,
     compile.py), pack (corpus/pack.py)."""
-    return crate_module(DATA_CRATE)
+    return crate_module(CORPUS_CRATE)

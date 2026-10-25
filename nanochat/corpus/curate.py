@@ -1,5 +1,5 @@
 """
-Curate every source from its standardized files (GB10), the steps of docs/corpus.md §4:
+Curate every source from its standardized files, the steps of docs/corpus.md §4:
 
 1. check (§4.2): every Python file (a category whose content is code) must parse with ast.parse (Python 3.12); one that
    does not is repaired by the smallest set of steps that makes it parse (repaired): Stack v3's placeholders <EMAIL>,
@@ -36,23 +36,32 @@ import pyarrow.parquet as pq
 from fissix import refactor
 
 from nanochat.corpus.parallel import MEMORY, SPAWN, ordered
-from nanochat.corpus.prepare import COMPRESSION, sha1
-from nanochat.corpus.schema import REPOSITORY_FILE, SAMPLE_FILE, SPLIT
-from nanochat.corpus.sources import SOURCES, checked_path, curated_dir, standardized_path
-from nanochat.native import data_crate
+from nanochat.corpus.schema import COMPRESSION, REPOSITORY_FILE, SAMPLE_FILE, SPLIT, sha1
+from nanochat.corpus.sources import (
+    SOURCES,
+    checked_path,
+    curated_dir,
+    footer_rows,
+    repository_samples,
+    sample_starts,
+    standardized_path,
+)
+from nanochat.native import corpus_crate
 from nanochat.paths import CORPUS
 
 # The id of an empty text
 EMPTY = hashlib.sha1(b"").hexdigest()
-# Row groups in flight: four per core, so the cores keep working while the oldest one, whose result is written next,
-# runs long (a row group's time follows its slowest files)
+# Row groups in flight: four per core, an engineering choice: the cores keep working while the oldest one, whose
+# result is written next, runs long (a row group's time follows its slowest files), at the memory of the results held
 WINDOW = 4 * os.cpu_count()
 # The fewest files of a repository shard's row group (the last excepted), whole samples each, so a reader of row
-# groups never splits a sample
+# groups never splits a sample; 2^16, an engineering choice: a row group is compile's task, so smaller groups spread a
+# shard over more workers and larger ones cost fewer tasks
 SAMPLE_ROWS = 65_536
 PLACEHOLDER = re.compile(r"<(EMAIL|KEY|NAME|PASSWORD)>")
 LEADING = re.compile(r"^[ \t]+", re.MULTILINE)
-# ast.parse's recursion limit: deep enough for real files, shallow enough that it does not overflow the C stack
+# ast.parse's recursion limit, an engineering choice above Python's default 1,000: higher parses more deeply nested
+# files, too high overflows the C stack before RecursionError
 RECURSION = 6_000
 
 
@@ -193,20 +202,16 @@ def shuffle(source: str, paths: list[Path], drops: pa.Table) -> None:
 
 def curate_partition(task: tuple[str, int]) -> None:
     """One partition as a curated shard (partition 0 is val): its files sorted by (lowercased repository, path, id),
-    cut into samples (repository_samples) and written in sample order, a row group per SAMPLE_ROWS files or more of
-    whole samples (large_string: 64-bit offsets hold a partition beyond 2 GiB)."""
+    cut into samples (sources.repository_samples) and written in sample order, a row group per SAMPLE_ROWS files or
+    more of whole samples."""
     source, part = task
     table = pq.read_table(shuffle_dir(source) / f"part={part}",
                           schema=pa.schema([("repo_name", pa.string()), ("relative_path", pa.string()),
                                             ("content", pa.large_string()), ("id", pa.string())]))
-    table = table.append_column("repository", pc.utf8_lower(table["repo_name"]))
-    table = table.sort_by([(key, "ascending") for key in ("repository", "relative_path", "id")]).combine_chunks()
-    ends = pc.run_end_encode(table["repository"].chunk(0)).run_ends.to_numpy().tolist()
-    groups = data_crate().repository_samples(table["relative_path"].to_pylist(), table["content"].to_pylist(), ends,
-                                             grammar=SOURCES[source].language)
+    table, _, groups = repository_samples(table, ("relative_path", "id"), SOURCES[source].language, one_per_path=False)
     order, samples = np.concatenate(groups), np.repeat(np.arange(len(groups)), [len(group) for group in groups])
     cuts = [0]
-    for start in np.flatnonzero(np.diff(samples, prepend=-1)).tolist():
+    for start in sample_starts(samples):
         if start - cuts[-1] >= SAMPLE_ROWS:
             cuts.append(start)
     columns = table.select(["repo_name", "relative_path", "content"])
@@ -239,7 +244,7 @@ def shard_documents(source: str, paths: list[Path], drops: pa.Table) -> None:
 
 def main() -> None:
     """Every source's curated shards, from its standardized files (a Python source's checked ones)."""
-    data_crate()  # built once here, before the workers load it
+    corpus_crate()  # built once here, before the workers load it
     files = {source: len(list(standardized_path(source, 0).parent.iterdir())) for source in SOURCES}
     python = [source for source, spec in SOURCES.items() if spec.category.code and spec.language == "Python"]
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
@@ -249,7 +254,7 @@ def main() -> None:
                       for k in range(files[source])] for source in SOURCES}
     drops = duplicates(paths)
     for source, spec in SOURCES.items():
-        print(f"{source}: {sum(pq.read_metadata(p).num_rows for p in paths[source]):,} rows, "
+        print(f"{source}: {footer_rows(paths[source]):,} rows, "
               f"{drops[source].num_rows:,} duplicates", flush=True)
         for split in ("train", "val"):
             curated_dir(source, split).mkdir(parents=True)

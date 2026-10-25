@@ -2,7 +2,7 @@
 The tokenizer ablation: it trains every candidate vocabulary of the corpus's tokenizer, measures them on the corpus,
 decides the split pattern and merge score, and adopts the decided vocabulary as the corpus's tokenizer
 (nanochat/corpus/tokenizer.py TOKENIZER). Each candidate is a vocabulary of 32,768 ids (32,764 mergeable tokens, BOS
-and 3 FIM sentinels) trained on the same sample by the same trainer (train: the data crate's), encoded by tiktoken,
+and 3 FIM sentinels) trained on the same sample by the same trainer (train: the corpus crate's), encoded by tiktoken,
 and trained on. The sample, the val splits and the packs come from the curated shards through nanochat/corpus
 (mixture.py, compile.py, pack.py).
 
@@ -123,18 +123,20 @@ from tokenizers import models
 from nanochat.config import VOCAB_SIZE
 from nanochat.corpus import mixture
 from nanochat.corpus.compile import compile_repositories, compile_source, compile_stage, train_parts
-from nanochat.corpus.loader import TOKEN_DTYPE, mixture_rows, split_path, weights
+from nanochat.corpus.layout import TOKEN_DTYPE, split_path, stage_rows
+from nanochat.corpus.mixture import weights
 from nanochat.corpus.pack import packed_shards, shard_count, write
 from nanochat.corpus.parallel import SPAWN
 from nanochat.corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
 from nanochat.corpus.sources import SOURCES, curated_shards, text_bytes, texts
 from nanochat.corpus.tokenizer import ABLATION, SPECIAL_TOKENS, SPLIT_PATTERN, TOKENIZER, get_tokenizer, save
-from nanochat.native import data_crate
+from nanochat.native import corpus_crate
 from nanochat.paths import RESULTS, ROOT
 
 Score = Literal["sa-bpe", "frequency"]
 
-# The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers)
+# The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers; that data is no longer on
+# the Hub), so an arm trains on as much text as the reference tokenizer did
 SAMPLE_BYTES = 13.38e9
 # karpathy/nanochat's split pattern (92d63d4): SPLIT_PATTERN with cl100k's punctuation clause, whose [\r\n]* takes the
 # line breaks after a punctuation run ("):\n" one chunk)
@@ -186,9 +188,11 @@ CODE_SIGMA = 0.0034
 PARSED = "mbpp_plus"
 # The categories whose documents are whole program texts in their source's language (depth invariance)
 PROGRAMS = (REPOSITORY_FILE, EXERCISE, SYNTHETIC_FILE, FUNCTION)
-# The fidelity check's texts: the first of each source's val split
+# The fidelity check's texts: the first of each source's val split; an engineering choice, the check's time (merges
+# replayed in Python) growing with each text
 FIDELITY_DOCUMENTS = 200
-# The depth-invariance check's lines: the first indented lines of each program source's val split
+# The depth-invariance check's lines: the first indented lines of each program source's val split; the rate's standard
+# error at most √(1/(4n)) ≈ 0.0022
 INDENTED_LINES = 50_000
 # An indented line: its leading spaces and tabs, then its statement
 INDENTED = regex.compile(r"([ \t]+)(\S.*)")
@@ -258,8 +262,8 @@ def train(docs: list[str], units: list[int], *, pattern: str, score: Score) -> l
     """VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 merges (merge i makes token 256 + i) trained on the documents (each from
     its authorship unit) within the chunks of `pattern`, by SA-BPE's F·ln R or by frequency alone (the crate's
     train)."""
-    return data_crate().train(docs, units, pattern=pattern, n_merges=VOCAB_SIZE - len(SPECIAL_TOKENS) - 256,
-                              score=score)
+    return corpus_crate().train(docs, units, pattern=pattern, n_merges=VOCAB_SIZE - len(SPECIAL_TOKENS) - 256,
+                                score=score)
 
 
 def vocabulary(merges: list[tuple[int, int]]) -> list[bytes]:
@@ -298,7 +302,7 @@ def vocabularies() -> None:
         return merges, time.perf_counter() - begin
 
     arms = {}
-    data_crate()  # built once, before the threads call it (pack.py's rule)
+    corpus_crate()  # built once, before the threads call it (pack.py's rule)
     with ThreadPoolExecutor(len(ARMS)) as pool:
         for (arm, (pattern, score)), (merges, seconds) in zip(ARMS.items(), pool.map(timed, ARMS.values()),
                                                               strict=True):
@@ -392,7 +396,7 @@ def fidelity(task: tuple[str, str]) -> dict[str, int]:
     its pattern's chunks (Python regex, whose chunks fancy-regex's equal) cover every text, tiktoken's encoding (by the
     rank of the joined bytes) equals the training segmentation chunk by chunk, and every text decodes back. The
     training segmentation is Hugging Face tokenizers' BPE model over the arm's merges, each byte spelled as the
-    Latin-1 character of its value: listed pairs merged by rank, each over every occurrence from the left (data/crate
+    Latin-1 character of its value: listed pairs merged by rank, each over every occurrence from the left (corpus/crate
     train.rs merge_pair), never a pair whose bytes another made."""
     arm, source = task
     tokenizer = get_tokenizer(ABLATION / arm)
@@ -492,7 +496,7 @@ def data() -> None:
     "seconds": "compiled", the wall time to the last compile's end (packs overlap the compiles), and "all"."""
     # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
     from nanochat.run import base_plan
-    from nanochat.train.stages import drawn, max_ratio, stage_rows
+    from nanochat.train.stages import drawn, max_ratio
 
     start, began = time.perf_counter(), provenance()
     run = base_plan(depth=DEPTH, ratio=RATIO)
@@ -531,7 +535,7 @@ def data() -> None:
             for corpus in mixture.REPOSITORIES.values():
                 pack(corpus, ABLATION / arm)
 
-    data_crate()  # built once, before the threads call it (pack.py's rule)
+    corpus_crate()  # built once, before the threads call it (pack.py's rule)
     with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
           ThreadPoolExecutor(len(ARMS) * len(SOURCES) + 2) as threads):  # the source jobs, repositories, compile_stage
         partitions = threads.submit(compile_stage, ABLATION / "sa-bpe", pool,
@@ -557,12 +561,9 @@ def data() -> None:
         read = {}
         for stage in stages:
             rows, count = stage_rows(tokenizer, stage), drawn(stage, arm_run)
-            shares, _ = weights(stage, rows, count)
-            names = list(shares)
-            draws = np.bincount(mixture_rows(np.array([shares[n] for n in names]), start=0, count=count),
-                                minlength=len(names))
-            read[str(stage.seq_len)] = {n: {"rows": rows[n], "weight": shares[n], "read": int(d) / rows[n]}
-                                        for n, d in zip(names, draws, strict=True)}
+            shares, draws, _ = weights(stage, rows, count)
+            read[str(stage.seq_len)] = {n: {"rows": rows[n], "weight": shares[n], "read": d / rows[n]}
+                                        for n, d in draws.items()}
         arms[arm] = {"data_key": tokenizer.data_key, "ratio": ratio, "tokens_per_param": arm_run.tokens_per_param,
                      "num_iterations": arm_run.num_iterations, "total_batch_size": arm_run.total_batch_size,
                      "repo_start": arm_run.repo_start, "lr": arm_run.lr, "stages": read}

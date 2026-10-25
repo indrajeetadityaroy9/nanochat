@@ -14,10 +14,13 @@ deduplication's keep-first order (curate.py).
 - ClimbMix: English web text.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from nanochat.corpus.schema import (
@@ -30,6 +33,7 @@ from nanochat.corpus.schema import (
     TEXT,
     Category,
 )
+from nanochat.native import corpus_crate
 from nanochat.paths import CORPUS
 
 # The line comment of each repository-file language: Python Language Reference §2.1.3 "Comments", C++23 [lex.comment]
@@ -124,6 +128,11 @@ def text_bytes(metadata: pq.FileMetaData, column: str) -> int:
                for g in range(metadata.num_row_groups)) - 4 * metadata.num_rows
 
 
+def footer_rows(paths: Iterable[Path]) -> int:
+    """The rows of Parquet files, from their footers."""
+    return sum(pq.read_metadata(path).num_rows for path in paths)
+
+
 def texts(source: str, table: pa.Table) -> list[str]:
     """Each curated row's text: its content; a repository file's is preceded by a line comment with its path
     (DeepSeek-Coder, arXiv 2401.14196 §2.2) and ends with a line end (C++23 [lex.phases] phase 2; Python Language
@@ -138,3 +147,26 @@ def texts(source: str, table: pa.Table) -> list[str]:
     return [f"{comment} {path.replace('\r', '\\r').replace('\n', '\\n')}\n{body}\n"
             + ("\n" if spec.language == "C++" and body.endswith("\\") else "")
             for path, body in zip(table["relative_path"].to_pylist(), bodies, strict=True)]
+
+
+def repository_samples(table: pa.Table, keys: tuple[str, ...], language: str, *, one_per_path: bool
+                       ) -> tuple[pa.Table, list[int], list[list[int]]]:
+    """Repository files (repo_name, relative_path, content; content large_string, whose 64-bit offsets hold a
+    partition beyond 2 GiB) sorted by lowercased repository, then `keys`, so a repository is a run of rows; with
+    one_per_path, only the first row of each (repository, path). Returns the table in one chunk, each repository's end
+    row, and its import-connected samples, each its rows in dependency order (the crate's repository_samples)."""
+    table = table.append_column("repository", pc.utf8_lower(table["repo_name"]))
+    table = table.sort_by([(key, "ascending") for key in ("repository", *keys)]).combine_chunks()
+    if one_per_path:
+        paths = pc.binary_join_element_wise(table["repository"], table["relative_path"], "\0").chunk(0)
+        first = pc.not_equal(paths[1:], paths[:-1]).to_numpy(zero_copy_only=False)
+        table = table.filter(np.concatenate([[True], first])).combine_chunks()
+    ends = pc.run_end_encode(table["repository"].chunk(0)).run_ends.to_numpy().tolist()
+    samples = corpus_crate().repository_samples(table["relative_path"].to_pylist(), table["content"].to_pylist(),
+                                                ends, grammar=language)
+    return table, ends, samples
+
+
+def sample_starts(samples: np.ndarray) -> list[int]:
+    """The first row of each sample, given each row's sample number (a sample's rows consecutive)."""
+    return np.flatnonzero(np.diff(samples, prepend=-1)).tolist()

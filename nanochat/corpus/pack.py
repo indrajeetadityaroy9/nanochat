@@ -2,14 +2,14 @@
 Pack the compiled corpus into training rows of seq_len + 1 tokens, stage by stage: the crate's pack, one curated shard
 per call (Best-Fit-Decreasing, each piece its own attention segment, long documents cut between statements;
 docs/corpus.md §7.1), with FIM examples in repository code's train splits (§6). Output per corpus and stage:
-<split>-T<seq_len>.pieces, .rows and .fim beside the compiled split (loader.py).
+<split>-T<seq_len>.pieces, .rows and .fim beside the compiled split (layout.py).
 
 A stage's train packs hold at least the rows the base model's run reads (mixture.STEPS), each document at most once:
 - file stage: the repository partitions before the 32K stage's, and the supply sources, whole; a source read in part
   (mixture.IN_PART), its leading shards;
 - repository stage: the repositories corpora and Codeforces-CoTs, whole; ClimbMix and UltraData-Math L3, the shards
   after the file stage's.
-A source read in part takes shards until the stage's weights (loader.weights) draw no more than it holds. Val splits
+A source read in part takes shards until the stage's weights (mixture.weights) draw no more than it holds. Val splits
 are packed whole at each reading stage's seq_len.
 
 python -m nanochat.corpus.pack
@@ -24,7 +24,7 @@ import numpy as np
 
 from nanochat.corpus import mixture
 from nanochat.corpus.compile import repository_parts, shard_tokens
-from nanochat.corpus.loader import (
+from nanochat.corpus.layout import (
     PIECE_COLUMNS,
     TOKEN_DTYPE,
     fim_packed,
@@ -32,12 +32,12 @@ from nanochat.corpus.loader import (
     packed_path,
     shard_bounds,
     split_path,
-    weights,
 )
+from nanochat.corpus.mixture import weights
 from nanochat.corpus.parallel import ordered
 from nanochat.corpus.sources import curated_shards
 from nanochat.corpus.tokenizer import FIM_TOKENS, TOKENIZER, get_tokenizer
-from nanochat.native import data_crate
+from nanochat.native import corpus_crate
 
 # FIM (docs/corpus.md §6), no line widening: rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv 2207.14255 §3);
 # 90% AST middles, 10% random character spans; PSM/SPM 50/50, as joint training matches or beats either mode alone
@@ -62,10 +62,10 @@ def pack_shard(task: tuple[str, str, int, int, Path]) -> Shard:
     fim = ({"rate": FIM_RATE, "random": RANDOM_SHARE, "single": SINGLE_NODE_SHARE, "spm": SPM_SHARE,
             "sentinels": [tokenizer.special_tokens[name] for name in FIM_TOKENS]}
            if fim_packed(corpus, split) else None)
-    pieces, counts, tokens = data_crate().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
-                                               (int(bounds[i]), int(bounds[i + 1])), row_len=seq_len + 1,
-                                               token_bytes=tokenizer.token_bytes[:tokenizer.bos_token_id],
-                                               pattern=tokenizer.pattern, grammar=grammar(corpus), fim=fim)
+    pieces, counts, tokens = corpus_crate().pack(str(compiled.with_suffix(".bin")), str(compiled.with_suffix(".idx")),
+                                                 (int(bounds[i]), int(bounds[i + 1])), row_len=seq_len + 1,
+                                                 token_bytes=tokenizer.token_bytes[:tokenizer.bos_token_id],
+                                                 pattern=tokenizer.pattern, grammar=grammar(corpus), fim=fim)
     return (np.frombuffer(pieces, np.int64).reshape(-1, PIECE_COLUMNS), np.frombuffer(counts, np.int64),
             np.frombuffer(tokens, TOKEN_DTYPE))
 
@@ -97,12 +97,6 @@ def shard_count(corpus: str, split: str, vocabulary: Path) -> int:
     return len(shard_bounds(corpus, split, get_tokenizer(vocabulary))) - 1
 
 
-def write_val(corpus: str, vocabulary: Path, seq_len: int) -> int:
-    """A corpus's val split packed whole (write)."""
-    shards = range(shard_count(corpus, "val", vocabulary))
-    return write(corpus, "val", vocabulary, packed_shards(corpus, "val", vocabulary, shards, seq_len), seq_len)
-
-
 def take(corpus: str, more: Iterator[Shard]) -> Shard:
     """The next packed shard of a corpus read in part; it has one while its rows fall short of its draw."""
     shard = next(more, None)
@@ -114,10 +108,10 @@ def take(corpus: str, more: Iterator[Shard]) -> Shard:
 
 def fit(stage: mixture.Stage, rows: dict[str, int], more: dict[str, Generator[Shard]],
         held: dict[str, list[Shard]]) -> dict[str, float]:
-    """The stage's weights once every corpus holds its draw over the stage's rows (loader.weights): a corpus read in
+    """The stage's weights once every corpus holds its draw over the stage's rows (mixture.weights): a corpus read in
     part (more) packs its next shard into held while it draws more rows than it holds."""
     while True:
-        shares, over = weights(stage, rows, stage.rows)
+        shares, _, over = weights(stage, rows, stage.rows)
         if not over:
             return shares
         for name, excess in over.items():
@@ -153,10 +147,13 @@ def pack_stage(stage: mixture.Stage, vocabulary: Path, whole: dict[str, list[int
 def main() -> None:
     """The corpus tokenizer's packs for the base model's run; val splits in threads beside the stages, so a val
     shard's longest document does not hold up the cores."""
-    data_crate()  # built once, before the threads call it
+    corpus_crate()  # built once, before the threads call it
     stages = (mixture.FILE_STAGE, mixture.REPO_STAGE)
     with ThreadPoolExecutor() as threads:
-        vals = [threads.submit(write_val, corpus, TOKENIZER, stage.seq_len)
+        # each val split packed whole
+        vals = [threads.submit(write, corpus, "val", TOKENIZER,
+                               packed_shards(corpus, "val", TOKENIZER, range(shard_count(corpus, "val", TOKENIZER)),
+                                             stage.seq_len), stage.seq_len)
                 for stage in stages for corpus in stage.sources]
         trailing = set(repository_parts(TOKENIZER))
         file_whole = {s: [i for i, path in enumerate(curated_shards(s, "train")) if int(path.stem) not in trailing]

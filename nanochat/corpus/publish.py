@@ -8,16 +8,15 @@ python -m nanochat.corpus.publish push | pull
 
 import sys
 
-import pyarrow.parquet as pq
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, snapshot_download
 
 from nanochat.config import DATASET
 from nanochat.corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
-from nanochat.corpus.sources import SOURCES, curated_dir
+from nanochat.corpus.sources import SOURCES, curated_dir, footer_rows
 from nanochat.paths import CORPUS
 
 # Bytes per preupload call: an upload URL the Hub's LFS batch call returns expires 15 minutes after the call
-# (X-Amz-Expires=900), so every file of a call must start uploading within them
+# (X-Amz-Expires=900), so every file of a call must start uploading within them: 4 GiB needs at least 4.6 MiB/s
 PREUPLOAD = 4 * 1024**3
 # The card's account of each folder and each column (docs/corpus.md §1-§3)
 CONTENTS = {
@@ -53,8 +52,8 @@ COLUMNS = {
 
 def curated() -> dict[str, dict[str, int]]:
     """{source: {split: rows (Parquet footers)}} of every read source."""
-    return {source: {split: sum(pq.read_metadata(path).num_rows for path in curated_dir(source, split).iterdir())
-                     for split in ("train", "val")} for source in SOURCES}
+    return {source: {split: footer_rows(curated_dir(source, split).iterdir()) for split in ("train", "val")}
+            for source in SOURCES}
 
 
 def card(rows: dict[str, dict[str, int]]) -> str:

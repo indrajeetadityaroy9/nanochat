@@ -3,13 +3,20 @@ The training mixture (docs/corpus.md §5): the run's tokens, its two stages, eac
 share is a fixed fraction of the stage's tokens, "supply" (read whole once), or "rest" (the code group taking what the
 other code groups leave of CODE_SHARE). Within a group, sources weigh by their amounts: tokens before packing, packed
 rows after. Groups read in part (IN_PART) read the same fraction of each source (prepare.extent fetches only that).
+A run's weights in a stage (weights) and its mixture of packed corpora row by row (mixture_rows).
 """
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
+
 from nanochat.config import MICRO_BATCH_TOKENS, REPO_SHARE
+
+# the Weyl sequence frac(n * GOLDEN) spreads every prefix of itself most evenly over [0, 1) (Knuth, TAOCP Vol. 3 §6.4)
+GOLDEN = (math.sqrt(5) - 1) / 2
 
 
 @dataclass(frozen=True)
@@ -63,13 +70,13 @@ class Stage:
 
 # The base model's run (docs/pretraining.md): schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens), its
 # last REPO_SHARE of steps at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run
-# draws by the stage's shares at its own size (loader.weights)
+# draws by the stage's shares at its own size (weights)
 STEPS, STEP_TOKENS = 69_580, 15 * MICRO_BATCH_TOKENS
 REPO_STEPS = round(REPO_SHARE * STEPS)
 
 # Code, text and math shares: DeepSeek-Coder's 87% code, 10% code-related English and 3% code-unrelated Chinese (arXiv
 # 2401.14196 §2: "87% source code, 10% English code-related natural language corpus, and 3% code-unrelated Chinese
-# natural language corpus"), the natural language here web text and mathematics [inference]
+# natural language corpus"); we take its natural language to cover web text and mathematics
 CODE_SHARE = 0.87
 NON_CODE = ("text", "math")
 REPOSITORY_SOURCES = ("stack_edu_python", "ultradata_stack_v3_l2_python", "ultradata_code_l2_python",
@@ -77,8 +84,8 @@ REPOSITORY_SOURCES = ("stack_edu_python", "ultradata_stack_v3_l2_python", "ultra
 MATH_SOURCES = ("ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultradata_math_l3_multi_style",
                 "ultradata_math_l3_textbook_exercise")
 # Synthetic code: UltraData-Code L3's exercises and Nemotron's rewritten Python and Python transpiled into C++, 30% of
-# code: good mixtures' share of rephrased synthetic data, "converging to ~30%" (Kang et al., arXiv 2510.01631 §1), a
-# finding on rephrased web text carried to code [inference]
+# code: good mixtures' share of rephrased synthetic data, "converging to ~30%" (Kang et al., arXiv 2510.01631 §1),
+# their finding on rephrased web text, applied to code
 SYNTHETIC_SOURCES = ("ultradata_code_l3_python", "ultradata_code_l3_cpp", "nemotron_rewriting_python",
                      "nemotron_transpilation_cpp")
 # The repository stage's documents per (repository, language) across REPOSITORY_SOURCES (compile.py), a corpus per
@@ -122,3 +129,34 @@ def draw(group: str) -> float:
     """The tokens both stages draw of a group read in part."""
     return sum(float(stage.groups[group].share) * stage.tokens for stage in (FILE_STAGE, REPO_STAGE)
                if group in stage.groups)
+
+
+def weights(stage: Stage, rows: dict[str, int], count: int
+            ) -> tuple[dict[str, float], dict[str, int], dict[str, int]]:
+    """A run's {corpus: weight} in a stage of `count` rows given each corpus's packed rows, {corpus: the rows it draws}
+    and {corpus: the rows it draws beyond its packed rows} (empty when the run fits): the stage's shares (Stage.shares)
+    of the packed rows, replayed by mixture_rows; a "supply" corpus that draws beyond its rows weighs as many rows less,
+    so it is read whole once and never overdraws."""
+    supply, weighed = set(stage.supply), dict(rows)
+    while True:
+        shares = stage.shares(weighed, count)
+        names = list(shares)
+        counts = np.bincount(mixture_rows(np.array([shares[n] for n in names]), start=0, count=count),
+                             minlength=len(names))
+        draws = dict(zip(names, counts.tolist(), strict=True))
+        over = {n: d - rows[n] for n, d in draws.items() if d > rows[n]}
+        if not over.keys() & supply:
+            return shares, draws, over
+        for n in over.keys() & supply:
+            weighed[n] -= over[n]
+
+
+def mixture_rows(weights: np.ndarray, *, start: int, count: int) -> np.ndarray:
+    """Corpus index (into weights) of each run row start..start+count-1: row n goes to the corpus whose share of the
+    cumulative weights holds the Weyl point frac((n + 1) * GOLDEN), so every prefix of the run holds each corpus nearly
+    in proportion to its weight (the sequence's low discrepancy), and any stretch of the run is computed without the
+    rows before it."""
+    bounds = np.cumsum(weights)
+    bounds /= bounds[-1]
+    points = np.modf(np.arange(start + 1, start + count + 1) * GOLDEN)[0]
+    return np.searchsorted(bounds, points, side="right")

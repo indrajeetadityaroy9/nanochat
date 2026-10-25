@@ -2,16 +2,17 @@
 The pre-training corpus (docs/corpus.md), one module per stage, under paths.CORPUS; run order: docs/pretraining.md.
 
   schema.py     document categories: schema, split group, whether the content is code
-  sources.py    the 18 sources and the corpus's file paths
-  mixture.py    the run's tokens, its two stages and their groups' shares
+  sources.py    the 18 sources, the corpus's file paths, curated texts and repository samples
+  mixture.py    the run's tokens, its two stages and their groups' shares; a run's weights and rows per corpus
   parallel.py   spawned workers, a bounded ordered map, the memory budget
-  prepare.py    fetch each source's Hub files and standardize them (GB10)
-  curate.py     Python 3 check with repair, exact deduplication, split, curated shards (GB10)
+  prepare.py    fetch each source's Hub files and standardize them
+  curate.py     Python 3 check with repair, exact deduplication, split, curated shards
   publish.py    the curated shards to the Hub (config.DATASET) and back
   tokenizer.py  load a vocabulary (ablations/tokenizer.py trains, decides and adopts it)
   compile.py    curated documents to tokens; the 32K stage's repository documents
   pack.py       each stage's training rows with FIM examples, and their weights
-  loader.py     the compiled and packed data, and their micro-batches
+  layout.py     the compiled and packed data's paths and counts (torch-free, for spawned workers)
+  loader.py     the packed data's micro-batches
   crate/        the Rust extension: SA-BPE trainer, repository samples, packing
 
   CORPUS/raw/<source>/<Hub path>                fetched Hub columns (prepare.fetch)

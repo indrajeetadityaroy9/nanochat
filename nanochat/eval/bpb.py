@@ -25,7 +25,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from nanochat.corpus.loader import PretrainingBatches, packed_rows
+from nanochat.corpus.layout import packed_rows, stage_rows
+from nanochat.corpus.loader import PretrainingBatches
 from nanochat.corpus.mixture import FILE_STAGE, NON_CODE, REPO_STAGE, Stage
 from nanochat.corpus.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT
@@ -122,7 +123,7 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     corpora = {name: {**sums(losses, loader, token_bytes, steps=len(samples[name]) // stage.batch_rows,
                              num_segments=num_segments),
                       "rows": sampled[name]} for name, loader in loaders.items()}
-    rows = {corpus: packed_rows(corpus, "train", tokenizer, stage.seq_len) for corpus in stage.sources}
+    rows = stage_rows(tokenizer, stage)
     weights = stage.shares(rows, sum(rows.values()))
     groups = {"code": stage.code} | {name: stage.groups[name].sources for name in NON_CODE}
     groups_bpb = {group: mixture_bpb(corpora, {c: weights[c] for c in members}) for group, members in groups.items()}

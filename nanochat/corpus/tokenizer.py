@@ -42,8 +42,8 @@ class Tokenizer:
     """A vocabulary: its mergeable tokens' bytes in rank order, then SPECIAL_TOKENS, encoded by tiktoken with its split
     pattern; `compiled` the directory of its compiled and packed data."""
 
-    def __init__(self, mergeable: list[bytes], pattern: str, *, name: str, compiled: Path) -> None:
-        self.name, self.compiled, self.pattern = name, compiled, pattern
+    def __init__(self, mergeable: list[bytes], pattern: str, *, compiled: Path) -> None:
+        self.compiled, self.pattern = compiled, pattern
         self.bos_token_id = len(mergeable)
         self.special_tokens = {token: len(mergeable) + i for i, token in enumerate(SPECIAL_TOKENS)}
         # every id's bytes (a special token's as its text) and its length in document bytes (0 for a special token)
@@ -70,4 +70,4 @@ def get_tokenizer(directory: Path = TOKENIZER) -> Tokenizer:
     with open(directory / "tokenizer.tiktoken", "rb") as f:
         mergeable = [base64.b64decode(line.split()[0]) for line in f]  # line i: token i, base64, and its rank i
     with open(directory / "tokenizer.pattern", newline="") as f:
-        return Tokenizer(mergeable, f.read(), name=directory.name, compiled=directory.parent / "compiled")
+        return Tokenizer(mergeable, f.read(), compiled=directory.parent / "compiled")

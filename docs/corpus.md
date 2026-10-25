@@ -83,10 +83,10 @@ One standardized Parquet file per Hub file, `CORPUS/standardized/<source>/<k>.pa
 
 | Category | Fields | Split group (§4.4) |
 |---|---|---|
-| REPOSITORY_FILE | `id`, `repo_name`, `relative_path`, `content`, `language` | `repo_name` |
+| REPOSITORY_FILE | `id`, `repo_name`, `relative_path`, `content`, `language` | `lower(repo_name)` |
 | EXERCISE | `id`, `content`, `language` | `id` |
 | SYNTHETIC_FILE | `id`, `content`, `language` | `id` |
-| FUNCTION | `id`, `repo_name`, `content`, `language` | `repo_name` |
+| FUNCTION | `id`, `repo_name`, `content`, `language` | `lower(repo_name)` |
 | CONVERSATION | `id`, `problem_id`, `content` | `problem_id` |
 | NOTEBOOK | `id`, `content`, `language` | `id` |
 | TEXT | `id`, `content` | `id` |
@@ -218,9 +218,10 @@ English (arXiv 2102.04664 §3.6, §3.9). On the Hub's Python splits:
 `curate` runs the Python 3 check with repair, exact deduplication, the split and the shards
 (`CORPUS/curated/<source>/<split>/<k>.parquet`); every output, the shards' row groups included, is a function of the
 standardized files. A repository shard's row group holds whole samples, at least 65,536 files (`curate.SAMPLE_ROWS`).
-Invariants of the curated corpus, checked on every row before publication: 178,887,291 rows; no empty text, CR or
-leading U+FEFF; every `id` its text's sha1; no text twice across all sources and splits; every Python file in a parse
-sample parses; one schema per source; each source's rows its input less its duplicates.
+Invariants of the curated corpus, by construction (no separate check runs): no empty text, CR or leading U+FEFF
+(`prepare.lines`, empty texts dropped with the duplicates); every `id` its text's sha1 (recomputed after a repair); no
+text twice across all sources and splits; every Python file of a code category parses (`curate.check`); one schema per
+source; each source's rows its standardized rows less its unrepairable Python files, duplicates and empty texts.
 
 ### 4.1 No generated, vendored or C++ syntax filter
 
@@ -491,7 +492,7 @@ tiers beat the same tokens mixed, MBPP 16.34 against 12.06.
   The rule helps Python only.
 - **Rows hold one corpus; steps hold every group.** A row is packed from one curated shard, Zhao et al.'s UniChunk
   (lower perplexity than MixChunk by 0.34 at 2K and 0.21 at 8K, arXiv 2402.13991 §3.2). The loader assigns run row n
-  to a corpus by frac((n + 1) · 0.618…) against the cumulative weights (`loader.mixture_rows`), so every step of the
+  to a corpus by frac((n + 1) · 0.618…) against the cumulative weights (`mixture.mixture_rows`), so every step of the
   base model's file stage holds 155–158 code, 17–20 text and 4–7 mathematics rows of its 180 (computed with
   `mixture_rows` over its 65,785 steps).
 
@@ -576,4 +577,4 @@ partitions are counted in tokens (`compile.compile_stage`).
 | Publish | `publish.py` | done: `iaroy/nanochat-data`, one commit: `<source>/<split>/<k>.parquet` (1,812 shards) and the card |
 | Tokenizer: sample, arms, decision, adoption | `ablations/tokenizer.py` (trains, decides, adopts), `tokenizer.py` (loads) | `vocabularies`, `intrinsic`, `data` done; runs, decision and adoption wait for the user's approval (`docs/tokenizer-ablation.md`) |
 | Compile: 8K samples, 32K repository documents | `compile.py` | after adoption |
-| Mixture, pack, loader | `mixture.py`, `pack.py`, `loader.py` | pack after compile; training reads the loader (`train/stages.py`) |
+| Mixture, pack, loader | `mixture.py`, `pack.py`, `layout.py`, `loader.py` | pack after compile; training reads the loader (`train/stages.py`) |

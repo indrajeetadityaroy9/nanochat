@@ -1,6 +1,6 @@
 """
 A run's training rows per stage: the packed train rows of the stage's corpora (corpus/pack.py packs each stage's
-documents apart, so no document is read twice), drawn by the run's weights in the stage (corpus/loader.py weights: the
+documents apart, so no document is read twice), drawn by the run's weights in the stage (corpus/mixture.py weights: the
 stage's shares of the packed rows at the rows the run draws there). max_ratio: the most tokens per scaling parameter at
 which no stage draws more rows of a corpus than it holds (PretrainingBatches stops at an exhausted corpus).
 stage_batches: a stage's training micro-batches in the run's data order.
@@ -13,16 +13,12 @@ import numpy as np
 import torch
 
 from nanochat.config import MICRO_BATCH_TOKENS
-from nanochat.corpus.loader import PretrainingBatches, packed_rows, weights
-from nanochat.corpus.mixture import FILE_STAGE, REPO_STAGE, Stage
+from nanochat.corpus.layout import stage_rows
+from nanochat.corpus.loader import PretrainingBatches
+from nanochat.corpus.mixture import FILE_STAGE, REPO_STAGE, Stage, weights
 from nanochat.corpus.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT, gpt_config, scaling_params
 from nanochat.train.schedule import RunPlan, plan
-
-
-def stage_rows(tokenizer: Tokenizer, stage: Stage) -> dict[str, int]:
-    """{corpus: its packed train rows} of the stage's corpora."""
-    return {corpus: packed_rows(corpus, "train", tokenizer, stage.seq_len) for corpus in stage.sources}
 
 
 def drawn(stage: Stage, run: RunPlan) -> int:
@@ -37,7 +33,7 @@ def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int
     permuted once by `seed` (RandomState's stream is frozen across numpy versions, so a resume sees the same order),
     FIM pieces read as FIM examples. A run that would overdraw a corpus raises (max_ratio bounds the ratio)."""
     rows = stage_rows(tokenizer, stage)
-    mixture, over = weights(stage, rows, drawn(stage, run))
+    mixture, _, over = weights(stage, rows, drawn(stage, run))
     if over:
         raise RuntimeError(f"the run draws {over} rows beyond the T{stage.seq_len} packs (train/stages.py max_ratio)")
     orders = {corpus: np.random.RandomState(seed).permutation(rows[corpus]) for corpus in mixture}
@@ -58,7 +54,7 @@ def max_ratio(tokenizer: Tokenizer, *, depth: int) -> float:
 
     def overdrawn(n: int) -> bool:
         run = plan(model=model, ratio=ratio(n))
-        return any(weights(stage, held, drawn(stage, run))[1] for stage, held in rows if drawn(stage, run))
+        return any(weights(stage, held, drawn(stage, run))[2] for stage, held in rows if drawn(stage, run))
 
     n = bisect.bisect_left(range(sum(rows[0][1].values()) * FILE_STAGE.seq_len // MICRO_BATCH_TOKENS + 1), True,
                            key=overdrawn)

@@ -1,5 +1,5 @@
 """
-Prepare every source (GB10): fetch the Hub files it reads, then standardize each into its category's schema, one
+Prepare every source: fetch the Hub files it reads, then standardize each into its category's schema, one
 standardized file per fetched file. Fetching reads only the standardizer's columns (ranged reads, several files at
 once) and keeps fetched files; standardized and checked files are rebuilt. A source read in part (mixture.IN_PART)
 fetches only the files that hold its share of the draw (extent). Stack-Edu's Hub files are metadata: each blob's text
@@ -32,20 +32,19 @@ from obstore.store import S3Store
 
 from nanochat.corpus import mixture
 from nanochat.corpus.parallel import SPAWN
-from nanochat.corpus.schema import CONVERSATION, FUNCTION, REPOSITORY_FILE, SPLIT
+from nanochat.corpus.schema import COMPRESSION, CONVERSATION, FUNCTION, REPOSITORY_FILE, SPLIT, sha1
 from nanochat.corpus.sources import (
     EDU,
     SOURCES,
     Source,
     checked_path,
+    footer_rows,
     raw_dir,
     standardized_path,
     text_bytes,
 )
 
-# Parquet codec of the files the corpus writes
-COMPRESSION = "zstd"
-# Hub files fetched at once (docs/corpus.md §1)
+# Hub files fetched at once: an engineering choice, more overlapping more transfers at more concurrent Hub connections
 FETCHES = 4
 
 
@@ -57,19 +56,17 @@ def hub_files(source: str) -> list[str]:
                   if any(fnmatch.fnmatchcase(f, glob) for glob in spec.files.values()))
 
 
-def hub_text_bytes(source: str, file: str) -> int:
-    """The text bytes of one of the source's Hub files, from its Parquet footer."""
-    spec = SOURCES[source]
-    with HfFileSystem().open(f"datasets/{spec.repo}/{file}", "rb") as remote:
-        return text_bytes(pq.ParquetFile(remote).metadata, spec.text)
-
-
 @functools.cache
 def file_bytes(source: str) -> dict[str, int]:
-    """{Hub file: its text bytes} of every Hub file of the source."""
-    files = hub_files(source)
+    """{Hub file: its text bytes, from its Parquet footer} of every Hub file of the source."""
+    spec, files = SOURCES[source], hub_files(source)
+
+    def footer_bytes(file: str) -> int:
+        with HfFileSystem().open(f"datasets/{spec.repo}/{file}", "rb") as remote:
+            return text_bytes(pq.ParquetFile(remote).metadata, spec.text)
+
     with ThreadPoolExecutor(FETCHES) as pool:
-        return dict(zip(files, pool.map(functools.partial(hub_text_bytes, source), files), strict=True))
+        return dict(zip(files, pool.map(footer_bytes, files), strict=True))
 
 
 def extent(source: str) -> list[str]:
@@ -148,11 +145,6 @@ def fetch(source: str, file: str) -> Path:
 
 
 # ---- standardize: a raw table into its category's schema
-
-def sha1(texts: pa.Array | pa.ChunkedArray) -> pa.Array:
-    """The hex sha1 of each text's UTF-8 bytes."""
-    return pa.array([hashlib.sha1(b).hexdigest() for b in texts.cast(pa.large_binary()).to_pylist()], pa.string())
-
 
 def lines(texts: pa.ChunkedArray) -> pa.ChunkedArray:
     """texts with CR LF and a lone CR as LF and every leading U+FEFF dropped, as Python and C++ read a source file
@@ -237,7 +229,7 @@ def prepare(source: str, files: list[str]) -> None:
         paths = list(pool.map(functools.partial(fetch, source), files))
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:
         list(pool.map(standardize, [(source, k, path) for k, path in enumerate(paths)]))
-    rows = sum(pq.read_metadata(standardized_path(source, k)).num_rows for k in range(len(files)))
+    rows = footer_rows(standardized_path(source, k) for k in range(len(files)))
     print(f"{source}: {len(files)} of {len(hub_files(source))} files of {spec.repo}, {rows:,} rows", flush=True)
 
 

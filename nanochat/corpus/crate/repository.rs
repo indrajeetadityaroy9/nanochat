@@ -186,7 +186,7 @@ fn samples(dependencies: &[Vec<usize>]) -> Vec<Vec<usize>> {
 }
 
 /// The samples (samples()) of the repositories of a partition: repository r holds files ends[r - 1]..ends[r] (from 0),
-/// paths[i] with contents texts[i] (within a repository sorted by path and content id; repository-relative,
+/// paths[i] with contents texts[i] (within a repository sorted by path; sources.repository_samples; repository-relative,
 /// '/'-separated paths, which may repeat) of a grammar ("Python", "C++"). File f depends on file g of its repository
 /// (g != f) when an import or include of f names g (Python, C++; every import node of f's tree, also of a tree with
 /// syntax errors, whose error recovery keeps the nodes it parsed); the file of a single-file repository is one sample,

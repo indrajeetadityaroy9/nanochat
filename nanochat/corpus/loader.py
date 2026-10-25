@@ -1,52 +1,18 @@
 """
-The corpus's compiled and packed data on disk (compile.py, pack.py), and training's reading of them: a run's weights
-in a stage (weights), its mixture of packed corpora row by row (mixture_rows), assembled into micro-batches
-(PretrainingBatches).
+Training's reading of the packed data (layout.py): a run's mixture of packed corpora (mixture.weights, row by row
+mixture.mixture_rows) assembled into micro-batches (PretrainingBatches).
 """
 
 import itertools
-import json
-import math
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Literal, NamedTuple
 
 import numpy as np
 import torch
 
-from nanochat.corpus import mixture
-from nanochat.corpus.sources import SOURCES
+from nanochat.corpus.layout import PIECE_COLUMNS, TOKEN_DTYPE, fim_packed, packed_path, split_path
+from nanochat.corpus.mixture import mixture_rows
 from nanochat.corpus.tokenizer import Tokenizer
-
-# the Weyl sequence frac(n * GOLDEN) spreads every prefix of itself most evenly over [0, 1) (Knuth, TAOCP Vol. 3 §6.4)
-GOLDEN = (math.sqrt(5) - 1) / 2
-TOKEN_DTYPE = np.uint16  # compiled tokens, as the data crate reads them (corpus/crate pack.rs: &[u16])
-# a pack index entry of the data crate (corpus/crate pack.rs pack_shard): token range [start, end) of the compiled
-# split, then the range of the piece's FIM example in the split's FIM tokens (empty for a piece read left to right)
-PIECE_COLUMNS = 4
-
-
-def split_path(corpus: str, split: str, tokenizer: Tokenizer) -> Path:
-    """The stem of a compiled split's files (compile.py: .bin tokens, .idx document offsets, .json documents per
-    curated file), in <tokenizer.compiled>/<corpus>-<tokenizer data key>/."""
-    return tokenizer.compiled / f"{corpus}-{tokenizer.data_key}" / split
-
-
-def packed_path(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Path:
-    """The stem of a packed split's files (pack.py: .pieces, .rows, .fim), the compiled split's at the row length."""
-    return split_path(corpus, split, tokenizer).with_name(f"{split}-T{seq_len}")
-
-
-def grammar(corpus: str) -> str | None:
-    """The tree-sitter grammar of a corpus of repository code (its statement cuts and AST middles), else None."""
-    if corpus in mixture.REPOSITORY_SOURCES:
-        return SOURCES[corpus].language
-    return {name: language for language, name in mixture.REPOSITORIES.items()}.get(corpus)
-
-
-def fim_packed(corpus: str, split: str) -> bool:
-    """Whether a split is packed with fill-in-the-middle examples: the train split of repository code (pack.py)."""
-    return grammar(corpus) is not None and split == "train"
 
 
 class PackedSplit(NamedTuple):
@@ -70,48 +36,6 @@ def packed(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Packe
                        np.memmap(packing.with_suffix(".rows"), dtype=np.int64, mode="r"),
                        np.memmap(packing.with_suffix(".fim"), dtype=TOKEN_DTYPE, mode="r")
                        if fim_packed(corpus, split) else None)
-
-
-def shard_bounds(corpus: str, split: str, tokenizer: Tokenizer) -> np.ndarray:
-    """Each curated shard's first document in a compiled split, then the number of documents (compiled <split>.json:
-    each shard's documents, in order)."""
-    files = json.loads(split_path(corpus, split, tokenizer).with_suffix(".json").read_text())["files"]
-    return np.cumsum([0] + [file["documents"] for file in files])
-
-
-def packed_rows(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> int:
-    """The rows of a packed split (its .rows: each row's first piece, then the number of pieces)."""
-    rows = packed_path(corpus, split, tokenizer, seq_len).with_suffix(".rows")
-    return len(np.memmap(rows, dtype=np.int64, mode="r")) - 1
-
-
-def weights(stage: mixture.Stage, rows: dict[str, int], count: int) -> tuple[dict[str, float], dict[str, int]]:
-    """A run's {corpus: weight} in a stage of `count` rows given each corpus's packed rows, and {corpus: the rows it
-    draws beyond its packed rows} (empty when the run fits): the stage's shares (Stage.shares) of the packed rows,
-    replayed by mixture_rows; a "supply" corpus that draws beyond its rows weighs as many rows less, so it is read whole
-    once and never overdraws."""
-    supply, weighed = set(stage.supply), dict(rows)
-    while True:
-        shares = stage.shares(weighed, count)
-        names = list(shares)
-        draws = np.bincount(mixture_rows(np.array([shares[n] for n in names]), start=0, count=count),
-                            minlength=len(names))
-        over = {n: int(d) - rows[n] for n, d in zip(names, draws, strict=True) if d > rows[n]}
-        if not over.keys() & supply:
-            return shares, over
-        for n in over.keys() & supply:
-            weighed[n] -= over[n]
-
-
-def mixture_rows(weights: np.ndarray, *, start: int, count: int) -> np.ndarray:
-    """Corpus index (into weights) of each run row start..start+count-1: row n goes to the corpus whose share of the
-    cumulative weights holds the Weyl point frac((n + 1) * GOLDEN), so every prefix of the run holds each corpus nearly
-    in proportion to its weight (the sequence's low discrepancy), and any stretch of the run is computed without the
-    rows before it."""
-    bounds = np.cumsum(weights)
-    bounds /= bounds[-1]
-    points = np.modf(np.arange(start + 1, start + count + 1) * GOLDEN)[0]
-    return np.searchsorted(bounds, points, side="right")
 
 
 class PretrainingBatches:

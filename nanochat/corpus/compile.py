@@ -17,6 +17,7 @@ writes tokens in task order, so the output does not depend on the number of work
 python -m nanochat.corpus.compile
 """
 
+import functools
 import itertools
 import json
 import os
@@ -26,20 +27,26 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from nanochat.corpus import mixture
-from nanochat.corpus.loader import TOKEN_DTYPE, shard_bounds, split_path
+from nanochat.corpus.layout import TOKEN_DTYPE, shard_bounds, split_path
 from nanochat.corpus.parallel import MEMORY, SPAWN, ordered
 from nanochat.corpus.schema import REPOSITORY_FILE
-from nanochat.corpus.sources import SOURCES, curated_dir, curated_shards, text_bytes, texts
+from nanochat.corpus.sources import (
+    SOURCES,
+    curated_dir,
+    curated_shards,
+    repository_samples,
+    sample_starts,
+    text_bytes,
+    texts,
+)
 from nanochat.corpus.tokenizer import TOKENIZER, get_tokenizer
-from nanochat.native import data_crate
 
 Documents = tuple[np.ndarray, np.ndarray]  # tokens, document lengths
-# A repository task's peak memory in its partition's text bytes: the Arrow table and its sorted copy, the contents,
-# files and documents as Python strings (up to 4 bytes a character) and their tokens
+# A repository task's peak memory in its partition's text bytes, an estimate, not measured: the Arrow table and its
+# sorted copy, the contents, files and documents as Python strings (up to 4 bytes a character) and their tokens
 PEAK = 10
 
 
@@ -64,7 +71,7 @@ def row_group_documents(task: tuple[str, Path, int, Path]) -> Documents:
     table = pq.ParquetFile(path).read_row_group(g)
     documents = texts(source, table)
     if SOURCES[source].category == REPOSITORY_FILE:
-        starts = np.flatnonzero(np.diff(table["sample"].to_numpy(), prepend=-1)).tolist()
+        starts = sample_starts(table["sample"].to_numpy())
         documents = ["".join(documents[a:b]) for a, b in itertools.pairwise([*starts, len(documents)])]
     return encode(documents, vocabulary)
 
@@ -84,18 +91,8 @@ def repository_documents(task: tuple[str, str, int, Path]) -> Documents:
         table.append_column("rank", pa.array(np.full(table.num_rows, rank)))
         for rank, table in enumerate(pq.read_table(curated_dir(source, split) / f"{part}.parquet",
                                                    columns=schema.names).cast(schema) for source in sources))
-    # sorted so a repository (its lowercased name) is a run of rows (large_string: 64-bit offsets hold a partition
-    # beyond 2 GiB) and the first source's file of each (repository, path) comes first; the rest of each path's files
-    # are dropped
-    table = table.append_column("repository", pc.utf8_lower(table["repo_name"]))
-    table = table.sort_by([("repository", "ascending"), ("relative_path", "ascending"),
-                           ("rank", "ascending")]).combine_chunks()
-    keys = pc.binary_join_element_wise(table["repository"], table["relative_path"], "\0").chunk(0)
-    table = table.filter(np.concatenate([[True], pc.not_equal(keys[1:], keys[:-1]).to_numpy(zero_copy_only=False)]))
-    table = table.combine_chunks()
-    ends = pc.run_end_encode(table["repository"].chunk(0)).run_ends.to_numpy().tolist()
-    samples = data_crate().repository_samples(table["relative_path"].to_pylist(), table["content"].to_pylist(), ends,
-                                              grammar=language)
+    # the first source's file of each (repository, path) sorts first and is kept
+    table, ends, samples = repository_samples(table, ("relative_path", "rank"), language, one_per_path=True)
     files = texts(sources[0], table)
     del table
     files = [files[i] for sample in samples for i in sample]  # a repository's samples permute its rows
@@ -144,19 +141,25 @@ def train_parts() -> list[int]:
     return [int(path.stem) for path in curated_shards(mixture.REPOSITORY_SOURCES[0], "train")]
 
 
+def repository_tasks(parts: list[int]) -> list[tuple[str, str, int]]:
+    """The repositories corpora's (language, split, partition) in write order: per language (mixture.REPOSITORIES
+    order), val partition 0, then train partitions `parts`."""
+    return [(language, split, part) for language in mixture.REPOSITORIES
+            for split, split_parts in (("val", [0]), ("train", parts)) for part in split_parts]
+
+
+@functools.cache
 def repository_window() -> int:
     """Repository tasks in flight: as many as MEMORY holds at PEAK times the largest partition's text (one language's
     sources)."""
     largest = max(sum(text_bytes(pq.read_metadata(curated_dir(s, split) / f"{part}.parquet"), "content")
                       for s in language_sources(language))
-                  for language in mixture.REPOSITORIES for split, parts in (("val", [0]), ("train", train_parts()))
-                  for part in parts)
+                  for language, split, part in repository_tasks(train_parts()))
     return max(1, MEMORY // (PEAK * largest))
 
 
 def write_repositories(vocabulary: Path, parts: list[int], results: Iterator[Documents]) -> None:
-    """The repositories corpora's splits from results, per language (mixture.REPOSITORIES order) the documents of val
-    partition 0, then of train partitions `parts`."""
+    """The repositories corpora's splits from results, in repository_tasks(parts) order."""
     tokenizer = get_tokenizer(vocabulary)
     for corpus in mixture.REPOSITORIES.values():
         split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
@@ -169,8 +172,7 @@ def write_repositories(vocabulary: Path, parts: list[int], results: Iterator[Doc
 def compile_repositories(vocabulary: Path, parts: list[int], pool: Executor) -> None:
     """The repositories corpora (mixture.REPOSITORIES) of train partitions `parts` and of val partition 0, every
     (language, split, partition) a task, repository_window() in flight."""
-    tasks = [(language, split, part, vocabulary) for language in mixture.REPOSITORIES
-             for split, split_parts in (("val", [0]), ("train", parts)) for part in split_parts]
+    tasks = [(*task, vocabulary) for task in repository_tasks(parts)]
     write_repositories(vocabulary, parts, ordered(pool, repository_documents, tasks, repository_window()))
 
 
@@ -193,9 +195,7 @@ def compile_stage(vocabulary: Path, pool: Executor, need: float) -> list[int]:
     if total < need:
         raise RuntimeError(f"the repository partitions hold {total:,} of the {need:,.0f} tokens of the 32K stage")
     chosen = parts[-(len(held) // len(languages) - 1):]
-    write_repositories(vocabulary, chosen, (held.pop((language, split, part)) for language in languages
-                                            for split, split_parts in (("val", [0]), ("train", chosen))
-                                            for part in split_parts))
+    write_repositories(vocabulary, chosen, (held.pop(task) for task in repository_tasks(chosen)))
     return chosen
 
 
