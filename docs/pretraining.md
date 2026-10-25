@@ -393,14 +393,17 @@ decoder is faster at d16 for codegen: greedy + sampled (23,100 requests) 100 s a
 bound by its per-step host work at this model size (GPU 17–36% busy, `max_num_seqs` 1,024). FIM greedy (16,976
 requests) is faster through vLLM, 45 s against 75 s. The native class and the Transformers backend run at the same rate.
 
-**Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir>`): the harnesses' own CLIs,
-unmodified, on an export served by vLLM: EvalPlus's `evalplus.codegen --backend vllm --greedy` on HumanEval+ and MBPP+
-(direct completion; the evalplus commit `pyproject.toml` pins) scored by `evalplus.evaluate`, and MultiPL-E's
-`automodel_vllm.py` on humaneval-cpp and mbpp-cpp (T = 0.2, top-p 0.95, 20 completions per problem; the commit
-`docker/Dockerfile` pins) judged by its `evaluation/src/main.py` and `pass_k.py`. Generation runs in the
-`nanochat-vllm` image, scoring in the nanochat image. It sets this suite's numbers beside the protocols as published,
-which differ from ours in their prompts' tokenization (text through `tokenizer.json`), MultiPL-E's 2,048-token
-context and their samplers.
+**Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir> [generate|score]`): the
+harnesses' own CLIs, unmodified, on an export served by vLLM: EvalPlus's `evalplus.codegen --backend vllm --greedy` on
+HumanEval+ and MBPP+ (direct completion; the evalplus commit `pyproject.toml` pins) scored by `evalplus.evaluate`, and
+MultiPL-E's `automodel_vllm.py` on humaneval-cpp and mbpp-cpp (T = 0.2, top-p 0.95, 20 completions per problem; the
+commit `docker/Dockerfile` pins) judged by its `evaluation/src/main.py` and `pass_k.py`. To run it on a checkpoint:
+`scripts/container.sh python -m inference.export_hf <checkpoint.pt> <dir>`, then `scripts/standard_eval.sh <dir> <out>`
+(the `generate` phase needs the GPU, in the `nanochat-vllm` image; the `score` phase is CPU work in the nanochat
+image). Results: `<out>/evalplus/<dataset>/*_eval_results.json`, `<out>/multipl-e/`, `<out>/pass_k.csv`. It sets this
+suite's numbers beside the protocols as published, which differ from ours in their prompts' tokenization (text through
+`tokenizer.json`), MultiPL-E's 2,048-token context and their samplers. On the d16 checkpoint above, EvalPlus's CLI gives
+HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 (base/plus), this suite's greedy mode 0.061/0.061 and 0.045/0.037.
 
 **Constrained decoding: syntax, not types.** Type-constrained decoding (arXiv 2504.09246) implements TypeScript only;
 arXiv 2606.21619 found an incomplete constrainer lowers functional correctness, while a complete syntax constrainer
