@@ -248,7 +248,7 @@ utilization 57% → 64–69%: separate cast passes and the transposed FP8 copies
 which at K = 768 outweigh the faster GEMMs); +8–10 GB from TE saving both the bf16 fc1 output and FP8 transposes;
 likely lost Inductor fusion around TE's graph breaks [inference]. Conclusion: FP8 does not pay at this model size.
 
-### 5.15 Optimizer screen (OptScreen, OptAdopt) — screen at the wrong lr; base vs stack re-run at ×2.797, 2 seeds
+### 5.15 Optimizer screen (OptScreen, OptAdopt) — screen at the wrong lr; NorMuon adopted (`646a986`)
 d16 at 20 tokens/param, 1 seed each (user-approved), each arm paired with base seed 0 (same init and data order).
 Outputs, end of run (bpb code 8K / 32K, all 8K / 32K; HumanEval+ and MBPP+ pass@1 base/plus):
 base s0 0.4394 / 0.4212, 0.5219 / 0.5087, 0.067/0.055, 0.074/0.061; base s1 0.4380 / 0.4196, 0.5205 / 0.5071,
@@ -302,7 +302,7 @@ cancelled and Polar Express dropped. d24 (200 steps, ×2.797, seed 0, 8K, alone)
 peak equal (77.5 GiB); landed as Muon's only path. The ×1 stack at seed 1 vs base s1: paired Δ +0.0008 over the
 last 50% (22/22 windows positive), code bpb 0.4381 / 0.4196 vs 0.4380 / 0.4196.
 
-### 5.16 Decoder at d24 (DecoderD24, DecoderOwner) — final tree measured, d16 evaluation pending
+### 5.16 Decoder at d24 (DecoderD24, DecoderOwner) — committed (`4385748`), FP8 KV
 Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise. Profile (1,024
 slots, positions 256–320): GEMV ~22 of a ~35 ms step (each 16-slot group re-read the weights from L2), attention ~7.8
 ms. Changes: a TMA-fed WGMMA GEMM over the slots keeping every epilogue (greedy and sampled choice, syntax masks, the
@@ -318,7 +318,11 @@ fixed-length benchmark (2,048 requests × 512 tokens, 1,048,576 output tokens): 
 d16 66,559 → 189,307 (2.84×). Batch independence: 64/64 greedy and 64/64 sampled requests identical alone and batched.
 Agreement with the training forward's greedy choice: final 0.9916 (137 of 16,261 tokens differ, largest top-2 logit
 gap 0.56, 11 above 0.25) against main's 0.9971 (12 of 4,096, largest 0.125): FP8 KV rounding flips near-ties ~3× as
-often. Open: the d16 evaluation (queued; FP8 kept if pass@1 is within noise of main, else the bf16-KV tree), the commit.
+often. Committed (`4385748`; d24 step 8.27 ms, 123.9K tok/s at 1,024 slots, prefill 1.03 s, one slot 1.29 ms): the
+121 extra mismatches are all near-ties (top-2 gap < 0.57, median 0.0625; 48 of 72 first divergences pick the
+forward's second choice, none BOS); full d16 evaluation 862 s vs 1,064 s, per-problem changes few and two-sided
+(MBPP+ greedy +4/−5 base, +2/−7 plus; HumanEval+ greedy unchanged; FIM line EM within 0.002), every path (sampled,
+syntax-constrained, FIM) run end to end; FP8 KV kept.
 
 ### 5.17 DeepSeek's open kernel libraries as guidance (user-provided repositories)
 Sources: DeepGEMM, FlashMLA (Hopper deep-dive at commit `ba89a34`; the 2026.09.30 release dropped Hopper), DeepEP,
