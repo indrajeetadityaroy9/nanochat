@@ -12,7 +12,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | RegimeAnswers, OptimizerAnswers, ArchitectureAnswers, DataAnswers, EngineeringAnswers | done | §8 |
 | EfficiencyResearch (GH200 throughput: the training step) | done: items 1, 2, 4 applied; FP8, MPS/concurrent runs and items 5-8 rejected (each ≤1% realizable; the step's GEMMs, ~58%, run at the 700 W cap's ceiling) | §3, §8 |
 | HydraRuns (Hydra run configuration, the D5/D6/D7 knobs) | done: every knob trained and evaluated against the baseline; Records' three files, rerun skipping, a failing job stopping the sweep. Not shown: a diverged job recorded mid-sweep, the stale guard (→ HydraChecks) | §0 |
-| RunUtilization (GPU and CPU utilization of a run's and a sweep's lifecycle outside the step: compile, evaluation, start-up, gaps; eval/ and inference/ hot loops into Rust where Python binds) | running: b8057ff/247067d re-verified under `stack=67108864:-1` (the benchmarks-mode overlap dropped, user: it only shortens the base run's evaluations) | §0 |
+| RunUtilization (GPU and CPU utilization of a run's and a sweep's lifecycle outside the step: compile, evaluation, start-up, gaps; eval/ and inference/ hot loops into Rust where Python binds) | done: b8057ff and 247067d pass under `stack=67108864:-1`; the benchmarks-mode overlap dropped (user: it only shortens the base run's evaluations) | §0 |
 | CorpusParallel (CPU parallelism of the corpus pipeline and the corpus crate) | done | §0 |
 | AblationsAudit (user's audit and KISS refactor of `ablations/` and its pipeline/tokenizer integration, `local://ABLATIONS-AUDIT.md`) | done (`c100017`) | §0 |
 | SecondAudit (independent second audit of `ablations/`) | done: 8 findings, all fixed | §0 |
@@ -20,7 +20,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | DocsConsolidation, DocRefs (docs from the final code; the `docs/` layout and every reference to it) | done | §0, §5 |
 | CorpusMap (`nanochat/corpus` map: duplication, layering, dead code; `local://CORPUS-MAP.md`) | done; its code findings → CorpusFindings | §0 |
 | ActionsCheck (this document against the code; `local://ACTIONS-CHECK.md`) | done; its corrections applied | all |
-| CorpusFindings (CorpusMap's code findings) | running | §0 |
+| CorpusFindings (CorpusMap's code findings) | done (`88c151e`) | §0 |
 | HydraChecks (the run app's diverged-job and stale-guard paths, d8 smokes) | done: both pass; a step-0 divergence crashed Records' curves (fixed) | §0 |
 
 ## 0. Status: closed and open
@@ -61,25 +61,25 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | Corpus CPU parallelism | `compile_stage` (repository partitions in flight within a memory bound, tokens computed once), the crate's partition-wide `repository_samples` (rayon), 64-thread encoding, `PerWorker` (one CoreBPE / regex per rayon worker: fancy-regex scratch atomics), val splits packed beside the stages, documents packed longest first: C++ val partition 386.7 → 16.3 s, Python 712 → 61 s, pack 189 → 93 CPU-s per shard | `b9769a8`, `9e40df4`, `4ce8004`, `a20d12a`, `737f2e1` |
 | EvalPlus scoring | no 20 s exit stall per call, all cores: HumanEval+ 22.5 → 9.6 s, MBPP+ 28.0 → 12.6 s | `b8057ff` |
 | SecondAudit (independent second audit of `ablations/`) | 8 findings, all fixed: F3 (P1), F7 `data()` packed sa-bpe's repositories before compiling them, F5 `adopt` failed over the provisional tokenizer, F1, F2, F4, F6 (softcap `lm_loss` in two buffers, 43.81 → 38.03 GiB), F8 | `b9769a8`, `7292351`, `9e40df4`, `b9da1da` |
-| Second-pass KISS audit | model/ops/kernels and train/run app/configs (shared `pointer`/`stream`, unused kernel instantiations and fields removed, stale comments and citations fixed; smokes on real packs); syntax crate; corpus crate; every corpus docstring and comment cut to what the implementation needs; `decoder.py`'s docstrings | `b9da1da`, `5cea003`, `608530c`, `a20d12a`, `2b43ad4`, `e95f82a` |
+| Second-pass KISS audit | model/ops/kernels and train/run app/configs (shared `pointer`/`stream`, unused kernel instantiations and fields removed, stale comments and citations fixed; smokes on real packs); syntax crate; corpus crate; every corpus docstring and comment cut to what the implementation needs; `decoder.py`'s docstrings; `nanochat/corpus`, `model/gpt.py` and `nanochat/ops` comments state functionality and references only (no machine, timing or review-tracking wording; user) | `b9da1da`, `5cea003`, `608530c`, `a20d12a`, `2b43ad4`, `e95f82a`, `7520800`, `350c207`, `88c151e` |
 | Docs consolidation | the docs from the final code, §5's corrections applied, untraceable numbers marked [unverified]; layout `docs/pretraining.md` (with the GH200 runbook), `docs/corpus.md`, `docs/tokenizer-ablation.md` | `fc6b9e9`, `54fc1bd` |
 | Provisional corpus tokenizer | sa-bpe copied to `CORPUS/tokenizer`, compiled and packed (`cp-pack` exit 0): 8K stage 19,349,569 rows, 32K stage repository partitions 95..99. Fit check: d24 `max_ratio` 526.13 → 69,611 steps of 15 micro-batches, repo_start 65,814, law lr 8.629e-4: the base plan fits. `adopt` overwrites; data keyed by the tokenizer's data key | artifacts |
+| Evaluation re-check | b8057ff's EvalPlus scoring and 247067d's parse-scoring overlap, each against its parent under `stack=67108864:-1` on a d16 checkpoint's completions (even tasks given the canonical solution, so statuses mix): identical per task. HumanEval+ base 82/82 pass/fail, plus 81/83 (pass@1 0.5, 0.4939); MBPP+ 188/190 both (0.4974). Smoke statuses from the old `stack=67108864` template (all "timeout") are invalid; `runs/container.sh` was always right | none |
+| Corpus code structure | `layout.py` (torch-free on-disk layout), `weights`/`mixture_rows` in `mixture.py`, torch imported lazily in `native.py`: compile, pack, curate and the tokenizer ablation load no torch; one `sources.repository_samples` and `sample_starts`, `repository_tasks`, `footer_rows`, `weights` returning its draws; `Tokenizer.name` removed, `data_crate` → `corpus_crate`; `docs/corpus.md` §2 `lower(repo_name)`, §4 invariants by construction. Outputs identical to the previous HEAD on real shards (curate, compile, pack, weights, max_ratio, micro-batches CPU and CUDA) | `88c151e` |
 
 ### Open (remaining)
 
 | Item | Next action | Waits on |
 |---|---|---|
-| Ablation queue | ready at HEAD: D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, compile, pack → D6 | the rest of this table; then the user's explicit permission |
+| Ablation queue | ready at HEAD (`88c151e`, engineering done): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, compile, pack → D6 | the user's explicit permission |
 | D7 Muon τ | `muon_tau_20.yaml` (d8 at 20, sa-bpe set, 2 seeds: user, 4 judged wasteful) and `muon_tau_200.yaml` (d8 at 200 reads 2.94B tokens, beyond the sa-bpe set's 2.11B: `tokenizer=corpus`, whose packs exist, 2 seeds); ×½, ×1, ×2; 12 runs | user approval |
 | D5 softcap | `softcap.yaml`: d16 at ratio 20.0 on the sa-bpe set, lr ×2.7972 (the D1-rebased base multiplier at `mixture.STEPS`' tokens), cap 15 vs none, 4 seeds | user approval |
 | Tokenizer ablation | 8 d16 runs at each arm's max_ratio (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer`), decision, `adopt`, compile, pack | D5 and D7 decided; user approval |
 | D6 AdamW-group lr | `adamw_lr.yaml`: d16 on the sa-bpe set at its max_ratio, ×¼ and ×4, 2 seeds; its ×1 arm is the tokenizer ablation's sa-bpe baseline (same run key), so 4 runs train | the tokenizer runs; user approval |
-| Evaluation re-check | b8057ff's EvalPlus scoring and 247067d's parse-scoring overlap re-verified under `stack=67108864:-1` (their checks ran under the broken template, every test "timeout"): statuses and pass@1 on the same completions of a real checkpoint, each commit vs its parent. The ablations' `parses` outcomes run through this code | RunUtilization |
-| Corpus code structure | CorpusMap's findings: torch-free compile/pack/curate workers (`weights`, `mixture_rows` into `mixture.py`; torch imported lazily in `native.py`), `COMPRESSION`/`sha1` in `schema.py`; one repository-samples helper (curate, compile), `repository_tasks`, cached `repository_window`, `stage_rows` beside the loader, `weights` returning its draws; `Tokenizer.name` removed, `data_crate` → `corpus_crate`; `docs/corpus.md` §2 (`lower(repo_name)`) and §4 (the invariants claim names no check) | CorpusFindings |
 | Base model pre-training | `experiment=base` (d24, the decided recipe and tokenizer) | every ablation above; its own user approval |
 
-Order: the open engineering rows → the user's permission → D7 at 20, D5, D7 at 200, tokenizer runs (with D6's arms) →
-adopt, compile, pack → base model pre-training (its own approval).
+Order: the user's permission → D7 at 20, D5, D7 at 200, tokenizer runs (with D6's arms) → adopt, compile, pack → base
+model pre-training (its own approval).
 
 ## 1. Decisions: model and training (ArchitectureCheck; affect every run, so the tokenizer ablation)
 
