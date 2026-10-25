@@ -245,7 +245,7 @@ utilization 57% → 64–69%: separate cast passes and the transposed FP8 copies
 which at K = 768 outweigh the faster GEMMs); +8–10 GB from TE saving both the bf16 fc1 output and FP8 transposes;
 likely lost Inductor fusion around TE's graph breaks [inference]. Conclusion: FP8 does not pay at this model size.
 
-### 5.15 Optimizer screen (OptScreen, OptAdopt) — NorMuon and Polar Express adopted; stack check at seed 1
+### 5.15 Optimizer screen (OptScreen, OptAdopt) — screen at the wrong lr; base vs stack re-run at ×2.797, 2 seeds
 d16 at 20 tokens/param, 1 seed each (user-approved), each arm paired with base seed 0 (same init and data order).
 Outputs, end of run (bpb code 8K / 32K, all 8K / 32K; HumanEval+ and MBPP+ pass@1 base/plus):
 base s0 0.4394 / 0.4212, 0.5219 / 0.5087, 0.067/0.055, 0.074/0.061; base s1 0.4380 / 0.4196, 0.5205 / 0.5071,
@@ -268,6 +268,30 @@ and code bpb not worse at 8K and 32K, else NorMuon alone). Polar Express's first
 memory beside co-running jobs and was rerun from its checkpoint. Cautious weight decay (arXiv 2510.12402): lower loss
 mid-run (−0.022 near 50%), worse at the end (last-200 +0.0108, code bpb +0.0023 / +0.0043): closed (the paper finds
 the best λ unchanged under CWD); 818.5K tok/s (−1.25%).
+Superseded (Oct 25, 22:30): the screen ran at the wrong learning rate. Every run has learning_rate_scale 1.0 (d16
+peak 1.669e-3), while the base recipe trains at the law × 2.797 (4.667e-3 at the same plan): the run app's default
+was the law's lr, and only `pretrain.yaml` applied the multiplier. `peak_lr.analysis` puts every measured optimum at
+×2.0–3.5 (d8 at 5 tokens/param ×3.47, curvature 0.071 bpb per (ln m)²; d8 at 200 ×3.16, 0.010; d24 at 5 ×2.02,
+0.009), so the screen's baselines sat ~0.005–0.05 bpb [inference] from their optimum, 2–20× the effects measured.
+Polar Express's update is larger than torch's Newton–Schulz at the same lr (CPU, bf16, its coefficients against
+torch's: update RMS ×1.02–1.25 on 1024×1024 and 1024×4096, noise and σ ∝ i^-0.5 or i^-1; NS 0.77–0.97 of an exactly
+orthogonal update, PE 0.95–0.99): at ×1 that step alone is worth ~0.002–0.004 bpb by the curvature, its whole
+−0.0019, and at ×2.797 it costs ≤ 0.0004. NorMuon preserves the update norm, so its −0.0029 is no step effect. The
+stack at seed 1 (×1) lost to base s1: paired Δ +0.0008 over the last 50% (22/22 windows positive), last 10%
++0.0006, code bpb 0.4381 / 0.4196 vs 0.4380 / 0.4196; additivity predicted −0.0048, so either the arms interact
+(+0.0056) or the treatment effect swings ~0.004 between seeds. Literature: Polar Express wins at every swept lr with
+the optimum unchanged (arXiv 2505.16932 v5, GPT-2 Small and Large); NorMuon keeps Muon's update norm by design, and
+no published comparison tunes it and Muon separately (its paper shares one lr; tuned speedrun: −15 of 2,330 steps,
+modded-nanogpt PR #144; Aurora's ablation −0.014 val loss, arXiv 2606.27715); its gain comes from the rectangular
+MLP matrices, none on square QKVO (DGA-Muon on NanoChat, arXiv 2610.06578; modded-nanogpt record 2025-12-11:
+W_O's orientation fix left loss at 3.2780 → 3.2779). Both implementations match their references (PolarExpress's
+coefficients, safety factor and normalization; NorMuon's per-row second moment and norm-preserving rescale; rows
+are the right neurons here, `ve_gate` one row per head). Design (user: research first, then base vs stack): both
+arms at ×2.797, seeds 0 and 1, each seed's arms one concurrent pair, parse evaluation only (HumanEval+/MBPP+ near
+0.07 at d16 inform nothing); adopt the stack iff its paired Δ over the last 50% is negative at both seeds and the
+seed-mean code bpb at 8K and 32K is not worse, otherwise plain Muon. The kernel loss checks ran at ×1 too (the
+harness's default; C3's reference l_cpb included), so the pending postact and C3 checks run at ×2.797 against one
+shared base curve.
 
 ### 5.16 Decoder at d24 (DecoderD24, DecoderOwner) — measured, acceptance pending
 Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise. Profile (1,024
