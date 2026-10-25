@@ -47,10 +47,9 @@ def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm
 class Request:
     """A continuation of prompt (BOS and at least one more token) by at most max_tokens tokens. stop: None or a
     predicate of the generated ids, true once the sequence is done. temperature 0: the greedy argmax (ties to the lowest
-    id); > 0: a sample of softmax(logits / temperature), the logits capped by the model's GPTConfig.softcap if it has
-    one, whose draw at generated position i depends only on (seed, i),
-    not on the slot or the batch (decode.cu gumbel), and with top_p < 1 from the fewest most likely tokens holding top_p
-    of that probability (nucleus sampling, arXiv 1904.09751, §3.1; decode.cu k_nucleus).
+    id); > 0: a sample of softmax(logits / temperature), logits capped by GPTConfig.softcap if set, its draw at
+    generated position i a function of (seed, i) only (decode.cu gumbel); top_p < 1 samples the fewest most likely
+    tokens holding top_p of the probability (nucleus sampling, arXiv 1904.09751 §3.1; decode.cu k_nucleus).
     constraint: the tokens allowed at each step."""
     prompt: list[int]
     max_tokens: int
@@ -97,13 +96,10 @@ class Reemit:
 
 
 def heal(tokenizer, prompt: list[int]) -> tuple[list[int], Reemit, bytes]:
-    """Token healing ("The Art of Prompt Design: Prompt Boundaries and Token Healing", Guidance, 2023), constrained
-    until the dropped token's bytes are re-emitted (TokEval, arXiv 2608.18062 App. C: "the decoder drops the affected
-    trailing prompt token(s) and constrains generation until their content is re-emitted"; Guidance constrains one
-    token, which forbids a tokenization splitting those bytes over two tokens): the prompt without its last token, the
-    constraint (Reemit), and the dropped token's bytes, so the model picks the tokens across the prompt's boundary; the
-    text of the healed prompt and the generated ids extends the prompt's text. prompt: BOS and at least two more
-    tokens."""
+    """Token healing (Guidance, "The Art of Prompt Design: Prompt Boundaries and Token Healing", 2023), constrained
+    until the dropped token's bytes are re-emitted (TokEval, arXiv 2608.18062 App. C; Guidance constrains one token,
+    which forbids splitting those bytes over two): the prompt without its last token, its Reemit constraint, and the
+    dropped bytes. prompt: BOS and at least two more tokens."""
     dropped = tokenizer.token_bytes[prompt[-1]]
     return prompt[:-1], Reemit(tokenizer, dropped), dropped
 
@@ -163,13 +159,11 @@ class NativeDecoder:
     max_len: a slot's cache capacity in positions, at most the model's sequence_len: the longest len(prompt) +
     max_tokens - 1 the caller will run (a slot's cache is 2 n_layer max_len n_embd bf16 values, so a smaller max_len
     fits more slots). The tokens do not depend on it: decode.cu splits attention by the model's sequence_len.
-    prompt_store: positions requested for decode.cu's prompt store, which takes at most the device memory left after
-    the slots (2 n_layer n_embd bf16 values a position): a prompt's K and V at all but its last position are kept there
-    once written, and a later request with the same prompt starts from them at its last token, len(prompt) - 1 steps
-    fewer, its tokens unchanged (a prompt's K and V depend on its tokens alone). A prompt is kept while pages are free;
-    to free pages, prompts not used in this run or the previous one are dropped, the least recently used first, so a
-    search's rounds (a run each, reusing its prompts) keep the prompts they reuse, and a store smaller than a round's
-    prompts keeps a fixed part of them rather than cycling."""
+    prompt_store: positions requested for decode.cu's prompt store (at most the device memory left after the slots, 2
+    n_layer n_embd bf16 values a position). A prompt's K and V at all but its last position are kept once written; a
+    later request with the same prompt starts at its last token, its tokens unchanged (K and V depend on the prompt
+    alone). To free pages, prompts unused in this run and the previous one are dropped, least recently used first, so a
+    search's rounds keep the prompts they reuse and a too-small store keeps a fixed part rather than cycling."""
 
     @torch.no_grad()
     def __init__(self, model: GPT, *, bos_token_id: int, max_len: int, prompt_store: int):
