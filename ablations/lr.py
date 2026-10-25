@@ -14,7 +14,8 @@ arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law eta = 1.79 N^-0.713 D^0.30
 (arXiv 2503.04715 §1 Eq. 1), raises it. Alternatives: the law's lr times 2 and 4, and 8 at d8 at LONG, where Step-Law
 points; one seed per setting.
 
-Analysis, pre-registered, written to RESULTS/lr.json's "analysis":
+Analysis, pre-registered, computed when the base experiment launches (nanochat/run.py lr_multiplier, from
+RESULTS/lr.jsonl; it depends on the adopted tokenizer's max_ratio, so no copy is stored):
 - per setting, code bits per byte fitted as a parabola in u = ln(multiplier) (fit): its vertex u* or the grid extension
   the rule calls for;
 - the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@SHORT) against the SDE rule's and Step-Law's predictions, each over
