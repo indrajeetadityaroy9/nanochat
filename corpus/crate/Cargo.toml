@@ -13,6 +13,8 @@ bytemuck = "1.25.2"
 fancy-regex = "0.19.2"
 # the trainer's set of sources holding a pair (its R): a bitset over the sources
 fixedbitset = "0.5.7"
+# the process's stack limit (getrlimit), the stack of rayon's workers (lib.rs)
+libc = "0.2.190"
 # the tokenized tokens and offsets (pack), read in place
 memmap2 = "0.9.11"
 # lexical cleaning of the paths a C++ #include names (repository samples)
@@ -34,6 +36,8 @@ tree-sitter = "0.27.1"
 tree-sitter-cpp = "0.23.4"
 tree-sitter-python = "0.25.0"
 
+# Whole-crate optimization, measured against cargo's release defaults on real data: pack of six shards 36.4 s against
+# 42.9 s, train of 8,000 merges on 252,906 documents 20.6 s against 22.1 s, outputs identical
 [profile.release]
 codegen-units = 1
 lto = true

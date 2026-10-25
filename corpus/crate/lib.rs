@@ -60,13 +60,17 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lang {
     }
 }
 
-/// The module, with rayon's global pool built here first: workers with 64 MiB stacks, not std's 2 MiB
-/// (std::thread::Builder::stack_size; the shell's stack ulimit does not apply). A worker waiting in a join runs stolen
-/// jobs on its own stack, so nesting deepens with concurrent pack calls from Python threads, and a job's first
-/// PerWorker get compiles fancy-regex patterns there (CoreBPE::new), which recurse: at 2 MiB that overflowed.
+/// The module, with rayon's global pool built here first: its workers get the process's stack limit (RLIMIT_STACK's
+/// soft limit: the stack of the main thread and glibc's default for every thread it creates, Python's included;
+/// scripts/container.sh sets it), not std's 2 MiB (std::thread::Builder, which ignores the limit). At 2 MiB, pack
+/// overflowed a worker's stack: a worker waiting in a join runs stolen jobs on its own stack, so the nesting deepens
+/// with the pack calls in flight from Python threads (corpus/pack.py).
 #[pymodule]
 fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    rayon::ThreadPoolBuilder::new().stack_size(64 << 20).build_global()
+    let mut stack = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit writes the limit into the struct it is given
+    unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut stack) };
+    rayon::ThreadPoolBuilder::new().stack_size(stack.rlim_cur as usize).build_global()
         .map_err(|e| PyValueError::new_err(format!("rayon's global pool: {e}")))?;
     m.add_function(wrap_pyfunction!(train::train, m)?)?;
     m.add_function(wrap_pyfunction!(repository::topological_sort, m)?)?;
