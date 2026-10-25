@@ -54,7 +54,8 @@ impl Word {
     }
 
     /// Merges every non-overlapping occurrence of pair, left to right, into new_id; returns the change of each pair's
-    /// number of occurrences in this word, one entry per removed (-1) or created (+1) occurrence (rustbpe's merge_pair).
+    /// number of occurrences in this word, one entry per removed (-1) or created (+1) occurrence (rustbpe's
+    /// merge_pair).
     fn merge_pair(&mut self, pair: Pair, new_id: u32) -> Vec<(Pair, i64)> {
         let (a, b) = pair;
         let n = self.ids.len();
@@ -85,7 +86,8 @@ impl Word {
     }
 }
 
-/// A pair's heap entry: its F, its R (exact when `exact`, else an upper bound), its score, and the words it may occur in.
+/// A pair's heap entry: its F, its R (exact when `exact`, else an upper bound), its score, and the words it may occur
+/// in.
 struct Job {
     pair: Pair,
     freq: i64,
@@ -115,9 +117,9 @@ impl PartialEq for Job {
 
 impl Eq for Job {}
 
-/// The distinct chunks of the documents (document d from source sources[d]) as words of byte ids. Documents are split in
-/// parallel, each worker by its own regex, into one chunk table per worker and hash shard; each shard's tables are then
-/// merged in parallel.
+/// The distinct chunks of the documents (document d from source sources[d]) as words of byte ids. Documents are split
+/// in parallel, each worker by its own regex, into one chunk table per worker and hash shard; each shard's tables are
+/// then merged in parallel.
 fn count_words<'a>(texts: &'a [PyBackedStr], sources: &[u32], pattern: &PerWorker<Regex>) -> Vec<Word> {
     struct Chunk {
         count: i64,
@@ -314,9 +316,9 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &PerWorker<Rege
     merges
 }
 
-/// Trains n_merges merges on the documents texts[d], from source sources[d] (source ids dense from 0), within the chunks
-/// of the regex pattern, by score "sa-bpe" or "frequency". Returns the merges (merge i makes token id 256 + i); a merge
-/// whose bytes are already a token is skipped and does not count.
+/// Trains n_merges merges on the documents texts[d], from source sources[d] (source ids dense from 0), within the
+/// chunks of the regex pattern, by score "sa-bpe" or "frequency". Returns the merges (merge i makes token id 256 + i);
+/// a merge whose bytes are already a token is skipped and does not count.
 #[pyfunction]
 #[pyo3(signature = (texts, sources, *, pattern, n_merges, score))]
 pub(crate) fn train(py: Python<'_>, texts: Vec<PyBackedStr>, sources: Vec<u32>, pattern: &str, n_merges: usize,

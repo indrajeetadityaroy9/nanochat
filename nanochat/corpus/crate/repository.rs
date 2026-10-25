@@ -1,6 +1,6 @@
-//! A repository's files as training samples by their dependencies (DeepSeek-Coder, arXiv 2401.14196
-//! §2.2 "Repository Level Data": the dependencies between a repository's files are parsed, the files ordered so that the
-//! context each file relies on precedes it, and each connected set of files is one training sample).
+//! A repository's files as training samples by their dependencies (DeepSeek-Coder, arXiv 2401.14196 §2.2 "Repository
+//! Level Data": the dependencies between a repository's files are parsed, the files ordered so that the context each
+//! file relies on precedes it, and each connected set of files is one training sample).
 //!
 //! A file depends on the files its imports (Python Language Reference §5 "The import system", §7.11 "The import
 //! statement") or includes (C++23 [cpp.include]) name. The names are read from the file's tree-sitter tree, where an
@@ -186,12 +186,13 @@ fn samples(dependencies: &[Vec<usize>]) -> Vec<Vec<usize>> {
 }
 
 /// The samples (samples()) of the repositories of a partition: repository r holds files ends[r - 1]..ends[r] (from 0),
-/// paths[i] with contents texts[i] (within a repository sorted by path; sources.repository_samples; repository-relative,
-/// '/'-separated paths, which may repeat) of a grammar ("Python", "C++"). File f depends on file g of its repository
-/// (g != f) when an import or include of f names g (Python, C++; every import node of f's tree, also of a tree with
-/// syntax errors, whose error recovery keeps the nodes it parsed); the file of a single-file repository is one sample,
-/// without parsing. Each sample as its files' indices into paths, the repositories' samples in repository order. The
-/// files are parsed, and the repositories' samples found, in parallel (rayon), which leaves the samples as they are.
+/// paths[i] with contents texts[i] (within a repository sorted by path; sources.repository_samples;
+/// repository-relative, '/'-separated paths, which may repeat) of a grammar ("Python", "C++"). File f depends on file g
+/// of its repository (g != f) when an import or include of f names g (Python, C++; every import node of f's tree, also
+/// of a tree with syntax errors, whose error recovery keeps the nodes it parsed); the file of a single-file repository
+/// is one sample, without parsing. Each sample as its files' indices into paths, the repositories' samples in
+/// repository order. Files are parsed and samples found in parallel (rayon); the result does not depend on the
+/// schedule.
 #[pyfunction]
 #[pyo3(signature = (paths, texts, ends, *, grammar))]
 pub(crate) fn repository_samples(py: Python<'_>, paths: Vec<String>, texts: Vec<PyBackedStr>, ends: Vec<usize>, grammar: Lang) -> Vec<Vec<usize>> {

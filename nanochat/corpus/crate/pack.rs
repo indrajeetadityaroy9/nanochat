@@ -131,9 +131,10 @@ pub(crate) struct Fim {
     sentinels: [u32; 3],
 }
 
-/// The generator of piece `piece` of document `document`: ChaCha8 keyed by the pair (the rest of its 256-bit key zero),
-/// so that every piece's draws are a stream of their own whatever the order of work; after its first draw, a FIM example
-/// with probability rate: Some(the generator for the example's draws), else None (the piece is read left to right).
+/// The generator of piece `piece` of document `document`: ChaCha8 keyed by the pair (the rest of its 256-bit key
+/// zero), so that every piece's draws are a stream of their own whatever the order of work; after its first draw, a FIM
+/// example with probability rate: Some(the generator for the example's draws), else None (the piece is read left to
+/// right).
 fn fim_draw(fim: &Fim, document: usize, piece: usize) -> Option<ChaCha8Rng> {
     let mut key = [0; 32];
     key[..8].copy_from_slice(&(document as u64).to_le_bytes());
@@ -177,9 +178,9 @@ fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) ->
         let node = root.named_descendant_for_byte_range(s, e).unwrap();
         let children: Vec<Node> = node.named_children(&mut node.walk()).collect();
         let (starts, ends): (Vec<usize>, Vec<usize>) = children.iter().map(|child| (child.start_byte(), child.end_byte())).unzip();
-        // For a fixed last child, IoU is largest at the last start <= s or the first start >= s (moving the start further
-        // out grows the union only, further in shrinks the intersection only); likewise the end at the last end <= e or the
-        // first end >= e. So the best run is one of these four.
+        // For a fixed last child, IoU is largest at the last start <= s or the first start >= s (moving the start
+        // further out grows the union only, further in shrinks the intersection only); likewise the end at the last
+        // end <= e or the first end >= e. So the best run is one of these four.
         let first = [starts.partition_point(|&a| a <= s).checked_sub(1), Some(starts.partition_point(|&a| a < s)).filter(|&i| i < children.len())];
         let last = [ends.partition_point(|&b| b <= e).checked_sub(1), Some(ends.partition_point(|&b| b < e)).filter(|&j| j < children.len())];
         let (mut best, mut best_iou) = ((node.start_byte(), node.end_byte()), (0, 1));
@@ -239,11 +240,11 @@ impl Split<'_> {
     /// document when it fits its row, else ends at a cut in its window: the last statement cut of the window (the
     /// document's statement_cuts, computed on first need), else after its last line-ending token, else before the last
     /// token it reaches that starts a character, so that every piece is whole characters. A piece read left to right
-    /// fits its row with its BOS, and when it ends the document the BOS after it, its target (a cut piece's next BOS is
-    /// no target: corpus/loader.py). A piece drawn a FIM example (fim_draw) fits with its BOS, the example and the target
-    /// BOS after its middle: its window first leaves room for the three sentinels; as the sections are encoded each on
-    /// its own, the example's length is known once built, and an example longer than its row shrinks the window by the
-    /// excess.
+    /// fits its row with its BOS, and when it ends the document the BOS after it, its target (a cut piece's next BOS
+    /// is no target: corpus/loader.py). A piece drawn a FIM example (fim_draw) fits with its BOS, the example and the
+    /// target BOS after its middle: its window first leaves room for the three sentinels; as the sections are encoded
+    /// each on its own, the example's length is known once built, and an example longer than its row shrinks the
+    /// window by the excess.
     fn pieces(&self, document: usize, start: usize, end: usize) -> Vec<Piece> {
         let statements = OnceCell::new();
         let cut = |s: usize, window: usize| {
@@ -289,16 +290,17 @@ impl Split<'_> {
 }
 
 /// Rows of pieces of at most row_len tokens by Best-Fit-Decreasing ("Fewer Truncations Improve Language Modeling",
-/// arXiv 2404.10830 §3.1): longest first (a stable sort: equal lengths keep document order), each piece
-/// into the row with the fewest free slots that holds it, else a new row, so no piece is cut; rows of one kind with equal
-/// room wait last-in first-out, and at equal free slots a row of targeted pieces only is taken before a row with a cut
-/// piece. A row whose pieces all have the BOS after them as their target (targeted) keeps one slot for the BOS after its
-/// last piece; a row holding a cut piece ends with it (pack_shard) and needs none. Each row as the indices of its pieces
-/// in the order placed.
+/// arXiv 2404.10830 §3.1): longest first (a stable sort: equal lengths keep document order), each piece into the row
+/// with the fewest free slots that holds it, else a new row, so no piece is cut; rows of one kind with equal room wait
+/// last-in first-out, and at equal free slots a row of targeted pieces only is taken before a row with a cut piece. A
+/// row whose pieces all have the BOS after them as their target (targeted) keeps one slot for the BOS after its last
+/// piece; a row holding a cut piece ends with it (pack_shard) and needs none. Each row as the indices of its pieces in
+/// the order placed.
 fn best_fit_decreasing(lengths: &[usize], targeted: &[bool], row_len: usize) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..lengths.len()).collect();
     order.sort_by_key(|&p| Reverse(lengths[p]));
-    // rows waiting by their room: [rows of targeted pieces only (room net of the final BOS slot), rows with a cut piece]
+    // rows waiting by their room: [rows of targeted pieces only (room net of the final BOS slot), rows with a cut
+    // piece]
     let mut rows: Vec<Vec<usize>> = Vec::new();
     let mut waiting: [BTreeMap<usize, Vec<usize>>; 2] = [BTreeMap::new(), BTreeMap::new()];
     let least = |map: &BTreeMap<usize, Vec<usize>>, need: usize| map.range(need..).next().map(|(&room, _)| room);
@@ -331,14 +333,14 @@ fn best_fit_decreasing(lengths: &[usize], targeted: &[bool], row_len: usize) -> 
 }
 
 /// One curated shard's documents first..last packed: the pack index entry of every piece in row order (token range
-/// [start, end) of the split, then the range of its FIM example in the shard's FIM tokens, empty for a piece read left
-/// to right; corpus/layout.py PIECE_COLUMNS, pack.py offsets the FIM range into the split's), the pieces per row, and the
-/// FIM examples' tokens in row order. A piece's BOS is followed by its tokens: a FIM example's when the loader reads
-/// "fim", else (reading "left_to_right", and every piece read left to right) its range; it takes the longer of the two
-/// in its row. A piece has the BOS after it as its target when it ends its document or is a FIM example (the end of its
-/// middle); such pieces come first in their row and the pieces cut from their document left to right last, so the BOS
-/// after a piece is its target. The documents are cut in parallel, the longest first and each a task of its own, so
-/// that the longest neither starts last nor waits in a run of long ones that one worker cuts in turn.
+/// [start, end) of the split, then the range of its FIM example in the shard's FIM tokens, empty for a piece read
+/// left to right; corpus/layout.py PIECE_COLUMNS, pack.py offsets the FIM range into the split's), the pieces per row,
+/// and the FIM examples' tokens in row order. A piece's BOS is followed by its tokens: a FIM example's when the loader
+/// reads "fim", else (reading "left_to_right", and every piece read left to right) its range; it takes the longer of
+/// the two in its row. A piece has the BOS after it as its target when it ends its document or is a FIM example (the
+/// end of its middle); such pieces come first in their row and the pieces cut from their document left to right last,
+/// so the BOS after a piece is its target. The documents are cut in parallel, longest first and one task each, so that
+/// no long document starts last or queues behind others on one worker.
 fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize)) -> (Vec<[i64; 4]>, Vec<i64>, Vec<u16>) {
     let mut longest: Vec<usize> = (first..last).collect();
     longest.sort_by_key(|&d| Reverse(offsets[d + 1] - offsets[d]));
@@ -367,12 +369,12 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize)) -> 
     (index, rows.iter().map(|row| row.len() as i64).collect(), fim_tokens)
 }
 
-/// Packs one curated shard (documents first..last) of a compiled split (its uint16 tokens and int64 document offsets at
-/// the given paths) into rows of row_len tokens (pack_shard), its documents in parallel. token_bytes: every mergeable
-/// token's bytes by id (= rank), with the split pattern the tokenizer's encoder (tiktoken-rs's CoreBPE: OpenAI tiktoken's
-/// core, fancy-regex as in tiktoken) for FIM sections; grammar: a repository corpus's language (None for other
-/// documents); fim: AST-FIM's shares and sentinel ids for its train split (Fim). Returns the pack index entries
-/// (native-endian int64, 4 per piece), the pieces per row (int64) and the FIM tokens (uint16).
+/// Packs one curated shard (documents first..last) of a compiled split (its uint16 tokens and int64 document offsets
+/// at the given paths) into rows of row_len tokens (pack_shard), its documents in parallel. token_bytes: every
+/// mergeable token's bytes by id (= rank), with the split pattern the tokenizer's encoder (tiktoken-rs's CoreBPE:
+/// OpenAI tiktoken's core, fancy-regex as in tiktoken) for FIM sections; grammar: a repository corpus's language (None
+/// for other documents); fim: AST-FIM's shares and sentinel ids for its train split (Fim). Returns the pack index
+/// entries (native-endian int64, 4 per piece), the pieces per row (int64) and the FIM tokens (uint16).
 #[pyfunction]
 #[pyo3(signature = (tokens_path, offsets_path, shard, *, row_len, token_bytes, pattern, grammar, fim))]
 #[allow(clippy::too_many_arguments)] // the keyword arguments of Python's call

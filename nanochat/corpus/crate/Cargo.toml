@@ -11,7 +11,7 @@ path = "lib.rs"
 bytemuck = "1.25.2"
 # the regex engine of OpenAI's tiktoken (0.14: fancy-regex 0.19), so training splits text as encoding does
 fancy-regex = "0.19.2"
-# the trainer's set of sources holding a pair (its R): a bitset over the sources (a dependency of petgraph)
+# the trainer's set of sources holding a pair (its R): a bitset over the sources
 fixedbitset = "0.5.7"
 # the compiled tokens and offsets (pack), read in place
 memmap2 = "0.9.11"
