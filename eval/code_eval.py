@@ -25,13 +25,12 @@ Benchmarks:
   end-of-middle target in training), at most the benchmark's longest reference middle in tokens. The references'
   middles are whole lines, the model's (trained on character-level and AST spans) rarely end at a line end, so
   single-line and multi-line middles are cut to the reference's lines (fim_lines: the first line, the first k lines
-  of a k-line reference; random-span unchanged), decoding stopping there (LinesStoppingCriteria), the post-processing
-  of
+  of a k-line reference; random-span unchanged), decoding stopping there (LinesStoppingCriteria), the post-processing of
   arXiv 2505.18789 (Table 1, Fig. 4: single-line one line, multi-line the reference's line count; its Table 1 also
   truncates a random-span middle's overlap with the prefix and suffix, which is not done here). FIM prompts are not
   healed: they end with a sentinel (PSM) or with the prefix encoded on its own (SPM), the training format, whose
-  character-level spans train mid-token boundaries (corpus/crate/pack.rs random_span). Scored by the package's entry
-  point (`python -m human_eval_infilling.evaluate_functional_correctness`: 3 s timeout, 4 workers); pass@1 by its
+  character-level spans train mid-token boundaries (corpus/crate/pack.rs random_span). Scored by the package's
+  check_correctness per middle (its 3 s timeout) in a worker process per CPU (INFILLING_EVALUATE); pass@1 by its
   estimate_pass_at_k.
 
 Scores: pass@1 by three generation modes, each scored by the benchmark's evaluator. "greedy": one greedy completion per
@@ -312,7 +311,9 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
     """MultiPL-E's evaluation of each problem's completions: {"pass@1" (pass_k.py: Codex's estimator over each
     problem's completions), "ids", "status" (per problem, per completion)}. Each problem is a completions file as
     multipl_e/completions.py writes it, judged by its own main.py --file process (--dir runs problems serially),
-    os.cpu_count() at once; the scripts import siblings, so no -I."""
+    os.cpu_count() at once, each with one judge thread (--max-workers 1): main.py's default of cpu_count() - 1 threads
+    per file puts up to 20 g++ per core, and a compile past its wall-clock limit scores "SyntaxError" (eval_cpp.py).
+    The scripts import siblings, so no -I."""
     root = Path(os.environ["MULTIPL_E"])
     main = root / "evaluation" / "src" / "main.py"
     with tempfile.TemporaryDirectory() as tmp:
@@ -322,8 +323,8 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
                                         "tests": t.entry_point,
                                         "completions": task_samples}), encoding="utf-8")
         with ThreadPoolExecutor(os.cpu_count()) as pool:
-            list(pool.map(lambda file: subprocess.run([sys.executable, main, "--file", file, "--output-dir", tmp],
-                                                      cwd=tmp, check=True), files))
+            list(pool.map(lambda file: subprocess.run([sys.executable, main, "--file", file, "--output-dir", tmp,
+                                                       "--max-workers", "1"], cwd=tmp, check=True), files))
         # pass_k.py's CSV (Dataset,Pass@k,Estimate,NumProblems,MinCompletions,MaxCompletions): at temperature 0.2,
         # which it takes when a file has none, as ours, one row, k = 1; none when a directory mixes temperatures
         out = subprocess.run([sys.executable, root / "pass_k.py", tmp], cwd=tmp, capture_output=True, text=True,
@@ -337,20 +338,43 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
     return {"pass@1": pass_at_1, "ids": [t.task_id for t in items], "status": status}
 
 
+# human_eval_infilling's evaluation (evaluation.py evaluate_functional_correctness: check_correctness per sample at its
+# default timeout, 3 s) across a fork pool of worker processes, in a fresh isolated process: its CLI's thread pool forks
+# a Manager and a Process per sample from one interpreter, so its rate is bound by that interpreter's GIL (4 threads or
+# 64, about the same). The CLI's modules are imported first: a sample runs in a fork of this process, and what it
+# imports at run time depends on the modules already loaded (reliability_guard disables what an import would call).
+INFILLING_EVALUATE = """
+import json, multiprocessing, sys
+from concurrent.futures import ProcessPoolExecutor
+import fire
+import human_eval_infilling.evaluation
+from human_eval_infilling.data import read_problems
+from human_eval_infilling.execution import check_correctness
+problems = read_problems(sys.argv[1])
+with open(sys.argv[2], encoding="utf-8") as f:
+    samples = json.load(f)
+def check(sample):
+    return check_correctness(problems[sample["task_id"]], sample["completion"], 3.0)["result"]
+with ProcessPoolExecutor(int(sys.argv[3]), mp_context=multiprocessing.get_context("fork")) as pool:
+    result = list(pool.map(check, samples))
+with open(sys.argv[4], "w", encoding="utf-8") as f:
+    json.dump(result, f)
+"""
+
+
 def infilling(name: str, problems: list[dict], middles: list[str]) -> dict:
     """Official evaluation of one middle per problem: {"pass@1", "ids", "completions", "result"} (per problem "passed",
-    "failed: <exception>" or "timed out", human_eval_infilling/execution.py)."""
+    "failed: <exception>" or "timed out", human_eval_infilling/execution.py), a worker process per CPU
+    (INFILLING_EVALUATE)."""
+    samples = [{"task_id": p["task_id"], "completion": middle} for p, middle in zip(problems, middles, strict=True)]
     with tempfile.TemporaryDirectory() as tmp:
-        samples = Path(tmp, "samples.jsonl")
-        with samples.open("w", encoding="utf-8") as f:
-            for p, middle in zip(problems, middles, strict=True):
-                f.write(json.dumps({"task_id": p["task_id"], "completion": middle}) + "\n")
-        subprocess.run([sys.executable, "-I", "-m", "human_eval_infilling.evaluate_functional_correctness", name,
-                        samples], cwd=tmp, check=True)
-        with Path(tmp, "samples.jsonl_results.jsonl").open(encoding="utf-8") as f:
-            scored = [json.loads(line) for line in f]
-    return {"pass@1": float(estimate_pass_at_k(1, [s["passed"] for s in scored], 1).mean()),
-            "ids": [s["task_id"] for s in scored], "completions": middles, "result": [s["result"] for s in scored]}
+        path, scored = Path(tmp, "samples.json"), Path(tmp, "results.json")
+        path.write_text(json.dumps(samples), encoding="utf-8")
+        subprocess.run([sys.executable, "-I", "-c", INFILLING_EVALUATE, name, path, str(os.cpu_count()), scored],
+                       cwd=tmp, check=True)
+        result = json.loads(scored.read_text(encoding="utf-8"))
+    return {"pass@1": float(estimate_pass_at_k(1, [r == "passed" for r in result], 1).mean()),
+            "ids": [s["task_id"] for s in samples], "completions": middles, "result": result}
 
 
 def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
