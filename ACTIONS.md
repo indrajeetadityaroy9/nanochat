@@ -180,6 +180,10 @@ ArchitectureCheck (no code effect):
 - also: D10's wording (1.44e-5 of peak at D1's plan is intended), the warmup text (40 steps per nanochat 92; 2410.23922 is not about
   Muon), FIM citations (§8), stale line-widening, manifest and ablation-driver text, `mixture.py:67`'s plan comment (D1).
 
+Working paper notes: `docs/findings.md` holds the model architecture, training, evaluation and hardware setup as built
+and one entry per agent execution (question, method, measured outputs, conclusion, commits); each agent's report is
+added to it as it lands.
+
 ## 6. Dataset `iaroy/nanochat-data`
 
 **Resolved (user decision): no manifest.** `manifest.json` is not needed for the research and is gone: `prepare`
