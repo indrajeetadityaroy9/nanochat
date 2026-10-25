@@ -6,8 +6,9 @@
  * dm * n, dn = dm * g, dx = rstd * (dn - n * mean(dn * n)).
  *
  * Layout: q, k, outputs, gradients contiguous (B, T, H, HEAD_DIM); position of row r = (r / H) % T. The first half of
- * the blocks takes q, the second k. Block size: the occupancy calculator's (a multiple of WARP, so rows never straddle
- * warps).
+ * the blocks takes q, the second k. Forward: a QK_LANES-thread group per position, its gains and cos/sin entries loaded
+ * once for the position's H heads, two heads' loads in flight. Block size: the occupancy calculator's (a multiple of
+ * WARP, so rows never straddle warps).
  *
  * Deterministic gain gradient without atomics: persistent blocks (half the device's resident blocks per tensor) stride
  * over rows accumulating dm * n in registers, reduce their warps in order into a per-block partial, and k_gain_sum adds
@@ -15,17 +16,33 @@
  */
 #include "qk_row.cuh"
 
-__global__ void k_forward(const bf16 *q, const bf16 *k, const float *gq, const float *gk, bf16 *qo, bf16 *ko,
-                          const float *cos, const float *sin, int64_t rows, unsigned nb, int H, int T) {
+__global__ void k_forward(const bf16 *__restrict__ q, const bf16 *__restrict__ k, const float *__restrict__ gq,
+                          const float *__restrict__ gk, bf16 *__restrict__ qo, bf16 *__restrict__ ko,
+                          const float *__restrict__ cos, const float *__restrict__ sin, int64_t rows, unsigned nb, int H,
+                          int T) {
     const bool isq = blockIdx.x < nb;
-    const int64_t g = (int64_t)(isq ? blockIdx.x : blockIdx.x - nb) * blockDim.x + threadIdx.x, i = g / QK_LANES;
-    if (i >= rows) return;
+    const int64_t g = (int64_t)(isq ? blockIdx.x : blockIdx.x - nb) * blockDim.x + threadIdx.x, p = g / QK_LANES;
+    if (p * H >= rows) return;
     const int o = (int)(g % QK_LANES) * VEC;
-    const int64_t at = i * HEAD_DIM + o, tab = (i / H % T) * HALF + o;
-    float y1[VEC], y2[VEC];
-    qk_row((isq ? q : k) + at, (isq ? gq : gk) + o, cos + tab, sin + tab, y1, y2);
+    const int64_t at = p * H * HEAD_DIM + o, tab = (p % T) * HALF + o;
+    const bf16 *x = (isq ? q : k) + at;
     bf16 *y = (isq ? qo : ko) + at;
-    store(y, y1); store(y + HALF, y2);
+    const float *gain = (isq ? gq : gk) + o;
+    float g1[VEC], g2[VEC], cs[VEC], sn[VEC];
+    load(gain, g1); load(gain + HALF, g2);
+    load(cos + tab, cs); load(sin + tab, sn);
+    for (int h = 0; h < H; h += 2) {
+        const bool pair = h + 1 < H;  /* uniform over the row group, as qk_row_sum's shuffles need */
+        float a1[VEC], a2[VEC], b1[VEC], b2[VEC], y1[VEC], y2[VEC];
+        load(x + h * HEAD_DIM, a1); load(x + h * HEAD_DIM + HALF, a2);
+        if (pair) { load(x + (h + 1) * HEAD_DIM, b1); load(x + (h + 1) * HEAD_DIM + HALF, b2); }
+        qk_rotate(a1, a2, g1, g2, cs, sn, y1, y2);
+        store(y + h * HEAD_DIM, y1); store(y + h * HEAD_DIM + HALF, y2);
+        if (pair) {
+            qk_rotate(b1, b2, g1, g2, cs, sn, y1, y2);
+            store(y + (h + 1) * HEAD_DIM, y1); store(y + (h + 1) * HEAD_DIM + HALF, y2);
+        }
+    }
 }
 
 constexpr int MAX_WARPS = 1024 / WARP;  /* CUDA max threads per block (Programming Guide, Compute Capabilities) */
@@ -107,7 +124,7 @@ static int backward_threads() {
 extern "C" void qkp_forward(const void *q, const void *k, const void *gq, const void *gk, void *qo, void *ko,
                             const void *cos, const void *sin, long long rows, int H, int T, void *stream) {
     static const int threads = block_size(k_forward);
-    const unsigned nb = (rows * QK_LANES + threads - 1) / threads;
+    const unsigned nb = (rows / H * QK_LANES + threads - 1) / threads;
     k_forward<<<2 * nb, threads, 0, (cudaStream_t)stream>>>(
         (const bf16 *)q, (const bf16 *)k, (const float *)gq, (const float *)gk, (bf16 *)qo, (bf16 *)ko,
         (const float *)cos, (const float *)sin, rows, nb, H, T);

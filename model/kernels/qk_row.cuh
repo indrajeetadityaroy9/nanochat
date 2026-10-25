@@ -31,6 +31,17 @@ static __device__ __forceinline__ float qk_rstd(const float *x1, const float *x2
     return rsqrtf(qk_row_sum(ss) / HEAD_DIM + FLT_EPSILON);
 }
 
+/* Forward math of this lane's vector pair x1, x2 (partners HALF apart) with its gains g1, g2 and cos/sin entries. */
+static __device__ __forceinline__ void qk_rotate(const float *x1, const float *x2, const float *g1, const float *g2,
+                                                 const float *cs, const float *sn, float *y1, float *y2) {
+    const float m = qk_rstd(x1, x2);
+    for (int i = 0; i < VEC; i++) {
+        const float n1 = x1[i] * m * g1[i], n2 = x2[i] * m * g2[i];
+        y1[i] = n1 * cs[i] + n2 * sn[i];
+        y2[i] = n2 * cs[i] - n1 * sn[i];
+    }
+}
+
 /* Forward of this lane's vector pair: x, g at its first vector (partners HALF further), c, s at its cos/sin entries. */
 static __device__ __forceinline__ void qk_row(const bf16 *x, const float *g, const float *c, const float *s, float *y1,
                                               float *y2) {
@@ -38,10 +49,5 @@ static __device__ __forceinline__ void qk_row(const bf16 *x, const float *g, con
     load(x, x1); load(x + HALF, x2);
     load(g, g1); load(g + HALF, g2);
     load(c, cs); load(s, sn);
-    const float m = qk_rstd(x1, x2);
-    for (int i = 0; i < VEC; i++) {
-        const float n1 = x1[i] * m * g1[i], n2 = x2[i] * m * g2[i];
-        y1[i] = n1 * cs[i] + n2 * sn[i];
-        y2[i] = n2 * cs[i] - n1 * sn[i];
-    }
+    qk_rotate(x1, x2, g1, g2, cs, sn, y1, y2);
 }
