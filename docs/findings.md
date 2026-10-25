@@ -86,8 +86,9 @@ Base-model pre-training ≈ 85 h at these rates.
 Kernel commits since, each against its parent in one session (d24, 8K / 32K tok/s): post-attention norm in the GEMM
 epilogues `373b549` 338,039 → 341,919 (+1.15%) / +0.5%; value-embedding gate `eaf14d0` 344,768 → 350,185 (+1.57%) /
 277,238 → 280,201 (+1.07%), step 4,290 → 4,223 ms; weight gradients into the fp32 `.grad` and one bf16 weight copy
-`f499be7` 344,925 → 347,634 (+0.79%) / 275,613 → 277,383 (+0.64%). Master as a whole is not re-measured yet (≈ 353K
-at 8K by composition [inference]).
+`f499be7` 344,925 → 347,634 (+0.79%) / 275,613 → 277,383 (+0.64%); FA4 window layers with a persistent forward and bf16
+dQ accumulation `0e627ff` 344,967 → 348,218 (+0.94%) / 276,538 → 278,524 (+0.72%). Master as a whole is not
+re-measured yet (≈ 356K at 8K by composition [inference]).
 
 Sharing the GPU (d16 training, 150 steps): one run 808.7K tok/s; two time-sliced processes 743.9K together (−8.0%);
 two MPS clients 825.0K (+2.0%). Under MPS an illegal memory access in one client kills every client (a device-side
@@ -182,7 +183,7 @@ vs FA4 0.413 and persistent FA4 0.359 (0.355); forward with QK-norm + RoPE fused
 0.546 (0.556), each K block being transformed ~5 times; window backward 1.193 (1.294) vs FA4 0.771 (0.828); a prologue
 backward reading FA4's fp32 dq accumulator 0.823 vs 0.405 for the dq post-process plus the plain prologue backward, so
 the combined prologue + attention op is −0.90% at d24 8K. PDL in the qk prologue +0.02%. Closed: hand attention
-kernels and QK-norm + RoPE inside attention (measured); FA3 not pursued (user). Committed: the persistent FA4 window
+kernels and QK-norm + RoPE inside attention; FA3 not pursued (user). Committed (`0e627ff`): the persistent FA4 window
 forward and bf16 dQ accumulation in the window layers only (at most 5 partial sums per dQ row there; full layers keep
 fp32 accumulation as FA3 does: 64–256 sums at 8K–32K). d24 exclusive A/B (25 steps, 8 warm-up; tok/s median, event
 mean): 8K base 344,967 / 344,686, persistent forward alone 346,074 / 345,801 (+0.32%), both 348,218 / 347,862
@@ -191,7 +192,10 @@ carries one 4 s step: FA4's preprocess compiling its >256-segment variant (`BIN_
 JIT disk cache. Window dq vs FA4's fp32 accumulation: norm rel 2.45e-3, median rel 0 (full layers 1.1e-6); 200-step
 loss last-20 3.4113 vs 3.4024 (+0.009; seed spread 0.035).
 Architecture levers ranked (GQA, more local layers, sinks, gated attention); the user approved one arm, GQA at a 2:1
-query:KV ratio (d16 4:2, d24 6:3), screened against the optimizer screen's baselines (d16 run queued).
+query:KV ratio, screened at d16 (4 query, 2 KV heads; seed 0) against the optimizer screen's MHA baselines: last-200
+train loss 1.3358 vs 1.3244 (s0) / 1.3168 (s1); code bpb 8K/32K 0.4435/0.4254 vs 0.4394/0.4212 (s1 0.4380/0.4196);
+all bpb 0.5263/0.5132 vs 0.5219/0.5087; HumanEval+ 0.067/0.061 vs 0.067/0.055, MBPP+ 0.090/0.071 vs 0.074/0.061
+(within noise); peak 28.7 vs 32.0 GiB. Loss and bpb worse beyond the seed spread: rejected, not committed.
 
 ### 5.12 Norm folded into GEMMs, fused QKV (NormFusion) — B1 committed, C3 open
 Method: norm(x)Wᵀ = diag(rstd)·xWᵀ for the gain-free RMS norm, rstd applied as a row scale in QuACK epilogues; fused
@@ -209,10 +213,11 @@ Method (TileKernels' Engram gate and weight-gradient reduce, in CUDA): the backw
 of the input ids per micro-batch, shared by every layer); a run of equal tokens reads its table row once and adds its
 summed gradient straight into the table's `.grad` (no zeroed 100 MB gradient, no autograd add); dz in bf16, the
 gate-weight gradient one cuBLAS GEMM. Outputs (`eaf14d0`): d24 8K 344,768 → 350,185 tok/s (+1.57%), 32K 277,238 →
-280,201 (+1.07%); ve_gate 161.9 → 92.6 ms/step; 200-step loss last-20 +0.0095 (seed spread 0.035). Open: QuACK's
-scaled-exp linear cross entropy, lm_head path 399 → 379 ms/step (+0.46%) and peak −5 GiB (Cut Cross-Entropy, arXiv
-2411.09009, is at best as fast as torch.compile; its gain is memory); a two-rows-per-warp gate forward 199 → 168 µs per
-call (identical output); one fused clip-grad norm and optimizer pass (~13 ms/step).
+280,201 (+1.07%); ve_gate 161.9 → 92.6 ms/step; 200-step loss last-20 +0.0095 (seed spread 0.035). Not pursued (return
+per GPU-minute below the cost of validating them): QuACK's scaled-exp linear cross entropy, lm_head path 399 → 379
+ms/step (+0.46%) and peak −5 GiB (Cut Cross-Entropy, arXiv 2411.09009, is at best as fast as torch.compile; its gain
+is memory); a two-rows-per-warp gate forward 199 → 168 µs per call (identical output); a fused clip-grad norm and
+optimizer pass (~13 ms/step).
 
 ### 5.14 Fused FP8 (FP8Fused) — closed, negative
 Outputs: cuTile 1.7.0 runs on sm_90 (FP8 e4m3 GEMM correct, rel. err 6.8e-4 vs the bf16 product); a naive cuTile
