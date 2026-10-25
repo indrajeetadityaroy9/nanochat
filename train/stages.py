@@ -26,8 +26,9 @@ def drawn(stage: Stage, run: RunPlan) -> int:
     return steps * run.gradient_accumulation_steps * stage.micro_batch_size
 
 
-def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int, device: torch.device,
-                  start: int) -> tuple[dict[str, float], Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]:
+def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int, device: torch.device, start: int
+                  ) -> tuple[dict[str, float], Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+                                                          np.ndarray]]]:
     """({corpus: weight}, the stage's training micro-batches from run row `start` on): each corpus's packed rows
     permuted once by `seed` (RandomState's stream is frozen across numpy versions, so a resume sees the same order),
     FIM pieces read as FIM examples. A run that would overdraw a corpus raises (max_tokens_per_param bounds the

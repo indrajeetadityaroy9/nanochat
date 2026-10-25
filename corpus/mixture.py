@@ -124,7 +124,7 @@ BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
 # How much better a retrained tokenizer may compress a source than the reference tokenizer: "the NSL on any given
 # subset only varies by 5 to 6 percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035
-# §2.3); ablations/tokenizer.py intrinsic measures each arm's margin (train_tokens_over_draw)
+# §2.3); ablations/tokenizer_split_merge.py intrinsic measures each arm's margin (train_tokens_over_draw)
 SPREAD = 0.06
 
 

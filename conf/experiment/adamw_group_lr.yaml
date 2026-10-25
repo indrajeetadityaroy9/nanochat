@@ -1,7 +1,7 @@
 # @package _global_
 # AdamW group lr: the AdamW groups' lr x 1/4 and x 4 against x 1 at their decay timescale, Muon's untouched; d16 on
 # the sa-bpe arm's data at its max_tokens_per_param, seeds 0 and 1; the x 1 runs are tokenizer_split_merge's sa-bpe
-# runs (the same run names). Analysis: ablations.recipe.adamw_group_lr.
+# runs (the same run names). Analysis: ablations.adamw_group_lr.analysis.
 num_hidden_layers: 16
 tokens_per_param: null
 tokenizer: sa-bpe
@@ -14,4 +14,4 @@ hydra:
   callbacks:
     records:
       _target_: ablations.records.Records
-      analysis: ablations.recipe.adamw_group_lr
+      analysis: ablations.adamw_group_lr.analysis

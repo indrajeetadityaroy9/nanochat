@@ -1,7 +1,7 @@
 # @package _global_
 # Output-logit soft-capping: cap 15 against none; d16 at 20 tokens per parameter on the sa-bpe arm's data, seeds 0-3,
 # at a fixed lr multiplier (ablations.peak_lr.analysis "base_multiplier"; fixed because ${lr_multiplier:} needs the
-# corpus tokenizer, which exists only after tokenizer_split_merge's adopt). Analysis: ablations.recipe.logit_softcap.
+# corpus tokenizer, which exists only after tokenizer_split_merge's adopt). Analysis: ablations.logit_softcap.analysis.
 num_hidden_layers: 16
 tokens_per_param: 20.0
 tokenizer: sa-bpe
@@ -15,4 +15,4 @@ hydra:
   callbacks:
     records:
       _target_: ablations.records.Records
-      analysis: ablations.recipe.logit_softcap
+      analysis: ablations.logit_softcap.analysis

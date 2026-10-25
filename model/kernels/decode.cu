@@ -651,7 +651,8 @@ typedef struct {
     unsigned long long *argmax;  /* [B] */
     bf16 *x, *x0, *xm, *h, *hn, *qkv_out, *att, *xo, *u;  /* [B][...]; hn: the normed input of fc and lm_head */
     bf16 *kc, *vc;            /* [B][L][max_len][C] */
-    bf16 *store_k, *store_v;  /* [L][store][C]: prompts' K and V kept for reuse (dec_save_prompt, dec_load_prompt) */
+    bf16 *store_k, *store_v;  /* [L][store][C] each, one allocation (V after K): prompts' K and V kept for reuse
+                               * (dec_save_prompt, dec_load_prompt) */
     float *attn_part;         /* k_attn's partials, reused by every layer: [B][H][attn_wave][HEAD_DIM] value sums */
     float2 *attn_stat;        /* [B][H][attn_wave]: their (m, l) */
     unsigned *attn_done;      /* [B][H]: k_attn's counters, zero between launches */
@@ -768,7 +769,6 @@ extern "C" void dec_destroy(void *handle) {
     slot_buffers(d, [](void **p, size_t) { cudaFree(*p); });
     cudaFree(d->active);
     cudaFree(d->store_k);
-    cudaFree(d->store_v);
     cudaFreeHost(d->host_tokens);
     cudaFreeHost(d->host_allow);
     free(d->layer);
@@ -836,12 +836,18 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     d->step = capture(d, [d] { enqueue_body(d); enqueue_head<false>(d); });
     d->body = capture(d, [d] { enqueue_body(d); });
     d->head = capture(d, [d] { enqueue_head<true>(d); });
-    /* the prompt store: the requested positions, at most what free memory holds after the slots and graphs */
+    /* the prompt store: the requested positions, at most what free memory holds after the slots and graphs; K and V
+     * in one allocation, shrunk 2 MiB at a time until it succeeds (cudaMemGetInfo's free bytes do not all fit one
+     * allocation) */
     const size_t position = 2 * (size_t)L * d->C * sizeof(bf16);
     cudaMemGetInfo(&free_bytes, &total_bytes);
     if ((size_t)d->store > free_bytes / position) d->store = (int)(free_bytes / position);
-    CUDA_CHECK(cudaMalloc((void **)&d->store_k, position / 2 * d->store));
-    CUDA_CHECK(cudaMalloc((void **)&d->store_v, position / 2 * d->store));
+    while (d->store > 0 && cudaMalloc((void **)&d->store_k, position * d->store) != cudaSuccess) {
+        cudaGetLastError();  /* clear the failed allocation's error */
+        const int step = (int)(((2 << 20) + position - 1) / position);
+        d->store = d->store > step ? d->store - step : 0;
+    }
+    d->store_v = d->store_k + (size_t)L * d->store * d->C;
     return d;
 }
 

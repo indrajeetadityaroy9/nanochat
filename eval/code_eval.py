@@ -45,6 +45,10 @@ constraint (inference/syntax_constraint.py; FIM: given the prefix and suffix), l
 solution_diagnostics, cpp_diagnostics) and passes its prompt's own examples, scored by the same evaluators. Selection
 reads only the prompt, but the prompts' examples overlap the scored base tests (verify.py), so it favours base over
 plus pass@1. Every evaluator runs as a fresh process (exec), never a fork of this torch/CUDA process.
+Each record also holds "scores": metrics.summary (standard errors, Miller arXiv 2411.00640) of its per-problem scores,
+the evaluator's pass@1 their mean: pass@1 and, with N_SAMPLE samples, pass@10 (Codex's estimator, metrics.pass_at_k);
+FIM's also CrossCodeEval's line exact match, exact match, edit similarity and identifier match against the reference
+middle (metrics.completion_scores), clustered by HumanEval problem. "latency": metrics.latency of the decoding pass.
 """
 
 import codecs
@@ -59,6 +63,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import warnings
 from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
@@ -77,7 +82,7 @@ from corpus.tokenizer import Tokenizer
 from eval.verify import chosen, search, solution_diagnostics
 from inference.decoder import AllOf, NativeDecoder, Request, fim_prompt, heal_tokens
 from inference.syntax_constraint import SyntaxConstraint
-from metrics import parse_outcome, parse_shares
+from metrics import completion_scores, latency, parse_outcome, parse_shares, pass_at_k, summary
 from model.modeling import CausalLM
 
 # HF dataset revisions
@@ -180,30 +185,40 @@ def completion(tokenizer: Tokenizer, task: Task, ids: list[int], *, special: Lit
     return text[:min([j for j in (text.find(s) for s in task.stopwords) if j >= 0], default=len(text))]
 
 
-def in_order(decoder: NativeDecoder, requests: list[Request]) -> list[list[int]]:
-    """The generated ids of each request, in request order."""
+def in_order(decoder: NativeDecoder, requests: list[Request]) -> tuple[list[list[int]], dict]:
+    """The generated ids of each request, in request order, and metrics.latency of the pass (decoder.timings;
+    duration: the pass's wall clock)."""
     out = [None] * len(requests)
+    begin = time.perf_counter()
     for i, ids in decoder.generate(requests):
         out[i] = ids
-    return out
+    duration = time.perf_counter() - begin
+    stamps = [(*decoder.timings[i], len(ids)) for i, ids in enumerate(out)]
+    return out, latency(*zip(*stamps, strict=True), duration=duration)
+
+
+def pass_scores(passed: list[list[bool]]) -> dict[str, dict]:
+    """metrics.summary of each problem's pass@k estimate (metrics.pass_at_k over its samples; one sample: whether it
+    passes), k 1 and 10 when every problem has at least 10 samples."""
+    return {f"pass@{k}": summary(pass_at_k(passed, k)) for k in (1, 10) if min(map(len, passed)) >= k}
 
 
 def filtered(decoder: NativeDecoder, request: Callable[[int], Request], text: Callable[[int, list[int]], str],
              check: Callable[[int, str], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
-             count: int) -> tuple[list[str], dict[str, list]]:
+             count: int) -> tuple[list[str], dict]:
     """The filtered mode of tasks 0..count-1: verify.search over request(i)'s candidates, each checked as check(i, its
     text(i, ids)) (the (prompt, program, diagnostics) verify.verdicts runs); the text of each task's verify.chosen
     candidate and which one it is per task: the candidates tried and whether the last was accepted (else the greedy
-    one is scored)."""
-    tried = search(decoder, request, lambda i, ids: check(i, text(i, ids)), language=language, count=count)
+    one is scored), with the search's latency."""
+    tried, timing = search(decoder, request, lambda i, ids: check(i, text(i, ids)), language=language, count=count)
     return [text(i, chosen(c).ids) for i, c in enumerate(tried)], {
-        "attempts": [len(c) for c in tried], "accepted": [c[-1].accepted for c in tried]}
+        "attempts": [len(c) for c in tried], "accepted": [c[-1].accepted for c in tried], "latency": timing}
 
 
 def filtered_completions(decoder: NativeDecoder, tokenizer: Tokenizer, items: list[Task], prompts: list[list[int]],
                          budgets: list[int], *, special: Literal["skip", "stop"],
                          check: Callable[[Task, str], tuple[str, str, list[str]]],
-                         language: Literal["python", "cpp"]) -> tuple[list[str], dict[str, list]]:
+                         language: Literal["python", "cpp"]) -> tuple[list[str], dict]:
     """filtered of left-to-right prompts (BOS and the prompt's tokens): candidates of the healed prompt
     (decoder.heal_tokens; one more token of budget, the dropped token's bytes re-emitted), Python tasks also under the
     syntax constraint of the healed prompt's text; each candidate checked as check(task, completion): the program its
@@ -231,7 +246,7 @@ def middle_request(tokenizer: Tokenizer, input_ids: list[int], lines: int | None
 
 
 def filtered_middles(decoder: NativeDecoder, tokenizer: Tokenizer, problems: list[dict], prompts: list[list[int]],
-                     lines: list[int | None], *, max_new_tokens: int) -> tuple[list[str], dict[str, list]]:
+                     lines: list[int | None], *, max_new_tokens: int) -> tuple[list[str], dict]:
     """filtered of FIM prompts: candidates under the syntax constraint of the problem's prefix and suffix, each middle
     cut to its lines (fim_lines) and checked as prefix + middle + suffix against the examples of its prompt (the
     prefix)."""
@@ -290,7 +305,8 @@ os._exit(0)
 def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: list[list[str]]) -> dict:
     """EvalPlus's evaluation of each task's completions (evalplus_solution's solutions, as many per task as it has):
     {"base pass@1", "plus pass@1" (its estimate_pass_at_k over each task's samples, plus: base and plus tests passed),
-    "ids", "base_status", "plus_status" (per task, per sample)}."""
+    "scores": {"base", "plus": pass_scores of the same outcomes}, "ids", "base_status", "plus_status" (per task, per
+    sample)}."""
     dataset = EVALPLUS[name][0]
     pairs = [(t, s) for t, task_samples in zip(items, samples, strict=True) for s in task_samples]
     with tempfile.TemporaryDirectory() as tmp:
@@ -302,14 +318,21 @@ def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: l
         subprocess.run([sys.executable, "-I", "-c", EVALPLUS_EVALUATE, dataset, path, scored], cwd=tmp, check=True)
         result = json.loads(scored.read_text(encoding="utf-8"))
     evaluated = [result["eval"][t.task_id] for t in items]
+    base_status = [[v["base_status"] for v in vs] for vs in evaluated]
+    plus_status = [[v["plus_status"] for v in vs] for vs in evaluated]
+    # evalplus/evaluate.py's pass@k outcomes: base_status "pass"; plus, base_status == plus_status == "pass"
+    base = [[b == "pass" for b in bs] for bs in base_status]
+    plus = [[b == p == "pass" for b, p in zip(bs, ps, strict=True)] for bs, ps in zip(base_status, plus_status,
+                                                                                       strict=True)]
     return {"base pass@1": result["pass_at_k"]["base"]["pass@1"], "plus pass@1": result["pass_at_k"]["plus"]["pass@1"],
-            "ids": [t.task_id for t in items], "base_status": [[v["base_status"] for v in vs] for vs in evaluated],
-            "plus_status": [[v["plus_status"] for v in vs] for vs in evaluated]}
+            "scores": {"base": pass_scores(base), "plus": pass_scores(plus)},
+            "ids": [t.task_id for t in items], "base_status": base_status, "plus_status": plus_status}
 
 
 def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
     """MultiPL-E's evaluation of each problem's completions: {"pass@1" (pass_k.py: Codex's estimator over each
-    problem's completions), "ids", "status" (per problem, per completion)}. Each problem is a completions file as
+    problem's completions), "scores": pass_scores of pass_k.py's outcomes (status "OK" and exit code 0), "ids",
+    "status" (per problem, per completion)}. Each problem is a completions file as
     multipl_e/completions.py writes it, judged by its own main.py --file process (--dir runs problems serially),
     os.cpu_count() at once, each with one judge thread (--max-workers 1): main.py's default of cpu_count() - 1 threads
     per file puts up to 20 g++ per core, and a compile past its wall-clock limit scores "SyntaxError" (eval_cpp.py).
@@ -333,9 +356,11 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
         if len(rows) != 1:
             raise RuntimeError(f"pass_k.py printed {len(rows)} pass@1 rows: {out!r}")
         pass_at_1 = float(rows[0]["Estimate"])
-        status = [[r["status"] for r in json.loads(Path(tmp, f"{t.task_id}.results.json").read_text(encoding="utf-8"))
-                   ["results"]] for t in items]
-    return {"pass@1": pass_at_1, "ids": [t.task_id for t in items], "status": status}
+        results = [json.loads(Path(tmp, f"{t.task_id}.results.json").read_text(encoding="utf-8"))["results"]
+                   for t in items]
+    passed = [[r["status"] == "OK" and r["exit_code"] == 0 for r in rs] for rs in results]
+    return {"pass@1": pass_at_1, "scores": pass_scores(passed), "ids": [t.task_id for t in items],
+            "status": [[r["status"] for r in rs] for rs in results]}
 
 
 # human_eval_infilling's evaluation (evaluation.py evaluate_functional_correctness: check_correctness per sample at its
@@ -363,9 +388,11 @@ with open(sys.argv[4], "w", encoding="utf-8") as f:
 
 
 def infilling(name: str, problems: list[dict], middles: list[str]) -> dict:
-    """Official evaluation of one middle per problem: {"pass@1", "ids", "completions", "result"} (per problem "passed",
-    "failed: <exception>" or "timed out", human_eval_infilling/execution.py), a worker process per CPU
-    (INFILLING_EVALUATE)."""
+    """Official evaluation of one middle per problem: {"pass@1", "scores", "ids", "completions", "result"} (per problem
+    "passed", "failed: <exception>" or "timed out", human_eval_infilling/execution.py), a worker process per CPU
+    (INFILLING_EVALUATE). scores: metrics.summary of each per-problem score, clustered by the HumanEval problem a
+    task derives from (task id "<Benchmark>/HumanEval/<n>/<span>"; Miller, arXiv 2411.00640: clustered questions),
+    "pass@1" (whether it passed) and metrics.completion_scores against the reference middle (canonical_solution)."""
     samples = [{"task_id": p["task_id"], "completion": middle} for p, middle in zip(problems, middles, strict=True)]
     with tempfile.TemporaryDirectory() as tmp:
         path, scored = Path(tmp, "samples.json"), Path(tmp, "results.json")
@@ -373,7 +400,11 @@ def infilling(name: str, problems: list[dict], middles: list[str]) -> dict:
         subprocess.run([sys.executable, "-I", "-c", INFILLING_EVALUATE, name, path, str(os.cpu_count()), scored],
                        cwd=tmp, check=True)
         result = json.loads(scored.read_text(encoding="utf-8"))
-    return {"pass@1": float(estimate_pass_at_k(1, [r == "passed" for r in result], 1).mean()),
+    passed = [r == "passed" for r in result]
+    clusters = ["/".join(p["task_id"].split("/")[1:3]) for p in problems]
+    scores = completion_scores(middles, [p["canonical_solution"] for p in problems]) | {"pass@1": passed}
+    return {"pass@1": float(estimate_pass_at_k(1, passed, 1).mean()),
+            "scores": {k: summary(v, clusters) for k, v in scores.items()},
             "ids": [s["task_id"] for s in samples], "completions": middles, "result": result}
 
 
@@ -381,8 +412,8 @@ def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list
                pool: ProcessPoolExecutor) -> dict[str, dict[str, dict]]:
     """{benchmark: {"greedy": its evaluator's scores of the greedy completions and the completions, "sampled": of
     N_SAMPLE samples per problem (module docstring), "filtered": of filtered_completions' completions, the completions
-    and their search record}} of the EvalPlus and MultiPL-E benchmarks, EvalPlus's solutions sanitized by `pool`
-    (sanitizers). Sample k of problem i draws with seed N_SAMPLE i + k."""
+    and their search record}, each with its decoding's "latency"} of the EvalPlus and MultiPL-E benchmarks, EvalPlus's
+    solutions sanitized by `pool` (sanitizers). Sample k of problem i draws with seed N_SAMPLE i + k."""
     bos = tokenizer.bos_token_id
     runs = {}
     for name in (*EVALPLUS, *MULTIPL_E_BENCHMARKS):
@@ -408,13 +439,13 @@ def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list
     decoder = NativeDecoder(model, bos_token_id=bos, max_length=max_length, prompt_store=prompt_store)
     results = {}
     for name, (items, prompts, budgets, special, check, language, score) in runs.items():
-        generated = in_order(decoder, [
+        generated, greedy_latency = in_order(decoder, [
             Request(input_ids=p, max_new_tokens=m,
                     stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=b""))
             for t, p, m in zip(items, prompts, budgets, strict=True)])
         greedy = [completion(tokenizer, t, ids, special=special, healed=b"")
                   for t, ids in zip(items, generated, strict=True)]
-        sampled = in_order(decoder, [
+        sampled, sampled_latency = in_order(decoder, [
             Request(input_ids=p, max_new_tokens=m,
                     stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=b""),
                     temperature=TEMPERATURE, top_p=TOP_P, seed=N_SAMPLE * i + k)
@@ -424,24 +455,26 @@ def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list
         chosen_completions, record = filtered_completions(decoder, tokenizer, items, prompts, budgets,
                                                           special=special, check=check, language=language)
         results[name] = {
-            "greedy": score(items, [[c] for c in greedy]) | {"completions": greedy},
-            "sampled": score(items, samples) | {"n_sample": N_SAMPLE},
+            "greedy": score(items, [[c] for c in greedy]) | {"completions": greedy, "latency": greedy_latency},
+            "sampled": score(items, samples) | {"n_sample": N_SAMPLE, "latency": sampled_latency},
             "filtered": score(items, [[c] for c in chosen_completions]) | {"completions": chosen_completions} | record}
     return results
 
 
 def parse_scores(pool: ProcessPoolExecutor, name: str, items: list[Task], completions: list[str],
-                 outcomes: list[str]) -> dict:
-    """parse_generation's record of a benchmark's completions and their metrics.parse_outcome outcomes."""
+                 outcomes: list[str], timing: dict) -> dict:
+    """parse_generation's record of a benchmark's completions, their metrics.parse_outcome outcomes and the decoding's
+    latency."""
     return (parse_shares(outcomes) | evalplus(pool, name, items, [[c] for c in completions])
-            | {"outcomes": outcomes, "completions": completions})
+            | {"outcomes": outcomes, "completions": completions, "latency": timing})
 
 
 def parse_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
                      pool: ProcessPoolExecutor, scorers: ThreadPoolExecutor) -> dict[str, Future[dict]]:
     """{benchmark: {"parses", "indentation", "syntax" (shares of its problems: how prompt + completion compiles,
-    parse_outcome), "outcomes", "completions"} | EvalPlus's base and plus pass@1 of the completions, sanitized by
-    `pool` (sanitizers)} of HumanEval+ and MBPP+: one greedy completion per problem, unconstrained, of the healed prompt
+    parse_outcome), "outcomes", "completions", "latency" (in_order)} | EvalPlus's base and plus pass@1 of the
+    completions (evalplus), sanitized by `pool` (sanitizers)} of HumanEval+ and MBPP+: one greedy completion per
+    problem, unconstrained, of the healed prompt
     (decoder.heal_tokens), TokEval's protocol (BOS, healing, greedy), so the failures a vocabulary's line-break tokens
     cause (SyntaxError when punctuation fuses with a line break, IndentationError when a line break fuses with the
     indentation after it, in arXiv 2608.18062's models) show where pass@1 is near zero. Each benchmark's EvalPlus
@@ -457,21 +490,21 @@ def parse_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str
     for name, prompts in runs.items():
         items = benchmarks[name]
         healed = [heal_tokens(tokenizer, p) for p in prompts]
-        generated = in_order(decoder, [Request(input_ids=h, max_new_tokens=budget, constraint=c,
-                                               stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords,
-                                                                                          healed=d))
-                                       for t, (h, c, d) in zip(items, healed, strict=True)])
+        generated, timing = in_order(decoder, [
+            Request(input_ids=h, max_new_tokens=budget, constraint=c,
+                    stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=d))
+            for t, (h, c, d) in zip(items, healed, strict=True)])
         completions = [completion(tokenizer, t, ids, special="skip", healed=d)
                        for t, ids, (_, _, d) in zip(items, generated, healed, strict=True)]
         outcomes = [parse_outcome(t.prompt + c) for t, c in zip(items, completions, strict=True)]
-        results[name] = scorers.submit(parse_scores, pool, name, items, completions, outcomes)
+        results[name] = scorers.submit(parse_scores, pool, name, items, completions, outcomes, timing)
     return results
 
 
 def fim_generation(model: CausalLM, tokenizer: Tokenizer) -> dict[str, dict[str, dict]]:
-    """{"<benchmark>/<mode>": {"greedy": infilling(...) of greedy middles cut to their lines (fim_lines)}} of the
-    INFILLING benchmarks in each FIM_MODES order, the FILTERED_MODE entry also {"filtered": that of filtered_middles'
-    middles and their search record}."""
+    """{"<benchmark>/<mode>": {"greedy": infilling(...) of greedy middles cut to their lines (fim_lines) and the
+    decoding's "latency"}} of the INFILLING benchmarks in each FIM_MODES order, the FILTERED_MODE entry also
+    {"filtered": that of filtered_middles' middles and their search record}."""
     runs = {}
     for name in INFILLING:
         problems = list(read_problems(name).values())
@@ -491,10 +524,10 @@ def fim_generation(model: CausalLM, tokenizer: Tokenizer) -> dict[str, dict[str,
     results = {}
     for name, (problems, max_new_tokens, prompts, lines) in runs.items():
         for mode in FIM_MODES:
-            generated = in_order(decoder, [middle_request(tokenizer, prompt, k, max_new_tokens=max_new_tokens)
-                                         for prompt, k in zip(prompts[mode], lines, strict=True)])
+            generated, timing = in_order(decoder, [middle_request(tokenizer, prompt, k, max_new_tokens=max_new_tokens)
+                                                   for prompt, k in zip(prompts[mode], lines, strict=True)])
             middles = [fim_lines(tokenizer.enc.decode(ids), k) for ids, k in zip(generated, lines, strict=True)]
-            results[f"{name}/{mode}"] = {"greedy": infilling(name, problems, middles)}
+            results[f"{name}/{mode}"] = {"greedy": infilling(name, problems, middles) | {"latency": timing}}
         middles, record = filtered_middles(decoder, tokenizer, problems, prompts[FILTERED_MODE], lines,
                                            max_new_tokens=max_new_tokens)
         results[f"{name}/{FILTERED_MODE}"]["filtered"] = infilling(name, problems, middles) | record

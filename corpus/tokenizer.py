@@ -1,5 +1,6 @@
 """
-The corpus's tokenizer in CORPUS/tokenizer (tokenizer.tiktoken, tokenizer.pattern), adopted by ablations/tokenizer.py:
+The corpus's tokenizer in CORPUS/tokenizer (tokenizer.tiktoken, tokenizer.pattern), adopted by
+ablations/tokenizer_split_merge.py:
 the mergeable tokens, then SPECIAL_TOKENS, encoded by tiktoken. A vocabulary's tokenized and packed data live in its
 directory's sibling tokenized/, keyed by its data key, so tokenize.py and pack.py serve every arm alike.
 """

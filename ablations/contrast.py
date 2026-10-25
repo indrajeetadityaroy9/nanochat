@@ -9,12 +9,17 @@ diverged run drops its seed from the arm's contrasts on both sides):
   bits per byte "shows no association with MBPP at any level");
 - code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal bound
   z CODE_SIGMA √(1 / n + 1 / n), z = scipy.stats.norm.ppf(1 - ALPHA / 2), n the contrast's seeds per arm, else equal.
+An arm is adopted iff its code is better and its parsing not worse (adopted). A scale swept over {low, 1, high}
+(scaled): the vertex of the exact 3-point quadratic in ln(scale) through the arms' mean code bits per byte, clamped to
+[low, high] (a concave or flat fit: the lower-code end), adopted iff the lower-code arm is adopted against 1; else 1.
 """
 import math
 import statistics
 
 import numpy as np
 from scipy.stats import binomtest, norm
+
+import metrics
 
 # The decisions' significance level, the conventional 0.05
 ALPHA = 0.05
@@ -30,7 +35,7 @@ def evaluated(lines: list[dict], field: str) -> dict[tuple, tuple[float, list[bo
     """{(the run's `field`, seed): (code bits per byte, per PARSED problem in the benchmark's order whether its healed
     greedy completion compiles)} of every evaluated run in an experiment's records (a diverged run has none)."""
     return {(line["config"][field], line["config"]["seed"]): (
-        line["measures"]["code"], [o == "parses" for o in line["evaluations"][-1]["parse"][PARSED]["outcomes"]])
+        line["measures"]["code"], metrics.parsed(line["evaluations"][-1]["parse"][PARSED]["outcomes"]))
         for line in lines if line["measures"] is not None}
 
 
@@ -52,3 +57,21 @@ def contrast(runs: dict[tuple, tuple[float, list[bool]]], arm: object, baseline:
             "parsing": "equal" if p >= ALPHA else "better" if here > there else "worse",
             "code_difference": difference, "code_margin": margin,
             "code": "better" if difference < -margin else "worse" if difference > margin else "equal"}
+
+
+def adopted(c: dict) -> bool:
+    """Whether a contrast adopts its arm (module docstring)."""
+    return c["code"] == "better" and c["parsing"] != "worse"
+
+
+def scaled(lines: list[dict], field: str, low: float, high: float) -> dict:
+    """A scale's decision over the arms {low, 1, high} of `field` (module docstring): "scale" the adopted scale."""
+    runs = evaluated(lines, field)
+    scales = (low, 1.0, high)
+    means = {s: statistics.fmean(code for (v, _), (code, _) in runs.items() if v == s) for s in scales}
+    curvature, x = metrics.parabola_vertex([math.log(s) for s in scales], [means[s] for s in scales])
+    end = min((low, high), key=means.__getitem__)
+    vertex = min(max(math.exp(x), low), high) if curvature > 0 else end
+    contrasts = {str(s): contrast(runs, s, 1.0) for s in (low, high)}
+    return {"means": {str(s): m for s, m in means.items()}, "curvature": curvature, "vertex": vertex,
+            "contrasts": contrasts, "scale": vertex if adopted(contrasts[str(end)]) else 1.0}

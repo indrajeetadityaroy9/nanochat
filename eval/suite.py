@@ -18,7 +18,6 @@ from typing import Literal
 
 import torch
 
-import metrics
 from corpus.tokenizer import Tokenizer
 from eval.bpb import likelihood
 from eval.code_eval import fim_generation, generation, parse_generation, sanitizers, tasks
@@ -52,9 +51,9 @@ def evaluate(model: CausalLM, tokenizer: Tokenizer, *, run_name: str, step: int,
     evaluation_path(run_name, step).write_text(json.dumps(evaluation, allow_nan=False), encoding="utf-8")
 
 
-def record(run_name: str) -> dict:
-    """A run's tracked metrics but the per-step ones: its non-train records and the evaluations (evaluate) of its
-    checkpoints on disk, in step order (a diverged run has none)."""
+def record(run_name: str, log: list[dict]) -> dict:
+    """A run's tracked metrics but the per-step ones: the non-train records of its log (metrics.records) and the
+    evaluations (evaluate) of its checkpoints on disk, in step order (a diverged run has none)."""
     paths = (RUNS / run_name).glob("eval-*.json")
-    return {"run_name": run_name, "records": [r for r in metrics.records(run_name) if r["kind"] != "train"],
+    return {"run_name": run_name, "records": [r for r in log if r["kind"] != "train"],
             "evaluations": sorted((json.loads(p.read_text(encoding="utf-8")) for p in paths), key=lambda r: r["step"])}

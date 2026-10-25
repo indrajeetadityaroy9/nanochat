@@ -11,6 +11,7 @@ new decoder). fim_prompt builds FIM prompts; heal_tokens and AllOf build constra
 import bisect
 import ctypes
 import functools
+import time
 import weakref
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -145,11 +146,14 @@ class Stored:
 @dataclass
 class Slot:
     """A request in a decoder slot: its index, the request, the steps left in its prompt before the step that chooses
-    its first token, whether its prompt's K and V go to the prompt store once written, the generated tokens."""
+    its first token, whether its prompt's K and V go to the prompt store once written, when it took the slot and when
+    its first generated token reached the host (time.perf_counter), the generated tokens."""
     index: int
     request: Request
     prompt_steps: int
     save: bool
+    start: float
+    first: float | None = None
     out: list = field(default_factory=list)
 
 
@@ -216,6 +220,7 @@ class NativeDecoder:
         # the prompt store: {prompt: its pages}, the free pages (once the decoder exists), the runs started
         self.stored: dict[tuple[int, ...], Stored] = {}
         self.runs = 0
+        self.timings: dict[int, tuple[float, float, float]] = {}  # generate's request timestamps
         self.bos = bos_token_id
         # dec_destroy (the finalizer) releases every native resource; the buffers it reads are this object's tensors
         self.stream = torch.cuda.Stream(model.embed_tokens.weight.device)
@@ -244,7 +249,7 @@ class NativeDecoder:
         start = 0 if stored is None else n
         self.lib.dec_set_prompt(self.handle, b, prompt.ctypes.data, len(prompt), start, request.temperature,
                                 request.top_p, request.seed)
-        return Slot(index, request, prompt_steps=n - start, save=stored is None)
+        return Slot(index, request, prompt_steps=n - start, save=stored is None, start=time.perf_counter())
 
     def save(self, b: int, input_ids: list[int]) -> None:
         """Keep slot b's prompt K and V (all but the last position, written by the launched steps) in free pages,
@@ -275,9 +280,14 @@ class NativeDecoder:
         follows from the previous token;
         the syntax constraints' masks in one parallel batch), then its head, the choice by mask and temperature; other
         steps launch the whole greedy step. Raises ValueError when len(input_ids) + max_new_tokens - 1 > max_length or a
-        constraint's mask allows no token (not even BOS)."""
+        constraint's mask allows no token (not even BOS).
+        timings: {request index: (start, first, end)} of this call's requests yielded so far (time.perf_counter
+        seconds, read on the host once each step's tokens arrive, no further device synchronization): when the request
+        took its slot, when its first generated token arrived (end for a request without one), and the step that
+        finished it."""
         lib, handle, B, bos, max_length = self.lib, self.handle, self.batch, self.bos, self.max_length
         self.runs += 1
+        self.timings = {}
         queue, slots = enumerate(requests), [None] * B
         stopping = []  # slots whose last token awaits its stopping criteria
         # row 0: the active slots, row 1: the masked slots; dec_set_active takes each row as 64-bit words, slot b at
@@ -331,6 +341,7 @@ class NativeDecoder:
                 flags[1] = False
                 lib.dec_launch_head(handle)
             lib.dec_tokens(handle, self.tokens.ctypes.data)
+            now = time.perf_counter()
             for b, s in enumerate(slots):
                 if s is None or b in finished:
                     continue
@@ -343,6 +354,8 @@ class NativeDecoder:
                 if token == bos:
                     finished.append(b)
                     continue
+                if not s.out:
+                    s.first = now
                 s.out.append(token)
                 if s.request.constraint is not None:
                     s.request.constraint.push(token)
@@ -354,5 +367,6 @@ class NativeDecoder:
                 for b in finished:
                     done = slots[b]
                     fill(b)
+                    self.timings[done.index] = (done.start, now if done.first is None else done.first, now)
                     yield done.index, done.out
                 set_active()  # each choosing step sets its masks anew

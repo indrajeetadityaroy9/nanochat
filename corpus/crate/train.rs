@@ -22,7 +22,7 @@
 //! A merge whose bytes are already a token (made by another pair) is refused, as a vocabulary maps bytes to one id.
 //!
 //! With score "frequency" a merge takes the pair of highest F alone, ties as above: rustbpe's BPE, R never counted (the
-//! frequency-BPE arm of ablations/tokenizer.py).
+//! frequency-BPE arm of ablations/tokenizer_split_merge.py).
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;

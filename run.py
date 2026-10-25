@@ -158,18 +158,19 @@ def job(config: RunConfig) -> None:
 
     name, run = run_name(config), plan_of(config)
     data_key = get_tokenizer(tokenizer_path(config)).data_key
-    if any(r["plan"] != asdict(run) or r["data_key"] != data_key for r in metrics.records(name) if r["kind"] == "run"):
+    log = metrics.records(name)
+    if any(r["plan"] != asdict(run) or r["data_key"] != data_key for r in log if r["kind"] == "run"):
         raise RuntimeError(f"recipe changed since {name} ran: delete {RUNS / name}")
-    if evaluation_path(name, run.max_steps).exists() or metrics.diverged(name) is not None:
+    if evaluation_path(name, run.max_steps).exists() or metrics.diverged(log) is not None:
         return
-    log = RUNS / name / "run.log"
-    if phase(log, training, config=config, run=run):
-        if metrics.diverged(name) is not None:
+    output = RUNS / name / "run.log"
+    if phase(output, training, config=config, run=run):
+        if metrics.diverged(metrics.records(name)) is not None:
             return
-        raise ChildProcessError(f"{name}: training failed ({log})")
+        raise ChildProcessError(f"{name}: training failed ({output})")
     for step in sorted(checkpoint_steps(config, run)):
-        if not evaluation_path(name, step).exists() and phase(log, evaluation, config=config, step=step):
-            raise ChildProcessError(f"{name}: evaluation of step {step} failed ({log})")
+        if not evaluation_path(name, step).exists() and phase(output, evaluation, config=config, step=step):
+            raise ChildProcessError(f"{name}: evaluation of step {step} failed ({output})")
 
 
 def lr_multiplier() -> float:

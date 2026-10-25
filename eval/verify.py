@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tokenize
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +35,7 @@ from typing import Literal
 
 from inference.decoder import NativeDecoder, Request
 from inference.syntax_constraint import syntax_error
+from metrics import latency
 
 # basedpyright rules (its configuration reference, config-files) whose errors on known types are runtime failures or
 # annotation contradictions: undefined variables (NameError), attribute accesses (AttributeError), call expressions and
@@ -216,25 +218,30 @@ class Candidate:
 
 def search(decoder: NativeDecoder, request: Callable[[int], Request],
            check: Callable[[int, list[int]], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
-           count: int) -> list[list[Candidate]]:
-    """The candidates of tasks 0..count-1 in attempt order: request(i) is task i's greedy request (a fresh constraint
-    each call), check(i, ids) the (prompt, program, diagnostics) that verdicts checks for generated ids. Each round
-    decodes every task without an accepted candidate yet (attempt a: request(i) at temperature 0 for a = 0, TEMPERATURE
-    with seed a after), at most ATTEMPTS rounds, each candidate's check built by a thread as it completes (while the
-    decoder runs the round's others), then checks the round's candidates at once (verdicts)."""
+           count: int) -> tuple[list[list[Candidate]], dict]:
+    """The candidates of tasks 0..count-1 in attempt order, and metrics.latency of the decoder's requests over every
+    round (duration: the rounds' decoding): request(i) is task i's greedy request (a fresh constraint each call),
+    check(i, ids) the (prompt, program, diagnostics) that verdicts checks for generated ids. Each round decodes every
+    task without an accepted candidate yet (attempt a: request(i) at temperature 0 for a = 0, TEMPERATURE with seed a
+    after), at most ATTEMPTS rounds, each candidate's check built by a thread as it completes (while the decoder runs
+    the round's others), then checks the round's candidates at once (verdicts)."""
     tried = [[] for _ in range(count)]
     pending = list(range(count))
+    stamps, duration = [], 0.0
     with ThreadPoolExecutor(os.cpu_count()) as pool:
         for attempt in range(ATTEMPTS):
             sampling = {"temperature": 0.0 if attempt == 0 else TEMPERATURE, "seed": attempt}
             generated, checks = {}, {}
+            begin = time.perf_counter()
             for k, ids in decoder.generate(dataclasses.replace(request(i), **sampling) for i in pending):
                 generated[pending[k]], checks[pending[k]] = ids, pool.submit(check, pending[k], ids)
+            duration += time.perf_counter() - begin
+            stamps += [(*decoder.timings[k], len(generated[i])) for k, i in enumerate(pending)]
             results = verdicts([checks[i].result() for i in pending], language=language)
             for i, (diagnostics, passed) in zip(pending, results, strict=True):
                 tried[i].append(Candidate(ids=generated[i], diagnostics=diagnostics, examples=passed))
             pending = [i for i in pending if not tried[i][-1].accepted]
-    return tried
+    return tried, latency(*zip(*stamps, strict=True), duration=duration)
 
 
 def chosen(candidates: list[Candidate]) -> Candidate:

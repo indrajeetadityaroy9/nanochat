@@ -42,8 +42,8 @@ def packed(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Packe
 
 
 class PretrainingBatches:
-    """Re-iterable micro-batches (input_ids, labels, cu_seqlens, segments) of a mixture {corpus: weight} of packed
-    corpora.
+    """Re-iterable micro-batches (input_ids, labels, cu_seqlens, segments, lengths) of a mixture {corpus: weight} of
+    packed corpora.
     orders: {corpus: row ids in read order, -1 an empty row (all padding)}; start: the run rows already consumed
     (resume), whose rows of each corpus (mixture_rows) are skipped; iteration stops when a
     corpus's order is exhausted, without the partial micro-batch. reading: "fim" reads the packed fill-in-the-middle
@@ -56,7 +56,9 @@ class PretrainingBatches:
       last offset (empty segments).
     - segments: the micro-batch's segments, a 0-dim int32 tensor on the host: the attention reads cu_seqlens'
       first segments + 1 entries only (model/ops/flash_attn.py), as FA4 spends time on every segment it is given,
-      empty or not."""
+      empty or not.
+    - lengths: the segments' lengths (cu_seqlens' differences), int64 on the host: the micro-batch's attention work
+      (metrics.executed_model_flops), read without a device synchronization."""
 
     def __init__(self, mixture: dict[str, float], split: str, tokenizer: Tokenizer, orders: dict[str, np.ndarray], *,
                  seq_len: int, micro_batch_size: int, device: torch.device | str,
@@ -97,7 +99,7 @@ class PretrainingBatches:
             out[at] = self.bos
         return [*starts, at]
 
-    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray]]:
         consumed = np.bincount(mixture_rows(self.weights, start=0, count=self.start), minlength=len(self.names))
         orders = [iter(order[skip:]) for order, skip in zip(self.orders, consumed, strict=True)]
         for position in itertools.count(self.start, self.micro_batch_size):
@@ -118,4 +120,4 @@ class PretrainingBatches:
             cu_seqlens = torch.from_numpy(cu).pin_memory().to(self.device, non_blocking=True)
             input_ids, labels = batch[:, :-1], batch[:, 1:].to(torch.int64)
             yield (input_ids.masked_fill(input_ids == IGNORE_INDEX, self.bos), labels, cu_seqlens,
-                   torch.tensor(len(bounds), dtype=torch.int32))
+                   torch.tensor(len(bounds), dtype=torch.int32), np.diff(cu[:len(bounds) + 1]).astype(np.int64))

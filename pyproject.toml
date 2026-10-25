@@ -19,14 +19,21 @@ dependencies = [
     "quack-kernels==0.6.5",
     "regex==2026.9.29",
     "scipy==1.18.1",
+    "statsmodels==0.15.0",
     "tiktoken==0.14.0",
+    # TokEval (arXiv 2608.18062): metrics.py tokeval; its package imports transformers at import time
+    "tokenizer-intrinsic-evals",
     "tokenizers==0.23.3",
 ]
 
 [tool.uv]
 # torch and numpy come from the NGC PyTorch base image as NVIDIA built them; evalplus's model-provider clients serve
 # only its code generation, which nanochat does not use
-exclude-dependencies = ["torch", "numpy", "openai", "anthropic", "google-generativeai", "boto3", "ollama", "transformers"]
+exclude-dependencies = ["torch", "numpy", "openai", "anthropic", "google-generativeai", "boto3", "ollama"]
+# TokEval's AST metrics parse with tree-sitter-language-pack 1.22.1, above its declared <1, as its reference numbers on
+# the corpus were computed; 1.x downloads the grammar libraries on first use into XDG_CACHE_HOME (artifacts/cache)
+override-dependencies = ["tree-sitter-language-pack==1.22.1"]
 
 [tool.uv.sources]
 evalplus = { git = "https://github.com/evalplus/evalplus", rev = "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e" }
+tokenizer-intrinsic-evals = { git = "https://github.com/cimeister/tokenizer-intrinsic-evals", rev = "7d03a61c2e2b4b557b796519141ccb52d144e10f" }

@@ -38,6 +38,7 @@ import math
 
 import numpy as np
 
+import metrics
 from run import RunConfig, base_plan, plan_of
 
 # The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords
@@ -72,8 +73,8 @@ def fit(lines: list[dict]) -> dict:
         return {"runs": evaluated, "curvature": None, "vertex": math.exp(u[best]), "extend": None}
     if not math.isfinite(code[best - 1]):
         raise RuntimeError("the lowest-code run's lower neighbour diverged: extend the grid down by hand")
-    a, b, _ = np.polyfit(u[best - 1:best + 2], code[best - 1:best + 2], 2)
-    return {"runs": evaluated, "curvature": float(a), "vertex": math.exp(-b / (2 * a)), "extend": None}
+    curvature, vertex = metrics.parabola_vertex(u[best - 1:best + 2], code[best - 1:best + 2])
+    return {"runs": evaluated, "curvature": curvature, "vertex": math.exp(vertex), "extend": None}
 
 
 def analysis(lines: list[dict]) -> dict:

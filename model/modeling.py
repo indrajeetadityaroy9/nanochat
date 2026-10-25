@@ -210,6 +210,13 @@ def num_non_embedding_params(model: CausalLM) -> int:
     return sum(p.numel() for p in model.layers.parameters()) + model.lm_head.weight.numel()
 
 
+def num_matmul_params(model: CausalLM) -> int:
+    """The weights the forward multiplies by, the N of PaLM's model FLOPs (metrics.py): every matrix but the embedding
+    tables (lookups); norm gains and scalars are elementwise."""
+    return sum(p.numel() for m in model.modules() if not isinstance(m, nn.Embedding)
+               for p in m.parameters(recurse=False) if p.ndim == 2)
+
+
 def non_embedding_flops_per_token(model: CausalLM) -> int:
     """DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72 n_layer d_model² + 12 n_layer d_model l_seq: full attention
     over the model's context l_seq, the count the batch and lr laws' constants were fit with (§3.1-3.2; every Table 3
