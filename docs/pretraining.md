@@ -369,12 +369,18 @@ infilling (arXiv 2207.14255; PSM and SPM), each scored by its official evaluator
   training data inflates its score.
 
 **Decoder** (`inference/decoder.py`, `model/kernels/decode.cu`): batched continuous decoding of up to 1,024 slots,
-each step one captured CUDA graph (a narrow copy over the first 256 slots while no higher slot is active). A new
-request's prompt is prefilled: its positions run as rows of one batched pass through the step's body (up to 1,024
-rows of any prompts per launch, each row computed alone as a step would), so its slot starts at the prompt's last
-token; a prompt's K and V are kept in a paged prompt store (pages of 64 positions) and a later request with the same
-prompt copies them instead. Every sum's order depends on the shapes and the slot's position alone, so a request's
-tokens do not depend on the batch, the store or timing. `memory_fraction` caps the decoder's device memory (slots,
+each step one captured CUDA graph (a narrow copy over the first 256 slots while no higher slot is active), its GEMMs
+on Hopper's wgmma tensor cores fed by TMA, its KV cache e4m3 with a scale per position and head (half the bytes a
+step reads), its attention streaming each slot's window through shared memory. A new request's prompt is prefilled:
+its positions run as rows of one batched pass through the step's body (up to 1,024 rows of any prompts per launch,
+each row computed alone as a step would), so its slot starts at the prompt's last token; a prompt's K and V are kept
+in a paged prompt store (pages of 64 positions) and a later request with the same prompt copies them instead. Every
+sum's order depends on the shapes and the slot's position alone, so a request's tokens do not depend on the batch,
+the store or timing; the FP8 cache makes them differ from the bf16 forward's where two logits nearly tie (d16
+reference, 128 code prompts × 128 greedy tokens teacher-forced: 99.16% the forward's argmax). On the fixed-length
+benchmark (2,048 random-init requests, 256-token prompts, 512 tokens) it decodes 94.8K tok/s at d24 and 189.3K at
+d16, against 21.8K and 66.6K for the per-slot-group GEMV decoder it replaced. `memory_fraction` caps the decoder's
+device memory (slots,
 prefill rows, graphs, store) at a fraction of the device's total (the evaluation reads
 `NANOCHAT_DECODER_MEMORY_FRACTION`; unset: all free memory), so a job can share the GPU. A `Request` carries the
 prompt's `input_ids`, `max_new_tokens`, `stopping_criteria`,

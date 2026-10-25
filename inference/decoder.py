@@ -165,19 +165,20 @@ class Slot:
 
 class NativeDecoder:
     """Decoding by decode.cu of up to `batch` sequences at once (slots); a sequence's tokens do not depend on the batch
-    (decode.cu computes each slot and each prefill row alone in a fixed order, and draws a sample's noise from its
-    request's seed and the generated position).
+    (decode.cu computes each slot and each prefill row alone, in a fixed order) and a sample's noise depends only on its
+    request's seed and the generated position. The KV cache is e4m3 with a scale per position and head (decode.cu), so
+    a sequence's tokens can differ from the bf16 forward's where two logits nearly tie.
     batch: dec_create's slot count, at most decode.cu's MAX_BATCH, bounded by free device memory.
     max_length: a slot's cache capacity in positions, at most the model's max_position_embeddings: the longest
     len(input_ids) + max_new_tokens - 1 the caller will run (a slot's cache is 2 num_hidden_layers max_length
-    hidden_size bf16 values, so a smaller max_length fits more slots). The tokens do not depend on it: decode.cu splits
-    attention by the model's max_position_embeddings.
+    (hidden_size + 4 num_attention_heads) bytes, so a smaller max_length fits more slots; the tokens do not depend on
+    it).
     prompt_store: positions requested for decode.cu's prompt store (at most the device memory left after the slots, 2
-    num_hidden_layers hidden_size bf16 values a position). A prompt's K and V at all but its last position are kept
-    once prefilled; a later request with the same prompt copies them instead of prefilling, its tokens unchanged (K
-    and V depend on the prompt alone). To free pages, prompts unused in this run and the previous one are dropped,
-    least recently used first, so a search's rounds keep the prompts they reuse and a too-small store keeps a fixed
-    part rather than cycling.
+    num_hidden_layers (hidden_size + 4 num_attention_heads) bytes a position). A prompt's K and V at all but its last
+    position are kept once prefilled; a later request with the same prompt copies them instead of prefilling, its
+    tokens unchanged (K and V depend on the prompt alone). To free pages, prompts unused in this run and the previous
+    one are dropped, least recently used first, so a search's rounds keep the prompts they reuse and a too-small store
+    keeps a fixed part rather than cycling.
     memory_fraction: the most device memory the decoder takes (slots, prefill rows, graphs and prompt store), as a
     fraction of the device's total, capped by its free memory (vLLM's gpu_memory_utilization, but counting this
     decoder alone); None: all free memory."""
