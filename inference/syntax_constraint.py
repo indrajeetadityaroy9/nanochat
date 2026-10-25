@@ -25,12 +25,17 @@ are expressions; parameter and argument orders are free; "(a as b)" parses anywh
 items); patterns accept f-strings and any dotted name as a mapping key; escapes, the f-string conversion character, a
 replacement field's unparenthesized lambda, and the limits on nesting are not checked; "<>" is "!=" (PEP 401's
 barry_as_FLUFL); a partial token at the end is judged by the lexemes it can begin with. BOS is exact: the crate
-proposes it when the lexer and parser end a module (always, before a suffix), ast.parse decides.
+proposes it when the lexer and parser end a module (always, before a suffix), and a chosen BOS stands only if the
+grammar ends a module after the suffix too and ast.parse accepts the text and suffix (ends; the decoder takes the
+step's best other token otherwise, NativeDecoder.generate).
 
 Masks (vocab.rs): for each lexer state, every vocabulary token's events (tokens emitted, newlines, line-start
 whitespace) and end state are computed once over a byte trie of the vocabulary, the subtrie after each first byte
 shared by the lexer states that byte takes to one state; a step then runs the parser once per distinct event sequence
-and maps the verdicts back to tokens. masks() computes a batch of constraints' masks in parallel, without the GIL.
+and maps the verdicts back to tokens. masks() computes a batch of constraints' masks in parallel, without the GIL,
+into the decoder's mask rows. A healed prompt's dropped bytes (decoder.heal_tokens) are owed: until the generated
+tokens re-emit them, a mask also holds only the tokens that are a non-empty proper prefix of the bytes still owed or
+start with them (decoder.Reemit's), BOS excluded.
 """
 
 import ast
@@ -114,33 +119,55 @@ def syntax_error(source: str) -> list[str]:
 
 
 class SyntaxConstraint:
-    """decoder.Constraint for the tokens generated after prefix (the program's text before them), its masks by masks().
-    BOS is allowed iff prefix + generated + suffix parses (suffix: a FIM middle's suffix). Raises ValueError when prefix
-    is not a prefix of any Python 3.12 module."""
+    """decoder.Constraint for the tokens generated after prefix (the program's UTF-8 bytes before them), its masks by
+    masks(). suffix: the bytes after the generation (a FIM middle's suffix; b"": none); owed: the bytes the generation
+    re-emits first (decoder.heal_tokens's dropped bytes; b"": none); lines: the generation is cut after its lines-th
+    line end (eval/code_eval.py fim_lines; None: uncut), so the token holding that line end ends it (the text up to
+    the line end and the suffix must parse: line_end), and a generation ended earlier by BOS gets a final "\\n" if it
+    has none. A BOS candidate stands iff ends() holds for it. Raises ValueError when prefix is not a prefix of any
+    Python 3.12 module."""
 
-    def __init__(self, tokenizer: Tokenizer, prefix: str, *, suffix: str):
+    def __init__(self, tokenizer: Tokenizer, prefix: bytes, *, suffix: bytes, owed: bytes = b"",
+                 lines: int | None = None):
         self.suffix, self.bos = suffix, tokenizer.bos_token_id
-        self.native = python_syntax(tokenizer).constraint(prefix.encode(), bool(suffix))
-
-    def parses(self) -> bool:
-        """Whether the text (valid UTF-8) and suffix parse."""
-        try:
-            source = self.native.text.decode() + self.suffix
-        except UnicodeDecodeError:
-            return False
-        return not syntax_error(source)
+        self.newlines = newline_tokens(tokenizer) if lines is not None else frozenset()
+        self.native = python_syntax(tokenizer).constraint(prefix, suffix=suffix, owed=owed, lines=lines)
 
     def push(self, token: int) -> None:
         self.native.push(token)
 
+    def line_end(self, token: int) -> bool | None:
+        """None if token holds no cut's line end, else whether ast.parse accepts the text up to it and the suffix
+        (the grammar's check is the mask's)."""
+        text = self.native.line_end(token) if token in self.newlines else None
+        return None if text is None else parses(text + self.suffix)
 
-def masks(constraints: list[SyntaxConstraint]) -> np.ndarray:
-    """The next masks of constraints (rows, in order), computed by the crate in parallel without the GIL, BOS's bit set
-    for a BOS candidate; then ast.parse decides each candidate (SyntaxConstraint.parses)."""
-    data = crate_module(CRATE).masks([c.native for c in constraints])
-    rows = np.frombuffer(data, dtype="<u4").reshape(len(constraints), -1).copy()
-    for c, row in zip(constraints, rows, strict=True):
-        word, bit = divmod(c.bos, 32)
-        if row[word] >> bit & 1 and not c.parses():
-            row[word] &= ~np.uint32(1 << bit)
-    return rows
+
+@functools.cache
+def newline_tokens(tokenizer: Tokenizer) -> frozenset[int]:
+    """The mergeable tokens holding a "\\n" (the only ones that can end a cut generation's line)."""
+    return frozenset(t for t in range(tokenizer.bos_token_id) if b"\n" in tokenizer.token_bytes[t])
+
+
+def parses(source: bytes) -> bool:
+    """Whether source is valid UTF-8 that ast.parse accepts (syntax_error)."""
+    try:
+        return not syntax_error(source.decode())
+    except UnicodeDecodeError:
+        return False
+
+
+def ends(constraints: list[SyntaxConstraint]) -> list[bool]:
+    """Whether each constraint's end text (the text, and a cut generation's final "\\n") and suffix are a module: the
+    grammar ends one (the crate, in parallel without the GIL), then ast.parse accepts them."""
+    grammar = crate_module(CRATE).grammar_ends([c.native for c in constraints])
+    return [ok and parses(c.native.end_text + c.suffix) for c, ok in zip(constraints, grammar, strict=True)]
+
+
+def masks(constraints: list[SyntaxConstraint], out: np.ndarray, rows: list[int]) -> list[tuple[bool, bool]]:
+    """Writes the next masks of constraints into rows of out (C-contiguous uint32 words, a row per mask; bit t % 32 of
+    word t // 32 set iff token t is allowed), computed by the crate in parallel without the GIL, BOS's bit set for a
+    candidate end (ends decides it), a cut generation's line end's iff the grammar ends the program there (line_end
+    decides it); whether each row allows some token, and whether it is a dead end (its line ends stand unchecked)."""
+    assert out.dtype == np.uint32 and out.flags.c_contiguous and out.ndim == 2 and max(rows, default=0) < len(out)
+    return crate_module(CRATE).masks([c.native for c in constraints], out.ctypes.data, rows, out.shape[1])

@@ -80,7 +80,7 @@ from human_eval_infilling.evaluation import estimate_pass_at_k
 
 from corpus.tokenizer import Tokenizer
 from eval.verify import chosen, search, solution_diagnostics
-from inference.decoder import AllOf, NativeDecoder, Request, fim_prompt, heal_tokens
+from inference.decoder import NativeDecoder, Request, fim_prompt, heal_tokens
 from inference.syntax_constraint import SyntaxConstraint
 from metrics import completion_scores, latency, parse_outcome, parse_shares, pass_at_k, summary
 from model.modeling import CausalLM
@@ -101,6 +101,13 @@ FILTERED_MODE = "spm"
 N_SAMPLE, TEMPERATURE, TOP_P = 20, 0.2, 0.95
 # EvalPlus's most new tokens of a completion (evalplus/provider/base.py:13 max_new_tokens)
 EVALPLUS_MAX_NEW_TOKENS = 768
+
+
+def decoder_memory_fraction() -> float | None:
+    """The evaluation decoders' memory budget (NativeDecoder memory_fraction), from NANOCHAT_DECODER_MEMORY_FRACTION
+    (unset: all free memory), so a job sharing the GPU keeps the rest."""
+    value = os.environ.get("NANOCHAT_DECODER_MEMORY_FRACTION")
+    return None if value is None else float(value)
 
 
 class Task(NamedTuple):
@@ -220,16 +227,16 @@ def filtered_completions(decoder: NativeDecoder, tokenizer: Tokenizer, items: li
                          check: Callable[[Task, str], tuple[str, str, list[str]]],
                          language: Literal["python", "cpp"]) -> tuple[list[str], dict]:
     """filtered of left-to-right prompts (BOS and the prompt's tokens): candidates of the healed prompt
-    (decoder.heal_tokens; one more token of budget, the dropped token's bytes re-emitted), Python tasks also under the
-    syntax constraint of the healed prompt's text; each candidate checked as check(task, completion): the program its
-    evaluator scores."""
+    (decoder.heal_tokens; one more token of budget, the dropped token's bytes re-emitted: Reemit, or the syntax
+    constraint of the healed prompt's bytes owing them for Python tasks); each candidate checked as check(task,
+    completion): the program its evaluator scores."""
     dropped = [heal_tokens(tokenizer, p)[2] for p in prompts]
 
     def request(i: int) -> Request:
         input_ids, constraint, _ = heal_tokens(tokenizer, prompts[i])  # a fresh constraint per candidate
         if language == "python":
-            constraint = AllOf(constraint,
-                               SyntaxConstraint(tokenizer, tokenizer.enc.decode(input_ids[1:]), suffix=""))
+            constraint = SyntaxConstraint(tokenizer, tokenizer.enc.decode_bytes(input_ids[1:]), suffix=b"",
+                                          owed=dropped[i])
         return Request(input_ids=input_ids, max_new_tokens=budgets[i] + 1, constraint=constraint,
                        stopping_criteria=KeywordsStoppingCriteria(tokenizer, items[i].stopwords, healed=dropped[i]))
 
@@ -245,14 +252,20 @@ def middle_request(tokenizer: Tokenizer, input_ids: list[int], lines: int | None
                    stopping_criteria=None if lines is None else LinesStoppingCriteria(tokenizer, lines=lines))
 
 
+def middle_constraint(tokenizer: Tokenizer, problem: dict, lines: int | None) -> SyntaxConstraint:
+    """The syntax constraint of a FIM middle cut to `lines` lines (fim_lines): after the problem's prefix, ending where
+    prefix + fim_lines(middle) + suffix parses (the middle's lines-th line end or BOS)."""
+    return SyntaxConstraint(tokenizer, problem["prompt"].encode(), suffix=problem["suffix"].encode(), lines=lines)
+
+
 def filtered_middles(decoder: NativeDecoder, tokenizer: Tokenizer, problems: list[dict], prompts: list[list[int]],
                      lines: list[int | None], *, max_new_tokens: int) -> tuple[list[str], dict]:
-    """filtered of FIM prompts: candidates under the syntax constraint of the problem's prefix and suffix, each middle
-    cut to its lines (fim_lines) and checked as prefix + middle + suffix against the examples of its prompt (the
-    prefix)."""
+    """filtered of FIM prompts: candidates under the syntax constraint of the problem's prefix and suffix
+    (middle_constraint), each middle cut to its lines (fim_lines) and checked as prefix + middle + suffix against the
+    examples of its prompt (the prefix)."""
     return filtered(decoder, lambda i: dataclasses.replace(
                         middle_request(tokenizer, prompts[i], lines[i], max_new_tokens=max_new_tokens),
-                        constraint=SyntaxConstraint(tokenizer, problems[i]["prompt"], suffix=problems[i]["suffix"])),
+                        constraint=middle_constraint(tokenizer, problems[i], lines[i])),
                     lambda i, ids: fim_lines(tokenizer.enc.decode(ids), lines[i]),
                     lambda i, middle: (problems[i]["prompt"], problems[i]["prompt"] + middle + problems[i]["suffix"],
                                        []),
@@ -436,7 +449,8 @@ def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list
     # the prompt store: the prompts of the greedy and sampled passes and the healed ones of the filtered pass
     # (decode.cu keeps what fits after its slots)
     prompt_store = 2 * sum(len(p) for _, prompts, *_ in runs.values() for p in prompts)
-    decoder = NativeDecoder(model, bos_token_id=bos, max_length=max_length, prompt_store=prompt_store)
+    decoder = NativeDecoder(model, bos_token_id=bos, max_length=max_length, prompt_store=prompt_store,
+                            memory_fraction=decoder_memory_fraction())
     results = {}
     for name, (items, prompts, budgets, special, check, language, score) in runs.items():
         generated, greedy_latency = in_order(decoder, [
@@ -485,7 +499,8 @@ def parse_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str
     budget = EVALPLUS_MAX_NEW_TOKENS + 1  # and a token for the bytes heal_tokens drops
     max_length = max(len(p) - 1 + budget for prompts in runs.values() for p in prompts)
     decoder = NativeDecoder(model, bos_token_id=bos, max_length=max_length,
-                            prompt_store=sum(len(p) for prompts in runs.values() for p in prompts))
+                            prompt_store=sum(len(p) for prompts in runs.values() for p in prompts),
+                            memory_fraction=decoder_memory_fraction())
     results = {}
     for name, prompts in runs.items():
         items = benchmarks[name]
@@ -520,7 +535,7 @@ def fim_generation(model: CausalLM, tokenizer: Tokenizer) -> dict[str, dict[str,
     prompt_store = sum(len(prompt) for _, _, prompts, _ in runs.values() for mode_prompts in prompts.values()
                        for prompt in mode_prompts)
     decoder = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id, max_length=max_length,
-                            prompt_store=prompt_store)
+                            prompt_store=prompt_store, memory_fraction=decoder_memory_fraction())
     results = {}
     for name, (problems, max_new_tokens, prompts, lines) in runs.items():
         for mode in FIM_MODES:

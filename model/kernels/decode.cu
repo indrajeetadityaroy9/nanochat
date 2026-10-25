@@ -4,28 +4,31 @@
  * per-slot set of allowed tokens (inference/decoder.py).
  *
  * A small-batch step is bound by weight reads and kernel launches: each weight is read from DRAM about once (each slot
- * group's GEMV block rereads it from L2), and the step's 7 kernels per layer plus 4 replay as one CUDA graph.
- * Positions, input tokens, prompts, KV caches, the active-slot mask and each slot's sampling parameters and allowed
- * tokens live in device memory. A slot starts at position 0 of its prompt (dec_set_prompt): until the prompt's last
- * token, a step's next input is the prompt's next token (k_commit), so prompts and generations run through the same
- * kernels, every slot's prompt advancing in the same steps as the other slots' generations; inactive slots are skipped
- * by every kernel. A prompt's K and V depend on its tokens alone, so the prompt store keeps them for a later request
- * with the same prompt, which starts at its last token (dec_save_prompt, dec_load_prompt; SGLang's
- * RadixAttention, arXiv 2312.07104, reuses prompt prefixes likewise).
+ * group's GEMV block rereads it from L2), and the step's 8 kernels per layer plus 4 replay as one CUDA graph.
+ * Positions, input tokens, KV caches, the active-slot mask and each slot's sampling parameters and allowed tokens live
+ * in device memory. A slot starts at its prompt's last token (dec_set_prompt), the positions before it cached: run as
+ * rows of a prefill (dec_prefill: up to MAX_BATCH (slot, position, token) rows of any prompts through the step's body
+ * at once, each row computed alone as a step would, the rows' K and V cached before any row's attention), or copied
+ * from the prompt store, which keeps a prompt's K and V (they depend on its tokens alone) for a later request with
+ * the same prompt (dec_save_prompt, dec_load_prompt; SGLang's RadixAttention, arXiv 2312.07104, reuses prompt
+ * prefixes likewise); inactive slots are skipped by every kernel.
  *
  * The step is captured whole (dec_launch), the greedy argmax for every slot, and as its body, everything before the
  * lm_head GEMV, and a head that chooses by each slot's allowed tokens, temperature and top_p (dec_launch_body,
  * dec_launch_head): the host supplies the allowed tokens, which follow from each slot's previous token, while the
- * body runs (decoder.py). The whole step's GEMVs compile without the choice (k_gemv's CHOICE).
+ * body runs (decoder.py). The head also chooses each slot's best allowed token but one lazy row (BOS), so the host
+ * confirms a chosen lazy row only then and otherwise takes that alternative (dec_take_alt): the same choice as
+ * excluding the row beforehand (greedy, or Gumbel-max sampling, whose noise is fixed per row). The whole step's
+ * GEMVs compile without the choice (k_gemv's CHOICE).
  *
  * Each step (modeling.py's forward at one position; C width, H heads of HEAD_DIM, x0 the normed embedding):
  *   k_norm    x0 = norm(wte[token])
  *   per layer i:
  *     k_norm  xm = resid_lambdas[i] x + x0_lambdas[i] x0 (x = x0 before layer 0), h = norm(xm)
  *     k_gemv  [q k v] = h [Wq Wk Wv]^T
- *     k_attn  VE layers: v += 2 sigmoid(W_g[head] . h) value_embeds[i][token] (per head, fp32);
- *             q, k = rope(norm_D(q) q_gain), rope(norm_D(k) k_gain) (qk_row.cuh, as qk_prologue.cu);
- *             y = softmax(q K^T / sqrt(HEAD_DIM)) V over the layer's window (FlashAttention's window_size left)
+ *     k_prologue VE layers: v += 2 sigmoid(W_g[head] . h) value_embeds[i][token] (per head, fp32);
+ *             q, k = rope(norm_D(q) q_gain), rope(norm_D(k) k_gain) (qk_row.cuh, as qk_prologue.cu); k, v cached
+ *     k_attn  y = softmax(q K^T / sqrt(HEAD_DIM)) V over the layer's window (FlashAttention's window_size left)
  *     k_gemv  xo = xm + y Wo^T
  *     k_norm  hn = norm(xo)
  *     k_gemv  u = relu(hn Wfc^T)^2
@@ -36,7 +39,7 @@
  *             packed key; a nucleus-sampled slot's s are stored instead (head only)
  *   k_nucleus a nucleus-sampled slot's choice: that argmax over the fewest most likely allowed tokens holding top_p of
  *             softmax(s / T) (head only)
- *   k_commit  the prompt's next token, or once past the prompt the choice, becomes each active slot's next input
+ *   k_commit  the choice (and its alternative) becomes each active slot's next input
  *
  * Numerics follow model/modeling.py's forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary
  * table, q/k norm weights and value-embedding gate (no contraction), the gate's mix rounded once to bf16; resid/x0
@@ -64,10 +67,11 @@
 
 constexpr int LANE_DIMS = HEAD_DIM / WARP;         /* a lane's dims of a query, key or value */
 constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thread per head dim */
-/* slots per decoder: k_commit runs them as one block of MAX_BATCH threads */
-constexpr int MAX_BATCH = 256;
+/* slots per decoder and rows per prefill launch: k_commit runs the slots as one block of MAX_BATCH threads */
+constexpr int MAX_BATCH = 1024;
 constexpr int MASK_BITS = CHAR_BIT * sizeof(unsigned long long);  /* slots per word of a slot mask */
 constexpr int MASK_WORDS = MAX_BATCH / MASK_BITS;                 /* words of a slot mask */
+constexpr int SMALL_BATCH = 256;  /* the narrow graphs' slots (Decoder::narrow) */
 static_assert(MAX_BATCH % MASK_BITS == 0, "slot masks are whole words");
 /* mma.sync m16n8k16 (PTX ISA "Matrix Fragments for mma.m16n8k16"): lanes form MMA_N groups (groupID = lane / GROUP) of
  * GROUP threads (threadID_in_group = lane % GROUP), each holding ACC fp32 accumulators */
@@ -200,6 +204,10 @@ typedef struct {
                                       * slot's logits are c tanh(s / c); 0 none. A greedy choice needs none: tanh is
                                       * increasing, so the argmax is the uncapped logits' (but for fp32 ties of
                                       * saturated caps) */
+    unsigned long long *alt;         /* [B]: the choice's key over the allowed rows but lazy (a slot not nucleus-
+                                      * sampled; 0 none): the host's choice when it rejects the lazy row (dec_tokens) */
+    int lazy;                        /* the row whose choice the host confirms after the step (BOS: an end the host
+                                      * checks only once chosen) */
 } Choice;
 
 static __device__ __forceinline__ void mma16816(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
@@ -283,8 +291,9 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
 #pragma unroll
     for (int n = 0; n < GROUP_TILES; n++) {
         if (n >= tiles) break;
-        /* ARGMAX: the lane's best key per column (2t, 2t + 1) over its rows g, g + 8; 0 below every key */
-        unsigned long long best[2] = {0ull, 0ull};
+        /* ARGMAX: the lane's best key per column (2t, 2t + 1) over its rows g, g + 8; 0 below every key. CHOICE: also
+         * the best key over the rows but c.lazy (alt) */
+        unsigned long long best[2] = {0ull, 0ull}, alt[2] = {0ull, 0ull};
         for (int i = 0; i < ACC; i++) {  /* the m16n8 accumulator fragment: rows g, g + 8; columns 2t, 2t + 1 */
             const int row = row0 + g + i / 2 * (MMA_M / 2), j = n * MMA_N + t * 2 + i % 2, b = s0 + j;
             if (row >= a.rows || !((live_bits >> j) & 1ull)) continue;
@@ -319,6 +328,8 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
                 }
                 const unsigned long long key = choice_key(score, row);
                 best[i % 2] = key > best[i % 2] ? key : best[i % 2];
+                if constexpr (CHOICE)
+                    if (row != c.lazy) alt[i % 2] = key > alt[i % 2] ? key : alt[i % 2];
             }
         }
         if (a.epi == EPI_ARGMAX) {
@@ -326,10 +337,17 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
                 for (int p = 0; p < 2; p++) {
                     const unsigned long long other = __shfl_xor_sync(0xffffffffu, best[p], o);
                     best[p] = other > best[p] ? other : best[p];
+                    if constexpr (CHOICE) {
+                        const unsigned long long other_alt = __shfl_xor_sync(0xffffffffu, alt[p], o);
+                        alt[p] = other_alt > alt[p] ? other_alt : alt[p];
+                    }
                 }
             if (g == 0)
-                for (int p = 0; p < 2; p++)
+                for (int p = 0; p < 2; p++) {
                     if (best[p]) atomicMax(a.argmax + s0 + n * MMA_N + t * 2 + p, best[p]);
+                    if constexpr (CHOICE)
+                        if (alt[p]) atomicMax(c.alt + s0 + n * MMA_N + t * 2 + p, alt[p]);
+                }
         }
     }
 }
@@ -456,6 +474,8 @@ typedef struct {
     unsigned *done;            /* [B][H]: the head's splits finished in this launch; its last resets it */
     int part_slot;             /* splits per head and slot the partial buffers hold */
     int C, H, window, run;
+    const int32_t *cache_slot; /* [B]: a prefill row's slot, whose cache row b reads and writes; NULL: slot b */
+    float *qkvf;               /* [B][3][C]: each row's q, k, v at its position (k_prologue), fp32 holding bf16 */
 } Attn;
 
 /* Slot b's q, k, v of the head at position p (fp32 holding bf16 values), as modeling.py: VE layers
@@ -507,6 +527,23 @@ static __device__ __forceinline__ float key_score(const float *q, const float *k
 /* exp(m - top); 0 for an empty state (m = top = -inf would give NaN) */
 static __device__ __forceinline__ float rescale(float m, float top) { return m == -INFINITY ? 0.f : expf(m - top); }
 
+/* The attention's prologue, once per (head, row) before k_attn's splits: the row's q, k, v at its position
+ * (attn_prologue) to qkvf, its k and v to its slot's cache. (head, row) blocks of HEAD_DIM threads. */
+__global__ void __launch_bounds__(HEAD_DIM) k_prologue(Attn a) {
+    __shared__ float q[HEAD_DIM], k[HEAD_DIM], v[HEAD_DIM];
+    const int head = blockIdx.x, b = blockIdx.y, tid = threadIdx.x;
+    if (!live(a.active, b)) return;
+    const int p = a.pos[b], cs = a.cache_slot ? a.cache_slot[b] : b;
+    attn_prologue(a, b, head, p, q, k, v);
+    float *out = a.qkvf + (size_t)b * 3 * a.C + head * HEAD_DIM + tid;
+    out[0] = q[tid];
+    out[a.C] = k[tid];
+    out[2 * a.C] = v[tid];
+    const size_t at = (size_t)cs * a.kv_slot + (size_t)p * a.C + head * HEAD_DIM + tid;
+    a.kc[at] = __float2bfloat16_rn(k[tid]);
+    a.vc[at] = __float2bfloat16_rn(v[tid]);
+}
+
 __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
     extern __shared__ float weight[];  /* [splits]: the last block's weight of each split's partial */
     __shared__ float q[HEAD_DIM], k[HEAD_DIM], v[HEAD_DIM];
@@ -516,21 +553,21 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
               lane = tid % WARP;
     if (!live(a.active, b)) return;
     const int p = a.pos[b];
-    /* each warp's first key is requested before the prologue, so the cache streams while the prologue runs */
+    /* each warp's first key is requested before q, k, v load */
     const int lo = p > a.window ? p - a.window : 0, splits = p > lo ? (p - lo + a.run - 1) / a.run : 1;
     if (split >= splits) return;
     const int begin = lo + split * a.run, end = begin + a.run < p ? begin + a.run : p;
-    const bf16 *kc = a.kc + (size_t)b * a.kv_slot, *vc = a.vc + (size_t)b * a.kv_slot;
+    const int cs = a.cache_slot ? a.cache_slot[b] : b;  /* the row's cache */
+    const bf16 *kc = a.kc + (size_t)cs * a.kv_slot, *vc = a.vc + (size_t)cs * a.kv_slot;
     const size_t col = (size_t)head * HEAD_DIM + lane * LANE_DIMS;
     int j = begin + warp;
     float kd[LANE_DIMS], vd[LANE_DIMS];
     if (j < end) load_dims(kc + (size_t)j * a.C + col, kd), load_dims(vc + (size_t)j * a.C + col, vd);
-    attn_prologue(a, b, head, p, q, k, v);
-    if (split == 0) {
-        const size_t at = (size_t)b * a.kv_slot + (size_t)p * a.C + head * HEAD_DIM + tid;
-        a.kc[at] = __float2bfloat16_rn(k[tid]);
-        a.vc[at] = __float2bfloat16_rn(v[tid]);
-    }
+    const float *in = a.qkvf + (size_t)b * 3 * a.C + head * HEAD_DIM + tid;
+    q[tid] = in[0];
+    k[tid] = in[a.C];
+    v[tid] = in[2 * a.C];
+    __syncthreads();
 
     float qd[LANE_DIMS], acc[LANE_DIMS], m = -INFINITY, l = 0.f;
     for (int e = 0; e < LANE_DIMS; e++) qd[e] = q[lane * LANE_DIMS + e], acc[e] = 0.f;
@@ -606,16 +643,26 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
     a.out[(size_t)b * a.C + head * HEAD_DIM + tid] = __float2bfloat16_rn(__fdiv_rn(y, total));
 }
 
-/* Each active slot's next input token and position: the prompt's next token while the slot is in its prompt, else the
- * chosen token (ARGMAX's maximum); a thread per slot. */
-__global__ void k_commit(int32_t *tokens, int32_t *pos, const unsigned long long *active, unsigned long long *argmax,
-                         const int32_t *prompt, const int32_t *plen, int max_len, int B) {
+/* Each active slot's next input token and position: the chosen token (ARGMAX's maximum), and its alternative (the
+ * choice but Choice::lazy, -1 if none); a thread per slot. */
+__global__ void k_commit(int32_t *tokens, int32_t *alt_tokens, int32_t *pos, const unsigned long long *active,
+                         unsigned long long *argmax, unsigned long long *alt, int B) {
     const int b = threadIdx.x;
     if (b >= B || !live(active, b)) return;
-    const int next = pos[b] + 1;
-    tokens[b] = next < plen[b] ? prompt[(size_t)b * max_len + next] : (int32_t)(UINT32_MAX - (uint32_t)argmax[b]);
-    pos[b] = next;
+    tokens[b] = (int32_t)(UINT32_MAX - (uint32_t)argmax[b]);
+    alt_tokens[b] = (int32_t)(UINT32_MAX - (uint32_t)alt[b]);  /* a key's row is ~(its low word): 0 gives -1 */
+    pos[b] += 1;
     argmax[b] = 0ull;
+    alt[b] = 0ull;
+}
+
+/* Slot b's next input becomes the alternative its last step chose (k_commit): the host rejected the lazy row. */
+__global__ void k_take_alt(int32_t *tokens, const int32_t *alt_tokens, int b) { tokens[b] = alt_tokens[b]; }
+
+/* Each active slot back to its last step's position, so the head chooses that step's token again (dec_rehead). */
+__global__ void k_uncommit(int32_t *pos, const unsigned long long *active, int B) {
+    const int b = threadIdx.x;
+    if (b < B && live(active, b)) pos[b] -= 1;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -630,14 +677,15 @@ typedef struct {
 } Layer;
 
 typedef struct {
-    /* max_len: a slot's cache positions (the caller's longest sequence). optin: the opt-in shared memory per block.
-     * store: the prompt store's positions */
-    int B, L, H, C, F, vocab, max_len, optin, attn_wave, attn_run, store;
+    /* B: the slots a graph covers; capacity: the decoder's slots (B but in a narrow graph's view, and the host tokens'
+     * layout). max_len: a slot's cache positions (the caller's longest sequence). optin: the opt-in shared memory per
+     * block. store: the prompt store's positions. lazy: the row whose choice the host confirms (Choice) */
+    int B, capacity, L, H, C, F, vocab, max_len, optin, attn_wave, attn_run, store, lazy;
     const bf16 *wte, *lm_head;
     const float *cos, *sin;   /* the fp32 rotary table [context][HALF] */
     Layer *layer;
     int32_t *tokens, *pos;    /* [B]: each slot's input token and position */
-    int32_t *prompt, *plen;   /* [B][max_len], [B]: each slot's prompt and its length */
+    int32_t *alt_tokens;      /* [B]: each slot's last alternative choice (k_commit) */
     int32_t *first;           /* [B]: the position of each slot's first generated token's input */
     float *temperature;       /* [B] */
     float *top_p;             /* [B] */
@@ -647,9 +695,10 @@ typedef struct {
     uint32_t *allow;          /* [B][vocab / WORD_BITS]: each masked slot's allowed tokens */
     uint32_t *host_allow;     /* pinned host, as allow: written by the caller (dec_masks), copied by dec_set_active */
     unsigned long long *active;  /* device [2][MASK_WORDS]: the active slots' mask, then the masked slots' */
-    int32_t *host_tokens;     /* pinned host [B]: the last step's tokens */
-    unsigned long long *argmax;  /* [B] */
+    int32_t *host_tokens;     /* pinned host [2][B]: the last step's tokens, then their alternatives */
+    unsigned long long *argmax, *alt;  /* [B]: the choice's key, the alternative's (Choice::alt) */
     bf16 *x, *x0, *xm, *h, *hn, *qkv_out, *att, *xo, *u;  /* [B][...]; hn: the normed input of fc and lm_head */
+    float *qkvf;              /* [B][3][C]: k_prologue's q, k, v */
     bf16 *kc, *vc;            /* [B][L][max_len][C] */
     bf16 *store_k, *store_v;  /* [L][store][C] each, one allocation (V after K): prompts' K and V kept for reuse
                                * (dec_save_prompt, dec_load_prompt) */
@@ -657,17 +706,25 @@ typedef struct {
     float2 *attn_stat;        /* [B][H][attn_wave]: their (m, l) */
     unsigned *attn_done;      /* [B][H]: k_attn's counters, zero between launches */
     cudaStream_t stream;      /* the caller's */
-    cudaGraphExec_t step, body, head;  /* the whole step; before the lm_head GEMV; from it on */
+    /* the whole step; before the lm_head GEMV; from it on; the head again after the step (k_uncommit first): [0] over
+     * all slots, [1] over the first SMALL_BATCH (narrow: no higher slot is active, dec_set_active) */
+    cudaGraphExec_t step[2], body[2], head[2], rehead[2];
+    bool narrow;
+    /* prefill: rows (slot, position, token) of prompts run through the body at once (dec_prefill): a Decoder of
+     * MAX_BATCH rows sharing this one's weights and caches, its row b at slot cache_slot[b] (NULL in a decoder) */
+    int32_t *cache_slot;
+    void *prefill_rows;       /* the prefill decoder (a Decoder *), NULL in it */
+    cudaGraphExec_t prefill;  /* the prefill decoder's body */
 } Decoder;
 
 /* f(buffer, bytes per slot) for each per-slot device buffer. */
 template <class F> static void slot_buffers(Decoder *d, F f) {
     const size_t C = d->C, kv = (size_t)d->L * d->max_len * C * sizeof(bf16), part = (size_t)d->H * d->attn_wave;
     f((void **)&d->tokens, sizeof(int32_t));
+    f((void **)&d->alt_tokens, sizeof(int32_t));
     f((void **)&d->pos, sizeof(int32_t));
-    f((void **)&d->prompt, d->max_len * sizeof(int32_t));
-    f((void **)&d->plen, sizeof(int32_t));
     f((void **)&d->argmax, sizeof(unsigned long long));
+    f((void **)&d->alt, sizeof(unsigned long long));
     f((void **)&d->first, sizeof(int32_t));
     f((void **)&d->temperature, sizeof(float));
     f((void **)&d->top_p, sizeof(float));
@@ -677,9 +734,24 @@ template <class F> static void slot_buffers(Decoder *d, F f) {
     f((void **)&d->allow, d->vocab / WORD_BITS * sizeof(uint32_t));
     for (bf16 **b : {&d->x, &d->x0, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
     f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
+    f((void **)&d->qkvf, 3 * C * sizeof(float));
     f((void **)&d->u, d->F * sizeof(bf16));
     f((void **)&d->kc, kv);
     f((void **)&d->vc, kv);
+    f((void **)&d->attn_part, part * HEAD_DIM * sizeof(float));
+    f((void **)&d->attn_stat, part * sizeof(float2));
+    f((void **)&d->attn_done, d->H * sizeof(unsigned));
+}
+
+/* f(buffer, bytes per row) for each per-row device buffer of a prefill decoder: its inputs (token, position, cache
+ * slot: one [3][rows] buffer at tokens), the body's activations and k_attn's partials. */
+template <class F> static void row_buffers(Decoder *d, F f) {
+    const size_t C = d->C, part = (size_t)d->H * d->attn_wave;
+    f((void **)&d->tokens, 3 * sizeof(int32_t));
+    for (bf16 **b : {&d->x, &d->x0, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
+    f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
+    f((void **)&d->qkvf, 3 * C * sizeof(float));
+    f((void **)&d->u, d->F * sizeof(bf16));
     f((void **)&d->attn_part, part * HEAD_DIM * sizeof(float));
     f((void **)&d->attn_stat, part * sizeof(float2));
     f((void **)&d->attn_done, d->H * sizeof(unsigned));
@@ -699,7 +771,8 @@ static void launch_norm(Decoder *d, int kind, const bf16 *in, const bf16 *in2, f
 }
 
 static Choice choice(const Decoder *d) {
-    return {d->allow, d->temperature, d->top_p, d->seed, d->pos, d->first, d->logits, d->probs, d->softcap};
+    return {d->allow, d->temperature, d->top_p, d->seed, d->pos, d->first, d->logits, d->probs, d->softcap, d->alt,
+            d->lazy};
 }
 
 /* A one-warp block per (slot group, row tile); groups without an active slot exit at once. */
@@ -725,7 +798,11 @@ static void enqueue_body(Decoder *d) {
                         d->kc + (size_t)l * d->max_len * C, d->vc + (size_t)l * d->max_len * C,
                         (size_t)L * d->max_len * C, d->att, d->tokens, d->pos, d->active, d->attn_part, d->attn_stat,
                         d->attn_done, d->attn_wave, C, d->H,
-                        ly->window, d->attn_run};
+                        ly->window, d->attn_run, d->cache_slot, d->qkvf};
+        /* every row's k, v cached before any row's attention (prefill: a slot's earlier positions may be rows of
+         * this launch); prefill's last layer needs nothing more (no row chooses a token) */
+        k_prologue<<<dim3(d->H, B), HEAD_DIM, 0, d->stream>>>(a);
+        if (d->cache_slot && l == L - 1) break;
         k_attn<<<dim3(d->H, splits, B), HEAD_DIM, splits * sizeof(float), d->stream>>>(a);
         Gemv g = gemv(d, ly->o, C, C, d->att, EPI_RESID, d->xo);
         g.res = d->xm;
@@ -746,9 +823,11 @@ template <bool CHOICE> static void enqueue_head(Decoder *d) {
     g.argmax = d->argmax;
     launch_gemv<CHOICE>(d, g);
     if constexpr (CHOICE) k_nucleus<<<d->B, NUCLEUS_THREADS, 0, d->stream>>>(choice(d), d->active, d->argmax, d->vocab);
-    k_commit<<<1, MAX_BATCH, 0, d->stream>>>(d->tokens, d->pos, d->active, d->argmax, d->prompt, d->plen, d->max_len,
-                                             d->B);
-    cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)d->B * sizeof(int32_t), cudaMemcpyDeviceToHost, d->stream);
+    k_commit<<<1, MAX_BATCH, 0, d->stream>>>(d->tokens, d->alt_tokens, d->pos, d->active, d->argmax, d->alt, d->B);
+    cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)d->capacity * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                    d->stream);
+    cudaMemcpyAsync(d->host_tokens + d->capacity, d->alt_tokens, (size_t)d->capacity * sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, d->stream);
 }
 
 /* The executable graph of the work enqueue() puts on d->stream. */
@@ -765,7 +844,14 @@ template <class F> static cudaGraphExec_t capture(Decoder *d, F enqueue) {
 
 extern "C" void dec_destroy(void *handle) {
     Decoder *d = (Decoder *)handle;
-    for (cudaGraphExec_t exec : {d->step, d->body, d->head}) cudaGraphExecDestroy(exec);
+    Decoder *pf = (Decoder *)d->prefill_rows;
+    cudaGraphExecDestroy(d->prefill);
+    row_buffers(pf, [](void **p, size_t) { cudaFree(*p); });
+    cudaFree(pf->active);
+    free(pf);
+    for (int narrow = 0; narrow < 2; narrow++)
+        for (cudaGraphExec_t exec : {d->step[narrow], d->body[narrow], d->head[narrow], d->rehead[narrow]})
+            cudaGraphExecDestroy(exec);
     slot_buffers(d, [](void **p, size_t) { cudaFree(*p); });
     cudaFree(d->active);
     cudaFree(d->store_k);
@@ -781,7 +867,9 @@ extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
 /*
  * cfg: L, C, MLP hidden width F (fc: [F][C]; proj: [C][F]), vocab (lm_head's rows), max_len (a slot's cache positions,
  *      at most context), context (the model's max_position_embeddings), store (the prompt store's positions
- *      requested: it takes at most the device memory left after the slots and graphs).
+ *      requested: it takes at most the device memory left after the slots and graphs), lazy (the row whose choice
+ *      the host confirms after a step, Choice::lazy; -1 none), budget (MiB the decoder takes at most: slots, prefill
+ *      rows, graphs and prompt store; 0: all free memory).
  * ptrs: GLOBAL_PTRS pointers wte, cos, sin (the fp32 rotary table [context][HALF] of every layer), lm_head; then
  *       LAYER_PTRS per layer: qkv, o, fc, proj, value-embedding table (0 if none), value-embedding gate (0 if none),
  *       q norm weight, k norm weight.
@@ -795,6 +883,7 @@ constexpr int GLOBAL_PTRS = 4, LAYER_PTRS = 8;
 extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *scal, const int *window, void *stream) {
     Decoder *d = (Decoder *)calloc(1, sizeof(Decoder));
     d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->store = cfg[6];
+    d->lazy = cfg[7];
     const int context = cfg[5];  /* the model's max_position_embeddings: the rotary table's rows, and attn_run's */
     d->H = d->C / HEAD_DIM;
     d->wte = (const bf16 *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
@@ -819,28 +908,63 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     d->attn_wave = resident_blocks(k_attn, HEAD_DIM) / d->H;
     d->attn_wave = resident_blocks(k_attn, HEAD_DIM, d->attn_wave * sizeof(float)) / d->H;
     d->attn_run = (context - 1 + d->attn_wave - 1) / d->attn_wave;
-    /* B: the most slots (at most MAX_BATCH) that fit free memory */
-    size_t slot = 0, free_bytes, total_bytes;
+    /* the decoder's memory: free memory, at most the budget (cfg[8] MiB; 0: none); B: the most slots (at most
+     * MAX_BATCH) that fit it after the prefill decoder's MAX_BATCH rows */
+    size_t slot = 0, row = 0, free_bytes, total_bytes;
     slot_buffers(d, [&](void **, size_t bytes) { slot += bytes; });
+    row_buffers(d, [&](void **, size_t bytes) { row += bytes; });
     cudaMemGetInfo(&free_bytes, &total_bytes);
+    const size_t free_start = free_bytes, budget = (size_t)cfg[8] << 20;
+    if (budget > 0 && budget < free_bytes) free_bytes = budget;
+    const size_t limit = free_bytes;  /* the bytes this decoder may take */
+    free_bytes -= MAX_BATCH * row < free_bytes ? MAX_BATCH * row : free_bytes;
     d->B = (int)(free_bytes / slot < (size_t)MAX_BATCH ? free_bytes / slot : MAX_BATCH);
+    d->capacity = d->B;
     slot_buffers(d, [&](void **p, size_t bytes) {
         CUDA_CHECK(cudaMalloc(p, d->B * bytes));
         CUDA_CHECK(cudaMemset(*p, 0, d->B * bytes));
     });
     CUDA_CHECK(cudaMalloc((void **)&d->active, 2 * MASK_WORDS * sizeof(unsigned long long)));
     CUDA_CHECK(cudaMemset(d->active, 0, 2 * MASK_WORDS * sizeof(unsigned long long)));
-    CUDA_CHECK(cudaHostAlloc((void **)&d->host_tokens, d->B * sizeof(int32_t), cudaHostAllocDefault));
+    CUDA_CHECK(cudaHostAlloc((void **)&d->host_tokens, 2 * d->B * sizeof(int32_t), cudaHostAllocDefault));
     CUDA_CHECK(cudaHostAlloc((void **)&d->host_allow, (size_t)d->B * (d->vocab / WORD_BITS) * sizeof(uint32_t),
                              cudaHostAllocDefault));
-    d->step = capture(d, [d] { enqueue_body(d); enqueue_head<false>(d); });
-    d->body = capture(d, [d] { enqueue_body(d); });
-    d->head = capture(d, [d] { enqueue_head<true>(d); });
-    /* the prompt store: the requested positions, at most what free memory holds after the slots and graphs; K and V
-     * in one allocation, shrunk 2 MiB at a time until it succeeds (cudaMemGetInfo's free bytes do not all fit one
-     * allocation) */
+    /* each graph twice: over all B slots, and over the first SMALL_BATCH (launched while no higher slot is active:
+     * the blocks of inactive slots exit at once, but a mostly idle batch of MAX_BATCH slots still pays their launch) */
+    for (int narrow = 0; narrow < 2; narrow++) {
+        Decoder view = *d;
+        if (narrow) view.B = d->B < SMALL_BATCH ? d->B : SMALL_BATCH;
+        Decoder *v = &view;
+        d->step[narrow] = capture(v, [v] { enqueue_body(v); enqueue_head<false>(v); });
+        d->body[narrow] = capture(v, [v] { enqueue_body(v); });
+        d->head[narrow] = capture(v, [v] { enqueue_head<true>(v); });
+        d->rehead[narrow] = capture(v, [v] {
+            k_uncommit<<<1, MAX_BATCH, 0, v->stream>>>(v->pos, v->active, v->B);
+            enqueue_head<true>(v);
+        });
+    }
+    /* the prefill decoder: this one's weights, shapes and caches, MAX_BATCH rows of its own activations */
+    Decoder *pf = (Decoder *)malloc(sizeof(Decoder));
+    *pf = *d;
+    pf->B = MAX_BATCH;
+    pf->prefill_rows = NULL;
+    row_buffers(pf, [&](void **p, size_t bytes) {
+        CUDA_CHECK(cudaMalloc(p, MAX_BATCH * bytes));
+        CUDA_CHECK(cudaMemset(*p, 0, MAX_BATCH * bytes));
+    });
+    pf->pos = pf->tokens + MAX_BATCH;
+    pf->cache_slot = pf->tokens + 2 * MAX_BATCH;
+    CUDA_CHECK(cudaMalloc((void **)&pf->active, 2 * MASK_WORDS * sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemset(pf->active, 0, 2 * MASK_WORDS * sizeof(unsigned long long)));
+    d->prefill_rows = pf;
+    d->prefill = capture(pf, [pf] { enqueue_body(pf); });
+    /* the prompt store: the requested positions, at most what the decoder's memory holds after the slots and graphs;
+     * K and V in one allocation, shrunk 2 MiB at a time until it succeeds (cudaMemGetInfo's free bytes do not all fit
+     * one allocation) */
     const size_t position = 2 * (size_t)L * d->C * sizeof(bf16);
     cudaMemGetInfo(&free_bytes, &total_bytes);
+    const size_t taken = free_start > free_bytes ? free_start - free_bytes : 0;
+    if (limit - (taken < limit ? taken : limit) < free_bytes) free_bytes = limit - (taken < limit ? taken : limit);
     if ((size_t)d->store > free_bytes / position) d->store = (int)(free_bytes / position);
     while (d->store > 0 && cudaMalloc((void **)&d->store_k, position * d->store) != cudaSuccess) {
         cudaGetLastError();  /* clear the failed allocation's error */
@@ -851,24 +975,40 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     return d;
 }
 
-/* Start slot b at position start of its prompt tokens[0..n) (n >= 2: BOS and at least one more; positions before start
- * already cached: 0, or n - 1 after dec_load_prompt): its steps run the rest of the prompt, then from the step whose
- * input is the prompt's last token choose tokens at temperature (0: argmax) with noise from seed (gumbel), from the
- * nucleus holding top_p of the probability when top_p < 1 (k_nucleus), the first choice at generated position 0.
- * Stream-ordered. */
-extern "C" void dec_set_prompt(void *handle, int b, const int32_t *tokens, int32_t n, int32_t start, float temperature,
-                               float top_p, unsigned long long seed) {
+/* Start slot b at its prompt's last token `token`, at position `last` (the positions before it cached: dec_prefill or
+ * dec_load_prompt): from that step on it chooses tokens at temperature (0: argmax) with noise from seed (gumbel),
+ * from the nucleus holding top_p of the probability when top_p < 1 (k_nucleus), the first choice at generated
+ * position 0. Stream-ordered. */
+extern "C" void dec_set_prompt(void *handle, int b, int32_t token, int32_t last, float temperature, float top_p,
+                               unsigned long long seed) {
     Decoder *d = (Decoder *)handle;
-    const int32_t last = n - 1;
-    cudaMemcpyAsync(d->prompt + (size_t)b * d->max_len, tokens, (size_t)n * sizeof(int32_t), cudaMemcpyHostToDevice,
-                    d->stream);
-    cudaMemcpyAsync(d->plen + b, &n, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpyAsync(d->tokens + b, tokens + start, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpyAsync(d->pos + b, &start, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
+    cudaMemcpyAsync(d->tokens + b, &token, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
+    cudaMemcpyAsync(d->pos + b, &last, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpyAsync(d->first + b, &last, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpyAsync(d->temperature + b, &temperature, sizeof(float), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpyAsync(d->top_p + b, &top_p, sizeof(float), cudaMemcpyHostToDevice, d->stream);
     cudaMemcpyAsync(d->seed + b, &seed, sizeof(seed), cudaMemcpyHostToDevice, d->stream);
+}
+
+/* The rows a dec_prefill call takes at most. */
+extern "C" int dec_prefill_rows(void *) { return MAX_BATCH; }
+
+/* Run n prompt rows through the body at once, caching each row's K and V at its position in its slot (the K and V a
+ * step with that slot's input at that position caches: every row is computed alone, in the step's order): rows[0, n)
+ * the tokens, rows[n, 2n) their positions, rows[2n, 3n) their slots. A slot's earlier positions are cached already
+ * or are earlier rows (the rows' K and V are cached before any row's attention). n <= dec_prefill_rows. A prompt's
+ * positions before its last token, so prefilled, let its slot start at its last token (dec_set_prompt).
+ * Stream-ordered. */
+extern "C" void dec_prefill(void *handle, int n, const int32_t *rows) {
+    Decoder *d = (Decoder *)handle;
+    Decoder *pf = (Decoder *)d->prefill_rows;
+    const size_t width = (size_t)n * sizeof(int32_t);
+    cudaMemcpy2DAsync(pf->tokens, MAX_BATCH * sizeof(int32_t), rows, width, width, 3, cudaMemcpyHostToDevice,
+                      d->stream);
+    unsigned long long mask[2 * MASK_WORDS] = {};
+    for (int r = 0; r < n; r++) mask[r / MASK_BITS] |= 1ull << (r % MASK_BITS);
+    cudaMemcpyAsync(pf->active, mask, sizeof mask, cudaMemcpyHostToDevice, d->stream);
+    cudaGraphLaunch(d->prefill, d->stream);
 }
 
 /* Slot b's cached K and V at positions [at, at + n) to the prompt store at [store_at, store_at + n) (to_store), or
@@ -915,6 +1055,10 @@ extern "C" void dec_set_active(void *handle, const unsigned long long *slots) {
     cudaMemcpy2DAsync(d->active, MASK_WORDS * sizeof(unsigned long long), slots, row, row, 2, cudaMemcpyHostToDevice,
                       d->stream);
     const unsigned long long *masked = slots + words;
+    int high = -1;  /* the highest active slot */
+    for (int w = 0; w < words; w++)
+        if (slots[w]) high = w * MASK_BITS + MASK_BITS - 1 - __builtin_clzll(slots[w]);
+    d->narrow = high < SMALL_BATCH;
     int lo = -1, hi = -1;
     for (int w = 0; w < words; w++)
         if (masked[w]) {
@@ -931,25 +1075,41 @@ extern "C" void dec_set_active(void *handle, const unsigned long long *slots) {
 /* Launch one greedy step (asynchronous): every slot takes its logits' argmax; dec_tokens returns its tokens. */
 extern "C" void dec_launch(void *handle) {
     Decoder *d = (Decoder *)handle;
-    cudaGraphLaunch(d->step, d->stream);
+    cudaGraphLaunch(d->step[d->narrow], d->stream);
 }
 
 /* Launch one step's body (asynchronous): everything before the token choice, which dec_launch_head then launches. */
 extern "C" void dec_launch_body(void *handle) {
     Decoder *d = (Decoder *)handle;
-    cudaGraphLaunch(d->body, d->stream);
+    cudaGraphLaunch(d->body[d->narrow], d->stream);
 }
 
 /* Launch one step's head (asynchronous) after its body: every slot chooses by its mask (if dec_set_active marks it
  * masked) and temperature; dec_tokens returns its tokens. */
 extern "C" void dec_launch_head(void *handle) {
     Decoder *d = (Decoder *)handle;
-    cudaGraphLaunch(d->head, d->stream);
+    cudaGraphLaunch(d->head[d->narrow], d->stream);
 }
 
-/* Wait for the launched step; out[b]: the token slot b took (stale for inactive slots). */
+/* Launch the last step's head again (asynchronous) for the slots dec_set_active marks active, by their masks as
+ * dec_set_active copies them now: the host rejected their choices (rows its masks no longer allow). The body's output
+ * and the positions are the step's, so the choice is the step's under the new mask; dec_tokens returns it. */
+extern "C" void dec_rehead(void *handle) {
+    Decoder *d = (Decoder *)handle;
+    cudaGraphLaunch(d->rehead[d->narrow], d->stream);
+}
+
+/* Wait for the launched step; out[b]: the token slot b took, out[B + b]: its alternative, the choice but the lazy row
+ * (Choice::lazy; -1 if none: a greedy whole step, a nucleus-sampled slot) (stale for inactive slots). */
 extern "C" void dec_tokens(void *handle, int32_t *out) {
     Decoder *d = (Decoder *)handle;
     CUDA_CHECK(cudaStreamSynchronize(d->stream));
-    for (int b = 0; b < d->B; b++) out[b] = d->host_tokens[b];
+    for (int b = 0; b < 2 * d->B; b++) out[b] = d->host_tokens[b];
+}
+
+/* Slot b's next input becomes its last step's alternative (dec_tokens), not its choice: the host rejected the lazy
+ * row. Stream-ordered, after dec_tokens and before the next launch. */
+extern "C" void dec_take_alt(void *handle, int b) {
+    Decoder *d = (Decoder *)handle;
+    k_take_alt<<<1, 1, 0, d->stream>>>(d->tokens, d->alt_tokens, b);
 }

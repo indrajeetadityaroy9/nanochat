@@ -48,9 +48,9 @@ Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and loo
     [unverified], so an equal-token comparison would give it more compute.
   - *head_dim 128:* compiled into the decoder's kernels (`model/config.py` `HEAD_DIM`); nanochat measured 128 better
     than 64 (LOG 2026-01-17).
-  - *MHA, not grouped-query attention:* GQA's benefit is KV-cache memory; d24's cache for the decoder's 256 slots
-    (`model/kernels/decode.cu` `MAX_BATCH`) of the longest benchmark request (391 prompt + 768 new tokens) is 21.9 GB
-    [arithmetic: 2 · 24 · 768 · 2 bytes · 1,158 · 256], which the GPU holds.
+  - *MHA, not grouped-query attention:* GQA's benefit is KV-cache memory; d24's cache for 256 of the decoder's
+    slots (`model/kernels/decode.cu` `MAX_BATCH` 1,024, as many as fit memory) of the longest benchmark request
+    (391 prompt + 768 new tokens) is 21.9 GB [arithmetic: 2 · 24 · 768 · 2 bytes · 1,158 · 256], which the GPU holds.
   - *RoPE base 10^6 from the first step* (D9): above arXiv 2405.14591's lower bound for a 32K context (Table 2:
     6.4e5), large from the start as Llama 3 (arXiv 2407.21783 §3.2); Barbero et al. (arXiv 2410.06205 Table 2) find
     10k against 500k at 8K within 0.3%, of mixed sign.
@@ -348,16 +348,21 @@ infilling (arXiv 2207.14255; PSM and SPM), each scored by its official evaluator
 - **Contamination.** The training corpora were not decontaminated against the benchmarks: a benchmark problem in the
   training data inflates its score.
 
-**Decoder** (`inference/decoder.py`, `model/kernels/decode.cu`): batched continuous decoding of up to 256 slots, each
-step one captured CUDA graph. A slot runs its prompt through the same kernels as its generation, so prompts and
-generations share steps; a prompt's K and V are kept in a paged prompt store (pages of 64 positions) and a later
-request with the same prompt starts at its last token. Every sum's order depends on the shapes and the slot's
-position alone, so a request's tokens do not depend on the batch, the store or timing. A `Request` carries the
+**Decoder** (`inference/decoder.py`, `model/kernels/decode.cu`): batched continuous decoding of up to 1,024 slots,
+each step one captured CUDA graph (a narrow copy over the first 256 slots while no higher slot is active). A new
+request's prompt is prefilled: its positions run as rows of one batched pass through the step's body (up to 1,024
+rows of any prompts per launch, each row computed alone as a step would), so its slot starts at the prompt's last
+token; a prompt's K and V are kept in a paged prompt store (pages of 64 positions) and a later request with the same
+prompt copies them instead. Every sum's order depends on the shapes and the slot's position alone, so a request's
+tokens do not depend on the batch, the store or timing. `memory_fraction` caps the decoder's device memory (slots,
+prefill rows, graphs, store) at a fraction of the device's total (the evaluation reads
+`NANOCHAT_DECODER_MEMORY_FRACTION`; unset: all free memory), so a job can share the GPU. A `Request` carries the
 prompt's `input_ids`, `max_new_tokens`, `stopping_criteria`,
 `temperature` (0 = argmax, ties to the lowest id), `top_p` (the nucleus, arXiv 1904.09751 §3.1, as Hugging Face's
 `TopPLogitsWarper` keeps it), `seed` (the sample at position *i* depends only on seed and *i*) and an optional
-constraint (`heal_tokens()`, the Python syntax constraint, `AllOf()` of both), whose masks each step takes for all
-constrained slots in one batched call.
+constraint (`heal_tokens()`'s `Reemit`, or the Python syntax constraint, which owes the healed bytes itself), whose
+masks are written while the step's body runs: the syntax constraints' in one parallel call straight into the
+decoder's pinned mask rows, each constraint's last token applied in the same call.
 
 **Constrained decoding: syntax, not types.** Type-constrained decoding (arXiv 2504.09246) implements TypeScript only;
 arXiv 2606.21619 found an incomplete constrainer lowers functional correctness, while a complete syntax constrainer
@@ -366,17 +371,29 @@ as Python 3 (`curate.repaired`, `docs/corpus.md` §3.1; UltraData-Code L3's exer
 checked), so the model's distribution of program files lies inside the constrainer's language.
 Types are checked after generation instead.
 
-**`PythonSyntax`** (`inference/syntax_constraint.py`, the Rust crate `inference/syntax/`):
-`PythonSyntax(tokenizer).constraint(prefix, *, suffix="")`; `masks(constraints)` computes a batch of constraints' next
-masks in parallel (rayon) without the GIL. Token *t* is allowed iff `prefix + generated + t` can still become a valid
-Python 3.12 module, the text ending anywhere; BOS iff `ast.parse(prefix + generated + suffix)` succeeds; FIM sentinels
-never; a prefix that cannot become valid Python 3.12 raises `ValueError`. Layers: CPython 3.12.3's tokenizer
+**`SyntaxConstraint`** (`inference/syntax_constraint.py`, the Rust crate `inference/syntax/`):
+`SyntaxConstraint(tokenizer, prefix, *, suffix, owed=b"", lines=None)` (bytes); `masks(constraints, out, rows)` writes a
+batch of constraints' next masks in parallel (rayon) without the GIL. Token *t* is allowed iff `prefix + generated + t`
+can still become a valid Python 3.12 module, the text ending anywhere; while `owed` bytes (a healed prompt's dropped
+token) are not re-emitted, only tokens that re-emit them; FIM sentinels never; a prefix that cannot become valid
+Python 3.12 raises `ValueError`. Ends are decided once chosen: a chosen BOS stands iff the grammar ends a module after
+the text and suffix and `ast.parse` accepts them (`ends`), else the slot takes the step's best other allowed token,
+which the head computes beside its choice (the same choice as masking BOS beforehand, greedy or Gumbel-max; a
+nucleus-sampled slot's BOS is decided before the step). A FIM middle cut to `lines` lines (single- and multi-line
+infilling, `fim_lines`) ends at its `lines`-th line end: a token holding it is allowed iff the grammar ends a module
+after the text up to that line end and the suffix, and stands iff `ast.parse` accepts them (else the slot's head runs
+again without it); a BOS-ended cut middle gets its final newline before the check, as `fim_lines` scores it; a line
+that no line end can end validly and only a line end continues (after a backslash) ends unchecked. Layers: CPython
+3.12.3's tokenizer
 (`Parser/tokenizer.c`) as a character-level state machine (`lexer.rs`); INDENT/DEDENT and the tab-consistency check;
 an LALR(1) grammar (`python.lark`) built by Lark at load and read by the crate (`parser.rs`), the soft keywords read
 both ways until one fails; per lexer state, the vocabulary's events over its byte trie (`vocab.rs`). Where it is looser
-than CPython it accepts rather than rejects. Checks [unverified]: 0 false rejections on 1,051,013 validation tokens of
-three Python corpora and on CPython 3.12.3's grammar tests and 167 standard-library files; all 881 grammar-breaking
-token substitutions rejected; no empty mask on 3,000 random walks. Rejected alternatives: SynCode (one-regex f-strings
+than CPython it accepts rather than rejects. Checks: 0 false rejections over 11.4M token steps of 3,000 Python files
+(the standard library, site-packages, this repository; BPE) and 9.2M randomly segmented, and no prefix that
+`ast.parse` accepts without the grammar's end; the d16 model's unconstrained completions (EvalPlus greedy and
+sampled, infilling SPM greedy and sampled) replayed through their constraints: every masked token invalid, the
+constrained outputs token-identical wherever nothing was masked; all 8,488 infilling reference middles (BPE and two
+random segmentations) accepted. Rejected alternatives: SynCode (one-regex f-strings
 reject valid 3.12 code), llguidance (no INDENT/DEDENT, issue #107), arXiv 2402.17988 (no released library). C++ is not
 constrained; it is checked after generation by `g++ -std=c++17 -fsyntax-only`, the MultiPL-E judge's compiler.
 

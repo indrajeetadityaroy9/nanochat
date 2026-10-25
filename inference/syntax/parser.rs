@@ -27,7 +27,7 @@ pub struct Tables {
 
 /// A parser state: the LR stacks (bottom first), bracket depth, indentation stack of (column, alt column), whether the
 /// line has tokens, the line's column and alt column so far, the column of the line's first backslash (0: none).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Parse {
     pub stacks: Vec<Vec<u32>>,
     pub depth: i32,
