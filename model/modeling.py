@@ -30,7 +30,7 @@ from corpus.mixture import Stage
 from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.ops.cross_entropy import lm_loss, lm_losses
 from model.ops.flash_attn import flash_attn
-from model.ops.linear import linear, relu2_mlp
+from model.ops.linear import linear, relu2_mlp, residual_rms
 from model.ops.qk_prologue import qk_norm_rope
 from model.ops.ve_gate import ve_mix
 
@@ -86,9 +86,11 @@ class Attention(nn.Module):
         self.ve_gate = (nn.Linear(C, C // HEAD_DIM, bias=False)
                         if has_ve(layer_idx, num_hidden_layers=config.num_hidden_layers) else None)
 
-    def forward(self, hidden_states: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
-                cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-        """hidden_states: normed stream; input_ids: the token ids; ve_table: this layer's value embeddings or None."""
+    def forward(self, hidden_states: Tensor, residual: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
+                cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor,
+                segments: Tensor) -> tuple[Tensor, Tensor]:
+        """hidden_states: normed stream; residual: the stream; input_ids: the token ids; ve_table: this layer's value
+        embeddings or None -> (residual + attention output, its rows' rstd; model/ops/linear.py residual_rms)."""
         B, T, C = hidden_states.size()
         q, k, v = (linear(hidden_states, w).view(B, T, -1, HEAD_DIM)
                    for w in (self.q_proj.weight, self.k_proj.weight, self.v_proj.weight))
@@ -97,11 +99,13 @@ class Attention(nn.Module):
         if ve_table is not None:
             v = ve_mix(hidden_states, v, input_ids, ve_table, self.ve_gate.weight)[0]
         q, k = qk_norm_rope(q, k, self.q_norm_weight, self.k_norm_weight, *cos_sin)
-        return linear(flash_attn(q, k, v, window_size, cu_seqlens, segments)[0].view(B, T, C), self.o_proj.weight)
+        return residual_rms(flash_attn(q, k, v, window_size, cu_seqlens, segments)[0].view(B, T, C),
+                            self.o_proj.weight, residual)
 
 
 class MLP(nn.Module):
-    """down_proj(relu(up_proj(x))^2); activation and derivative run in QuACK GEMM epilogues (model/ops/linear.py)."""
+    """h + down_proj(relu(up_proj(norm(h)))^2) from the stream h and its rows' rstd; norm, activation, residual and
+    their derivatives run in QuACK GEMM epilogues (model/ops/linear.py relu2_mlp)."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -109,8 +113,8 @@ class MLP(nn.Module):
         self.up_proj = nn.Linear(C, 4 * C, bias=False)
         self.down_proj = nn.Linear(4 * C, C, bias=False)
 
-    def forward(self, x: Tensor) -> Tensor:
-        return relu2_mlp(x, self.up_proj.weight, self.down_proj.weight)[0]
+    def forward(self, h: Tensor, rstd: Tensor) -> Tensor:
+        return relu2_mlp(h, rstd, self.up_proj.weight, self.down_proj.weight)[0]
 
 
 class DecoderLayer(nn.Module):
@@ -121,10 +125,9 @@ class DecoderLayer(nn.Module):
 
     def forward(self, hidden_states: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
                 cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-        hidden_states = hidden_states + self.self_attn(norm(hidden_states), input_ids, ve_table, cos_sin=cos_sin,
-                                                       window_size=window_size, cu_seqlens=cu_seqlens,
-                                                       segments=segments)
-        return hidden_states + self.mlp(norm(hidden_states))
+        h, rstd = self.self_attn(norm(hidden_states), hidden_states, input_ids, ve_table, cos_sin=cos_sin,
+                                 window_size=window_size, cu_seqlens=cu_seqlens, segments=segments)
+        return self.mlp(h, rstd)
 
 
 class CausalLM(nn.Module):

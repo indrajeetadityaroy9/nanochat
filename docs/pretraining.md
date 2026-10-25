@@ -148,7 +148,7 @@ Ops in `model/ops/`, CUDA sources in `model/kernels/` (built on first use by `na
 | Op | Implementation |
 |---|---|
 | Projection, MLP, LM-head GEMMs | forward and dX: QuACK SM90 GEMMs autotuned by QuACK (`quack.gemm_interface`, `tuned=True`); fp32 weight gradients: cuBLAS `torch.mm` |
-| ReLU² MLP | QuACK `gemm_act` / `gemm_dact` |
+| Post-attention norm, ReLU² MLP, residuals | `model/ops/linear.py`: the gain-free norm folded into QuACK epilogues, the normed stream never stored: `o_proj` adds the residual and sums each row's squares (`sq_reduce_mod`, `rms_final_reduce`); the up projection scales rows by rstd before relu² (`gemm_norm_act`); the down projection adds the residual (`gemm_add`); backward: relu²'s derivative with the rstd scale and the norm's row sum in one epilogue, the norm's backward in the up projection's dX epilogue |
 | Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them; the softcap arm's capped loss fused in the same op (`model/ops/cross_entropy.py`) |
 | Attention | FlashAttention-4 varlen over the micro-batch's real document segments only (`model/ops/flash_attn.py`), its default backward |
 | q/k norm + gain + RoPE | `model/kernels/qk_prologue.cu`: one pass per direction; gain gradient without atomics (row math shared with the decoder, `model/kernels/qk_row.cuh`) |
@@ -163,6 +163,9 @@ Measured choices [unverified: `torch.profiler` and CUDA-graph timings, records n
   1.8e-5).
 - **`model/kernels/qk_prologue.cu`** rather than Inductor's fusion of the PyTorch ops: the d24 step 3,792 against
   3,890 ms; and micro-batches of 98,304 tokens rather than 65,536 (1% faster per token).
+- **The post-attention norm in GEMM epilogues** rather than Inductor's add + RMS norm kernels (d24 8K nsys, GH200 at
+  700 W): GPU time 4,296 against 4,355 ms per step (Inductor 383 → 231 ms, QuACK GEMMs +79 ms); peak memory 61.1
+  against 64.5 GiB; 200-step loss within same-seed noise (last-20 mean −0.007).
 - **FlashAttention-4** rather than cuDNN 9.26: forward + backward 1.47 against 4.96 ms at window 512, 1.83 against 5.85
   ms at 8,192 (d8 shapes); its full-context layers use the causal kernel (`window = None`), 1–2% faster than the local
   kernel at window T, outputs bitwise equal. FA4 on the real segments rather than the loader's padded `cu_seqlens`:
