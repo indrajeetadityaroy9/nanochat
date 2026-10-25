@@ -93,12 +93,18 @@ def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float, muon_t
     return adamw, Muon(matrices, lr=lr, weight_decay=weight_decay / muon_tau_scale, adjust_lr_fn="match_rms_adamw")
 
 
-def update(model: torch.nn.Module, opts: tuple[torch.optim.Optimizer, ...]) -> torch.Tensor:
+def update(model: torch.nn.Module, opts: tuple[torch.optim.Optimizer, ...],
+           accumulated: list[torch.nn.Parameter]) -> torch.Tensor:
     """One update from the accumulated gradients: their global norm clipped to MAX_GRAD_NORM before every optimizer,
-    each optimizer stepped, the gradients zeroed. Returns the norm before clipping, on the device (no host
-    synchronization)."""
+    each optimizer stepped, the gradients zeroed: those of `accumulated` (parameters whose .grad the ops accumulate into
+    in place, model/modeling.py accumulated_weights) in place, the rest freed. Returns the norm before clipping, on the
+    device (no host synchronization)."""
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
     for opt in opts:
         opt.step()
-    model.zero_grad()
+    in_place = set(accumulated)
+    for p in model.parameters():
+        if p not in in_place:
+            p.grad = None
+    torch._foreach_zero_([p.grad for p in accumulated])
     return norm

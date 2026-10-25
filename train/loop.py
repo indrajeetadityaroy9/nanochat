@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 import metrics
 from corpus.tokenizer import get_tokenizer
-from model.modeling import CausalLM, non_embedding_flops_per_token, num_matmul_params
+from model.modeling import CausalLM, accumulated_weights, non_embedding_flops_per_token, num_matmul_params
 from model.ops.cross_entropy import step_shares
 from train.checkpoint import checkpoint_path, save_checkpoint
 from train.diagnostics import Diagnostics
@@ -41,6 +41,10 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
     tokenizer = get_tokenizer(tokenizer_path)
     model.to_empty(device=device)
     model.init_weights(seed=seed)
+    # fp32 weight gradients the GEMMs accumulate into across micro-batches (model/ops/linear.py); update zeroes them
+    accumulated = accumulated_weights(model)
+    for p in accumulated:
+        p.grad = torch.zeros_like(p)
     opts = optimizers(model, lr=run.learning_rate,
                       weight_decay=tau_weight_decay(lr=run.learning_rate, steps=run.max_steps,
                                                     tokens_per_param=run.tokens_per_param),
@@ -169,7 +173,8 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
                                                         windows=model.window_sizes)
             if reading:
                 upcoming.append(next(train_iter))
-        grad_norm = update(model, opts)
+        grad_norm = update(model, opts, accumulated)
+        model.refresh_gemm_weights()
         diagnostics.after_update()
         for scheduler in schedulers:
             scheduler.step()

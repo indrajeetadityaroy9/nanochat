@@ -73,14 +73,24 @@ def norm(x: Tensor) -> Tensor:
     return F.rms_norm(x, (x.size(-1),), eps=torch.finfo(torch.float32).eps)
 
 
+class GemmLinear(nn.Linear):
+    """A bias-free linear of the decoder layers' GEMM ops (model/ops/linear.py): the ops multiply by weight_bf16, a
+    bf16 copy of the fp32 master weight refreshed once per weight change (CausalLM.refresh_gemm_weights), not by a
+    cast per micro-batch, and accumulate dW into the master's .grad."""
+
+    def __init__(self, in_features: int, out_features: int) -> None:
+        super().__init__(in_features, out_features, bias=False)
+        self.register_buffer("weight_bf16", torch.empty_like(self.weight, dtype=torch.bfloat16), persistent=False)
+
+
 class Attention(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int) -> None:
         super().__init__()
         C = config.hidden_size
-        self.q_proj = nn.Linear(C, C, bias=False)
-        self.k_proj = nn.Linear(C, C, bias=False)
-        self.v_proj = nn.Linear(C, C, bias=False)
-        self.o_proj = nn.Linear(C, C, bias=False)
+        self.q_proj = GemmLinear(C, C)
+        self.k_proj = GemmLinear(C, C)
+        self.v_proj = GemmLinear(C, C)
+        self.o_proj = GemmLinear(C, C)
         self.q_norm_weight = nn.Parameter(torch.empty(HEAD_DIM))
         self.k_norm_weight = nn.Parameter(torch.empty(HEAD_DIM))
         self.ve_gate = (nn.Linear(C, C // HEAD_DIM, bias=False)
@@ -92,15 +102,15 @@ class Attention(nn.Module):
         """hidden_states: normed stream; residual: the stream; input_ids: the token ids; ve_table: this layer's value
         embeddings or None -> (residual + attention output, its rows' rstd; model/ops/linear.py residual_rms)."""
         B, T, C = hidden_states.size()
-        q, k, v = (linear(hidden_states, w).view(B, T, -1, HEAD_DIM)
-                   for w in (self.q_proj.weight, self.k_proj.weight, self.v_proj.weight))
+        q, k, v = (linear(hidden_states, m.weight_bf16, m.weight.grad).view(B, T, -1, HEAD_DIM)
+                   for m in (self.q_proj, self.k_proj, self.v_proj))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once
         # (model/ops/ve_gate.py)
         if ve_table is not None:
             v = ve_mix(hidden_states, v, input_ids, ve_table, self.ve_gate.weight)[0]
         q, k = qk_norm_rope(q, k, self.q_norm_weight, self.k_norm_weight, *cos_sin)
         return residual_rms(flash_attn(q, k, v, window_size, cu_seqlens, segments)[0].view(B, T, C),
-                            self.o_proj.weight, residual)
+                            self.o_proj.weight_bf16, self.o_proj.weight.grad, residual)
 
 
 class MLP(nn.Module):
@@ -110,11 +120,12 @@ class MLP(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         C = config.hidden_size
-        self.up_proj = nn.Linear(C, 4 * C, bias=False)
-        self.down_proj = nn.Linear(4 * C, C, bias=False)
+        self.up_proj = GemmLinear(C, 4 * C)
+        self.down_proj = GemmLinear(4 * C, C)
 
     def forward(self, h: Tensor, rstd: Tensor) -> Tensor:
-        return relu2_mlp(h, rstd, self.up_proj.weight, self.down_proj.weight)[0]
+        return relu2_mlp(h, rstd, self.up_proj.weight_bf16, self.down_proj.weight_bf16, self.up_proj.weight.grad,
+                         self.down_proj.weight.grad)[0]
 
 
 class DecoderLayer(nn.Module):
@@ -147,6 +158,7 @@ class CausalLM(nn.Module):
         # Rotary tables, set by init_buffers
         for name in ("cos", "sin"):
             self.register_buffer(name, None, persistent=False)
+        self.register_load_state_dict_post_hook(lambda module, _: module.refresh_gemm_weights())
 
     @torch.no_grad()
     def init_weights(self, *, seed: int) -> None:
@@ -167,6 +179,18 @@ class CausalLM(nn.Module):
                 t.uniform_(-bound, bound,
                            generator=torch.Generator(t.device).manual_seed(seed * 2**32 + zlib.crc32(name.encode())))
         self.init_buffers()
+        self.refresh_gemm_weights()
+
+    @torch.no_grad()
+    def refresh_gemm_weights(self) -> None:
+        """The GemmLinears' bf16 copies from their fp32 weights: after init, load and every optimizer step; in place
+        (a compiled graph holds the copies), reallocated only where a load assigned weights on another device
+        (train/checkpoint.py load_model's meta model)."""
+        linears = [m for m in self.modules() if isinstance(m, GemmLinear)]
+        for m in linears:
+            if m.weight_bf16.device != m.weight.device:
+                m.weight_bf16 = torch.empty_like(m.weight, dtype=torch.bfloat16)
+        torch._foreach_copy_([m.weight_bf16 for m in linears], [m.weight for m in linears])
 
     def init_buffers(self) -> None:
         """Non-checkpointed buffers: the fp32 rotary tables cos/sin (max_position_embeddings, HEAD_DIM/2) of
@@ -215,6 +239,12 @@ class CausalLM(nn.Module):
 def num_non_embedding_params(model: CausalLM) -> int:
     """Decoder-layer parameters + lm_head: what the token budget scales with (92d63d4 scripts/base_train.py:263-267)."""
     return sum(p.numel() for p in model.layers.parameters()) + model.lm_head.weight.numel()
+
+
+def accumulated_weights(model: CausalLM) -> list[nn.Parameter]:
+    """The weights whose fp32 .grad the ops of model/ops/linear.py accumulate into in place (the GemmLinears: q/k/v/o,
+    up, down of every layer): a training backward needs their .grad allocated."""
+    return [m.weight for m in model.modules() if isinstance(m, GemmLinear)]
 
 
 def num_matmul_params(model: CausalLM) -> int:
