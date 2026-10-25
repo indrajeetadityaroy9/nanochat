@@ -287,18 +287,24 @@ lowers perplexity over UniChunk, arXiv 2402.13991 §3.2).
 **Rows** (`best_fit_decreasing`): pieces longest first, each into the row with the fewest free slots that holds it,
 else a new row, so no piece is truncated (arXiv 2404.10830 §3.1). A row's pieces come from one curated shard.
 
-**FIM** (`pack.FIM_RATE`, `RANDOM_SPAN_RATE`, `SINGLE_NODE_RATE`, `SPM_RATE`), in the train splits of repository code
-only (`layout.fim_packed`: the six repository sources and the repositories corpora):
+**FIM** (`pack.FIM_RATE`, `RANDOM_SPAN_RATE`, `SINGLE_NODE_RATE`, `LINE_START_RATE`, `SPM_RATE`), in the train splits
+of repository code only (`layout.fim_packed`: the six repository sources and the repositories corpora):
 
 | Parameter | Value | Evidence |
 |---|---|---|
 | Rate, per piece after cutting (context-level) | 0.5 | DeepSeek-Coder's 50% (arXiv 2401.14196 §3.1.2); [1] |
 | Middle: random character span, else AST | 0.1 | "90% use our AST-FIM, and 10% use Rand-FIM" (arXiv 2506.00204 §5.1) |
 | AST middle: Single-Node, else Aligned-Span | 0.5 | "an equal mix of two masking methods" (arXiv 2506.00204 §3.3) |
+| AST middle starting its line: the line's indentation in the middle | 0.5 | [3] |
 | SPM, else PSM | 0.5 | [2]; AST-FIM's "50% PSM and 50% SPM" (arXiv 2506.00204 §5.1) |
 
 [1] "context-level FIM yields a consistent and significant improvement over document-level FIM" (arXiv 2207.14255
 §4.4). [2] Joint PSM/SPM training matches or beats either mode alone (arXiv 2207.14255 §3.1, §4.3 Table 1, §8.1).
+[3] An AST node starts after its indentation, so without the rule no PSM example has a prefix ending in a line break
+and a middle starting with indentation, the layout of line-level infilling (HumanEval single-line and multi-line
+infilling mask whole lines: all 1,033 single-line prefixes end in a line break). Trained so, d16 at 20 tokens per
+parameter opens a new definition or file after the end sentinel (PSM line exact match 0.023 against SPM 0.353, also
+on prompts the attention window covers whole); with the rule 15.6% of PSM examples have that layout.
 
 - A FIM piece is decoded to text; its middle is a random span with probability 0.1, else an AST-FIM span on its
   tree-sitter parse, or a random span when the piece does not parse or has no node below the root.

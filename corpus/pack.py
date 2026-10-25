@@ -39,12 +39,14 @@ from corpus.tokenize import repository_parts, shard_tokens
 from corpus.tokenizer import FIM_TOKENS, TOKENIZER, get_tokenizer
 from native import corpus_crate
 
-# FIM, no line widening: rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv 2207.14255 §3);
+# FIM: rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv 2207.14255 §3);
 # 90% AST middles, 10% random character spans; PSM/SPM 50/50, as joint training matches or beats either mode alone
 # (arXiv 2207.14255 §3.1, §4.3 Table 1, §8.1; SPM as App. D's variant 2) and AST-FIM trains (arXiv 2506.00204v1 §5.1);
-# AST middles an equal mix of Single-Node and Aligned-Span masking (§3.3). The crate draws each piece's FIM from ChaCha8
-# keyed by document and piece, so packs do not depend on the order of work
-FIM_RATE, RANDOM_SPAN_RATE, SINGLE_NODE_RATE, SPM_RATE = 0.5, 0.1, 0.5, 0.5
+# AST middles an equal mix of Single-Node and Aligned-Span masking (§3.3); an AST middle whose node starts its line
+# takes the line's indentation with probability 0.5, so both a prefix ending in the line break (line-level infilling,
+# as HumanEval infilling masks whole lines) and one ending in the indentation (a cursor after it) are trained. The
+# crate draws each piece's FIM from ChaCha8 keyed by document and piece, so packs do not depend on the order of work
+FIM_RATE, RANDOM_SPAN_RATE, SINGLE_NODE_RATE, LINE_START_RATE, SPM_RATE = 0.5, 0.1, 0.5, 0.5, 0.5
 # Pack calls in flight: one per core (the crate releases the GIL)
 WINDOW = os.cpu_count()
 
@@ -59,7 +61,8 @@ def pack_shard(task: tuple[str, str, int, int, Path]) -> Shard:
     tokenizer = get_tokenizer(tokenizer_path)
     tokenized = split_path(corpus, split, tokenizer)
     bounds = shard_bounds(corpus, split, tokenizer)
-    fim = ({"rate": FIM_RATE, "random": RANDOM_SPAN_RATE, "single": SINGLE_NODE_RATE, "spm": SPM_RATE,
+    fim = ({"rate": FIM_RATE, "random": RANDOM_SPAN_RATE, "single": SINGLE_NODE_RATE, "line_start": LINE_START_RATE,
+            "spm": SPM_RATE,
             "sentinels": [tokenizer.special_tokens[name] for name in FIM_TOKENS]}
            if fim_packed(corpus, split) else None)
     pieces, counts, tokens = corpus_crate().pack(str(tokenized.with_suffix(".bin")),

@@ -119,14 +119,17 @@ fn statement_cuts(ids: &[u16], token_bytes: &[Vec<u8>], ends_line: &[bool], gram
 /// Fill-in-the-middle as AST-FIM trains it (arXiv 2506.00204v1 §5.1 "FIM", §3.3 "Masking Algorithm"), extracted from
 /// pack.py's mapping: the share of pieces made FIM examples (rate); of those the share whose middle is a random
 /// character span (random: Rand-FIM) rather than AST-aligned; of AST-aligned middles the share by Single-Node rather
-/// than Aligned-Span masking (single); the share in SPM rather than PSM order (spm); the ids of <｜fim▁begin｜>,
-/// <｜fim▁hole｜>, <｜fim▁end｜> (sentinels).
+/// than Aligned-Span masking (single); of AST-aligned middles whose node starts its line, the share that take the
+/// line's indentation into the middle (line_start), so the prefix ends with the line break as in line-level infilling
+/// (HumanEval single-line and multi-line infilling, arXiv 2207.14255 §5.1); the share in SPM rather than PSM order
+/// (spm); the ids of <｜fim▁begin｜>, <｜fim▁hole｜>, <｜fim▁end｜> (sentinels).
 #[derive(FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct Fim {
     rate: f64,
     random: f64,
     single: f64,
+    line_start: f64,
     spm: f64,
     sentinels: [u32; 3],
 }
@@ -198,16 +201,23 @@ fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) ->
 }
 
 /// The FIM example of a piece's text: its middle a random character span (random_span) with probability random, else
-/// AST-FIM's (ast_middle; a random span where it has none); prefix, suffix and middle each encoded on its own by
-/// tiktoken's encoder (arXiv 2207.14255 §3), in SPM order with probability spm (arXiv 2207.14255 App. D, variant 2),
-/// else PSM:
+/// AST-FIM's (ast_middle; a random span where it has none), an AST middle whose node starts its line extended to the
+/// line's start with probability line_start; prefix, suffix and middle each encoded on its own by tiktoken's encoder
+/// (arXiv 2207.14255 §3), in SPM order with probability spm (arXiv 2207.14255 App. D, variant 2), else PSM:
 ///   PSM: <｜fim▁begin｜> prefix <｜fim▁hole｜> suffix <｜fim▁end｜> middle
 ///   SPM: <｜fim▁begin｜> <｜fim▁hole｜> suffix <｜fim▁end｜> prefix middle
 /// The BOS before the example and its target BOS after the middle are the loader's (corpus/loader.py).
 fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng: ChaCha8Rng) -> Vec<u16> {
     let spm = rng.random_bool(fim.spm);
     let random = rng.random_bool(fim.random);
-    let (a, b) = (!random).then(|| ast_middle(text, grammar, fim, &mut rng)).flatten().unwrap_or_else(|| random_span(text, &mut rng));
+    let ast = (!random).then(|| ast_middle(text, grammar, fim, &mut rng)).flatten();
+    let (mut a, b) = ast.unwrap_or_else(|| random_span(text, &mut rng));
+    if ast.is_some() && rng.random_bool(fim.line_start) {
+        let line = text[..a].rfind('\n').map_or(0, |i| i + 1);
+        if text[line..a].bytes().all(|c| c == b' ' || c == b'\t') {
+            a = line;
+        }
+    }
     let (prefix, middle, suffix) = (bpe.encode_ordinary(&text[..a]), bpe.encode_ordinary(&text[a..b]), bpe.encode_ordinary(&text[b..]));
     let [pre, suf, mid] = fim.sentinels;
     let sections: &[&[u32]] = if spm { &[&[pre, suf], &suffix, &[mid], &prefix, &middle] } else { &[&[pre], &prefix, &[suf], &suffix, &[mid], &middle] };
