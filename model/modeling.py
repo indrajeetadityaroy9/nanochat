@@ -15,8 +15,9 @@ parameters, arXiv 2309.14322 §3.2.5; a fixed scale costs 0.11% of loss in nGPT,
   output-logit cap c tanh(z / c) (ModelConfig.final_logit_softcapping).
 Not taken from 92d63d4: its smear and backout, its QK order (RoPE, norm, x 1.2) and its init (init_weights states this
 model's); its logit softcap is optional here.
-fp32 parameters, bf16 activations; the ops round weights to bf16. Gradient reductions run in no fixed order (FA4's and
-the embedding backward's atomic accumulation), so gradients are not bitwise reproducible.
+fp32 parameters, bf16 activations; the GEMM ops multiply by bf16 copies of the weights (GemmLinear), the other ops
+round theirs to bf16. Gradient reductions run in no fixed order (FA4's and the embedding backward's atomic
+accumulation), so gradients are not bitwise reproducible.
 """
 
 import zlib

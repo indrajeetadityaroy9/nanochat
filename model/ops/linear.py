@@ -1,12 +1,12 @@
 """The decoder layer's GEMMs as torch.library ops (traceable by fullgraph torch.compile): forward and dX on QuACK's
-GEMMs (quack.gemm_interface and quack.epilogue fused epilogues, tuned) with the weight W in x's dtype (model/modeling.py
-GemmLinear's bf16 copy of the fp32 master; another dtype is cast per call); dW accumulated in fp32 by cuBLAS straight
-into the fp32 master's .grad (accumulate_dw).
+GEMMs (quack.gemm_interface and quack.epilogue fused epilogues, tuned) with W the bf16 copy of the fp32 master
+(model/modeling.py GemmLinear); dW accumulated in fp32 by cuBLAS straight into the fp32 master's .grad (aten
+addmm.dtype_out, beta = 1).
 
 Weight gradients: each op takes its weights' .grad buffers (fp32, allocated and zeroed by train/loop.py) and its
-backward adds dW into them in place, so the gradient-accumulation micro-batches sum in the GEMM (beta = 1) instead of
-a new dW per micro-batch plus autograd's AccumulateGrad add; autograd sees no gradient for those weights. Forward-only
-callers pass None.
+backward adds dW into them in place, so the gradient-accumulation micro-batches sum in the GEMM instead of a new dW per
+micro-batch plus autograd's AccumulateGrad add; autograd sees no gradient for those weights. Forward-only callers pass
+None.
 
 nanochat::linear (q_proj, k_proj, v_proj): y = x W^T; backward dX = dY W, dW = dY^T X.
 
@@ -37,22 +37,10 @@ from torch.autograd.function import FunctionCtx
 EPS = torch.finfo(torch.float32).eps
 
 
-def accumulate_dw(grad: Tensor, a: Tensor, b: Tensor) -> None:
-    """grad += a^T b: bf16 operands, fp32 accumulation and output, cuBLAS with beta = 1 (aten addmm.dtype_out)."""
-    torch.addmm(grad, a.t(), b, out_dtype=grad.dtype, out=grad)
-
-
-def grad_buffers(*grads: Tensor | None) -> tuple[Tensor, ...]:
-    """The weights' .grad buffers a backward accumulates into; None: the caller allocated none (forward-only)."""
-    if any(g is None for g in grads):
-        raise RuntimeError("backward through model/ops/linear.py needs the weights' .grad allocated (train/loop.py)")
-    return grads
-
-
 @torch.library.custom_op("nanochat::linear", mutates_args=(), device_types="cuda")
 def linear(x: Tensor, weight: Tensor, grad: Tensor | None) -> Tensor:
-    """x (..., K), weight (N, K), grad: weight's fp32 .grad or None -> (..., N) in x's dtype."""
-    y = gemm(x.reshape(-1, x.shape[-1]), weight.to(x.dtype).t(), out_dtype=x.dtype)
+    """x (..., K), weight (N, K) bf16, grad: weight's fp32 .grad or None -> (..., N) in x's dtype."""
+    y = gemm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=x.dtype)
     return y.view(*x.shape[:-1], weight.shape[0])
 
 
@@ -65,8 +53,8 @@ def linear_fake(x: Tensor, weight: Tensor, grad: Tensor | None) -> Tensor:
 def linear_bwd(dy: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> Tensor:
     """dX like x; dW accumulated into grad."""
     dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
-    dx = gemm(dy2, weight.to(x.dtype), out_dtype=x.dtype).view(x.shape)
-    accumulate_dw(grad, dy2, x2)
+    dx = gemm(dy2, weight, out_dtype=x.dtype).view(x.shape)
+    torch.addmm(grad, dy2.t(), x2, out_dtype=grad.dtype, out=grad)
     return dx
 
 
@@ -81,7 +69,7 @@ def linear_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor | None], 
 
 def linear_grad(ctx: FunctionCtx, dy: Tensor) -> tuple[Tensor, None, None]:
     x, weight, grad = ctx.saved_tensors
-    return linear_bwd(dy, x, weight, *grad_buffers(grad)), None, None
+    return linear_bwd(dy, x, weight, grad), None, None
 
 
 linear.register_autograd(linear_grad, setup_context=linear_save)
@@ -94,7 +82,7 @@ def residual_rms(x: Tensor, weight: Tensor, grad: Tensor | None, residual: Tenso
     differentiates through it."""
     N = weight.shape[0]
     r = sq_reduce_mod(has_c=True, has_rowvec=False, has_aux=False)(
-        x.reshape(-1, x.shape[-1]), weight.to(x.dtype).t(), residual.reshape(-1, N))
+        x.reshape(-1, x.shape[-1]), weight.t(), residual.reshape(-1, N))
     # gemm_rms's epilogue and finalize (quack/gemm_interface.py _gemm_rms_call, _rms_finalize); the per-tile partials
     # of a cold autotuned call are a strided slice, which rms_final_reduce rejects, hence contiguous()
     rstd = rms_final_reduce(r["mColVecReduce"].contiguous(), scale=1 / N, eps=EPS)
@@ -114,7 +102,7 @@ def residual_rms_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor | N
 
 def residual_rms_grad(ctx: FunctionCtx, dh: Tensor, drstd: None) -> tuple[Tensor, None, None, Tensor]:
     x, weight, grad = ctx.saved_tensors
-    return linear_bwd(dh, x, weight, *grad_buffers(grad)), None, None, dh
+    return linear_bwd(dh, x, weight, grad), None, None, dh
 
 
 residual_rms.register_autograd(residual_rms_grad, setup_context=residual_rms_save)
@@ -142,8 +130,8 @@ def relu2_mlp(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tenso
     g_down their fp32 .grad or None -> (h + MLP(norm(h)) like h, scaled pre-activation (M, 4C) saved for the
     backward)."""
     h2 = h.reshape(-1, h.shape[-1])
-    preact, postact = gemm_norm_act(h2, w_up.to(h.dtype).t(), rstd=rstd, activation="relu_sq", store_preact=True)
-    y = gemm_add(postact, w_down.to(h.dtype).t(), C=h2)
+    preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True)
+    y = gemm_add(postact, w_down.t(), C=h2)
     return y.view(h.shape), preact
 
 
@@ -158,13 +146,13 @@ def relu2_mlp_bwd(dy: Tensor, h: Tensor, rstd: Tensor, preact: Tensor, w_up: Ten
                   g_down: Tensor) -> Tensor:
     """dh like h, through the residual, the MLP and the norm; dW_up, dW_down accumulated into g_up, g_down."""
     dy2, h2 = dy.reshape(-1, dy.shape[-1]), h.reshape(-1, h.shape[-1])
-    r = relu2_dact_rstd(dy2, w_down.to(h.dtype), preact, rstd=rstd, dynamic_scheduler=True)
+    r = relu2_dact_rstd(dy2, w_down, preact, rstd=rstd, dynamic_scheduler=True)
     dp, postact = r["D"], r["postact"]
-    accumulate_dw(g_down, dy2, postact)
+    torch.addmm(g_down, dy2.t(), postact, out_dtype=g_down.dtype, out=g_down)
     del postact
     corr = rstd.square().mul_(r["dsum"]).mul_(-1 / h.shape[-1])
-    dh = norm_bwd_apply(dp, w_up.to(h.dtype), dy2, h=h2, corr=corr)["D"].view(h.shape)
-    accumulate_dw(g_up, dp, h2)
+    dh = norm_bwd_apply(dp, w_up, dy2, h=h2, corr=corr)["D"].view(h.shape)
+    torch.addmm(g_up, dp.t(), h2, out_dtype=g_up.dtype, out=g_up)
     return dh
 
 
@@ -181,7 +169,7 @@ def relu2_mlp_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor, Tenso
 
 def relu2_mlp_grad(ctx: FunctionCtx, dy: Tensor, dpreact: Tensor) -> tuple[Tensor, None, None, None, None, None]:
     h, rstd, w_up, w_down, g_up, g_down, preact = ctx.saved_tensors
-    return relu2_mlp_bwd(dy, h, rstd, preact, w_up, w_down, *grad_buffers(g_up, g_down)), None, None, None, None, None
+    return relu2_mlp_bwd(dy, h, rstd, preact, w_up, w_down, g_up, g_down), None, None, None, None, None
 
 
 relu2_mlp.register_autograd(relu2_mlp_grad, setup_context=relu2_mlp_save)
