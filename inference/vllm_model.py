@@ -8,14 +8,9 @@ per_layer_sliding_window, as Gemma 3; vLLM's hybrid KV-cache manager keeps a sli
 and CUDA graphs (support_torch_compile). The q/k prologue, value-embedding mix and residual mix are PyTorch expressions
 at the training kernels' precision, fused by vLLM's torch.compile. One GPU (tensor parallel size 1): the value
 embeddings and their gates are not sharded.
-
-LinesStop: a logits processor (vLLM's model runner V2 interface) ending a request once its output holds
-extra_args["lines"] line breaks, eval/code_eval.py LinesStoppingCriteria's rule for FIM middles cut to their
-reference's lines: from then on only BOS (the end of a middle) is allowed.
 """
 
 import torch
-from tokenizers import Tokenizer
 from torch import nn
 from transformers import AutoConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -23,17 +18,30 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.linear import (ColumnParallelLinear, QKVParallelLinear, ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
-from vllm.v1.worker.gpu.sample.logits_processor import interface
 
-from inference.modeling_nanochat import NanochatConfig, mix, norm, qk_norm_rope, rotary, ve_mix
+from inference.modeling_nanochat import (
+    NanochatConfig,
+    mix,
+    norm,
+    qk_norm_rope,
+    rotary,
+    ve_mix,
+)
 
 
 class NanochatAttention(nn.Module):
@@ -153,49 +161,13 @@ class NanochatForCausalLM(nn.Module):
             for shard in ("q", "k", "v"):
                 if f".{shard}_proj." in name:
                     name = name.replace(f".{shard}_proj.", ".qkv_proj.")
-                    getattr(params[name], "weight_loader")(params[name], tensor, shard)
+                    params[name].weight_loader(params[name], tensor, shard)
                     break
             else:
                 param = params[name]
                 getattr(param, "weight_loader", default_weight_loader)(param, tensor)
             loaded.add(name)
         return loaded
-
-
-class LinesStop(interface.LogitsProcessor):
-    """Requests with extra_args {"lines": k}: once their output tokens hold k line breaks, only BOS is allowed."""
-
-    def __init__(self, vllm_config: VllmConfig, req_states: interface.LogitsProcRequestState) -> None:
-        self.req_states = req_states
-        model = vllm_config.model_config
-        tokenizer = Tokenizer.from_file(f"{model.tokenizer}/tokenizer.json")
-        self.bos = model.hf_config.bos_token_id
-        # line breaks per token; a ByteLevel token string spells byte 0x0A "\u010a"; special tokens (BOS on) none
-        breaks = [tokenizer.id_to_token(i).count("\u010a") if i < self.bos else 0 for i in range(req_states.vocab_size)]
-        self.breaks = torch.tensor(breaks, dtype=torch.int32, device=req_states.device)
-        self.lines = torch.zeros(req_states.max_num_reqs, dtype=torch.int32, device=req_states.device)
-
-    def add_request(self, req_idx: int, sampling_params) -> bool:
-        lines = (sampling_params.extra_args or {}).get("lines")
-        self.lines[req_idx] = lines or 0
-        return lines is not None
-
-    def apply(self, logits: torch.Tensor, ctx: interface.LogitsContext) -> torch.Tensor:
-        if not ctx.idx_mapping_np.size:
-            return logits
-        slots, s = ctx.expanded_idx_mapping, self.req_states
-        # each row's output tokens: all_token_ids[slot, prompt_len:total_len]
-        width = int(ctx.seq_lens_upper_bound_np.max()) + 1
-        col = torch.arange(width, device=logits.device)
-        out = (col >= s.prompt_len.gpu[slots, None]) & (col < s.total_len.gpu[slots, None])
-        ids = s.all_token_ids.gpu[slots, :width].clamp(0, self.breaks.numel() - 1)
-        count = (self.breaks[ids] * out).sum(1)
-        lines = self.lines[slots]
-        done = (lines > 0) & (count >= lines)
-        bos = logits[:, self.bos].clone()
-        logits.masked_fill_(done[:, None], float("-inf"))
-        logits[:, self.bos] = torch.where(done, 0.0, bos)
-        return logits
 
 
 def register() -> None:

@@ -18,13 +18,21 @@ runs in transformers (eager, sdpa, flash attention, generate with a cache) and v
   stay fp32 (_keep_in_fp32_modules_strict).
 """
 
+from typing import ClassVar
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import GenerationMixin, PreTrainedConfig, PreTrainedModel
 from transformers.cache_utils import DynamicCache
-from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.masking_utils import (
+    create_causal_mask,
+    create_sliding_window_causal_mask,
+)
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 
@@ -139,12 +147,13 @@ class NanochatDecoderLayer(nn.Module):
 class NanochatPreTrainedModel(PreTrainedModel):
     config_class = NanochatConfig
     base_model_prefix = "model"
-    _no_split_modules = ["NanochatDecoderLayer"]
+    _no_split_modules: ClassVar[list[str]] = ["NanochatDecoderLayer"]
     _supports_flash_attn = True
     _supports_sdpa = True
     _supports_flex_attn = True
     _supports_attention_backend = True
-    _keep_in_fp32_modules_strict = ["resid_lambdas", "x0_lambdas", "q_norm_weight", "k_norm_weight", "ve_gate"]
+    _keep_in_fp32_modules_strict: ClassVar[list[str]] = ["resid_lambdas", "x0_lambdas", "q_norm_weight",
+                                                         "k_norm_weight", "ve_gate"]
 
 
 class NanochatModel(NanochatPreTrainedModel):
