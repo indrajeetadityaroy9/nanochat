@@ -17,17 +17,12 @@
  * Deterministic dW without atomics: ve_dw's blocks each sum dz x n over a fixed range of rows per column (one thread
  * per column) into a per-block partial, and ve_dw_sum adds the partials in block order.
  */
-#include "qk_row.cuh"
+#include "common.cuh"
 
 /* VEC fp32 of the table, each rounded to bf16 and back: ve = F.embedding(idx, table).to(bfloat16). */
 static __device__ __forceinline__ void load_ve(const float *p, float *v) {
     load(p, v);
     for (int i = 0; i < VEC; i++) v[i] = __bfloat162float(__float2bfloat16(v[i]));
-}
-
-static __device__ __forceinline__ float warp_sum(float v) {
-    for (int o = WARP / 2; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
 }
 
 /* sum += x with Kahan's compensation err (Higham, "Accuracy and Stability of Numerical Algorithms", §4.3). */
@@ -165,29 +160,12 @@ __global__ void ve_dw_sum_kernel(const float *part, int nb, int HC, float *dw) {
     dw[i] = sum;
 }
 
-static int sms() {
-    static const int count = [] {
-        int device, c;
-        cudaGetDevice(&device);
-        cudaDeviceGetAttribute(&c, cudaDevAttrMultiProcessorCount, device);
-        return c;
-    }();
-    return count;
-}
-
-/* Persistent grids: resident blocks of a kernel, all SMs. */
-template <typename F> static int grid(F f) {
-    int per_sm;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, f, THREADS, 0);
-    return per_sm * sms();
-}
-
 /* Blocks of ve_dw, fixed per device, so the summation order is fixed; part: fp32 (ve_dw_blocks(), H, C). */
-extern "C" int ve_dw_blocks() { return 2 * sms(); }
+extern "C" int ve_dw_blocks() { return 2 * sm_count(); }
 
 template <int H> static void forward(const void *n, const void *v, const void *idx, const void *table, const void *w,
                                      void *out, void *gate, long long rows, cudaStream_t s) {
-    static const int blocks = grid(ve_forward_kernel<H>);
+    static const int blocks = resident_blocks(ve_forward_kernel<H>, THREADS);
     ve_forward_kernel<H><<<blocks, THREADS, 0, s>>>((const bf16 *)n, (const bf16 *)v, (const int *)idx,
                                                     (const float *)table, (const float *)w, (bf16 *)out,
                                                     (float *)gate, rows);
@@ -197,7 +175,7 @@ template <int H> static void backward(const void *dout, const void *n, const voi
                                       const void *w, const void *gate, void *dn, void *dtable, long long table_rows,
                                       void *dw, void *dz, void *part, long long rows, cudaStream_t s) {
     constexpr int C = H * HEAD_DIM;
-    static const int blocks = grid(ve_backward_kernel<H>);
+    static const int blocks = resident_blocks(ve_backward_kernel<H>, THREADS);
     const int nb = ve_dw_blocks();
     cudaMemsetAsync(dtable, 0, sizeof(float) * table_rows * C, s);
     ve_backward_kernel<H><<<blocks, THREADS, 0, s>>>((const bf16 *)dout, (const int *)idx, (const float *)table,

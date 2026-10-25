@@ -116,13 +116,7 @@ extern "C" void qkp_forward(const void *q, const void *k, const void *gq, const 
 /* Blocks per tensor: half the device's resident k_backward blocks, fixed per device, so the summation order is fixed;
  * blocks past the last row contribute exact zeros. */
 extern "C" int qkp_backward_blocks() {
-    static const int half = [] {
-        int device, sms, per_sm;
-        cudaGetDevice(&device);
-        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device);
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, k_backward, backward_threads(), 0);
-        return sms * per_sm / 2;
-    }();
+    static const int half = resident_blocks(k_backward, backward_threads()) / 2;
     return half;
 }
 

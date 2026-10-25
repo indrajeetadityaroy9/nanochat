@@ -108,11 +108,6 @@ static __device__ __forceinline__ bool live(const unsigned long long *mask, int 
     return (mask[b / MASK_BITS] >> (b % MASK_BITS)) & 1ull;
 }
 
-static __device__ __forceinline__ float warp_sum(float v) {
-    for (int o = WARP / 2; o > 0; o >>= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
-
 /* Maximum over the warp, to every lane. */
 static __device__ __forceinline__ float warp_max(float v) {
     for (int o = WARP / 2; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
@@ -811,20 +806,16 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
                        (const bf16 *)p[4], (const float *)p[5], (const float *)p[6], (const float *)p[7], scal[2 * l],
                        scal[2 * l + 1], window[l]};
     }
-    int device, sms;
+    int device;
     cudaGetDevice(&device);
-    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device);
     cudaDeviceGetAttribute(&d->optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
     for (const void *kernel : {(const void *)k_gemv<false>, (const void *)k_gemv<true>})
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, d->optin);
     /* attn_wave: (head, split) blocks the SMs hold at once, per head; residency is retaken with the per-split shared
      * memory of that wave (fewer splits fit). attn_run: keys per split, so context - 1 keys take one wave; from the
      * context, not max_len, so a position's splits, and the order its keys are summed in, do not depend on max_len */
-    int resident;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, 0);
-    d->attn_wave = sms * resident / d->H;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, k_attn, HEAD_DIM, d->attn_wave * sizeof(float));
-    d->attn_wave = sms * resident / d->H;
+    d->attn_wave = resident_blocks(k_attn, HEAD_DIM) / d->H;
+    d->attn_wave = resident_blocks(k_attn, HEAD_DIM, d->attn_wave * sizeof(float)) / d->H;
     d->attn_run = (context - 1 + d->attn_wave - 1) / d->attn_wave;
     /* B: the most slots (at most MAX_BATCH) that fit free memory */
     size_t slot = 0, free_bytes, total_bytes;

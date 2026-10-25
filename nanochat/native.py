@@ -1,5 +1,7 @@
 """Native libraries (CUDA kernels, the Rust crates' Python modules), built on first use, cached under NATIVE; pointer
-and stream, the ctypes arguments of csrc's entry points. torch is imported by the CUDA paths alone, so the corpus's
+and stream, the ctypes arguments of csrc's entry points. csrc follows ThunderKittens' layout (header-only shared code,
+common.cuh and qk_row.cuh; one self-contained file per kernel, its C entry points beside its kernels); this module is
+its one build, with one nvcc command for every kernel. torch is imported by the CUDA paths alone, so the corpus's
 spawned workers, which load only the crates, import none."""
 
 import ctypes
@@ -24,10 +26,10 @@ CSRC = Path(__file__).resolve().parent / "csrc"
 CORPUS_CRATE = Path(__file__).resolve().parent / "corpus" / "crate"
 
 
-def native_library(name: str, sources: list[Path], build: Callable[[Path], None], *, settings: bytes) -> Path:
-    """NATIVE/<name>-<sha256(settings, sources)>.so, built once per version of its sources and settings by build(tmp)
-    and renamed atomically, so concurrent first builds never share a file."""
-    digest = hashlib.sha256(settings)
+def native_library(name: str, command: list[str], sources: list[Path], build: Callable[[Path], None]) -> Path:
+    """NATIVE/<name>-<sha256(command, sources)>.so, built once per version of its build command and sources by
+    build(tmp) and renamed atomically, so concurrent first builds never share a file. The toolchain is the image's."""
+    digest = hashlib.sha256(" ".join(command).encode())
     for source in sources:
         digest.update(source.read_bytes())
     path = NATIVE / f"{name}-{digest.hexdigest()}.so"
@@ -51,40 +53,37 @@ def stream() -> ctypes.c_void_p:
 
 @functools.cache
 def cuda_library(name: str) -> ctypes.CDLL:
-    """csrc/<name>.cu and qk_row.cuh built by nvcc for the current device's architecture with config.HEAD_DIM, keyed by
-    the nvcc command and version, loaded by ctypes once per process."""
+    """csrc/<name>.cu built by nvcc for the current device's architecture with config.HEAD_DIM, keyed by the command,
+    the file and every csrc header, loaded by ctypes once per process."""
     import torch
 
     major, minor = torch.cuda.get_device_capability()
     arch = f"sm_{major}{minor}"
     source = CSRC / f"{name}.cu"
     command = ["nvcc", f"-arch={arch}", f"-DHEAD_DIM={HEAD_DIM}", "-Xcompiler", "-fPIC", "-shared", "-o"]
-    version = subprocess.run(["nvcc", "--version"], capture_output=True, check=True).stdout
 
     def build(path: Path) -> None:
         subprocess.run([*command, path, source], check=True)
 
-    return ctypes.CDLL(native_library(f"{name}-{arch}", [source, CSRC / "qk_row.cuh"], build,
-                                      settings=" ".join(command).encode() + version))
+    return ctypes.CDLL(native_library(f"{name}-{arch}", command, [source, *sorted(CSRC.glob("*.cuh"))], build))
 
 
 @functools.cache
 def crate_module(crate: Path) -> ModuleType:
     """The Python module nanochat_<crate.name> of the Rust crate in directory crate (pyo3), built by cargo in its target
-    directory NATIVE/<crate.name>-target, keyed by the cargo command and the rustc version, imported once per
+    directory NATIVE/<crate.name>-target, keyed by the cargo command and the crate's files, imported once per
     process."""
     name = f"nanochat_{crate.name}"
     target = NATIVE / f"{crate.name}-target"
     command = ["cargo", "build", "--release", "--locked", "--manifest-path", str(crate / "Cargo.toml"),
                "--target-dir", str(target)]
-    version = subprocess.run(["rustc", "-vV"], capture_output=True, check=True).stdout
 
     def build(path: Path) -> None:
         subprocess.run(command, check=True)
         shutil.copyfile(target / "release" / f"lib{name}.so", path)
 
     sources = [*sorted(crate.glob("*.rs")), crate / "Cargo.toml", crate / "Cargo.lock"]
-    path = native_library(crate.name, sources, build, settings=" ".join(command).encode() + version)
+    path = native_library(crate.name, command, sources, build)
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

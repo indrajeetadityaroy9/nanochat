@@ -1,48 +1,17 @@
 /*
- * Device code shared by csrc/qk_prologue.cu (training) and csrc/decode.cu (decoding), so the decoder's q and k equal
- * the training forward's bitwise. Row math on one head row x: n = x / sqrt(mean(x^2) + eps) (F.rms_norm's fp32
- * epsilon), m = n * g, y = m rotated by -theta over the full head (m1, m2 the halves; y1 = m1 cos + m2 sin,
+ * q/k row math shared by csrc/qk_prologue.cu (training) and csrc/decode.cu (decoding), so the decoder's q and k equal
+ * the training forward's bitwise. On one head row x: n = x / sqrt(mean(x^2) + eps) (F.rms_norm's fp32 epsilon),
+ * m = n * g, y = m rotated by -theta over the full head (m1, m2 the halves; y1 = m1 cos + m2 sin,
  * y2 = -m1 sin + m2 cos; karpathy/nanochat 92d63d4 gpt.py:57-65). A row is QK_LANES threads, each holding dims
  * o..o+VEC-1 and their rotation partners o+HALF..; row sums reduce by shuffles within those lanes.
  */
 #pragma once
 
-#include <float.h>
-#include <stdint.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include "common.cuh"
 
-typedef __nv_bfloat16 bf16;
-
-constexpr int WARP = 32;                           /* threads per warp (CUDA C++ Programming Guide, warpSize) */
 /* HEAD_DIM: config.HEAD_DIM, defined by native.py's nvcc command */
-constexpr int HALF = HEAD_DIM / 2;                 /* rotation pairs per head: dims i and i + HALF */
-constexpr int VEC = sizeof(uint4) / sizeof(bf16);  /* bf16 per 16-byte access */
-constexpr int QK_LANES = HALF / VEC;               /* threads per head row, one rotation pair of vectors each */
-
-/* VEC bf16 (one 16-byte load) as fp32. */
-static __device__ __forceinline__ void load(const bf16 *p, float *v) {
-    const uint4 u = *reinterpret_cast<const uint4 *>(p);
-    const __nv_bfloat162 *h = reinterpret_cast<const __nv_bfloat162 *>(&u);
-    for (int i = 0; i < VEC / 2; i++) {
-        const float2 f = __bfloat1622float2(h[i]);
-        v[2 * i] = f.x; v[2 * i + 1] = f.y;
-    }
-}
-
-/* VEC fp32; offsets are multiples of VEC, so each float4 is aligned. */
-static __device__ __forceinline__ void load(const float *p, float *v) {
-    for (int i = 0; i < VEC; i += sizeof(float4) / sizeof(float))
-        *reinterpret_cast<float4 *>(v + i) = *reinterpret_cast<const float4 *>(p + i);
-}
-
-/* VEC fp32 rounded to bf16, one 16-byte store. */
-static __device__ __forceinline__ void store(bf16 *p, const float *v) {
-    uint4 u;
-    __nv_bfloat162 *h = reinterpret_cast<__nv_bfloat162 *>(&u);
-    for (int i = 0; i < VEC / 2; i++) h[i] = __floats2bfloat162_rn(v[2 * i], v[2 * i + 1]);
-    *reinterpret_cast<uint4 *>(p) = u;
-}
+constexpr int HALF = HEAD_DIM / 2;    /* rotation pairs per head: dims i and i + HALF */
+constexpr int QK_LANES = HALF / VEC;  /* threads per head row, one rotation pair of vectors each */
 
 /* Shuffle mask of this thread's row; rows are whole QK_LANES-thread groups, so a group is live together. */
 static __device__ __forceinline__ unsigned qk_row_mask() {
