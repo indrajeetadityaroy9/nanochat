@@ -54,7 +54,7 @@ def diverged(tag: str) -> int | None:
 
 def curves(tag: str) -> dict[str, list]:
     """train_steps as columns, one per train record field (step, tokens, loss, lr, grad_norm, tok_per_s, attempt,
-    time), in step order."""
+    time), in step order; none for a run without train steps (diverged at step 0)."""
     by_step = train_steps(tag)
     steps = [by_step[s] for s in sorted(by_step)]
-    return {k: [s[k] for s in steps] for k in steps[0] if k not in ("tag", "kind")}
+    return {k: [s[k] for s in steps] for k in (steps[0] if steps else ()) if k not in ("tag", "kind")}
