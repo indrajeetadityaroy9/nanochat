@@ -173,7 +173,7 @@ diagnostics committed (`7e77833`): per-corpus training loss, logsumexp max and m
 loss/grad-norm spike flags and a clipped flag, per-group update RMS and parameter norm every 10th step (from optimizer
 state); +0.4 GiB peak at d24; the interval held-out evaluation was removed (it added ~2.1 GiB and 0.24% of step time).
 
-### 5.11 Attention kernels (AttnKernel, AttnKernel2) — in progress
+### 5.11 Attention kernels (AttnKernel, AttnKernel2, AttnOwner) — in progress
 Outputs: every FA4 forward/backward tile and scheduling variant tried is slower than the defaults; static persistent
 schedules lose to the hardware scheduler on varlen tiles. Per micro-batch at 8K: window layers 1.50 ms (fwd 285, bwd
 389 TFLOP/s), full layers 3.13 ms; backward pre/post 0.30 ms per call (20% of a window layer); real segments: median
@@ -182,9 +182,14 @@ vs FA4 0.413 and persistent FA4 0.359 (0.355); forward with QK-norm + RoPE fused
 0.546 (0.556), each K block being transformed ~5 times; window backward 1.193 (1.294) vs FA4 0.771 (0.828); a prologue
 backward reading FA4's fp32 dq accumulator 0.823 vs 0.405 for the dq post-process plus the plain prologue backward, so
 the combined prologue + attention op is −0.90% at d24 8K. PDL in the qk prologue +0.02%. Closed: hand attention
-kernels and QK-norm + RoPE inside attention (measured); FA3 not pursued (user). Open: the persistent FA4 window forward
-(~+0.3%) and bf16 dQ accumulation in the window layers only (−0.17 ms per call; at most 5 partial sums per dQ row
-there, while full layers keep fp32 accumulation as FA3 does: 64–256 sums at 8K–32K), one d24 A/B queued.
+kernels and QK-norm + RoPE inside attention (measured); FA3 not pursued (user). Committed: the persistent FA4 window
+forward and bf16 dQ accumulation in the window layers only (at most 5 partial sums per dQ row there; full layers keep
+fp32 accumulation as FA3 does: 64–256 sums at 8K–32K). d24 exclusive A/B (25 steps, 8 warm-up; tok/s median, event
+mean): 8K base 344,967 / 344,686, persistent forward alone 346,074 / 345,801 (+0.32%), both 348,218 / 347,862
+(+0.94% / +0.92%); 32K 276,538 / 276,013 → 278,524 / 277,647 (+0.72% / +0.59%). The both-arm's wall rate (328,934)
+carries one 4 s step: FA4's preprocess compiling its >256-segment variant (`BIN_BATCH_SEARCH_THRESH`) once into the
+JIT disk cache. Window dq vs FA4's fp32 accumulation: norm rel 2.45e-3, median rel 0 (full layers 1.1e-6); 200-step
+loss last-20 3.4113 vs 3.4024 (+0.009; seed spread 0.035).
 Architecture levers ranked (GQA, more local layers, sinks, gated attention); the user approved one arm, GQA at a 2:1
 query:KV ratio (d16 4:2, d24 6:3), screened against the optimizer screen's baselines (d16 run queued).
 

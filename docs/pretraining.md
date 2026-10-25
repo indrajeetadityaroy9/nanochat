@@ -150,7 +150,7 @@ Ops in `model/ops/`, CUDA sources in `model/kernels/` (built on first use by `na
 | Projection, MLP, LM-head GEMMs | forward and dX: QuACK SM90 GEMMs autotuned by QuACK (`quack.gemm_interface`, `tuned=True`); fp32 weight gradients: cuBLAS `torch.mm` |
 | Post-attention norm, ReLU² MLP, residuals | `model/ops/linear.py`: the gain-free norm folded into QuACK epilogues, the normed stream never stored: `o_proj` adds the residual and sums each row's squares (`sq_reduce_mod`, `rms_final_reduce`); the up projection scales rows by rstd before relu² (`gemm_norm_act`); the down projection adds the residual (`gemm_add`); backward: relu²'s derivative with the rstd scale and the norm's row sum in one epilogue, the norm's backward in the up projection's dX epilogue |
 | Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them; the softcap arm's capped loss fused in the same op (`model/ops/cross_entropy.py`) |
-| Attention | FlashAttention-4 varlen over the micro-batch's real document segments only (`model/ops/flash_attn.py`), its default backward |
+| Attention | FlashAttention-4 varlen over the micro-batch's real document segments only (`model/ops/flash_attn.py`); window layers: a persistent forward (one CTA per SM, the output tile staged apart from Q) and dQ reduce-added in bf16 (no fp32 accumulator, zero fill or postprocess); full layers FA4's own kernels |
 | q/k norm + gain + RoPE | `model/kernels/qk_prologue.cu`: one pass per direction; gain gradient without atomics (row math shared with the decoder, `model/kernels/qk_row.cuh`) |
 | Value-embedding gate and mix | `model/kernels/ve_gate.cu` (`model/ops/ve_gate.py`): one launch forward, the gate's logits in fp32; backward in token order (one sort of `input_ids` per micro-batch, shared by the layers), one atomic per run of equal tokens, added straight into the table's `.grad` (no zeroed buffer, no autograd add); the gate weight's gradient a cuBLAS GEMM from bf16 dz |
 | Muon | Newton–Schulz batched over same-shape matrices (`optim.Muon`) |
@@ -170,6 +170,10 @@ Measured choices [unverified: `torch.profiler` and CUDA-graph timings, records n
   ms at 8,192 (d8 shapes); its full-context layers use the causal kernel (`window = None`), 1–2% faster than the local
   kernel at window T, outputs bitwise equal. FA4 on the real segments rather than the loader's padded `cu_seqlens`:
   losses bitwise, gradients within run-to-run spread.
+- **FA4 window layers persistent, with bf16 dQ** (d24, GH200 at 700 W, 25 steps, 8 warm-up, median tok/s): 8K
+  344,967 → 348,218 (+0.94%; the persistent forward alone +0.32%), 32K 276,538 → 278,524 (+0.72%); a window dQ element
+  sums at most 5 bf16 partials (norm rel 2.45e-3 vs fp32 accumulation), full layers (64–256 partials) keep fp32;
+  200-step loss last-20 +0.009 (seed spread 0.035).
 - **Split q/k/v projections** rather than one GEMM on concatenated weights: fusion saved no measurable GEMM time and
   its layout needs copies.
 - **Ours over QuACK's chunked linear cross entropy** for the LM-head loss (29.2 against ≥ 31.4 ms at d8); per-position
