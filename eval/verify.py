@@ -29,12 +29,12 @@ import sys
 import tempfile
 import time
 import tokenize
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal
 
-from inference.decoder import Request
+from inference.decoder import NativeDecoder, Request
 from inference.syntax_constraint import syntax_error
 from metrics import latency
 
@@ -210,18 +210,6 @@ def verdicts(checks: list[tuple[str, str, list[str]]], *,
     return list(zip(diagnostics, passed, strict=True))
 
 
-class Generator(Protocol):
-    """A generation engine, requests (inference.decoder.Request) in, token ids out, with NativeDecoder.generate's
-    contract: generate yields (request index, generated ids) in completion order, a continuation ending at BOS
-    (excluded), after max_new_tokens or once its stopping_criteria holds (that token included), drawn as the Request's
-    temperature, top_p, seed and constraint define; timings: {request index: (start, first, end)} (time.perf_counter
-    seconds: the request's start, its first generated token, its end) of the last generate call's requests yielded so
-    far."""
-    timings: dict[int, tuple[float, float, float]]
-
-    def generate(self, requests: Iterable[Request]) -> Iterator[tuple[int, list[int]]]: ...
-
-
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Candidate:
     """A generated candidate: a task's candidates[0] is greedy, candidates[a] for a > 0 a sample with seed a at
@@ -235,7 +223,7 @@ class Candidate:
         return not self.diagnostics and self.examples
 
 
-def search(generator: Generator, request: Callable[[int], Request],
+def search(generator: NativeDecoder, request: Callable[[int], Request],
            check: Callable[[int, list[int]], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
            count: int) -> tuple[list[list[Candidate]], dict]:
     """The candidates of tasks 0..count-1 in attempt order, and metrics.latency of the generator's requests over every

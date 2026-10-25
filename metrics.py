@@ -53,12 +53,10 @@ identifier exact match / F1 (exact_match, edit_similarity, identifier_match; arX
 pass@k (pass_at_k): Codex's unbiased estimator per problem (arXiv 2107.03374 §2.1), the implementation the benchmarks'
 own evaluators call (human-eval / human_eval_infilling estimate_pass_at_k).
 
-Error bars (summary, standard_error, paired_difference, proportion_interval; Miller, arXiv 2411.00640): each score
-is a mean of question-level scores (a problem's pass@k estimate, its mean over samples, Miller §3.1); its CLT standard
-error (Eq. 1), clustered by the problem a question derives from when several do (Eq. 4, as statsmodels' cluster-robust
-CR0: the infilling benchmarks' lines and spans of one HumanEval problem), and the paired standard error of two
-models' or arms' difference on the same questions (Eq. 7); 95% intervals by the normal quantile (Eq. 5-6); a rate's
-interval by Wilson's score.
+Error bars (summary, bpb_summary; Miller, arXiv 2411.00640): each score is a mean of question-level scores (a
+problem's pass@k estimate, its mean over samples, Miller §3.1); its CLT standard error (Eq. 1), clustered by the
+problem a question derives from when several do (Eq. 4, as statsmodels' cluster-robust CR0: the infilling benchmarks'
+lines and spans of one HumanEval problem); 95% intervals by the normal quantile (Eq. 5-6).
 
 Hardware (model_flops_per_token, executed_model_flops, mfu, latency): model FLOPs utilization (PaLM, arXiv 2204.02311
 App. B: 6N + 12 L H Q T per token, 2 FLOPs per multiply-add, rematerialization not counted) at the GPU's dense BF16
@@ -78,7 +76,6 @@ ablations/contrast.py scaled).
 import difflib
 import json
 import keyword
-import math
 import re
 import statistics
 import time
@@ -91,7 +88,6 @@ import numpy as np
 import statsmodels.api as sm
 from human_eval_infilling.evaluation import estimate_pass_at_k
 from numpy.typing import ArrayLike
-from scipy import stats
 
 from corpus.mixture import REPO_LEVEL_STAGE
 from paths import RUNS
@@ -155,19 +151,15 @@ def offset_bpb(corpora: dict, weights: dict[str, float]) -> list[float | None]:
     return [b / y if y else None for b, y in zip(bits, nbytes, strict=True)]
 
 
-def bpb_summary(bits: ArrayLike, nbytes: ArrayLike, *, row_weights: ArrayLike | None = None,
-                baseline_bits: ArrayLike | None = None) -> dict:
+def bpb_summary(bits: ArrayLike, nbytes: ArrayLike, *, row_weights: ArrayLike | None = None) -> dict:
     """Bits per byte Σw bits / Σw bytes of sampled val rows (per-row sums; row weights w, 1 by default; rows of 0 bytes
     dropped) with its row-level standard error: the weighted least-squares fit of each row's bits per byte on a
     constant, weights w x its bytes (statsmodels WLS, whose estimate is the ratio of sums), sandwich covariance HC1 (the
-    delta-method ratio standard error, times √(n / (n - 1)) as Eq. 1's n - 1). With baseline_bits (another model's
-    bits on the same rows), the paired difference instead (Miller Eq. 7 on the rows)."""
+    delta-method ratio standard error, times √(n / (n - 1)) as Eq. 1's n - 1)."""
     y = np.asarray(nbytes, dtype=np.float64)
     w = y if row_weights is None else y * np.asarray(row_weights, dtype=np.float64)
     keep = y > 0
     r = np.asarray(bits, dtype=np.float64)[keep] / y[keep]
-    if baseline_bits is not None:
-        r = r - np.asarray(baseline_bits, dtype=np.float64)[keep] / y[keep]
     fit = sm.WLS(r, np.ones_like(r), weights=w[keep]).fit(cov_type="HC1", use_t=False)
     low, high = fit.conf_int()[0]
     return {"bpb": float(fit.params[0]), "se": float(fit.bse[0]), "interval": (float(low), float(high)),
@@ -310,7 +302,7 @@ def identifier_match(prediction: str, reference: str) -> tuple[bool, float]:
 
 def completion_scores(predictions: Sequence[str], references: Sequence[str]) -> dict[str, list[float]]:
     """Per sample: line_exact_match, exact_match, edit_similarity, identifier exact match and F1 (cceval's per-sample
-    detailed_results), each a 0-1 or 0-100 question score for standard_error."""
+    detailed_results), each a 0-1 or 0-100 question score for summary."""
     out = {"line_em": [], "em": [], "es": [], "id_em": [], "id_f1": []}
     for p, r in zip(predictions, references, strict=True):
         id_em, id_f1 = identifier_match(p, r)
@@ -321,52 +313,28 @@ def completion_scores(predictions: Sequence[str], references: Sequence[str]) -> 
 
 
 def pass_at_k(passed: Sequence[Sequence[bool]], k: int) -> np.ndarray:
-    """Each problem's pass@k estimate from its samples' outcomes (problems with fewer than k samples raise)."""
+    """Each problem's pass@k estimate from its samples' outcomes (at least k samples each)."""
     n = np.array([len(p) for p in passed])
-    if (n < k).any():
-        raise ValueError(f"pass@{k} of problems with {n.min()} samples")
     return estimate_pass_at_k(n, np.array([sum(p) for p in passed]), k)
 
 
-def summary(scores: ArrayLike, clusters: ArrayLike | None = None, *, confidence: float = 0.95) -> dict:
-    """{"mean", "se", "interval", "p" (of a zero mean), "n", "clusters"} of question scores: the least-squares fit of
-    the scores on a constant (statsmodels OLS, normal reference distribution). Unclustered, its standard error is
-    Miller's Eq. 1 (sample variance over n - 1; for a difference of paired scores, Eq. 7); clustered by `clusters`
-    (each question's cluster label), the Liang-Zeger cluster-robust CR0 (cov_type "cluster" without the small-sample
-    correction), Miller's Eq. 4 but for Eq. 4's (n - 1) in its diagonal term. A constant score has se 0, its interval
-    the point and p 1 if 0 else 0."""
+def summary(scores: ArrayLike, clusters: ArrayLike | None = None) -> dict:
+    """{"mean", "se", "interval", "n", "clusters"} of question scores: the least-squares fit of the scores on a
+    constant (statsmodels OLS, normal reference distribution). Unclustered, its standard error is Miller's Eq. 1
+    (sample variance over n - 1); clustered by `clusters` (each question's cluster label), the Liang-Zeger
+    cluster-robust CR0 (cov_type "cluster" without the small-sample correction), Miller's Eq. 4 but for Eq. 4's (n - 1)
+    in its diagonal term; the 95% interval (Eq. 5-6). A constant score has se 0 and its interval the point."""
     s = np.asarray(scores, dtype=np.float64)
     mean = float(s.mean())
     groups = None if clusters is None else np.unique(np.asarray(clusters), return_inverse=True)[1]
     out = {"n": int(s.size), "clusters": None if groups is None else int(groups.max() + 1), "mean": mean}
     if np.ptp(s) == 0:
-        return out | {"se": 0.0, "interval": (mean, mean), "p": float(mean == 0)}
+        return out | {"se": 0.0, "interval": (mean, mean)}
     model = sm.OLS(s, np.ones_like(s))
     fit = (model.fit(use_t=False) if groups is None else
            model.fit(cov_type="cluster", cov_kwds={"groups": groups, "use_correction": False}, use_t=False))
-    low, high = fit.conf_int(alpha=1 - confidence)[0]
-    return out | {"se": float(fit.bse[0]), "interval": (float(low), float(high)), "p": float(fit.pvalues[0])}
-
-
-def standard_error(scores: ArrayLike, clusters: ArrayLike | None = None) -> float:
-    """summary's standard error."""
-    return summary(scores, clusters)["se"]
-
-
-def paired_difference(a: ArrayLike, b: ArrayLike, clusters: ArrayLike | None = None) -> dict:
-    """Model or arm a minus b on the same questions (Miller §4.2): summary of the per-question differences (Eq. 7;
-    clustered as summary), with the unpaired standard error √(SE_a² + SE_b²) (Eq. 5) and the questions' score
-    correlation the pairing exploits."""
-    x, y = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
-    return summary(x - y, clusters) | {
-        "unpaired_se": math.hypot(standard_error(x, clusters), standard_error(y, clusters)),
-        "correlation": float(np.corrcoef(x, y)[0, 1]) if np.ptp(x) > 0 and np.ptp(y) > 0 else None}
-
-
-def proportion_interval(successes: int, trials: int, *, confidence: float = 0.95) -> tuple[float, float]:
-    """Wilson's score interval of a rate (scipy.stats.binomtest proportion_ci)."""
-    ci = stats.binomtest(successes, trials).proportion_ci(confidence_level=confidence, method="wilson")
-    return float(ci.low), float(ci.high)
+    low, high = fit.conf_int()[0]
+    return out | {"se": float(fit.bse[0]), "interval": (float(low), float(high))}
 
 
 # The GPU's dense BF16 peak: H100 SXM5 / GH200 (NVIDIA H100 datasheet, 989.4 TFLOP/s without sparsity)
@@ -396,9 +364,9 @@ def executed_model_flops(lengths: np.ndarray, *, matmul_params: int, hidden_size
     return 6 * matmul_params * int(np.asarray(lengths).sum()) + 12 * hidden_size * keys
 
 
-def mfu(flops: float, seconds: float, *, peak: float = PEAK_FLOPS) -> float:
-    """Model FLOPs utilization: the model FLOPs done per second over the peak."""
-    return flops / seconds / peak
+def mfu(flops: float, seconds: float) -> float:
+    """Model FLOPs utilization: the model FLOPs done per second over PEAK_FLOPS."""
+    return flops / seconds / PEAK_FLOPS
 
 
 def parabola_vertex(x: Sequence[float], y: Sequence[float]) -> tuple[float, float]:
@@ -410,15 +378,15 @@ def parabola_vertex(x: Sequence[float], y: Sequence[float]) -> tuple[float, floa
 
 def latency(starts: ArrayLike, firsts: ArrayLike, ends: ArrayLike, new_tokens: ArrayLike, *, duration: float) -> dict:
     """Decoding latency of requests (seconds; vLLM calculate_metrics): ttft (first token - start), tpot ((end - first)
-    / (new tokens - 1), requests of more than one token), e2el (end - start), each {"mean", "median", "p90", "p99"},
+    / (new tokens - 1), requests of more than one token), e2el (end - start), each {"mean", "median", "p99"} (the
+    percentile serve.py reports by default, --metric-percentiles 99),
     and output_throughput (output tokens / duration)."""
     start, first, end = (np.asarray(t, dtype=np.float64) for t in (starts, firsts, ends))
     n = np.asarray(new_tokens)
     many = n > 1
 
     def describe(x: np.ndarray) -> dict:
-        return {"mean": float(x.mean()), "median": float(np.median(x)), "p90": float(np.percentile(x, 90)),
-                "p99": float(np.percentile(x, 99))}
+        return {"mean": float(x.mean()), "median": float(np.median(x)), "p99": float(np.percentile(x, 99))}
 
     return {"ttft": describe(first - start), "tpot": describe((end - first)[many] / (n[many] - 1)),
             "e2el": describe(end - start), "output_throughput": float(n.sum() / duration),
@@ -430,62 +398,42 @@ def latency(starts: ArrayLike, firsts: ArrayLike, ends: ArrayLike, new_tokens: A
 # imported inside the functions: this module's import stays light for the forkserver workers that load it.
 
 
-def gpt2_byte_to_unicode() -> dict[int, str]:
-    """GPT-2's bytes_to_unicode (openai/gpt-2 src/encoder.py): printable bytes as themselves, the rest from U+0100 up in
-    byte order."""
-    printable = {*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)}
-    table, extra = {}, 0
-    for b in range(256):
-        if b in printable:
-            table[b] = chr(b)
-        else:
-            table[b] = chr(256 + extra)
-            extra += 1
-    return table
-
-
 def token_offsets(text: str, lengths: np.ndarray) -> list[tuple[int, int]]:
     """Each token's (start, end) character range in `text` from its byte length: the characters its bytes belong to,
     so a token holding part of a multi-byte character overlaps the next token's range at that character (as
-    HuggingFace ByteLevel offsets do). The tokens' bytes must be text's UTF-8 bytes in order (checked)."""
-    if len(lengths) == 0:
-        return []
+    HuggingFace ByteLevel offsets do). The tokens' bytes are text's UTF-8 bytes in order (its encoding)."""
     data = np.frombuffer(text.encode("utf-8"), dtype=np.uint8)
     ends = np.cumsum(lengths)
-    if ends[-1] != len(data):
-        raise ValueError(f"tokens hold {int(ends[-1])} bytes, the text {len(data)}")
     # the character each byte belongs to: the lead and ASCII bytes up to it, less one
     char_of_byte = np.cumsum((data & 0xC0) != 0x80) - 1
     return list(zip(char_of_byte[ends - lengths].tolist(), (char_of_byte[ends - 1] + 1).tolist(), strict=True))
 
 
-def tokeval_wrapper(name: str, tokenizer, *, threads: int = 8):
+def tokeval_wrapper(name: str, tokenizer):
     """A corpus/tokenizer.py Tokenizer as a TokEval TokenizerWrapper (core/tokenizer_wrapper.py). encode is tiktoken's
     encode_ordinary (special tokens' text encodes as ordinary text, as corpus/tokenize.py does); decode joins the
     tokens' bytes; pretokenize is the tokenizer's split pattern.
 
-    Vocabulary keys are GPT-2's byte-to-unicode rendering of each mergeable token's bytes (HuggingFace's ByteLevel form
-    of tiktoken vocabularies), a bijection on byte strings, so keys are distinct and keep partial characters. TokEval
+    Vocabulary keys are GPT-2's byte-to-unicode rendering of each mergeable token's bytes (transformers'
+    bytes_to_unicode, openai/gpt-2 src/encoder.py: HuggingFace's ByteLevel form of tiktoken vocabularies), a bijection
+    on byte strings, so keys are distinct and keep partial characters. TokEval
     reads the keys as this form: utf8_token_integrity (metrics/utf8_integrity.py _detect_gpt2_encoding) recognizes the
     GPT-2 marker keys and maps each key back to its exact bytes; indentation_consistency (metrics/code_ast.py
     _is_whitespace_token) and BaseMetrics._build_char_decode_table read a space, line feed, tab and carriage return as
-    Ġ, Ċ, ĉ, č. Special tokens keep their text as key."""
+    Ġ, Ċ, ĉ, č. Special tokens (the ids after the mergeable tokens, in order: corpus/tokenizer.py) keep their text as
+    key."""
     import regex
     from tokenizer_analysis.core.tokenizer_wrapper import TokenizerWrapper
+    from transformers.convert_slow_tokenizer import bytes_to_unicode
 
-    byte_to_unicode = gpt2_byte_to_unicode()
+    byte_to_unicode = bytes_to_unicode()
 
     class Wrapper(TokenizerWrapper):
         def __init__(self) -> None:
             self._enc, self._mergeable, self._lengths = tokenizer.enc, tokenizer.bos_token_id, tokenizer.token_lengths
             self._strings = ["".join(byte_to_unicode[b] for b in token)
                              for token in tokenizer.token_bytes[:self._mergeable]] + list(tokenizer.special_tokens)
-            if [tokenizer.special_tokens[s] for s in self._strings[self._mergeable:]] != \
-                    list(range(self._mergeable, tokenizer.vocab_size)):
-                raise ValueError("special tokens are not the ids after the mergeable tokens in order")
             self._vocab = {s: i for i, s in enumerate(self._strings)}
-            if len(self._vocab) != tokenizer.vocab_size:
-                raise ValueError("vocabulary keys collide")
             self._split = regex.compile(tokenizer.pattern)
 
         def get_name(self) -> str:
@@ -517,11 +465,11 @@ def tokeval_wrapper(name: str, tokenizer, *, threads: int = 8):
 
         @classmethod
         def from_config(cls, name: str, config: dict):
-            """{"path": a tokenizer directory (corpus/tokenizer.py get_tokenizer), "threads": optional}."""
+            """{"path": a tokenizer directory (corpus/tokenizer.py get_tokenizer)}."""
             from pathlib import Path
 
             from corpus.tokenizer import get_tokenizer
-            return tokeval_wrapper(name, get_tokenizer(Path(config["path"])), threads=int(config.get("threads", 8)))
+            return tokeval_wrapper(name, get_tokenizer(Path(config["path"])))
 
         def can_decode(self) -> bool:
             return True
@@ -536,7 +484,7 @@ def tokeval_wrapper(name: str, tokenizer, *, threads: int = 8):
             return ids, token_offsets(text, self._lengths[np.asarray(ids, dtype=np.int64)])
 
         def encode_batch_with_offsets(self, texts: list[str]) -> list[tuple[list[int], list[tuple[int, int]]]]:
-            batch = self._enc.encode_ordinary_batch(texts, num_threads=threads)
+            batch = self._enc.encode_ordinary_batch(texts)
             return [(ids, token_offsets(text, self._lengths[np.asarray(ids, dtype=np.int64)]))
                     for text, ids in zip(texts, batch, strict=True)]
 
@@ -552,8 +500,7 @@ def tokeval_wrapper(name: str, tokenizer, *, threads: int = 8):
     return Wrapper()
 
 
-def tokeval(tokenizers: dict, texts: dict[str, list[str]], code: dict[str, list[str]], math: list[str], *,
-            threads: int = 8) -> dict:
+def tokeval(tokenizers: dict, texts: dict[str, list[str]], code: dict[str, list[str]], math: list[str]) -> dict:
     """TokEval's full analysis (main.py UnifiedTokenizerAnalyzer.run_analysis) of corpus/tokenizer.py Tokenizers
     ({name: Tokenizer}) in its published form (cli/run_analysis.py normalize_results, non-finite floats as null).
 
@@ -574,7 +521,7 @@ def tokeval(tokenizers: dict, texts: dict[str, list[str]], code: dict[str, list[
     from tokenizer_analysis.core.input_providers import create_input_provider
     from tokenizer_analysis.core.input_utils import create_simple_specifications
 
-    wrappers = {name: tokeval_wrapper(name, tokenizer, threads=threads) for name, tokenizer in tokenizers.items()}
+    wrappers = {name: tokeval_wrapper(name, tokenizer) for name, tokenizer in tokenizers.items()}
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
         for language, documents in code.items():

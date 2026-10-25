@@ -47,8 +47,7 @@ tokenize, pack → `pretrain` (its own approval). `muon_wd_timescale_200tpp` rea
 | `tokens_per_second`, `mfu` | medians over the file-level stage's steps (executed MFU) |
 
 - **Error bars** (`metrics.measure_errors`; Miller, arXiv 2411.00640): bits per byte by the val rows' weighted ratio
-  (statsmodels WLS, HC1); shares and pass@1 by their CLT standard error over problems (Eq. 1); paired differences
-  (Eq. 7, `metrics.paired_difference`); rates by Wilson's interval (`metrics.proportion_interval`).
+  (statsmodels WLS, HC1); shares and pass@1 by their CLT standard error over problems (Eq. 1).
 
 ### Shared tests (`ablations/contrast.py`)
 

@@ -144,7 +144,6 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
     cu_seqlens = torch.arange(0, micro_batch_size * seq_len + 1, seq_len, dtype=torch.int32, device=device)
     segments = torch.tensor(micro_batch_size, dtype=torch.int32)
-    lengths = np.full(micro_batch_size, seq_len, dtype=np.int64)
     results = {}
     for name in SOLUTION_BENCHMARKS:
         seqs = []
@@ -160,7 +159,7 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
             for r, (ids, first) in enumerate(seqs[g:g + micro_batch_size]):
                 x[r, :len(ids) - 1] = torch.tensor(ids[:-1])
                 y[r, first - 1:len(ids) - 1] = torch.tensor(ids[first:])
-            batches.append((x.to(device), y.to(device), cu_seqlens, segments, lengths))
+            batches.append((x.to(device), y.to(device), cu_seqlens, segments, None))  # sums reads no lengths
         scored = sums(losses, batches, token_bytes, steps=len(batches), num_segments=micro_batch_size)
         results[name] = scored | {k: scored[k][:len(seqs)] for k in ("row_bits", "row_bytes")}
     return results

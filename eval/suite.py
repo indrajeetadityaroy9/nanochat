@@ -12,7 +12,6 @@ checkpoints verbatim, in step order; an experiment's RESULTS/<experiment>.jsonl 
 (ablations/records.py).
 """
 import json
-import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
@@ -22,7 +21,6 @@ import torch
 from corpus.tokenizer import Tokenizer
 from eval.bpb import likelihood
 from eval.code_eval import (
-    Engine,
     filtered_generation,
     fim_filtered_generation,
     fim_generation,
@@ -31,33 +29,12 @@ from eval.code_eval import (
     sanitizers,
     tasks,
 )
-from inference.decoder import NativeDecoder
 from model.modeling import CausalLM
 from paths import RUNS
 
 
 def evaluation_path(run_name: str, step: int) -> Path:
     return RUNS / run_name / f"eval-{step}.json"
-
-
-def decoder_memory_fraction() -> float | None:
-    """The evaluation decoders' memory budget (NativeDecoder memory_fraction), from NANOCHAT_DECODER_MEMORY_FRACTION
-    (unset: all free memory), so a job sharing the GPU keeps the rest."""
-    value = os.environ.get("NANOCHAT_DECODER_MEMORY_FRACTION")
-    return None if value is None else float(value)
-
-
-def native_engine(model: CausalLM, tokenizer: Tokenizer) -> Engine:
-    """code_eval's Engine of `model` (on the GPU): a NativeDecoder per call, created once the CUDA caching allocator has
-    returned its unused blocks (the likelihood pass's) to the device, whose free memory the decoder sizes its slots
-    and prompt store by."""
-
-    def engine(*, max_length: int, prompt_store: int) -> NativeDecoder:
-        torch.cuda.empty_cache()
-        return NativeDecoder(model, bos_token_id=tokenizer.bos_token_id, max_length=max_length,
-                             prompt_store=prompt_store, memory_fraction=decoder_memory_fraction())
-
-    return engine
 
 
 def resolved(records: dict) -> dict:
@@ -78,18 +55,17 @@ def evaluate(model: CausalLM, tokenizer: Tokenizer, *, run_name: str, step: int,
     but for timed checks, which heavy CPU load can fail (EvalPlus's time limits, verify.py's and the evaluators'
     timeouts)."""
     benchmarks = tasks()
-    engine = native_engine(model, tokenizer)
     codegen = fim = None
     with sanitizers() as pool, ThreadPoolExecutor(1) as scorers:
-        parse = parse_generation(engine, tokenizer, benchmarks, pool=pool, scorers=scorers)
+        parse = parse_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
         if generate == "benchmarks":
-            codegen = generation(engine, tokenizer, benchmarks, pool=pool, scorers=scorers)
-            fim = fim_generation(engine, tokenizer, scorers=scorers)
+            codegen = generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
+            fim = fim_generation(model, tokenizer, scorers=scorers)
         results = likelihood(model, tokenizer, benchmarks, device=torch.device("cuda"))
         if generate == "benchmarks":
-            for name, record in filtered_generation(engine, tokenizer, benchmarks, pool=pool, scorers=scorers).items():
+            for name, record in filtered_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers).items():
                 codegen[name]["filtered"] = record
-            for key, record in fim_filtered_generation(engine, tokenizer, scorers=scorers).items():
+            for key, record in fim_filtered_generation(model, tokenizer, scorers=scorers).items():
                 fim[key]["filtered"] = record
         results |= {"parse": resolved(parse), "codegen": None if codegen is None else resolved(codegen),
                     "fim": None if fim is None else resolved(fim)}
