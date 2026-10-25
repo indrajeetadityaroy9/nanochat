@@ -289,13 +289,18 @@ op's measured bandwidth leaves headroom or the design removes bytes.
   (paper 0.348; transformers 5 drops BOS), MBPP 0.466 (paper 0.462); our EvalPlus scorer agrees on 163/164 problems.
 - **d16 reference** (RefModelTrain): code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050 at 20 tokens/param.
 
-### 5.19 GEMMs: weight gradients, DeepGEMM, hand kernels (GemmDeep, DeepGemmStudy) — C1+C2 committed
-Outputs: DeepGEMM on the d24 shapes (TFLOP/s): forward q/k/v/o QuACK 828, torch 705, DeepGEMM 710; up-projection
-without epilogue QuACK 652, torch 543, DeepGEMM 779; dW C×C torch.mm fp32 662, DeepGEMM with fp32 accumulation
-295–315, DeepGEMM through cuBLASLt 643: not adopted as a library. C1, dW added into the fp32 `.grad` by cuBLAS addmm
-with β = 1 (Megatron-LM's gradient-accumulation fusion), and C2, one bf16 copy of each q/k/v/o/up/down weight refreshed
-per weight change instead of 12 casts per layer and micro-batch (`f499be7`): d24 8K 344,925 → 347,634 tok/s (+0.79%),
-32K 275,613 → 277,383 (+0.64%), peak 61.6 → 62.0 GiB; numerically neutral, the 200-step loss check confirming after
-landing. Open: a hand sm_90a dact GEMM after DeepGEMM's SM90 design (first version bitwise-correct, 1.15 ms vs QuACK
-B1's 1.076 ms) with the MLP postact saved in the forward (+14.5 GB; −110 to −135 ms/step [estimate]), and the
-up-projection forward with relu² fused.
+### 5.19 GEMMs: weight gradients, DeepGEMM, hand kernels (GemmDeep, DeepGemmStudy, GemmOwner) — C1+C2 committed
+Outputs: DeepGEMM on the d24 shapes (TFLOP/s, sequential bench): forward q/k/v/o QuACK 828, torch 705, DeepGEMM 710;
+up-projection without epilogue QuACK 652, torch 543, DeepGEMM 779 — a lead an interleaved rerun attributes to drift
+(per-shape interleaved table queued); dW C×C torch.mm fp32 662, DeepGEMM with fp32 accumulation 295–315, DeepGEMM
+through cuBLASLt 643. DeepGEMM's dW is slow here because its persistent scheduler has no split-K (a 768×768 fp32
+output in 128-row tiles gives at most 36 tiles for 132 SMs), its split-K kernel (`bmk_bnk_mn`) needs K-major operands
+(activations stored transposed), and on the 4C dW shapes (590–598) it neither prefetches across k-blocks nor overlaps
+the epilogue with the next tile: not adopted as a library. C1, dW added into the fp32 `.grad` by cuBLAS addmm with
+β = 1 (Megatron-LM's gradient-accumulation fusion), and C2, one bf16 copy of each q/k/v/o/up/down weight refreshed per
+weight change instead of 12 casts per layer and micro-batch (`f499be7`): d24 8K 344,925 → 347,634 tok/s (+0.79%), 32K
+275,613 → 277,383 (+0.64%), peak 61.6 → 62.0 GiB; numerically neutral. `b59a22b` removes the casts C2 made no-ops.
+Open: the MLP postact saved in the forward (+14.5 GB) with hand sm_90a relu² backward and up-projection GEMMs in
+DeepGEMM's producer/consumer layout, consumer warpgroups alternating whole tiles so one tile's epilogue overlaps the
+next tile's math (built, unmeasured; −110 to −135 ms/step [estimate]); split-K dW into the fp32 `.grad` (−30 to −75
+ms/step [estimate]).
