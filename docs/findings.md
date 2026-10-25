@@ -360,6 +360,6 @@ sources (2,062 files) byte-identical, real shard 0 of six splits packs equal to 
 sample identical on the whole corpus; one intended change, the tokenizer ablation's fidelity check over a whole val
 row group instead of 200 documents (its recorded counts grow); `142eae3` makes logit_softcap's learning_rate_scale
 `${lr_multiplier:}` (the 2.7972 copy had drifted from the analysis' 2.79704; no softcap run exists); `7794e2f` vLLM
-serving and `b483f1e` eval and metrics (EarlierAudit). Noted, unchanged: `stack_edu_python`'s published row groups (~64,920
-rows) are below the 65,536 the current curate writes, so an older version wrote them — tokens do not depend on row
-grouping (three shards re-cut at 122,880 rows tokenize identically).
+serving and `b483f1e` eval and metrics (EarlierAudit). Noted, unchanged: `stack_edu_python`'s published row groups
+(~64,920 rows) are below the 65,536 the current curate writes, so an older version wrote them — tokens do not depend
+on row grouping (three shards re-cut at 122,880 rows tokenize identically).
