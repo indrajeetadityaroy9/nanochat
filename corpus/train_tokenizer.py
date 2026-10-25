@@ -36,9 +36,6 @@ Score = Literal["sa-bpe", "frequency"]
 # The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers; that data is no longer on
 # the Hub), so a vocabulary trains on as much text as the reference tokenizer did
 SAMPLE_BYTES = 13.38e9
-# The fidelity check's texts: the first of each source's val split; an engineering choice, bounding the check's cost
-# (merges replayed in Python)
-FIDELITY_DOCUMENTS = 200
 
 
 @functools.cache
@@ -62,15 +59,15 @@ def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str]
     rows that the source's systematic sample takes, `start` the source's rows before the group: row i when
     floor((i + 1) * fraction) exceeds floor(i * fraction). A row naming its repository (a repository file, a function)
     has that repository as its unit, its name lowercased (one unit across the sources that hold it); any other document
-    is its own."""
+    is its own, by its id (a hex SHA-1, never a GitHub owner/name)."""
     source, path, g, start, fraction = task
     group = pq.ParquetFile(path).read_row_group(g)
     rows = np.arange(start, start + group.num_rows)
     batch = group.take(np.flatnonzero(np.floor((rows + 1) * fraction) > np.floor(rows * fraction)))
     if "repo_name" in batch.column_names:
-        units = ["repo:" + name.lower() for name in batch["repo_name"].to_pylist()]
+        units = [name.lower() for name in batch["repo_name"].to_pylist()]
     else:
-        units = ["doc:" + id for id in batch["id"].to_pylist()]
+        units = batch["id"].to_pylist()
     docs = texts(source, batch)
     return docs, units, sum(len(text.encode()) for text in docs)
 
@@ -118,20 +115,20 @@ def vocabulary(merges: list[tuple[int, int]]) -> list[bytes]:
 
 
 def fidelity(task: tuple[Path, str]) -> dict[str, int]:
-    """The vocabulary in `directory` (its merges.json beside it) checked on a source's first FIDELITY_DOCUMENTS val
-    texts (the documents and chunks checked): its pattern's chunks (Python regex, whose chunks fancy-regex's equal)
-    cover every text, tiktoken's encoding (by the rank of the joined bytes) equals the training segmentation chunk by
-    chunk, and every text decodes back. The training segmentation is Hugging Face tokenizers' BPE model over the
-    merges, each byte spelled as the Latin-1 character of its value: listed pairs merged by rank, each over every
-    occurrence from the left (corpus/crate train.rs merge_pair), never a pair whose bytes another made."""
+    """The vocabulary in `directory` (its merges.json beside it) checked on the texts of the first row group of a
+    source's val split, the unit the split is read in (the documents and chunks checked): its pattern's chunks (Python
+    regex, whose chunks fancy-regex's equal) cover every text, tiktoken's encoding (by the rank of the joined bytes)
+    equals the training segmentation chunk by chunk, and every text decodes back. The training segmentation is Hugging
+    Face tokenizers' BPE model over the merges, each byte spelled as the Latin-1 character of its value: listed pairs
+    merged by rank, each over every occurrence from the left (corpus/crate train.rs merge_pair), never a pair whose
+    bytes another made. A first row group checks in up to 155 s (climbmix's 122,880 documents, 72.5M chunks)."""
     directory, source = task
     tokenizer = get_tokenizer(directory)
     spelled = [entry.decode("latin-1") for entry in tokenizer.token_bytes[:tokenizer.bos_token_id]]
     merges = json.loads((directory / "merges.json").read_text())
     bpe = models.BPE(vocab={s: i for i, s in enumerate(spelled)}, merges=[(spelled[a], spelled[b]) for a, b in merges])
     pattern = regex.compile(tokenizer.pattern)
-    first = pq.ParquetFile(curated_shards(source, "val")[0]).read_row_group(0)
-    docs = texts(source, first.slice(0, FIDELITY_DOCUMENTS))
+    docs = texts(source, pq.ParquetFile(curated_shards(source, "val")[0]).read_row_group(0))
     chunks = 0
     for doc in docs:
         pieces = [m.group().encode() for m in pattern.finditer(doc)]

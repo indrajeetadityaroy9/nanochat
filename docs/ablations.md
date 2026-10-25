@@ -254,7 +254,7 @@ neither significantly (arXiv 2503.13423 Table 1).
 |---|---|---|
 | bytes per token | per source: val bytes over val tokens; file stage: Σ w_s / Σ (w_s / b_s) over its byte shares | an arm's tokens at equal bytes; tokenize and pack budgets |
 | extent margin | per group read in part (synthetic, text, math): train tokens under the arm over the group's draw | below 1 the corpus's extent is too small for the arm (`mixture.SPREAD`) |
-| validity (asserted) | every arm holds the same bytes per document; on each source's first 200 val texts the chunks cover the text, tiktoken equals the merges replayed (`train_tokenizer.fidelity`), every text decodes | a failure stops the step |
+| validity (asserted) | every arm holds the same bytes per document; on the first row group of each source's val split the chunks cover the text, tiktoken equals the merges replayed (`train_tokenizer.fidelity`), every text decodes | a failure stops the step |
 | line-break entries | entries holding a line break; fusing punctuation with one (`[^\s\p{L}\p{N}][\r\n]`); ending in a line break and indentation | the post's strongest MBPP correlate (Spearman ρ = −0.719 over 58 tokenizers) |
 | depth invariance | of each program source's first 50,000 indented val lines, the share whose tokens are the indentation's then the statement's at depth 0 | the hybrid's clause 2 |
 | merged reads | merged tokens the val documents read never, < 10, < 100 times | the tie-break (SA-BPE's coverage, arXiv 2604.14053 Table 3, graded) |
