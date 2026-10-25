@@ -9,9 +9,10 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-# the GPU at its maximum SM clock (1980 MHz on the GH200): under a power cap the driver otherwise lowers the clock
+# the GPUs at their maximum SM clock (1980 MHz on the GH200): under a power cap the driver otherwise lowers the clock
 # (ACTIONS.md E2); speed only, not numerics; reset by a reboot
-sudo nvidia-smi -lgc 1980,1980
+MAX_SM_CLOCK=$(nvidia-smi --id=0 --query-gpu=clocks.max.sm --format=csv,noheader,nounits)
+sudo nvidia-smi -lgc "$MAX_SM_CLOCK,$MAX_SM_CLOCK"
 # the docker group applies at the next login; sg runs this script's docker commands in it
 sudo usermod -aG docker "$USER"
 sg docker -c "docker build -f '$ROOT/docker/Dockerfile' -t nanochat '$ROOT'"
