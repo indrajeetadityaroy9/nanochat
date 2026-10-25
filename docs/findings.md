@@ -102,6 +102,10 @@ the decoder's cudaMalloc at the end of a screen run); and the compiled training 
 distinct sequence length, so checks that run the forward prompt by prompt pad to one length (an agreement check spent
 47 min compiling). A third: the profiling harness lives outside the repository, so a repository audit that removed a
 convenience default (`meta_model`'s softcap) broke every scratch copy of it at start, losing one loss window.
+Two more (Oct 25, late): a benchmark arm must reproduce the reference implementation's configuration, or a real lead
+reads as none (torch's cuBLASLt workspace is 1 MiB against DeepGEMM's 16 MiB, which excludes the split-K algorithms
+behind DeepGEMM's dW times; §5.19); and a check must run on the tree that lands (the decoder evaluation's file copy
+predated the syntax audit `865610e`, which rewrote the paths it was to cover; refreshed before it ran).
 
 ## 5. Execution log
 
@@ -207,7 +211,7 @@ train loss 1.3358 vs 1.3244 (s0) / 1.3168 (s1); code bpb 8K/32K 0.4435/0.4254 vs
 all bpb 0.5263/0.5132 vs 0.5219/0.5087; HumanEval+ 0.067/0.061 vs 0.067/0.055, MBPP+ 0.090/0.071 vs 0.074/0.061
 (within noise); peak 28.7 vs 32.0 GiB. Loss and bpb worse beyond the seed spread: rejected, not committed.
 
-### 5.12 Norm folded into GEMMs, fused QKV (NormFusion) — B1 committed, C3 open
+### 5.12 Norm folded into GEMMs, fused QKV (NormFusion, C3Lander) — B1 committed; C3 +0.77%, commit pending
 Method: norm(x)Wᵀ = diag(rstd)·xWᵀ for the gain-free RMS norm, rstd applied as a row scale in QuACK epilogues; fused
 ops have lower error vs fp64 than the bf16 path (y 2.6e-3 vs 3.2e-3). Outputs: `373b549`, d24 8K 341,919 vs 338,039
 tok/s (+1.15%), 32K +0.5%, 200-step loss last-20 Δ −0.0071, peak 65.6 vs 69.3 GB. The rstd-scaled dact epilogue costs
@@ -222,19 +226,25 @@ whose backward writes every q/k/v gradient into one buffer; against master's ops
 dk, dv, the k-norm gradient and every value-embedding gradient are bitwise equal (window and full layers, with and
 without value embeddings), dq and the q-norm gradient differ by 1e-6 to 2e-5 (inside master's own run-to-run spread
 from FA4's atomic adds); a 2-step warm-up gave 355,980 vs 359,063 tok/s (a hint, not the A/B). The rebased candidate
-(`a3dc544` + C3) passed its smoke. Open: the d24 A/B (queued) and the 200-step loss, at the base recipe's lr (×2.797)
-against the postact check's master curve (§5.15: every earlier loss check ran at ×1).
+(`a3dc544` + C3) passed its smoke. d24 exclusive A/B (`c3ab`, 0e627ff trees, 25 steps / 8 warm-up at 8K, 12 / 6 at
+32K): 356,431 → 359,180 tok/s (+0.77%, MFU 0.4735 → 0.4777), 32K 283,357 → 285,776 (+0.85%). Numerics: the 200-step
+loss check was replaced by a 10-step equivalence at ×2.797 on the candidate rebased onto `6299e84` against two master
+runs there, with a bitwise assert that the stacked bf16 copy is refreshed after every update (single-step gradients
+were already equivalent, and master's own losses are bitwise through step 3, so a refresh or accumulation bug shows by
+step 2). Its q/k/v weight gradients are still three C×C `addmm` (36 tiles of 128 × 128 on 132 SMs at C = 768); one
+3C × C GEMM into a contiguous fp32 buffer is under test (~11 ms/step [estimate]). TileKernels' next fusion on this
+GEMM, QK-norm + RoPE in its epilogue (§5.21), builds on it.
 
 ### 5.13 Value embeddings and cross entropy (VeCeKernel) — gate committed
 Method (TileKernels' Engram gate and weight-gradient reduce, in CUDA): the backward visits rows in token order (one sort
 of the input ids per micro-batch, shared by every layer); a run of equal tokens reads its table row once and adds its
 summed gradient straight into the table's `.grad` (no zeroed 100 MB gradient, no autograd add); dz in bf16, the
 gate-weight gradient one cuBLAS GEMM. Outputs (`eaf14d0`): d24 8K 344,768 → 350,185 tok/s (+1.57%), 32K 277,238 →
-280,201 (+1.07%); ve_gate 161.9 → 92.6 ms/step; 200-step loss last-20 +0.0095 (seed spread 0.035). Not pursued (return
-per GPU-minute below the cost of validating them): QuACK's scaled-exp linear cross entropy, lm_head path 399 → 379
-ms/step (+0.46%) and peak −5 GiB (Cut Cross-Entropy, arXiv 2411.09009, is at best as fast as torch.compile; its gain
-is memory); a two-rows-per-warp gate forward 199 → 168 µs per call (identical output); a fused clip-grad norm and
-optimizer pass (~13 ms/step).
+280,201 (+1.07%); ve_gate 161.9 → 92.6 ms/step; 200-step loss last-20 +0.0095 (seed spread 0.035). QuACK's scaled-exp
+linear cross entropy (lm_head path 399 → 379 ms/step, +0.46%, peak −5 GiB; Cut Cross-Entropy, arXiv 2411.09009, is
+at best as fast as torch.compile, its gain memory) was first deferred and is now being landed (LinearCE, §5.21). Not
+pursued: a two-rows-per-warp gate forward 199 → 168 µs per call (identical output, ~0.13%); a fused clip-grad norm
+and optimizer pass (~13 ms/step).
 
 ### 5.14 Fused FP8 (FP8Fused) — closed, negative
 Outputs: cuTile 1.7.0 runs on sm_90 (FP8 e4m3 GEMM correct, rel. err 6.8e-4 vs the bf16 product); a naive cuTile
@@ -390,7 +400,13 @@ split_k auto; run spread 9–20%), 4C×C 0.734 → 0.751 (QuACK auto), C×4C 0.7
 k-grouped G = 4 0.765 with the partial sum): only the four C×C dW per layer gain, −0.04 ms per layer and micro-batch,
 inside the run spread: rejected. Lead (not split-K): DeepGEMM's cuBLASLt path with C = D (`bf16_gemm_tn(c=acc)`) beats
 `torch.addmm` on all three dW shapes, 0.170 / 0.713 / 0.702 against 0.194 / 0.734 / 0.738 ms (−0.15 ms per layer and
-micro-batch, about −55 ms of the 4.16 s step [estimate]).
+micro-batch, about −55 ms of the 4.16 s step [estimate]). DeepGEMM's wrapper (csrc/runtime/runtime.hpp
+kCublasLtWorkspaceSize; csrc/jit_kernels/impls/smxx_cublaslt.hpp) asks the heuristic with a 16 MiB workspace and the
+reduction schemes NONE | COMPUTE_TYPE; torch's cuBLASLt path in this image has 1 MiB (cuBLAS 32 MiB; measured with
+`torch._C._cuda_getCublasLtWorkspaceSize`), and a split-K dW into a 768 × 768 fp32 output needs ~2.4 MB of partials
+per split, so `preferred_blas_library("cublaslt")` alone cannot reach DeepGEMM's times. Candidate: every torch matmul
+on cuBLASLt with a 16 MiB workspace (set in `train/loop.py`); its d24 exclusive A/B against master is running; a
+process-global setting, so the A/B also measures Muon's batched Newton–Schulz and the gate's weight gradient.
 
 ### 5.20 Code audit (user specification; one auditor per file) — in progress
 Specification: every parameter, literal, branch and dependency justified by mathematics, the data, model or hardware
@@ -418,10 +434,24 @@ cached judged items re-scored with 0 outcome differences), `865610e` syntax cons
 copy of `Reemit`, unused parameters; 47,166 recorded and fuzzed token streams, 8.38M steps, replayed identical; LTO
 kept, 13% faster). OptAdopt: `51c3dec` train/ (the spike and clipped flags, arbitrary thresholds over quantities the
 records already hold, removed; the update-statistics interval of 10 kept by measurement, every step −0.50% at d24;
-step 0's diagnostics bitwise equal to master's; −38 lines). Per-file tables filed: RunAudit, EarlierAudit,
-CorpusAudit, VeCeKernel, OptAdopt (but `optim.py`'s algorithms, with the optimizer decision); the attention files
-(C3Lander), the decoder (DecoderOwner) and postact's GEMM files (GemmOwner) land with their commits. Integration
-check queued: a d8 run end to end through `run.py` at master, at ×1 (reference code bpb 2.7011–2.7013) and at the
-new default. Noted, unchanged: `stack_edu_python`'s published row groups
+step 0's diagnostics bitwise equal to master's; −38 lines), `646a986` train/optim.py (NorMuon as Muon's only path;
+β2 and eps cited to the paper and the official code). DecoderOwner: `4385748` decode.cu, decoder.py (the large-tile
+path, the rehead path, `NORM_WARPS` 4 → 2 derived from residency, every remaining launch constant measured or ISA).
+Per-file tables filed: RunAudit, EarlierAudit, CorpusAudit, VeCeKernel, OptAdopt (all of train/), DecoderOwner;
+GemmOwner's linear.py change with `6299e84` (its hand GEMM kernels did not land, so there is nothing to audit); the
+attention files (C3Lander) land with C3's commit. Integration check: a d8 run end to end through `run.py` at
+`300eca3` at ×1, exit 0 in every phase, code bpb 2.6977 against 2.7011–2.7013 at the pre-kernel commits; the four
+numerics-changing kernel commits since (B1, the gate, C1, bf16 dQ) were each verified at d24 [inference: the
+−0.0035 not attributed among them]. Noted, unchanged: `stack_edu_python`'s published row groups
 (~64,920 rows) are below the 65,536 the current curate writes, so an older version wrote them — tokens do not depend
 on row grouping (three shards re-cut at 122,880 rows tokenize identically).
+
+### 5.21 TileKernels fusions and the remaining step-time cuts (QkvEpi, MlpOutMix, LinearCE, PdlDpsum) — in progress
+User: aggressive execution of the designs TileKernelsStudy left as follow-ups (methodology §2; ceilings are byte
+arithmetic, not measurements), each on a GEMM as fast as QuACK's (the hand sm90 skeleton they were prototyped on
+measured slower) and landed at ≥ 0.3% with an op check and the 10-step equivalence: QK-norm + RoPE in the fused-QKV
+GEMM epilogue (QkvEpi; register-local in the WGMMA fragment; ≤ 66 ms/step, floor 31); the next layer's residual mix
+and norm beside the down projection (MlpOutMix; ≤ 58, floor 15); the linear cross entropy (LinearCE; ~20 ms/step
+measured on an older base); Inductor's PDL setting and FA4's dpsum from the o_proj dX epilogue (PdlDpsum; ≤ 13 and
+~15 ms/step). Ablations as GPU backfill (user): the queue runs from `646a986` one run at a time (Ablations-2), so an
+exclusive A/B waits at most one d16 run; the tokenizer ablation's pre-run data are already complete (`df62b22`).
