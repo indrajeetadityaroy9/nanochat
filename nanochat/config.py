@@ -9,7 +9,7 @@ VOCAB_SIZE = 2**15
 # Attention head width: nanochat's 128; compiled into csrc's kernels (native.py), whose register arrays need it at
 # compile time
 HEAD_DIM = 128
-# Most whole rows of both contexts (12 x 8K, 3 x 32K) whose d24 step fits 80 GB
+# Tokens per micro-batch: whole rows of both contexts, 12 x 8,192 and 3 x 32,768
 MICRO_BATCH_TOKENS = 98_304
 # Repo-level share of steps: Qwen2.5-Coder's 300B of 5.2T + 300B (arXiv 2409.12186 §3.2.1-3.2.2)
 REPO_SHARE = 300e9 / (5.2e12 + 300e9)
