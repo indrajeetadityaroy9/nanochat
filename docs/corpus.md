@@ -304,7 +304,10 @@ of repository code only (`layout.fim_packed`: the six repository sources and the
 and a middle starting with indentation, the layout of line-level infilling (HumanEval single-line and multi-line
 infilling mask whole lines: all 1,033 single-line prefixes end in a line break). Trained so, d16 at 20 tokens per
 parameter opens a new definition or file after the end sentinel (PSM line exact match 0.023 against SPM 0.353, also
-on prompts the attention window covers whole); with the rule 15.6% of PSM examples have that layout.
+on prompts the attention window covers whole), the train/test mismatch AST-FIM names for span shapes it does not
+train (arXiv 2506.00204 §7). With the rule 15.6% of PSM examples have that layout, and d16 at 20 retrained on the
+repacked data infills single lines in PSM at line exact match 0.175 (from 0.022; multi-line 0.008 to 0.045), SPM
+unchanged (0.367, 0.356).
 
 - A FIM piece is decoded to text; its middle is a random span with probability 0.1, else an AST-FIM span on its
   tree-sitter parse, or a random span when the piece does not parse or has no node below the root.
