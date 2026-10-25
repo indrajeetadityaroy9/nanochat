@@ -62,20 +62,19 @@ class RunConfig:
 
 
 def run_name(config: RunConfig) -> str:
-    """The fields that differ from RunConfig()'s, sorted, k=v joined by "," (floats by repr); "defaults" if none. A
-    field added with a default renames no run."""
+    """The fields that differ from RunConfig()'s, sorted, k=v joined by ","; "defaults" if none. A field added with a
+    default renames no run."""
     default = RunConfig()
     changed = sorted((f.name, getattr(config, f.name)) for f in fields(config)
                      if getattr(config, f.name) != getattr(default, f.name))
-    return ",".join(f"{name}={value!r}" if isinstance(value, float) else f"{name}={value}"
-                    for name, value in changed) or "defaults"
+    return ",".join(f"{name}={value}" for name, value in changed) or "defaults"
 
 
 def tokenizer_path(config: RunConfig) -> Path:
     return TOKENIZER if config.tokenizer == "corpus" else ABLATION / config.tokenizer
 
 
-def meta_model(num_hidden_layers: int, final_logit_softcapping: float | None = None) -> "CausalLM":
+def meta_model(num_hidden_layers: int, final_logit_softcapping: float | None) -> "CausalLM":
     """The model on the meta device (no memory) at the file-level stage's context: what plans and training build."""
     import torch
 
@@ -91,7 +90,7 @@ def base_plan(*, num_hidden_layers: int, tokens_per_param: float) -> "RunPlan":
     """The base model's plan at num_hidden_layers and tokens per non-embedding parameter (schedule.plan)."""
     from train.schedule import plan
 
-    return plan(model=meta_model(num_hidden_layers), tokens_per_param=tokens_per_param)
+    return plan(model=meta_model(num_hidden_layers, None), tokens_per_param=tokens_per_param)
 
 
 def plan_of(config: RunConfig) -> "RunPlan":
