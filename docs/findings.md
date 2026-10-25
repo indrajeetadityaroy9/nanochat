@@ -154,8 +154,9 @@ cuBLAS, FP8 via torchao (d16 rowwise −28.8%, tensorwise −9.5%; d24 tensorwis
 QuACK (−10 ms/step, cold-autotune peak 89.8 GB), the `ve_dw` rewrite (−2.6 ms/step). Kept: the qk-prologue forward per
 position, 250.3 → 183.6 µs per call (+0.3% end to end, d24 200-step loss Δ last-20 +0.0035 vs seed spread 0.035),
 `62b50c2`. Loss noise: d24 200 steps seed 0 vs 1 last-20 mean Δ −0.035; d16 same-seed reruns |Δ| ≈ 0.007. Training
-diagnostics (per-corpus loss, interval held-out loss, update RMS, spike flags) implemented; +2.5 GiB peak at d24 being
-isolated before commit.
+diagnostics committed (`7e77833`): per-corpus training loss, logsumexp max and mean square, the largest QK-norm gain,
+loss/grad-norm spike flags and a clipped flag, per-group update RMS and parameter norm every 10th step (from optimizer
+state); +0.4 GiB peak at d24; the interval held-out evaluation was removed (it added ~2.1 GiB and 0.24% of step time).
 
 ### 5.11 Attention kernels (AttnKernel) — in progress
 Outputs so far: every FA4 forward/backward tile and scheduling variant tried is slower than the defaults; static
