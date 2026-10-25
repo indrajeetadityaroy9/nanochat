@@ -7,12 +7,11 @@
  *   dgate[h] = sum over head h's dims of dout ve, dz = 2 dgate (1 - s) s with s = gate / 2 (sigmoid's derivative as
  *   torch's sigmoid_backward writes it), dn = bf16(dz W), dve = bf16(gate[head] dout) added into the table's fp32
  *   gradient at row idx (atomics, as the embedding backward), dW = dz^T n.
- * Inductor's fusion of the same expressions ran its z and dW reductions far below memory bandwidth.
  *
  * Layout: n, v, out, dout, dn contiguous (rows, C), C = H * HEAD_DIM; idx (rows,) int32; table, dtable (V, C) fp32;
  * gate, dz (rows, H) fp32. A row is one warp; lane l holds the VEC-wide chunks l, l + WARP, ... of the row, each inside
- * one head (HEAD_DIM is a multiple of VEC). H is a template parameter, so per-head arrays stay in registers: the
- * depths run, d8, d16, d24 (model/gpt.py gpt_config; conf/experiment), have H = 2, 4, 6.
+ * one head (HEAD_DIM is a multiple of VEC). H is a template parameter, so per-head arrays stay in registers; it is
+ * instantiated for H = 2, 4, 6, the head counts of the configured depths (model/gpt.py gpt_config).
  *
  * Deterministic dW without atomics: ve_dw's blocks each sum dz x n over a fixed range of rows per column (one thread
  * per column) into a per-block partial, and ve_dw_sum adds the partials in block order.

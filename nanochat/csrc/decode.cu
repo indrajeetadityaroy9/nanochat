@@ -64,7 +64,7 @@
 
 constexpr int LANE_DIMS = HEAD_DIM / WARP;         /* a lane's dims of a query, key or value */
 constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thread per head dim */
-/* slots: d24's tokens per second still rise up to 256 slots */
+/* slots per decoder: k_commit runs them as one block of MAX_BATCH threads */
 constexpr int MAX_BATCH = 256;
 constexpr int MASK_BITS = CHAR_BIT * sizeof(unsigned long long);  /* slots per word of a slot mask */
 constexpr int MASK_WORDS = MAX_BATCH / MASK_BITS;                 /* words of a slot mask */
@@ -76,8 +76,8 @@ constexpr int GROUP = WARP / MMA_N, ACC = MMA_M * MMA_N / WARP;
 constexpr int K_BLOCK = GROUP * VEC;               /* k per group step: VEC per lane */
 static_assert(K_BLOCK == 2 * MMA_K, "a K_BLOCK block is two k16 MMAs (k_gemv)");
 /* k_gemv: a block's slots (GROUP_TILES n tiles, their accumulators in registers: 16 slots, so a row tile has B / 16
- * blocks to spread over the SMs) and the K_BLOCK blocks of weights its warp keeps in flight. DEPTH by Little's law: an
- * SM's share of DRAM bandwidth (3.35 TB/s / 132 SMs) times its ~600 ns latency is ~15 KB in flight; a warp holds 32
+ * blocks to spread over the SMs) and the K_BLOCK blocks of weights its warp keeps in flight. DEPTH by Little's law:
+ * the bytes an SM must keep in flight are its share of DRAM bandwidth times the memory latency; a warp holds 32
  * lanes x 2 x 16 bytes per block, 8 KB at 8 */
 constexpr int GROUP_TILES = 2, GROUP_SLOTS = GROUP_TILES * MMA_N, DEPTH = 8;
 static_assert(MASK_BITS % GROUP_SLOTS == 0, "a slot group lies in one word of the active mask (k_gemv)");
@@ -219,8 +219,8 @@ static __device__ __forceinline__ void copy16(void *dst, const void *src, bool v
 static __device__ __forceinline__ void copies_done() { asm volatile("cp.async.wait_all;\n" ::: "memory"); }
 
 /* CHOICE: ARGMAX honours each slot's allowed tokens and temperature (c; the head graph); without it, the logits' argmax
- * (the whole-step graph). A compile-time argument: code added to the kernel changes the compiled loops of every GEMV
- * (measurably slower), so greedy steps run the kernel compiled without it. */
+ * (the whole-step graph). A compile-time argument: code added to the kernel changes the compiled loops of every GEMV,
+ * so greedy steps run the kernel compiled without it. */
 template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
     extern __shared__ __align__(16) unsigned char gemv_buf[];
     bf16 *xs = reinterpret_cast<bf16 *>(gemv_buf);  /* [GROUP_SLOTS][ks] */
@@ -333,16 +333,16 @@ template <bool CHOICE> __global__ void k_gemv(Gemv a, Choice c) {
     }
 }
 
-/* A nucleus-sampled slot's choice (top-p sampling: arXiv 1904.09751, "The Curious Case of
- * Neural Text Degeneration", §3.1): Gumbel-max at temperature T, as k_gemv's epilogue, over the fewest most likely
- * allowed tokens whose probability under softmax(s / T) reaches top_p; its key to argmax for k_commit. Hugging Face
- * transformers' TopPLogitsWarper, which the code benchmarks' generators run (MultiPL-E automodel.py,
- * bigcode-evaluation-harness), sorts the probabilities ascending and drops every token whose cumulative probability is
- * at most 1 - top_p; here, with e = exp(s / T - max s / T) (0 outside the allowed tokens) and C(x) the sum of e over
- * the tokens with e <= x, the tokens kept are those with e >= e*, the least e with C(e) > (1 - top_p) sum(e), found by
- * bisection on the IEEE bits of x in [0, 1] (C is a step function rising at each e, so the least such bits are an e's).
- * Tokens of exactly equal probability are kept or dropped together. The sums run in a fixed order, so the choice
- * depends on the slot alone. A block per slot; inactive, greedy and top_p 1 slots exit. */
+/* A nucleus-sampled slot's choice (top-p sampling: arXiv 1904.09751, "The Curious Case of Neural Text Degeneration",
+ * §3.1): Gumbel-max at temperature T, as k_gemv's epilogue, over the fewest most likely allowed tokens whose
+ * probability under softmax(s / T) reaches top_p; its key to argmax for k_commit. The nucleus is Hugging Face
+ * transformers' TopPLogitsWarper's (the generator of MultiPL-E automodel.py and bigcode-evaluation-harness), which
+ * sorts the probabilities ascending and drops every token whose cumulative probability is at most 1 - top_p; here,
+ * with e = exp(s / T - max s / T) (0 outside the allowed tokens) and C(x) the sum of e over the tokens with e <= x,
+ * the tokens kept are those with e >= e*, the least e with C(e) > (1 - top_p) sum(e), found by bisection on the IEEE
+ * bits of x in [0, 1] (C is a step function rising at each e, so the least such bits are an e's). Tokens of exactly
+ * equal probability are kept or dropped together. The sums run in a fixed order, so the choice depends on the slot
+ * alone. A block per slot; inactive, greedy and top_p 1 slots exit. */
 __global__ void __launch_bounds__(NUCLEUS_THREADS) k_nucleus(Choice c, const unsigned long long *active,
                                                               unsigned long long *argmax, int vocab) {
     __shared__ float scratch[NUCLEUS_THREADS / WARP];
