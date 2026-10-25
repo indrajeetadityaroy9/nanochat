@@ -189,7 +189,21 @@ weight decay (arXiv 2510.12402), Polar Express (arXiv 2505.16932), and all three
 ### 5.16 Decoder at d24 (DecoderD24) — in progress
 Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise.
 
-### 5.17 Earlier executions (summary)
+### 5.17 DeepSeek's open kernel libraries as guidance (user-provided repositories)
+Sources: DeepGEMM, FlashMLA (Hopper deep-dive at commit `ba89a34`; the 2026.09.30 release dropped Hopper), DeepEP,
+TileLang. Transferable: DeepGEMM's SM90 BF16 GEMM and dense weight-gradient kernels with D = C + A·B accumulation
+(benchmarked against QuACK/cuBLAS on d24 shapes, and used to write weight gradients straight into the fp32 `.grad`:
+GemmDeep), its SM90 GEMM that computes pre-norm statistics inside the GEMM (reference for folding RMSNorm into GEMMs:
+NormFusion) and programmatic dependent launch; its README's requirement that FP8 casts be fused into the producing
+kernels, which is why unfused FP8 lost here (§5.14); FlashMLA's fused Q-norm + RoPE + attention + O-RoPE + cast kernel
+(Blackwell), evidence that QK-norm and RoPE fuse into attention without losing TFLOP/s (AttnKernel); FlashMLA's Hopper
+FP8 KV decode — 1×128 tile scales, RoPE dimensions kept in bf16, dequantization-bound on Hopper (no direct fp8→bf16:
+~50 CUDA-core cycles per token against ~34 MMA cycles), relieved by 2-CTA clusters sharing dequantized K/V through
+distributed shared memory (DecoderD24); TileLang's SM90 producer-consumer pipelines, persistent tile scheduler,
+variable-length block-causal attention and TMA gather/scatter (AttnKernel's window kernel, VeCeKernel's
+value-embedding gather/scatter). Not applicable: DeepEP (expert-parallel communication; one GPU, dense model).
+
+### 5.18 Earlier executions (summary)
 - **Metrics** (MetricsValidation): edit similarity by difflib as cceval (rapidfuzz, thefuzz and torchmetrics disagree
   on 46–71% of real strings); bpb bucket sums kept manual (torchmetrics SumMetric differs).
 - **TokEval** (TokEvalDeps): needs tree-sitter-language-pack 1.22.1 (0.13.0 changes 35/135 values).
