@@ -99,7 +99,8 @@ Two operational lessons (Oct 25): a job's declared memory must cover its evaluat
 NANOCHAT_DECODER_MEMORY_FRACTION of the GPU), or co-running jobs over-commit it (two out-of-memory failures, one in
 the decoder's cudaMalloc at the end of a screen run); and the compiled training forward and FA4 compile once per
 distinct sequence length, so checks that run the forward prompt by prompt pad to one length (an agreement check spent
-47 min compiling).
+47 min compiling). A third: the profiling harness lives outside the repository, so a repository audit that removed a
+convenience default (`meta_model`'s softcap) broke every scratch copy of it at start, losing one loss window.
 
 ## 5. Execution log
 
@@ -209,9 +210,15 @@ tok/s (+1.15%), 32K +0.5%, 200-step loss last-20 Δ −0.0071, peak 65.6 vs 69.3
 +200 µs per layer and micro-batch over plain QuACK gemm_dact (~72 ms/step; §5.19). Norm statistics from the producing
 epilogue (B2) dropped by analysis: the remaining Inductor norm/mix (231 ms/step: norm1 + mix backward 155 ms, forward
 58 ms) already runs at ~3.6 TB/s, and deferring norm1 into the down-projection epilogue moves a scaling pass elsewhere
-(net ≈ 0). Fused QKV (C3, one (M, 3C) projection, q/k/v as strided views): loss identical, gradients within 6e-3
-relative; +0.89% at d24 8K against the same attention op without C3, that op being the combined one (−0.90%, §5.11),
-so the port onto master's attention path is open.
+(net ≈ 0). Fused QKV (C3, one (M, 3C) projection, q/k/v as strided views): the first prototype's +0.89% at d24 8K was
+measured against the combined prologue + attention op (−0.90%, §5.11), so roughly neutral against master. Port onto
+master's attention path (AttnOwner, landing by C3Lander): one stacked bf16 q/k/v weight per layer, one `qkv_proj`
+op (the separate `linear` op deleted), one `attention` op holding the q/k prologue, the value-embedding mix and FA4
+whose backward writes every q/k/v gradient into one buffer; against master's ops on real d24 8K segments, the output,
+dk, dv, the k-norm gradient and every value-embedding gradient are bitwise equal (window and full layers, with and
+without value embeddings), dq and the q-norm gradient differ by 1e-6 to 2e-5 (inside master's own run-to-run spread
+from FA4's atomic adds); a 2-step warm-up gave 355,980 vs 359,063 tok/s (a hint, not the A/B). Open: the d24 A/B and
+the 200-step loss check (queued).
 
 ### 5.13 Value embeddings and cross entropy (VeCeKernel) — gate committed
 Method (TileKernels' Engram gate and weight-gradient reduce, in CUDA): the backward visits rows in token order (one sort
@@ -264,13 +271,16 @@ the best λ unchanged under CWD); 818.5K tok/s (−1.25%).
 Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise. Profile (1,024
 slots, positions 256–320): GEMV ~22 of a ~35 ms step (each 16-slot group re-read the weights from L2), attention ~7.8
 ms. Changes: a TMA-fed WGMMA GEMM over the slots keeping every epilogue (greedy and sampled choice, syntax masks, the
-BOS alternative; 128-row × 128-slot tiles when they cover every SM, else 64 × 64), an e4m3 KV cache with one fp32
-scale per position and head, attention streaming each slot's window through shared memory with the scores on tensor
-cores (f16, exact for e4m3 keys and the bf16 q), PDL; the GEMV and mma.sync GEMMs, the split attention and the ≤ 16-slot
-graphs deleted. d24 random init, 1,024 slots, prompt 256, 512 steps: main 34.8 ms/step, 29.4K tok/s (prefill 5.89 s)
-→ bf16 KV + WGMMA 16.5 ms, 62.1K (1.68 s) → FP8 KV 10.85 ms, 94.4K (1.39 s) → scores on tensor cores 9.67 ms, 105.9K
-(1.32 s), 3.6×. FP8 KV costs ≤ 1–2 points of pass@1 with per-tensor scales (vLLM, 2026). Open: agreement with the
-training forward and the d16 evaluation (FP8 kept if both are within noise of main, else the bf16-KV tree), the commit.
+BOS alternative), an e4m3 KV cache with one fp32 scale per position and head, attention streaming each slot's window
+through shared memory with the scores on tensor cores (f16, exact for e4m3 keys and the bf16 q), PDL; the GEMV and
+mma.sync GEMMs, the split attention and the ≤ 16-slot graphs deleted. d24 random init, 1,024 slots, prompt 256, 512
+steps: main 34.8 ms/step, 29.4K tok/s (prefill 5.89 s) → bf16 KV + WGMMA 16.5 ms, 62.1K (1.68 s) → FP8 KV 10.85 ms,
+94.4K (1.39 s) → scores on tensor cores 9.67 ms, 105.9K (1.32 s), 3.6×. The second audit pass changed the tree:
+attention runs of 64 keys instead of 128 (−5.5% step, measured), one 64×64 WGMMA tile shape (as fast as the size
+dispatch, so the large-tile path is deleted), which also restores batch-independent tokens; the final tree's numbers
+come from its own benchmark. FP8 KV costs ≤ 1–2 points of pass@1 with per-tensor scales (vLLM, 2026). Open: agreement
+with the training forward and the d16 evaluation (FP8 kept if both are within noise of main, else the bf16-KV tree),
+the commit.
 
 ### 5.17 DeepSeek's open kernel libraries as guidance (user-provided repositories)
 Sources: DeepGEMM, FlashMLA (Hopper deep-dive at commit `ba89a34`; the 2026.09.30 release dropped Hopper), DeepEP,
@@ -323,10 +333,13 @@ the epilogue with the next tile: not adopted as a library. C1, dW added into the
 β = 1 (Megatron-LM's gradient-accumulation fusion), and C2, one bf16 copy of each q/k/v/o/up/down weight refreshed per
 weight change instead of 12 casts per layer and micro-batch (`f499be7`): d24 8K 344,925 → 347,634 tok/s (+0.79%), 32K
 275,613 → 277,383 (+0.64%), peak 61.6 → 62.0 GiB; numerically neutral. `b59a22b` removes the casts C2 made no-ops.
-Open: the MLP postact saved in the forward (+14.5 GB) with hand sm_90a relu² backward and up-projection GEMMs in
-DeepGEMM's producer/consumer layout, consumer warpgroups alternating whole tiles so one tile's epilogue overlaps the
-next tile's math (built, unmeasured; −110 to −135 ms/step [estimate]); split-K dW into the fp32 `.grad` (−30 to −75
-ms/step [estimate]).
+The hand sm_90a relu² GEMMs (DeepGEMM's producer/consumer layout, consumer warpgroups alternating whole tiles) are
+bitwise equal to QuACK but slower: the backward 2.78 ms vs QuACK's 2.45 ms without the postact write, the up
+projection 3.02 vs 1.64 ms (`gemm_norm_act`), the 2-CTA multicast variants 6–7 ms: not landed. `b59a22b` confirmed
+bitwise (23/23 tensors). Open: the MLP postact saved in the forward with QuACK's dact epilogue (+14.5 GB; not bitwise:
+the down projection's weight gradient uses the forward's relu² of the fp32 pre-activation, rounded once, instead of
+relu² recomputed from the bf16 pre-activation), decided by its d24 tok/s and 200-step loss; split-K dW into the fp32
+`.grad` (−30 to −75 ms/step [estimate]) only if the per-shape numbers support ≥ 0.3%.
 
 ### 5.20 Code audit (user specification; one auditor per file) — in progress
 Specification: every parameter, literal, branch and dependency justified by mathematics, the data, model or hardware
