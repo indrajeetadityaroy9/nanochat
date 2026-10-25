@@ -337,9 +337,16 @@ fn best_fit_decreasing(lengths: &[usize], targeted: &[bool], row_len: usize) -> 
 /// "fim", else (reading "left_to_right", and every piece read left to right) its range; it takes the longer of the two
 /// in its row. A piece has the BOS after it as its target when it ends its document or is a FIM example (the end of its
 /// middle); such pieces come first in their row and the pieces cut from their document left to right last, so the BOS
-/// after a piece is its target.
+/// after a piece is its target. The documents are cut in parallel, the longest first and each a task of its own, so
+/// that the longest neither starts last nor waits in a run of long ones that one worker cuts in turn.
 fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize)) -> (Vec<[i64; 4]>, Vec<i64>, Vec<u16>) {
-    let documents: Vec<Vec<Piece>> = (first..last).into_par_iter().map(|d| split.pieces(d, offsets[d] as usize, offsets[d + 1] as usize)).collect();
+    let mut longest: Vec<usize> = (first..last).collect();
+    longest.sort_by_key(|&d| Reverse(offsets[d + 1] - offsets[d]));
+    let mut documents: Vec<Vec<Piece>> = (first..last).map(|_| Vec::new()).collect();
+    let cut: Vec<Vec<Piece>> = longest.par_iter().with_max_len(1).map(|&d| split.pieces(d, offsets[d] as usize, offsets[d + 1] as usize)).collect();
+    for (d, pieces) in longest.into_iter().zip(cut) {
+        documents[d - first] = pieces;
+    }
     let (mut pieces, mut targeted) = (Vec::new(), Vec::new());
     for document in documents {
         let n = document.len();
