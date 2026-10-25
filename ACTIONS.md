@@ -71,7 +71,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 
 | Item | Next action | Waits on |
 |---|---|---|
-| Ablation queue | ready at HEAD (`88c151e`, engineering done): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, compile, pack → D6 | the user's explicit permission |
+| Ablation queue | ready at HEAD (`9ea5037`, engineering done; an end-to-end d8 run from a clean clone, train and parse evaluation through `nanochat.run`: exit 0 in 110 s, code bpb 2.7012 against 2.7011 at `d0a2ec0`, the same parse rate): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, compile, pack → D6 | the user's explicit permission |
 | D7 Muon τ | `muon_tau_20.yaml` (d8 at 20, sa-bpe set, 2 seeds: user, 4 judged wasteful) and `muon_tau_200.yaml` (d8 at 200 reads 2.94B tokens, beyond the sa-bpe set's 2.11B: `tokenizer=corpus`, whose packs exist, 2 seeds); ×½, ×1, ×2; 12 runs | user approval |
 | D5 softcap | `softcap.yaml`: d16 at ratio 20.0 on the sa-bpe set, lr ×2.7972 (the D1-rebased base multiplier at `mixture.STEPS`' tokens), cap 15 vs none, 4 seeds | user approval |
 | Tokenizer ablation | 8 d16 runs at each arm's max_ratio (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer`), decision, `adopt`, compile, pack | D5 and D7 decided; user approval |
