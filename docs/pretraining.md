@@ -184,7 +184,7 @@ the tokenizer ablation's in `docs/tokenizer-ablation.md`.
   solutions given their prompts, pooled; *repo_32k* and *repo_beyond_8k*, the 32K repository rows and their targets
   beyond 8,192; *text*, *math*; *unparsed*, *indentation*, *syntax*, the shares of HumanEval+ and MBPP+ problems whose
   healed greedy completion does not compile (Parse measure, Evaluation); *greedy*, their base pass@1; *tok_per_s*.
-- **Power.** σ = 0.0034 bits per byte on 8K code (`ablations/tokenizer.py` `CODE_SIGMA`): the pooled seed standard
+- **Power.** σ = 0.0034 bits per byte on 8K code (`ablations/contrast.py` `CODE_SIGMA`): the pooled seed standard
   deviation of six d8 runs at 20 tokens per parameter, two configurations × data seeds 0–2, on the removed pipeline's
   data (records not in `results/` [unverified]), carried to d16 and to the corpus [inference]. Two runs against two
   resolve 1.96·σ·√(2/2) = 0.0067; four against four 0.0047 [arithmetic].
@@ -489,10 +489,12 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
 - `inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
 - `corpus/`: the corpus pipeline, one module per step (`__init__.py` lists them; `mixture.py` also holds the
-  micro-batch and repository-stage share, `publish.py` the dataset); `crate/`, its Rust crate
-  (`native.py`): the SA-BPE trainer (and frequency BPE), repository samples and the packer.
-- `ablations/`: `records.py` (an experiment's records in `results/`), `peak_lr.py`, `recipe.py` (the logit softcap,
-  AdamW group lr and Muon weight-decay timescale analyses), `tokenizer.py` (`docs/tokenizer-ablation.md`).
+  micro-batch and repository-stage share, `publish.py` the dataset, `train_tokenizer.py` the tokenizer's sample and
+  trainer); `crate/`, its Rust crate (`native.py`): the SA-BPE trainer (and frequency BPE), repository samples and
+  the packer.
+- `ablations/`: `records.py` (an experiment's records in `results/`), `contrast.py` (the pre-registered tests every
+  ablation decides by), `peak_lr.py`, `recipe.py` (the logit softcap, AdamW group lr and Muon weight-decay timescale
+  analyses), `tokenizer.py` (the tokenizer ablation, `docs/tokenizer-ablation.md`).
 - `docs/`: `pretraining.md` (this document), `corpus.md` (the corpus's specification), `tokenizer-ablation.md`.
 - `scripts/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image. `results/`: the records.
 

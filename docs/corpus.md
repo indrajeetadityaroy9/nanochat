@@ -540,7 +540,7 @@ no line break after a punctuation run), 32,768 ids, trained on equal bytes from 
 sources. Every token figure in this document is in the reference tokenizer; a retrained one rescales each by its
 bytes per token.
 
-**Retrained on this corpus, at the file stage's shares of bytes** (`ablations/tokenizer.py` `sample`; the sample, its
+**Retrained on this corpus, at the file stage's shares of bytes** (`corpus/train_tokenizer.py` `sample`; the sample, its
 rationale, authorship units and draw are in `docs/tokenizer-ablation.md`, Sample). The reference tokenizer's sample
 holds none of the synthetic code or UltraData-Math L3, 29.1% of the file stage, and 18.27% of its bytes are web
 mathematics this corpus does not read. The longest whitespace run of any curated document is 9,721 characters;
@@ -575,6 +575,6 @@ partitions are counted in tokens (`compile.compile_stage`).
 | Prepare: fetch, standardize | `prepare.py` | done: 18 sources (§1) |
 | Curate: Python check, deduplication, split, shards | `curate.py` | done: 178,887,291 rows (§4) |
 | Publish | `publish.py` | done: `iaroy/nanochat-data`, one commit: `<source>/<split>/<k>.parquet` (1,812 shards) and the card |
-| Tokenizer: sample, arms, decision, adoption | `ablations/tokenizer.py` (trains, decides, adopts), `tokenizer.py` (loads) | `vocabularies`, `intrinsic`, `data` done; runs, decision and adoption wait for the user's approval (`docs/tokenizer-ablation.md`) |
+| Tokenizer: sample, arms, decision, adoption | `train_tokenizer.py` (sample, trainer), `ablations/tokenizer.py` (arms, decides, adopts), `tokenizer.py` (loads) | `vocabularies`, `intrinsic`, `data` done; runs, decision and adoption wait for the user's approval (`docs/tokenizer-ablation.md`) |
 | Compile: 8K samples, 32K repository documents | `compile.py` | after adoption |
 | Mixture, pack, loader | `mixture.py`, `pack.py`, `layout.py`, `loader.py` | pack after compile; training reads the loader (`train/stages.py`) |

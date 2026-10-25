@@ -1,9 +1,10 @@
 # Tokenizer ablation
 
 The experiment decides the split pattern and the merge score of the corpus's tokenizer, the vocabulary every later
-step of pre-training reads. The code is `ablations/tokenizer.py`, which also holds the pre-registered rules. The records
-are in `results/tokenizer-*.json`. Every figure below comes from those records unless it is marked [arithmetic] (derived
-from them), [inference] or [unverified] (measured, record not kept).
+step of pre-training reads. The code is `ablations/tokenizer.py` (the arms, steps and decision), over
+`corpus/train_tokenizer.py` (the sample and trainer) and `ablations/contrast.py` (the pre-registered tests). The records
+are in `results/tokenizer_split_merge-*.json`. Every figure below comes from those records unless it is marked
+[arithmetic] (derived from them), [inference] or [unverified] (measured, record not kept).
 
 ## Status
 
@@ -34,10 +35,10 @@ The arms' vocabularies are in `artifacts/corpus/tokenizer-ablation/<arm>/` (`tok
 ### Sample
 
 Each of the file stage's 17 sources contributes its share of the stage's bytes as its share of 13.38 GB
-(`SAMPLE_BYTES`). A source's share of the stage's bytes is its share of the stage's tokens (`mixture.FILE_STAGE`) at
-the reference tokenizer's bytes per token (`mixture.BYTES_PER_TOKEN`). Within a source the sample is systematic, in
-shard order: row i is taken when floor((i + 1)·f) > floor(i·f),
-where f is the fraction of the source's rows taken.
+(`corpus/train_tokenizer.py` `SAMPLE_BYTES`). A source's share of the stage's bytes is its share of the stage's
+tokens (`mixture.FILE_STAGE`) at the reference tokenizer's bytes per token (`mixture.BYTES_PER_TOKEN`). Within a
+source the sample is systematic, in shard order: row i is taken when floor((i + 1)·f) > floor(i·f), where f is the
+fraction of the source's rows taken.
 
 Rationale:
 - Tokenizer training data should be "representative of model training data" (arXiv 2405.05417 §5).

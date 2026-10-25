@@ -21,10 +21,9 @@ analyses (conf/experiment/<name>.yaml's analysis):
   for Muon; else Muon's own law through both points, tau* = c TPP^e with c = TAU_C m_20 20^-D, e = TAU_E + D,
   D = ln(m_200 / m_20) / ln 10 (muon_wd_timescale_law; TAU_C, TAU_E the law's, train/optim.py).
 
-contrast: ablations/tokenizer.py contrast, an arm against the baseline on the seeds where both have an evaluation:
-code bits per byte better or worse beyond z CODE_SIGMA sqrt(2 / n), z = scipy.stats.norm.ppf(1 - ALPHA / 2), n the
-seeds per arm; MBPP+ parsing by the exact sign test (scipy.stats.binomtest) over the problems whose parsing seeds
-differ, at ALPHA.
+contrast: ablations/contrast.py, an arm against the baseline on the seeds where both have an evaluation: code bits per
+byte better or worse beyond z CODE_SIGMA sqrt(2 / n), z = scipy.stats.norm.ppf(1 - ALPHA / 2), n the seeds per arm;
+MBPP+ parsing by the exact sign test (scipy.stats.binomtest) over the problems whose parsing seeds differ, at ALPHA.
 """
 import json
 import math
@@ -32,7 +31,7 @@ import statistics
 
 import numpy as np
 
-from ablations.tokenizer import contrast, evaluated
+from ablations.contrast import contrast, evaluated
 from paths import RESULTS
 from train.optim import TAU_C, TAU_E
 

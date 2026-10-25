@@ -91,6 +91,6 @@ def crate_module(crate: Path) -> ModuleType:
 
 
 def corpus_crate() -> ModuleType:
-    """The corpus's Rust crate (corpus/crate): train (ablations/tokenizer.py), repository_samples (corpus/curate.py,
-    compile.py), pack (corpus/pack.py)."""
+    """The corpus's Rust crate (corpus/crate): train (corpus/train_tokenizer.py), repository_samples
+    (corpus/sources.py), pack (corpus/pack.py)."""
     return crate_module(CORPUS_CRATE)

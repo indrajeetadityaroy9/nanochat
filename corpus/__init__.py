@@ -1,6 +1,6 @@
 """
 The pre-training corpus, one module per stage, under paths.CORPUS. Run order: prepare, curate, publish, the tokenizer
-(ablations/tokenizer.py), compile, pack.
+(train_tokenizer.py trains the candidates; ablations/tokenizer.py decides and adopts one), compile, pack.
 
   schema.py     document categories: schema, split group, whether the content is code
   sources.py    the 18 sources, the corpus's file paths, curated texts and repository samples
@@ -9,7 +9,8 @@ The pre-training corpus, one module per stage, under paths.CORPUS. Run order: pr
   prepare.py    fetch each source's Hub files and standardize them
   curate.py     Python 3 check with repair, exact deduplication, split, curated shards
   publish.py    the curated shards to the Hub (DATASET) and back
-  tokenizer.py  load a vocabulary (ablations/tokenizer.py trains, decides and adopts it)
+  tokenizer.py  load and save a vocabulary
+  train_tokenizer.py  the tokenizer's sample and trainer (the corpus crate's BPE), and a vocabulary's fidelity check
   compile.py    curated documents to tokens; the 32K stage's repository documents
   pack.py       each stage's training rows with FIM examples, and their weights
   layout.py     the compiled and packed data's paths and counts (torch-free, for spawned workers)
