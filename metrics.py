@@ -29,9 +29,8 @@ train (each optimizer step, 0-based): step; num_input_tokens_seen (row positions
     (model_flops per step_seconds over PEAK_FLOPS); train/diagnostics.py's: max_logsumexp and mean_square_logsumexp
     (the output logits' logsumexp over the step's valid positions: maximum and mean square, PaLM's z-loss quantity,
     arXiv 2204.02311 §5), qk_norm_gain_max (the largest QK-norm gain magnitude), corpus_loss ({corpus: mean loss of
-    the step's rows drawn from it}), loss_spike and grad_norm_spike (above 1.1x / 3x the median of the previous 100
-    steps), clipped (grad_norm above max_grad_norm); every 10th step update_rms ({optimizer[group]: RMS of the step's
-    update without its decoupled weight decay}) and param_norm ({optimizer[group]: L2 norm after the step}).
+    the step's rows drawn from it}); every 10th step update_rms ({optimizer[group]: RMS of the step's update without
+    its decoupled weight decay}) and param_norm ({optimizer[group]: L2 norm after the step}).
 end (the last step trained): step; peak_memory_bytes and peak_reserved_bytes over the last stage (since the switch,
     or the process start): the memory footprint FlashAttention reports (arXiv 2205.14135) and the allocator's.
 failure (a non-finite loss or gradient norm; the run stops): step, loss and grad_norm (null).

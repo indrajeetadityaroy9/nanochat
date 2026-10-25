@@ -175,20 +175,20 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
                 upcoming.append(next(train_iter))
         grad_norm = update(model, opts, accumulated)
         model.refresh_gemm_weights()
-        diagnostics.after_update()
+        # the step's values to the host without blocking; the previous step is logged while this one runs
+        values, layout = diagnostics.end_step(step, torch.stack(losses).sum(), grad_norm)
         for scheduler in schedulers:
             scheduler.step()
         stage_rows += len(batches) * stage.micro_batch_size
         batches = upcoming
-        # the step's values to the host without blocking; the previous step is logged while this one runs
-        values, layout = diagnostics.end_step(step, torch.stack(losses).sum(), grad_norm)
         end = torch.cuda.Event(enable_timing=True)
         end.record()
         if pending is not None:
             log(*pending)
         pending, previous_end = (step, learning_rate, model_flops, values, layout, previous_end, end), end
         if step == start_step:
-            # no cyclic garbage per step: keep the collector off after setup (its scans are slow) except after saves
+            # no cyclic garbage per step: the collector off after setup (its scans are slow; karpathy/nanochat 07c4dd4)
+            # except after saves
             gc.collect()
             gc.freeze()
             gc.disable()
