@@ -2,7 +2,7 @@
 The training mixture (docs/corpus.md §5): the run's tokens, its two stages, and each stage's groups of sources.
 A group's share is its fraction of the stage's tokens, "supply" for a group read whole once (its share is its tokens
 over the stage's), or "rest" for the code group that takes what the stage's other code groups leave of CODE_SHARE.
-Within a group, sources weigh in by their tokens.
+Within a group, sources weigh in by their amounts: tokens before packing, packed rows after (Stage.shares).
 
 The groups read in part (IN_PART) read the same fraction of each of their sources; prepare fetches only the Hub files
 that hold it (prepare.extent).
@@ -64,14 +64,16 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The base model's pre-training run: d24 (docs/pretraining.md), 102.6B tokens, written as 86,975 steps of 12
-# micro-batches (train/schedule.plan's D1 batch reads them as 69,580 steps of 15); its last REPO_SHARE of steps
-# (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv 2409.12186 §3.2.1-3.2.2) at 32K, placed as
-# train/schedule.plan places it. A Stage's tokens are this run's; any other run draws rows by the stage's shares at its
-# own size (loader.weights)
-STEPS, STEP_TOKENS = 86_975, 12 * MICRO_BATCH_TOKENS
+# The base model's pre-training run: d24 (docs/pretraining.md), 102.6B tokens, train/schedule.plan's 69,580 steps of 15
+# micro-batches; its last REPO_SHARE of steps (config.py: Qwen2.5-Coder's ~300B repo-level of 5.2T + 300B, arXiv
+# 2409.12186 §3.2.1-3.2.2) at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run
+# draws rows by the stage's shares at its own size (loader.weights)
+STEPS, STEP_TOKENS = 69_580, 15 * MICRO_BATCH_TOKENS
 REPO_STEPS = round(REPO_SHARE * STEPS)
 
+# Code, text and math shares: DeepSeek-Coder's 87% code, 10% code-related English and 3% code-unrelated Chinese (arXiv
+# 2401.14196 §2: "87% source code, 10% English code-related natural language corpus, and 3% code-unrelated Chinese
+# natural language corpus"), the natural language here web text and mathematics [inference]
 CODE_SHARE = 0.87
 NON_CODE = ("text", "math")
 REPOSITORY_SOURCES = ("stack_edu_python", "ultradata_stack_v3_l2_python", "ultradata_code_l2_python",

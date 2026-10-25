@@ -4,8 +4,8 @@ crate's pack, one curated shard per call (Best-Fit-Decreasing, every piece its o
 cut between whole statements; docs/corpus.md §7.1), with fill-in-the-middle examples in repository code's train
 splits (§6). Per corpus and stage, <split>-T<seq_len>.pieces, .rows and .fim beside its compiled split (loader.py).
 
-A stage's train packs hold exactly the rows the base model's pre-training run reads (mixture.py STEPS), so no document
-is read twice:
+A stage's train packs hold at least the rows the base model's pre-training run reads (mixture.py STEPS), each document
+at most once:
 - file stage: the repository sources' partitions before the repository stage's (compile.repository_parts) and the
   supply sources, whole; a source read in part (mixture.IN_PART), its leading shards;
 - repository stage: the repositories corpora and Codeforces-CoTs, whole; ClimbMix and UltraData-Math L3, the shards
