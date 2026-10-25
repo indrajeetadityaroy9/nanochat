@@ -295,6 +295,12 @@ arms at ×2.797, seeds 0 and 1, each seed's arms one concurrent pair, parse eval
 seed-mean code bpb at 8K and 32K is not worse, otherwise plain Muon. The kernel loss checks ran at ×1 too (the
 harness's default; C3's reference l_cpb included), so the pending postact and C3 checks run at ×2.797 against one
 shared base curve.
+Superseded (user): NorMuon alone, adopted on the literature (upstream karpathy/nanochat dev/LOG.md 2026-01-10:
+Polar Express in the noise, NorMuon a very small improvement, kept) and one d24 stability check; the 2-seed A/B was
+cancelled and Polar Express dropped. d24 (200 steps, ×2.797, seed 0, 8K, alone) vs master + postact: last-20 loss
+2.2946 vs 2.2967, max grad norm after step 40 1.153 vs 1.387, no loss spike, 358,929 vs 359,229 tok/s (−0.08%),
+peak equal (77.5 GiB); landed as Muon's only path. The ×1 stack at seed 1 vs base s1: paired Δ +0.0008 over the
+last 50% (22/22 windows positive), code bpb 0.4381 / 0.4196 vs 0.4380 / 0.4196.
 
 ### 5.16 Decoder at d24 (DecoderD24, DecoderOwner) — final tree measured, d16 evaluation pending
 Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise. Profile (1,024
