@@ -160,10 +160,10 @@ static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, i
 
 /* ---------------------------------------------------------------------------------------------------------------- */
 /* GEMV of B slots on the tensor cores: out[b][r] = W[r] . x[b] by mma.sync m16n8k16 (bf16 operands, fp32 accumulators).
- * A block is one warp: one MMA_M-row tile of W and one group of GROUP_SLOTS slots, the grid's x the group (fastest, so
- * a row tile's groups run together and read its weights from L2 after the first), y the row tile; a group without an
- * active slot exits. Many small blocks keep every SM loading (flat GEMMs with few rows are parallelism-bound:
- * FlashDecoding++, arXiv 2311.01282, §4). A slot is one column of an n tile, and each output's sum
+ * A block is one warp: one MMA_M-row tile of W and one group of GROUP_SLOTS slots, the grid's x the group (the
+ * fastest-varying index, so a row tile's groups run together and read its weights from L2 after the first), y the row
+ * tile; a group without an active slot exits. Many small blocks keep every SM loading (flat GEMMs with few rows are
+ * parallelism-bound: FlashDecoding++, arXiv 2311.01282, §4). A slot is one column of an n tile, and each output's sum
  * runs over K in a fixed order (K_BLOCK blocks, two k16 MMAs each), so a slot's outputs do not depend on B. In a
  * K_BLOCK block lane (g, t) = (groupID, threadID_in_group) loads k t*VEC.. of rows g, g + 8 and of its column's input
  * (one 16-byte load each); A and B map MMA k to physical k alike, so the product is W . x. The warp keeps DEPTH blocks
