@@ -17,10 +17,10 @@ from pathlib import Path
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
+import metrics
 from corpus.tokenizer import get_tokenizer
 from model.gpt import GPT, non_embedding_flops_per_token
 from model.ops.cross_entropy import step_shares
-from train import metrics
 from train.checkpoint import checkpoint_path, save_checkpoint
 from train.optim import MAX_NORM, optimizers, tau_weight_decay, update
 from train.schedule import RunPlan, lr_multiplier

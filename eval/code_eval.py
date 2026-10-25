@@ -74,6 +74,7 @@ from corpus.tokenizer import Tokenizer
 from eval.verify import chosen, search, solution_diagnostics
 from inference.decoder import AllOf, NativeDecoder, Request, fim_prompt, heal
 from inference.syntax_constraint import SyntaxConstraint
+from metrics import parse_outcome, parse_shares
 from model.gpt import GPT
 
 # HF dataset revisions
@@ -389,26 +390,10 @@ def generation(model: GPT, tokenizer: Tokenizer, benchmarks: dict[str, list[Task
     return results
 
 
-def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
-    """How a program fails to compile: IndentationError (TabError among them) checked before any other SyntaxError,
-    the classification of TokEval's companion post (cimeister.github.io/blog/code_tokenizer_ablations, "How the failing
-    generations fail"; linked from arXiv 2608.18062 App. F.3, footnote 15); the parser's overflow (MemoryError,
-    RecursionError) is a SyntaxError, as syntax_constraint.syntax_error counts it."""
-    with warnings.catch_warnings(action="ignore"):
-        try:
-            compile(source, "<completion>", "exec")
-        except IndentationError:
-            return "indentation"
-        except (SyntaxError, MemoryError, RecursionError):
-            return "syntax"
-    return "parses"
-
-
 def parse_scores(pool: ProcessPoolExecutor, name: str, items: list[Task], completions: list[str],
                  outcomes: list[str]) -> dict:
-    """parse_generation's record of a benchmark's completions and their parse_outcome outcomes."""
-    shares = {kind: outcomes.count(kind) / len(outcomes) for kind in ("parses", "indentation", "syntax")}
-    return (shares | evalplus(pool, name, items, [[c] for c in completions])
+    """parse_generation's record of a benchmark's completions and their metrics.parse_outcome outcomes."""
+    return (parse_shares(outcomes) | evalplus(pool, name, items, [[c] for c in completions])
             | {"outcomes": outcomes, "completions": completions})
 
 

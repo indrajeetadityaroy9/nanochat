@@ -1,20 +1,18 @@
 """
-Likelihood metrics of a checkpoint in bits per byte (BPB): summed next-token loss in bits (nats / ln 2) over the
-summed UTF-8 bytes of the targets (The Pile's bits per UTF-8 byte, arXiv 2101.00027 §3.1; tokenizer-independent, so
-models and vocabularies compare), targets of 0 bytes (special tokens, padding) excluded from both (karpathy/nanochat
-evaluate_bpb, nanochat/loss_eval.py).
+Likelihood metrics of a checkpoint in bits per byte (metrics.bpb, metrics.mixture_bpb), targets of 0 bytes (special
+tokens, padding) excluded from both sums (karpathy/nanochat evaluate_bpb, nanochat/loss_eval.py).
 - val_bits: each training corpus's held-out val split, the test loss of autoregressive training (arXiv 2207.14255
   §2: its "AR loss"; "AR test loss", §1.1), per context bucket (CONTEXTS: Code Llama's loss as a function of context
   length, arXiv 2308.12950 §3.3, Fig. 4a), per corpus, per group (code, text, math) and overall, pooled by the stage's
-  mixture weights (mixture_bpb), as The Pile reports its BPB per component and over the whole.
+  mixture weights, as The Pile reports its BPB per component and over the whole.
 - solution_bits: each benchmark's reference solutions given their prompts, the task loss of arXiv 2412.04403 §2.2
   (the correct answer's bits per byte; its tasks multiple-choice, without pass@1), a predictor of pass@1 at scales
   where pass@1 is near zero (DataDecide, arXiv 2504.11393 §3.4, Fig. 6: the correct answer's probability makes
   HumanEval and MBPP decisions predictable where accuracy is trivial; arXiv 2508.13144 §5.3: BPB raises the
   signal-to-noise ratio of most benchmarks; arXiv 2604.07769 §3.3.1, Table 2: the loss on a benchmark's problems and
   reference solutions, its "valid-loss", tracks pass@1 where held-out corpus loss does not).
-Each returns the bits and bytes sums per context bucket, so corpora, buckets and benchmarks pool exactly (bpb,
-mixture_bpb). Sums are fp64 on the device, reduced in a fixed order.
+Each returns the bits and bytes sums per context bucket, so corpora, buckets and benchmarks pool exactly. Sums are fp64
+on the device, reduced in a fixed order.
 """
 import math
 import re
@@ -29,6 +27,7 @@ from corpus.layout import packed_rows, stage_rows
 from corpus.loader import PretrainingBatches
 from corpus.mixture import FILE_STAGE, NON_CODE, REPO_STAGE, Stage
 from corpus.tokenizer import Tokenizer
+from metrics import mixture_bpb
 from model.gpt import GPT
 
 # Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the
@@ -79,19 +78,6 @@ def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, step
     (bits, nbytes), (offset_bits, offset_nbytes) = total.cpu().numpy(), offset_total.cpu().numpy()
     return {"bits": (bits / math.log(2)).tolist(), "bytes": nbytes.tolist(),
             "offset_bits": (offset_bits / math.log(2)).tolist(), "offset_bytes": offset_nbytes.tolist()}
-
-
-def bpb(*pooled: dict) -> float:
-    """Bits per byte of sums (sums) pooled over their context buckets and over every argument."""
-    return sum(sum(s["bits"]) for s in pooled) / sum(sum(s["bytes"]) for s in pooled)
-
-
-def mixture_bpb(corpora: dict, weights: dict[str, float], *, buckets: slice = slice(None)) -> float:
-    """Bits per byte of val rows drawn with row weights {corpus: weight}: weighted bits per row over weighted bytes per
-    row of corpora {corpus: {"bits", "bytes", "rows"}}, over the context buckets `buckets` (all by default)."""
-    bits = sum(w * sum(corpora[c]["bits"][buckets]) / corpora[c]["rows"] for c, w in weights.items())
-    nbytes = sum(w * sum(corpora[c]["bytes"][buckets]) / corpora[c]["rows"] for c, w in weights.items())
-    return bits / nbytes
 
 
 def sample_rows(stage: Stage) -> int:

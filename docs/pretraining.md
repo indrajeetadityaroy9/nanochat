@@ -179,7 +179,7 @@ the tokenizer ablation's in `docs/tokenizer-ablation.md`.
   recipes, a single proxy 7× below the target picks the target's better of two in about 80% of pairs (DataDecide,
   arXiv 2504.11393 Abstract, §3.1), and a continuous correct-answer likelihood makes code benchmarks predictable
   where accuracy is not (its §3.4, Fig. 6). Architecture rankings can change with scale (arXiv 2207.10551).
-- **Measures** (`ablations/records.py measures`, bits per byte unless stated): *code*, 8K validation of the code
+- **Measures** (`metrics.measures`, bits per byte unless stated): *code*, 8K validation of the code
   group at its corpus weights, the decision measure; *solutions*, the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled; *repo_32k* and *repo_beyond_8k*, the 32K repository rows and their targets
   beyond 8,192; *text*, *math*; *unparsed*, *indentation*, *syntax*, the shares of HumanEval+ and MBPP+ problems whose
@@ -195,7 +195,7 @@ the tokenizer ablation's in `docs/tokenizer-ablation.md`.
 
 A run's key (`run.key`) is its `RunConfig` fields that differ from the defaults, sorted, `k=v` joined by `,`
 (e.g. `depth=16,seed=1,tokenizer=sa-bpe`; `defaults` if none), so a run two experiments share is one run. Per run, in
-`artifacts/runs/<key>/`: `.hydra/` (the composed config), `metrics.jsonl` (`train/metrics.py`: every step and attempt;
+`artifacts/runs/<key>/`: `.hydra/` (the composed config), `metrics.jsonl` (`metrics.py`: every step and attempt;
 the run record holds the model config, the `RunConfig` as `config`, the tokenizer's `data_key`, parameters, FLOPs per
 token, the clip threshold, the plan, lr and weight decay per group; the end record the peak memory; a failure record
 the step a run diverged at), `step<N>.pt`, `eval-step<N>.json` (`eval/suite.py evaluate`) and `run.log`. A rerun
@@ -371,8 +371,8 @@ Every metric is a published one, computed as its source computes it. `eval/suite
 the base model's checkpoints take everything (`generate="benchmarks"`), the ablation runs the likelihood metrics and
 the parse measure (`generate="parse"`).
 
-**Likelihood metrics** (`eval/bpb.py`), in bits per byte (The Pile, arXiv 2101.00027: summed bits over summed UTF-8
-bytes, tokenizer-independent):
+**Likelihood metrics** (`eval/bpb.py`, by `metrics.bpb`), in bits per byte (The Pile, arXiv 2101.00027: summed bits
+over summed UTF-8 bytes, tokenizer-independent):
 
 - *Held-out corpora:* each training corpus's val split at 8K and at 32K, per context bucket (≤ 8K, > 8K: Code Llama's
   perplexity by context length, arXiv 2308.12950 §3.3, Fig. 4a) and per byte-offset bucket (doublings from 1 KiB to
@@ -475,14 +475,16 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
 ## Layout
 
 - `run.py`, `conf/`: the run app (Ablations).
+- `metrics.py`: the run log (`metrics.jsonl`) and every metric: bits per byte, parse outcomes, a run's compared
+  measures; torch-free, imported by training, evaluation and the ablations.
 - `paths.py`: the checkout's layout (`artifacts/`, `results/`). `native.py`: builds and loads the CUDA kernels and the
   Rust crates.
 - `model/`: `gpt.py` (the model, scaling parameters and FLOPs per token), `config.py` (vocabulary, head width, RoPE
   base), `ops/` and `kernels/` (the ops above and the decoder).
 - `train/`: `loop.py` (setup, resume, the steps, checkpoints and records), `optim.py` (optimizers, weight
   decay, gradient clip), `schedule.py` (plan, each step's stage, lr multiplier), `stages.py` (`max_ratio`, each stage's
-  micro-batches in the run's order), `checkpoint.py`, `metrics.py`.
-- `eval/`: the checkpoint's evaluation (`suite.py`), the likelihood metrics (`bpb.py`), the code benchmarks
+  micro-batches in the run's order), `checkpoint.py`.
+- `eval/`: the checkpoint's evaluation (`suite.py`), the likelihood sums (`bpb.py`), the code benchmarks
   (`code_eval.py`) and the post-generation checks (`verify.py`).
 - `inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).

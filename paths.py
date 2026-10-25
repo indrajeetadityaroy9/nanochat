@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 ARTIFACTS = ROOT / "artifacts"
 CORPUS = ARTIFACTS / "corpus"    # the corpus pipeline's stages (corpus/__init__.py)
-# RUNS/<key>/ per run (run.py): .hydra/, metrics.jsonl (train/metrics.py), step<step>.pt
+# RUNS/<key>/ per run (run.py): .hydra/, metrics.jsonl (metrics.py), step<step>.pt
 # (train/checkpoint.py), eval-step<step>.json (eval/suite.py evaluate), run.log (its phases' output)
 RUNS = ARTIFACTS / "runs"
 # native libraries and their build directories (native.py), beside docker/Dockerfile's compiler caches in

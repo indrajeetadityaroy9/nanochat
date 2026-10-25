@@ -8,7 +8,7 @@ ablations/records.py writes once every job has ended; the first failed job stops
 
 A run's key (key) names its directory RUNS/<key> (paths.py), so a run two experiments share is one run. Its
 job (job): the stale guard, which raises when a recorded run record's plan or vocabulary data key is not the current
-one; then the run is skipped if its final checkpoint's evaluation exists or it diverged (train/metrics.py failure: a
+one; then the run is skipped if its final checkpoint's evaluation exists or it diverged (metrics.py failure: a
 non-finite loss or gradient norm, an outcome of a lr sweep's high end, arXiv 2309.14322 §3.1); else training, then
 each checkpoint's evaluation, each in a fresh process (torch.compile's recompile limit and the CUDA caching
 allocator's reservations are per process), their output appended to RUNS/<key>/run.log. A training process that fails
@@ -33,9 +33,9 @@ import hydra
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
+import metrics
 from corpus.tokenizer import ABLATION, TOKENIZER, get_tokenizer
 from paths import RESULTS, ROOT, RUNS
-from train import metrics
 
 if TYPE_CHECKING:
     from train.schedule import RunPlan

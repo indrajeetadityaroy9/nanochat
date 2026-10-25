@@ -7,7 +7,7 @@ completions parse (eval/code_eval.py parse_generation: "parse") and, with genera
 benchmarks (eval/code_eval.py: "codegen", "fim"; null with generate "parse", the ablation runs' evaluation). NaN and
 infinities are not JSON and raise.
 
-record: a run's records but the per-step ones (train/metrics.py: run, stage, end, failure) and the evaluations of its
+record: a run's records but the per-step ones (metrics.py: run, stage, end, failure) and the evaluations of its
 checkpoints verbatim, in step order; an experiment's RESULTS/<experiment>.jsonl holds one per run
 (ablations/records.py).
 """
@@ -18,12 +18,12 @@ from typing import Literal
 
 import torch
 
+import metrics
 from corpus.tokenizer import Tokenizer
 from eval.bpb import likelihood
 from eval.code_eval import fim_generation, generation, parse_generation, sanitizers, tasks
 from model.gpt import GPT
 from paths import RUNS
-from train import metrics
 
 
 def evaluation_path(tag: str, step: int) -> Path:
