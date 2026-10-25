@@ -137,8 +137,11 @@ at a row offset: KL 1.8e-4); HumanEval+ 0.067/0.067 vs NativeDecoder 0.061/0.061
 0.045/0.037, FIM single-line PSM/SPM line EM 0.0223/0.368 vs 0.0223/0.367. Throughput on the d16 request sets:
 NativeDecoder 175 s vs vLLM 312 s (vLLM host-bound at 19% GPU); fixed-length decode (2,048 requests × 512 tokens):
 d16 NativeDecoder 66.5K vs vLLM 31.0K tok/s, d24 21.8K vs 23.1K. Conclusion: NativeDecoder stays the evaluation
-engine at d16; at d24 both are far below the KV-read roofline (~100–200K tok/s [estimate]) — see §5.16. Commits
-`3c03023`, `971b1b8`, `ac2b997`, `4214ae9`, `505dbc0`, `c38ed0c`.
+engine at d16; at d24 both are far below the KV-read roofline (~100–200K tok/s [estimate]) — see §5.16. Standard
+protocol through the unmodified CLIs (`evalplus.codegen --backend vllm --greedy` + `evalplus.evaluate`, d16):
+HumanEval+ 0.067/0.067, MBPP+ 0.053/0.042; the MultiPL-E half is deferred to the d24 checkpoints. Workarounds in the
+model code only: RoPE rotated in fp32 by the model itself (−θ), `sliding_window` 513, token ids passed to every layer
+for the value embeddings. Commits `3c03023`, `971b1b8`, `ac2b997`, `4214ae9`, `505dbc0`, `c38ed0c` through `ec1c841`.
 
 ### 5.9 Pipelined evaluation (EvalOverlap)
 Outputs: full d16 benchmarks evaluation 1,472 → 1,064 s (−28%), GPU idle 57.4% → 34.2%, scoring time with no GPU work
@@ -203,6 +206,13 @@ FP8 KV decode — 1×128 tile scales, RoPE dimensions kept in bf16, dequantizati
 distributed shared memory (DecoderD24); TileLang's SM90 producer-consumer pipelines, persistent tile scheduler,
 variable-length block-causal attention and TMA gather/scatter (AttnKernel's window kernel, VeCeKernel's
 value-embedding gather/scatter). Not applicable: DeepEP (expert-parallel communication; one GPU, dense model).
+TileKernels (DeepSeek's TileLang kernels used in its training): the Engram gate — a persistent kernel fusing two
+RMSNorms, the gate and the mix, in place, saving only per-token gate values — and its weight-gradient reduction (fp32
+partials per persistent block, one reduce accumulating into `.grad`, no atomics) are the designs for the value-
+embedding gate and its backward (VeCeKernel); the mHC norm kernels (partial sums of squares from the producing
+kernel, a small reduce finishing the RMS statistics forward and backward) the design for removing the norm pass
+(NormFusion); programmatic dependent launch on every kernel. Implemented in CUDA C++ (user: all implementations in
+CUDA), the TileLang sources serving as reference.
 
 ### 5.18 Earlier executions (summary)
 - **Metrics** (MetricsValidation): edit similarity by difflib as cceval (rapidfuzz, thefuzz and torchmetrics disagree
