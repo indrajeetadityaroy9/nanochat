@@ -62,7 +62,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | EvalPlus scoring | no 20 s exit stall per call, all cores: HumanEval+ 22.5 → 9.6 s, MBPP+ 28.0 → 12.6 s | `b8057ff` |
 | SecondAudit (independent second audit of `ablations/`) | 8 findings, all fixed: F3 (P1), F7 `data()` packed sa-bpe's repositories before compiling them, F5 `adopt` failed over the provisional tokenizer, F1, F2, F4, F6 (softcap `lm_loss` in two buffers, 43.81 → 38.03 GiB), F8 | `b9769a8`, `7292351`, `9e40df4`, `b9da1da` |
 | Second-pass KISS audit | model/ops/kernels and train/run app/configs (shared `pointer`/`stream`, unused kernel instantiations and fields removed, stale comments and citations fixed; smokes on real packs); syntax crate; corpus crate; every corpus docstring and comment cut to what the implementation needs; `decoder.py`'s docstrings. Comment sweep of all the project's code (user): comments and docstrings state only functionality and exact references; no machine-specific wording, measured timings, decision or review ids, or pointers to the repository's docs; restatements and history cut. Comments only: SASS identical, crates build, every module imports | `b9da1da`, `5cea003`, `608530c`, `a20d12a`, `2b43ad4`, `e95f82a`, `7520800`, `350c207`, `88c151e`, `0e09b5d`, `97be219`, `43f1969`, `9df1d1e`, `7841011`, `88b0af2`, `c9d487f`, `e60e45e` |
-| Docs consolidation | the docs from the final code, §5's corrections applied, untraceable numbers marked [unverified]; layout `docs/pretraining.md` (with the GH200 runbook), `docs/corpus.md`, `docs/tokenizer-ablation.md` | `fc6b9e9`, `54fc1bd` |
+| Docs consolidation | the docs from the final code, §5's corrections applied, untraceable numbers marked [unverified]; layout `docs/pretraining.md` (with the GH200 runbook), `docs/corpus.md`, `docs/tokenizer-ablation.md` (now `docs/ablations.md`, every ablation) | `fc6b9e9`, `54fc1bd` |
 | Provisional corpus tokenizer | sa-bpe copied to `CORPUS/tokenizer`, compiled and packed (`cp-pack` exit 0): 8K stage 19,349,569 rows, 32K stage repository partitions 95..99. Fit check: d24 `max_ratio` 526.13 → 69,611 steps of 15 micro-batches, repo_start 65,814, law lr 8.629e-4: the base plan fits. `adopt` overwrites; data keyed by the tokenizer's data key | artifacts |
 | Evaluation re-check | b8057ff's EvalPlus scoring and 247067d's parse-scoring overlap, each against its parent under `stack=67108864:-1` on a d16 checkpoint's completions (even tasks given the canonical solution, so statuses mix): identical per task. HumanEval+ base 82/82 pass/fail, plus 81/83 (pass@1 0.5, 0.4939); MBPP+ 188/190 both (0.4974). Smoke statuses from the old `stack=67108864` template (all "timeout") are invalid; `scripts/container.sh` was always right | none |
 | Corpus code structure | `layout.py` (torch-free on-disk layout), `weights`/`mixture_rows` in `mixture.py`, torch imported lazily in `native.py`: compile, pack, curate and the tokenizer ablation load no torch; one `sources.repository_samples` and `sample_starts`, `repository_tasks`, `footer_rows`, `weights` returning its draws; `Tokenizer.name` removed, `data_crate` → `corpus_crate`; `docs/corpus.md` §2 `lower(repo_name)`, §4 invariants by construction. Outputs identical to the previous HEAD on real shards (curate, compile, pack, weights, max_ratio, micro-batches CPU and CUDA) | `88c151e` |
@@ -77,7 +77,11 @@ approval; proof-of-concept runs for development and verification are allowed, on
 
 | Item | Next action | Waits on |
 |---|---|---|
-| Metrics and hardware efficiency (user: ICML 2026 standard; `metrics.py` the only source of metrics; libraries such as torchmetrics and TokEval; FLOPs/MFU and token metrics, no energy metrics; DeepSeek-Coder and survey metrics; GitHub implementations as guidance) | research (evaluation harnesses, decoding, training kernels, metric libraries), then design, consolidate `metrics.py` (`local://METRICS-AUDIT.md`: duplicates, dead `offset_bits`), apply the efficiency changes. Measured: the benchmarks evaluation idles the GPU while `human_eval_infilling` scores with its default 4 workers on 64 cores; d8 training ≈ 67% of BF16 peak by DeepSeek's M | the research agents |
+| Metrics (user: ICML 2026 standard; `metrics.py` the only source; libraries first; FLOPs/MFU, token and latency metrics, no energy; DeepSeek-Coder and survey metrics; TokEval) | integrate the eval/inference call sites (infilling exact match, edit similarity, identifier match with clustered errors; pass@10; latency; per-row bpb errors; offset curve), end-to-end d8 sweep with Records, commit. Done uncommitted: `metrics.py` (error bars by statsmodels/scipy, CrossCodeEval scores identical to cceval on 30,794 real strings, executed and nominal MFU, TokEval section), run log read once, loop records (d8 executed MFU 0.290 at 8K, matching the independent 0.291), TokEval in the intrinsic record (identical to the reference on all 135 values per arm), image with statsmodels 0.15.0, TokEval 7d03a61, tree-sitter-language-pack 1.22.1 | EvalInferenceMetrics |
+| Training step without host synchronizations | `/home/ubuntu/eqv/RefModelTrain/proto/train/loop.py`: loss and gradient norm read one step late from a pinned buffer, step time by CUDA events; bitwise identical in deterministic mode; +3.4% at d8 measured under contention (unmeasured alone); merge onto the new loop records | the metrics commit |
+| Decoder prefill | prompts run one token per decode step: 37% of HumanEval+ greedy positions, TTFT ≈ prompt length × TPOT (CrossCodeEval prompts: ~96% of steps); DecoderPerf's batched prefill and prologue hoist (`/home/ubuntu/eqv/DecoderPerf/{repo,hoist,big}`) compile, not run; tokens should stay bitwise identical (each slot computed alone) | the decode.cu prompt-store fix landing |
+| Constrained decoding idle | filtered passes leave the GPU idle ~45% (each step's masks computed between its body and head; `ast.parse` BOS checks serial): overlap the masks with the head, BOS checks in a process pool | after the metrics commit |
+| Scoring overlapped with generation | scoring phases are GPU-idle (d16: EvalPlus 85 s, MultiPL-E 263 s of a 969 s codegen half); EvalPipeline's pipelined prototype (`/home/ubuntu/eqv/EvalPipeline/proto.diff`) not run; risk: the timed checks (3 s examples, 15 s compiles) under concurrent CPU load | after the metrics commit |
 | Ablation queue | ready at HEAD (`860ac7b`; end-to-end d8 runs through `run.py` at `9ea5037` and `860ac7b`: exit 0, code bpb 2.7012 and 2.7013 against 2.7011 at `d0a2ec0`): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, tokenize, pack → D6 | the user's explicit permission |
 | D7 Muon τ | `muon_wd_timescale_20tpp.yaml` (d8 at 20, sa-bpe set, 2 seeds: user, 4 judged wasteful) and `muon_wd_timescale_200tpp.yaml` (d8 at 200 reads 2.94B tokens, beyond the sa-bpe set's 2.11B: `tokenizer=corpus`, whose packs exist, 2 seeds); ×½, ×1, ×2; 12 runs | user approval |
 | D5 softcap | `logit_softcap.yaml`: d16 at tokens_per_param 20.0 on the sa-bpe set, learning_rate_scale 2.7972 (the D1-rebased base multiplier at `mixture.MAX_STEPS`' tokens), final_logit_softcapping 15 vs none, 4 seeds | user approval |
@@ -155,7 +159,7 @@ reference's own spread, CUDA SASS/PTX identical, no interface or record-format c
 ## 5. Documentation (after the code is final)
 
 Done (`fc6b9e9`, `54fc1bd`): `docs/pretraining.md` (the GH200 runbook merged in), `docs/corpus.md` and
-`docs/tokenizer-ablation.md` from the final code: cutover done, `data` step, DeepSeek-Coder terminology. Corrections from
+`docs/tokenizer-ablation.md` (now `docs/ablations.md`) from the final code: cutover done, `data` step, DeepSeek-Coder terminology. Corrections from
 ArchitectureCheck (no code effect):
 - wrong locations: MobileLLM 32×960 is Table 9; nanochat Muon 0.02 at 92 `gpt.py:419/450`, √ factor at `optim.py:393`;
   zero-init lm_head is modded-nanogpt record #8; Power Lines constants in App. E.3.1; DataDecide's ~80% in the abstract
@@ -182,7 +186,7 @@ dataset holds the 1,812 shards, the regenerated card and `.gitattributes` (commi
 
 ## 7. Tokenizer ablation (`data` done, `679e7d9`; runs wait for the user's approval)
 
-`python -m ablations.tokenizer data` (the d16 set compiled and packed under every arm,
+`python -m ablations.tokenizer_split_merge data` (the d16 set compiled and packed under every arm,
 `results/tokenizer_split_merge-data.json`), then `python run.py experiment=tokenizer_split_merge` (8 d16 runs: 4 arms ×
 seeds 0 and 1; the decision in `results/tokenizer_split_merge.json`), then `adopt`, compile, pack, pre-training
 (`python run.py experiment=pretrain`).
@@ -228,7 +232,7 @@ Gemma 3 and OLMo 2 learn it; per-head QK norm with learnable parameters in arXiv
   (modded-nanogpt record #9 −0.0053 nats at cap 30; nanochat LOG 2026-03-02: caps 10-30 within 1e-3).
 - Design: d16 at 20, cap 15 vs none, 4 paired seeds; adopt iff code bpb better by > 1.96·0.0034·√(2/4) = 0.0047 and
   MBPP+ not worse (sign test); ~9 GPU-h. `RunConfig.softcap` (`GPTConfig.softcap`: c·tanh(z/c) in the training loss,
-  eval losses, decoder sampling), `conf/experiment/logit_softcap.yaml`, analysis in `ablations/recipe.py`. Runs on the
+  eval losses, decoder sampling), `conf/experiment/logit_softcap.yaml`, analysis in `ablations/logit_softcap.py`. Runs on the
   sa-bpe arm's data (its d16 max_ratio is 31.42) at lr_scale 2.7972 (peak_lr.py's base multiplier under D1), since the
   corpus tokenizer does not exist before the tokenizer ablation's adopt.
 
@@ -245,7 +249,7 @@ do not (no Muon fit; doubling Muon's decay cost 0.010-0.019 loss in arXiv 2509.0
 data, then `muon_wd_timescale_200tpp.yaml` on the corpus's packs, as d8 at 200 reads 2.94B tokens, beyond the arm's set) ×½ and ×2 on Muon
 matrices only, d8 at 20 and at 200, 2 seeds each (user: 4 seeds at 20 judged wasteful; the code margin widens from
 0.0047 to 0.0067, so a smaller effect keeps the law); keep the law unless an arm clears its margin, else fit Muon's
-own law through the two horizons (`ablations/recipe.py` `muon_wd_timescale_law`); ~2.8 GPU-h.
+own law through the two horizons (`ablations/muon_wd_timescale.py` `law`); ~2.8 GPU-h.
 
 ### D9 RoPE base (ArchitectureAnswers): answered; keep 10^6 from the start
 Barbero et al. (arXiv 2410.06205 Table 2) Gemma 2B at 8K, 10k vs 500k: differences under 0.3%, mixed sign; Llama 3,
