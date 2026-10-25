@@ -95,6 +95,11 @@ two MPS clients 825.0K (+2.0%). Under MPS an illegal memory access in one client
 assert does not); time-sliced processes stay isolated. So throughput is measured with the GPU alone, stable non-timing
 jobs (loss runs, evaluations) share it as MPS clients within a memory budget, and new kernels' first runs stay
 time-sliced.
+Two operational lessons (Oct 25): a job's declared memory must cover its evaluation phase (the decoder takes
+NANOCHAT_DECODER_MEMORY_FRACTION of the GPU), or co-running jobs over-commit it (two out-of-memory failures, one in
+the decoder's cudaMalloc at the end of a screen run); and the compiled training forward and FA4 compile once per
+distinct sequence length, so checks that run the forward prompt by prompt pad to one length (an agreement check spent
+47 min compiling).
 
 ## 5. Execution log
 
@@ -231,28 +236,35 @@ utilization 57% → 64–69%: separate cast passes and the transposed FP8 copies
 which at K = 768 outweigh the faster GEMMs); +8–10 GB from TE saving both the bf16 fc1 output and FP8 transposes;
 likely lost Inductor fusion around TE's graph breaks [inference]. Conclusion: FP8 does not pay at this model size.
 
-### 5.15 Optimizer screen (OptScreen) — in progress
+### 5.15 Optimizer screen (OptScreen, OptAdopt) — NorMuon passes, Polar Express's evaluation pending
 d16 at 20 tokens/param, 1 seed each (user-approved), each arm paired with base seed 0 (same data order). Outputs: base
 s0 matches the FimFix run within mean |Δloss| 0.0015 (median 832,695 tok/s); s1 − s0 last-200 train loss −0.0076, code
-bpb −0.0014 (8K) / −0.0016 (32K). NorMuon (arXiv 2510.05491): paired Δ train loss −0.0027 at 50% and −0.0030 at 75%,
-negative since step ~500 against paired noise ~0.001; stopped at 75% by an early-stop rule that used the seed spread
-instead of the paired noise, now rerun to the end. Cautious weight decay (arXiv 2510.12402): lower loss mid-run
-(−0.022 near 50%), worse at the end (last-200 +0.0108, code bpb +0.0023 / +0.0043; HumanEval+ 0.073/0.067 and MBPP+
-0.090/0.077 vs 0.067/0.055 and 0.074/0.061, within noise): closed (the paper finds the best λ unchanged under CWD).
-d16 tok/s: base 828.8K, NorMuon 827.5K (−0.15%), Polar Express (arXiv 2505.16932) 825.9K (−0.35%), CWD 818.5K
-(−1.25%). All three set modded-nanogpt records (NorMuon −15 steps, Polar Express −10 steps, CWD with an lr-tied
-schedule). Open: Polar Express and the NorMuon rerun (an MPS pair), then the stack of adopted arms.
+bpb −0.0014 (8K) / −0.0016 (32K), paired Δ over the last 50% −0.0052. Same-configuration noise (NorMuon's stopped run
+vs its rerun, 3,450 common steps): 100-step window means sd 0.0005, max |Δ| 0.0010. NorMuon (arXiv 2510.05491), full
+rerun: last-200 loss 1.3223 vs 1.3244, paired Δ over the last 50% −0.0029 with all 23 windows negative, code bpb
+0.4385 / 0.4205 vs 0.4394 / 0.4212 (8K / 32K), all bpb 0.5210 / 0.5079 vs 0.5219 / 0.5087: passes the adoption rule
+(paired Δ ≤ −2× the paired noise, end bpb not worse). Polar Express (arXiv 2505.16932): last-200 loss 1.3217, paired
+Δ −0.0019, all 23 windows negative; its end-of-run evaluation ran out of GPU memory beside co-running jobs and is
+rerun from the checkpoint. Both arms' effects are smaller than the seed-to-seed difference (−0.0052; bpb −0.0014 /
+−0.0016), so with one seed each the evidence agrees with the published gains without being significant on its own.
+Cautious weight decay (arXiv 2510.12402): lower loss mid-run (−0.022 near 50%), worse at the end (last-200 +0.0108,
+code bpb +0.0023 / +0.0043; HumanEval+ 0.073/0.067 and MBPP+ 0.090/0.077 vs 0.067/0.055 and 0.074/0.061, within
+noise): closed (the paper finds the best λ unchanged under CWD). d16 tok/s: base 828.8K, NorMuon 827.5K (−0.15%),
+Polar Express 825.9K (−0.35%), CWD 818.5K (−1.25%). All three set modded-nanogpt records (NorMuon −15 steps, Polar
+Express −10 steps, CWD with an lr-tied schedule). Open: Polar Express's evaluation, the stack if both pass, and the
+landing of the adopted arms as the only implementation.
 
-### 5.16 Decoder at d24 (DecoderD24) — measured, not yet committed
+### 5.16 Decoder at d24 (DecoderD24, DecoderOwner) — measured, acceptance pending
 Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise. Profile (1,024
 slots, positions 256–320): GEMV ~22 of a ~35 ms step (each 16-slot group re-read the weights from L2), attention ~7.8
 ms. Changes: a TMA-fed WGMMA GEMM over the slots keeping every epilogue (greedy and sampled choice, syntax masks, the
-BOS alternative), asynchronous key loads in attention, PDL, an e4m3 KV cache with one fp32 scale per position and
-head. d24 random init, 1,024 slots, prompt 256, 512 steps: main 34.8 ms/step, 29.4K tok/s (prefill 5.89 s) → bf16
-WGMMA 16.5 ms, 62.1K (1.68 s) → FP8 KV 11.83 ms, 86.6K (1.47 s); PDL neutral at 1,024 slots, ~2% at 1–16 slots. At
-FP8, attention is 6.4 ms (FP8 unpacking on CUDA cores, ~1.7 TB/s), GEMMs 2.4 ms. FP8 KV costs ≤ 1–2 points of pass@1
-with per-tensor scales (vLLM, 2026), small sliding-window layers being the known exception. Open: agreement per layer
-type, the benchmark, the d16 evaluation, the commit.
+BOS alternative; 128-row × 128-slot tiles when they cover every SM, else 64 × 64), an e4m3 KV cache with one fp32
+scale per position and head, attention streaming each slot's window through shared memory with the scores on tensor
+cores (f16, exact for e4m3 keys and the bf16 q), PDL; the GEMV and mma.sync GEMMs, the split attention and the ≤ 16-slot
+graphs deleted. d24 random init, 1,024 slots, prompt 256, 512 steps: main 34.8 ms/step, 29.4K tok/s (prefill 5.89 s)
+→ bf16 KV + WGMMA 16.5 ms, 62.1K (1.68 s) → FP8 KV 10.85 ms, 94.4K (1.39 s) → scores on tensor cores 9.67 ms, 105.9K
+(1.32 s), 3.6×. FP8 KV costs ≤ 1–2 points of pass@1 with per-tensor scales (vLLM, 2026). Open: agreement with the
+training forward and the d16 evaluation (FP8 kept if both are within noise of main, else the bf16-KV tree), the commit.
 
 ### 5.17 DeepSeek's open kernel libraries as guidance (user-provided repositories)
 Sources: DeepGEMM, FlashMLA (Hopper deep-dive at commit `ba89a34`; the 2026.09.30 release dropped Hopper), DeepEP,
@@ -277,6 +289,11 @@ CUDA), the TileLang sources serving as reference.
 The user made DeepGEMM and TileKernels the reference for all kernel work (Oct 25; clones at DeepGEMM `5081f85`,
 TileKernels `c1cf914`): DeepGemmStudy owns the GEMM area (§5.19); each TileKernels design is ported only where the
 op's measured bandwidth leaves headroom or the design removes bytes.
+TileKernels outcome (TileKernelsStudy, AttnKernel2): the qk prologue already runs at 3.36 TB/s forward and 3.3 TB/s
+backward (~7% headroom: not ported); designs that remove bytes, recorded as follow-ups of the GEMM work: the q/k norm
++ RoPE in the fused-QKV GEMM's epilogue (no separate prologue pass; 302 MB per layer and micro-batch, ≤ 66 ms/step)
+and the next layer's residual mix + norm in the down projection's epilogue (≤ 58 ms/step); FA4's dpsum in the o_proj
+dX epilogue not pursued (it replaces part of a 178 µs/call preprocess).
 
 ### 5.18 Earlier executions (summary)
 - **Metrics** (MetricsValidation): edit similarity by difflib as cceval (rapidfuzz, thefuzz and torchmetrics disagree
@@ -304,3 +321,15 @@ Open: the MLP postact saved in the forward (+14.5 GB) with hand sm_90a relu² ba
 DeepGEMM's producer/consumer layout, consumer warpgroups alternating whole tiles so one tile's epilogue overlaps the
 next tile's math (built, unmeasured; −110 to −135 ms/step [estimate]); split-K dW into the fp32 `.grad` (−30 to −75
 ms/step [estimate]).
+
+### 5.20 Code audit (user specification; one auditor per file) — in progress
+Specification: every parameter, literal, branch and dependency justified by mathematics, the data, model or hardware
+structure, a library contract or an explicit experimental setting; arbitrary values removed at their source (not
+renamed), experimental settings kept; one implementation per mechanism; behavior verified (SASS diffs, byte-identical
+outputs, identical plans and analyses). Commits so far: `eeb0c53` native.py (the arch_specific flag; SASS identical for
+every kernel); `b59a22b` linear.py, modeling.py (casts C2 made no-ops, a guard, a wrapper); `141e44a` run.py, conf/
+(restated defaults; every experiment's plans and run keys byte-identical); `e8f3c85` ablations/ (swept scales read from
+the records; analyses identical, peak_lr 2.7970369); `9b094a8` setup.sh (the SM clock lock queried from the GPU, the
+same command here), .gitignore; `9d40cb1` ve_gate.cu, ve_gate.py, cross_entropy.py (unreachable guards removed; launch
+sizes cited to their measurements; SASS identical). Noted, unchanged: logit_softcap's fixed learning_rate_scale 2.7972
+against the analysis' current 2.79704.
