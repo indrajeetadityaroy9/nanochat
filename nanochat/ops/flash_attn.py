@@ -1,13 +1,13 @@
 """
-FlashAttention-4 (Dao-AILab flash_attn.cute, SM90 kernels) as torch.library ops, causal with `window_left` keys before
-each query; FA4's own autograd.Function cannot be traced by torch.compile.
+FlashAttention-4 (Dao-AILab flash_attn.cute) as torch.library ops, causal with `window_left` keys before each query;
+FA4's own autograd.Function cannot be traced by torch.compile.
 
 Document masking (ProLong, arXiv 2410.02660): FA4's varlen kernels restrict attention to the segments in
 cu_seqlens, the int32 offsets of the flattened (B*T) tokens (corpus/loader.py PretrainingBatches). cu_seqlens has a
 fixed length per loader (one compiled shape), its unused entries empty segments; `segments`, a 0-dim int32 tensor on
 the host (no device synchronization), is how many are not, and the ops pass FA4 only those: FA4 schedules work for
-every segment it is given, empty or not (padded cu_seqlens slow varlen attention, outputs unchanged: McCormick,
-"Optimizing Training with FlashAttention varlen", 2026).
+every segment it is given, so padding segments cost time without changing outputs (McCormick, "Optimizing Training
+with FlashAttention varlen", 2026).
 """
 
 import torch
@@ -17,8 +17,8 @@ from torch.autograd.function import FunctionCtx
 
 
 def fa4_window_left(window_left: int, T: int) -> int | None:
-    """None (FA4's causal kernel) when the window spans T, else the local window: at a full window the causal kernel
-    gives the local kernel's outputs and is faster; FA4 does not make this switch (interface.py
+    """None (FA4's causal kernel) when the window spans T, else the local window: a window spanning T is plain causal
+    attention, so the cheaper causal kernel computes it; FA4 keeps the local kernel (interface.py
     _resolve_causal_local_window)."""
     return None if window_left >= T else window_left
 
@@ -49,7 +49,7 @@ def flash_attn_fake(q: Tensor, k: Tensor, v: Tensor, window_left: int, cu_seqlen
 @torch.library.custom_op("nanochat::flash_attn_bwd", mutates_args=(), device_types="cuda")
 def flash_attn_bwd(dout: Tensor, q: Tensor, k: Tensor, v: Tensor, out: Tensor, lse: Tensor, window_left: int,
                    cu_seqlens: Tensor, segments: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """(dq, dk, dv); FA4's backward with atomic dq accumulation, its fastest (deterministic=True is slower)."""
+    """(dq, dk, dv); FA4's backward with atomic dq accumulation (not bitwise reproducible)."""
     T, cu = q.size(1), segmented(cu_seqlens, segments)
     grads = _flash_attn_bwd(q.flatten(0, 1), k.flatten(0, 1), v.flatten(0, 1), out.flatten(0, 1), dout.flatten(0, 1),
                             lse, causal=True, window_size_left=fa4_window_left(window_left, T), cu_seqlens_q=cu,

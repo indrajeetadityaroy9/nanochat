@@ -2,7 +2,7 @@
 Value-embedding gate and mix of model/gpt.py Attention (csrc/ve_gate.cu), one launch forward and one pass backward:
 v + 2 sigmoid(n W^T) per head x bf16(table[idx]) (per-layer token-indexed value embeddings: modded-nanogpt record #14,
 MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6, behind a per-head gate; nanochat e85db6b), the gate's logits in fp32 and
-the mix rounded once to bf16, as the PyTorch expressions it replaces.
+the mix rounded once to bf16, as the unfused PyTorch expressions round.
 The embedding lookup is the op's, so its backward writes the table's gradient (fp32, atomics as F.embedding's backward)
 and the gate weight's (fp32, a fixed summation order).
 """

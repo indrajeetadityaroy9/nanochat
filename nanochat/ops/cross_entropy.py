@@ -5,12 +5,11 @@ LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z 
 
 nanochat::lm_loss (training): a GEMM writes bf16 z; QuACK's cross_entropy_fwd_out (quack/cross_entropy.py, dx = z as
 with inplace_backward) writes each row's loss and overwrites z with softmax(z) - onehot(t); dx = (1/n) z W on QuACK
-(bf16), dW = (1/n) z^T x on cuBLAS in fp32 (as ops/linear.py's weight gradients). QuACK's fused linear-cross-entropy
-is not faster at any chunk size.
+(bf16), dW = (1/n) z^T x by torch.mm in fp32 (as ops/linear.py's weight gradients).
 
 nanochat::lm_losses (evaluation): QuACK's lse_target_epi GEMM epilogue (quack/epilogue/library.py) reduces each row's
-logsumexp and gathers the target logit from the fp32 accumulators without storing z: faster and more accurate than
-bf16 logits and cross entropy.
+logsumexp and gathers the target logit from the fp32 accumulators without storing z, so no bf16 rounding of the
+logits enters the loss.
 
 With an output-logit cap c (model/gpt.py GPTConfig.softcap; 92d63d4 gpt.py:511-515, Gemma 2's final-logit
 softcapping, arXiv 2408.00118 §2) z becomes c tanh(z / c) (tanh in fp32), in kernels Inductor fuses (cap_,
@@ -50,7 +49,7 @@ def capped_losses(z: Tensor, target: Tensor, softcap: float) -> Tensor:
     return torch.logsumexp(z, dim=1) - z.gather(1, target[:, None]).squeeze(1)
 
 
-# Opaque to torch.compile: functionalizing the in-place logit gradient corrupted x's gradient.
+# Opaque to torch.compile: its functionalization of the in-place logit gradient (dx = z) gives x a wrong gradient.
 @torch.library.custom_op("nanochat::lm_loss", mutates_args=(), device_types="cuda")
 def lm_loss(x: Tensor, weight: Tensor, target: Tensor, softcap: float | None) -> tuple[Tensor, Tensor, Tensor]:
     """x (M, C) bf16, fp32 weight (V, C), target (M,) int64 -> (mean loss fp32, dloss/dx in x's dtype, dloss/dW
