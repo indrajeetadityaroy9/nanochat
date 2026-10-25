@@ -379,17 +379,18 @@ constraint (`heal_tokens()`'s `Reemit`, or the Python syntax constraint, which o
 masks are written while the step's body runs: the syntax constraints' in one parallel call straight into the
 decoder's pinned mask rows, each constraint's last token applied in the same call.
 
-**vLLM and transformers** (`inference/export_hf.py`, `inference/vllm_model.py`, `inference/modeling_nanochat.py`,
-`docker/Dockerfile.vllm`): `python -m inference.export_hf <checkpoint.pt> <dir> [<tokenizer dir>]` (nanochat image)
+**vLLM and transformers** (`inference/export_hf.py`, `inference/modeling_nanochat.py`):
+`python -m inference.export_hf <checkpoint.pt> <dir> [<tokenizer dir>]` (nanochat image)
 writes a Hugging Face model directory: `model.safetensors` (matrices and tables bf16, the per-dim and per-layer vectors
 and value-embedding gates fp32), `config.json` (the per-layer windows as Gemma 3's `layer_types` + `sliding_window`,
 FA4's `window_left` + 1), `generation_config.json` (BOS ends a generation) and `tokenizer.json` (transformers'
-`TikTokenConverter`: the same ids as tiktoken, BOS prepended). The `nanochat-vllm` image (vLLM 0.32.0 on its own
-torch 2.13, which the NGC-based nanochat image cannot hold) registers `NanochatForCausalLM` through vLLM's
-`vllm.general_plugins` entry point, so `vllm serve <dir>` and `LLM(<dir>)` run the model with vLLM's layers (paged
-attention with per-layer sliding windows and the hybrid KV cache, CUDA graphs, torch.compile); `model_impl=
-"transformers"` (vLLM's Transformers backend) or transformers' `AutoModelForCausalLM.from_pretrained(<dir>,
-trust_remote_code=True)` run `modeling_nanochat.py`, copied into the directory. No architectural change was needed;
+`TikTokenConverter`: the same ids as tiktoken, BOS prepended). `modeling_nanochat.py`, copied into the directory
+and named in its `auto_map`, is the model for both: transformers' `AutoModelForCausalLM.from_pretrained(<dir>,
+trust_remote_code=True)`, and vLLM's own image (`vllm/vllm-openai` v0.32.0 at a pinned digest, on its own torch 2.13,
+which the NGC-based nanochat image cannot hold), where `vllm serve <dir> --trust-remote-code` and `LLM(<dir>,
+trust_remote_code=True)` run it through vLLM's Transformers backend (paged attention with per-layer sliding windows and
+the hybrid KV cache, CUDA graphs, torch.compile; `_keep_in_fp32_modules_strict` kept fp32). No architectural change
+was needed;
 the model's own pieces are PyTorch expressions at the training kernels' precision: the rotation by −θ with fp32
 tables (vLLM's and transformers' rotary embeddings rotate by +θ from bf16 tables), the value embeddings (they read
 `input_ids` in every layer) and the residual mix. Checked on a d16 checkpoint: `tokenizer.json` encodes 108,026
@@ -400,7 +401,10 @@ against itself at another row offset: 99.4%, 1.8·10⁻⁴), next-token loss wit
 0.061/0.061, 0.045/0.037, 0.022, 0.367 on the same checkpoint. On the code benchmarks' request sets the native
 decoder is faster at d16 for codegen: greedy + sampled (23,100 requests) 100 s against vLLM's 267 s, whose engine is
 bound by its per-step host work at this model size (GPU 17–36% busy, `max_num_seqs` 1,024). FIM greedy (16,976
-requests) is faster through vLLM, 45 s against 75 s. The native class and the Transformers backend run at the same rate.
+requests) is faster through vLLM, 45 s against 75 s. These figures were measured with a native vLLM model class
+(fused QKV, vLLM's linear layers); the Transformers backend ran at the same rate and, in the same execution mode, gave
+the same logits (eager: mean KL 4.25·10⁻⁴ on HumanEval+ for both), so the class and its plugin image were removed as a
+second implementation of the model.
 
 **Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir> [generate|score]`): the
 harnesses' own CLIs, unmodified, on an export served by vLLM: EvalPlus's `evalplus.codegen --backend vllm --greedy` on
@@ -408,8 +412,7 @@ HumanEval+ and MBPP+ (direct completion; the evalplus commit `pyproject.toml` pi
 MultiPL-E's `automodel_vllm.py` on humaneval-cpp and mbpp-cpp (T = 0.2, top-p 0.95, 20 completions per problem; the
 commit `docker/Dockerfile` pins) judged by its `evaluation/src/main.py` and `pass_k.py`. To run it on a checkpoint:
 `scripts/container.sh python -m inference.export_hf <checkpoint.pt> <dir>`, then `scripts/standard_eval.sh <dir> <out>`
-(the `generate` phase needs the GPU, in the `nanochat-vllm` image; the `score` phase is CPU work in the nanochat
-image). Results: `<out>/evalplus/<dataset>/*_eval_results.json`, `<out>/multipl-e/`, `<out>/pass_k.csv`. It sets this
+(the `generate` phase needs the GPU, in vLLM's image; the `score` phase is CPU work in the nanochat image). Results: `<out>/evalplus/<dataset>/*_eval_results.json`, `<out>/multipl-e/`, `<out>/pass_k.csv`. It sets this
 suite's numbers beside the protocols as published, which differ from ours in their prompts' tokenization (text through
 `tokenizer.json`), MultiPL-E's 2,048-token context and their samplers. On the d16 checkpoint above, EvalPlus's CLI gives
 HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 (base/plus), this suite's greedy mode 0.061/0.061 and 0.045/0.037.
@@ -490,7 +493,7 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
   (`code_eval.py`) and the post-generation checks (`verify.py`).
 - `inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`), the Hugging Face export (`export_hf.py`), the
-  transformers model (`modeling_nanochat.py`) and the vLLM model (`vllm_model.py`).
+  model for transformers and vLLM (`modeling_nanochat.py`).
 - `corpus/`: the corpus pipeline, one module per step (`__init__.py` lists them; `mixture.py` also holds the
   micro-batch and repository-stage share, `publish.py` the dataset, `train_tokenizer.py` the tokenizer's sample and
   trainer); `crate/`, its Rust crate (`native.py`): the SA-BPE trainer (and frequency BPE), repository samples and
@@ -500,8 +503,7 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
   `adamw_group_lr.py`, `muon_wd_timescale.py`); `contrast.py` (the pre-registered tests and adoption rules they decide
   by), `records.py` (an experiment's records in `results/`).
 - `docs/`: `pretraining.md` (this document), `corpus.md` (the corpus's specification), `ablations.md`.
-- `scripts/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image; `docker/Dockerfile.vllm`: the
-  vLLM image. `results/`: the records.
+- `scripts/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image. `results/`: the records.
 
 ## References
 

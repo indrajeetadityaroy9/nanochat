@@ -1,9 +1,9 @@
 #!/bin/bash
 # Prepare a fresh GH200 or H100 host with Docker and the NVIDIA driver (Lambda's Ubuntu image): the CDI spec
-# for scripts/container.sh's `--device nvidia.com/gpu=all`, docker group membership, the nanochat and nanochat-vllm
-# images, the artifacts layout (paths.py) and the curated corpus (corpus/publish.py pull), from which the tokenizer
-# ablation, tokenize and pack build the training rows (docs/pretraining.md, Reproducing the run). Idempotent: docker
-# build cache, mkdir exist_ok.
+# for scripts/container.sh's `--device nvidia.com/gpu=all`, docker group membership, the nanochat image, the
+# artifacts layout (paths.py) and the curated corpus (corpus/publish.py pull), from which the tokenizer ablation,
+# tokenize and pack build the training rows (docs/pretraining.md, Reproducing the run). Idempotent: docker build
+# cache, mkdir exist_ok.
 #
 #   HF_TOKEN=<read token> scripts/setup.sh
 set -euo pipefail
@@ -16,7 +16,6 @@ sudo nvidia-smi -lgc "$MAX_SM_CLOCK,$MAX_SM_CLOCK"
 # the docker group applies at the next login; sg runs this script's docker commands in it
 sudo usermod -aG docker "$USER"
 sg docker -c "docker build -f '$ROOT/docker/Dockerfile' -t nanochat '$ROOT'"
-sg docker -c "docker build -f '$ROOT/docker/Dockerfile.vllm' -t nanochat-vllm '$ROOT/docker'"
 sg docker -c "'$ROOT/scripts/container.sh' hf auth login --token $HF_TOKEN"
 sg docker -c "'$ROOT/scripts/container.sh' python -m paths"
 sg docker -c "'$ROOT/scripts/container.sh' python -m corpus.publish pull"

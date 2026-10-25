@@ -1,13 +1,14 @@
 """
 model/modeling.py's CausalLM as a transformers model, for inference from the directory inference/export_hf.py writes
-(this file is copied there and named in config.json's auto_map, Hugging Face's custom-code convention). Self-contained
-(torch and transformers only): its config and the forward's math are shared with the vLLM model
-(inference/vllm_model.py).
+(this file is copied there and named in config.json's auto_map, Hugging Face's custom-code convention; torch and
+transformers only). vLLM runs it through its Transformers backend (vLLM docs, "Transformers backend"), which honors
+_keep_in_fp32_modules_strict, the per-layer sliding windows (layer_types) and final_logit_softcapping with its own
+attention, KV cache, torch.compile and CUDA graphs.
 
 Layout as transformers' Qwen3 (modeling_qwen3.py): attention through ALL_ATTENTION_FUNCTIONS with each layer's window
 (config.layer_types "sliding_attention" / "full_attention" and sliding_window, as Qwen3 and Gemma 3), so the same code
-runs in transformers (eager, sdpa, flash attention, generate with a cache) and vLLM's Transformers backend
-(model_impl="transformers"). The training forward's precision, where its kernels keep fp32:
+runs in transformers (eager, sdpa, generate with a cache) and in vLLM. The training forward's precision, where its
+kernels keep fp32:
 - q/k (model/kernels/qk_row.cuh): per-head RMS norm (eps FLT_EPSILON), fp32 gain, rotation by -theta over the full
   head ((m1, m2) -> (m1 cos + m2 sin, m2 cos - m1 sin), karpathy/nanochat 92d63d4 gpt.py:57-65), angles t theta^(-2i/D)
   in fp64 rounded once to fp32 (CausalLM.init_buffers), one bf16 rounding. transformers' and vLLM's rotary embeddings
@@ -66,20 +67,10 @@ def qk_norm_rope(x: torch.Tensor, gain: torch.Tensor, cos: torch.Tensor, sin: to
     return torch.cat([m1 * c + m2 * s, m2 * c - m1 * s], dim=-1).to(x.dtype)
 
 
-def ve_mix(n: torch.Tensor, v: torch.Tensor, ve: torch.Tensor, gate_weight: torch.Tensor) -> torch.Tensor:
-    """v (..., H, D) + 2 sigmoid(n W^T) per head x ve (..., H * D), in fp32, rounded once to v's dtype."""
-    gate = 2 * torch.sigmoid(F.linear(n.float(), gate_weight.float()))
-    return (v.float() + gate[..., None] * ve.view(v.shape).float()).to(v.dtype)
-
-
-def mix(h: torch.Tensor, x0: torch.Tensor, resid_lambda: torch.Tensor, x0_lambda: torch.Tensor) -> torch.Tensor:
-    """resid_lambda h + x0_lambda x0 in fp32, rounded once to h's dtype."""
-    return (resid_lambda * h.float() + x0_lambda * x0.float()).to(h.dtype)
-
-
 def eager_attention_forward(module: nn.Module, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-                            attention_mask: torch.Tensor | None, scaling: float, dropout: float = 0.0,
+                            attention_mask: torch.Tensor | None, scaling: float,
                             **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+    """transformers' attention-interface signature; the mask carries the causal and sliding-window structure."""
     weights = torch.matmul(query, key.transpose(2, 3)) * scaling
     if attention_mask is not None:
         weights = weights + attention_mask
@@ -103,12 +94,13 @@ class NanochatAttention(nn.Module):
         self.sliding_window = (config.sliding_window if config.layer_types[layer_idx] == "sliding_attention"
                                else None)
 
-    def forward(self, n, value_embeds, position_embeddings, attention_mask, past_key_values=None, **kwargs):
+    def forward(self, n, value_embeds, position_embeddings, attention_mask, past_key_values, **kwargs):
         """n (B, T, C) the normed stream; value_embeds (B, T, C) this layer's or None."""
         shape = (*n.shape[:-1], -1, self.head_dim)
         q, k, v = (proj(n).view(shape) for proj in (self.q_proj, self.k_proj, self.v_proj))
         if value_embeds is not None:
-            v = ve_mix(n, v, value_embeds, self.ve_gate.weight)
+            gate = 2 * torch.sigmoid(F.linear(n.float(), self.ve_gate.weight))
+            v = (v.float() + gate[..., None] * value_embeds.view(v.shape).float()).to(v.dtype)
         eps, (cos, sin) = self.config.rms_norm_eps, position_embeddings
         q = qk_norm_rope(q, self.q_norm_weight, cos, sin, eps).transpose(1, 2)
         k = qk_norm_rope(k, self.k_norm_weight, cos, sin, eps).transpose(1, 2)
@@ -116,9 +108,9 @@ class NanochatAttention(nn.Module):
         if past_key_values is not None:
             k, v = past_key_values.update(k, v, self.layer_idx)
         attention = ALL_ATTENTION_FUNCTIONS.get_interface(self.config._attn_implementation, eager_attention_forward)
-        out, weights = attention(self, q, k, v, attention_mask, dropout=0.0, scaling=self.scaling,
-                                 sliding_window=self.sliding_window, **kwargs)
-        return self.o_proj(out.reshape(*shape[:-2], -1).contiguous()), weights
+        out, _ = attention(self, q, k, v, attention_mask, scaling=self.scaling, sliding_window=self.sliding_window,
+                           **kwargs)
+        return self.o_proj(out.reshape(*shape[:-2], -1).contiguous())
 
 
 class NanochatMLP(nn.Module):
@@ -138,20 +130,18 @@ class NanochatDecoderLayer(nn.Module):
         self.self_attn = NanochatAttention(config, layer_idx)
         self.mlp = NanochatMLP(config)
 
-    def forward(self, h, value_embeds, position_embeddings, attention_mask, past_key_values=None, **kwargs):
+    def forward(self, h, value_embeds, position_embeddings, attention_mask, past_key_values, **kwargs):
         h = h + self.self_attn(norm(h, self.eps), value_embeds, position_embeddings, attention_mask, past_key_values,
-                               **kwargs)[0]
+                               **kwargs)
         return h + self.mlp(norm(h, self.eps))
 
 
 class NanochatPreTrainedModel(PreTrainedModel):
     config_class = NanochatConfig
     base_model_prefix = "model"
-    _no_split_modules: ClassVar[list[str]] = ["NanochatDecoderLayer"]
-    _supports_flash_attn = True
     _supports_sdpa = True
-    _supports_flex_attn = True
-    _supports_attention_backend = True
+    _supports_attention_backend = True  # vLLM's Transformers backend runs models that declare it
+    # export_hf.py writes these fp32 (FP32 there is this list)
     _keep_in_fp32_modules_strict: ClassVar[list[str]] = ["resid_lambdas", "x0_lambdas", "q_norm_weight",
                                                          "k_norm_weight", "ve_gate"]
 
@@ -172,8 +162,7 @@ class NanochatModel(NanochatPreTrainedModel):
 
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
                 inputs_embeds=None, use_cache=None, **kwargs) -> BaseModelOutputWithPast:
-        if input_ids is None:
-            raise ValueError("the value embeddings read input_ids")
+        """input_ids always (the value embeddings read them); inputs_embeds, when given, their embeddings."""
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         if use_cache and past_key_values is None:
@@ -191,7 +180,7 @@ class NanochatModel(NanochatPreTrainedModel):
         eps = self.config.rms_norm_eps
         h = x0 = norm(inputs_embeds, eps)
         for i, layer in enumerate(self.layers):
-            h = mix(h, x0, self.resid_lambdas[i], self.x0_lambdas[i])
+            h = (self.resid_lambdas[i] * h.float() + self.x0_lambdas[i] * x0.float()).to(h.dtype)
             ve = self.value_embeds[str(i)](input_ids) if str(i) in self.value_embeds else None
             h = layer(h, ve, position_embeddings, masks[self.config.layer_types[i]], past_key_values, **kwargs)
         return BaseModelOutputWithPast(last_hidden_state=norm(h, eps),
@@ -205,17 +194,12 @@ class NanochatForCausalLM(NanochatPreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
 
-    def get_input_embeddings(self) -> nn.Embedding:
-        return self.model.embed_tokens
-
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
-                inputs_embeds=None, labels=None, use_cache=None, logits_to_keep=0, **kwargs) -> CausalLMOutputWithPast:
+                inputs_embeds=None, use_cache=None, logits_to_keep=0, **kwargs) -> CausalLMOutputWithPast:
         out = self.model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
                          past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs)
         keep = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(out.last_hidden_state[:, keep])
         if (c := self.config.final_logit_softcapping) is not None:
             logits = c * torch.tanh(logits / c)
-        loss = None if labels is None else self.loss_function(logits=logits, labels=labels,
-                                                                vocab_size=self.config.vocab_size, **kwargs)
-        return CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=out.past_key_values)
+        return CausalLMOutputWithPast(logits=logits, past_key_values=out.past_key_values)
