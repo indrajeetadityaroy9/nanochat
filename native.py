@@ -52,15 +52,18 @@ def stream() -> ctypes.c_void_p:
 
 
 @functools.cache
-def cuda_library(name: str) -> ctypes.CDLL:
+def cuda_library(name: str, arch_specific: bool = False) -> ctypes.CDLL:
     """model/kernels/<name>.cu built by nvcc for the current device's architecture with HEAD_DIM (model/config.py),
-    keyed by the command, the file and every model/kernels header, loaded by ctypes once per process."""
+    keyed by the command, the file and every model/kernels header, loaded by ctypes once per process. arch_specific:
+    for the architecture-specific target alone (sm_90a: wgmma, setmaxnreg; CUDA C++ Programming Guide, "Feature
+    Availability"), whose instructions the portable PTX of -arch cannot carry."""
     import torch
 
     major, minor = torch.cuda.get_device_capability()
-    arch = f"sm_{major}{minor}"
+    arch = f"sm_{major}{minor}{'a' if arch_specific else ''}"
+    target = f"-gencode=arch=compute_{arch[3:]},code={arch}" if arch_specific else f"-arch={arch}"
     source = KERNELS / f"{name}.cu"
-    command = ["nvcc", f"-arch={arch}", f"-DHEAD_DIM={HEAD_DIM}", "-Xcompiler", "-fPIC", "-shared", "-o"]
+    command = ["nvcc", target, f"-DHEAD_DIM={HEAD_DIM}", "-Xcompiler", "-fPIC", "-shared", "-o"]
 
     def build(path: Path) -> None:
         subprocess.run([*command, path, source], check=True)
