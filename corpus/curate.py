@@ -51,17 +51,16 @@ from paths import CORPUS
 
 # The id of an empty text
 EMPTY = hashlib.sha1(b"").hexdigest()
-# Row groups in flight: four per core, an engineering choice: the cores keep working while the oldest one, whose
-# result is written next, runs long (a row group's time follows its slowest files), at the memory of the results held
-WINDOW = 4 * os.cpu_count()
 # The fewest files of a repository shard's row group (the last excepted), whole samples each, so a reader of row
-# groups never splits a sample; 2^16, an engineering choice: a row group is tokenize's task, so smaller groups spread a
-# shard over more workers and larger ones cost fewer tasks
+# groups never splits a sample; a row group is tokenize's task, and its tokens do not depend on the grouping (measured:
+# three published shards re-cut at 122,880 files tokenize identically). 2^16: the published dataset's row groups
+# (publish.DATASET), whose task peaks at 1.71 GiB (a 235 MiB group of ultradata_code_l2_python), 3.14 at 122,880 files
 SAMPLE_ROWS = 65_536
 PLACEHOLDER = re.compile(r"<(EMAIL|KEY|NAME|PASSWORD)>")
 LEADING = re.compile(r"^[ \t]+", re.MULTILINE)
-# ast.parse's recursion limit, an engineering choice above Python's default 1,000: higher parses more deeply nested
-# files, too high overflows the C stack before RecursionError
+# Python's recursion limit in the check, which bounds fissix's 2to3 (pure Python, recursive over the parse tree), not
+# ast.parse (CPython 3.12's C limits, measured unchanged from 1,000 to 100,000): at 1,000 2to3 fails on 800 nested
+# blocks, at 6,000 not on 1,600. 6,000: the limit the published corpus (publish.DATASET) was checked with
 RECURSION = 6_000
 
 
@@ -143,12 +142,17 @@ def check_row_group(task: tuple[str, int, int]) -> pa.Table:
 
 def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
     """checked_path of each of a Python source's standardized files (written to .partial, then renamed; an existing
-    file is kept), the remaining files' row groups as one stream so no file's slowest group idles the pool."""
-    groups = {k: pq.ParquetFile(standardized_path(source, k)).num_row_groups for k in range(files)
-              if not checked_path(source, k).exists()}
+    file is kept), the remaining files' row groups as one stream so no file's slowest group idles the pool, as many in
+    flight as MEMORY holds of the largest (a checked row group is about its standardized size; its result waits until
+    every earlier one is written)."""
+    metadata = {k: pq.read_metadata(standardized_path(source, k)) for k in range(files)
+                if not checked_path(source, k).exists()}
+    groups = {k: md.num_row_groups for k, md in metadata.items()}
     tasks = [(source, k, g) for k, n in groups.items() for g in range(n)]
+    largest = max((md.row_group(g).total_byte_size for md in metadata.values() for g in range(md.num_row_groups)),
+                  default=MEMORY)
     writers: dict[int, pq.ParquetWriter] = {}
-    for (_, k, g), table in zip(tasks, ordered(pool, check_row_group, tasks, WINDOW), strict=True):
+    for (_, k, g), table in zip(tasks, ordered(pool, check_row_group, tasks, MEMORY // largest), strict=True):
         path = checked_path(source, k)
         partial = path.with_name(path.name + ".partial")
         if g == 0:

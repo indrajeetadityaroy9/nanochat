@@ -67,7 +67,7 @@ def save(directory: Path, mergeable: list[bytes], pattern: str) -> None:
 
 
 @functools.cache
-def get_tokenizer(directory: Path = TOKENIZER) -> Tokenizer:
+def get_tokenizer(directory: Path) -> Tokenizer:
     """The vocabulary in `directory`, its tokenized and packed data in directory.parent / "tokenized"."""
     with open(directory / "tokenizer.tiktoken", "rb") as f:
         mergeable = [base64.b64decode(line.split()[0]) for line in f]  # line i: token i, base64, and its rank i

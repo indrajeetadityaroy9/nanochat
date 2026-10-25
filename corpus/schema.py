@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import pyarrow as pa
 
 SPLIT = 100  # 1% of groups held out
-# Parquet codec of the files the corpus writes
+# Parquet codec of the files the corpus writes, the published dataset's (publish.DATASET)
 COMPRESSION = "zstd"
 
 

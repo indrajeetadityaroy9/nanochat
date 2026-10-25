@@ -46,9 +46,10 @@ from corpus.sources import (
 from corpus.tokenizer import TOKENIZER, get_tokenizer
 
 Documents = tuple[np.ndarray, np.ndarray]  # tokens, document lengths
-# A repository task's peak memory in its partition's text bytes, an estimate, not measured: the Arrow table and its
-# sorted copy, the contents, files and documents as Python strings (up to 4 bytes a character) and their tokens
-PEAK = 10
+# A repository task's peak memory in its partition's text bytes, measured (ru_maxrss of a spawned worker, the corpus
+# tokenizer, each language's largest train partition): 6.52 for Python (partition 41: 3.02 GiB of text, 19.7 GiB at
+# peak), 8.18 for C++ (partition 71: 2.40 GiB, 19.6 GiB); the larger
+PEAK = 8.18
 
 
 def encode(documents: list[str], tokenizer_path: Path, threads: ThreadPoolExecutor | None = None) -> Documents:
@@ -157,7 +158,7 @@ def repository_window() -> int:
     largest = max(sum(text_bytes(pq.read_metadata(curated_dir(s, split) / f"{part}.parquet"), "content")
                       for s in language_sources(language))
                   for language, split, part in repository_tasks(train_parts()))
-    return max(1, MEMORY // (PEAK * largest))
+    return max(1, int(MEMORY / (PEAK * largest)))
 
 
 def write_repositories(tokenizer_path: Path, parts: list[int], results: Iterator[Documents]) -> None:

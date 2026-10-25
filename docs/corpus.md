@@ -99,13 +99,14 @@ extent's order), in the category's schema (`schema.py`; every column a non-null 
 ### 3.1 Python 3 check, with repair
 
 Every file of a Python source whose category is `code` (Stack-Edu, UltraData-Stack-v3-L2 and UltraData-Code L2 Python,
-Nemotron rewriting, CodeXGLUE) must parse with `ast.parse` (Python 3.12, recursion limit `RECURSION` = 6,000). A file
-that does not is repaired by the smallest subset of these steps that makes it parse (`curate.repaired`: of the steps
-that change it, every subset by size, then in step order); the repaired text is kept with its `id` recomputed, and a
-file no subset repairs is dropped. Output: `checked/<source>/<k>.parquet`.
+Nemotron rewriting, CodeXGLUE) must parse with `ast.parse` (Python 3.12). A file that does not is repaired by the
+smallest subset of these steps that makes it parse (`curate.repaired`: of the steps that change it, every subset by
+size, then in step order); the repaired text is kept with its `id` recomputed, and a file no subset repairs is
+dropped. Output: `checked/<source>/<k>.parquet`.
 1. Stack v3's placeholders `<EMAIL>`, `<KEY>`, `<NAME>`, `<PASSWORD>` become the bare word.
 2. Leading-indentation tabs expand to 8 columns (Python 2 Language Reference §2.1.8).
-3. Every fixer of `fissix.fixes` (2to3).
+3. Every fixer of `fissix.fixes` (2to3), under the recursion limit `RECURSION` = 6,000 (2to3 recurses over the parse
+   tree; at Python's default 1,000 it fails on 800 nested blocks; `ast.parse`'s depth limits are CPython's own).
 
 ### 3.2 Exact deduplication
 
