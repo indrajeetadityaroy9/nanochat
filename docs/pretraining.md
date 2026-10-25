@@ -14,18 +14,18 @@ marked [unverified]. Terminology follows DeepSeek-Coder: the base model, its pre
 
 ## Model
 
-`nanochat/model/gpt.py`: karpathy/nanochat 92d63d4 plus the wins of its experiment log ("LOG", `dev/LOG.md`), with
+`model/gpt.py`: karpathy/nanochat 92d63d4 plus the wins of its experiment log ("LOG", `dev/LOG.md`), with
 Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and looks up its value embeddings
 (`GPT.hidden`); its `Block` then applies `Attention` and `MLP` to the RMS-normed stream, each added back.
 
 | | d24 (the base model) |
 |---|---|
 | Shape | 24 layers × 768 (`gpt_config`: width 30 × depth rounded up to whole 128-dim heads; MobileLLM-350M's 32 × 960, arXiv 2402.14905 Table 9), 6 heads × 128, MHA |
-| Attention | per-head RMS norm → learned per-dim gain → RoPE over the full head, base 10^6 (`config.ROPE_BASE`); SSSL windows (S = 512), last layer full; FlashAttention-4 varlen with document masking |
+| Attention | per-head RMS norm → learned per-dim gain → RoPE over the full head, base 10^6 (`model/config.py` `ROPE_BASE`); SSSL windows (S = 512), last layer full; FlashAttention-4 varlen with document masking |
 | MLP | ReLU², hidden 4C |
 | Residual | `x = resid_lambda·x + x0_lambda·x0` per layer; value embeddings on alternating layers (12 of 24) behind a per-head `2·sigmoid` gate of the normed stream, zero init (gate 1): modded-nanogpt record #14's per-layer tables, MoVE's LaVE (arXiv 2601.22887 §4.1 Eq. 6) |
 | Head | untied `lm_head`, zero init (modded-nanogpt record #8), plain cross entropy, no z-loss; an output-logit softcap only as the D5 ablation's arm (`GPTConfig.softcap`) |
-| Vocabulary | 2^15 ids (`config.VOCAB_SIZE`; BOS and 3 FIM sentinels; `docs/tokenizer-ablation.md`) |
+| Vocabulary | 2^15 ids (`model/config.py` `VOCAB_SIZE`; BOS and 3 FIM sentinels; `docs/tokenizer-ablation.md`) |
 | Parameters | 195,096,576 scaling parameters (blocks + `lm_head`, `scaling_params`), what the token budget counts; 522,252,336 in all with the token table and 12 value-embedding tables (25,165,824 each) |
 | FLOPs per token | 2.831 GFLOP non-embedding: DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72·n_layer·d² + 12·n_layer·d·l_seq at the full 8K context (`non_embedding_flops_per_token`) |
 | Init | stream-reading matrices and tables uniform with std C^-½; `c_o`, `c_proj` (modded-nanogpt record #5), `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
@@ -41,15 +41,15 @@ Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and loo
   App. A.9 Table 5); per-head QK norm with learnable parameters in arXiv 2309.14322 §3.2.5.
 - **Published, not tested here** (no reference code model ablates such details):
   - *ReLU² rather than SwiGLU:* nanochat measured SwiGLU worse at d12 and d24 under Muon (LOG 2026-02-05); a gated
-    MLP would also need a gated decode MLP (`csrc/decode.cu`).
+    MLP would also need a gated decode MLP (`model/kernels/decode.cu`).
   - *SSSL windows:* Gemma 3 (arXiv 2503.19786 §5.2) measures local:global up to 7:1 and windows down to 512 nearly
     lossless in perplexity; StarCoder2 trains code under a 4,096-token window.
   - *Shape:* MobileLLM's deep-and-thin shape at d24's scaling parameters (35 × 640) takes 9.2% more FLOPs per token
     [unverified], so an equal-token comparison would give it more compute.
-  - *head_dim 128:* compiled into the decoder's kernels (`config.HEAD_DIM`); nanochat measured 128 better than 64
-    (LOG 2026-01-17).
+  - *head_dim 128:* compiled into the decoder's kernels (`model/config.py` `HEAD_DIM`); nanochat measured 128 better
+    than 64 (LOG 2026-01-17).
   - *MHA, not grouped-query attention:* GQA's benefit is KV-cache memory; d24's cache for the decoder's 256 slots
-    (`csrc/decode.cu` `MAX_BATCH`) of the longest benchmark request (391 prompt + 768 new tokens) is 21.9 GB
+    (`model/kernels/decode.cu` `MAX_BATCH`) of the longest benchmark request (391 prompt + 768 new tokens) is 21.9 GB
     [arithmetic: 2 · 24 · 768 · 2 bytes · 1,158 · 256], which the GPU holds.
   - *RoPE base 10^6 from the first step* (D9): above arXiv 2405.14591's lower bound for a 32K context (Table 2:
     6.4e5), large from the start as Llama 3 (arXiv 2407.21783 §3.2); Barbero et al. (arXiv 2410.06205 Table 2) find
@@ -79,10 +79,10 @@ to left-to-right completion; DeepSeek-Coder the FIM rate (Fig. 3); StarCoder2 Ro
 
 ## Data and stages
 
-The corpus, its mixture and its two stages are specified in `docs/corpus.md`; the code is `nanochat/corpus/`
+The corpus, its mixture and its two stages are specified in `docs/corpus.md`; the code is `corpus/`
 (`mixture.py` the stages and shares, `pack.py` the rows and FIM, `loader.py` the micro-batches). In short:
 code:text:math 87:10:3 in both stages; an 8,192-token file stage, then a 32,768-token repository stage over the last
-`config.REPO_SHARE` (5.45%) of steps (Qwen2.5-Coder, arXiv 2409.12186 §3.2); 102.6B tokens in all (`mixture.STEPS` ×
+`mixture.REPO_SHARE` (5.45%) of steps (Qwen2.5-Coder, arXiv 2409.12186 §3.2); 102.6B tokens in all (`mixture.STEPS` ×
 `STEP_TOKENS`), what the curated corpus holds without any stage reading a document twice. A run's ratio defaults to its
 data's `train/stages.py` `max_ratio`. The tokenizer is decided by `docs/tokenizer-ablation.md`.
 
@@ -127,7 +127,7 @@ neighbours (`lr.fit`; arXiv 2409.19913 §3.1 fits quadratics in log lr). The hor
 [inference: arXiv 2409.19913 §4 finds its exponent size-independent only from 760M parameters].
 
 Code bits per byte at × 1 / 2 / 4 / 8 of the law's lr, seed 0 (`results/lr.jsonl`, dataset revision `1e711aa`, the
-removed `nanochat/data` pipeline's data):
+removed data pipeline's data):
 
 | Setting | Plan | × 1 | × 2 | × 4 | × 8 | Vertex (`lr.json`) |
 |---|---|---|---|---|---|---|
@@ -143,14 +143,14 @@ Eq. 2's M; it rounds to 2 from 77.7 tokens per parameter on [arithmetic, `schedu
 The vertices are multipliers of the law's lr the runs recorded, which predates D1 (DeepSeek LLM Eq. 2's M); the runs'
 batches and steps are unchanged under D1, so `lr.analysis` re-bases each vertex onto the current law's lr. Under D1 the
 base model's multiplier is × 2.7972 at 102.6B tokens (fixed in `conf/experiment/softcap.yaml`). The base experiment
-computes its own when it launches (`nanochat/run.py` `lr_multiplier`, from `results/lr.jsonl` at the adopted tokenizer's
+computes its own when it launches (`run.py` `lr_multiplier`, from `results/lr.jsonl` at the adopted tokenizer's
 plan), so no copy is stored. A d8 at 20 comparison of × 2 against × 1 (seeds 0 and 1, 2026-10-20) has no record in
 `results/` [unrecorded].
 
 ## Ablations
 
 One pre-registered experiment per decision whose outcome the literature does not settle. Every run is a
-`nanochat/run.py` `RunConfig` (Hydra, hydra-core 1.3.7: `RunConfig`'s defaults are the base model's recipe,
+`run.py` `RunConfig` (Hydra, hydra-core 1.3.7: `RunConfig`'s defaults are the base model's recipe,
 `conf/experiment/<name>.yaml` sweeps fields against them), trained by `train/loop.py` and evaluated by
 `eval/suite.py evaluate`, the base model's code paths. No experiment runs without the user's approval.
 
@@ -169,7 +169,7 @@ the tokenizer ablation's in `docs/tokenizer-ablation.md`.
 ### Method
 
 - **Arms.** An arm differs from the experiment's baseline only in its yaml's fields. Its plan (batch, steps, peak lr)
-  is the base model's at its depth and ratio (`nanochat.run.base_plan`, `plan_of` at its `lr_scale`), so arms match in
+  is the base model's at its depth and ratio (`run.base_plan`, `plan_of` at its `lr_scale`), so arms match in
   hyperparameters and, unless an arm sets its own ratio (the tokenizer ablation's equal bytes), in tokens; every run
   completes its own schedule (warmup, then linear decay to zero over its length). Weight decay follows each run's lr
   by the τ law, so an lr sweep varies η at the fixed EMA timescale (arXiv 2405.13698; Power Lines). A run that
@@ -193,7 +193,7 @@ the tokenizer ablation's in `docs/tokenizer-ablation.md`.
 
 ### Records
 
-A run's key (`nanochat.run.key`) is its `RunConfig` fields that differ from the defaults, sorted, `k=v` joined by `,`
+A run's key (`run.key`) is its `RunConfig` fields that differ from the defaults, sorted, `k=v` joined by `,`
 (e.g. `depth=16,seed=1,tokenizer=sa-bpe`; `defaults` if none), so a run two experiments share is one run. Per run, in
 `artifacts/runs/<key>/`: `.hydra/` (the composed config), `metrics.jsonl` (`train/metrics.py`: every step and attempt;
 the run record holds the model config, the `RunConfig` as `config`, the tokenizer's `data_key`, parameters, FLOPs per
@@ -210,27 +210,27 @@ run's fields as `fields`).
 
 ## GPU implementation
 
-Ops in `nanochat/ops/`, CUDA sources in `nanochat/csrc/` (built on first use by `native.cuda_library`). Each is a
+Ops in `model/ops/`, CUDA sources in `model/kernels/` (built on first use by `native.cuda_library`). Each is a
 `torch.library` op, so `torch.compile(fullgraph=True)` traces one graph per stage.
 
 | Op | Implementation |
 |---|---|
 | Projection, MLP, LM-head GEMMs | forward and dX: QuACK SM90 GEMMs autotuned by QuACK (`quack.gemm_interface`, `tuned=True`); fp32 weight gradients: cuBLAS `torch.mm` |
 | ReLU² MLP | QuACK `gemm_act` / `gemm_dact` |
-| Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them; the softcap arm's capped loss fused in the same op (`ops/cross_entropy.py`) |
-| Attention | FlashAttention-4 varlen over the micro-batch's real document segments only (`ops/flash_attn.py`), its default backward |
-| q/k norm + gain + RoPE | `csrc/qk_prologue.cu`: one pass per direction; gain gradient without atomics (row math shared with the decoder, `csrc/qk_row.cuh`) |
-| Value-embedding gate and mix | `csrc/ve_gate.cu` (`ops/ve_gate.py`): one launch forward, one pass backward, the gate's logits in fp32 |
+| Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them; the softcap arm's capped loss fused in the same op (`model/ops/cross_entropy.py`) |
+| Attention | FlashAttention-4 varlen over the micro-batch's real document segments only (`model/ops/flash_attn.py`), its default backward |
+| q/k norm + gain + RoPE | `model/kernels/qk_prologue.cu`: one pass per direction; gain gradient without atomics (row math shared with the decoder, `model/kernels/qk_row.cuh`) |
+| Value-embedding gate and mix | `model/kernels/ve_gate.cu` (`model/ops/ve_gate.py`): one launch forward, one pass backward, the gate's logits in fp32 |
 | Muon | Newton–Schulz batched over same-shape matrices (`optim.Muon`) |
 | Embeddings | `F.embedding`, bf16 cast fused by Inductor; backward adds rows with atomics |
-| Decoding | `csrc/decode.cu` (`inference/decoder.py`): batched native decoder for the code benchmarks |
+| Decoding | `model/kernels/decode.cu` (`inference/decoder.py`): batched native decoder for the code benchmarks |
 
 Measured choices [unverified: `torch.profiler` and CUDA-graph timings, records not kept]:
 - **cuBLAS for the fp32 weight gradients:** dYᵀX has a small output (768 × 768 or 768 × 3,072) and K = 98,304; QuACK's
   split-K-1 tiles left most SMs idle (c_q/c_k/c_v/c_o dW 0.544 against 0.191 ms, relative error vs fp64 2.3e-4 against
   1.8e-5).
-- **`csrc/qk_prologue.cu`** rather than Inductor's fusion of the PyTorch ops: the d24 step 3,792 against 3,890 ms; and
-  micro-batches of 98,304 tokens rather than 65,536 (1% faster per token).
+- **`model/kernels/qk_prologue.cu`** rather than Inductor's fusion of the PyTorch ops: the d24 step 3,792 against
+  3,890 ms; and micro-batches of 98,304 tokens rather than 65,536 (1% faster per token).
 - **FlashAttention-4** rather than cuDNN 9.26: forward + backward 1.47 against 4.96 ms at window 512, 1.83 against 5.85
   ms at 8,192 (d8 shapes); its full-context layers use the causal kernel (`window = None`), 1–2% faster than the local
   kernel at window T, outputs bitwise equal. FA4 on the real segments rather than the loader's padded `cu_seqlens`:
@@ -254,7 +254,7 @@ micro-batches. The GEMMs run at the 700 W power cap's ceiling (703 of 989 dense 
 - **Fastest kernels.** FA4's and the embedding backward reduce with atomics, so repeated steps differ in the last bits;
   fixed-order reductions would cost about 1% of a step [unverified]. Python's garbage collector stays off after setup
   and collects only after a checkpoint save (`train/loop.py`). The forward is deterministic: Inductor's
-  coordinate-descent tuning is off (`runs/container.sh`), since it picks kernel configurations by timing, so two
+  coordinate-descent tuning is off (`scripts/container.sh`), since it picks kernel configurations by timing, so two
   processes would compile different kernels.
 - **Resume.** A relaunched run continues from its newest checkpoint (weights, optimizer state, data position), written
   to a temporary file and renamed, so a kill mid-save leaves the previous one.
@@ -269,63 +269,63 @@ micro-batches. The GEMMs run at the 700 W power cap's ceiling (703 of 989 dense 
 ## Reproducing the run
 
 The pipeline splits at the tokenizer. Everything through curation is text and runs on the GB10; the curated shards go
-to the private Hub dataset `iaroy/nanochat-data` (`config.DATASET`). The tokenizer ablation and decision, compile, pack
-and training run on the GH200 from a pull of that dataset. Every command runs in the `nanochat` image
-(`docker build -f docker/Dockerfile -t nanochat .`) from the repository's root: through `runs/container.sh` on the
+to the private Hub dataset `iaroy/nanochat-data` (`corpus/publish.py` `DATASET`). The tokenizer ablation and decision,
+compile, pack and training run on the GH200 from a pull of that dataset. Every command runs in the `nanochat` image
+(`docker build -f docker/Dockerfile -t nanochat .`) from the repository's root: through `scripts/container.sh` on the
 GH200, or on the GB10 as
 
 ```
 docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/workspace/nanochat -w /workspace/nanochat \
-  -v $PWD:/workspace/nanochat nanochat python -m nanochat.corpus.<step> ...
+  -v $PWD:/workspace/nanochat nanochat python -m corpus.<step> ...
 ```
 
 (steps that read the Hub add `-e HF_HOME=/tmp/hf -e HF_HUB_DISABLE_XET=1 -e HF_TOKEN=$(hf auth token | tail -1)`).
 
 On the GB10, once (the dataset is constant afterwards):
 
-1. **Prepare**: `python -m nanochat.corpus.prepare` fetches and standardizes every source (`docs/corpus.md` §1);
+1. **Prepare**: `python -m corpus.prepare` fetches and standardizes every source (`docs/corpus.md` §1);
    fetched files are kept, so a rerun downloads only what it lacks; a source read in part fetches its extent
    (`prepare.extent`).
-2. **Curate**: `python -m nanochat.corpus.curate`: the Python 3 check with repair, exact deduplication, the split, the
+2. **Curate**: `python -m corpus.curate`: the Python 3 check with repair, exact deduplication, the split, the
    curated shards (`CORPUS/curated/<source>/<split>/<k>.parquet`; `docs/corpus.md` §4, its invariants by construction).
-3. **Publish**: `python -m nanochat.corpus.publish push` writes the card, replaces the dataset's tree and squashes its
+3. **Publish**: `python -m corpus.publish push` writes the card, replaces the dataset's tree and squashes its
    history into one commit (the card turns the Hub's viewer off).
 
 On a fresh Lambda `gpu_1x_gh200` (Ubuntu with Docker and the NVIDIA driver; the H100 SXM5 runs the same image):
 
 ```bash
 git clone https://github.com/indrajeetadityaroy9/nanochat nanochat && cd nanochat
-HF_TOKEN=<read token> runs/setup.sh   # CDI spec, clock lock, docker group, image, artifacts/, the curated corpus
+HF_TOKEN=<read token> scripts/setup.sh   # CDI spec, clock lock, docker group, image, artifacts/, the curated corpus
 ```
 
-then, after logging in again (docker group), each through `runs/container.sh`:
+then, after logging in again (docker group), each through `scripts/container.sh`:
 
 1. **Tokenizer ablation, intrinsic part and data** (`docs/tokenizer-ablation.md`): `python -m ablations.tokenizer
    vocabularies`, `intrinsic`, `data`. An arm's extent margin (`results/tokenizer-intrinsic.json`) below 1 means a group
    read in part is too small for it: raise `mixture.SPREAD`, then prepare, curate and publish again on the GB10.
-2. **Recipe ablations and tokenizer decision** (the user's approval): `python -m nanochat.run experiment=<name>` for
+2. **Recipe ablations and tokenizer decision** (the user's approval): `python run.py experiment=<name>` for
    `muon_tau_20`, `softcap`, `muon_tau_200`, `tokenizer`, `adamw_lr` (records in `results/<name>.*`; runs in
    `artifacts/runs/<key>/`).
 3. **Adopt the tokenizer**: `python -m ablations.tokenizer adopt` writes the decided vocabulary to `CORPUS/tokenizer`
    (over any provisional one); every later step reads it.
-4. **Compile**: `python -m nanochat.corpus.compile`, ending with the 32K stage's repository partitions
+4. **Compile**: `python -m corpus.compile`, ending with the 32K stage's repository partitions
    (`compile.compile_stage`).
-5. **Pack**: `python -m nanochat.corpus.pack`; it stops naming any source that holds fewer rows than its draw.
+5. **Pack**: `python -m corpus.pack`; it stops naming any source that holds fewer rows than its draw.
 6. **Smoke**: the first micro-batches of both stages (`loader.PretrainingBatches` at the stages' weights), decoded;
    each step's group composition and FIM share.
-7. **Train** (the user's approval): `tmux new -d -s run 'runs/container.sh python -m nanochat.run experiment=base'`.
+7. **Train** (the user's approval): `tmux new -d -s run 'scripts/container.sh python run.py experiment=base'`.
 
-Everything a run reads or writes lives in the checkout (`nanochat/paths.py`): `artifacts/` (gitignored, created by
-`runs/setup.sh`) holds `corpus/`, `runs/<key>/` and `cache/`; `results/` (tracked) holds the data the paper's tables
+Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored, created by
+`scripts/setup.sh`) holds `corpus/`, `runs/<key>/` and `cache/`; `results/` (tracked) holds the data the paper's tables
 and figures are drawn from.
 
-`python -m nanochat.run experiment=base` (`conf/experiment/base.yaml`) trains both stages with a checkpoint (the run's
+`python run.py experiment=base` (`conf/experiment/base.yaml`) trains both stages with a checkpoint (the run's
 full state) at each tenth of the steps and at the repository stage's start, evaluates every checkpoint with every
 benchmark, and writes `results/base.jsonl` and `results/base-curves.jsonl`. **Expected time** [inference from the
 unverified GH200 step]: 69,580 steps of 15 micro-batches at about 1.25 × 3.49 s, about 84 h, plus evaluation.
 
-`runs/release.sh <key> <repo>` uploads the run's checkpoints, records and `results/` to a Hugging Face model
-repository; `runs/container.sh hf download <repo> --local-dir /workspace/nanochat` restores them where `load_model`
+`scripts/release.sh <key> <repo>` uploads the run's checkpoints, records and `results/` to a Hugging Face model
+repository; `scripts/container.sh hf download <repo> --local-dir /workspace/nanochat` restores them where `load_model`
 and a resumed run read them.
 
 ### Hardware
@@ -335,10 +335,10 @@ the base model's pre-training; the H100 SXM5 (80 GB) is the measured fallback. W
 
 - *Power.* The GPU's enforced limit is 700 W, set outside the VM (`nvidia-smi -pl 900` is accepted but not enforced),
   and the GH200 module (Grace + Hopper + memory) shares a 1,000 W budget with the CPU [unverified], so no heavy CPU job
-  runs beside a measured run. `runs/setup.sh` locks the SM clock at 1,980 MHz (speed only, not numerics).
-- *Memory.* `config.MICRO_BATCH_TOKENS` (98,304: 12 rows at 8K, 3 at 32K) is the most whole rows of both contexts
-  whose d24 step fits 80 GB (peak 69.6 GiB [unverified]); on 96 GB it stays, as a larger micro-batch would change
-  every run's batch rounding (`schedule.plan`).
+  runs beside a measured run. `scripts/setup.sh` locks the SM clock at 1,980 MHz (speed only, not numerics).
+- *Memory.* `corpus/mixture.py` `MICRO_BATCH_TOKENS` (98,304: 12 rows at 8K, 3 at 32K) is the most whole rows of both
+  contexts whose d24 step fits 80 GB (peak 69.6 GiB [unverified]); on 96 GB it stays, as a larger micro-batch would
+  change every run's batch rounding (`schedule.plan`).
 - *Kernels.* Both GPUs are sm_90; QuACK's autotuner picks GEMM tiles by timing, per host, so steps need not be bitwise
   across hosts [inference].
 - *ARM64.* `docker/Dockerfile` pins multi-arch index digests; the data order does not depend on the CPU [inference].
@@ -415,11 +415,12 @@ infilling (arXiv 2207.14255; PSM and SPM), each scored by its official evaluator
 - **Contamination.** The training corpora were not decontaminated against the benchmarks: a benchmark problem in the
   training data inflates its score.
 
-**Decoder** (`inference/decoder.py`, `csrc/decode.cu`): batched continuous decoding of up to 256 slots, each step one
-captured CUDA graph. A slot runs its prompt through the same kernels as its generation, so prompts and generations
-share steps; a prompt's K and V are kept in a paged prompt store (pages of 64 positions) and a later request with the
-same prompt starts at its last token. Every sum's order depends on the shapes and the slot's position alone, so a
-request's tokens do not depend on the batch, the store or timing. A `Request` carries the prompt, budget, stop rule,
+**Decoder** (`inference/decoder.py`, `model/kernels/decode.cu`): batched continuous decoding of up to 256 slots, each
+step one captured CUDA graph. A slot runs its prompt through the same kernels as its generation, so prompts and
+generations share steps; a prompt's K and V are kept in a paged prompt store (pages of 64 positions) and a later
+request with the same prompt starts at its last token. Every sum's order depends on the shapes and the slot's
+position alone, so a request's tokens do not depend on the batch, the store or timing. A `Request` carries the
+prompt, budget, stop rule,
 `temperature` (0 = argmax, ties to the lowest id), `top_p` (the nucleus, arXiv 1904.09751 §3.1, as Hugging Face's
 `TopPLogitsWarper` keeps it), `seed` (the sample at position *i* depends only on seed and *i*) and an optional
 constraint (`heal()`, the Python syntax constraint, `AllOf()` of both), whose masks each step takes for all
@@ -473,23 +474,25 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
 
 ## Layout
 
-- `nanochat/config.py`: dataset, vocabulary, head width, micro-batch, repository-stage share, RoPE base.
-- `nanochat/model/gpt.py`: the model, scaling parameters and FLOPs per token.
-- `nanochat/ops/`, `nanochat/csrc/`: the ops above and the decoder.
-- `nanochat/train/`: `loop.py` (setup, resume, the steps, checkpoints and records), `optim.py` (optimizers, weight
+- `run.py`, `conf/`: the run app (Ablations).
+- `paths.py`: the checkout's layout (`artifacts/`, `results/`). `native.py`: builds and loads the CUDA kernels and the
+  Rust crates.
+- `model/`: `gpt.py` (the model, scaling parameters and FLOPs per token), `config.py` (vocabulary, head width, RoPE
+  base), `ops/` and `kernels/` (the ops above and the decoder).
+- `train/`: `loop.py` (setup, resume, the steps, checkpoints and records), `optim.py` (optimizers, weight
   decay, gradient clip), `schedule.py` (plan, each step's stage, lr multiplier), `stages.py` (`max_ratio`, each stage's
   micro-batches in the run's order), `checkpoint.py`, `metrics.py`.
-- `nanochat/eval/`: the checkpoint's evaluation (`suite.py`), the likelihood metrics (`bpb.py`), the code benchmarks
+- `eval/`: the checkpoint's evaluation (`suite.py`), the likelihood metrics (`bpb.py`), the code benchmarks
   (`code_eval.py`) and the post-generation checks (`verify.py`).
-- `nanochat/inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
+- `inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
   (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
-- `nanochat/corpus/`: the corpus pipeline, one module per step (`__init__.py` lists them); `crate/`, its Rust crate
+- `corpus/`: the corpus pipeline, one module per step (`__init__.py` lists them; `mixture.py` also holds the
+  micro-batch and repository-stage share, `publish.py` the dataset); `crate/`, its Rust crate
   (`native.py`): the SA-BPE trainer (and frequency BPE), repository samples and the packer.
-- `nanochat/run.py`, `conf/`: the run app (Ablations).
 - `ablations/`: `records.py` (an experiment's records in `results/`), `lr.py`, `recipe.py` (the softcap, AdamW lr and
   Muon τ analyses), `tokenizer.py` (`docs/tokenizer-ablation.md`).
 - `docs/`: `pretraining.md` (this document), `corpus.md` (the corpus's specification), `tokenizer-ablation.md`.
-- `runs/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image. `results/`: the records.
+- `scripts/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image. `results/`: the records.
 
 ## References
 

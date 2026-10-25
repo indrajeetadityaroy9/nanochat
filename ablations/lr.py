@@ -14,7 +14,7 @@ arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law eta = 1.79 N^-0.713 D^0.30
 (arXiv 2503.04715 §1 Eq. 1), raises it. Alternatives: the law's lr times 2 and 4, and 8 at d8 at LONG, where Step-Law
 points; one seed per setting.
 
-Analysis, pre-registered, computed when the base experiment launches (nanochat/run.py lr_multiplier, from
+Analysis, pre-registered, computed when the base experiment launches (run.py lr_multiplier, from
 RESULTS/lr.jsonl; it depends on the adopted tokenizer's max_ratio, so no copy is stored):
 - per setting, code bits per byte fitted as a parabola in u = ln(multiplier) (fit): its vertex u* or the grid extension
   the rule calls for;
@@ -26,19 +26,19 @@ RESULTS/lr.jsonl; it depends on the adopted tokenizer's max_ratio, so no copy is
   factor; arXiv 2512.22382 Table 1), its exponent (horizon_exponent_net) carried to the base model's horizon range
   (every rule in play is a power law in D), and the base model's batch growth by the same rule.
 m_D,base is the base model's tokens over d24 at SHORT's, m_D,d8 d8 at LONG's over d8 at SHORT's. Batches, token counts
-and the law's lrs are the runs' recorded plans (the base model's: nanochat/run.py plan_of(RunConfig()), d24 at its
+and the law's lrs are the runs' recorded plans (the base model's: run.py plan_of(RunConfig()), d24 at its
 data's max_ratio).
 
 The recorded runs (RESULTS/lr.jsonl, lr-curves.jsonl, lr.json) were made by 4ade225's ablations/harness.py, whose
 records name a run's fields "fields" (n_layer, ratio, lr_scale, seed) and its setting "setting" (depth,
 tokens_per_param, seeds); its grids: d8 at SHORT x1, 2, 4, 8, d8 at LONG x1, 2, 4, 8, d24 at SHORT x1, 2, 4, one seed
-each. The estimate is the base experiment's lr_scale (conf/experiment/base.yaml, nanochat/run.py lr_multiplier).
+each. The estimate is the base experiment's lr_scale (conf/experiment/base.yaml, run.py lr_multiplier).
 """
 import math
 
 import numpy as np
 
-from nanochat.run import RunConfig, base_plan, plan_of
+from run import RunConfig, base_plan, plan_of
 
 # The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords
 SHORT = 5

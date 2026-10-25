@@ -23,7 +23,7 @@ The arms' vocabularies are in `artifacts/corpus/tokenizer-ablation/<arm>/` (`tok
 
 - **Vocabulary size:** 32,768 ids: the 256 bytes, 32,508 merges, BOS and three FIM sentinels (`<fim_prefix>`,
   `<fim_suffix>`, `<fim_middle>`); the reason for the size is in `docs/corpus.md` §9.
-- **Trainer:** the corpus crate's byte-level BPE (`nanochat/corpus/crate/train.rs`), within the chunks of the arm's
+- **Trainer:** the corpus crate's byte-level BPE (`corpus/crate/train.rs`), within the chunks of the arm's
   split pattern. Every merge is an argmax with fixed tie-breaks, so the arms are trained concurrently and
   independently. Training is deterministic: a second training of the four arms gave identical vocabularies
   [unverified].
@@ -310,7 +310,7 @@ Every arm passed every validity check. 3,600 val texts per arm were checked chun
 ## Runs (pre-registered; wait for the user's approval)
 
 **Design:**
-- Every arm at d16, two seeds each (0 and 1): 8 runs through `python -m nanochat.run experiment=tokenizer`
+- Every arm at d16, two seeds each (0 and 1): 8 runs through `python run.py experiment=tokenizer`
   (`conf/experiment/tokenizer.yaml`), each with the base model's code paths and its own plan (`schedule.plan` at its
   tokens); the decision is `ablations.tokenizer.decide` over the records grouped by `config.tokenizer`.
 - **Equal bytes:** each run reads the set's code documents once, so an arm's tokens are their bytes over its bytes per
@@ -376,13 +376,13 @@ untested].
 
 Inside the project image on the GH200 (64 Neoverse-V2 cores, 525 GB; Python 3.12.3, tiktoken 0.14.0, tokenizers
 0.23.2 as the records' provenance states, numpy 2.1.0, scipy 1.18.1, pyarrow 26.0.0, regex 2026.9.29), after
-`python -m nanochat.corpus.publish pull`:
+`python -m corpus.publish pull`:
 
 ```bash
 python -m ablations.tokenizer vocabularies   # sample, then the four arms at once
 python -m ablations.tokenizer intrinsic      # 72 val compiles and every measure, one process pool
 python -m ablations.tokenizer data           # the d16 set compiled and packed under every arm
-python -m nanochat.run experiment=tokenizer  # the 8 runs and the decision
+python run.py experiment=tokenizer           # the 8 runs and the decision
 python -m ablations.tokenizer adopt
 ```
 

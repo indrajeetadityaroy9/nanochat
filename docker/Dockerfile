@@ -1,18 +1,18 @@
 # syntax=docker/dockerfile:1
 #
-# nanochat image for the NVIDIA GH200 and H100 (sm_90). Neither code nor data is baked in: runs/container.sh mounts the
-# checkout at the working directory /workspace/nanochat, nanochat/paths.py's ROOT; data, checkpoints, results and
-# caches live in its artifacts/ (created by runs/setup.sh).
+# nanochat image for the NVIDIA GH200 and H100 (sm_90). Neither code nor data is baked in: scripts/container.sh mounts
+# the checkout at the working directory /workspace/nanochat, paths.py's ROOT; data, checkpoints, results and
+# caches live in its artifacts/ (created by scripts/setup.sh).
 #
 # Built on NVIDIA's NGC PyTorch image, which supplies PyTorch as NVIDIA built it: torch, everything only torch needs
-# (Triton, the CUDA libraries, nvcc for nanochat/native.py) and numpy (which the image's numba pins below 2.5), none of
+# (Triton, the CUDA libraries, nvcc for native.py) and numpy (which the image's numba pins below 2.5), none of
 # them in uv.lock (pyproject.toml exclude-dependencies). uv.lock goes into a virtual environment that sees the image's
 # packages: every locked package is the lock's version, over the image's copy. The image's own FlashAttention is
 # uninstalled: its regular `flash_attn` package (FA2, with an FA4 beta inside) would hide the environment's
 # flash_attn.cute. UV_COMPILE_BYTECODE: the container's user cannot write bytecode into /opt/venv; UV_LINK_MODE=copy:
 # the uv cache is a separate build mount, which hard links cannot cross.
 #
-#   runs/setup.sh builds it: docker build -f docker/Dockerfile -t nanochat .
+#   scripts/setup.sh builds it: docker build -f docker/Dockerfile -t nanochat .
 #
 # Every base image is pinned by its manifest digest (each tag as resolved when pinned), so a rebuild anywhere starts
 # from the same bytes.
@@ -24,7 +24,7 @@ COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH
 WORKDIR /workspace/nanochat
 
-# Rust toolchain for the Rust crates (nanochat/corpus/crate, nanochat/inference/syntax), built on first use like the CUDA
+# Rust toolchain for the Rust crates (corpus/crate, inference/syntax), built on first use like the CUDA
 # kernels: rustup's minimal profile at a pinned version. Crates fetched on that first build go to CARGO_HOME in
 # artifacts/cache (set below): the container's user cannot write the image's /usr/local.
 ENV RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
@@ -48,7 +48,7 @@ RUN git clone https://github.com/openai/human-eval-infilling /opt/human-eval-inf
     ln -s HumanEval-RandomSpanInfilling.jsonl.gz /opt/human-eval-infilling/data/HumanEval-RandomSpan.jsonl.gz && \
     echo /opt/human-eval-infilling > "$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/human_eval_infilling.pth"
 
-# nuprl/MultiPL-E's evaluator, the official C++ judge (nanochat/eval/code_eval.py runs its scripts from the checkout at
+# nuprl/MultiPL-E's evaluator, the official C++ judge (eval/code_eval.py runs its scripts from the checkout at
 # $MULTIPL_E): evaluation/src/main.py (eval_cpp.py: g++ -std=c++17, the image's g++) and pass_k.py. Their dependencies
 # (tqdm, numpy) are in the image.
 ENV MULTIPL_E=/opt/MultiPL-E

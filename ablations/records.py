@@ -1,5 +1,5 @@
 """
-An experiment's records (the Records callback of conf/experiment/<name>.yaml; nanochat/run.py) once every job of its
+An experiment's records (the Records callback of conf/experiment/<name>.yaml; run.py) once every job of its
 sweep has ended: RESULTS/<experiment>.jsonl, a record per run (eval/suite.py record, the run's config, its compared
 measures, efficiency, the step it diverged at), RESULTS/<experiment>-curves.jsonl (per run, train/metrics.py curves)
 and, with an analysis (the experiment's pre-registered decision, a function of the .jsonl's records),
@@ -15,11 +15,11 @@ from hydra.experimental.callback import Callback
 from hydra.utils import get_method
 from omegaconf import DictConfig, OmegaConf
 
-from nanochat.corpus.mixture import REPO_STAGE
-from nanochat.eval import bpb, suite
-from nanochat.paths import RESULTS
-from nanochat.run import RunConfig, key, plan_of
-from nanochat.train import metrics
+from corpus.mixture import REPO_STAGE
+from eval import bpb, suite
+from paths import RESULTS
+from run import RunConfig, key, plan_of
+from train import metrics
 
 
 def measures(config: RunConfig) -> dict[str, float]:

@@ -1,9 +1,9 @@
 """
 The tokenizer ablation: it trains every candidate vocabulary of the corpus's tokenizer, measures them on the corpus,
 decides the split pattern and merge score, and adopts the decided vocabulary as the corpus's tokenizer
-(nanochat/corpus/tokenizer.py TOKENIZER). Each candidate is a vocabulary of 32,768 ids (32,764 mergeable tokens, BOS
+(corpus/tokenizer.py TOKENIZER). Each candidate is a vocabulary of 32,768 ids (32,764 mergeable tokens, BOS
 and 3 FIM sentinels) trained on the same sample by the same trainer (train: the corpus crate's), encoded by tiktoken,
-and trained on. The sample, the val splits and the packs come from the curated shards through nanochat/corpus
+and trained on. The sample, the val splits and the packs come from the curated shards through corpus
 (mixture.py, compile.py, pack.py).
 
 Sample (sample): of each file-stage source's curated train split, its share of the stage's bytes (byte_shares: its
@@ -66,11 +66,11 @@ max_ratio; of a "supply" source (notebooks, functions, traces), its draw, read w
 shards of each stage, and of the repositories corpora the trailing partitions (compile.compile_stage, under sa-bpe),
 holding MARGIN times their draws, so they never bind.
 
-runs (conf/experiment/tokenizer.yaml: `python -m nanochat.run experiment=tokenizer`): every arm at d16, seeds 0 and 1,
+runs (conf/experiment/tokenizer.yaml: `python run.py experiment=tokenizer`): every arm at d16, seeds 0 and 1,
 at equal bytes: each at its max_ratio (ratio null), so it reads the set's code documents once and its tokens are
 their bytes over its bytes per token; text and math are drawn by rows. Each run's plan is its own (schedule.plan at
 its tokens), its contexts the corpus's 8,192 and 32,768 tokens (eval/bpb.py's byte-offset buckets: the bytes of
-context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1), trained and evaluated through nanochat/run.py,
+context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1), trained and evaluated through run.py,
 the records by ablations/records.py. RESULTS/tokenizer.json "analysis" (decide): each challenger's contrasts with
 sa-bpe, the baseline, and the decision.
 
@@ -120,18 +120,18 @@ import regex
 from scipy.stats import binomtest, norm
 from tokenizers import models
 
-from nanochat.config import VOCAB_SIZE
-from nanochat.corpus import mixture
-from nanochat.corpus.compile import compile_repositories, compile_source, compile_stage, train_parts
-from nanochat.corpus.layout import TOKEN_DTYPE, split_path, stage_rows
-from nanochat.corpus.mixture import weights
-from nanochat.corpus.pack import packed_shards, shard_count, write
-from nanochat.corpus.parallel import SPAWN
-from nanochat.corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
-from nanochat.corpus.sources import SOURCES, curated_shards, text_bytes, texts
-from nanochat.corpus.tokenizer import ABLATION, SPECIAL_TOKENS, SPLIT_PATTERN, TOKENIZER, get_tokenizer, save
-from nanochat.native import corpus_crate
-from nanochat.paths import RESULTS, ROOT
+from corpus import mixture
+from corpus.compile import compile_repositories, compile_source, compile_stage, train_parts
+from corpus.layout import TOKEN_DTYPE, split_path, stage_rows
+from corpus.mixture import weights
+from corpus.pack import packed_shards, shard_count, write
+from corpus.parallel import SPAWN
+from corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
+from corpus.sources import SOURCES, curated_shards, text_bytes, texts
+from corpus.tokenizer import ABLATION, SPECIAL_TOKENS, SPLIT_PATTERN, TOKENIZER, get_tokenizer, save
+from model.config import VOCAB_SIZE
+from native import corpus_crate
+from paths import RESULTS, ROOT
 
 Score = Literal["sa-bpe", "frequency"]
 
@@ -462,7 +462,7 @@ def document_set(run) -> dict:
     """The set's shards (module docstring) for the d16 run `run` at RATIO under sa-bpe: {"file": {source: its leading
     train shards, the file stage's}, "repository": {source: its train shards after those, the repository stage's},
     "draws": {seq_len: {corpus: its tokens in the run}}}; the repositories corpora's partitions: data."""
-    from nanochat.train.stages import drawn
+    from train.stages import drawn
 
     measured = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))["arms"]["sa-bpe"]
     estimate = {s: np.array(shard_bytes(s)) / measured["sources"][s]["bytes_per_token"] for s in SOURCES}
@@ -495,8 +495,8 @@ def data() -> None:
     repository sources' jobs and the other arms' repositories corpora, one arm after another (each fills the cores).
     "seconds": "compiled", the wall time to the last compile's end (packs overlap the compiles), and "all"."""
     # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
-    from nanochat.run import base_plan
-    from nanochat.train.stages import drawn, max_ratio
+    from run import base_plan
+    from train.stages import drawn, max_ratio
 
     start, began = time.perf_counter(), provenance()
     run = base_plan(depth=DEPTH, ratio=RATIO)
@@ -635,7 +635,7 @@ def adopt() -> None:
     arm of the decided pattern and score, copied, or that pair trained on the sample when no arm holds it. It writes
     over the provisional tokenizer (the sa-bpe arm's copy) in place: compiled and packed data are keyed by a
     vocabulary's data key, so adopting sa-bpe reuses the provisional corpus and any other vocabulary compiles into new
-    directories (nanochat/run.py's stale guard rejects a run recorded under the replaced one)."""
+    directories (run.py's stale guard rejects a run recorded under the replaced one)."""
     decision = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))["analysis"]["decision"]
     pattern, score = ARMS[decision["pattern"]][0], decision["score"]
     TOKENIZER.mkdir(parents=True, exist_ok=True)

@@ -10,7 +10,7 @@ dependencies = [
     "flash-attn-4==4.0.0b35",
     "huggingface-hub==2.2.0",
     "hydra-core==1.3.7",
-    # Lark(strict=True) checks terminal collisions with interegular (nanochat/inference/syntax_constraint.py)
+    # Lark(strict=True) checks terminal collisions with interegular (inference/syntax_constraint.py)
     "lark[interegular]==1.3.1",
     # the CuTe DSL of quack-kernels and flash-attn-4, its CUDA 13 libraries (the NGC image's CUDA)
     "nvidia-cutlass-dsl[cu13]==4.8.1",

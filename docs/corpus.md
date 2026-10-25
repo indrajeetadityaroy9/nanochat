@@ -1,17 +1,17 @@
 # Pretraining corpus for Python and C++ code generation: specification
 
-This document specifies `nanochat/corpus`: pre-training from scratch for code generation in Python and C++, from the 18
-sources of `nanochat/corpus/sources.py`. Every rule is a decision. Every number is quoted from a paper, read from the
+This document specifies `corpus/`: pre-training from scratch for code generation in Python and C++, from the 18
+sources of `corpus/sources.py`. Every rule is a decision. Every number is quoted from a paper, read from the
 code, or measured; `[inference]` marks a step no source states, `[arithmetic]` a figure derived from others. The
 measurements were made on the GB10 while the corpus was built, and their records are not in `results/`: every measured
 figure here is [unverified] unless it names a record or the code.
 
 The reference run is the base model's d24 pre-training: 195.1M scaling parameters, 102.6B tokens (`mixture.STEPS` ×
 `STEP_TOKENS`), which `train/schedule.plan` reads as 69,580 steps of 15 micro-batches; an 8K file stage, then a 32K
-repository stage over the last 5.45% of steps (65,785–69,580, `config.REPO_SHARE`); a linear decay of the learning
+repository stage over the last 5.45% of steps (65,785–69,580, `mixture.REPO_SHARE`); a linear decay of the learning
 rate to zero after 40 warmup steps (`train/schedule.py`); document masking.
 
-Measurements name their data: this corpus's files, or (R1–R5) the removed `nanochat/data` pipeline's copies of the
+Measurements name their data: this corpus's files, or (R1–R5) the removed data pipeline's copies of the
 sources and its packs, tokenized by the reference tokenizer (SA-BPE within `SPLIT_PATTERN`, trained by that pipeline;
 its bytes per token per source are `mixture.BYTES_PER_TOKEN`).
 
@@ -534,7 +534,7 @@ by repo": HumanEval(+) 17.1 (15.9) against 12.8 (10.4) (Arctic-SnowCoder, arXiv 
 
 ## 9. Tokenizer
 
-The reference tokenizer (trained by the removed `nanochat/data` pipeline): byte-level BPE scored by SA-BPE's F·ln R
+The reference tokenizer (trained by the removed data pipeline): byte-level BPE scored by SA-BPE's F·ln R
 (arXiv 2604.14053 §4.1) within `SPLIT_PATTERN` (`corpus/tokenizer.py`; cl100k's with numbers in one or two digits and
 no line break after a punctuation run), 32,768 ids, trained on equal bytes from each of that pipeline's curated
 sources. Every token figure in this document is in the reference tokenizer; a retrained one rescales each by its
@@ -547,7 +547,7 @@ mathematics this corpus does not read. The longest whitespace run of any curated
 `SPLIT_PATTERN`'s `\s+(?!\S)` stops tiktoken (and the trainer) on a run of 999,999 not ending in a line break,
 fancy-regex's backtrack limit (`ablations/tokenizer.py` HYBRID_PATTERN).
 
-**Vocabulary: 32,768** (`config.VOCAB_SIZE`). SA-BPE ran at 32,768 ids (arXiv 2604.14053 App. B, Table 5);
+**Vocabulary: 32,768** (`model/config.py` `VOCAB_SIZE`). SA-BPE ran at 32,768 ids (arXiv 2604.14053 App. B, Table 5);
 DeepSeek-Coder uses 32,000 (arXiv 2401.14196 §3.2); StarCoder2, at 49,152, found in preliminary experiments that
 "increasing the vocabulary size to 100K did not improve performance" (arXiv 2402.19173 §6.2); Dagan et al. measured
 HumanEval pass@1 20.52–20.84 from 32K to 256K on a 1.5B model (arXiv 2402.01035 §3.2, Table 3).

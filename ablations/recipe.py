@@ -1,5 +1,5 @@
 """
-The recipe ablations (ACTIONS.md §8), each a knob of nanochat/run.py RunConfig at its default in the baseline, the
+The recipe ablations (ACTIONS.md §8), each a knob of run.py RunConfig at its default in the baseline, the
 tokenizer ablation's d16 or d8 recipe, and their pre-registered analyses (conf/experiment/<name>.yaml's analysis):
 
 - softcap (D5, conf/experiment/softcap.yaml): the output logits capped at c = 15 (karpathy/nanochat 92d63d4
@@ -34,8 +34,8 @@ import statistics
 import numpy as np
 
 from ablations.tokenizer import contrast, evaluated
-from nanochat.paths import RESULTS
-from nanochat.train.optim import TAU_C, TAU_E
+from paths import RESULTS
+from train.optim import TAU_C, TAU_E
 
 
 def adopted(c: dict) -> bool:

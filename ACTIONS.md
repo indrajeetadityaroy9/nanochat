@@ -18,7 +18,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | SecondAudit (independent second audit of `ablations/`) | done: 8 findings, all fixed | §0 |
 | KissModel, KissTrain, KissSyntax (second-pass KISS: model/ops/kernels, train/run app/configs, syntax crate) | done | §0 |
 | DocsConsolidation, DocRefs (docs from the final code; the `docs/` layout and every reference to it) | done | §0, §5 |
-| CorpusMap (`nanochat/corpus` map: duplication, layering, dead code; `local://CORPUS-MAP.md`) | done; its code findings → CorpusFindings | §0 |
+| CorpusMap (`corpus/` map: duplication, layering, dead code; `local://CORPUS-MAP.md`) | done; its code findings → CorpusFindings | §0 |
 | ActionsCheck (this document against the code; `local://ACTIONS-CHECK.md`) | done; its corrections applied | all |
 | CorpusFindings (CorpusMap's code findings) | done (`88c151e`) | §0 |
 | HydraChecks (the run app's diverged-job and stale-guard paths, d8 smokes) | done: both pass; a step-0 divergence crashed Records' curves (fixed) | §0 |
@@ -45,14 +45,14 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | viable_end | an unparseable prefix is not viable (as `allowed`) | `ba01bb5` |
 | I1 dependencies | `tokenizers==0.23.3`, `regex==2026.9.29` declared and locked | `ba01bb5` |
 | `results/lr.json` | keys `production_*` → `base_*`; its pre-D1 analysis (×2.3218, never regenerated) removed: `run.py` `lr_multiplier` computes the multiplier at launch from `results/lr.jsonl` | `ba01bb5`, `d0a2ec0` |
-| E2 clock lock | 1,980 MHz machine-wide; `runs/setup.sh` | `4ade225` |
+| E2 clock lock | 1,980 MHz machine-wide; `scripts/setup.sh` | `4ade225` |
 | E3 throughput plan | reported; items 1-2 (FA4 real segments, batched Newton-Schulz) applied, d16 −10%, d24 −5.3% | `a81410c` |
 | KISS refactor | five slices verified identical to the reference | `4ade225` |
 | Data provenance | every run reads iaroy/nanochat-data; 1,812 shards SHA-256-equal to `b091cb47` | §8 |
 | Model-generated sources | stay in the mixture as designed (user) | none |
 | D8 synthetic-code share | keep 0.30 of code (user: LLM-generated code is valid data; no ablation, no literature study); Kang et al.'s ~30% marked [inference] for code | `679e7d9` |
 | Tokenizer `data` step | the d16 set under every arm; max_ratio sa-bpe 31.42, sa-bpe-fused 29.48, hybrid 31.49, bpe 31.42, every arm 3 micro-batches (one train shard per repository source exceeds d16 at 20's draw) | `679e7d9` |
-| Run configuration | Hydra (`hydra-core==1.3.7`) run app `nanochat/run.py` (`247067d`) replaces the harness and `scripts/pretrain.py` (deleted in `679e7d9`); d8 run vs the harness bitwise-equal (records, evaluation); knobs and sweep mechanics checked by HydraRuns; HydraChecks: a diverged job is recorded (`diverged_at`), the sweep continues, a rerun skips it; a changed recipe under the same key raises "recipe changed" before training; `metrics.curves` of a run without train steps (diverged at step 0) no longer raises | `247067d`, `e27620b` |
+| Run configuration | Hydra (`hydra-core==1.3.7`) run app `run.py` (`247067d`) replaces the harness and `scripts/pretrain.py` (deleted in `679e7d9`); d8 run vs the harness bitwise-equal (records, evaluation); knobs and sweep mechanics checked by HydraRuns; HydraChecks: a diverged job is recorded (`diverged_at`), the sweep continues, a rerun skips it; a changed recipe under the same key raises "recipe changed" before training; `metrics.curves` of a run without train steps (diverged at step 0) no longer raises | `247067d`, `e27620b` |
 | Eval-exit deadlock | `code_eval.sanitizers()`'s cached forkserver pool was joined by a spawned phase's exit before `concurrent.futures`' shutdown (every job hung after its first evaluation); the pool now lives for `suite.evaluate`'s call | `247067d` |
 | Step throughput (EfficiencyResearch) | items 1, 2, 4 applied; FP8 (loss penalty), MPS/concurrent runs (−8%/+1.6%), items 5-8 (≤1% each) rejected; the step's GEMMs run at the 700 W cap's ceiling | `a81410c`, `7ad594f` |
 | E1 GPU power cap | not liftable from the guest: `nvidia-smi -pl 900` is accepted (power.limit 900 W) but the enforced limit stays 700 W (set outside the VM); and the GH200 module (Grace + Hopper + memory) draws 888-910 W against its 1,000 W limit (its maximum) with the CPU busy, so a 900 W GPU would exceed the module budget except with an idle CPU. Closed as a hardware constraint (user: Lambda may not lift it). Rule: no heavy CPU jobs beside measured runs (`tok_per_s`), as they draw from the same module budget | none |
@@ -61,18 +61,18 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | Corpus CPU parallelism | `compile_stage` (repository partitions in flight within a memory bound, tokens computed once), the crate's partition-wide `repository_samples` (rayon), 64-thread encoding, `PerWorker` (one CoreBPE / regex per rayon worker: fancy-regex scratch atomics), val splits packed beside the stages, documents packed longest first: C++ val partition 386.7 → 16.3 s, Python 712 → 61 s, pack 189 → 93 CPU-s per shard | `b9769a8`, `9e40df4`, `4ce8004`, `a20d12a`, `737f2e1` |
 | EvalPlus scoring | no 20 s exit stall per call, all cores: HumanEval+ 22.5 → 9.6 s, MBPP+ 28.0 → 12.6 s | `b8057ff` |
 | SecondAudit (independent second audit of `ablations/`) | 8 findings, all fixed: F3 (P1), F7 `data()` packed sa-bpe's repositories before compiling them, F5 `adopt` failed over the provisional tokenizer, F1, F2, F4, F6 (softcap `lm_loss` in two buffers, 43.81 → 38.03 GiB), F8 | `b9769a8`, `7292351`, `9e40df4`, `b9da1da` |
-| Second-pass KISS audit | model/ops/kernels and train/run app/configs (shared `pointer`/`stream`, unused kernel instantiations and fields removed, stale comments and citations fixed; smokes on real packs); syntax crate; corpus crate; every corpus docstring and comment cut to what the implementation needs; `decoder.py`'s docstrings. Comment sweep of all of `nanochat/` (user): comments and docstrings state only functionality and exact references; no machine-specific wording, measured timings, decision or review ids, or pointers to the repository's docs; restatements and history cut. Comments only: SASS identical, crates build, every module imports | `b9da1da`, `5cea003`, `608530c`, `a20d12a`, `2b43ad4`, `e95f82a`, `7520800`, `350c207`, `88c151e`, `0e09b5d`, `97be219`, `43f1969`, `9df1d1e`, `7841011`, `88b0af2`, `c9d487f`, `e60e45e` |
+| Second-pass KISS audit | model/ops/kernels and train/run app/configs (shared `pointer`/`stream`, unused kernel instantiations and fields removed, stale comments and citations fixed; smokes on real packs); syntax crate; corpus crate; every corpus docstring and comment cut to what the implementation needs; `decoder.py`'s docstrings. Comment sweep of all the project's code (user): comments and docstrings state only functionality and exact references; no machine-specific wording, measured timings, decision or review ids, or pointers to the repository's docs; restatements and history cut. Comments only: SASS identical, crates build, every module imports | `b9da1da`, `5cea003`, `608530c`, `a20d12a`, `2b43ad4`, `e95f82a`, `7520800`, `350c207`, `88c151e`, `0e09b5d`, `97be219`, `43f1969`, `9df1d1e`, `7841011`, `88b0af2`, `c9d487f`, `e60e45e` |
 | Docs consolidation | the docs from the final code, §5's corrections applied, untraceable numbers marked [unverified]; layout `docs/pretraining.md` (with the GH200 runbook), `docs/corpus.md`, `docs/tokenizer-ablation.md` | `fc6b9e9`, `54fc1bd` |
 | Provisional corpus tokenizer | sa-bpe copied to `CORPUS/tokenizer`, compiled and packed (`cp-pack` exit 0): 8K stage 19,349,569 rows, 32K stage repository partitions 95..99. Fit check: d24 `max_ratio` 526.13 → 69,611 steps of 15 micro-batches, repo_start 65,814, law lr 8.629e-4: the base plan fits. `adopt` overwrites; data keyed by the tokenizer's data key | artifacts |
-| Evaluation re-check | b8057ff's EvalPlus scoring and 247067d's parse-scoring overlap, each against its parent under `stack=67108864:-1` on a d16 checkpoint's completions (even tasks given the canonical solution, so statuses mix): identical per task. HumanEval+ base 82/82 pass/fail, plus 81/83 (pass@1 0.5, 0.4939); MBPP+ 188/190 both (0.4974). Smoke statuses from the old `stack=67108864` template (all "timeout") are invalid; `runs/container.sh` was always right | none |
+| Evaluation re-check | b8057ff's EvalPlus scoring and 247067d's parse-scoring overlap, each against its parent under `stack=67108864:-1` on a d16 checkpoint's completions (even tasks given the canonical solution, so statuses mix): identical per task. HumanEval+ base 82/82 pass/fail, plus 81/83 (pass@1 0.5, 0.4939); MBPP+ 188/190 both (0.4974). Smoke statuses from the old `stack=67108864` template (all "timeout") are invalid; `scripts/container.sh` was always right | none |
 | Corpus code structure | `layout.py` (torch-free on-disk layout), `weights`/`mixture_rows` in `mixture.py`, torch imported lazily in `native.py`: compile, pack, curate and the tokenizer ablation load no torch; one `sources.repository_samples` and `sample_starts`, `repository_tasks`, `footer_rows`, `weights` returning its draws; `Tokenizer.name` removed, `data_crate` → `corpus_crate`; `docs/corpus.md` §2 `lower(repo_name)`, §4 invariants by construction. Outputs identical to the previous HEAD on real shards (curate, compile, pack, weights, max_ratio, micro-batches CPU and CUDA) | `88c151e` |
-| `native.py` and `csrc` layout (user: ThunderKittens as the model) | `csrc/common.cuh` holds the shared types, vector access, fixed-order `warp_sum`, `sm_count`, `resident_blocks`; `qk_row.cuh` only the q/k row math; each kernel file self-contained, C entry points unchanged. `native.py` keys a library by its command and sources (every csrc header), no toolchain-version subprocesses. Not taken from ThunderKittens: `sm_90a` (no wgmma/TMA here), `--use_fast_math` (breaks the PyTorch match and the decoder's bitwise q/k), pybind11/torch bindings (heavier builds for three ctypes libraries). Measured: cached loads 4 ms per process, so no runtime cost to remove. SASS identical for all three kernels, launch sizes identical, end-to-end d8 run exit 0 (code bpb 2.70129) | `860ac7b` |
+| `native.py` and `model/kernels` layout (user: ThunderKittens as the model) | `model/kernels/common.cuh` holds the shared types, vector access, fixed-order `warp_sum`, `sm_count`, `resident_blocks`; `qk_row.cuh` only the q/k row math; each kernel file self-contained, C entry points unchanged. `native.py` keys a library by its command and sources (every `model/kernels` header), no toolchain-version subprocesses. Not taken from ThunderKittens: `sm_90a` (no wgmma/TMA here), `--use_fast_math` (breaks the PyTorch match and the decoder's bitwise q/k), pybind11/torch bindings (heavier builds for three ctypes libraries). Measured: cached loads 4 ms per process, so no runtime cost to remove. SASS identical for all three kernels, launch sizes identical, end-to-end d8 run exit 0 (code bpb 2.70129) | `860ac7b` |
 
 ### Open (remaining)
 
 | Item | Next action | Waits on |
 |---|---|---|
-| Ablation queue | ready at HEAD (`860ac7b`; end-to-end d8 runs through `nanochat.run` at `9ea5037` and `860ac7b`: exit 0, code bpb 2.7012 and 2.7013 against 2.7011 at `d0a2ec0`): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, compile, pack → D6 | the user's explicit permission |
+| Ablation queue | ready at HEAD (`860ac7b`; end-to-end d8 runs through `run.py` at `9ea5037` and `860ac7b`: exit 0, code bpb 2.7012 and 2.7013 against 2.7011 at `d0a2ec0`): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, compile, pack → D6 | the user's explicit permission |
 | D7 Muon τ | `muon_tau_20.yaml` (d8 at 20, sa-bpe set, 2 seeds: user, 4 judged wasteful) and `muon_tau_200.yaml` (d8 at 200 reads 2.94B tokens, beyond the sa-bpe set's 2.11B: `tokenizer=corpus`, whose packs exist, 2 seeds); ×½, ×1, ×2; 12 runs | user approval |
 | D5 softcap | `softcap.yaml`: d16 at ratio 20.0 on the sa-bpe set, lr ×2.7972 (the D1-rebased base multiplier at `mixture.STEPS`' tokens), cap 15 vs none, 4 seeds | user approval |
 | Tokenizer ablation | 8 d16 runs at each arm's max_ratio (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer`), decision, `adopt`, compile, pack | D5 and D7 decided; user approval |
@@ -115,7 +115,8 @@ reference's own spread, CUDA SASS/PTX identical, no interface or record-format c
   `NATIVE`), line reflows (CUDA host code differs only in `__LINE__` constants).
 - CorpusCuration: one `undropped(paths)` SQL helper shared by `shuffle` and `shard_documents` (same SQL text), one
   `pa.array` pass with nulls in `check_row_group` (no trailing cast), the standardizer looked up once per file,
-  `safe.directory={ROOT}`, stale references (`nanochat/data`, `packed.json`), `fissix` imported at module level.
+  `safe.directory={ROOT}`, stale references (the removed data package, `packed.json`), `fissix` imported at module
+  level.
   Verified identical: `texts`/`text_bytes`/`curated_shards` on all 1,812 shards and 2.1M rows; `curate.main()` end to
   end on synthetic standardized files for all 18 sources (1,822 output files byte-identical); `prepare` on one real Hub
   file per category (raw, standardized, extent identical; the extent matches the published file list);
@@ -135,7 +136,7 @@ reference's own spread, CUDA SASS/PTX identical, no interface or record-format c
 | # | Finding | Action | State |
 |---|---|---|---|
 | E1 | GPU power: requested 900 W, enforced 700 W outside the VM (KVM guest); during the d24 8K step the SW power cap is active in every sample, SM clock avg 1,564 MHz of 1,980 | none: the module's 1,000 W budget is shared with the CPU (§0) | closed (hardware constraint) |
-| E2 | Locking the SM clock at 1,980 MHz: d24 8K step −3.0% (3,585-3,590 vs 3,682-3,696 ms), d16 −1.7%; speed only | locked machine-wide; `sudo nvidia-smi -lgc 1980,1980` added to `runs/setup.sh` (not persistent across reboot) | done |
+| E2 | Locking the SM clock at 1,980 MHz: d24 8K step −3.0% (3,585-3,590 vs 3,682-3,696 ms), d16 −1.7%; speed only | locked machine-wide; `sudo nvidia-smi -lgc 1980,1980` added to `scripts/setup.sh` (not persistent across reboot) | done |
 | E3 | Profile, kernel breakdown, ranked CUDA/C plan (`local://EfficiencyResearch.md`) | items 1-2 (`a81410c`) and 4 (`7ad594f`) applied; FP8, MPS and items 5-8 rejected | done |
 
 ## 4. Infrastructure
@@ -143,7 +144,7 @@ reference's own spread, CUDA SASS/PTX identical, no interface or record-format c
 - **I1** ✓ (`ba01bb5`): `tokenizers==0.23.3` (0.23.2 conflicts with huggingface-hub 2.2.0; fidelity identical) and
   `regex==2026.9.29` declared and locked; the image is rebuilt with the Hydra migration's `hydra-core`. `basedpyright`
   stays (eval/verify.py runs it).
-- **I2** `runs/setup.sh`: clock lock (E2) added; long line reflowed.
+- **I2** `scripts/setup.sh`: clock lock (E2) added; long line reflowed.
 
 ## 5. Documentation (after the code is final)
 
@@ -152,7 +153,7 @@ Done (`fc6b9e9`, `54fc1bd`): `docs/pretraining.md` (the GH200 runbook merged in)
 ArchitectureCheck (no code effect):
 - wrong locations: MobileLLM 32×960 is Table 9; nanochat Muon 0.02 at 92 `gpt.py:419/450`, √ factor at `optim.py:393`;
   zero-init lm_head is modded-nanogpt record #8; Power Lines constants in App. E.3.1; DataDecide's ~80% in the abstract
-  and §3.1; `production_plan` → `base_plan` (now `nanochat/run.py`), `production` fields → `baseline`;
+  and §3.1; `production_plan` → `base_plan` (now `run.py`), `production` fields → `baseline`;
 - wrong values: MoVE d24 extrapolation ≈ −0.014 in MoVE's coordinates (the cited gains are LaVE rows); deep-and-thin
   d24 analogue +9.2% FLOPs; LONG threshold 190.5; Step-Law's fit uses 1,912 samples from 7 dense sizes; "within 7% of
   nanochat's lr" fails like-for-like (1.24× and 1.69×); StarCoder2's FIM ≈25% of chunks, DeepSeek-Coder PSM only;
@@ -176,8 +177,8 @@ dataset holds the 1,812 shards, the regenerated card and `.gitattributes` (commi
 ## 7. Tokenizer ablation (`data` done, `679e7d9`; runs wait for the user's approval)
 
 `python -m ablations.tokenizer data` (the d16 set compiled and packed under every arm, `results/tokenizer-data.json`),
-then `python -m nanochat.run experiment=tokenizer` (8 d16 runs: 4 arms × seeds 0 and 1; the decision in
-`results/tokenizer.json`), then `adopt`, compile, pack, pre-training (`python -m nanochat.run experiment=base`).
+then `python run.py experiment=tokenizer` (8 d16 runs: 4 arms × seeds 0 and 1; the decision in
+`results/tokenizer.json`), then `adopt`, compile, pack, pre-training (`python run.py experiment=base`).
 
 ## 8. Answers and ablation designs
 
@@ -311,7 +312,7 @@ ResFormer (which reuses the first layer's values); LaVE gains 0.016/0.010/0.010 
 ### Run configuration: Hydra (hydra-core 1.3.7)
 - Replaces `ablations/harness.py` (`Run`, `python -m ablations.harness '<json>'`), `scripts/pretrain.py` (both deleted in
   `679e7d9`), `config.run_tag`'s hashed tags, `suite.export`, the `variant` record field, lr.py's driver and the tokenizer
-  ablation's `runs` verb. `nanochat/run.py`'s `RunConfig` defaults are the base model's recipe (depth 24, ratio null =
+  ablation's `runs` verb. `run.py`'s `RunConfig` defaults are the base model's recipe (depth 24, ratio null =
   `train/stages.py` max_ratio, seed 0, tokenizer corpus, scales 1.0, softcap null); `conf/run.yaml` composes them (the
   `run_schema` ConfigStore node) with an experiment and Hydra's settings; `conf/experiment/<name>.yaml` sweeps fields
   against them (base, tokenizer, softcap, adamw_lr, muon_tau_20/200).
@@ -322,5 +323,5 @@ ResFormer (which reuses the first layer's values); LaVE gains 0.016/0.010/0.010 
   a finished or diverged run is skipped; training and each checkpoint's evaluation run in fresh spawned processes;
   any other failure stops the sweep. `ablations/records.py`'s callback writes `results/<experiment>.jsonl`,
   `-curves.jsonl` and, with an analysis, `results/<experiment>.json` = {"analysis": ...}.
-- Commands: `runs/container.sh python -m nanochat.run experiment=<name>`; ad hoc
-  `python -m nanochat.run depth=8 ratio=0.5 tokenizer=sa-bpe`.
+- Commands: `scripts/container.sh python run.py experiment=<name>`; ad hoc
+  `python run.py depth=8 ratio=0.5 tokenizer=sa-bpe`.

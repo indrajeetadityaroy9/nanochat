@@ -1,4 +1,4 @@
-# The run app's root config (nanochat/run.py): the base model's recipe, RunConfig's defaults, then an experiment's
+# The run app's root config (run.py): the base model's recipe, RunConfig's defaults, then an experiment's
 # fields and sweep (conf/experiment/<name>.yaml, selected by experiment=<name>) and the command line's overrides.
 defaults:
   - run_schema
