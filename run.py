@@ -163,10 +163,10 @@ def job(config: RunConfig) -> None:
 
 
 def lr_multiplier() -> float:
-    """The base model's multiplier of the law's peak lr: ablations/lr.py's estimator over its recorded runs."""
-    from ablations.lr import analysis
+    """The base model's multiplier of the law's peak lr: ablations/peak_lr.py's estimator over its recorded runs."""
+    from ablations.peak_lr import analysis
 
-    lines = [json.loads(line) for line in (RESULTS / "lr.jsonl").read_text(encoding="utf-8").splitlines()]
+    lines = [json.loads(line) for line in (RESULTS / "peak_lr.jsonl").read_text(encoding="utf-8").splitlines()]
     return analysis(lines)["base_multiplier"]
 
 

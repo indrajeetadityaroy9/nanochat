@@ -44,7 +44,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | A1 syntax constraint | takes the caller's tokenizer; tables cached per tokenizer | `ba01bb5` |
 | viable_end | an unparseable prefix is not viable (as `allowed`) | `ba01bb5` |
 | I1 dependencies | `tokenizers==0.23.3`, `regex==2026.9.29` declared and locked | `ba01bb5` |
-| `results/lr.json` | keys `production_*` → `base_*`; its pre-D1 analysis (×2.3218, never regenerated) removed: `run.py` `lr_multiplier` computes the multiplier at launch from `results/lr.jsonl` | `ba01bb5`, `d0a2ec0` |
+| `results/peak_lr.json` | keys `production_*` → `base_*`; its pre-D1 analysis (×2.3218, never regenerated) removed: `run.py` `lr_multiplier` computes the multiplier at launch from `results/peak_lr.jsonl` | `ba01bb5`, `d0a2ec0` |
 | E2 clock lock | 1,980 MHz machine-wide; `scripts/setup.sh` | `4ade225` |
 | E3 throughput plan | reported; items 1-2 (FA4 real segments, batched Newton-Schulz) applied, d16 −10%, d24 −5.3% | `a81410c` |
 | KISS refactor | five slices verified identical to the reference | `4ade225` |
@@ -74,11 +74,11 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | Item | Next action | Waits on |
 |---|---|---|
 | Ablation queue | ready at HEAD (`860ac7b`; end-to-end d8 runs through `run.py` at `9ea5037` and `860ac7b`: exit 0, code bpb 2.7012 and 2.7013 against 2.7011 at `d0a2ec0`): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, compile, pack → D6 | the user's explicit permission |
-| D7 Muon τ | `muon_tau_20.yaml` (d8 at 20, sa-bpe set, 2 seeds: user, 4 judged wasteful) and `muon_tau_200.yaml` (d8 at 200 reads 2.94B tokens, beyond the sa-bpe set's 2.11B: `tokenizer=corpus`, whose packs exist, 2 seeds); ×½, ×1, ×2; 12 runs | user approval |
-| D5 softcap | `softcap.yaml`: d16 at ratio 20.0 on the sa-bpe set, lr ×2.7972 (the D1-rebased base multiplier at `mixture.STEPS`' tokens), cap 15 vs none, 4 seeds | user approval |
-| Tokenizer ablation | 8 d16 runs at each arm's max_ratio (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer`), decision, `adopt`, compile, pack | D5 and D7 decided; user approval |
-| D6 AdamW-group lr | `adamw_lr.yaml`: d16 on the sa-bpe set at its max_ratio, ×¼ and ×4, 2 seeds; its ×1 arm is the tokenizer ablation's sa-bpe baseline (same run key), so 4 runs train | the tokenizer runs; user approval |
-| Base model pre-training | `experiment=base` (d24, the decided recipe and tokenizer) | every ablation above; its own user approval |
+| D7 Muon τ | `muon_wd_timescale_20tpp.yaml` (d8 at 20, sa-bpe set, 2 seeds: user, 4 judged wasteful) and `muon_wd_timescale_200tpp.yaml` (d8 at 200 reads 2.94B tokens, beyond the sa-bpe set's 2.11B: `tokenizer=corpus`, whose packs exist, 2 seeds); ×½, ×1, ×2; 12 runs | user approval |
+| D5 softcap | `logit_softcap.yaml`: d16 at ratio 20.0 on the sa-bpe set, lr ×2.7972 (the D1-rebased base multiplier at `mixture.STEPS`' tokens), cap 15 vs none, 4 seeds | user approval |
+| Tokenizer ablation | 8 d16 runs at each arm's max_ratio (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer_split_merge`), decision, `adopt`, compile, pack | D5 and D7 decided; user approval |
+| D6 AdamW-group lr | `adamw_group_lr.yaml`: d16 on the sa-bpe set at its max_ratio, ×¼ and ×4, 2 seeds; its ×1 arm is the tokenizer ablation's sa-bpe baseline (same run key), so 4 runs train | the tokenizer runs; user approval |
+| Base model pre-training | `experiment=pretrain` (d24, the decided recipe and tokenizer) | every ablation above; its own user approval |
 
 Order: the user's permission → D7 at 20, D5, D7 at 200, tokenizer runs (with D6's arms) → adopt, compile, pack → base
 model pre-training (its own approval).
@@ -163,7 +163,7 @@ ArchitectureCheck (no code effect):
   2410.23922 read as covering Muon; 2405.18392 cited for crossing curves; d8@20 ×2 lr results without a record in
   `results/` (unrecoverable: delete or mark unrecorded); `fit` called a polynomial fit per 2409.19913 (it is a 3-point
   local parabola).
-- record: `results/lr.json`'s `production_*` keys renamed `base_*` ✓ (`ba01bb5`).
+- record: `results/peak_lr.json`'s `production_*` keys renamed `base_*` ✓ (`ba01bb5`).
 - also: D10's wording (1.44e-5 of peak at D1's plan is intended), the warmup text (40 steps per nanochat 92; 2410.23922 is not about
   Muon), FIM citations (§8), stale line-widening, manifest and ablation-driver text, `mixture.py:67`'s plan comment (D1).
 
@@ -177,9 +177,10 @@ dataset holds the 1,812 shards, the regenerated card and `.gitattributes` (commi
 
 ## 7. Tokenizer ablation (`data` done, `679e7d9`; runs wait for the user's approval)
 
-`python -m ablations.tokenizer data` (the d16 set compiled and packed under every arm, `results/tokenizer-data.json`),
-then `python run.py experiment=tokenizer` (8 d16 runs: 4 arms × seeds 0 and 1; the decision in
-`results/tokenizer.json`), then `adopt`, compile, pack, pre-training (`python run.py experiment=base`).
+`python -m ablations.tokenizer data` (the d16 set compiled and packed under every arm,
+`results/tokenizer_split_merge-data.json`), then `python run.py experiment=tokenizer_split_merge` (8 d16 runs: 4 arms ×
+seeds 0 and 1; the decision in `results/tokenizer_split_merge.json`), then `adopt`, compile, pack, pre-training
+(`python run.py experiment=pretrain`).
 
 ## 8. Answers and ablation designs
 
@@ -195,7 +196,7 @@ pre-registered decision rule, GH200 cost). Filled in as the research agents repo
   12·8·512·4096). The code's per-window M was nanochat 92's convention, ×1.82 below Eq. 2 at d24/8K.
 - Applied (`gpt.non_embedding_flops_per_token`, l_seq the model's context). Plans: d16 at 20: 2 → 3 micro-batches,
   6,828 → 4,552 steps, law lr ×0.914; d24 base: 12 → 15 micro-batches, 86,975 → 69,580 steps on the same 102.6B
-  tokens. The lr ablation's three settings keep their batch and steps, so its optima carry over: `lr.analysis`
+  tokens. The lr ablation's three settings keep their batch and steps, so its optima carry over: `peak_lr.analysis`
   re-bases the vertices (×1.1186 at d8, ×1.0776 at d24), base multiplier ×2.7972, base lr 2.4138e-3 (verified on the
   GH200). No batch ablation: Muon's loss is flat across a 2× batch at 8× Chinchilla (arXiv 2509.02046 App. C.9
   Table 85).
@@ -207,7 +208,7 @@ Citation fixed in `schedule.py`.
 
 ### D3 gradient clip before Muon (OptimizerAnswers): answered; keep 1.0
 The Megatron PR 5395 stall needs gradient norms ~5e7-2e11 (below Newton-Schulz's 1e-7 floor); the largest recorded
-here is 10.76 (`results/lr-curves.jsonl`, d8 at 200 ×1, step 14,202). DeepSpeed #8439's bug clips after orthogonalization, which this code does not. Kimi K2's MuonClip clips
+here is 10.76 (`results/peak_lr-curves.jsonl`, d8 at 200 ×1, step 14,202). DeepSpeed #8439's bug clips after orthogonalization, which this code does not. Kimi K2's MuonClip clips
 q/k weights, not gradients. The only source for 1.0 is DeepSeek LLM §2.3.
 
 ### D4 learnable QK gains (ArchitectureAnswers): answered; keep
@@ -222,24 +223,24 @@ Gemma 3 and OLMo 2 learn it; per-head QK norm with learnable parameters in arXiv
   (modded-nanogpt record #9 −0.0053 nats at cap 30; nanochat LOG 2026-03-02: caps 10-30 within 1e-3).
 - Design: d16 at 20, cap 15 vs none, 4 paired seeds; adopt iff code bpb better by > 1.96·0.0034·√(2/4) = 0.0047 and
   MBPP+ not worse (sign test); ~9 GPU-h. `RunConfig.softcap` (`GPTConfig.softcap`: c·tanh(z/c) in the training loss,
-  eval losses, decoder sampling), `conf/experiment/softcap.yaml`, analysis in `ablations/recipe.py`. Runs on the
-  sa-bpe arm's data (its d16 max_ratio is 31.42) at lr_scale 2.7972 (lr.py's base multiplier under D1), since the
+  eval losses, decoder sampling), `conf/experiment/logit_softcap.yaml`, analysis in `ablations/recipe.py`. Runs on the
+  sa-bpe arm's data (its d16 max_ratio is 31.42) at lr_scale 2.7972 (peak_lr.py's base multiplier under D1), since the
   corpus tokenizer does not exist before the tokenizer ablation's adopt.
 
 ### D6 one lr/weight decay for all groups (OptimizerAnswers): source found; ablation after the tokenizer runs
 Moonlight §2.2 shares lr and weight decay "among matrix and non-matrix parameters" (its matched-RMS argument covers
 Muon's update size, not the AdamW groups' lr). Design: `RunConfig.adamw_lr_scale` (AdamW lr × s, weight decay / s;
-`conf/experiment/adamw_lr.yaml`) ×¼ and ×4 at d16, 2 seeds, decay
+`conf/experiment/adamw_group_lr.yaml`) ×¼ and ×4 at d16, 2 seeds, decay
 timescale of the tables held; adopt iff better by > 0.0067 bpb and MBPP+ not worse; ~4 GPU-h.
 
 ### D7 τ weight-decay law on Muon (OptimizerAnswers): ablation, before the tokenizer runs
 The law's form carries to Muon (Power Lines App. B; arXiv 2512.05620 App. H.5 reproduces it for Muon), its constants
 do not (no Muon fit; doubling Muon's decay cost 0.010-0.019 loss in arXiv 2509.02046). Design:
-`RunConfig.muon_tau_scale` (Muon weight decay / s; `conf/experiment/muon_tau_20.yaml` on the sa-bpe arm's data, then
-`muon_tau_200.yaml` on the corpus's packs, as d8 at 200 reads 2.94B tokens, beyond the arm's set) ×½ and ×2 on Muon
+`RunConfig.muon_tau_scale` (Muon weight decay / s; `conf/experiment/muon_wd_timescale_20tpp.yaml` on the sa-bpe arm's
+data, then `muon_wd_timescale_200tpp.yaml` on the corpus's packs, as d8 at 200 reads 2.94B tokens, beyond the arm's set) ×½ and ×2 on Muon
 matrices only, d8 at 20 and at 200, 2 seeds each (user: 4 seeds at 20 judged wasteful; the code margin widens from
 0.0047 to 0.0067, so a smaller effect keeps the law); keep the law unless an arm clears its margin, else fit Muon's
-own law through the two horizons (`ablations/recipe.py` `muon_tau_law`); ~2.8 GPU-h.
+own law through the two horizons (`ablations/recipe.py` `muon_wd_timescale_law`); ~2.8 GPU-h.
 
 ### D9 RoPE base (ArchitectureAnswers): answered; keep 10^6 from the start
 Barbero et al. (arXiv 2410.06205 Table 2) Gemma 2B at 8K, 10k vs 500k: differences under 0.3%, mixed sign; Llama 3,
@@ -312,11 +313,11 @@ ResFormer (which reuses the first layer's values); LaVE gains 0.016/0.010/0.010 
 
 ### Run configuration: Hydra (hydra-core 1.3.7)
 - Replaces `ablations/harness.py` (`Run`, `python -m ablations.harness '<json>'`), `scripts/pretrain.py` (both deleted in
-  `679e7d9`), `config.run_tag`'s hashed tags, `suite.export`, the `variant` record field, lr.py's driver and the tokenizer
+  `679e7d9`), `config.run_tag`'s hashed tags, `suite.export`, the `variant` record field, peak_lr.py's driver and the tokenizer
   ablation's `runs` verb. `run.py`'s `RunConfig` defaults are the base model's recipe (depth 24, ratio null =
   `train/stages.py` max_ratio, seed 0, tokenizer corpus, scales 1.0, softcap null); `conf/run.yaml` composes them (the
   `run_schema` ConfigStore node) with an experiment and Hydra's settings; `conf/experiment/<name>.yaml` sweeps fields
-  against them (base, tokenizer, softcap, adamw_lr, muon_tau_20/200).
+  against them (pretrain, tokenizer_split_merge, logit_softcap, adamw_group_lr, muon_wd_timescale_20tpp/200tpp).
 - A run's key is the fields differing from the defaults, sorted, `k=v` joined by `,` (e.g.
   `depth=16,seed=1,tokenizer=sa-bpe`; `defaults` if none); a run shared by two experiments is one run. Everything of
   it is in `artifacts/runs/<key>/`: `.hydra/`, `metrics.jsonl` (its run record holds `config` and `data_key`),

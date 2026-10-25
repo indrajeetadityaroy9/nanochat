@@ -9,10 +9,10 @@ from them), [inference] or [unverified] (measured, record not kept).
 
 | Step | State | Record | Code | Machine, wall time |
 |---|---|---|---|---|
-| `vocabularies` | done, 2026-10-24 | `results/tokenizer-vocabularies.json` | `5ba5025` | GH200, 737 s |
-| `intrinsic` | done, 2026-10-24 | `results/tokenizer-intrinsic.json` | `ebd8058` | GH200, 114 s |
-| `data` | done, 2026-10-24 | `results/tokenizer-data.json` | `ba01bb5` | GH200, 3,002 s |
-| `runs` | ready; waits for the user's approval | `results/tokenizer.json`, `.jsonl` | | |
+| `vocabularies` | done, 2026-10-24 | `results/tokenizer_split_merge-vocabularies.json` | `5ba5025` | GH200, 737 s |
+| `intrinsic` | done, 2026-10-24 | `results/tokenizer_split_merge-intrinsic.json` | `ebd8058` | GH200, 114 s |
+| `data` | done, 2026-10-24 | `results/tokenizer_split_merge-data.json` | `ba01bb5` | GH200, 3,002 s |
+| `runs` | ready; waits for the user's approval | `results/tokenizer_split_merge.json`, `.jsonl` | | |
 | `adopt` | after `runs` | `artifacts/corpus/tokenizer` | | |
 
 The arms' vocabularies are in `artifacts/corpus/tokenizer-ablation/<arm>/` (`tokenizer.tiktoken`, `tokenizer.pattern`,
@@ -310,8 +310,8 @@ Every arm passed every validity check. 3,600 val texts per arm were checked chun
 ## Runs (pre-registered; wait for the user's approval)
 
 **Design:**
-- Every arm at d16, two seeds each (0 and 1): 8 runs through `python run.py experiment=tokenizer`
-  (`conf/experiment/tokenizer.yaml`), each with the base model's code paths and its own plan (`schedule.plan` at its
+- Every arm at d16, two seeds each (0 and 1): 8 runs through `python run.py experiment=tokenizer_split_merge`
+  (`conf/experiment/tokenizer_split_merge.yaml`), each with the base model's code paths and its own plan (`schedule.plan` at its
   tokens); the decision is `ablations.tokenizer.decide` over the records grouped by `config.tokenizer`.
 - **Equal bytes:** each run reads the set's code documents once, so an arm's tokens are their bytes over its bytes per
   token. Text and math are drawn by rows. At equal bytes, the arm that compresses better trains on fewer tokens and
@@ -322,7 +322,8 @@ Every arm passed every validity check. 3,600 val texts per arm were checked chun
   Table 3; d16 at 20 is 4,552 steps of 294,912 tokens). Each code corpus takes the fewest leading train shards whose
   estimated sa-bpe tokens hold its file-stage draw; text, math and the repository corpora hold `MARGIN` (1.5) times
   their draws. Whole shards hold more than the draw: every arm's `max_ratio` on the set is 29.5–31.5 (sa-bpe 31.42,
-  sa-bpe-fused 29.48, hybrid 31.49, bpe 31.42), 6,710–7,167 steps of 3 micro-batches (`results/tokenizer-data.json`).
+  sa-bpe-fused 29.48, hybrid 31.49, bpe 31.42), 6,710–7,167 steps of 3 micro-batches
+  (`results/tokenizer_split_merge-data.json`).
 
 **Measures:**
 - **Parsing:** per MBPP+ problem, whether the healed greedy completion compiles. MBPP+ alone, because its prompts leave
@@ -341,7 +342,7 @@ seed from both sides):
     and to this corpus [inference].
   - At n = 2 the margin is 0.0067 bits per byte [arithmetic].
 
-**Decision** (`results/tokenizer.json` `"analysis"` `"decision"`):
+**Decision** (`results/tokenizer_split_merge.json` `"analysis"` `"decision"`):
 
 ```mermaid
 flowchart TD
@@ -382,7 +383,7 @@ Inside the project image on the GH200 (64 Neoverse-V2 cores, 525 GB; Python 3.12
 python -m ablations.tokenizer vocabularies   # sample, then the four arms at once
 python -m ablations.tokenizer intrinsic      # 72 val compiles and every measure, one process pool
 python -m ablations.tokenizer data           # the d16 set compiled and packed under every arm
-python run.py experiment=tokenizer           # the 8 runs and the decision
+python run.py experiment=tokenizer_split_merge   # the 8 runs and the decision
 python -m ablations.tokenizer adopt
 ```
 

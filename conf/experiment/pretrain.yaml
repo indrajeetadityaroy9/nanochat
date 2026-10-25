@@ -1,0 +1,17 @@
+# @package _global_
+# Pre-training of the base model: d24 at the most tokens per scaling parameter its data holds without rereading a
+# document (ratio null: train/stages.py max_ratio), seed 0, both stages, peak lr the DeepSeek LLM law's (arXiv
+# 2401.02954 §3.1 Eq. 1) times ablations.peak_lr.analysis's "base_multiplier"; a checkpoint at each tenth of the run
+# and at the repository stage's start, each evaluated with every benchmark. No analysis.
+depth: 24
+ratio: null
+seed: 0
+lr_scale: ${lr_multiplier:}
+checkpoints: 10
+generate: benchmarks
+
+hydra:
+  callbacks:
+    records:
+      _target_: ablations.records.Records
+      analysis: null

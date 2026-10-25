@@ -1,0 +1,16 @@
+# @package _global_
+# Muon weight-decay EMA timescale at 20 tokens per parameter: x 1/2 and x 2 against the tau law (x 1); d8 on the
+# sa-bpe arm's data, seeds 0 and 1. Analysis: ablations.recipe.muon_wd_timescale.
+depth: 8
+ratio: 20.0
+tokenizer: sa-bpe
+
+hydra:
+  sweeper:
+    params:
+      muon_tau_scale: 0.5,1.0,2.0
+      seed: range(2)
+  callbacks:
+    records:
+      _target_: ablations.records.Records
+      analysis: ablations.recipe.muon_wd_timescale

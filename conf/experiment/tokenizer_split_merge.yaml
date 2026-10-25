@@ -1,0 +1,16 @@
+# @package _global_
+# Pre-tokenizer split pattern x BPE merge score (ablations/tokenizer.py): arms sa-bpe (baseline), sa-bpe-fused, hybrid,
+# bpe, each at d16 (tokenizer.DEPTH) at its max_ratio (ratio null: equal bytes), seeds 0 and 1.
+# Analysis: ablations.tokenizer.decide.
+depth: 16
+ratio: null
+
+hydra:
+  sweeper:
+    params:
+      tokenizer: sa-bpe,sa-bpe-fused,hybrid,bpe
+      seed: range(2)
+  callbacks:
+    records:
+      _target_: ablations.records.Records
+      analysis: ablations.tokenizer.decide

@@ -66,7 +66,7 @@ Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and loo
 | MLP | ReLU², hidden 4C | SwiGLU (DeepSeek-Coder, Qwen2.5-Coder, Code Llama); StarCoder2 GELU |
 | Value embeddings | alternating layers, gated | none |
 | Optimizer | Muon on matrices, AdamW on tables and vectors | AdamW, β = (0.9, 0.95) (DeepSeek-Coder §3.4, Code Llama) |
-| Peak lr | DeepSeek LLM's law × `ablations/lr.py`'s multiplier, the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
+| Peak lr | DeepSeek LLM's law × `ablations/peak_lr.py`'s multiplier, the peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3, the schedule DeepSeek-Coder §3.4 follows) |
 | Weight decay | τ law (Regime) | 0.1 (DeepSeek LLM §2.3) |
 | Gradient clipping | 1.0 | 1.0 (DeepSeek LLM §2.3) |
 | Context stages | 8K file level, then the last 5.45% of steps at 32K on repositories | Qwen2.5-Coder: the same 8K → 32K repository stage; DeepSeek-Coder: 16K repository-ordered files; Code Llama: a 16K long-context stage |
@@ -92,7 +92,7 @@ data's `train/stages.py` `max_ratio`. The tokenizer is decided by `docs/tokenize
 |---|---|---|
 | Batch | 1,474,560 tokens (15 micro-batches of 98,304) at 102.6B tokens | DeepSeek LLM's law B = 0.2920·C^0.3271, C = M·D (`train/schedule.py` `plan`), rounded to whole micro-batches |
 | Steps | 69,580 (525.89 tokens per scaling parameter); repository stage from step 65,785 | `schedule.plan` (D11: `round(ratio · params)`) |
-| Peak lr | the law's η = 0.3118·C^-0.125 = 8.6295e-4 times `ablations/lr.py`'s multiplier: × 2.7972 = 2.4139e-3 at 102.6B tokens | DeepSeek LLM §3.1 Eq. 1; `conf/experiment/base.yaml`'s `lr_scale` resolves `lr.py`'s `analysis` at the corpus's `max_ratio` (Peak lr) |
+| Peak lr | the law's η = 0.3118·C^-0.125 = 8.6295e-4 times `ablations/peak_lr.py`'s multiplier: × 2.7972 = 2.4139e-3 at 102.6B tokens | DeepSeek LLM §3.1 Eq. 1; `conf/experiment/pretrain.yaml`'s `lr_scale` resolves `peak_lr.py`'s `analysis` at the corpus's `max_ratio` (Peak lr) |
 | Warmup | 40 steps, linear | 2/(1 − β₂) (arXiv 1910.04209, for Adam); nanochat 92d63d4's 40 steps at d24 |
 | Decay | linear to zero; the last step at 1/(69,580 − 40) = 1.44e-5 of peak (D10: exactly 0 is not required) | arXiv 2502.15938 §4 |
 | Optimizers | AdamW (fused) on tables, `lm_head` and vectors; Muon (`torch.optim.Muon`'s update, Newton–Schulz batched by shape) with `match_rms_adamw` on the other matrices, one lr for every group | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
@@ -110,7 +110,7 @@ describes for a pre-Muon clip needs gradient norms far above any recorded here; 
 orthogonalization, which this code does not.
 
 **Warmup.** 40 steps, the value nanochat 92d63d4 uses at d24 and 2/(1 − β₂) for AdamW's β₂ (arXiv 1910.04209); the
-lr ablation's 11 runs (`results/lr.jsonl`, up to × 8 at d8) show no lr-dependent warmup instability. No paper fixes a
+lr ablation's 11 runs (`results/peak_lr.jsonl`, up to × 8 at d8) show no lr-dependent warmup instability. No paper fixes a
 warmup for Muon.
 
 ### Peak lr
@@ -118,7 +118,7 @@ warmup for Muon.
 DeepSeek LLM's law was fit for AdamW at compute below the base model's (§3.1), and the transfer rules disagree on how
 the optimum moves with the horizon: from d8 at 5 to 200 tokens per parameter, Complete^(d)P's SDE rule
 (arXiv 2512.22382 Table 1) predicts the optimum's multiplier of the law changes × 0.354, Step-Law (arXiv 2503.04715,
-fit on 1,912 samples from 7 dense model sizes) × 4.92 (`results/lr.json`). `ablations/lr.py` therefore measures the
+fit on 1,912 samples from 7 dense model sizes) × 4.92 (`results/peak_lr.json`). `ablations/peak_lr.py` therefore measures the
 multiplier: × 1, × 2, × 4 at d24 over 5 tokens per parameter, times the optimum's horizon trend measured at d8 (× 1
 to × 8 over 5 and over 200), net of d8's batch growth by the square-root batch rule (arXiv 2205.10287 Def. 5.2), its
 exponent carried to the base model's horizon, and the base model's batch growth by the same rule. Each setting's
@@ -126,7 +126,7 @@ optimum is the vertex of the 3-point local parabola in ln(multiplier) through it
 neighbours (`lr.fit`; arXiv 2409.19913 §3.1 fits quadratics in log lr). The horizon trend is assumed width-independent
 [inference: arXiv 2409.19913 §4 finds its exponent size-independent only from 760M parameters].
 
-Code bits per byte at × 1 / 2 / 4 / 8 of the law's lr, seed 0 (`results/lr.jsonl`, dataset revision `1e711aa`, the
+Code bits per byte at × 1 / 2 / 4 / 8 of the law's lr, seed 0 (`results/peak_lr.jsonl`, dataset revision `1e711aa`, the
 removed data pipeline's data):
 
 | Setting | Plan | × 1 | × 2 | × 4 | × 8 | Vertex (`lr.json`) |
@@ -141,9 +141,9 @@ barely moves with the horizon, against both rules. At d8 at 200, d8's law batch 
 Eq. 2's M; it rounds to 2 from 77.7 tokens per parameter on [arithmetic, `schedule.plan`]).
 
 The vertices are multipliers of the law's lr the runs recorded, which predates D1 (DeepSeek LLM Eq. 2's M); the runs'
-batches and steps are unchanged under D1, so `lr.analysis` re-bases each vertex onto the current law's lr. Under D1 the
-base model's multiplier is × 2.7972 at 102.6B tokens (fixed in `conf/experiment/softcap.yaml`). The base experiment
-computes its own when it launches (`run.py` `lr_multiplier`, from `results/lr.jsonl` at the adopted tokenizer's
+batches and steps are unchanged under D1, so `peak_lr.analysis` re-bases each vertex onto the current law's lr. Under D1 the
+base model's multiplier is × 2.7972 at 102.6B tokens (fixed in `conf/experiment/logit_softcap.yaml`). The pretrain
+experiment computes its own when it launches (`run.py` `lr_multiplier`, from `results/peak_lr.jsonl` at the adopted tokenizer's
 plan), so no copy is stored. A d8 at 20 comparison of × 2 against × 1 (seeds 0 and 1, 2026-10-20) has no record in
 `results/` [unrecorded].
 
@@ -156,12 +156,12 @@ One pre-registered experiment per decision whose outcome the literature does not
 
 | Experiment (`conf/experiment/`) | Decision | Arms | Analysis | State |
 |---|---|---|---|---|
-| (`ablations/lr.py`, 4ade225's records) | the base model's peak lr | Peak lr | `lr.analysis` | done, `results/lr.jsonl`; the multiplier computed at launch |
-| `tokenizer.yaml` | split pattern and merge score | 4 arms at d16, each at its `max_ratio`, 2 seeds | `ablations.tokenizer.decide` | intrinsic part and data done; runs wait (`docs/tokenizer-ablation.md`) |
-| `softcap.yaml` | D5 output-logit softcap | cap 15 vs none, d16 at 20, 4 seeds, lr × 2.7972 | `ablations.recipe.softcap` | waits |
-| `muon_tau_20.yaml`, `muon_tau_200.yaml` | D7 τ law on Muon | Muon's τ × ½, × 1, × 2, d8 at 20 and at 200, 2 seeds each | `ablations.recipe.muon_tau`, `muon_tau_law` | waits; the 200 half needs the corpus's packs |
-| `adamw_lr.yaml` | D6 AdamW groups' lr | × ¼, × 1, × 4 at d16 on the sa-bpe arm's data, 2 seeds; × 1 is the tokenizer ablation's sa-bpe runs | `ablations.recipe.adamw_lr` | waits for the tokenizer runs |
-| `base.yaml` | the base model's pre-training | d24 at `max_ratio`, seed 0, every benchmark | none | waits for every ablation above |
+| `peak_lr` (`ablations/peak_lr.py`, 4ade225's records) | the base model's peak lr | Peak lr | `peak_lr.analysis` | done, `results/peak_lr.jsonl`; the multiplier computed at launch |
+| `tokenizer_split_merge.yaml` | split pattern and merge score | 4 arms at d16, each at its `max_ratio`, 2 seeds | `ablations.tokenizer.decide` | intrinsic part and data done; runs wait (`docs/tokenizer-ablation.md`) |
+| `logit_softcap.yaml` | D5 output-logit softcap | cap 15 vs none, d16 at 20, 4 seeds, lr × 2.7972 | `ablations.recipe.logit_softcap` | waits |
+| `muon_wd_timescale_20tpp.yaml`, `muon_wd_timescale_200tpp.yaml` | D7 τ law on Muon | Muon's τ × ½, × 1, × 2, d8 at 20 and at 200, 2 seeds each | `ablations.recipe.muon_wd_timescale`, `muon_wd_timescale_law` | waits; the 200 half needs the corpus's packs |
+| `adamw_group_lr.yaml` | D6 AdamW groups' lr | × ¼, × 1, × 4 at d16 on the sa-bpe arm's data, 2 seeds; × 1 is the tokenizer ablation's sa-bpe runs | `ablations.recipe.adamw_group_lr` | waits for the tokenizer runs |
+| `pretrain.yaml` | the base model's pre-training | d24 at `max_ratio`, seed 0, every benchmark | none | waits for every ablation above |
 
 Each recipe ablation's rule (its contrasts, margins and adoption condition) is in `ablations/recipe.py`'s docstring;
 the tokenizer ablation's in `docs/tokenizer-ablation.md`.
@@ -204,8 +204,8 @@ and a run whose recorded plan or data key differs stops the sweep ("recipe chang
 Training and each checkpoint's evaluation run in fresh spawned processes. When the sweep ends, `ablations/records.py`'s
 `Records` callback writes `results/<experiment>.jsonl` (a record per run: its evaluation verbatim, `config`, measures,
 efficiency), `results/<experiment>-curves.jsonl` (per run its per-step train records as columns) and, with an analysis,
-`results/<experiment>.json` = {"analysis": ...}, so tables and figures need no rerun. `results/lr.jsonl`,
-`lr-curves.jsonl` and `lr.json` were written by 4ade225's `ablations/harness.py` in its earlier format (hashed tags, the
+`results/<experiment>.json` = {"analysis": ...}, so tables and figures need no rerun. `results/peak_lr.jsonl`,
+`peak_lr-curves.jsonl` and `peak_lr.json` were written by 4ade225's `ablations/harness.py` in its earlier format (hashed tags, the
 run's fields as `fields`).
 
 ## GPU implementation
@@ -301,10 +301,10 @@ HF_TOKEN=<read token> scripts/setup.sh   # CDI spec, clock lock, docker group, i
 then, after logging in again (docker group), each through `scripts/container.sh`:
 
 1. **Tokenizer ablation, intrinsic part and data** (`docs/tokenizer-ablation.md`): `python -m ablations.tokenizer
-   vocabularies`, `intrinsic`, `data`. An arm's extent margin (`results/tokenizer-intrinsic.json`) below 1 means a group
+   vocabularies`, `intrinsic`, `data`. An arm's extent margin (`results/tokenizer_split_merge-intrinsic.json`) below 1 means a group
    read in part is too small for it: raise `mixture.SPREAD`, then prepare, curate and publish again on the GB10.
 2. **Recipe ablations and tokenizer decision** (the user's approval): `python run.py experiment=<name>` for
-   `muon_tau_20`, `softcap`, `muon_tau_200`, `tokenizer`, `adamw_lr` (records in `results/<name>.*`; runs in
+   `muon_wd_timescale_20tpp`, `logit_softcap`, `muon_wd_timescale_200tpp`, `tokenizer_split_merge`, `adamw_group_lr` (records in `results/<name>.*`; runs in
    `artifacts/runs/<key>/`).
 3. **Adopt the tokenizer**: `python -m ablations.tokenizer adopt` writes the decided vocabulary to `CORPUS/tokenizer`
    (over any provisional one); every later step reads it.
@@ -313,15 +313,15 @@ then, after logging in again (docker group), each through `scripts/container.sh`
 5. **Pack**: `python -m corpus.pack`; it stops naming any source that holds fewer rows than its draw.
 6. **Smoke**: the first micro-batches of both stages (`loader.PretrainingBatches` at the stages' weights), decoded;
    each step's group composition and FIM share.
-7. **Train** (the user's approval): `tmux new -d -s run 'scripts/container.sh python run.py experiment=base'`.
+7. **Train** (the user's approval): `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'`.
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored, created by
 `scripts/setup.sh`) holds `corpus/`, `runs/<key>/` and `cache/`; `results/` (tracked) holds the data the paper's tables
 and figures are drawn from.
 
-`python run.py experiment=base` (`conf/experiment/base.yaml`) trains both stages with a checkpoint (the run's
+`python run.py experiment=pretrain` (`conf/experiment/pretrain.yaml`) trains both stages with a checkpoint (the run's
 full state) at each tenth of the steps and at the repository stage's start, evaluates every checkpoint with every
-benchmark, and writes `results/base.jsonl` and `results/base-curves.jsonl`. **Expected time** [inference from the
+benchmark, and writes `results/pretrain.jsonl` and `results/pretrain-curves.jsonl`. **Expected time** [inference from the
 unverified GH200 step]: 69,580 steps of 15 micro-batches at about 1.25 × 3.49 s, about 84 h, plus evaluation.
 
 `scripts/release.sh <key> <repo>` uploads the run's checkpoints, records and `results/` to a Hugging Face model
@@ -489,8 +489,8 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
 - `corpus/`: the corpus pipeline, one module per step (`__init__.py` lists them; `mixture.py` also holds the
   micro-batch and repository-stage share, `publish.py` the dataset); `crate/`, its Rust crate
   (`native.py`): the SA-BPE trainer (and frequency BPE), repository samples and the packer.
-- `ablations/`: `records.py` (an experiment's records in `results/`), `lr.py`, `recipe.py` (the softcap, AdamW lr and
-  Muon τ analyses), `tokenizer.py` (`docs/tokenizer-ablation.md`).
+- `ablations/`: `records.py` (an experiment's records in `results/`), `peak_lr.py`, `recipe.py` (the logit softcap,
+  AdamW group lr and Muon weight-decay timescale analyses), `tokenizer.py` (`docs/tokenizer-ablation.md`).
 - `docs/`: `pretraining.md` (this document), `corpus.md` (the corpus's specification), `tokenizer-ablation.md`.
 - `scripts/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image. `results/`: the records.
 

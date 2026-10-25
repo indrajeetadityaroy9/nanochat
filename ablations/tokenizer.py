@@ -1,7 +1,8 @@
 """
-The tokenizer ablation: it trains every candidate vocabulary of the corpus's tokenizer, measures them on the corpus,
-decides the split pattern and merge score, and adopts the decided vocabulary as the corpus's tokenizer
-(corpus/tokenizer.py TOKENIZER). Each candidate is a vocabulary of 32,768 ids (32,764 mergeable tokens, BOS
+The tokenizer ablation (experiment EXPERIMENT: pre-tokenizer split pattern x BPE merge score): it trains every
+candidate vocabulary of the corpus's tokenizer, measures them on the corpus, decides the split pattern and merge score,
+and adopts the decided vocabulary as the corpus's tokenizer (corpus/tokenizer.py TOKENIZER). Each candidate is a
+vocabulary of 32,768 ids (32,764 mergeable tokens, BOS
 and 3 FIM sentinels) trained on the same sample by the same trainer (train: the corpus crate's), encoded by tiktoken,
 and trained on. The sample, the val splits and the packs come from the curated shards through corpus
 (mixture.py, compile.py, pack.py).
@@ -11,9 +12,9 @@ share of the stage's tokens, Stage.shares, at the reference tokenizer's bytes pe
 a systematic sample in shard order: tokenizer training data "representative of model training data"
 (arXiv 2405.05417 §5); across tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage
 points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); over languages, proportional tokenizer-training
-weights give lower bits per byte than equal ones (arXiv 2610.12144 Table 6, §7). The sample's composition is not an arm
-(docs/corpus.md §9). An authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository files and
-functions; any other document is its own.
+weights give lower bits per byte than equal ones (arXiv 2610.12144 Table 6, §7). The sample's composition is not an
+arm. An authorship unit (SA-BPE's R) is the repository, its name lowercased, for repository files and functions; any
+other document is its own.
 
 Arms (ARMS):
 - sa-bpe: the reference tokenizer's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the
@@ -28,18 +29,18 @@ Arms (ARMS):
   the paper's §4.3 and App. C.1). If the parse test misses it at d16, it cannot decide the other arms;
 - hybrid: HYBRID_PATTERN, whose statement chunks are the same at every indentation depth (its comment);
 - bpe: frequency alone (Table 3's F row, SA-BPE's baseline) within SPLIT_PATTERN, close to F·log R in compression,
-  so a tie in the runs is likely [inference], which the val coverage breaks.
+  so a tie in the runs is likely (assumed), which the val coverage breaks.
 Not run: tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (arXiv 2409.04599
 Alg. 2) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.2); SuperBPE moved HumanEval and MBPP pass@10 in opposite
 directions, neither significantly (arXiv 2503.13423 Table 1).
 
 vocabularies: every arm trained at once on one draw of the sample (every merge is an argmax with fixed tie-breaks, so
 an arm does not depend on the others); ABLATION/<arm>: its vocabulary, pattern and merges;
-RESULTS/tokenizer-vocabularies.json: the sample's composition per source (target bytes, the fraction of rows taken,
-the documents, bytes and units taken) and each arm's training time.
+RESULTS/tokenizer_split_merge-vocabularies.json: the sample's composition per source (target bytes, the fraction of
+rows taken, the documents, bytes and units taken) and each arm's training time.
 
-intrinsic: every arm's compiled val split of every source, and RESULTS/tokenizer-intrinsic.json, only the measures
-that plan the runs, gate their validity, test an arm's mechanism or break the decision's tie:
+intrinsic: every arm's compiled val split of every source, and RESULTS/tokenizer_split_merge-intrinsic.json, only the
+measures that plan the runs, gate their validity, test an arm's mechanism or break the decision's tie:
 - planning: each source's bytes per token and the file stage's over its byte shares (an arm's tokens at equal bytes;
   the compile and pack budgets), and each group read in part's train tokens over its draw (below 1, the corpus's extent
   is too small for that arm: prepare.extent, mixture.SPREAD);
@@ -57,22 +58,24 @@ the paper attributes "to the vocabulary's line-break handling" (arXiv 2608.18062
 Rényi efficiency predicts neither code bits per byte nor MBPP (Table 2).
 
 data: every arm's training set, the same documents (the set) compiled and packed under each arm (corpus compile.py and
-pack.py, given the arm's directory), and RESULTS/tokenizer-data.json: the set and, per arm, its packed rows per stage,
-its d16 max_ratio and plan, and the share of each corpus's packed rows its run reads. The set holds a d16 run at RATIO
-tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3), each source at its share of the base model's
+pack.py, given the arm's directory), and RESULTS/tokenizer_split_merge-data.json: the set and, per arm, its packed rows
+per stage, its d16 max_ratio and plan, and the share of each corpus's packed rows its run reads. The set holds a d16
+run at RATIO tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3), each source at its share of the
+base model's
 stage (Stage.shares of the sources' train tokens), the tokens of a shard estimated from its text bytes at sa-bpe's val
 bytes per token: of each code source the leading train shards that fill its file-stage draw, so code binds every arm's
 max_ratio; of a "supply" source (notebooks, functions, traces), its draw, read whole once; of text and math the leading
 shards of each stage, and of the repositories corpora the trailing partitions (compile.compile_stage, under sa-bpe),
 holding MARGIN times their draws, so they never bind.
 
-runs (conf/experiment/tokenizer.yaml: `python run.py experiment=tokenizer`): every arm at d16, seeds 0 and 1,
-at equal bytes: each at its max_ratio (ratio null), so it reads the set's code documents once and its tokens are
-their bytes over its bytes per token; text and math are drawn by rows. Each run's plan is its own (schedule.plan at
+runs (conf/experiment/tokenizer_split_merge.yaml: `python run.py experiment=tokenizer_split_merge`): every arm at d16,
+seeds 0 and 1, at equal bytes: each at its max_ratio (ratio null), so it reads the set's code documents once and its
+tokens are their bytes over its bytes per token; text and math are drawn by rows. Each run's plan is its own
+(schedule.plan at
 its tokens), its contexts the corpus's 8,192 and 32,768 tokens (eval/bpb.py's byte-offset buckets: the bytes of
 context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1), trained and evaluated through run.py,
-the records by ablations/records.py. RESULTS/tokenizer.json "analysis" (decide): each challenger's contrasts with
-sa-bpe, the baseline, and the decision.
+the records by ablations/records.py. RESULTS/tokenizer_split_merge.json "analysis" (decide): each challenger's
+contrasts with sa-bpe, the baseline, and the decision.
 
 Decisions, pre-registered (decide), each challenger (CHALLENGERS) against sa-bpe on the
 seeds where both have an evaluation (a diverged run drops its seed from the arm's contrasts on both sides):
@@ -88,12 +91,11 @@ seeds where both have an evaluation (a diverged run drops its seed from the arm'
   never qualifies (the control detects, it is not a candidate). Pattern: the hybrid's iff it qualifies, else sa-bpe's.
   Score: bpe iff it qualifies, or is equal on both and the val documents read fewer of its merged tokens under 100
   times than of sa-bpe's (SA-BPE's claimed benefit, a higher coverage than BPE's), carried to the adopted pattern
-  [inference]; otherwise SA-BPE.
+  (assumed); otherwise SA-BPE.
 
-adopt: the decided vocabulary (RESULTS/tokenizer.json "analysis" "decision") as the corpus's tokenizer: the arm of
-the decided pattern and score, or, bpe's score carried to another arm's pattern, that pair trained on the sample.
-
-The comparisons, their measures and the recorded results: docs/tokenizer-ablation.md.
+adopt: the decided vocabulary (RESULTS/tokenizer_split_merge.json "analysis" "decision") as the corpus's tokenizer:
+the arm of the decided pattern and score, or, bpe's score carried to another arm's pattern, that pair trained on the
+sample.
 
 python -m ablations.tokenizer vocabularies|intrinsic|data|adopt
 """
@@ -133,6 +135,10 @@ from model.config import VOCAB_SIZE
 from native import corpus_crate
 from paths import RESULTS, ROOT
 
+# The experiment's name (conf/experiment/<EXPERIMENT>.yaml): its records and analysis, RESULTS/<EXPERIMENT>.jsonl and
+# .json, and this module's results, RESULTS/<EXPERIMENT>-{vocabularies,intrinsic,data}.json
+EXPERIMENT = "tokenizer_split_merge"
+
 Score = Literal["sa-bpe", "frequency"]
 
 # The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers; that data is no longer on
@@ -171,25 +177,25 @@ HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]+
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
-# The runs' depth, which the set is sized for (conf/experiment/tokenizer.yaml)
+# The runs' depth, which the set is sized for (conf/experiment/tokenizer_split_merge.yaml)
 DEPTH = 16
 # The set's size: a d16 run at Chinchilla's 20 tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3)
 RATIO = 20
 # The set's margin over the draws of the corpora that must not bind (text, math, the repositories corpora): above the
-# code shards' rounding up to whole shards and the arms' spread in compression [inference]
+# code shards' rounding up to whole shards and the arms' spread in compression (assumed)
 MARGIN = 1.5
 # The decisions' significance level, the conventional 0.05
 ALPHA = 0.05
 # The pooled seed standard deviation of a run's 8K code bits per byte (seed variances pooled over configurations): two
-# d8 configurations at 20 tokens per parameter on the reference tokenizer's data, data seeds 0 to 2 (six runs; no
-# results/ file holds them), carried to d16 and to the corpus [inference]
+# d8 configurations at 20 tokens per parameter on the reference tokenizer's data, data seeds 0 to 2 (six runs),
+# assumed to carry to d16 and to the corpus
 CODE_SIGMA = 0.0034
 # The benchmark of the parse test (Decisions)
 PARSED = "mbpp_plus"
 # The categories whose documents are whole program texts in their source's language (depth invariance)
 PROGRAMS = (REPOSITORY_FILE, EXERCISE, SYNTHETIC_FILE, FUNCTION)
-# The fidelity check's texts: the first of each source's val split; an engineering choice, the check's time (merges
-# replayed in Python) growing with each text
+# The fidelity check's texts: the first of each source's val split; an engineering choice, bounding the check's cost
+# (merges replayed in Python)
 FIDELITY_DOCUMENTS = 200
 # The depth-invariance check's lines: the first indented lines of each program source's val split; the rate's standard
 # error at most √(1/(4n)) ≈ 0.0022
@@ -289,7 +295,7 @@ def provenance() -> dict:
 
 def vocabularies() -> None:
     """Every arm's tokenizer.tiktoken, tokenizer.pattern and merges.json in ABLATION/<arm>, trained at once on one draw
-    of the sample, and RESULTS/tokenizer-vocabularies.json (module docstring)."""
+    of the sample, and RESULTS/<EXPERIMENT>-vocabularies.json (module docstring)."""
     for arm in ARMS:
         (ABLATION / arm).mkdir(parents=True)
     start, began = time.perf_counter(), provenance()
@@ -314,7 +320,7 @@ def vocabularies() -> None:
     record = {"sample": {"documents": len(docs), "bytes": sum(c["bytes"] for c in composition.values()),
                          "units": max(units) + 1, "seconds": sampled, "sources": composition},
               "arms": arms, "seconds": time.perf_counter() - start, "provenance": began}
-    (RESULTS / "tokenizer-vocabularies.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+    (RESULTS / f"{EXPERIMENT}-vocabularies.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
 def val_split(task: tuple[str, str]) -> tuple[np.ndarray, np.ndarray]:
@@ -421,7 +427,7 @@ def fidelity(task: tuple[str, str]) -> dict[str, int]:
 
 
 def intrinsic() -> None:
-    """Every arm's compiled val split of every source, the equal-bytes check, and RESULTS/tokenizer-intrinsic.json
+    """Every arm's compiled val split of every source, the equal-bytes check, and RESULTS/<EXPERIMENT>-intrinsic.json
     (module docstring), all in one process pool: depth invariance per program source and fidelity per arm and source
     (which read no compiled data) beside the compiles, every split at once, each split's counts as it is compiled.
     "seconds": "compiled", the wall time to the last compile's end (the checks overlap the compiles), and "all"."""
@@ -455,7 +461,7 @@ def intrinsic() -> None:
         for (arm, source), future in zip(checks, fidelities, strict=True):
             record["arms"][arm]["fidelity"][source] = future.result()
     record |= {"seconds": {"compiled": compiled_seconds, "all": time.perf_counter() - start}, "provenance": began}
-    (RESULTS / "tokenizer-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+    (RESULTS / f"{EXPERIMENT}-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
 def document_set(run) -> dict:
@@ -464,7 +470,7 @@ def document_set(run) -> dict:
     "draws": {seq_len: {corpus: its tokens in the run}}}; the repositories corpora's partitions: data."""
     from train.stages import drawn
 
-    measured = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))["arms"]["sa-bpe"]
+    measured = json.loads((RESULTS / f"{EXPERIMENT}-intrinsic.json").read_text(encoding="utf-8"))["arms"]["sa-bpe"]
     estimate = {s: np.array(shard_bytes(s)) / measured["sources"][s]["bytes_per_token"] for s in SOURCES}
 
     def shards(source: str, tokens: float, start: int) -> int:
@@ -489,7 +495,7 @@ def document_set(run) -> dict:
 
 
 def data() -> None:
-    """Every arm's training set, compiled and packed, and RESULTS/tokenizer-data.json (module docstring): each corpus
+    """Every arm's training set, compiled and packed, and RESULTS/<EXPERIMENT>-data.json (module docstring): each corpus
     of each arm compiled, then packed, as its own job, every job into one process pool; compile_stage, beside the other
     sources' compiles, chooses the partitions and compiles sa-bpe's repositories corpora, then the set check, then the
     repository sources' jobs and the other arms' repositories corpora, one arm after another (each fills the cores).
@@ -574,7 +580,7 @@ def data() -> None:
               "set": chosen, "arms": arms,
               "seconds": {"compiled": compiled_seconds, "all": time.perf_counter() - start},
               "provenance": began}
-    (RESULTS / "tokenizer-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+    (RESULTS / f"{EXPERIMENT}-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
 def evaluated(lines: list[dict], field: str) -> dict[tuple, tuple[float, list[bool]]]:
@@ -618,7 +624,7 @@ def decide(lines: list[dict]) -> dict:
         contrasts[arm] = c | {"unparsed_difference": unparsed[arm] - unparsed["sa-bpe"]}
     verdicts = {arm: (c["parsing"], c["code"]) for arm, c in contrasts.items()}
     qualified = {arm for arm, v in verdicts.items() if "worse" not in v and "better" in v}
-    record = json.loads((RESULTS / "tokenizer-intrinsic.json").read_text(encoding="utf-8"))
+    record = json.loads((RESULTS / f"{EXPERIMENT}-intrinsic.json").read_text(encoding="utf-8"))
     rare = {arm: measures["merged_reads"]["under 100"] for arm, measures in record["arms"].items()}
     frequency = "bpe" in qualified or (verdicts["bpe"] == ("equal", "equal") and rare["bpe"] < rare["sa-bpe"])
     # the positive control gates the decision: undetected, the corpus keeps sa-bpe's pattern and score; detected, it
@@ -631,12 +637,12 @@ def decide(lines: list[dict]) -> dict:
 
 
 def adopt() -> None:
-    """The decided vocabulary (RESULTS/tokenizer.json "analysis" "decision") as the corpus's tokenizer, TOKENIZER: the
-    arm of the decided pattern and score, copied, or that pair trained on the sample when no arm holds it. It writes
+    """The decided vocabulary (RESULTS/<EXPERIMENT>.json "analysis" "decision") as the corpus's tokenizer, TOKENIZER:
+    the arm of the decided pattern and score, copied, or that pair trained on the sample when no arm holds it. It writes
     over the provisional tokenizer (the sa-bpe arm's copy) in place: compiled and packed data are keyed by a
     vocabulary's data key, so adopting sa-bpe reuses the provisional corpus and any other vocabulary compiles into new
     directories (run.py's stale guard rejects a run recorded under the replaced one)."""
-    decision = json.loads((RESULTS / "tokenizer.json").read_text(encoding="utf-8"))["analysis"]["decision"]
+    decision = json.loads((RESULTS / f"{EXPERIMENT}.json").read_text(encoding="utf-8"))["analysis"]["decision"]
     pattern, score = ARMS[decision["pattern"]][0], decision["score"]
     TOKENIZER.mkdir(parents=True, exist_ok=True)
     arm = next((arm for arm, spec in ARMS.items() if spec == (pattern, score)), None)
