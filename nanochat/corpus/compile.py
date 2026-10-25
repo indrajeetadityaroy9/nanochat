@@ -57,7 +57,8 @@ def encode(documents: list[str], vocabulary: Path, threads: ThreadPoolExecutor |
     order = sorted(range(len(documents)), key=lambda i: -len(documents[i]))
     ids = [np.zeros(0, TOKEN_DTYPE)] * len(documents)
     for i, tokens in zip(order, (threads.map if threads else map)(
-            lambda i: enc.encode_to_numpy(documents[i], disallowed_special=()).astype(TOKEN_DTYPE), order), strict=True):
+            lambda i: enc.encode_to_numpy(documents[i], disallowed_special=()).astype(TOKEN_DTYPE), order),
+            strict=True):
         ids[i] = tokens
     lengths = np.array([len(doc) for doc in ids], dtype=np.int64)
     return np.concatenate([np.zeros(0, TOKEN_DTYPE), *ids]), lengths
