@@ -11,12 +11,12 @@ arXiv 2309.14322 §3.2.5; a fixed scale costs 0.11% of loss in nGPT, arXiv 2410.
   MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6; nanochat e85db6b, whose gate read the stream's first 32 channels);
   FlashAttention-4 with document masking.
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
-- Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy; an output-logit
-  cap c tanh(z / c) only as the softcap ablation's arm (GPTConfig.softcap; ACTIONS.md §8 D5).
-Not taken from 92d63d4: its smear, backout and logit softcap (an ablation arm here), its QK order (RoPE, norm, x 1.2)
-and its init (init_weights states this model's).
-fp32 parameters, bf16 activations; the ops round weights to bf16. Gradient reductions use the fastest kernels, not a
-fixed order (FA4's and the embedding backward's atomics: faster per step).
+- Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy; an optional
+  output-logit cap c tanh(z / c) (GPTConfig.softcap).
+Not taken from 92d63d4: its smear and backout, its QK order (RoPE, norm, x 1.2) and its init (init_weights states this
+model's); its logit softcap is optional here.
+fp32 parameters, bf16 activations; the ops round weights to bf16. Gradient reductions run in no fixed order (FA4's and
+the embedding backward's atomic accumulation), so gradients are not bitwise reproducible.
 """
 
 import zlib
@@ -207,7 +207,7 @@ def scaling_params(model: GPT) -> int:
 def non_embedding_flops_per_token(model: GPT) -> int:
     """DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72 n_layer d_model² + 12 n_layer d_model l_seq: full attention
     over the model's context l_seq, the count the batch and lr laws' constants were fit with (§3.1-3.2; every Table 3
-    model at l_seq 4,096), for windowed layers too, as a near-lossless windowed model takes its full-attention twin's
-    hyperparameters [inference]."""
+    model at l_seq 4,096). Windowed layers are counted as full attention too, on the assumption that a model whose
+    local windows are near-lossless (arXiv 2503.19786 §5.2) shares its full-attention counterpart's hyperparameters."""
     n, d = model.config.n_layer, model.config.n_embd
     return 72 * n * d * d + 12 * n * d * model.config.sequence_len
