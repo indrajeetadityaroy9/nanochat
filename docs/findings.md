@@ -127,8 +127,10 @@ Hybrid local+global attention (HybridAttnLit, FA4Internals) is not needed for th
 
 ### 5.4 Repacking and the packer crash
 Outputs: `python -m ablations.tokenizer_split_merge repack` 176 s (new step, `df62b22`); `python -m corpus.pack`
-segfaulted (core dump: stack overflow in a rayon worker compiling the tokenizer regex on a 2 MiB std stack, nested
-work stealing); rayon pool built with 64 MiB stacks (`0de5dfb`); the corpus repack then ran 1,567 s. Profile of the
+segfaulted (core dump: stack overflow in a rayon worker on a 2 MiB std stack: rayon nesting stolen jobs while many
+pack calls ran at once; compiling the tokenizer pattern needs under 128 KiB, measured by EarlierAudit); rayon workers
+given 64 MiB stacks (`0de5dfb`; since `03d131e` they take the process's stack limit, 64 MiB under
+`scripts/container.sh`); the corpus repack then ran 1,567 s. Profile of the
 packer: 63/72 cores busy, parsing 45%, FIM encoding 25%, no duplicate parses: not worth optimizing further.
 
 ### 5.5 Syntax-constrained decoding (SyntaxDecoding)
@@ -350,5 +352,13 @@ every kernel); `b59a22b` linear.py, modeling.py (casts C2 made no-ops, a guard, 
 (restated defaults; every experiment's plans and run keys byte-identical); `e8f3c85` ablations/ (swept scales read from
 the records; analyses identical, peak_lr 2.7970369); `9b094a8` setup.sh (the SM clock lock queried from the GPU, the
 same command here), .gitignore; `9d40cb1` ve_gate.cu, ve_gate.py, cross_entropy.py (unreachable guards removed; launch
-sizes cited to their measurements; SASS identical). Noted, unchanged: logit_softcap's fixed learning_rate_scale 2.7972
-against the analysis' current 2.79704.
+sizes cited to their measurements; SASS identical); `03d131e`, `c1a7d7b`, `2b32aef` corpus/ and corpus/crate/ (the
+rayon stack literal replaced by the process's stack limit; curate's in-flight row groups bounded by memory instead of
+4 × cores; tokenize's per-byte worker peak measured, 8.18, instead of an estimate of 10; unused defaults; corrected
+comments: RECURSION limits fissix's 2to3, not `ast.parse`) — curate, tokenize and pack on a sandbox of all 18
+sources (2,062 files) byte-identical, real shard 0 of six splits packs equal to the packs on disk, the tokenizer
+sample identical on the whole corpus; one intended change, the tokenizer ablation's fidelity check over a whole val
+row group instead of 200 documents (its recorded counts grow). Noted, unchanged: logit_softcap's fixed
+learning_rate_scale 2.7972 against the analysis' current 2.79704; `stack_edu_python`'s published row groups (~64,920
+rows) are below the 65,536 the current curate writes, so an older version wrote them — tokens do not depend on row
+grouping (three shards re-cut at 122,880 rows tokenize identically).
