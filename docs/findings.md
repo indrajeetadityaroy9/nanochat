@@ -354,7 +354,7 @@ dX epilogue not pursued (it replaces part of a 178 µs/call preprocess).
   (paper 0.348; transformers 5 drops BOS), MBPP 0.466 (paper 0.462); our EvalPlus scorer agrees on 163/164 problems.
 - **d16 reference** (RefModelTrain): code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050 at 20 tokens/param.
 
-### 5.19 GEMMs (GemmDeep, DeepGemmStudy, GemmOwner) — C1+C2 committed; postact +1.42%, its loss pending
+### 5.19 GEMMs (GemmDeep, DeepGemmStudy, GemmOwner) — C1+C2, postact committed; split-K dW rejected
 Outputs: DeepGEMM on the d24 shapes (TFLOP/s, sequential bench): forward q/k/v/o QuACK 828, torch 705, DeepGEMM 710;
 up-projection without epilogue QuACK 652, torch 543, DeepGEMM 779 — a lead an interleaved rerun attributes to drift
 (per-shape interleaved table queued); dW C×C torch.mm fp32 662, DeepGEMM with fp32 accumulation 295–315, DeepGEMM
@@ -372,9 +372,15 @@ bitwise (23/23 tensors). The MLP postact saved in the forward with QuACK's dact 
 projection's weight gradient uses the forward's relu² of the fp32 pre-activation, rounded once, instead of relu²
 recomputed from the bf16 pre-activation), d24 exclusive A/B (`w1`; 25 steps / 8 warm-up at 8K, 12 / 6 at 32K): master
 356,259 → 361,324 tok/s (+1.42%, MFU 0.473 → 0.480), 32K 282,256 → 285,118 (+1.01%); peak 66.4 → 80.9 GB at 8K,
-66.2 → 80.7 at 32K. Above the 0.3% bar; open: its 200-step loss at the base recipe's lr (×2.797, both arms; §5.15),
-then the commit; split-K dW into the fp32 `.grad` (−30 to −75 ms/step [estimate]) only if `w1`'s per-shape numbers
-support ≥ 0.3%.
+66.2 → 80.7 at 32K. 200-step loss at the base recipe's lr (×2.797, seed 0, same-seed master a3dc544): last-100 mean
+3.0041 → 3.0014 (−0.0027; same-seed noise 0.005 at ×1), last-20 2.2984 → 2.2967; 354,550 → 359,229 tok/s over
+the 189 timed steps (+1.32%), peak 68.7 → 83.2 GB (master with NorMuon). Committed. Split-K dW (`w1`, exclusive,
+7 interleaved rounds, ms per call; today's cuBLAS addmm β = 1 → best split-K): C×C 0.194 → 0.184 (QuACK `gemm_add`
+split_k auto; run spread 9–20%), 4C×C 0.734 → 0.751 (QuACK auto), C×4C 0.738 → 0.744 (QuACK split_k 4; DeepGEMM's
+k-grouped G = 4 0.765 with the partial sum): only the four C×C dW per layer gain, −0.04 ms per layer and micro-batch,
+inside the run spread: rejected. Lead (not split-K): DeepGEMM's cuBLASLt path with C = D (`bf16_gemm_tn(c=acc)`) beats
+`torch.addmm` on all three dW shapes, 0.170 / 0.713 / 0.702 against 0.194 / 0.734 / 0.738 ms (−0.15 ms per layer and
+micro-batch, about −55 ms of the 4.16 s step [estimate]).
 
 ### 5.20 Code audit (user specification; one auditor per file) — in progress
 Specification: every parameter, literal, branch and dependency justified by mathematics, the data, model or hardware

@@ -148,7 +148,7 @@ Ops in `model/ops/`, CUDA sources in `model/kernels/` (built on first use by `na
 | Op | Implementation |
 |---|---|
 | Projection, MLP, LM-head GEMMs | forward and dX: QuACK SM90 GEMMs autotuned by QuACK (`quack.gemm_interface`, `tuned=True`); fp32 weight gradients: cuBLAS `torch.mm` |
-| Post-attention norm, ReLU² MLP, residuals | `model/ops/linear.py`: the gain-free norm folded into QuACK epilogues, the normed stream never stored: `o_proj` adds the residual and sums each row's squares (`sq_reduce_mod`, `rms_final_reduce`); the up projection scales rows by rstd before relu² (`gemm_norm_act`); the down projection adds the residual (`gemm_add`); backward: relu²'s derivative with the rstd scale and the norm's row sum in one epilogue, the norm's backward in the up projection's dX epilogue |
+| Post-attention norm, ReLU² MLP, residuals | `model/ops/linear.py`: the gain-free norm folded into QuACK epilogues, the normed stream never stored: `o_proj` adds the residual and sums each row's squares (`sq_reduce_mod`, `rms_final_reduce`); the up projection scales rows by rstd before relu² (`gemm_norm_act`), its pre-activation and activation both saved for the backward; the down projection adds the residual (`gemm_add`); backward: relu²'s derivative with the rstd scale and the norm's row sum in one epilogue, the norm's backward in the up projection's dX epilogue |
 | Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them; the softcap arm's capped loss fused in the same op (`model/ops/cross_entropy.py`) |
 | Attention | FlashAttention-4 varlen over the micro-batch's real document segments only (`model/ops/flash_attn.py`); window layers: a persistent forward (one CTA per SM, the output tile staged apart from Q) and dQ reduce-added in bf16 (no fp32 accumulator, zero fill or postprocess); full layers FA4's own kernels |
 | q/k norm + gain + RoPE | `model/kernels/qk_prologue.cu`: one pass per direction; gain gradient without atomics (row math shared with the decoder, `model/kernels/qk_row.cuh`) |
@@ -166,6 +166,11 @@ Measured choices [unverified: `torch.profiler` and CUDA-graph timings, records n
 - **The post-attention norm in GEMM epilogues** rather than Inductor's add + RMS norm kernels (d24 8K nsys, GH200 at
   700 W): GPU time 4,296 against 4,355 ms per step (Inductor 383 → 231 ms, QuACK GEMMs +79 ms); peak memory 61.1
   against 64.5 GiB; 200-step loss within same-seed noise (last-20 mean −0.007).
+- **The MLP activation saved in the forward** rather than recomputed by the backward's relu² epilogue (d24, GH200 at
+  700 W, 25 steps, 8 warm-up, median tok/s): 8K 356,259 → 361,324 (+1.42%), 32K 282,256 → 285,118 (+1.01%); peak
+  memory 61.8 → 75.3 GiB at 8K, 61.7 → 75.2 at 32K; dW of the down projection now uses the forward's activation (relu²
+  of the fp32 pre-activation, rounded once) rather than relu² of the bf16 pre-activation; 200-step loss at the base
+  recipe's lr last-100 −0.0027 (same-seed noise 0.005 at ×1).
 - **FlashAttention-4** rather than cuDNN 9.26: forward + backward 1.47 against 4.96 ms at window 512, 1.83 against 5.85
   ms at 8,192 (d8 shapes); its full-context layers use the causal kernel (`window = None`), 1–2% faster than the local
   kernel at window T, outputs bitwise equal. FA4 on the real segments rather than the loader's padded `cu_seqlens`:
