@@ -142,20 +142,21 @@ Eq. 2's M; it rounds to 2 from 77.7 tokens per parameter on [arithmetic, `schedu
 
 The vertices are multipliers of the law's lr the runs recorded, which predates D1 (DeepSeek LLM Eq. 2's M); the runs'
 batches and steps are unchanged under D1, so `lr.analysis` re-bases each vertex onto the current law's lr. Under D1 the
-base model's multiplier is × 2.7972 at 102.6B tokens (`conf/experiment/softcap.yaml`); `results/lr.json`'s stored
-`analysis` (× 2.3218) predates D1 and is regenerated when the tokenizer is adopted. A d8 at 20 comparison of × 2
-against × 1 (seeds 0 and 1, 2026-10-20) has no record in `results/` [unrecorded].
+base model's multiplier is × 2.7972 at 102.6B tokens (fixed in `conf/experiment/softcap.yaml`). The base experiment
+computes its own when it launches (`nanochat/run.py` `lr_multiplier`, from `results/lr.jsonl` at the adopted tokenizer's
+plan), so no copy is stored. A d8 at 20 comparison of × 2 against × 1 (seeds 0 and 1, 2026-10-20) has no record in
+`results/` [unrecorded].
 
 ## Ablations
 
 One pre-registered experiment per decision whose outcome the literature does not settle. Every run is a
-`nanochat/run.py` `RunConfig` (Hydra, hydra-core 1.3.7: `conf/run.yaml` holds the base model's recipe as the defaults,
-`conf/experiment/<name>.yaml` sweeps fields against it), trained by `train/loop.py` and evaluated by
+`nanochat/run.py` `RunConfig` (Hydra, hydra-core 1.3.7: `RunConfig`'s defaults are the base model's recipe,
+`conf/experiment/<name>.yaml` sweeps fields against them), trained by `train/loop.py` and evaluated by
 `eval/suite.py evaluate`, the base model's code paths. No experiment runs without the user's approval.
 
 | Experiment (`conf/experiment/`) | Decision | Arms | Analysis | State |
 |---|---|---|---|---|
-| (`ablations/lr.py`, 4ade225's records) | the base model's peak lr | Peak lr | `lr.analysis` | done, `results/lr.json` |
+| (`ablations/lr.py`, 4ade225's records) | the base model's peak lr | Peak lr | `lr.analysis` | done, `results/lr.jsonl`; the multiplier computed at launch |
 | `tokenizer.yaml` | split pattern and merge score | 4 arms at d16, each at its `max_ratio`, 2 seeds | `ablations.tokenizer.decide` | intrinsic part and data done; runs wait (`docs/tokenizer-ablation.md`) |
 | `softcap.yaml` | D5 output-logit softcap | cap 15 vs none, d16 at 20, 4 seeds, lr × 2.7972 | `ablations.recipe.softcap` | waits |
 | `muon_tau_20.yaml`, `muon_tau_200.yaml` | D7 τ law on Muon | Muon's τ × ½, × 1, × 2, d8 at 20 and at 200, 2 seeds each | `ablations.recipe.muon_tau`, `muon_tau_law` | waits; the 200 half needs the corpus's packs |
@@ -263,7 +264,7 @@ micro-batches. The GEMMs run at the 700 W power cap's ceiling (703 of 989 dense 
   data key stops its experiment.
 - **Data order.** Each corpus's packed rows are permuted once by the run's seed (NumPy `RandomState`; `train/stages.py`
   `stage_batches`), which also seeds its initialization; rows go to corpora by the loader's Weyl sequence
-  (`loader.mixture_rows`).
+  (`mixture.mixture_rows`).
 
 ## Reproducing the run
 
