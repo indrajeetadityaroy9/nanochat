@@ -32,8 +32,8 @@ from nanochat.corpus.tokenizer import Tokenizer
 from nanochat.model.gpt import GPT
 
 # Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the
-# whole split if smaller; arms are scored on identical rows (the tokenizer ablation's, whose rows differ, on val splits
-# within the sample: identical documents), so the subsample's sampling error cancels in differences
+# whole split if smaller; models of one tokenizer are scored on identical rows (models of different tokenizers, on
+# identical documents when the split lies within the sample), so the subsample's sampling error cancels in differences
 VAL_TOKENS = 80 * 2**19
 # Context buckets of a target (its input's position in its piece + 1): positions both stages train (at most the
 # file-level context) and positions only the repo-level stage trains
@@ -136,8 +136,8 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
     micro-batches (one compiled shape), one example and one attention segment per row: BOS + the tokens of prompt +
     solution, scored from the token starting at the prompt's end (decode_with_offsets; none starting there raises).
     The solution's leading blank lines, through its last leading line break, count as prompt: EvalPlus's solutions
-    begin with them, and a tokenizer joins them to the prompt's last line break, so the prompt would end inside a token
-    (every HumanEval+ and MBPP+ prompt, in each tokenizer measured) and tokenizers would score different bytes."""
+    begin with them, and a tokenizer joins them to the prompt's last line break, so the prompt would end inside a
+    token and tokenizers would score different bytes."""
     batch_rows, seq_len = FILE_STAGE.batch_rows, FILE_STAGE.seq_len
     bos = tokenizer.bos_token_id
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)

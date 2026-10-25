@@ -83,7 +83,7 @@ EVALPLUS = {"humaneval_plus": ("humaneval", get_human_eval_plus), "mbpp_plus": (
 MULTIPL_E_BENCHMARKS = ("humaneval_cpp", "mbpp_cpp")
 INFILLING = ("single-line", "multi-line", "random-span")
 FIM_MODES = ("psm", "spm")  # the two orders the packer trains (arXiv 2207.14255 App. D)
-# the FIM filtered mode's order: at d8 SPM beat PSM on all three benchmarks (greedy pass@1)
+# the FIM order of the filtered mode
 FILTERED_MODE = "spm"
 # The sampled mode (Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem; §3.2: nucleus
 # sampling at top p 0.95 for all its sampling; §3.3, Fig. 5: T = 0.2 the pass@1 optimum): MultiPL-E's pass@1
@@ -238,12 +238,12 @@ def filtered_middles(decoder: NativeDecoder, tokenizer: Tokenizer, problems: lis
 
 
 def sanitizers() -> ProcessPoolExecutor:
-    """evalplus_solution's sanitize workers, a process per CPU (sanitize parses every line span of a program: run
-    serially, the evaluation's bottleneck), from a forkserver (never a fork of this torch/CUDA process), SyntaxWarnings
-    of generated code ignored. Each worker imports the main module (nanochat/run.py, whose top level is light for this
-    reason). The caller shuts the pool down (suite.evaluate's `with`): in a spawned process (nanochat/run.py's phases),
-    multiprocessing's exit handler joins the pool's workers before concurrent.futures' exit handler would stop them, so
-    a pool left open never lets the process exit."""
+    """evalplus_solution's sanitize workers, a process per CPU (sanitize parses every line span of a program), from a
+    forkserver (never a fork of this torch/CUDA process), SyntaxWarnings of generated code ignored. Each worker imports
+    the main module (nanochat/run.py, whose top level is light for this reason). The caller shuts the pool down
+    (suite.evaluate's `with`): in a spawned process (nanochat/run.py's phases), multiprocessing's exit handler joins the
+    pool's workers before concurrent.futures' exit handler would stop them, so a pool left open never lets the process
+    exit."""
     return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("forkserver"),
                                initializer=warnings.filterwarnings, initargs=("ignore", "", SyntaxWarning))
 

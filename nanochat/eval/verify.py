@@ -35,7 +35,7 @@ from typing import Literal
 from nanochat.inference.decoder import NativeDecoder, Request
 from nanochat.inference.syntax_constraint import syntax_error
 
-# basedpyright rules (docs/configuration/config-files.md) whose errors on known types are runtime failures or
+# basedpyright rules (its configuration reference, config-files) whose errors on known types are runtime failures or
 # annotation contradictions: undefined variables (NameError), attribute accesses (AttributeError), call expressions and
 # their arguments (arity and keyword TypeErrors), return types against the declared return annotation. Every other rule
 # is off (typeCheckingMode "off"): style, unknown types, possibly-unbound or optional-member findings that a correct
