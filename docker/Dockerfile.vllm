@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+#
+# nanochat-vllm: vLLM's own image (vllm/vllm-openai, vLLM 0.32.0 on torch 2.13.0+cu130, FlashInfer's precompiled sm90a
+# kernels, nvcc) with nanochat's model registered as a vLLM plugin. vLLM pins its torch build, which the nanochat image
+# (NGC PyTorch's torch) cannot take, so generation runs here and scoring in the nanochat image; the export
+# (inference/export_hf.py) runs in the nanochat image. Like the nanochat image it holds no code: the checkout is mounted
+# at /workspace/nanochat, on PYTHONPATH, and the plugin's vllm.general_plugins entry point (vLLM docs, "Plugin system")
+# calls inference.vllm_model:register in every vLLM process. vLLM's compile cache lives in the checkout's
+# artifacts/cache, as the nanochat image's caches do.
+#
+#   docker build -f docker/Dockerfile.vllm -t nanochat-vllm docker
+#   docker run --rm --device nvidia.com/gpu=all --ipc=host --user "$(id -u):$(id -g)" -e HOME=/tmp \
+#     -v "$PWD":/workspace/nanochat nanochat-vllm vllm serve <exported dir>
+
+FROM vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+
+COPY <<EOF /opt/nanochat-vllm/pyproject.toml
+[project]
+name = "nanochat-vllm"
+version = "0.1.0"
+
+[project.entry-points."vllm.general_plugins"]
+nanochat = "inference.vllm_model:register"
+
+[tool.setuptools]
+py-modules = []
+EOF
+RUN pip install --no-deps --no-cache-dir /opt/nanochat-vllm
+
+ENV PYTHONPATH=/workspace/nanochat VLLM_CACHE_ROOT=/workspace/nanochat/artifacts/cache/vllm PYTHONUNBUFFERED=1
+WORKDIR /workspace/nanochat
+ENTRYPOINT []

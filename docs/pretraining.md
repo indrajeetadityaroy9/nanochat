@@ -364,6 +364,27 @@ constraint (`heal_tokens()`'s `Reemit`, or the Python syntax constraint, which o
 masks are written while the step's body runs: the syntax constraints' in one parallel call straight into the
 decoder's pinned mask rows, each constraint's last token applied in the same call.
 
+**vLLM and transformers** (`inference/export_hf.py`, `inference/vllm_model.py`, `inference/modeling_nanochat.py`,
+`docker/Dockerfile.vllm`): `python -m inference.export_hf <checkpoint.pt> <dir> [<tokenizer dir>]` (nanochat image)
+writes a Hugging Face model directory: `model.safetensors` (matrices and tables bf16, the per-dim and per-layer vectors
+and value-embedding gates fp32), `config.json` (the per-layer windows as Gemma 3's `layer_types` + `sliding_window`,
+FA4's `window_left` + 1), `generation_config.json` (BOS ends a generation) and `tokenizer.json` (transformers'
+`TikTokenConverter`: the same ids as tiktoken, BOS prepended). The `nanochat-vllm` image (vLLM 0.32.0 on its own
+torch 2.13, which the NGC-based nanochat image cannot hold) registers `NanochatForCausalLM` through vLLM's
+`vllm.general_plugins` entry point, so `vllm serve <dir>` and `LLM(<dir>)` run the model with vLLM's layers (paged
+attention with per-layer sliding windows and the hybrid KV cache, CUDA graphs, torch.compile); `model_impl=
+"transformers"` (vLLM's Transformers backend) or transformers' `AutoModelForCausalLM.from_pretrained(<dir>,
+trust_remote_code=True)` run `modeling_nanochat.py`, copied into the directory. No architectural change was needed;
+the model's own pieces are PyTorch expressions at the training kernels' precision: the rotation by −θ with fp32
+tables (vLLM's and transformers' rotary embeddings rotate by +θ from bf16 tables), the value embeddings (they read
+`input_ids` in every layer) and the residual mix. `LinesStop` (a vLLM logits processor) ends a FIM middle at its
+reference's line count, as `LinesStoppingCriteria`. Checked on a d16 checkpoint: `tokenizer.json` encodes 108,026
+benchmark and corpus val texts exactly as tiktoken; vLLM's logits against the training forward on 207K real positions
+(benchmarks, FIM, val documents to 32K): top-1 agreement 97.9–99.3%, mean KL 2.5–5.8·10⁻⁴ nats (the training forward
+against itself at another row offset: 99.4%, 1.8·10⁻⁴), next-token loss within 0.002 nats; greedy HumanEval+
+0.067/0.067, MBPP+ 0.056/0.045, FIM single-line line EM PSM 0.022, SPM 0.368, against NativeDecoder's
+0.061/0.061, 0.045/0.037, 0.022, 0.367 on the same checkpoint.
+
 **Constrained decoding: syntax, not types.** Type-constrained decoding (arXiv 2504.09246) implements TypeScript only;
 arXiv 2606.21619 found an incomplete constrainer lowers functional correctness, while a complete syntax constrainer
 gained (its §5.3). Python 3 syntax can be constrained completely, and every Python file of the code categories parses
@@ -438,7 +459,8 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
 - `eval/`: the checkpoint's evaluation (`suite.py`), the likelihood sums (`bpb.py`), the code benchmarks
   (`code_eval.py`) and the post-generation checks (`verify.py`).
 - `inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint
-  (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`).
+  (`syntax_constraint.py`, its Rust crate and grammar in `syntax/`), the Hugging Face export (`export_hf.py`), the
+  transformers model (`modeling_nanochat.py`) and the vLLM model (`vllm_model.py`).
 - `corpus/`: the corpus pipeline, one module per step (`__init__.py` lists them; `mixture.py` also holds the
   micro-batch and repository-stage share, `publish.py` the dataset, `train_tokenizer.py` the tokenizer's sample and
   trainer); `crate/`, its Rust crate (`native.py`): the SA-BPE trainer (and frequency BPE), repository samples and
@@ -448,7 +470,8 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
   `adamw_group_lr.py`, `muon_wd_timescale.py`); `contrast.py` (the pre-registered tests and adoption rules they decide
   by), `records.py` (an experiment's records in `results/`).
 - `docs/`: `pretraining.md` (this document), `corpus.md` (the corpus's specification), `ablations.md`.
-- `scripts/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image. `results/`: the records.
+- `scripts/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image; `docker/Dockerfile.vllm`: the
+  vLLM image. `results/`: the records.
 
 ## References
 
