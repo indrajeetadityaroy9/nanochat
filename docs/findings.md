@@ -87,8 +87,9 @@ Kernel commits since, each against its parent in one session (d24, 8K / 32K tok/
 epilogues `373b549` 338,039 → 341,919 (+1.15%) / +0.5%; value-embedding gate `eaf14d0` 344,768 → 350,185 (+1.57%) /
 277,238 → 280,201 (+1.07%), step 4,290 → 4,223 ms; weight gradients into the fp32 `.grad` and one bf16 weight copy
 `f499be7` 344,925 → 347,634 (+0.79%) / 275,613 → 277,383 (+0.64%); FA4 window layers with a persistent forward and bf16
-dQ accumulation `0e627ff` 344,967 → 348,218 (+0.94%) / 276,538 → 278,524 (+0.72%). Master as a whole is not
-re-measured yet (≈ 356K at 8K by composition [inference]).
+dQ accumulation `0e627ff` 344,967 → 348,218 (+0.94%) / 276,538 → 278,524 (+0.72%). Master measured as a whole (`w1`,
+`eeb0c53`; the later model and train commits are bitwise or SASS-identical): 356,259 tok/s (MFU 0.473) at 8K and
+282,256 (0.483) at 32K, +5.4% / +3.2% over 338,039 / 273,536; pre-training ≈ 81 h (97.1B tokens at 8K, 5.6B at 32K).
 
 Sharing the GPU (d16 training, 150 steps): one run 808.7K tok/s; two time-sliced processes 743.9K together (−8.0%);
 two MPS clients 825.0K (+2.0%). Under MPS an illegal memory access in one client kills every client (a device-side
@@ -220,8 +221,9 @@ op (the separate `linear` op deleted), one `attention` op holding the q/k prolog
 whose backward writes every q/k/v gradient into one buffer; against master's ops on real d24 8K segments, the output,
 dk, dv, the k-norm gradient and every value-embedding gradient are bitwise equal (window and full layers, with and
 without value embeddings), dq and the q-norm gradient differ by 1e-6 to 2e-5 (inside master's own run-to-run spread
-from FA4's atomic adds); a 2-step warm-up gave 355,980 vs 359,063 tok/s (a hint, not the A/B). Open: the d24 A/B and
-the 200-step loss check (queued).
+from FA4's atomic adds); a 2-step warm-up gave 355,980 vs 359,063 tok/s (a hint, not the A/B). The rebased candidate
+(`a3dc544` + C3) passed its smoke. Open: the d24 A/B (queued) and the 200-step loss, at the base recipe's lr (×2.797)
+against the postact check's master curve (§5.15: every earlier loss check ran at ×1).
 
 ### 5.13 Value embeddings and cross entropy (VeCeKernel) — gate committed
 Method (TileKernels' Engram gate and weight-gradient reduce, in CUDA): the backward visits rows in token order (one sort
@@ -294,7 +296,7 @@ seed-mean code bpb at 8K and 32K is not worse, otherwise plain Muon. The kernel 
 harness's default; C3's reference l_cpb included), so the pending postact and C3 checks run at ×2.797 against one
 shared base curve.
 
-### 5.16 Decoder at d24 (DecoderD24, DecoderOwner) — measured, acceptance pending
+### 5.16 Decoder at d24 (DecoderD24, DecoderOwner) — final tree measured, d16 evaluation pending
 Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise. Profile (1,024
 slots, positions 256–320): GEMV ~22 of a ~35 ms step (each 16-slot group re-read the weights from L2), attention ~7.8
 ms. Changes: a TMA-fed WGMMA GEMM over the slots keeping every epilogue (greedy and sampled choice, syntax masks, the
@@ -305,9 +307,12 @@ steps: main 34.8 ms/step, 29.4K tok/s (prefill 5.89 s) → bf16 KV + WGMMA 16.5 
 94.4K (1.39 s) → scores on tensor cores 9.67 ms, 105.9K (1.32 s), 3.6×. The second audit pass changed the tree:
 attention runs of 64 keys instead of 128 (−5.5% step, measured), one 64×64 WGMMA tile shape (as fast as the size
 dispatch, so the large-tile path is deleted), which also restores batch-independent tokens; the final tree's numbers
-come from its own benchmark. FP8 KV costs ≤ 1–2 points of pass@1 with per-tensor scales (vLLM, 2026). Open: agreement
-with the training forward and the d16 evaluation (FP8 kept if both are within noise of main, else the bf16-KV tree),
-the commit.
+come from its own benchmark. FP8 KV costs ≤ 1–2 points of pass@1 with per-tensor scales (vLLM, 2026). Final tree,
+fixed-length benchmark (2,048 requests × 512 tokens, 1,048,576 output tokens): d24 main 21,809 → 94,778 tok/s (4.35×),
+d16 66,559 → 189,307 (2.84×). Batch independence: 64/64 greedy and 64/64 sampled requests identical alone and batched.
+Agreement with the training forward's greedy choice: final 0.9916 (137 of 16,261 tokens differ, largest top-2 logit
+gap 0.56, 11 above 0.25) against main's 0.9971 (12 of 4,096, largest 0.125): FP8 KV rounding flips near-ties ~3× as
+often. Open: the d16 evaluation (queued; FP8 kept if pass@1 is within noise of main, else the bf16-KV tree), the commit.
 
 ### 5.17 DeepSeek's open kernel libraries as guidance (user-provided repositories)
 Sources: DeepGEMM, FlashMLA (Hopper deep-dive at commit `ba89a34`; the 2026.09.30 release dropped Hopper), DeepEP,
@@ -349,7 +354,7 @@ dX epilogue not pursued (it replaces part of a 178 µs/call preprocess).
   (paper 0.348; transformers 5 drops BOS), MBPP 0.466 (paper 0.462); our EvalPlus scorer agrees on 163/164 problems.
 - **d16 reference** (RefModelTrain): code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050 at 20 tokens/param.
 
-### 5.19 GEMMs: weight gradients, DeepGEMM, hand kernels (GemmDeep, DeepGemmStudy, GemmOwner) — C1+C2 committed
+### 5.19 GEMMs (GemmDeep, DeepGemmStudy, GemmOwner) — C1+C2 committed; postact +1.42%, its loss pending
 Outputs: DeepGEMM on the d24 shapes (TFLOP/s, sequential bench): forward q/k/v/o QuACK 828, torch 705, DeepGEMM 710;
 up-projection without epilogue QuACK 652, torch 543, DeepGEMM 779 — a lead an interleaved rerun attributes to drift
 (per-shape interleaved table queued); dW C×C torch.mm fp32 662, DeepGEMM with fp32 accumulation 295–315, DeepGEMM
@@ -363,10 +368,13 @@ weight change instead of 12 casts per layer and micro-batch (`f499be7`): d24 8K 
 The hand sm_90a relu² GEMMs (DeepGEMM's producer/consumer layout, consumer warpgroups alternating whole tiles) are
 bitwise equal to QuACK but slower: the backward 2.78 ms vs QuACK's 2.45 ms without the postact write, the up
 projection 3.02 vs 1.64 ms (`gemm_norm_act`), the 2-CTA multicast variants 6–7 ms: not landed. `b59a22b` confirmed
-bitwise (23/23 tensors). Open: the MLP postact saved in the forward with QuACK's dact epilogue (+14.5 GB; not bitwise:
-the down projection's weight gradient uses the forward's relu² of the fp32 pre-activation, rounded once, instead of
-relu² recomputed from the bf16 pre-activation), decided by its d24 tok/s and 200-step loss; split-K dW into the fp32
-`.grad` (−30 to −75 ms/step [estimate]) only if the per-shape numbers support ≥ 0.3%.
+bitwise (23/23 tensors). The MLP postact saved in the forward with QuACK's dact epilogue (not bitwise: the down
+projection's weight gradient uses the forward's relu² of the fp32 pre-activation, rounded once, instead of relu²
+recomputed from the bf16 pre-activation), d24 exclusive A/B (`w1`; 25 steps / 8 warm-up at 8K, 12 / 6 at 32K): master
+356,259 → 361,324 tok/s (+1.42%, MFU 0.473 → 0.480), 32K 282,256 → 285,118 (+1.01%); peak 66.4 → 80.9 GB at 8K,
+66.2 → 80.7 at 32K. Above the 0.3% bar; open: its 200-step loss at the base recipe's lr (×2.797, both arms; §5.15),
+then the commit; split-K dW into the fp32 `.grad` (−30 to −75 ms/step [estimate]) only if `w1`'s per-shape numbers
+support ≥ 0.3%.
 
 ### 5.20 Code audit (user specification; one auditor per file) — in progress
 Specification: every parameter, literal, branch and dependency justified by mathematics, the data, model or hardware
@@ -384,7 +392,20 @@ comments: RECURSION limits fissix's 2to3, not `ast.parse`) — curate, tokenize 
 sources (2,062 files) byte-identical, real shard 0 of six splits packs equal to the packs on disk, the tokenizer
 sample identical on the whole corpus; one intended change, the tokenizer ablation's fidelity check over a whole val
 row group instead of 200 documents (its recorded counts grow); `142eae3` makes logit_softcap's learning_rate_scale
-`${lr_multiplier:}` (the 2.7972 copy had drifted from the analysis' 2.79704; no softcap run exists); `7794e2f` vLLM
-serving and `b483f1e` eval and metrics (EarlierAudit). Noted, unchanged: `stack_edu_python`'s published row groups
+`${lr_multiplier:}` (the 2.7972 copy had drifted from the analysis' 2.79704; no softcap run exists), and `269e671`
+makes it every run's default in `conf/run.yaml` (user; §5.15), pretrain and softcap jobs byte-identical, the others
+exactly ×2.797 in lr. EarlierAudit: `7794e2f` vLLM serving (a second model implementation, `vllm_model.py` and its
+image, removed: vLLM's Transformers backend runs `modeling_nanochat.py` at the same speed and logits; export
+byte-identical but the unused pair template; transformers logits bitwise on 6-, 16- and 1,803-token prompts; the GPU
+vLLM check queued), `b483f1e` eval and metrics (engine/generator protocols, dead error-bar helpers, unread keys; 77,332
+cached judged items re-scored with 0 outcome differences), `865610e` syntax constraint (an unused mode, the crate's
+copy of `Reemit`, unused parameters; 47,166 recorded and fuzzed token streams, 8.38M steps, replayed identical; LTO
+kept, 13% faster). OptAdopt: `51c3dec` train/ (the spike and clipped flags, arbitrary thresholds over quantities the
+records already hold, removed; the update-statistics interval of 10 kept by measurement, every step −0.50% at d24;
+step 0's diagnostics bitwise equal to master's; −38 lines). Per-file tables filed: RunAudit, EarlierAudit,
+CorpusAudit, VeCeKernel, OptAdopt (but `optim.py`'s algorithms, with the optimizer decision); the attention files
+(C3Lander), the decoder (DecoderOwner) and postact's GEMM files (GemmOwner) land with their commits. Integration
+check queued: a d8 run end to end through `run.py` at master, at ×1 (reference code bpb 2.7011–2.7013) and at the
+new default. Noted, unchanged: `stack_edu_python`'s published row groups
 (~64,920 rows) are below the 65,536 the current curate writes, so an older version wrote them — tokens do not depend
 on row grouping (three shards re-cut at 122,880 rows tokenize identically).
