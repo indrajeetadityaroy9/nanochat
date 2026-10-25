@@ -389,9 +389,9 @@ benchmark and corpus val texts exactly as tiktoken; vLLM's logits against the tr
 against itself at another row offset: 99.4%, 1.8·10⁻⁴), next-token loss within 0.002 nats; greedy HumanEval+
 0.067/0.067, MBPP+ 0.056/0.045, FIM single-line line EM PSM 0.022, SPM 0.368, against NativeDecoder's
 0.061/0.061, 0.045/0.037, 0.022, 0.367 on the same checkpoint. On the code benchmarks' request sets the native
-decoder is faster at d16: codegen greedy + sampled (23,100 requests) 100 s against vLLM's 267 s, whose engine is
-bound by its per-step host work at this model size (GPU 17–36% busy, `max_num_seqs` 1,024); FIM greedy (16,976
-requests) 75 s against 45 s. The native class and the Transformers backend run at the same rate.
+decoder is faster at d16 for codegen: greedy + sampled (23,100 requests) 100 s against vLLM's 267 s, whose engine is
+bound by its per-step host work at this model size (GPU 17–36% busy, `max_num_seqs` 1,024). FIM greedy (16,976
+requests) is faster through vLLM, 45 s against 75 s. The native class and the Transformers backend run at the same rate.
 
 **Constrained decoding: syntax, not types.** Type-constrained decoding (arXiv 2504.09246) implements TypeScript only;
 arXiv 2606.21619 found an incomplete constrainer lowers functional correctness, while a complete syntax constrainer
