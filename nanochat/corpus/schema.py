@@ -1,5 +1,5 @@
 """
-Document categories (docs/corpus.md §2). A standardized file holds one category's rows; id is the SHA-1 of the text.
+Document categories. A standardized file holds one category's rows; id is the SHA-1 of the text.
 
 REPOSITORY_FILE  a repository's source file, with its path and language
 EXERCISE         a synthetic exercise as published: the task, then the solution
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 
-SPLIT = 100  # 1% of groups held out (docs/corpus.md §4.4)
+SPLIT = 100  # 1% of groups held out
 # Parquet codec of the files the corpus writes
 COMPRESSION = "zstd"
 

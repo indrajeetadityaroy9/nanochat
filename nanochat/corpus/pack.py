@@ -1,7 +1,7 @@
 """
 Pack the compiled corpus into training rows of seq_len + 1 tokens, stage by stage: the crate's pack, one curated shard
-per call (Best-Fit-Decreasing, each piece its own attention segment, long documents cut between statements;
-docs/corpus.md §7.1), with FIM examples in repository code's train splits (§6). Output per corpus and stage:
+per call (Best-Fit-Decreasing, each piece its own attention segment, long documents cut between statements), with
+FIM examples in repository code's train splits. Output per corpus and stage:
 <split>-T<seq_len>.pieces, .rows and .fim beside the compiled split (layout.py).
 
 A stage's train packs hold at least the rows the base model's run reads (mixture.STEPS), each document at most once:
@@ -39,7 +39,7 @@ from nanochat.corpus.sources import curated_shards
 from nanochat.corpus.tokenizer import FIM_TOKENS, TOKENIZER, get_tokenizer
 from nanochat.native import corpus_crate
 
-# FIM (docs/corpus.md §6), no line widening: rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv 2207.14255 §3);
+# FIM, no line widening: rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv 2207.14255 §3);
 # 90% AST middles, 10% random character spans; PSM/SPM 50/50, as joint training matches or beats either mode alone
 # (arXiv 2207.14255 §3.1, §4.3 Table 1, §8.1; SPM as App. D's variant 2) and AST-FIM trains (arXiv 2506.00204v1 §5.1);
 # AST middles an equal mix of Single-Node and Aligned-Span masking (§3.3). The crate draws each piece's FIM from ChaCha8

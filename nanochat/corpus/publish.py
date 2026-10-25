@@ -18,7 +18,7 @@ from nanochat.paths import CORPUS
 # Bytes per preupload call: an upload URL the Hub's LFS batch call returns expires 15 minutes after the call
 # (X-Amz-Expires=900), so every file of a call must start uploading within them: 4 GiB needs at least 4.6 MiB/s
 PREUPLOAD = 4 * 1024**3
-# The card's account of each folder and each column (docs/corpus.md §1-§3)
+# The card's account of each folder and each column
 CONTENTS = {
     "stack_edu_python": "GitHub Python files filtered for educational value",
     "stack_edu_cpp": "GitHub C++ files filtered for educational value",

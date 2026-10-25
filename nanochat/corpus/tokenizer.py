@@ -28,7 +28,7 @@ FIM_TOKENS = (FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE)
 SPECIAL_TOKENS = (BOS, *FIM_TOKENS)  # ids after the mergeable tokens, in this order
 
 # The reference split pattern (the sa-bpe arm): cl100k's with digit runs of one or two (karpathy/nanochat's) and no
-# line break after a punctuation run, so no token joins "):" to its line break (docs/tokenizer-ablation.md)
+# line break after a punctuation run, so no token joins "):" to its line break
 SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]"""
                  r"""|\s+(?!\S)|\s+""")
 

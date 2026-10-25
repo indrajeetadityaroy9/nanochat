@@ -6,8 +6,8 @@ partition's document count (<split>.json; pack.py packs each one's documents tog
 
 A source's documents are its curated rows (a repository source's: its import-connected samples, each file after a path
 comment, sources.texts). The 32K stage adds mixture.REPOSITORIES: per language, one document per repository across that
-language's repository sources (docs/corpus.md §7.2), from the fewest trailing partitions holding the stage's draw
-(compile_stage), and partition 0 for val. A path several sources hold in one repository keeps the first source's file
+language's repository sources, from the fewest trailing partitions holding the stage's draw (compile_stage), and
+partition 0 for val. A path several sources hold in one repository keeps the first source's file
 (mixture.REPOSITORY_SOURCES order), a path one source holds twice its first row; a repository's files are cut into
 import-connected components (the crate's repository_samples), each in dependency order, in order of their first file.
 

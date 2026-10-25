@@ -1,5 +1,5 @@
 """
-The corpus's sources (docs/corpus.md §1) and its file paths under paths.CORPUS. A source: a Hub dataset, its files per
+The corpus's sources and its file paths under paths.CORPUS. A source: a Hub dataset, its files per
 language (a Linguist name for code), its category (schema.py) and the column holding a document's text. SOURCES is in
 deduplication's keep-first order (curate.py).
 - Stack-Edu (arXiv 2502.02737): The Stack v2's educational files, by Software Heritage blob id (prepare.fetch).

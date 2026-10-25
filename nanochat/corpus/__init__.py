@@ -1,5 +1,6 @@
 """
-The pre-training corpus (docs/corpus.md), one module per stage, under paths.CORPUS; run order: docs/pretraining.md.
+The pre-training corpus, one module per stage, under paths.CORPUS. Run order: prepare, curate, publish, the tokenizer
+(ablations/tokenizer.py), compile, pack.
 
   schema.py     document categories: schema, split group, whether the content is code
   sources.py    the 18 sources, the corpus's file paths, curated texts and repository samples

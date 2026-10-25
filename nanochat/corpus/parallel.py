@@ -18,8 +18,8 @@ def memory() -> int:
     return physical if text == "max" else min(physical, int(text))
 
 
-# Half: DuckDB's guidance, as some operations bypass its memory limit
-# (duckdb.org/docs/lts/guides/troubleshooting/oom_errors); other jobs share the unified memory
+# Half: DuckDB's guidance, as some operations bypass its memory limit (DuckDB documentation, Guides, Troubleshooting,
+# "Out of Memory Errors"); the rest is left to other processes
 MEMORY = memory() // 2
 
 

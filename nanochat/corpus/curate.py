@@ -1,13 +1,13 @@
 """
-Curate every source from its standardized files, the steps of docs/corpus.md §4:
+Curate every source from its standardized files:
 
-1. check (§4.2): every Python file (a category whose content is code) must parse with ast.parse (Python 3.12); one that
+1. check: every Python file (a category whose content is code) must parse with ast.parse (Python 3.12); one that
    does not is repaired by the smallest set of steps that makes it parse (repaired): Stack v3's placeholders <EMAIL>,
    <KEY>, <NAME>, <PASSWORD> become the bare word; leading tabs expand to 8 columns (Python 2 Language Reference
    §2.1.8); fissix's 2to3 fixers. The repaired text is kept with its id recomputed; a file that never parses is dropped.
-2. dedup (§4.3): one row per id over every source and split, the first in SOURCES order, then file and row; empty
+2. dedup: one row per id over every source and split, the first in SOURCES order, then file and row; empty
    texts dropped.
-3. split (§4.4): val iff md5_number(group) % SPLIT = 0 (schema.py).
+3. split: val iff md5_number(group) % SPLIT = 0 (schema.py).
 4. shards: a repository source's files by that residue's partitions (0 val, 1..SPLIT-1 train), each sorted by
    (repository, path, id) and cut into import-connected samples (the crate's repository_samples; SAMPLE_FILE); any
    other source's train rows in id order (a uniform order, id being a hash) over SPLIT shards, its val rows in one.
