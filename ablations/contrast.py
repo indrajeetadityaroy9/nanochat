@@ -43,8 +43,6 @@ def contrast(runs: dict[tuple, tuple[float, list[bool]]], arm: object, baseline:
     """An arm against the baseline (module docstring; evaluated's runs) over the seeds where both have an evaluation:
     parsing by the exact sign test, code bits per byte by the difference of the means beyond its bound."""
     seeds = sorted(seed for value, seed in runs if value == arm and (baseline, seed) in runs)
-    if not seeds:
-        raise RuntimeError(f"no seed evaluated under both {arm} and {baseline}")
     code = {v: statistics.fmean(runs[v, seed][0] for seed in seeds) for v in (arm, baseline)}
     # per problem, the seeds whose completion parses under the arm minus under the baseline
     seeds_parsing = (np.sum([runs[arm, seed][1] for seed in seeds], axis=0)
@@ -64,10 +62,11 @@ def adopted(c: dict) -> bool:
     return c["code"] == "better" and c["parsing"] != "worse"
 
 
-def scaled(lines: list[dict], field: str, low: float, high: float) -> dict:
-    """A scale's decision over the arms {low, 1, high} of `field` (module docstring): "scale" the adopted scale."""
+def scaled(lines: list[dict], field: str) -> dict:
+    """A scale's decision over the arms {low, 1, high} of `field`, the values its records swept (module docstring):
+    "scale" the adopted scale."""
     runs = evaluated(lines, field)
-    scales = (low, 1.0, high)
+    scales = low, _, high = sorted({line["config"][field] for line in lines})
     means = {s: statistics.fmean(code for (v, _), (code, _) in runs.items() if v == s) for s in scales}
     curvature, x = metrics.parabola_vertex([math.log(s) for s in scales], [means[s] for s in scales])
     end = min((low, high), key=means.__getitem__)

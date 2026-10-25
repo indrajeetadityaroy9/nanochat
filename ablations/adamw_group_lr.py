@@ -9,4 +9,4 @@ from ablations.contrast import scaled
 
 def analysis(lines: list[dict]) -> dict:
     """The AdamW group lr decision: "scale" the adopted adamw_learning_rate_scale."""
-    return scaled(lines, "adamw_learning_rate_scale", 0.25, 4.0)
+    return scaled(lines, "adamw_learning_rate_scale")

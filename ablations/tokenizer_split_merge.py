@@ -183,8 +183,8 @@ TOKEVAL_LANGUAGES = {"Python": "python", "C++": "cpp"}
 def provenance() -> dict:
     """Where and when a step ran: the checkout's commit, the UTC time, the host, its cores and memory, and the versions
     of Python and of the packages that compute the measures."""
-    commit = subprocess.run(["git", "-c", f"safe.directory={ROOT}", "-C", str(ROOT), "rev-parse", "HEAD"],
-                            capture_output=True, text=True, check=True).stdout.strip()
+    commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                            check=True).stdout.strip()
     return {"commit": commit, "utc": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
             "host": platform.node(), "machine": platform.machine(), "cpus": os.cpu_count(),
             "memory_gb": memory() / 2**30, "python": platform.python_version(),
@@ -548,9 +548,6 @@ def analysis(lines: list[dict]) -> dict:
     """The runs' analysis (RESULTS/<EXPERIMENT>.json "analysis", ablations/records.py): each challenger's contrast with
     sa-bpe, with the difference of the arms' MBPP+ unparsed shares, and the decision (module docstring), over
     RESULTS/<EXPERIMENT>.jsonl's records."""
-    swept = {line["config"]["tokenizer"] for line in lines}
-    if swept != set(ARMS):
-        raise RuntimeError(f"the experiment swept {sorted(swept)}, not the arms {sorted(ARMS)}")
     runs = evaluated(lines, "tokenizer")
     contrasts = {}
     for arm in CHALLENGERS:
@@ -580,7 +577,6 @@ def adopt() -> None:
     directories (run.py's stale guard rejects a run recorded under the replaced one)."""
     decision = json.loads((RESULTS / f"{EXPERIMENT}.json").read_text(encoding="utf-8"))["analysis"]["decision"]
     pattern, score = ARMS[decision["pattern"]][0], decision["score"]
-    TOKENIZER.mkdir(parents=True, exist_ok=True)
     arm = next((arm for arm, spec in ARMS.items() if spec == (pattern, score)), None)
     if arm is None:
         docs, units, _ = sample()

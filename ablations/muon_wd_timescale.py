@@ -19,7 +19,7 @@ from train.optim import TAU_C, TAU_E
 
 def analysis(lines: list[dict]) -> dict:
     """Muon's timescale multiplier m at one setting (muon_wd_timescale_20tpp): "scale"."""
-    return scaled(lines, "muon_tau_scale", 0.5, 2.0)
+    return scaled(lines, "muon_tau_scale")
 
 
 def law(lines: list[dict]) -> dict:
