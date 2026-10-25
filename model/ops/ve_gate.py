@@ -20,17 +20,12 @@ from torch.autograd.function import FunctionCtx
 from native import cuda_library, pointer, stream
 
 
-def evenly_spaced_rows(t: Tensor) -> bool:
-    """t (B, T, H, HEAD_DIM): heads contiguous and rows evenly spaced, the layout the kernels index by a row stride."""
-    return t.stride(3) == 1 and t.stride(2) == t.size(3) and t.stride(0) == t.size(1) * t.stride(1)
-
-
 def ve_mix(n: Tensor, v: Tensor, input_ids: Tensor, table: Tensor, w: Tensor) -> tuple[Tensor, Tensor]:
     """n (B, T, C) bf16 normed stream and input_ids (B, T) int32 token ids, contiguous; v (B, T, H, HEAD_DIM) bf16 with
     evenly spaced rows (contiguous, or a view of a fused q/k/v projection); table (V, C) fp32 value embeddings (a leaf;
     its gradient accumulates into table.grad), w (H, C) fp32 gate weight -> (mixed v, contiguous, gate (B*T, H) fp32,
     saved for the backward)."""
-    if not evenly_spaced_rows(v):
+    if v.stride(3) != 1 or v.stride(2) != v.size(3) or v.stride(0) != v.size(1) * v.stride(1):  # kernels: row stride
         raise ValueError(f"ve_mix: v's strides {v.stride()} are not evenly spaced rows of contiguous heads")
     ids, order = torch.sort(input_ids.flatten())
     return ve_mix_sorted(n, v, input_ids, table, w, ids, order)
@@ -59,18 +54,14 @@ def ve_mix_fake(n: Tensor, v: Tensor, input_ids: Tensor, table: Tensor, w: Tenso
 @torch.library.custom_op("nanochat::ve_mix_backward", mutates_args=(), device_types="cuda")
 def ve_mix_backward(dout: Tensor, n: Tensor, ids: Tensor, order: Tensor, table: Tensor, w: Tensor,
                     gate: Tensor) -> tuple[Tensor, Tensor]:
-    """(dn like n, dw like w); dv is dout itself; the table's gradient is added into table.grad (zeros when None).
-    dout with evenly spaced rows."""
-    if not (table.is_leaf and table.requires_grad):
-        raise ValueError("ve_mix: the table must be a leaf that requires grad (its gradient goes to table.grad)")
+    """(dn like n, dw like w); dv is dout itself; the table's gradient is added into table.grad (zeros when None; table a
+    leaf parameter). dout with evenly spaced rows; H one ve_forward accepted."""
     if table.grad is None:
         table.grad = torch.zeros_like(table)
     dn, dz = torch.empty_like(n), torch.empty_like(gate, dtype=torch.bfloat16)
-    if not cuda_library("ve_gate").ve_backward(pointer(dout), ctypes.c_longlong(dout.stride(1)), pointer(ids),
-                                               pointer(order), pointer(table), pointer(w), pointer(gate), pointer(dn),
-                                               pointer(table.grad), pointer(dz), ctypes.c_longlong(ids.numel()),
-                                               w.size(0), stream()):
-        raise ValueError(f"model/kernels/ve_gate.cu has no kernel for {w.size(0)} heads")
+    cuda_library("ve_gate").ve_backward(pointer(dout), ctypes.c_longlong(dout.stride(1)), pointer(ids), pointer(order),
+                                        pointer(table), pointer(w), pointer(gate), pointer(dn), pointer(table.grad),
+                                        pointer(dz), ctypes.c_longlong(ids.numel()), w.size(0), stream())
     return dn, torch.mm(dz.t(), n.view(-1, n.size(-1)), out_dtype=w.dtype)
 
 
@@ -87,7 +78,7 @@ def ve_mix_save(ctx: FunctionCtx, inputs: tuple[Tensor, ...], output: tuple[Tens
 
 def ve_mix_grad(ctx: FunctionCtx, dout: Tensor, dgate: Tensor) -> tuple[Tensor | None, ...]:
     n, ids, order, table, w, gate = ctx.saved_tensors
-    dn, dw = ve_mix_backward(dout if evenly_spaced_rows(dout) else dout.contiguous(), n, ids, order, table, w, gate)
+    dn, dw = ve_mix_backward(dout, n, ids, order, table, w, gate)
     return dn, dout, None, None, dw, None, None
 
 

@@ -17,7 +17,6 @@ final-logit softcapping, arXiv 2408.00118 §2) z becomes c tanh(z / c) (tanh in 
 logits-sized buffers, runs QuACK's cross entropy on the capped logits and multiplies its logit gradient by the
 derivative before the two gradient GEMMs; lm_losses takes logsumexp minus the label's logit of the capped fp32 logits
 of each row chunk's GEMM (CHUNK rows), as lse_target_epi has no tanh epilogue.
-Without a cap both run as above.
 """
 
 import torch
@@ -29,7 +28,8 @@ from torch.autograd.function import FunctionCtx
 
 from corpus.loader import IGNORE_INDEX
 
-# Rows of lm_losses' capped fp32 logits per GEMM: 8,192 x 2^15 x 4 bytes = 1 GiB
+# Rows of lm_losses' capped fp32 logits per GEMM, a memory bound only (each row's loss is computed whole within its
+# chunk, so the losses do not depend on it): 8,192 x 2^15 x 4 bytes = 1 GiB
 CHUNK = 8192
 
 
@@ -102,11 +102,11 @@ def step_shares(labels: list[Tensor]) -> Tensor:
 def lm_losses(x: Tensor, weight: Tensor, labels: Tensor, final_logit_softcapping: float | None) -> Tensor:
     """Per-position loss (M,) fp32, 0 at IGNORE_INDEX labels; no gradient. QuACK's default tile config
     (tuned=False)."""
-    valid = labels != IGNORE_INDEX
+    valid, w = labels != IGNORE_INDEX, weight.to(x.dtype).t()
     if final_logit_softcapping is None:
-        res = lse_target_epi(x, weight.to(x.dtype).t(), store_d=False, target=labels, tuned=False)
+        res = lse_target_epi(x, w, store_d=False, target=labels, tuned=False)
         return torch.where(valid, res["lse"] - res["target_logit"], 0.0)
-    w, rows = weight.to(x.dtype).t(), torch.where(valid, labels, 0)
+    rows = torch.where(valid, labels, 0)
     losses = [capped_losses(torch.mm(xc, w, out_dtype=torch.float32), tc, final_logit_softcapping)
               for xc, tc in zip(x.split(CHUNK), rows.split(CHUNK), strict=True)]
     return torch.where(valid, torch.cat(losses), 0.0)

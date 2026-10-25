@@ -41,8 +41,10 @@ static __device__ __forceinline__ void unpack(const uint4 &u, float *v) {
     }
 }
 
+/* The launch configuration measured at d24 (eaf14d0: 8K +1.57% tok/s): THREADS per block, the backward at 2 blocks per
+ * SM (128 registers per thread), RUN positions per warp (isolated backward 222 / 203 / 251 us at RUN 8 / 16 / 32). */
 constexpr int THREADS = 256;  /* warps per block: THREADS / WARP */
-constexpr int RUN = 16;       /* backward: consecutive token-order positions per warp (measured: 8, 16, 32) */
+constexpr int RUN = 16;       /* backward: consecutive token-order positions per warp */
 static_assert(RUN <= WARP, "a warp's positions are held one per lane");
 
 template <int H> __global__ void __launch_bounds__(THREADS)
@@ -241,15 +243,15 @@ extern "C" int ve_forward(const void *n, const void *v, long long v_stride, cons
 }
 
 /* dout_stride: elements between dout's rows; ids: int32 (rows,) the tokens in visiting order, idx[order]; order: int64
- * (rows,) a permutation of the rows sorting idx; dtable: fp32 (table_rows, C), accumulated into; dz: bf16 (rows, H). */
-extern "C" int ve_backward(const void *dout, long long dout_stride, const void *ids, const void *order,
-                           const void *table, const void *w, const void *gate, void *dn, void *dtable, void *dz,
-                           long long rows, int H, void *stream) {
+ * (rows,) a permutation of the rows sorting idx; dtable: fp32 (table_rows, C), accumulated into; dz: bf16 (rows, H).
+ * H: one ve_forward accepted. */
+extern "C" void ve_backward(const void *dout, long long dout_stride, const void *ids, const void *order,
+                            const void *table, const void *w, const void *gate, void *dn, void *dtable, void *dz,
+                            long long rows, int H, void *stream) {
     const cudaStream_t s = (cudaStream_t)stream;
     switch (H) {
-        case 2: backward<2>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); return 1;
-        case 4: backward<4>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); return 1;
-        case 6: backward<6>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); return 1;
-        default: return 0;
+        case 2: backward<2>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); break;
+        case 4: backward<4>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); break;
+        case 6: backward<6>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); break;
     }
 }
