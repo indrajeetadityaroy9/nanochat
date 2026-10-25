@@ -93,7 +93,7 @@ code:text:math 87:10:3 in both stages; an 8,192-token file stage, then a 32,768-
 |---|---|---|
 | Batch | 1,474,560 tokens (15 micro-batches of 98,304) at 102.6B tokens | DeepSeek LLM's law B = 0.2920·C^0.3271, C = M·D (`train/schedule.py` `plan`), rounded to whole micro-batches |
 | Steps | 69,580 (525.89 tokens per non-embedding parameter); repository stage from step 65,785 | `schedule.plan` (D11: `round(tokens_per_param · num_non_embedding_params)`) |
-| Peak lr | the law's η = 0.3118·C^-0.125 = 8.6295e-4 times `ablations/peak_lr.py`'s multiplier: × 2.7972 = 2.4139e-3 at 102.6B tokens | DeepSeek LLM §3.1 Eq. 1; `conf/experiment/pretrain.yaml`'s `learning_rate_scale` resolves `peak_lr.py`'s `analysis` at the corpus's `max_tokens_per_param` (`docs/ablations.md`, peak_lr) |
+| Peak lr | the law's η = 0.3118·C^-0.125 = 8.6295e-4 times `ablations/peak_lr.py`'s multiplier (2.79704 on the recorded runs, computed at launch) = 2.4137e-3 at 102.6B tokens | DeepSeek LLM §3.1 Eq. 1; `conf/experiment/pretrain.yaml`'s `learning_rate_scale` resolves `peak_lr.py`'s `analysis` at the corpus's `max_tokens_per_param` (`docs/ablations.md`, peak_lr) |
 | Warmup | 40 steps, linear | 2/(1 − β₂) (arXiv 1910.04209, for Adam); nanochat 92d63d4's 40 steps at d24 |
 | Decay | linear to zero; the last step at 1/(69,580 − 40) = 1.44e-5 of peak (D10: exactly 0 is not required) | arXiv 2502.15938 §4 |
 | Optimizers | AdamW (fused) on tables, `lm_head` and vectors; Muon (`torch.optim.Muon`'s update, Newton–Schulz batched by shape) with `match_rms_adamw` on the other matrices, one lr for every group | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |

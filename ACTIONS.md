@@ -29,7 +29,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 
 | Item | Decision | Where |
 |---|---|---|
-| D1 FLOP count M | adopt DeepSeek LLM Eq. 2's M; lr ablation re-based (base ×2.7972, lr 2.4138e-3), its 11 runs reused; `mixture.STEPS` = 69,580 steps of 15 micro-batches (D1's plan) | `ba01bb5`, `b065ad7` |
+| D1 FLOP count M | adopt DeepSeek LLM Eq. 2's M; lr ablation re-based (base ×2.7972 on Oct 19's records, 2.79704 as `peak_lr.analysis` gives it now, computed at launch; lr 2.4138e-3), its 11 runs reused; `mixture.STEPS` = 69,580 steps of 15 micro-batches (D1's plan) | `ba01bb5`, `b065ad7` |
 | D2 repository-stage lr | keep decay to zero (2502.15938); citation fixed | `ba01bb5` |
 | D3 clip before Muon | keep 1.0 (DeepSeek LLM §2.3); citation fixed | `a81410c` |
 | D4 learnable QK gains | keep (nGPT App. A.9 Table 5); citation fixed | `ba01bb5` |
@@ -89,7 +89,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | Training-step throughput (d24 pre-training ~85 h at the Oct 24 rates) | GPU-bound (busy 99%). Done: FA4 persistent window forward and bf16 dQ in the window layers (+0.94% d24 8K, +0.72% 32K). Open: the MLP postact saved in the forward with QuACK's dact epilogue (the hand sm_90a relu² GEMMs are bitwise but slower and do not land; postact is not bitwise, so its d24 tok/s and 200-step loss decide); fused QKV on master's attention path (port audited and bitwise-verified; d24 A/B and loss queued); split-K dW only if the per-shape numbers support ≥ 0.3%; the optimizer screen's landing (NorMuon and Polar Express adopted; stack at seed 1 checks their interaction); the decoder's acceptance and commit (final tree re-measured after its second audit pass); the code audit of every file (user; `docs/findings.md` §5.20). Deferred: window-512 attention efficiency | GemmOwner, C3Lander, OptAdopt, DecoderOwner, EarlierAudit, CorpusAudit, RunAudit |
 | Ablation queue | ready at HEAD (`860ac7b`; end-to-end d8 runs through `run.py` at `9ea5037` and `860ac7b`: exit 0, code bpb 2.7012 and 2.7013 against 2.7011 at `d0a2ec0`): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, tokenize, pack → D6 | the user's explicit permission |
 | D7 Muon τ | `muon_wd_timescale_20tpp.yaml` (d16 at 20, sa-bpe set, 2 seeds: user, d16 the closer signal for d24; ~3.3 GPU-h) and `muon_wd_timescale_200tpp.yaml` (d8 at 200, 2.94B tokens beyond the sa-bpe set's 2.11B: `tokenizer=corpus`, 2 seeds; user: d16 at 200 is 13.4B tokens, ~29 GPU-h); ×½, ×1, ×2; 12 runs | user approval |
-| D5 softcap | `logit_softcap.yaml`: d16 at tokens_per_param 20.0 on the sa-bpe set, learning_rate_scale 2.7972 (the D1-rebased base multiplier at `mixture.MAX_STEPS`' tokens), final_logit_softcapping 15 vs none, 4 seeds | user approval |
+| D5 softcap | `logit_softcap.yaml`: d16 at tokens_per_param 20.0 on the sa-bpe set, learning_rate_scale `${lr_multiplier:}` (the D1-rebased base multiplier, computed at launch from `results/peak_lr.jsonl`: 2.79704; `142eae3` replaced a 2.7972 copy), final_logit_softcapping 15 vs none, 4 seeds | user approval |
 | Tokenizer ablation | 8 d16 runs at each arm's max_tokens_per_param (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer_split_merge`), decision, `adopt`, tokenize, pack | D5 and D7 decided; user approval |
 | D6 AdamW-group lr | `adamw_group_lr.yaml`: d16 on the sa-bpe set at its max_tokens_per_param, adamw_learning_rate_scale ¼ and 4, 2 seeds; its ×1 arm is the tokenizer ablation's sa-bpe baseline (same run name), so 4 runs train | the tokenizer runs; user approval |
 | Base model pre-training | `experiment=pretrain` (d24, the decided recipe and tokenizer) | every ablation above; its own user approval |
@@ -215,7 +215,8 @@ pre-registered decision rule, GH200 cost). Filled in as the research agents repo
 - Applied (`gpt.non_embedding_flops_per_token`, l_seq the model's context). Plans: d16 at 20: 2 → 3 micro-batches,
   6,828 → 4,552 steps, law lr ×0.914; d24 base: 12 → 15 micro-batches, 86,975 → 69,580 steps on the same 102.6B
   tokens. The lr ablation's three settings keep their batch and steps, so its optima carry over: `peak_lr.analysis`
-  re-bases the vertices (×1.1186 at d8, ×1.0776 at d24), base multiplier ×2.7972, base lr 2.4138e-3 (verified on the
+  re-bases the vertices (×1.1186 at d8, ×1.0776 at d24), base multiplier ×2.7972 on Oct 19's records (2.79704 as the
+  analysis gives it now, computed at launch), base lr 2.4138e-3 (verified on the
   GH200). No batch ablation: Muon's loss is flat across a 2× batch at 8× Chinchilla (arXiv 2509.02046 App. C.9
   Table 85).
 
@@ -242,7 +243,8 @@ Gemma 3 and OLMo 2 learn it; per-head QK norm with learnable parameters in arXiv
 - Design: d16 at 20, cap 15 vs none, 4 paired seeds; adopt iff code bpb better by > 1.96·0.0034·√(2/4) = 0.0047 and
   MBPP+ not worse (sign test); ~9 GPU-h. `RunConfig.softcap` (`GPTConfig.softcap`: c·tanh(z/c) in the training loss,
   eval losses, decoder sampling), `conf/experiment/logit_softcap.yaml`, analysis in `ablations/logit_softcap.py`. Runs on the
-  sa-bpe arm's data (its d16 max_ratio is 31.42) at lr_scale 2.7972 (peak_lr.py's base multiplier under D1), since the
+  sa-bpe arm's data (its d16 max_ratio is 31.42) at lr_scale `${lr_multiplier:}` (peak_lr.py's base multiplier under
+  D1, computed at launch: 2.79704), since the
   corpus tokenizer does not exist before the tokenizer ablation's adopt.
 
 ### D6 one lr/weight decay for all groups (OptimizerAnswers): source found; ablation after the tokenizer runs
