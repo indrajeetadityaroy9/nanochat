@@ -17,13 +17,13 @@ are in `results/tokenizer_split_merge-*.json`. Every figure below comes from tho
 | `adopt` | after `runs` | `artifacts/corpus/tokenizer` | | |
 
 The arms' vocabularies are in `artifacts/corpus/tokenizer-ablation/<arm>/` (`tokenizer.tiktoken`, `tokenizer.pattern`,
-`merges.json`), and their compiled val splits are in `artifacts/corpus/tokenizer-ablation/compiled/` (72 splits,
+`merges.json`), and their tokenized val splits are in `artifacts/corpus/tokenizer-ablation/tokenized/` (72 splits,
 13 GB), on the GH200.
 
 ## Fixed across arms
 
-- **Vocabulary size:** 32,768 ids: the 256 bytes, 32,508 merges, BOS and three FIM sentinels (`<fim_prefix>`,
-  `<fim_suffix>`, `<fim_middle>`); the reason for the size is in `docs/corpus.md` §9.
+- **Vocabulary size:** 32,768 ids: the 256 bytes, 32,508 merges, BOS and three FIM sentinels (`<｜fim▁begin｜>`,
+  `<｜fim▁hole｜>`, `<｜fim▁end｜>`); the reason for the size is in `docs/corpus.md` §9.
 - **Trainer:** the corpus crate's byte-level BPE (`corpus/crate/train.rs`), within the chunks of the arm's
   split pattern. Every merge is an argmax with fixed tie-breaks, so the arms are trained concurrently and
   independently. Training is deterministic: a second training of the four arms gave identical vocabularies
@@ -36,7 +36,7 @@ The arms' vocabularies are in `artifacts/corpus/tokenizer-ablation/<arm>/` (`tok
 
 Each of the file stage's 17 sources contributes its share of the stage's bytes as its share of 13.38 GB
 (`corpus/train_tokenizer.py` `SAMPLE_BYTES`). A source's share of the stage's bytes is its share of the stage's
-tokens (`mixture.FILE_STAGE`) at the reference tokenizer's bytes per token (`mixture.BYTES_PER_TOKEN`). Within a
+tokens (`mixture.FILE_LEVEL_STAGE`) at the reference tokenizer's bytes per token (`mixture.BYTES_PER_TOKEN`). Within a
 source the sample is systematic, in shard order: row i is taken when floor((i + 1)·f) > floor(i·f), where f is the
 fraction of the source's rows taken.
 
@@ -205,7 +205,7 @@ Each measure plans the runs, gates their validity, tests an arm's mechanism or b
 - **Train tokens over draw (extent margin):** per group read in part (synthetic code, text, math), the train tokens of
   its sources under the arm over the group's draw. Below 1, the corpus's extent is too small for that arm.
 - **Validity, asserted** (a failure stops the step):
-  - every arm's compiled val documents hold the same bytes;
+  - every arm's tokenized val documents hold the same bytes;
   - on each source's first 200 val texts, the pattern's chunks (Python `regex`) cover the text;
   - tiktoken's encoding of every chunk equals the arm's merges replayed in training order (Hugging Face `tokenizers`'
     BPE model);
@@ -319,11 +319,11 @@ Every arm passed every validity check. 3,600 val texts per arm were checked chun
   fewer steps [arithmetic].
 - **Contexts:** the corpus's 8,192 and 32,768 tokens. Bits per byte is also reported by byte offset, the bytes of
   context a better compressor sees (arXiv 2503.13423 §3.1, App. B.1).
-- **Size of the set** (`document_set`): 20 tokens per scaling parameter of d16 under sa-bpe (arXiv 2203.15556
+- **Size of the set** (`document_set`): 20 tokens per non-embedding parameter of d16 under sa-bpe (arXiv 2203.15556
   Table 3; d16 at 20 is 4,552 steps of 294,912 tokens). Each code corpus takes the fewest leading train shards whose
   estimated sa-bpe tokens hold its file-stage draw; text, math and the repository corpora hold `MARGIN` (1.5) times
-  their draws. Whole shards hold more than the draw: every arm's `max_ratio` on the set is 29.5–31.5 (sa-bpe 31.42,
-  sa-bpe-fused 29.48, hybrid 31.49, bpe 31.42), 6,710–7,167 steps of 3 micro-batches
+  their draws. Whole shards hold more than the draw: every arm's `max_tokens_per_param` on the set is 29.5–31.5 (sa-bpe
+  31.42, sa-bpe-fused 29.48, hybrid 31.49, bpe 31.42), 6,710–7,167 steps of 3 micro-batches
   (`results/tokenizer_split_merge-data.json`).
 
 **Measures:**
@@ -382,8 +382,8 @@ Inside the project image on the GH200 (64 Neoverse-V2 cores, 525 GB; Python 3.12
 
 ```bash
 python -m ablations.tokenizer vocabularies   # sample, then the four arms at once
-python -m ablations.tokenizer intrinsic      # 72 val compiles and every measure, one process pool
-python -m ablations.tokenizer data           # the d16 set compiled and packed under every arm
+python -m ablations.tokenizer intrinsic      # 72 val tokenize jobs and every measure, one process pool
+python -m ablations.tokenizer data           # the d16 set tokenized and packed under every arm
 python run.py experiment=tokenizer_split_merge   # the 8 runs and the decision
 python -m ablations.tokenizer adopt
 ```
@@ -392,6 +392,6 @@ python -m ablations.tokenizer adopt
 |---|---|
 | sample (64 workers) | 31 s |
 | training, concurrent: sa-bpe / sa-bpe-fused / hybrid / bpe | 690 / 683 / 687 / 624 s |
-| val compiles, 4 arms × 18 sources | 53 s |
+| val tokenize jobs, 4 arms × 18 sources | 53 s |
 | measures | 19 s |
-| `data`: compile and pack of the d16 set under every arm | 2,767 s and 235 s |
+| `data`: tokenize and pack of the d16 set under every arm | 2,767 s and 235 s |

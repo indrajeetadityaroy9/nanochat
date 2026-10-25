@@ -7,13 +7,13 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
-# typed views of the memory-mapped compiled tokens and document offsets, and of the packed rows returned
+# typed views of the memory-mapped tokenized tokens and document offsets, and of the packed rows returned
 bytemuck = "1.25.2"
 # the regex engine of OpenAI's tiktoken (0.14: fancy-regex 0.19), so training splits text as encoding does
 fancy-regex = "0.19.2"
 # the trainer's set of sources holding a pair (its R): a bitset over the sources
 fixedbitset = "0.5.7"
-# the compiled tokens and offsets (pack), read in place
+# the tokenized tokens and offsets (pack), read in place
 memmap2 = "0.9.11"
 # lexical cleaning of the paths a C++ #include names (repository samples)
 path-clean = "1.0.1"

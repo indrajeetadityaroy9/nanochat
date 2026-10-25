@@ -14,21 +14,21 @@ marked [unverified]. Terminology follows DeepSeek-Coder: the base model, its pre
 
 ## Model
 
-`model/gpt.py`: karpathy/nanochat 92d63d4 plus the wins of its experiment log ("LOG", `dev/LOG.md`), with
+`model/modeling.py`: karpathy/nanochat 92d63d4 plus the wins of its experiment log ("LOG", `dev/LOG.md`), with
 Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and looks up its value embeddings
-(`GPT.hidden`); its `Block` then applies `Attention` and `MLP` to the RMS-normed stream, each added back.
+(`CausalLM.hidden`); its `DecoderLayer` then applies `Attention` and `MLP` to the RMS-normed stream, each added back.
 
 | | d24 (the base model) |
 |---|---|
-| Shape | 24 layers × 768 (`gpt_config`: width 30 × depth rounded up to whole 128-dim heads; MobileLLM-350M's 32 × 960, arXiv 2402.14905 Table 9), 6 heads × 128, MHA |
-| Attention | per-head RMS norm → learned per-dim gain → RoPE over the full head, base 10^6 (`model/config.py` `ROPE_BASE`); SSSL windows (S = 512), last layer full; FlashAttention-4 varlen with document masking |
+| Shape | 24 layers × 768 (`model_config`: width 30 × num_hidden_layers rounded up to whole 128-dim heads; MobileLLM-350M's 32 × 960, arXiv 2402.14905 Table 9), 6 heads × 128, MHA |
+| Attention | per-head RMS norm → learned per-dim gain → RoPE over the full head, base 10^6 (`model/config.py` `ROPE_THETA`); SSSL windows (S = 512), last layer full; FlashAttention-4 varlen with document masking |
 | MLP | ReLU², hidden 4C |
 | Residual | `x = resid_lambda·x + x0_lambda·x0` per layer; value embeddings on alternating layers (12 of 24) behind a per-head `2·sigmoid` gate of the normed stream, zero init (gate 1): modded-nanogpt record #14's per-layer tables, MoVE's LaVE (arXiv 2601.22887 §4.1 Eq. 6) |
-| Head | untied `lm_head`, zero init (modded-nanogpt record #8), plain cross entropy, no z-loss; an output-logit softcap only as the D5 ablation's arm (`GPTConfig.softcap`) |
+| Head | untied `lm_head`, zero init (modded-nanogpt record #8), plain cross entropy, no z-loss; an output-logit softcap only as the D5 ablation's arm (`ModelConfig.final_logit_softcapping`) |
 | Vocabulary | 2^15 ids (`model/config.py` `VOCAB_SIZE`; BOS and 3 FIM sentinels; `docs/tokenizer-ablation.md`) |
-| Parameters | 195,096,576 scaling parameters (blocks + `lm_head`, `scaling_params`), what the token budget counts; 522,252,336 in all with the token table and 12 value-embedding tables (25,165,824 each) |
+| Parameters | 195,096,576 non-embedding parameters (`layers` + `lm_head`, `num_non_embedding_params`), what the token budget counts; 522,252,336 in all with the token table and 12 value-embedding tables (25,165,824 each) |
 | FLOPs per token | 2.831 GFLOP non-embedding: DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72·n_layer·d² + 12·n_layer·d·l_seq at the full 8K context (`non_embedding_flops_per_token`) |
-| Init | stream-reading matrices and tables uniform with std C^-½; `c_o`, `c_proj` (modded-nanogpt record #5), `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
+| Init | stream-reading matrices and tables uniform with std C^-½; `o_proj`, `down_proj` (modded-nanogpt record #5), `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
 | Precision | fp32 parameters, gradients and optimizer state; bf16 activations and GEMM inputs |
 | Lineage | From nanochat 92d63d4: the block layout, value-embedding layers, MLP and window pattern. Not taken: its smear, backout and logit softcap, QK order (RoPE → norm → ×1.2), short window (a quarter of the context), RoPE base (10^5) and init. The gate is nanochat e85db6b's (2·sigmoid, zero init) read over the full width rather than its first 32 channels; the full-width read is not ablated |
 
@@ -71,7 +71,7 @@ Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and loo
 | Gradient clipping | 1.0 | 1.0 (DeepSeek LLM §2.3) |
 | Context stages | 8K file level, then the last 5.45% of steps at 32K on repositories | Qwen2.5-Coder: the same 8K → 32K repository stage; DeepSeek-Coder: 16K repository-ordered files; Code Llama: a 16K long-context stage |
 | Data | code:text:math 87:10:3 | DeepSeek-Coder 87% code, 10% code-related English, 3% Chinese; Qwen2.5-Coder code:text:math 70:20:10 |
-| FIM | rate 0.5 per piece of the repository corpora's train documents, PSM/SPM 50/50, AST-FIM middles (`pack.FIM_RATE`, `SPM_SHARE`; `docs/corpus.md` §6) | DeepSeek-Coder 0.5, PSM only (arXiv 2401.14196 §3.1.2); StarCoder2 ≈25% of chunks; Code Llama 90% |
+| FIM | rate 0.5 per piece of the repository corpora's train documents, PSM/SPM 50/50, AST-FIM middles (`pack.FIM_RATE`, `SPM_RATE`; `docs/corpus.md` §6) | DeepSeek-Coder 0.5, PSM only (arXiv 2401.14196 §3.1.2); StarCoder2 ≈25% of chunks; Code Llama 90% |
 
 What those models ablate: Code Llama the RoPE base of its long-context stage (Appendix G.4, Table 18) and FIM's cost
 to left-to-right completion; DeepSeek-Coder the FIM rate (Fig. 3); StarCoder2 RoPE against learned positions; OpenCoder
@@ -82,27 +82,28 @@ to left-to-right completion; DeepSeek-Coder the FIM rate (Fig. 3); StarCoder2 Ro
 The corpus, its mixture and its two stages are specified in `docs/corpus.md`; the code is `corpus/`
 (`mixture.py` the stages and shares, `pack.py` the rows and FIM, `loader.py` the micro-batches). In short:
 code:text:math 87:10:3 in both stages; an 8,192-token file stage, then a 32,768-token repository stage over the last
-`mixture.REPO_SHARE` (5.45%) of steps (Qwen2.5-Coder, arXiv 2409.12186 §3.2); 102.6B tokens in all (`mixture.STEPS` ×
-`STEP_TOKENS`), what the curated corpus holds without any stage reading a document twice. A run's ratio defaults to its
-data's `train/stages.py` `max_ratio`. The tokenizer is decided by `docs/tokenizer-ablation.md`.
+`mixture.REPO_LEVEL_SHARE` (5.45%) of steps (Qwen2.5-Coder, arXiv 2409.12186 §3.2); 102.6B tokens in all
+(`mixture.MAX_STEPS` × `BATCH_SIZE`), what the curated corpus holds without any stage reading a document twice. A run's
+`tokens_per_param` defaults to its data's `train/stages.py` `max_tokens_per_param`. The tokenizer is decided by
+`docs/tokenizer-ablation.md`.
 
 ## Regime
 
 | Setting | Value | Source |
 |---|---|---|
 | Batch | 1,474,560 tokens (15 micro-batches of 98,304) at 102.6B tokens | DeepSeek LLM's law B = 0.2920·C^0.3271, C = M·D (`train/schedule.py` `plan`), rounded to whole micro-batches |
-| Steps | 69,580 (525.89 tokens per scaling parameter); repository stage from step 65,785 | `schedule.plan` (D11: `round(ratio · params)`) |
-| Peak lr | the law's η = 0.3118·C^-0.125 = 8.6295e-4 times `ablations/peak_lr.py`'s multiplier: × 2.7972 = 2.4139e-3 at 102.6B tokens | DeepSeek LLM §3.1 Eq. 1; `conf/experiment/pretrain.yaml`'s `lr_scale` resolves `peak_lr.py`'s `analysis` at the corpus's `max_ratio` (Peak lr) |
+| Steps | 69,580 (525.89 tokens per non-embedding parameter); repository stage from step 65,785 | `schedule.plan` (D11: `round(tokens_per_param · num_non_embedding_params)`) |
+| Peak lr | the law's η = 0.3118·C^-0.125 = 8.6295e-4 times `ablations/peak_lr.py`'s multiplier: × 2.7972 = 2.4139e-3 at 102.6B tokens | DeepSeek LLM §3.1 Eq. 1; `conf/experiment/pretrain.yaml`'s `learning_rate_scale` resolves `peak_lr.py`'s `analysis` at the corpus's `max_tokens_per_param` (Peak lr) |
 | Warmup | 40 steps, linear | 2/(1 − β₂) (arXiv 1910.04209, for Adam); nanochat 92d63d4's 40 steps at d24 |
 | Decay | linear to zero; the last step at 1/(69,580 − 40) = 1.44e-5 of peak (D10: exactly 0 is not required) | arXiv 2502.15938 §4 |
 | Optimizers | AdamW (fused) on tables, `lm_head` and vectors; Muon (`torch.optim.Muon`'s update, Newton–Schulz batched by shape) with `match_rms_adamw` on the other matrices, one lr for every group | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
 | AdamW | β = (0.9, 0.95) | DeepSeek LLM §2.3 |
 | Weight decay | λ = 1/(η τ T), the EMA timescale τ = 1.084·TPP^−0.527 of the T steps (λ = 0.1492 at the base model's peak lr), on tables, `lm_head` and Muon matrices, 0 on vectors | Power Lines, arXiv 2505.13738 App. E.3.1 (`optim.tau_weight_decay`) |
-| Gradient clipping | global norm 1.0 on the accumulated gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (D3; `optim.MAX_NORM`, `update`) |
+| Gradient clipping | global norm 1.0 on the accumulated gradient, before both optimizers; the norm is logged every step | DeepSeek LLM §2.3 (D3; `optim.MAX_GRAD_NORM`, `update`) |
 | Repository stage | continues the decay: 5.46% of peak at its first step, 0 at the last, over 3,795 steps | D2: decay to zero (arXiv 2502.15938); DeepSeek-Coder §3.6 and DeepSeek-V3 instead hold their final lr |
 
 Batch, steps, lr and weight decay at 102.6B tokens are computed from the code (`schedule.plan` at d24); the run's own
-values come from `max_ratio` on the adopted tokenizer's packs.
+values come from `max_tokens_per_param` on the adopted tokenizer's packs.
 
 **Gradient clipping** at 1.0 (D3). Adam's update is invariant to the gradient's scale and Muon's Newton–Schulz divides
 its input by its norm, so under a slowly varying scale the clip damps only spikes. The failure Megatron-LM PR 5395
@@ -157,11 +158,11 @@ One pre-registered experiment per decision whose outcome the literature does not
 | Experiment (`conf/experiment/`) | Decision | Arms | Analysis | State |
 |---|---|---|---|---|
 | `peak_lr` (`ablations/peak_lr.py`, 4ade225's records) | the base model's peak lr | Peak lr | `peak_lr.analysis` | done, `results/peak_lr.jsonl`; the multiplier computed at launch |
-| `tokenizer_split_merge.yaml` | split pattern and merge score | 4 arms at d16, each at its `max_ratio`, 2 seeds | `ablations.tokenizer.decide` | intrinsic part and data done; runs wait (`docs/tokenizer-ablation.md`) |
+| `tokenizer_split_merge.yaml` | split pattern and merge score | 4 arms at d16, each at its `max_tokens_per_param`, 2 seeds | `ablations.tokenizer.decide` | intrinsic part and data done; runs wait (`docs/tokenizer-ablation.md`) |
 | `logit_softcap.yaml` | D5 output-logit softcap | cap 15 vs none, d16 at 20, 4 seeds, lr × 2.7972 | `ablations.recipe.logit_softcap` | waits |
 | `muon_wd_timescale_20tpp.yaml`, `muon_wd_timescale_200tpp.yaml` | D7 τ law on Muon | Muon's τ × ½, × 1, × 2, d8 at 20 and at 200, 2 seeds each | `ablations.recipe.muon_wd_timescale`, `muon_wd_timescale_law` | waits; the 200 half needs the corpus's packs |
 | `adamw_group_lr.yaml` | D6 AdamW groups' lr | × ¼, × 1, × 4 at d16 on the sa-bpe arm's data, 2 seeds; × 1 is the tokenizer ablation's sa-bpe runs | `ablations.recipe.adamw_group_lr` | waits for the tokenizer runs |
-| `pretrain.yaml` | the base model's pre-training | d24 at `max_ratio`, seed 0, every benchmark | none | waits for every ablation above |
+| `pretrain.yaml` | the base model's pre-training | d24 at `max_tokens_per_param`, seed 0, every benchmark | none | waits for every ablation above |
 
 Each recipe ablation's rule (its contrasts, margins and adoption condition) is in `ablations/recipe.py`'s docstring;
 the tokenizer ablation's in `docs/tokenizer-ablation.md`.
@@ -169,13 +170,14 @@ the tokenizer ablation's in `docs/tokenizer-ablation.md`.
 ### Method
 
 - **Arms.** An arm differs from the experiment's baseline only in its yaml's fields. Its plan (batch, steps, peak lr)
-  is the base model's at its depth and ratio (`run.base_plan`, `plan_of` at its `lr_scale`), so arms match in
-  hyperparameters and, unless an arm sets its own ratio (the tokenizer ablation's equal bytes), in tokens; every run
+  is the base model's at its `num_hidden_layers` and `tokens_per_param` (`run.base_plan`, `plan_of` at its
+  `learning_rate_scale`), so arms match in hyperparameters and, unless an arm sets its own `tokens_per_param` (the
+  tokenizer ablation's equal bytes), in tokens; every run
   completes its own schedule (warmup, then linear decay to zero over its length). Weight decay follows each run's lr
   by the τ law, so an lr sweep varies η at the fixed EMA timescale (arXiv 2405.13698; Power Lines). A run that
   diverges (a non-finite loss or gradient norm) is recorded with its step and excluded from the comparisons
   (arXiv 2309.14322 §3.1); any other failure stops the sweep.
-- **Settings.** No affordable run reaches the base model (d24 at 525.9 tokens per scaling parameter). For data
+- **Settings.** No affordable run reaches the base model (d24 at 525.9 tokens per non-embedding parameter). For data
   recipes, a single proxy 7× below the target picks the target's better of two in about 80% of pairs (DataDecide,
   arXiv 2504.11393 Abstract, §3.1), and a continuous correct-answer likelihood makes code benchmarks predictable
   where accuracy is not (its §3.4, Fig. 6). Architecture rankings can change with scale (arXiv 2207.10551).
@@ -183,7 +185,8 @@ the tokenizer ablation's in `docs/tokenizer-ablation.md`.
   group at its corpus weights, the decision measure; *solutions*, the HumanEval+, MBPP+ and HumanEval-X C++ reference
   solutions given their prompts, pooled; *repo_32k* and *repo_beyond_8k*, the 32K repository rows and their targets
   beyond 8,192; *text*, *math*; *unparsed*, *indentation*, *syntax*, the shares of HumanEval+ and MBPP+ problems whose
-  healed greedy completion does not compile (Parse measure, Evaluation); *greedy*, their base pass@1; *tok_per_s*.
+  healed greedy completion does not compile (Parse measure, Evaluation); *pass@1*, their greedy base pass@1;
+  *tokens_per_second*.
 - **Power.** σ = 0.0034 bits per byte on 8K code (`ablations/contrast.py` `CODE_SIGMA`): the pooled seed standard
   deviation of six d8 runs at 20 tokens per parameter, two configurations × data seeds 0–2, on the removed pipeline's
   data (records not in `results/` [unverified]), carried to d16 and to the corpus [inference]. Two runs against two
@@ -193,12 +196,13 @@ the tokenizer ablation's in `docs/tokenizer-ablation.md`.
 
 ### Records
 
-A run's key (`run.key`) is its `RunConfig` fields that differ from the defaults, sorted, `k=v` joined by `,`
-(e.g. `depth=16,seed=1,tokenizer=sa-bpe`; `defaults` if none), so a run two experiments share is one run. Per run, in
-`artifacts/runs/<key>/`: `.hydra/` (the composed config), `metrics.jsonl` (`metrics.py`: every step and attempt;
-the run record holds the model config, the `RunConfig` as `config`, the tokenizer's `data_key`, parameters, FLOPs per
-token, the clip threshold, the plan, lr and weight decay per group; the end record the peak memory; a failure record
-the step a run diverged at), `step<N>.pt`, `eval-step<N>.json` (`eval/suite.py evaluate`) and `run.log`. A rerun
+A run's name (`run.run_name`) is its `RunConfig` fields that differ from the defaults, sorted, `k=v` joined by `,`
+(e.g. `num_hidden_layers=16,seed=1,tokenizer=sa-bpe`; `defaults` if none), so a run two experiments share is one run.
+Per run, in `artifacts/runs/<run_name>/`: `.hydra/` (the composed config), `metrics.jsonl` (`metrics.py`: every step
+and attempt; the run record holds the model config, the `RunConfig` as `config`, the tokenizer's `data_key`,
+`num_parameters`, FLOPs per token, the clip threshold `max_grad_norm`, the plan, `learning_rate` and weight decay per
+group; the end record the peak memory; a failure record the step a run diverged at), `checkpoint-<N>.pt`,
+`eval-<N>.json` (`eval/suite.py evaluate`) and `run.log`. A rerun
 resumes: a run with a final evaluation or a divergence is skipped, a stopped one resumes from its newest checkpoint,
 and a run whose recorded plan or data key differs stops the sweep ("recipe changed") until its directory is deleted.
 Training and each checkpoint's evaluation run in fresh spawned processes. When the sweep ends, `ablations/records.py`'s
@@ -270,7 +274,7 @@ micro-batches. The GEMMs run at the 700 W power cap's ceiling (703 of 989 dense 
 
 The pipeline splits at the tokenizer. Everything through curation is text and runs on the GB10; the curated shards go
 to the private Hub dataset `iaroy/nanochat-data` (`corpus/publish.py` `DATASET`). The tokenizer ablation and decision,
-compile, pack and training run on the GH200 from a pull of that dataset. Every command runs in the `nanochat` image
+tokenize, pack and training run on the GH200 from a pull of that dataset. Every command runs in the `nanochat` image
 (`docker build -f docker/Dockerfile -t nanochat .`) from the repository's root: through `scripts/container.sh` on the
 GH200, or on the GB10 as
 
@@ -305,26 +309,26 @@ then, after logging in again (docker group), each through `scripts/container.sh`
    read in part is too small for it: raise `mixture.SPREAD`, then prepare, curate and publish again on the GB10.
 2. **Recipe ablations and tokenizer decision** (the user's approval): `python run.py experiment=<name>` for
    `muon_wd_timescale_20tpp`, `logit_softcap`, `muon_wd_timescale_200tpp`, `tokenizer_split_merge`, `adamw_group_lr` (records in `results/<name>.*`; runs in
-   `artifacts/runs/<key>/`).
+   `artifacts/runs/<run_name>/`).
 3. **Adopt the tokenizer**: `python -m ablations.tokenizer adopt` writes the decided vocabulary to `CORPUS/tokenizer`
    (over any provisional one); every later step reads it.
-4. **Compile**: `python -m corpus.compile`, ending with the 32K stage's repository partitions
-   (`compile.compile_stage`).
+4. **Tokenize**: `python -m corpus.tokenize`, ending with the 32K stage's repository partitions
+   (`tokenize.tokenize_repo_level_stage`).
 5. **Pack**: `python -m corpus.pack`; it stops naming any source that holds fewer rows than its draw.
 6. **Smoke**: the first micro-batches of both stages (`loader.PretrainingBatches` at the stages' weights), decoded;
    each step's group composition and FIM share.
 7. **Train** (the user's approval): `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'`.
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored, created by
-`scripts/setup.sh`) holds `corpus/`, `runs/<key>/` and `cache/`; `results/` (tracked) holds the data the paper's tables
-and figures are drawn from.
+`scripts/setup.sh`) holds `corpus/`, `runs/<run_name>/` and `cache/`; `results/` (tracked) holds the data the paper's
+tables and figures are drawn from.
 
 `python run.py experiment=pretrain` (`conf/experiment/pretrain.yaml`) trains both stages with a checkpoint (the run's
 full state) at each tenth of the steps and at the repository stage's start, evaluates every checkpoint with every
 benchmark, and writes `results/pretrain.jsonl` and `results/pretrain-curves.jsonl`. **Expected time** [inference from the
 unverified GH200 step]: 69,580 steps of 15 micro-batches at about 1.25 × 3.49 s, about 84 h, plus evaluation.
 
-`scripts/release.sh <key> <repo>` uploads the run's checkpoints, records and `results/` to a Hugging Face model
+`scripts/release.sh <run_name> <repo>` uploads the run's checkpoints, records and `results/` to a Hugging Face model
 repository; `scripts/container.sh hf download <repo> --local-dir /workspace/nanochat` restores them where `load_model`
 and a resumed run read them.
 
@@ -402,7 +406,7 @@ infilling (arXiv 2207.14255; PSM and SPM), each scored by its official evaluator
 | Mode | Decoding | Score |
 |---|---|---|
 | `greedy` | left-to-right argmax, one completion per problem | pass@1 as DeepSeek-Coder (arXiv 2401.14196 §4.1), StarCoder2 (arXiv 2402.19173 §7.1.1) and EvalPlus's leaderboard report it |
-| `sampled` (EvalPlus, MultiPL-E) | 20 samples per problem at temperature 0.2 from the nucleus (arXiv 1904.09751) top-p 0.95 (`code_eval.SAMPLES`, `SAMPLE_TEMPERATURE`, `TOP_P`) | pass@1 by Codex's unbiased estimator (arXiv 2107.03374 §2.1, §3.2–3.3), as MultiPL-E reports it |
+| `sampled` (EvalPlus, MultiPL-E) | 20 samples per problem at temperature 0.2 from the nucleus (arXiv 1904.09751) top-p 0.95 (`code_eval.N_SAMPLE`, `TEMPERATURE`, `TOP_P`) | pass@1 by Codex's unbiased estimator (arXiv 2107.03374 §2.1, §3.2–3.3), as MultiPL-E reports it |
 | `filtered` | left-to-right prompts healed (arXiv 2608.18062 App. C; token healing, Guidance 2023), Python and FIM middles under the syntax constraint; the greedy candidate, then seeded samples until one has no post-generation diagnostic and passes the prompt's own examples, at most 10 (`verify.ATTEMPTS`); the accepted candidate, else the greedy one | filtered pass@1 (arXiv 2107.03374 §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
 
 - **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E drew 200 and the BigCode
@@ -420,10 +424,10 @@ step one captured CUDA graph. A slot runs its prompt through the same kernels as
 generations share steps; a prompt's K and V are kept in a paged prompt store (pages of 64 positions) and a later
 request with the same prompt starts at its last token. Every sum's order depends on the shapes and the slot's
 position alone, so a request's tokens do not depend on the batch, the store or timing. A `Request` carries the
-prompt, budget, stop rule,
+prompt's `input_ids`, `max_new_tokens`, `stopping_criteria`,
 `temperature` (0 = argmax, ties to the lowest id), `top_p` (the nucleus, arXiv 1904.09751 §3.1, as Hugging Face's
 `TopPLogitsWarper` keeps it), `seed` (the sample at position *i* depends only on seed and *i*) and an optional
-constraint (`heal()`, the Python syntax constraint, `AllOf()` of both), whose masks each step takes for all
+constraint (`heal_tokens()`, the Python syntax constraint, `AllOf()` of both), whose masks each step takes for all
 constrained slots in one batched call.
 
 **Constrained decoding: syntax, not types.** Type-constrained decoding (arXiv 2504.09246) implements TypeScript only;
@@ -479,11 +483,11 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
   measures; torch-free, imported by training, evaluation and the ablations.
 - `paths.py`: the checkout's layout (`artifacts/`, `results/`). `native.py`: builds and loads the CUDA kernels and the
   Rust crates.
-- `model/`: `gpt.py` (the model, scaling parameters and FLOPs per token), `config.py` (vocabulary, head width, RoPE
-  base), `ops/` and `kernels/` (the ops above and the decoder).
+- `model/`: `modeling.py` (the model, non-embedding parameters and FLOPs per token), `config.py` (vocabulary, head
+  width, RoPE theta), `ops/` and `kernels/` (the ops above and the decoder).
 - `train/`: `loop.py` (setup, resume, the steps, checkpoints and records), `optim.py` (optimizers, weight
-  decay, gradient clip), `schedule.py` (plan, each step's stage, lr multiplier), `stages.py` (`max_ratio`, each stage's
-  micro-batches in the run's order), `checkpoint.py`.
+  decay, gradient clip), `schedule.py` (plan, each step's stage, `lr_lambda`), `stages.py` (`max_tokens_per_param`,
+  each stage's micro-batches in the run's order), `checkpoint.py`.
 - `eval/`: the checkpoint's evaluation (`suite.py`), the likelihood sums (`bpb.py`), the code benchmarks
   (`code_eval.py`) and the post-generation checks (`verify.py`).
 - `inference/`: the native decoder (`decoder.py`), the Python 3.12 syntax constraint

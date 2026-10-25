@@ -1,5 +1,5 @@
 //! The corpus crate, Python module nanochat_crate (built by native.py): SA-BPE (arXiv 2604.14053)
-//! tokenizer training (train.rs; train_tokenizer.py), repository samples (repository.rs; curate.py, compile.py)
+//! tokenizer training (train.rs; train_tokenizer.py), repository samples (repository.rs; curate.py, tokenize.py)
 //! and the packer of training rows (pack.rs; pack.py).
 
 mod pack;
@@ -63,6 +63,6 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lang {
 #[pymodule]
 fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(train::train, m)?)?;
-    m.add_function(wrap_pyfunction!(repository::repository_samples, m)?)?;
+    m.add_function(wrap_pyfunction!(repository::topological_sort, m)?)?;
     m.add_function(wrap_pyfunction!(pack::pack, m)?)
 }

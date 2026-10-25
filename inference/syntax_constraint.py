@@ -98,7 +98,7 @@ def python_syntax(tokenizer: Tokenizer):
         start=conf.start_state, end=conf.end_state,
         xid_start=identifier_ranges(str.isidentifier),
         xid_continue=identifier_ranges(lambda c: ("a" + c).isidentifier()),
-        token_bytes=tokenizer.token_bytes[:bos], vocab_size=tokenizer.vocab_size, bos=bos)
+        token_bytes=tokenizer.token_bytes[:bos], vocab_size=tokenizer.vocab_size, bos_token_id=bos)
 
 
 def syntax_error(source: str) -> list[str]:

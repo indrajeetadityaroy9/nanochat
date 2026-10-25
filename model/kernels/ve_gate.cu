@@ -1,6 +1,6 @@
 /*
- * Value-embedding gate and mix of model/gpt.py Attention (per-layer token-indexed value embeddings behind a per-head
- * gate), forward and backward, one pass over each row's memory:
+ * Value-embedding gate and mix of model/modeling.py Attention (per-layer token-indexed value embeddings behind a
+ * per-head gate), forward and backward, one pass over each row's memory:
  *   z = n W^T (fp32; W the gate's (H, C) fp32 weight), gate = 2 sigmoid(z),
  *   ve = bf16(table[idx]), out = bf16(v + gate[head] ve).
  * Backward from dout (dv = dout, passed through by the op):
@@ -11,7 +11,7 @@
  * Layout: n, v, out, dout, dn contiguous (rows, C), C = H * HEAD_DIM; idx (rows,) int32; table, dtable (V, C) fp32;
  * gate, dz (rows, H) fp32. A row is one warp; lane l holds the VEC-wide chunks l, l + WARP, ... of the row, each inside
  * one head (HEAD_DIM is a multiple of VEC). H is a template parameter, so per-head arrays stay in registers; it is
- * instantiated for H = 2, 4, 6, the head counts of the configured depths (model/gpt.py gpt_config).
+ * instantiated for H = 2, 4, 6, the head counts of the configured num_hidden_layers (model/modeling.py model_config).
  *
  * Deterministic dW without atomics: ve_dw's blocks each sum dz x n over a fixed range of rows per column (one thread
  * per column) into a per-block partial, and ve_dw_sum adds the partials in block order.

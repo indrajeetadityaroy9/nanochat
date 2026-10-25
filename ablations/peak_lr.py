@@ -15,7 +15,7 @@ arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law eta = 1.79 N^-0.713 D^0.30
 points; one seed per setting.
 
 Analysis, pre-registered, computed when the pretrain experiment launches (run.py lr_multiplier, from
-RESULTS/peak_lr.jsonl; it depends on the adopted tokenizer's max_ratio, so no copy is stored):
+RESULTS/peak_lr.jsonl; it depends on the adopted tokenizer's max_tokens_per_param, so no copy is stored):
 - per setting, code bits per byte fitted as a parabola in u = ln(multiplier) (fit): its vertex u* or the grid extension
   the rule calls for;
 - the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@SHORT) against the SDE rule's and Step-Law's predictions, each over
@@ -27,12 +27,12 @@ RESULTS/peak_lr.jsonl; it depends on the adopted tokenizer's max_ratio, so no co
   (every rule in play is a power law in D), and the base model's batch growth by the same rule.
 m_D,base is the base model's tokens over d24 at SHORT's, m_D,d8 d8 at LONG's over d8 at SHORT's. Batches, token counts
 and the law's lrs are the runs' recorded plans (the base model's: run.py plan_of(RunConfig()), d24 at its
-data's max_ratio).
+data's max_tokens_per_param).
 
 The recorded runs (RESULTS/peak_lr.jsonl, peak_lr-curves.jsonl, peak_lr.json) use an earlier record format: a run's
 fields under "fields" (n_layer, ratio, lr_scale, seed) and its setting under "setting" (depth, tokens_per_param,
 seeds); the grids: d8 at SHORT x1, 2, 4, 8, d8 at LONG x1, 2, 4, 8, d24 at SHORT x1, 2, 4, one seed each. The
-estimate is the pretrain experiment's lr_scale (conf/experiment/pretrain.yaml, run.py lr_multiplier).
+estimate is the pretrain experiment's learning_rate_scale (conf/experiment/pretrain.yaml, run.py lr_multiplier).
 """
 import math
 
@@ -49,9 +49,10 @@ LONG = 200
 STEP_LAW_D = 0.307
 
 
-def setting(lines: list[dict], depth: int, ratio: float) -> list[dict]:
+def setting(lines: list[dict], num_hidden_layers: int, tokens_per_param: float) -> list[dict]:
     """The records of a setting's runs."""
-    return [line for line in lines if (line["setting"]["depth"], line["setting"]["tokens_per_param"]) == (depth, ratio)]
+    return [line for line in lines
+            if (line["setting"]["depth"], line["setting"]["tokens_per_param"]) == (num_hidden_layers, tokens_per_param)]
 
 
 def fit(lines: list[dict]) -> dict:
@@ -79,27 +80,27 @@ def analysis(lines: list[dict]) -> dict:
     """The pre-registered estimator over RESULTS/peak_lr.jsonl's records (module docstring); the derived values are
     None while any setting's grid needs extending. The vertices are multipliers of the law's lr the runs recorded; they
     are re-based onto the current law's lr (base_plan), whose batch and steps must be the recorded runs'."""
-    def recorded_plan(depth, ratio):
+    def recorded_plan(num_hidden_layers, tokens_per_param):
         """The setting's current plan (every arm's batch and steps are the same), with the law's lr its runs
-        recorded."""
-        line = setting(lines, depth, ratio)[0]
+        recorded; the old record keys of RESULTS/peak_lr.jsonl."""
+        line = setting(lines, num_hidden_layers, tokens_per_param)[0]
         recorded = next(r for r in line["records"] if r["kind"] == "run")["plan"]
-        current = base_plan(depth=depth, ratio=ratio)
-        if (recorded["total_batch_size"], recorded["num_iterations"]) != (current.total_batch_size,
-                                                                          current.num_iterations):
-            raise RuntimeError(f"d{depth} at {ratio:g}: the recorded runs' batch and steps are not the current plan's")
-        return recorded | {"lr": current.lr, "recorded_lr": recorded["lr"] / line["fields"]["lr_scale"]}
+        current = base_plan(num_hidden_layers=num_hidden_layers, tokens_per_param=tokens_per_param)
+        if (recorded["total_batch_size"], recorded["num_iterations"]) != (current.batch_size, current.max_steps):
+            raise RuntimeError(f"d{num_hidden_layers} at {tokens_per_param:g}: the recorded runs' batch and steps are "
+                               "not the current plan's")
+        return recorded | {"lr": current.learning_rate, "recorded_lr": recorded["lr"] / line["fields"]["lr_scale"]}
 
     def tokens(p):
         return p["num_iterations"] * p["total_batch_size"]
 
-    fits = {f"d{depth} at {ratio:g}": fit(setting(lines, depth, ratio))
-            for depth, ratio in ((8, SHORT), (8, LONG), (24, SHORT))}
+    fits = {f"d{num_hidden_layers} at {tokens_per_param:g}": fit(setting(lines, num_hidden_layers, tokens_per_param))
+            for num_hidden_layers, tokens_per_param in ((8, SHORT), (8, LONG), (24, SHORT))}
     d8_short, d8_long, d24_short = recorded_plan(8, SHORT), recorded_plan(8, LONG), recorded_plan(24, SHORT)
     base = plan_of(RunConfig())
-    m_b_base = base.total_batch_size / d24_short["total_batch_size"]
+    m_b_base = base.batch_size / d24_short["total_batch_size"]
     m_b_d8 = d8_long["total_batch_size"] / d8_short["total_batch_size"]
-    m_d_base = base.num_iterations * base.total_batch_size / tokens(d24_short)
+    m_d_base = base.max_steps * base.batch_size / tokens(d24_short)
     m_d_d8 = tokens(d8_long) / tokens(d8_short)
     law_fall_d8 = d8_long["lr"] / d8_short["lr"]
     out = {"settings": fits, "m_b_base": m_b_base, "m_b_d8": m_b_d8, "m_d_base": m_d_base,
@@ -116,5 +117,5 @@ def analysis(lines: list[dict]) -> dict:
         out["horizon_exponent"] = math.log(ratio) / math.log(m_d_d8)
         out["horizon_exponent_net"] = math.log(ratio / math.sqrt(m_b_d8)) / math.log(m_d_d8)
         out["base_multiplier"] = d24 * m_d_base ** out["horizon_exponent_net"] * math.sqrt(m_b_base)
-        out["base_lr"] = out["base_multiplier"] * base.lr
+        out["base_lr"] = out["base_multiplier"] * base.learning_rate
     return out

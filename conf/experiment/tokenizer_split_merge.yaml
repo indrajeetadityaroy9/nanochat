@@ -1,9 +1,10 @@
 # @package _global_
 # Pre-tokenizer split pattern x BPE merge score (ablations/tokenizer.py): arms sa-bpe (baseline), sa-bpe-fused, hybrid,
-# bpe, each at d16 (tokenizer.DEPTH) at its max_ratio (ratio null: equal bytes), seeds 0 and 1.
+# bpe, each at d16 (tokenizer.NUM_HIDDEN_LAYERS) at its max_tokens_per_param (tokens_per_param null: equal bytes),
+# seeds 0 and 1.
 # Analysis: ablations.tokenizer.decide.
-depth: 16
-ratio: null
+num_hidden_layers: 16
+tokens_per_param: null
 
 hydra:
   sweeper:

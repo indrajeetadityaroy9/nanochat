@@ -3,7 +3,7 @@ The tokenizer ablation (experiment EXPERIMENT: pre-tokenizer split pattern x BPE
 candidate vocabulary of the corpus's tokenizer (corpus/train_tokenizer.py: one sample, one trainer, VOCAB_SIZE ids),
 measures them on the corpus, decides the split pattern and merge score, and adopts the decided vocabulary as the
 corpus's tokenizer (corpus/tokenizer.py TOKENIZER). The val splits and the packs come from the curated shards through
-corpus (mixture.py, compile.py, pack.py).
+corpus (mixture.py, tokenize.py, pack.py).
 
 Arms (ARMS):
 - sa-bpe: the reference tokenizer's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the
@@ -28,10 +28,10 @@ an arm does not depend on the others); ABLATION/<arm>: its vocabulary, pattern a
 RESULTS/tokenizer_split_merge-vocabularies.json: the sample's composition per source (target bytes, the fraction of
 rows taken, the documents, bytes and units taken) and each arm's training time.
 
-intrinsic: every arm's compiled val split of every source, and RESULTS/tokenizer_split_merge-intrinsic.json, only the
+intrinsic: every arm's tokenized val split of every source, and RESULTS/tokenizer_split_merge-intrinsic.json, only the
 measures that plan the runs, gate their validity, test an arm's mechanism or break the decision's tie:
 - planning: each source's bytes per token and the file stage's over its byte shares (an arm's tokens at equal bytes;
-  the compile and pack budgets), and each group read in part's train tokens over its draw (below 1, the corpus's extent
+  the tokenize and pack budgets), and each group read in part's train tokens over its draw (below 1, the corpus's extent
   is too small for that arm: prepare.extent, mixture.SPREAD);
 - validity, asserted: every arm holds the same bytes per document, and on each source's first val texts its encoding
   matches its merges (corpus/train_tokenizer.py fidelity);
@@ -45,22 +45,22 @@ Not measured: TokEval's intrinsic metrics, which no decision reads: of its 14 on
 the paper attributes "to the vocabulary's line-break handling" (arXiv 2608.18062 §5), measured here directly, and
 Rényi efficiency predicts neither code bits per byte nor MBPP (Table 2).
 
-data: every arm's training set, the same documents (the set) compiled and packed under each arm (corpus compile.py and
-pack.py, given the arm's directory), and RESULTS/tokenizer_split_merge-data.json: the set and, per arm, its packed rows
-per stage, its d16 max_ratio and plan, and the share of each corpus's packed rows its run reads. The set holds a d16
-run at RATIO tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3), each source at its share of the
-base model's
-stage (Stage.shares of the sources' train tokens), the tokens of a shard estimated from its text bytes at sa-bpe's val
-bytes per token: of each code source the leading train shards that fill its file-stage draw, so code binds every arm's
-max_ratio; of a "supply" source (notebooks, functions, traces), its draw, read whole once; of text and math the leading
-shards of each stage, and of the repositories corpora the trailing partitions (compile.compile_stage, under sa-bpe),
-holding MARGIN times their draws, so they never bind.
+data: every arm's training set, the same documents (the set) tokenized and packed under each arm (corpus tokenize.py
+and pack.py, given the arm's directory), and RESULTS/tokenizer_split_merge-data.json: the set and, per arm, its packed
+rows per stage, its d16 max_tokens_per_param and plan, and the share of each corpus's packed rows its run reads. The set
+holds a d16 run at TOKENS_PER_PARAM tokens per non-embedding parameter under sa-bpe (arXiv 2203.15556 Table 3), each
+source at its share of the base model's stage (Stage.shares of the sources' train tokens), the tokens of a shard
+estimated from its text bytes at sa-bpe's val bytes per token: of each code source the leading train shards that fill
+its file-stage draw, so code binds every arm's max_tokens_per_param; of a "supply" source (notebooks, functions,
+traces), its draw, read whole once; of text and math the leading shards of each stage, and of the repositories corpora
+the trailing partitions (tokenize.tokenize_repo_level_stage, under sa-bpe), holding MARGIN times their draws, so they
+never bind.
 
 runs (conf/experiment/tokenizer_split_merge.yaml: `python run.py experiment=tokenizer_split_merge`): every arm at d16,
-seeds 0 and 1, at equal bytes: each at its max_ratio (ratio null), so it reads the set's code documents once and its
-tokens are their bytes over its bytes per token; text and math are drawn by rows. Each run's plan is its own
-(schedule.plan at
-its tokens), its contexts the corpus's 8,192 and 32,768 tokens (eval/bpb.py's byte-offset buckets: the bytes of
+seeds 0 and 1, at equal bytes: each at its max_tokens_per_param (tokens_per_param null), so it reads the set's code
+documents once and its tokens are their bytes over its bytes per token; text and math are drawn by rows. Each run's
+plan is its own (schedule.plan at its tokens), its contexts the corpus's 8,192 and 32,768 tokens (eval/bpb.py's
+byte-offset buckets: the bytes of
 context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1), trained and evaluated through run.py,
 the records by ablations/records.py. RESULTS/tokenizer_split_merge.json "analysis" (decide): each challenger's
 contrasts with sa-bpe, the baseline, and the decision.
@@ -100,13 +100,13 @@ import regex
 
 from ablations.contrast import contrast, evaluated
 from corpus import mixture
-from corpus.compile import compile_repositories, compile_source, compile_stage, train_parts
 from corpus.layout import TOKEN_DTYPE, split_path, stage_rows
 from corpus.mixture import weights
 from corpus.pack import packed_shards, shard_count, write
 from corpus.parallel import SPAWN
 from corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
 from corpus.sources import SOURCES, curated_shards, texts
+from corpus.tokenize import tokenize_repo_level_stage, tokenize_repositories, tokenize_source, train_parts
 from corpus.tokenizer import ABLATION, SPLIT_PATTERN, TOKENIZER, get_tokenizer, save
 from corpus.train_tokenizer import Score, byte_shares, fidelity, sample, shard_bytes, train, vocabulary
 from native import corpus_crate
@@ -149,10 +149,11 @@ HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]+
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
-# The runs' depth, which the set is sized for (conf/experiment/tokenizer_split_merge.yaml)
-DEPTH = 16
-# The set's size: a d16 run at Chinchilla's 20 tokens per scaling parameter under sa-bpe (arXiv 2203.15556 Table 3)
-RATIO = 20
+# The runs' num_hidden_layers, which the set is sized for (conf/experiment/tokenizer_split_merge.yaml)
+NUM_HIDDEN_LAYERS = 16
+# The set's size: a d16 run at Chinchilla's 20 tokens per non-embedding parameter under sa-bpe (arXiv 2203.15556
+# Table 3)
+TOKENS_PER_PARAM = 20
 # The set's margin over the draws of the corpora that must not bind (text, math, the repositories corpora): above the
 # code shards' rounding up to whole shards and the arms' spread in compression (assumed)
 MARGIN = 1.5
@@ -209,7 +210,7 @@ def vocabularies() -> None:
 
 
 def val_split(task: tuple[str, str]) -> tuple[np.ndarray, np.ndarray]:
-    """An arm's compiled val split of a source: each mergeable token's count and each document's bytes."""
+    """An arm's tokenized val split of a source: each mergeable token's count and each document's bytes."""
     arm, corpus = task
     tokenizer = get_tokenizer(ABLATION / arm)
     path = split_path(corpus, "val", tokenizer)
@@ -242,8 +243,8 @@ def describe(arm: str, counts: dict[str, np.ndarray]) -> dict:
     fused, indented = regex.compile(r"[^\s\p{L}\p{N}][\r\n]"), regex.compile(r"[\r\n][ \t]+\Z")
     merged = held[256:]
     return {"data_key": tokenizer.data_key, "sources": sources,
-            "file_stage_bytes_per_token": {"all": mixed(mixture.FILE_STAGE.sources)}
-            | {name: mixed(group.sources) for name, group in mixture.FILE_STAGE.groups.items()},
+            "file_stage_bytes_per_token": {"all": mixed(mixture.FILE_LEVEL_STAGE.sources)}
+            | {name: mixed(group.sources) for name, group in mixture.FILE_LEVEL_STAGE.groups.items()},
             "train_tokens_over_draw": {
                 group: sum(sum(shard_bytes(s)) / sources[s]["bytes_per_token"] for s, g in mixture.PART.items()
                            if g == group) / mixture.draw(group) for group in mixture.IN_PART},
@@ -283,10 +284,11 @@ def depth_invariance(source: str) -> dict[str, dict[str, float]]:
 
 
 def intrinsic() -> None:
-    """Every arm's compiled val split of every source, the equal-bytes check, and RESULTS/<EXPERIMENT>-intrinsic.json
+    """Every arm's tokenized val split of every source, the equal-bytes check, and RESULTS/<EXPERIMENT>-intrinsic.json
     (module docstring), all in one process pool: depth invariance per program source and fidelity per arm and source
-    (which read no compiled data) beside the compiles, every split at once, each split's counts as it is compiled.
-    "seconds": "compiled", the wall time to the last compile's end (the checks overlap the compiles), and "all"."""
+    (which read no tokenized data) beside the tokenize jobs, every split at once, each split's counts as it is
+    tokenized. "seconds": "tokenized", the wall time to the last tokenize job's end (the checks overlap them), and
+    "all"."""
     start, began = time.perf_counter(), provenance()
     programs = [s for s, spec in SOURCES.items() if spec.category in PROGRAMS]
     checks = [(arm, source) for arm in ARMS for source in SOURCES]
@@ -296,19 +298,19 @@ def intrinsic() -> None:
         invariance = [pool.submit(depth_invariance, source) for source in programs]
         fidelities = [pool.submit(fidelity, (ABLATION / arm, source)) for arm, source in checks]
 
-        def compiled(check: tuple[str, str]) -> Future:
-            compile_source(check[1], "val", ABLATION / check[0], pool)
+        def tokenized(check: tuple[str, str]) -> Future:
+            tokenize_source(check[1], "val", ABLATION / check[0], pool)
             return pool.submit(val_split, check)
 
         # a val split is a few row groups: one split at a time would leave the pool idle
-        splits = dict(zip(checks, threads.map(compiled, checks), strict=True))
-        compiled_seconds = time.perf_counter() - start
+        splits = dict(zip(checks, threads.map(tokenized, checks), strict=True))
+        tokenized_seconds = time.perf_counter() - start
         counts, sizes = {}, {}
         for check, future in splits.items():
             counts[check], sizes[check] = future.result()
         for corpus in SOURCES:
             if not all(np.array_equal(sizes["sa-bpe", corpus], sizes[arm, corpus]) for arm in CHALLENGERS):
-                raise RuntimeError(f"{corpus}: the arms' compiled val documents differ in bytes")
+                raise RuntimeError(f"{corpus}: the arms' tokenized val documents differ in bytes")
         record = {"arms": {arm: describe(arm, {corpus: counts[arm, corpus] for corpus in SOURCES})
                            | {"depth_invariance": {}, "fidelity": {}} for arm in ARMS}}
         for source, future in zip(programs, invariance, strict=True):
@@ -316,13 +318,14 @@ def intrinsic() -> None:
                 record["arms"][arm]["depth_invariance"][source] = result
         for (arm, source), future in zip(checks, fidelities, strict=True):
             record["arms"][arm]["fidelity"][source] = future.result()
-    record |= {"seconds": {"compiled": compiled_seconds, "all": time.perf_counter() - start}, "provenance": began}
+    record |= {"seconds": {"tokenized": tokenized_seconds, "all": time.perf_counter() - start}, "provenance": began}
     (RESULTS / f"{EXPERIMENT}-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
 def document_set(run) -> dict:
-    """The set's shards (module docstring) for the d16 run `run` at RATIO under sa-bpe: {"file": {source: its leading
-    train shards, the file stage's}, "repository": {source: its train shards after those, the repository stage's},
+    """The set's shards (module docstring) for the d16 run `run` at TOKENS_PER_PARAM under sa-bpe: {"file": {source:
+    its leading train shards, the file stage's}, "repository": {source: its train shards after those, the repository
+    stage's},
     "draws": {seq_len: {corpus: its tokens in the run}}}; the repositories corpora's partitions: data."""
     from train.stages import drawn
 
@@ -342,40 +345,41 @@ def document_set(run) -> dict:
         shares = stage.shares({s: estimate[s].sum() if s in SOURCES else 1.0 for s in stage.sources}, stage.tokens)
         return {s: share * drawn(stage, run) * stage.seq_len for s, share in shares.items()}
 
-    file_draws, repo_draws = draws(mixture.FILE_STAGE), draws(mixture.REPO_STAGE)
-    file = {s: shards(s, tokens * (1 if s in mixture.FILE_STAGE.code else MARGIN), 0)
+    file_draws, repo_draws = draws(mixture.FILE_LEVEL_STAGE), draws(mixture.REPO_LEVEL_STAGE)
+    file = {s: shards(s, tokens * (1 if s in mixture.FILE_LEVEL_STAGE.code else MARGIN), 0)
             for s, tokens in file_draws.items()}
-    repository = {s: shards(s, tokens * (1 if s in mixture.REPO_STAGE.supply else MARGIN), file.get(s, 0))
+    repository = {s: shards(s, tokens * (1 if s in mixture.REPO_LEVEL_STAGE.supply else MARGIN), file.get(s, 0))
                   for s, tokens in repo_draws.items() if s in SOURCES}
     return {"file": file, "repository": repository, "draws": {"8192": file_draws, "32768": repo_draws}}
 
 
 def data() -> None:
-    """Every arm's training set, compiled and packed, and RESULTS/<EXPERIMENT>-data.json (module docstring): each corpus
-    of each arm compiled, then packed, as its own job, every job into one process pool; compile_stage, beside the other
-    sources' compiles, chooses the partitions and compiles sa-bpe's repositories corpora, then the set check, then the
-    repository sources' jobs and the other arms' repositories corpora, one arm after another (each fills the cores).
-    "seconds": "compiled", the wall time to the last compile's end (packs overlap the compiles), and "all"."""
+    """Every arm's training set, tokenized and packed, and RESULTS/<EXPERIMENT>-data.json (module docstring): each
+    corpus of each arm tokenized, then packed, as its own job, every job into one process pool;
+    tokenize_repo_level_stage, beside the other sources' tokenize jobs, chooses the partitions and tokenizes sa-bpe's
+    repositories corpora, then the set check, then the repository sources' jobs and the other arms' repositories
+    corpora, one arm after another (each fills the cores). "seconds": "tokenized", the wall time to the last tokenize
+    job's end (packs overlap them), and "all"."""
     # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
     from run import base_plan
-    from train.stages import drawn, max_ratio
+    from train.stages import drawn, max_tokens_per_param
 
     start, began = time.perf_counter(), provenance()
-    run = base_plan(depth=DEPTH, ratio=RATIO)
+    run = base_plan(num_hidden_layers=NUM_HIDDEN_LAYERS, tokens_per_param=TOKENS_PER_PARAM)
     shards = document_set(run)
-    stages = (mixture.FILE_STAGE, mixture.REPO_STAGE)
+    stages = (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE)
     leading = {s: shards["file"].get(s, 0) + shards["repository"].get(s, 0) for s in SOURCES}
-    compiled = []  # each compile's end
+    tokenized = []  # each tokenize job's end
 
     def pack(corpus: str, directory: Path) -> None:
-        """A compiled corpus's packs in each stage that reads it: its train split's shards in the set, its val split
+        """A tokenized corpus's packs in each stage that reads it: its train split's shards in the set, its val split
         whole."""
         for stage in stages:
             if corpus not in stage.sources:
                 continue
             if corpus in mixture.REPOSITORIES.values():
                 train = range(shard_count(corpus, "train", directory))
-            elif stage is mixture.FILE_STAGE:
+            elif stage is mixture.FILE_LEVEL_STAGE:
                 train = range(shards["file"][corpus])
             else:
                 first = shards["file"].get(corpus, 0)
@@ -385,24 +389,24 @@ def data() -> None:
                       stage.seq_len)
 
     def source(arm: str, corpus: str) -> None:
-        compile_source(corpus, "train", ABLATION / arm, pool, leading=leading[corpus])
-        compiled.append(time.perf_counter())
+        tokenize_source(corpus, "train", ABLATION / arm, pool, leading=leading[corpus])
+        tokenized.append(time.perf_counter())
         pack(corpus, ABLATION / arm)
 
     def repositories(parts: list[int]) -> None:
         for arm in ARMS:
-            if arm != "sa-bpe":  # compile_stage compiled sa-bpe's as it chose the partitions
-                compile_repositories(ABLATION / arm, parts, pool)
-            compiled.append(time.perf_counter())
+            if arm != "sa-bpe":  # tokenize_repo_level_stage tokenized sa-bpe's as it chose the partitions
+                tokenize_repositories(ABLATION / arm, parts, pool)
+            tokenized.append(time.perf_counter())
             for corpus in mixture.REPOSITORIES.values():
                 pack(corpus, ABLATION / arm)
 
     corpus_crate()  # built once, before the threads call it (pack.py's rule)
     with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
-          ThreadPoolExecutor(len(ARMS) * len(SOURCES) + 2) as threads):  # the source jobs, repositories, compile_stage
-        partitions = threads.submit(compile_stage, ABLATION / "sa-bpe", pool,
+          ThreadPoolExecutor(len(ARMS) * len(SOURCES) + 2) as threads):  # source jobs, repositories, the 32K stage's
+        partitions = threads.submit(tokenize_repo_level_stage, ABLATION / "sa-bpe", pool,
                                     MARGIN * sum(shards["draws"]["32768"][c] for c in mixture.REPOSITORIES.values()))
-        # the sources the set check does not gate compile while compile_stage chooses the partitions
+        # the sources the set check does not gate tokenize while tokenize_repo_level_stage chooses the partitions
         jobs = [threads.submit(source, arm, corpus) for arm in ARMS for corpus in SOURCES
                 if corpus not in mixture.REPOSITORY_SOURCES]
         parts = partitions.result()
@@ -414,27 +418,29 @@ def data() -> None:
             job.result()
     chosen = {"file": shards["file"], "repository": shards["repository"], "partitions": parts,
               "draws": shards["draws"]}
-    compiled_seconds = max(compiled) - start
+    tokenized_seconds = max(tokenized) - start
     arms = {}
     for arm in ARMS:
         tokenizer = get_tokenizer(ABLATION / arm)
-        ratio = max_ratio(tokenizer, depth=DEPTH)
-        arm_run = base_plan(depth=DEPTH, ratio=ratio)
+        tokens_per_param = max_tokens_per_param(tokenizer, num_hidden_layers=NUM_HIDDEN_LAYERS)
+        arm_run = base_plan(num_hidden_layers=NUM_HIDDEN_LAYERS, tokens_per_param=tokens_per_param)
         read = {}
         for stage in stages:
             rows, count = stage_rows(tokenizer, stage), drawn(stage, arm_run)
             shares, draws, _ = weights(stage, rows, count)
             read[str(stage.seq_len)] = {n: {"rows": rows[n], "weight": shares[n], "read": d / rows[n]}
                                         for n, d in draws.items()}
-        arms[arm] = {"data_key": tokenizer.data_key, "ratio": ratio, "tokens_per_param": arm_run.tokens_per_param,
-                     "num_iterations": arm_run.num_iterations, "total_batch_size": arm_run.total_batch_size,
-                     "repo_start": arm_run.repo_start, "lr": arm_run.lr, "stages": read}
-        print(f"{arm}: ratio {ratio:.2f}, {arm_run.num_iterations:,} steps of {arm_run.total_batch_size:,} tokens",
-              flush=True)
-    record = {"run": {"depth": DEPTH, "ratio": RATIO, "num_iterations": run.num_iterations,
-                      "total_batch_size": run.total_batch_size, "repo_start": run.repo_start},
+        arms[arm] = {"data_key": tokenizer.data_key, "tokens_per_param": arm_run.tokens_per_param,
+                     "max_steps": arm_run.max_steps, "batch_size": arm_run.batch_size,
+                     "repo_level_start": arm_run.repo_level_start, "learning_rate": arm_run.learning_rate,
+                     "stages": read}
+        print(f"{arm}: tokens_per_param {tokens_per_param:.2f}, {arm_run.max_steps:,} steps of "
+              f"{arm_run.batch_size:,} tokens", flush=True)
+    record = {"run": {"num_hidden_layers": NUM_HIDDEN_LAYERS, "tokens_per_param": TOKENS_PER_PARAM,
+                      "max_steps": run.max_steps, "batch_size": run.batch_size,
+                      "repo_level_start": run.repo_level_start},
               "set": chosen, "arms": arms,
-              "seconds": {"compiled": compiled_seconds, "all": time.perf_counter() - start},
+              "seconds": {"tokenized": tokenized_seconds, "all": time.perf_counter() - start},
               "provenance": began}
     (RESULTS / f"{EXPERIMENT}-data.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 
@@ -470,8 +476,8 @@ def decide(lines: list[dict]) -> dict:
 def adopt() -> None:
     """The decided vocabulary (RESULTS/<EXPERIMENT>.json "analysis" "decision") as the corpus's tokenizer, TOKENIZER:
     the arm of the decided pattern and score, copied, or that pair trained on the sample when no arm holds it. It writes
-    over the provisional tokenizer (the sa-bpe arm's copy) in place: compiled and packed data are keyed by a
-    vocabulary's data key, so adopting sa-bpe reuses the provisional corpus and any other vocabulary compiles into new
+    over the provisional tokenizer (the sa-bpe arm's copy) in place: tokenized and packed data are keyed by a
+    vocabulary's data key, so adopting sa-bpe reuses the provisional corpus and any other vocabulary tokenizes into new
     directories (run.py's stale guard rejects a run recorded under the replaced one)."""
     decision = json.loads((RESULTS / f"{EXPERIMENT}.json").read_text(encoding="utf-8"))["analysis"]["decision"]
     pattern, score = ARMS[decision["pattern"]][0], decision["score"]

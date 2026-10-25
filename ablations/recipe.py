@@ -2,16 +2,17 @@
 The recipe ablations, each a knob of run.py RunConfig at its default in the baseline, and their pre-registered
 analyses (conf/experiment/<name>.yaml's analysis):
 
-- logit_softcap: the output logits capped at c = 15 (karpathy/nanochat 92d63d4 gpt.py:511-515; modded-nanogpt record
-  #18 "lowers that to 15") against none, d16 at Chinchilla's 20 tokens per parameter (arXiv 2203.15556 Table 3) on the
-  sa-bpe arm's data, 4 paired seeds, at lr_scale 2.7972 (the base model's multiplier, ablations/peak_lr.py analysis,
-  as the cap's published effect is a high-lr one). Adopt c = 15 iff code is better and parsing is not worse
-  (contrast); else no cap ("equal" keeps: the cap costs the loss, eval and decoder paths).
+- logit_softcap: the output logits capped at c = 15 (final_logit_softcapping; karpathy/nanochat 92d63d4
+  gpt.py:511-515; modded-nanogpt record #18 "lowers that to 15") against none, d16 at Chinchilla's 20 tokens per
+  parameter (arXiv 2203.15556 Table 3) on the sa-bpe arm's data, 4 paired seeds, at learning_rate_scale 2.7972 (the
+  base model's multiplier, ablations/peak_lr.py analysis, as the cap's published effect is a high-lr one). Adopt
+  c = 15 iff code is better and parsing is not worse (contrast); else no cap ("equal" keeps: the cap costs the loss,
+  eval and decoder paths).
 - adamw_group_lr: the AdamW groups' lr x 1/4 and x 4 at their decay timescale (their weight decay / scale), Muon's
-  untouched, d16 at the sa-bpe arm's max_ratio, 2 seeds; the baseline is tokenizer_split_merge's sa-bpe runs (the same
-  keys). k*: the vertex of the exact 3-point quadratic in ln k through the arms' mean code bits per byte over
-  {1/4, 1, 4}, clamped to [1/4, 4]; adopt adamw_lr_scale = k* iff the better of the two arms is better on code than
-  the baseline and not worse on parsing, else keep one lr (scaled).
+  untouched, d16 at the sa-bpe arm's max_tokens_per_param, 2 seeds; the baseline is tokenizer_split_merge's sa-bpe
+  runs (the same run names). k*: the vertex of the exact 3-point quadratic in ln k through the arms' mean code bits
+  per byte over {1/4, 1, 4}, clamped to [1/4, 4]; adopt adamw_learning_rate_scale = k* iff the better of the two arms
+  is better on code than the baseline and not worse on parsing, else keep one lr (scaled).
 - muon_wd_timescale (muon_wd_timescale_20tpp, then muon_wd_timescale_200tpp): Muon's weight-decay EMA timescale x 1/2
   and x 2 (its weight decay x 2 and x 1/2) under the tau law (train/optim.py tau_weight_decay: Power Lines, arXiv
   2505.13738, fit with AdamW; its App. B extends the EMA view to decoupled-decay optimizers), AdamW's untouched, d8 at
@@ -42,8 +43,8 @@ def adopted(c: dict) -> bool:
 
 def logit_softcap(lines: list[dict]) -> dict:
     """The softcap decision (module docstring)."""
-    c = contrast(evaluated(lines, "softcap"), 15.0, None)
-    return {"contrast": c, "decision": {"softcap": 15.0 if adopted(c) else None}}
+    c = contrast(evaluated(lines, "final_logit_softcapping"), 15.0, None)
+    return {"contrast": c, "decision": {"final_logit_softcapping": 15.0 if adopted(c) else None}}
 
 
 def scaled(lines: list[dict], field: str, low: float, high: float) -> dict:
@@ -63,8 +64,8 @@ def scaled(lines: list[dict], field: str, low: float, high: float) -> dict:
 
 
 def adamw_group_lr(lines: list[dict]) -> dict:
-    """The AdamW group lr decision: "scale" the adopted adamw_lr_scale."""
-    return scaled(lines, "adamw_lr_scale", 0.25, 4.0)
+    """The AdamW group lr decision: "scale" the adopted adamw_learning_rate_scale."""
+    return scaled(lines, "adamw_learning_rate_scale", 0.25, 4.0)
 
 
 def muon_wd_timescale(lines: list[dict]) -> dict:

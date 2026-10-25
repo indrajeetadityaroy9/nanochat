@@ -2,8 +2,8 @@
 # Muon weight-decay EMA timescale at 200 tokens per parameter: x 1/2 and x 2 against the tau law (x 1); d8 on the
 # corpus tokenizer's data, seeds 0 and 1. Runs after muon_wd_timescale_20tpp, whose result its analysis reads.
 # Analysis: ablations.recipe.muon_wd_timescale_law.
-depth: 8
-ratio: 200.0
+num_hidden_layers: 8
+tokens_per_param: 200.0
 tokenizer: corpus
 
 hydra:

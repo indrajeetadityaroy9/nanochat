@@ -6,10 +6,10 @@ code, or measured; `[inference]` marks a step no source states, `[arithmetic]` a
 measurements were made on the GB10 while the corpus was built, and their records are not in `results/`: every measured
 figure here is [unverified] unless it names a record or the code.
 
-The reference run is the base model's d24 pre-training: 195.1M scaling parameters, 102.6B tokens (`mixture.STEPS` ×
-`STEP_TOKENS`), which `train/schedule.plan` reads as 69,580 steps of 15 micro-batches; an 8K file stage, then a 32K
-repository stage over the last 5.45% of steps (65,785–69,580, `mixture.REPO_SHARE`); a linear decay of the learning
-rate to zero after 40 warmup steps (`train/schedule.py`); document masking.
+The reference run is the base model's d24 pre-training: 195.1M non-embedding parameters, 102.6B tokens
+(`mixture.MAX_STEPS` × `BATCH_SIZE`), which `train/schedule.plan` reads as 69,580 steps of 15 micro-batches; an 8K file
+stage, then a 32K repository stage over the last 5.45% of steps (65,785–69,580, `mixture.REPO_LEVEL_SHARE`); a linear
+decay of the learning rate to zero after 40 warmup steps (`train/schedule.py`); document masking.
 
 Measurements name their data: this corpus's files, or (R1–R5) the removed data pipeline's copies of the
 sources and its packs, tokenized by the reference tokenizer (SA-BPE within `SPLIT_PATTERN`, trained by that pipeline;
@@ -345,7 +345,7 @@ repository of the seven sources that name one, no Codeforces problem and no text
 
 - **Both stages keep 87 : 10 : 3 in tokens,** 84.5 : 12.2 : 3.3 in bytes [arithmetic, at the reference tokenizer's
   bytes per token: code 3.405, text 4.275, mathematics 3.911].
-- **The 32K stage keeps text and mathematics** (`mixture.REPO_STAGE`), where the removed pipeline read code alone:
+- **The 32K stage keeps text and mathematics** (`mixture.REPO_LEVEL_STAGE`), where the removed pipeline read code alone:
   OpenCoder's anneal keeps "84% of the annealing data" from "the original distribution" against "catastrophic
   forgetting" (arXiv 2411.04905 §2.2), and To Code keeps "10% of code in text mixture data … to avoid a full
   distribution shift" (arXiv 2408.10914 §3.1, footnote 5).
@@ -507,7 +507,7 @@ a corpus per language (`repositories_python`, `repositories_cpp`).
   DeepSeek-Coder: "a comment indicating the file's path is added at the beginning of each file" (arXiv 2401.14196
   §2.2). A line break in a path is written `\n` or `\r`; a file without a final line end gets one, and a C++ file
   ending in a backslash an empty line too, so the next comment starts its own line.
-- The stage reads the fewest trailing partitions whose documents hold its draw (`compile.compile_stage`).
+- The stage reads the fewest trailing partitions whose documents hold its draw (`tokenize.tokenize_repo_level_stage`).
 
 Against the removed pipeline's samples, import-connected components within one corpus (R3):
 
@@ -568,7 +568,7 @@ and a card go to the private Hub dataset `iaroy/nanochat-data` (`publish.push` r
 history). Everything after needs the tokenizer and runs on the GH200 from `publish.pull` (the steps:
 `docs/pretraining.md`, Reproducing the run): packing cuts
 pieces at token offsets in rows of `seq_len` tokens, FIM encodes its parts around sentinel ids, and the 32K stage's
-partitions are counted in tokens (`compile.compile_stage`).
+partitions are counted in tokens (`tokenize.tokenize_repo_level_stage`).
 
 | Stage | Module | Status |
 |---|---|---|
@@ -576,5 +576,5 @@ partitions are counted in tokens (`compile.compile_stage`).
 | Curate: Python check, deduplication, split, shards | `curate.py` | done: 178,887,291 rows (§4) |
 | Publish | `publish.py` | done: `iaroy/nanochat-data`, one commit: `<source>/<split>/<k>.parquet` (1,812 shards) and the card |
 | Tokenizer: sample, arms, decision, adoption | `train_tokenizer.py` (sample, trainer), `ablations/tokenizer.py` (arms, decides, adopts), `tokenizer.py` (loads) | `vocabularies`, `intrinsic`, `data` done; runs, decision and adoption wait for the user's approval (`docs/tokenizer-ablation.md`) |
-| Compile: 8K samples, 32K repository documents | `compile.py` | after adoption |
-| Mixture, pack, loader | `mixture.py`, `pack.py`, `layout.py`, `loader.py` | pack after compile; training reads the loader (`train/stages.py`) |
+| Tokenize: 8K samples, 32K repository documents | `tokenize.py` | after adoption |
+| Mixture, pack, loader | `mixture.py`, `pack.py`, `layout.py`, `loader.py` | pack after tokenize; training reads the loader (`train/stages.py`) |

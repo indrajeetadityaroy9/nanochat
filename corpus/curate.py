@@ -9,7 +9,7 @@ Curate every source from its standardized files:
    texts dropped.
 3. split: val iff md5_number(group) % SPLIT = 0 (schema.py).
 4. shards: a repository source's files by that residue's partitions (0 val, 1..SPLIT-1 train), each sorted by
-   (repository, path, id) and cut into import-connected samples (the crate's repository_samples; SAMPLE_FILE); any
+   (repository, path, id) and cut into import-connected samples (the crate's topological_sort; SAMPLE_FILE); any
    other source's train rows in id order (a uniform order, id being a hash) over SPLIT shards, its val rows in one.
 
 Every output, rows, order and row groups, is a function of the standardized files.
@@ -55,7 +55,7 @@ EMPTY = hashlib.sha1(b"").hexdigest()
 # result is written next, runs long (a row group's time follows its slowest files), at the memory of the results held
 WINDOW = 4 * os.cpu_count()
 # The fewest files of a repository shard's row group (the last excepted), whole samples each, so a reader of row
-# groups never splits a sample; 2^16, an engineering choice: a row group is compile's task, so smaller groups spread a
+# groups never splits a sample; 2^16, an engineering choice: a row group is tokenize's task, so smaller groups spread a
 # shard over more workers and larger ones cost fewer tasks
 SAMPLE_ROWS = 65_536
 PLACEHOLDER = re.compile(r"<(EMAIL|KEY|NAME|PASSWORD)>")

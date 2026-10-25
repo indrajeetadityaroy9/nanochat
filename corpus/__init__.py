@@ -1,6 +1,6 @@
 """
 The pre-training corpus, one module per stage, under paths.CORPUS. Run order: prepare, curate, publish, the tokenizer
-(train_tokenizer.py trains the candidates; ablations/tokenizer.py decides and adopts one), compile, pack.
+(train_tokenizer.py trains the candidates; ablations/tokenizer.py decides and adopts one), tokenize, pack.
 
   schema.py     document categories: schema, split group, whether the content is code
   sources.py    the 18 sources, the corpus's file paths, curated texts and repository samples
@@ -11,9 +11,9 @@ The pre-training corpus, one module per stage, under paths.CORPUS. Run order: pr
   publish.py    the curated shards to the Hub (DATASET) and back
   tokenizer.py  load and save a vocabulary
   train_tokenizer.py  the tokenizer's sample and trainer (the corpus crate's BPE), and a vocabulary's fidelity check
-  compile.py    curated documents to tokens; the 32K stage's repository documents
+  tokenize.py   curated documents to tokens; the 32K stage's repository documents
   pack.py       each stage's training rows with FIM examples, and their weights
-  layout.py     the compiled and packed data's paths and counts (torch-free, for spawned workers)
+  layout.py     the tokenized and packed data's paths and counts (torch-free, for spawned workers)
   loader.py     the packed data's micro-batches
   crate/        the Rust extension: SA-BPE trainer, repository samples, packing
 
@@ -22,7 +22,7 @@ The pre-training corpus, one module per stage, under paths.CORPUS. Run order: pr
   CORPUS/checked/<source>/<k>.parquet           a Python source's standardized file, every file parsing
   CORPUS/curated/<source>/<split>/<k>.parquet   curated shard k (the published dataset)
   CORPUS/tokenizer/tokenizer.{tiktoken,pattern} the corpus's tokenizer
-  CORPUS/tokenizer-ablation/<arm>/, compiled/   the tokenizer ablation's arms and their data
-  CORPUS/compiled/<corpus>-<data key>/<split>.* compiled split (.bin, .idx, .json) and packs (-T<seq_len>.pieces,
+  CORPUS/tokenizer-ablation/<arm>/, tokenized/  the tokenizer ablation's arms and their data
+  CORPUS/tokenized/<corpus>-<data key>/<split>.* tokenized split (.bin, .idx, .json) and packs (-T<seq_len>.pieces,
                                                 .rows, .fim)
 """

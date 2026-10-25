@@ -2,7 +2,7 @@
 # Prepare a fresh GH200 or H100 host with Docker and the NVIDIA driver (Lambda's Ubuntu image): the CDI spec
 # for scripts/container.sh's `--device nvidia.com/gpu=all`, docker group membership, the nanochat image, the artifacts
 # layout (paths.py) and the curated corpus (corpus/publish.py pull), from which the tokenizer ablation,
-# compile and pack build the training rows (docs/pretraining.md, Reproducing the run). Idempotent: docker build
+# tokenize and pack build the training rows (docs/pretraining.md, Reproducing the run). Idempotent: docker build
 # cache, mkdir exist_ok.
 #
 #   HF_TOKEN=<read token> scripts/setup.sh
@@ -22,6 +22,6 @@ echo "log in again (docker group), then follow docs/pretraining.md's Reproducing
 echo "  scripts/container.sh python -m ablations.tokenizer vocabularies|intrinsic|data"
 echo "  scripts/container.sh python run.py experiment=tokenizer_split_merge"
 echo "  scripts/container.sh python -m ablations.tokenizer adopt"
-echo "then compile, pack and the base model's pre-training (output in artifacts/runs/<key>/run.log):"
-echo "  scripts/container.sh python -m corpus.compile && scripts/container.sh python -m corpus.pack"
+echo "then tokenize, pack and the base model's pre-training (output in artifacts/runs/<run_name>/run.log):"
+echo "  scripts/container.sh python -m corpus.tokenize && scripts/container.sh python -m corpus.pack"
 echo "  tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'"

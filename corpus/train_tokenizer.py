@@ -50,9 +50,9 @@ def shard_bytes(source: str) -> list[int]:
 def byte_shares() -> dict[str, float]:
     """Each file-stage source's share of the stage's bytes: its share of the stage's tokens (Stage.shares, tokens
     counted at the reference tokenizer's bytes per token) at its bytes per token."""
-    sources, per_token = mixture.FILE_STAGE.sources, mixture.BYTES_PER_TOKEN
-    shares = mixture.FILE_STAGE.shares({s: sum(shard_bytes(s)) / per_token[s] for s in sources},
-                                       mixture.FILE_STAGE.tokens)
+    sources, per_token = mixture.FILE_LEVEL_STAGE.sources, mixture.BYTES_PER_TOKEN
+    shares = mixture.FILE_LEVEL_STAGE.shares({s: sum(shard_bytes(s)) / per_token[s] for s in sources},
+                                             mixture.FILE_LEVEL_STAGE.tokens)
     stage_bytes = sum(shares[s] * per_token[s] for s in sources)
     return {s: shares[s] * per_token[s] / stage_bytes for s in sources}
 

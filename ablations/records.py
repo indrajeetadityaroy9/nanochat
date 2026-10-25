@@ -17,24 +17,24 @@ from omegaconf import DictConfig, OmegaConf
 import metrics
 from eval import suite
 from paths import RESULTS
-from run import RunConfig, key, plan_of
+from run import RunConfig, plan_of, run_name
 
 
 def record(config: RunConfig, experiment: str) -> dict:
     """A run's line of RESULTS/<experiment>.jsonl; its measures from its final checkpoint's evaluation."""
-    tag, run = key(config), plan_of(config)
-    stopped = metrics.diverged(tag)
-    records = metrics.records(tag)
+    name, run = run_name(config), plan_of(config)
+    stopped = metrics.diverged(name)
+    records = metrics.records(name)
     started = [r for r in records if r["kind"] == "run"][-1]
     ended = [r for r in records if r["kind"] == "end"]
     measured = efficiency = None
     if stopped is None:
-        evaluation = json.loads(suite.evaluation_path(tag, run.num_iterations).read_text(encoding="utf-8"))
-        measured = metrics.measures(evaluation, metrics.train_steps(tag), repo_start=run.repo_start)
+        evaluation = json.loads(suite.evaluation_path(name, run.max_steps).read_text(encoding="utf-8"))
+        measured = metrics.measures(evaluation, metrics.train_steps(name), repo_level_start=run.repo_level_start)
         # model size and cost (metrics.py run and end records)
-        efficiency = {"params": started["params"], "flops_per_token": started["flops_per_token"],
+        efficiency = {"num_parameters": started["num_parameters"], "flops_per_token": started["flops_per_token"],
                       "peak_memory_bytes": ended[-1]["peak_memory_bytes"]}
-    return {"experiment": experiment} | suite.record(tag) | {
+    return {"experiment": experiment} | suite.record(name) | {
         "config": dataclasses.asdict(config), "measures": measured, "efficiency": efficiency, "diverged_at": stopped}
 
 
@@ -56,7 +56,8 @@ class Records(Callback):
         (RESULTS / f"{experiment}.jsonl").write_text(
             "".join(json.dumps(line, allow_nan=False) + "\n" for line in lines), encoding="utf-8")
         (RESULTS / f"{experiment}-curves.jsonl").write_text(
-            "".join(json.dumps({"experiment": experiment, "tag": key(c)} | metrics.curves(key(c)), allow_nan=False)
+            "".join(json.dumps({"experiment": experiment, "run_name": run_name(c)} | metrics.curves(run_name(c)),
+                               allow_nan=False)
                     + "\n" for c in self.configs), encoding="utf-8")
         if self.analysis is not None:
             (RESULTS / f"{experiment}.json").write_text(

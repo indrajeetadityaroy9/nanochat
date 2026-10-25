@@ -155,7 +155,7 @@ def repository_samples(table: pa.Table, keys: tuple[str, ...], language: str, *,
     """Repository files (repo_name, relative_path, content; content large_string, whose 64-bit offsets hold a
     partition beyond 2 GiB) sorted by lowercased repository, then `keys`, so a repository is a run of rows; with
     one_per_path, only the first row of each (repository, path). Returns the table in one chunk, each repository's end
-    row, and its import-connected samples, each its rows in dependency order (the crate's repository_samples)."""
+    row, and its import-connected samples, each its rows in dependency order (the crate's topological_sort)."""
     table = table.append_column("repository", pc.utf8_lower(table["repo_name"]))
     table = table.sort_by([(key, "ascending") for key in ("repository", *keys)]).combine_chunks()
     if one_per_path:
@@ -163,8 +163,8 @@ def repository_samples(table: pa.Table, keys: tuple[str, ...], language: str, *,
         first = pc.not_equal(paths[1:], paths[:-1]).to_numpy(zero_copy_only=False)
         table = table.filter(np.concatenate([[True], first])).combine_chunks()
     ends = pc.run_end_encode(table["repository"].chunk(0)).run_ends.to_numpy().tolist()
-    samples = corpus_crate().repository_samples(table["relative_path"].to_pylist(), table["content"].to_pylist(),
-                                                ends, grammar=language)
+    samples = corpus_crate().topological_sort(table["relative_path"].to_pylist(), table["content"].to_pylist(),
+                                             ends, grammar=language)
     return table, ends, samples
 
 

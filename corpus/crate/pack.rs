@@ -1,4 +1,4 @@
-//! The packer (corpus/pack.py): one curated shard of a compiled split at a time, its documents cut into pieces
+//! The packer (corpus/pack.py): one curated shard of a tokenized split at a time, its documents cut into pieces
 //! that fit a training row, the pieces of a train split of a repository corpus drawn fill-in-the-middle examples
 //! (context-level FIM: per piece, after cutting; arXiv 2207.14255 §3.2) whose middles AST-FIM chooses
 //! (arXiv 2506.00204v1 §3.3, §5.1), and the pieces placed in rows by Best-Fit-Decreasing.
@@ -119,8 +119,8 @@ fn statement_cuts(ids: &[u16], token_bytes: &[Vec<u8>], ends_line: &[bool], gram
 /// Fill-in-the-middle as AST-FIM trains it (arXiv 2506.00204v1 §5.1 "FIM", §3.3 "Masking Algorithm"), extracted from
 /// pack.py's mapping: the share of pieces made FIM examples (rate); of those the share whose middle is a random
 /// character span (random: Rand-FIM) rather than AST-aligned; of AST-aligned middles the share by Single-Node rather
-/// than Aligned-Span masking (single); the share in SPM rather than PSM order (spm); the ids of <fim_prefix>,
-/// <fim_suffix>, <fim_middle> (sentinels).
+/// than Aligned-Span masking (single); the share in SPM rather than PSM order (spm); the ids of <｜fim▁begin｜>,
+/// <｜fim▁hole｜>, <｜fim▁end｜> (sentinels).
 #[derive(FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct Fim {
@@ -201,8 +201,8 @@ fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) ->
 /// AST-FIM's (ast_middle; a random span where it has none); prefix, suffix and middle each encoded on its own by
 /// tiktoken's encoder (arXiv 2207.14255 §3), in SPM order with probability spm (arXiv 2207.14255 App. D, variant 2),
 /// else PSM:
-///   PSM: <fim_prefix> prefix <fim_suffix> suffix <fim_middle> middle
-///   SPM: <fim_prefix> <fim_suffix> suffix <fim_middle> prefix middle
+///   PSM: <｜fim▁begin｜> prefix <｜fim▁hole｜> suffix <｜fim▁end｜> middle
+///   SPM: <｜fim▁begin｜> <｜fim▁hole｜> suffix <｜fim▁end｜> prefix middle
 /// The BOS before the example and its target BOS after the middle are the loader's (corpus/loader.py).
 fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng: ChaCha8Rng) -> Vec<u16> {
     let spm = rng.random_bool(fim.spm);
@@ -211,7 +211,7 @@ fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng:
     let (prefix, middle, suffix) = (bpe.encode_ordinary(&text[..a]), bpe.encode_ordinary(&text[a..b]), bpe.encode_ordinary(&text[b..]));
     let [pre, suf, mid] = fim.sentinels;
     let sections: &[&[u32]] = if spm { &[&[pre, suf], &suffix, &[mid], &prefix, &middle] } else { &[&[pre], &prefix, &[suf], &suffix, &[mid], &middle] };
-    sections.iter().flat_map(|section| section.iter().map(|&id| id as u16)).collect() // ids fit uint16 (compiled tokens)
+    sections.iter().flat_map(|section| section.iter().map(|&id| id as u16)).collect() // ids fit uint16 (a tokenized split's tokens)
 }
 
 /// A piece of a document: its token range, and as a FIM example its tokens (fim_example).
@@ -369,7 +369,7 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize)) -> 
     (index, rows.iter().map(|row| row.len() as i64).collect(), fim_tokens)
 }
 
-/// Packs one curated shard (documents first..last) of a compiled split (its uint16 tokens and int64 document offsets
+/// Packs one curated shard (documents first..last) of a tokenized split (its uint16 tokens and int64 document offsets
 /// at the given paths) into rows of row_len tokens (pack_shard), its documents in parallel. token_bytes: every
 /// mergeable token's bytes by id (= rank), with the split pattern the tokenizer's encoder (tiktoken-rs's CoreBPE:
 /// OpenAI tiktoken's core, fancy-regex as in tiktoken) for FIM sections; grammar: a repository corpus's language (None
@@ -381,7 +381,7 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize)) -> 
 pub(crate) fn pack<'py>(py: Python<'py>, tokens_path: &str, offsets_path: &str, shard: (usize, usize), row_len: usize, token_bytes: Vec<Vec<u8>>,
                         pattern: &str, grammar: Option<Lang>, fim: Option<Fim>)
                         -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>) {
-    // pack.py cuts a compiled split only after its last pack call returns, so the files are not modified while mapped
+    // pack.py cuts a tokenized split only after its last pack call returns, so the files are not modified while mapped
     let tokens = unsafe { Mmap::map(&File::open(tokens_path).unwrap()).unwrap() };
     let offsets = unsafe { Mmap::map(&File::open(offsets_path).unwrap()).unwrap() };
     let ends_line: Vec<bool> = token_bytes.iter().map(|token| token.last() == Some(&b'\n')).collect();

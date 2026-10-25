@@ -1,5 +1,5 @@
 """
-The compiled and packed data on disk (compile.py, pack.py), without torch, so the spawned workers that read them
+The tokenized and packed data on disk (tokenize.py, pack.py), without torch, so the spawned workers that read them
 import none: their paths, dtypes, shard bounds, grammars and row counts.
 """
 
@@ -12,20 +12,20 @@ from corpus import mixture
 from corpus.sources import SOURCES
 from corpus.tokenizer import Tokenizer
 
-TOKEN_DTYPE = np.uint16  # compiled tokens, as the corpus crate reads them (corpus/crate pack.rs: &[u16])
-# a pack index entry of the corpus crate (corpus/crate pack.rs pack_shard): token range [start, end) of the compiled
+TOKEN_DTYPE = np.uint16  # a tokenized split's tokens, as the corpus crate reads them (corpus/crate pack.rs: &[u16])
+# a pack index entry of the corpus crate (corpus/crate pack.rs pack_shard): token range [start, end) of the tokenized
 # split, then the range of the piece's FIM example in the split's FIM tokens (empty for a piece read left to right)
 PIECE_COLUMNS = 4
 
 
 def split_path(corpus: str, split: str, tokenizer: Tokenizer) -> Path:
-    """The stem of a compiled split's files (compile.py: .bin tokens, .idx document offsets, .json documents per
-    curated file), in <tokenizer.compiled>/<corpus>-<tokenizer data key>/."""
-    return tokenizer.compiled / f"{corpus}-{tokenizer.data_key}" / split
+    """The stem of a tokenized split's files (tokenize.py: .bin tokens, .idx document offsets, .json documents per
+    curated file), in <tokenizer.tokenized>/<corpus>-<tokenizer data key>/."""
+    return tokenizer.tokenized / f"{corpus}-{tokenizer.data_key}" / split
 
 
 def packed_path(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Path:
-    """The stem of a packed split's files (pack.py: .pieces, .rows, .fim), the compiled split's at the row length."""
+    """The stem of a packed split's files (pack.py: .pieces, .rows, .fim), the tokenized split's at the row length."""
     return split_path(corpus, split, tokenizer).with_name(f"{split}-T{seq_len}")
 
 
@@ -42,7 +42,7 @@ def fim_packed(corpus: str, split: str) -> bool:
 
 
 def shard_bounds(corpus: str, split: str, tokenizer: Tokenizer) -> np.ndarray:
-    """Each curated shard's first document in a compiled split, then the number of documents (compiled <split>.json:
+    """Each curated shard's first document in a tokenized split, then the number of documents (tokenized <split>.json:
     each shard's documents, in order)."""
     files = json.loads(split_path(corpus, split, tokenizer).with_suffix(".json").read_text())["files"]
     return np.cumsum([0] + [file["documents"] for file in files])

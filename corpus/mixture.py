@@ -16,7 +16,7 @@ import numpy as np
 # Tokens per micro-batch: whole rows of both contexts, 12 x 8,192 and 3 x 32,768
 MICRO_BATCH_TOKENS = 98_304
 # Repo-level share of steps: Qwen2.5-Coder's 300B of 5.2T + 300B (arXiv 2409.12186 §3.2.1-3.2.2)
-REPO_SHARE = 300e9 / (5.2e12 + 300e9)
+REPO_LEVEL_SHARE = 300e9 / (5.2e12 + 300e9)
 
 # the Weyl sequence frac(n * GOLDEN) spreads every prefix of itself most evenly over [0, 1) (Knuth, TAOCP Vol. 3 §6.4)
 GOLDEN = (math.sqrt(5) - 1) / 2
@@ -40,7 +40,7 @@ class Stage:
         return self.tokens // self.seq_len
 
     @property
-    def batch_rows(self) -> int:
+    def micro_batch_size(self) -> int:
         """Rows of a micro-batch."""
         return MICRO_BATCH_TOKENS // self.seq_len
 
@@ -71,11 +71,11 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The base model's run: schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens), its
-# last REPO_SHARE of steps at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run
-# draws by the stage's shares at its own size (weights)
-STEPS, STEP_TOKENS = 69_580, 15 * MICRO_BATCH_TOKENS
-REPO_STEPS = round(REPO_SHARE * STEPS)
+# The base model's run: schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens), its last REPO_LEVEL_SHARE of
+# steps at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run draws by the
+# stage's shares at its own size (weights)
+MAX_STEPS, BATCH_SIZE = 69_580, 15 * MICRO_BATCH_TOKENS
+REPO_LEVEL_STEPS = round(REPO_LEVEL_SHARE * MAX_STEPS)
 
 # Code, text and math shares: DeepSeek-Coder's 87% code, 10% code-related English and 3% code-unrelated Chinese (arXiv
 # 2401.14196 §2: "87% source code, 10% English code-related natural language corpus, and 3% code-unrelated Chinese
@@ -91,11 +91,11 @@ MATH_SOURCES = ("ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultra
 # their finding on rephrased web text, applied to code
 SYNTHETIC_SOURCES = ("ultradata_code_l3_python", "ultradata_code_l3_cpp", "nemotron_rewriting_python",
                      "nemotron_transpilation_cpp")
-# The repository stage's documents per (repository, language) across REPOSITORY_SOURCES (compile.py), a corpus per
+# The repository stage's documents per (repository, language) across REPOSITORY_SOURCES (tokenize.py), a corpus per
 # language, as a pack call parses one grammar
 REPOSITORIES = {"Python": "repositories_python", "C++": "repositories_cpp"}
 # Each stage's context: Qwen2.5-Coder's 8,192 and 32,768 (arXiv 2409.12186 §3.2.1, §3.2.2)
-FILE_STAGE = Stage(8192, (STEPS - REPO_STEPS) * STEP_TOKENS, {
+FILE_LEVEL_STAGE = Stage(8192, (MAX_STEPS - REPO_LEVEL_STEPS) * BATCH_SIZE, {
     "repository": Group("rest", REPOSITORY_SOURCES),
     "synthetic": Group(0.30 * CODE_SHARE, SYNTHETIC_SOURCES),
     "notebooks": Group("supply", ("kaggle_notebooks",)),
@@ -103,7 +103,7 @@ FILE_STAGE = Stage(8192, (STEPS - REPO_STEPS) * STEP_TOKENS, {
     "text": Group(0.10, ("climbmix",)),
     "math": Group(0.03, MATH_SOURCES),
 })
-REPO_STAGE = Stage(32_768, REPO_STEPS * STEP_TOKENS, {
+REPO_LEVEL_STAGE = Stage(32_768, REPO_LEVEL_STEPS * BATCH_SIZE, {
     "repositories": Group("rest", tuple(REPOSITORIES.values())),
     "traces": Group("supply", ("codeforces_cots",)),
     "text": Group(0.10, ("climbmix",)),
@@ -112,7 +112,7 @@ REPO_STAGE = Stage(32_768, REPO_STEPS * STEP_TOKENS, {
 
 IN_PART = ("synthetic", "text", "math")
 # {source: its group} of every source of a group read in part (such a group has the same sources in both stages)
-PART = {source: group for group in IN_PART for source in FILE_STAGE.groups[group].sources}
+PART = {source: group for group in IN_PART for source in FILE_LEVEL_STAGE.groups[group].sources}
 # Bytes per token of the reference tokenizer (SA-BPE within SPLIT_PATTERN, trained before this corpus) on each source,
 # for token counts that precede the corpus's tokenizer (extents, the tokenizer sample)
 BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.638,
@@ -130,7 +130,7 @@ SPREAD = 0.06
 
 def draw(group: str) -> float:
     """The tokens both stages draw of a group read in part."""
-    return sum(float(stage.groups[group].share) * stage.tokens for stage in (FILE_STAGE, REPO_STAGE)
+    return sum(float(stage.groups[group].share) * stage.tokens for stage in (FILE_LEVEL_STAGE, REPO_LEVEL_STAGE)
                if group in stage.groups)
 
 

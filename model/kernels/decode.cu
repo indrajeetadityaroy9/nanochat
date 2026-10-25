@@ -1,5 +1,5 @@
 /*
- * Decoding of a nanochat GPT (model/gpt.py) for B independent sequences (slots): each step advances every
+ * Decoding of a nanochat CausalLM (model/modeling.py) for B independent sequences (slots): each step advances every
  * active slot by one token, chosen greedily or sampled (optionally from its nucleus), optionally restricted to a
  * per-slot set of allowed tokens (inference/decoder.py).
  *
@@ -18,7 +18,7 @@
  * dec_launch_head): the host supplies the allowed tokens, which follow from each slot's previous token, while the
  * body runs (decoder.py). The whole step's GEMVs compile without the choice (k_gemv's CHOICE).
  *
- * Each step (gpt.py's forward at one position; C width, H heads of HEAD_DIM, x0 the normed embedding):
+ * Each step (modeling.py's forward at one position; C width, H heads of HEAD_DIM, x0 the normed embedding):
  *   k_norm    x0 = norm(wte[token])
  *   per layer i:
  *     k_norm  xm = resid_lambdas[i] x + x0_lambdas[i] x0 (x = x0 before layer 0), h = norm(xm)
@@ -38,11 +38,11 @@
  *             softmax(s / T) (head only)
  *   k_commit  the prompt's next token, or once past the prompt the choice, becomes each active slot's next input
  *
- * Numerics follow model/gpt.py's forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary table, q/k
- * gains and value-embedding gate (no contraction), the gate's mix rounded once to bf16; resid/x0 lambdas as bf16 values
- * on bf16 tensors (PyTorch's 0-dim fp32 x bf16 promotion), each product and sum rounded; ReLU^2 from the fp32
- * accumulators as QuACK's gemm_act relu_sq (quack/activation.py), one bf16 rounding; F.rms_norm's fp32 epsilon; the
- * choice over fp32 logits.
+ * Numerics follow model/modeling.py's forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary
+ * table, q/k norm weights and value-embedding gate (no contraction), the gate's mix rounded once to bf16; resid/x0
+ * lambdas as bf16 values on bf16 tensors (PyTorch's 0-dim fp32 x bf16 promotion), each product and sum rounded; ReLU^2
+ * from the fp32 accumulators as QuACK's gemm_act relu_sq (quack/activation.py), one bf16 rounding; F.rms_norm's fp32
+ * epsilon; the choice over fp32 logits.
  *
  * No sum mixes slots and every sum's order is fixed by the shapes and the slot's position (GEMV: MMAs over K in fixed
  * order; attention: split count from the position; nucleus: fixed-order block sums), and a sample's noise depends only
@@ -196,9 +196,10 @@ typedef struct {
     const int32_t *pos, *first;      /* [B]: the input's position and the first generated token's (i = pos - first) */
     float *logits;                   /* [B][rows]: a nucleus-sampled slot's logits, -inf outside its allowed rows */
     float *probs;                    /* [B][rows]: k_nucleus's exp(s / T - max) */
-    float softcap;                   /* the model's output-logit cap c (GPTConfig.softcap): a sampled slot's logits
-                                      * are c tanh(s / c); 0 none. A greedy choice needs none: tanh is increasing, so
-                                      * the argmax is the uncapped logits' (but for fp32 ties of saturated caps) */
+    float softcap;                   /* the model's output-logit cap c (ModelConfig.final_logit_softcapping): a sampled
+                                      * slot's logits are c tanh(s / c); 0 none. A greedy choice needs none: tanh is
+                                      * increasing, so the argmax is the uncapped logits' (but for fp32 ties of
+                                      * saturated caps) */
 } Choice;
 
 static __device__ __forceinline__ void mma16816(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
@@ -457,7 +458,7 @@ typedef struct {
     int C, H, window, run;
 } Attn;
 
-/* Slot b's q, k, v of the head at position p (fp32 holding bf16 values), as gpt.py: VE layers
+/* Slot b's q, k, v of the head at position p (fp32 holding bf16 values), as modeling.py: VE layers
  * v += 2 sigmoid(ve_gate[head] . h) value_embedding[token] in fp32, one bf16 rounding; q and k by qk_row (qk_row.cuh;
  * threads 0..QK_LANES-1 the query row, the next QK_LANES the key row). Ends with the block synchronized. */
 static __device__ void attn_prologue(const Attn &a, int b, int head, int p, float *q, float *k, float *v) {
@@ -779,12 +780,13 @@ extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
 
 /*
  * cfg: L, C, MLP hidden width F (fc: [F][C]; proj: [C][F]), vocab (lm_head's rows), max_len (a slot's cache positions,
- *      at most context), context (the model's sequence_len), store (the prompt store's positions requested: it takes
- *      at most the device memory left after the slots and graphs).
+ *      at most context), context (the model's max_position_embeddings), store (the prompt store's positions
+ *      requested: it takes at most the device memory left after the slots and graphs).
  * ptrs: GLOBAL_PTRS pointers wte, cos, sin (the fp32 rotary table [context][HALF] of every layer), lm_head; then
  *       LAYER_PTRS per layer: qkv, o, fc, proj, value-embedding table (0 if none), value-embedding gate (0 if none),
- *       q gain, k gain.
- * scal: per layer: resid lambda, x0 lambda (bf16 values); then the output-logit cap (GPTConfig.softcap, 0 none).
+ *       q norm weight, k norm weight.
+ * scal: per layer: resid lambda, x0 lambda (bf16 values); then the output-logit cap
+ *       (ModelConfig.final_logit_softcapping, 0 none).
  * window: per layer, the keys before each query that it attends (FlashAttention's window_size left).
  * stream: the caller's stream (not the legacy default stream: it is captured), alive past dec_destroy.
  */
@@ -793,7 +795,7 @@ constexpr int GLOBAL_PTRS = 4, LAYER_PTRS = 8;
 extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *scal, const int *window, void *stream) {
     Decoder *d = (Decoder *)calloc(1, sizeof(Decoder));
     d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->store = cfg[6];
-    const int context = cfg[5];  /* the model's sequence_len: the rotary table's rows, and attn_run's */
+    const int context = cfg[5];  /* the model's max_position_embeddings: the rotary table's rows, and attn_run's */
     d->H = d->C / HEAD_DIM;
     d->wte = (const bf16 *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
     d->lm_head = (const bf16 *)ptrs[3]; d->stream = (cudaStream_t)stream;

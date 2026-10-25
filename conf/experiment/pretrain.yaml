@@ -1,13 +1,14 @@
 # @package _global_
-# Pre-training of the base model: d24 at the most tokens per scaling parameter its data holds without rereading a
-# document (ratio null: train/stages.py max_ratio), seed 0, both stages, peak lr the DeepSeek LLM law's (arXiv
-# 2401.02954 §3.1 Eq. 1) times ablations.peak_lr.analysis's "base_multiplier"; a checkpoint at each tenth of the run
-# and at the repository stage's start, each evaluated with every benchmark. No analysis.
-depth: 24
-ratio: null
+# Pre-training of the base model: d24 at the most tokens per non-embedding parameter its data holds without rereading
+# a document (tokens_per_param null: train/stages.py max_tokens_per_param), seed 0, both stages, peak learning rate
+# the DeepSeek LLM law's (arXiv 2401.02954 §3.1 Eq. 1) times ablations.peak_lr.analysis's "base_multiplier"; a
+# checkpoint at each tenth of the run and at the repository stage's start, each evaluated with every benchmark. No
+# analysis.
+num_hidden_layers: 24
+tokens_per_param: null
 seed: 0
-lr_scale: ${lr_multiplier:}
-checkpoints: 10
+learning_rate_scale: ${lr_multiplier:}
+num_checkpoints: 10
 generate: benchmarks
 
 hydra:

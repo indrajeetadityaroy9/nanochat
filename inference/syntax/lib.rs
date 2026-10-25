@@ -32,18 +32,19 @@ impl Syntax {
     #[new]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (*, keywords, soft, operators, basic, special, terminals, nonterminals, actions, goto, rules,
-                        start, end, xid_start, xid_continue, token_bytes, vocab_size, bos))]
+                        start, end, xid_start, xid_continue, token_bytes, vocab_size, bos_token_id))]
     fn new(keywords: Vec<(String, Vec<u16>)>, soft: Vec<(String, Vec<u16>)>, operators: Vec<(String, Vec<u16>)>,
            basic: [u16; 5], special: [u16; 4], terminals: usize, nonterminals: usize, actions: Vec<i32>,
            goto: Vec<i32>, rules: Vec<(u32, u32)>, start: u32, end: u32, xid_start: Vec<(u32, u32)>,
-           xid_continue: Vec<(u32, u32)>, token_bytes: Vec<PyBackedBytes>, vocab_size: usize, bos: u32) -> Syntax {
+           xid_continue: Vec<(u32, u32)>, token_bytes: Vec<PyBackedBytes>, vocab_size: usize,
+           bos_token_id: u32) -> Syntax {
         let lexicon = lexer::Lexicon::new(keywords, soft, operators, basic, xid_start, xid_continue);
         let [t_end, t_newline, t_indent, t_dedent] = special;
         let tables = parser::Tables {
             terminals, nonterminals, actions, goto, rules, start, end, t_end, t_newline, t_indent, t_dedent,
         };
         let token_bytes = token_bytes.iter().map(|b| b.to_vec()).collect();
-        Syntax { inner: Arc::new(vocab::Syntax::new(lexicon, tables, token_bytes, vocab_size, bos)) }
+        Syntax { inner: Arc::new(vocab::Syntax::new(lexicon, tables, token_bytes, vocab_size, bos_token_id)) }
     }
 
     /// The constraint of the tokens generated after prefix (UTF-8); suffix: whether a suffix follows the generation

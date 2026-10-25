@@ -16,7 +16,7 @@ BETAS = (0.9, 0.95)
 # invariant to the gradient's scale (arXiv 1412.6980 §2.1) and Muon's Newton-Schulz divides its input by
 # its norm (torch/optim/_muon.py _zeropower_via_newtonschulz, after KellerJordan/Muon), so under a slowly varying
 # gradient scale the clip damps only spikes
-MAX_NORM = 1.0
+MAX_GRAD_NORM = 1.0
 # AdamW's EMA timescale law tau* = TAU_C TPP^TAU_E of the run's steps (Power Lines, arXiv 2505.13738 App. E.3.1)
 TAU_C, TAU_E = 1.084, -0.527
 
@@ -70,27 +70,28 @@ class Muon(torch.optim.Muon):
 
 
 def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float, muon_tau_scale: float,
-               adamw_lr_scale: float) -> tuple[torch.optim.Optimizer, ...]:
+               adamw_learning_rate_scale: float) -> tuple[torch.optim.Optimizer, ...]:
     """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, not 1-D parameters (karpathy/nanoGPT
     model.py configure_optimizers). Two scales, each the identity at 1: muon_tau_scale divides Muon's weight decay, so
     its EMA timescale 1 / (lr wd) grows by it (the tau law was fit with AdamW; Power Lines, arXiv 2505.13738 App. B);
-    adamw_lr_scale multiplies AdamW's lr and divides its weight decay, holding its timescale (Moonlight's one lr and
-    weight decay for every group, arXiv 2502.16982 §2.2, matches Muon's update RMS, not the AdamW groups' lr)."""
-    tables = [model.wte.weight, model.lm_head.weight, *model.value_embeds.parameters()]
+    adamw_learning_rate_scale multiplies AdamW's lr and divides its weight decay, holding its timescale (Moonlight's
+    one lr and weight decay for every group, arXiv 2502.16982 §2.2, matches Muon's update RMS, not the AdamW groups'
+    lr)."""
+    tables = [model.embed_tokens.weight, model.lm_head.weight, *model.value_embeds.parameters()]
     table_ids = {id(p) for p in tables}
     vectors = [p for p in model.parameters() if p.ndim == 1]
     matrices = [p for p in model.parameters() if p.ndim == 2 and id(p) not in table_ids]
-    adamw = torch.optim.AdamW([{"params": tables, "weight_decay": weight_decay / adamw_lr_scale},
-                               {"params": vectors, "weight_decay": 0.0}], lr=lr * adamw_lr_scale, betas=BETAS,
-                              fused=True)
+    adamw = torch.optim.AdamW([{"params": tables, "weight_decay": weight_decay / adamw_learning_rate_scale},
+                               {"params": vectors, "weight_decay": 0.0}], lr=lr * adamw_learning_rate_scale,
+                              betas=BETAS, fused=True)
     return adamw, Muon(matrices, lr=lr, weight_decay=weight_decay / muon_tau_scale, adjust_lr_fn="match_rms_adamw")
 
 
 def update(model: torch.nn.Module, opts: tuple[torch.optim.Optimizer, ...]) -> torch.Tensor:
-    """One update from the accumulated gradients: their global norm clipped to MAX_NORM before every optimizer, each
-    optimizer stepped, the gradients zeroed. Returns the norm before clipping, on the device (no host
+    """One update from the accumulated gradients: their global norm clipped to MAX_GRAD_NORM before every optimizer,
+    each optimizer stepped, the gradients zeroed. Returns the norm before clipping, on the device (no host
     synchronization)."""
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_NORM)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
     for opt in opts:
         opt.step()
     model.zero_grad()

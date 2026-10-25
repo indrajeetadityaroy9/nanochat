@@ -76,14 +76,14 @@ approval; proof-of-concept runs for development and verification are allowed, on
 
 | Item | Next action | Waits on |
 |---|---|---|
-| Ablation queue | ready at HEAD (`860ac7b`; end-to-end d8 runs through `run.py` at `9ea5037` and `860ac7b`: exit 0, code bpb 2.7012 and 2.7013 against 2.7011 at `d0a2ec0`): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, compile, pack → D6 | the user's explicit permission |
+| Ablation queue | ready at HEAD (`860ac7b`; end-to-end d8 runs through `run.py` at `9ea5037` and `860ac7b`: exit 0, code bpb 2.7012 and 2.7013 against 2.7011 at `d0a2ec0`): D7 at 20 → D5 → D7 at 200 → tokenizer → decision, adopt, tokenize, pack → D6 | the user's explicit permission |
 | D7 Muon τ | `muon_wd_timescale_20tpp.yaml` (d8 at 20, sa-bpe set, 2 seeds: user, 4 judged wasteful) and `muon_wd_timescale_200tpp.yaml` (d8 at 200 reads 2.94B tokens, beyond the sa-bpe set's 2.11B: `tokenizer=corpus`, whose packs exist, 2 seeds); ×½, ×1, ×2; 12 runs | user approval |
-| D5 softcap | `logit_softcap.yaml`: d16 at ratio 20.0 on the sa-bpe set, lr ×2.7972 (the D1-rebased base multiplier at `mixture.STEPS`' tokens), cap 15 vs none, 4 seeds | user approval |
-| Tokenizer ablation | 8 d16 runs at each arm's max_ratio (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer_split_merge`), decision, `adopt`, compile, pack | D5 and D7 decided; user approval |
-| D6 AdamW-group lr | `adamw_group_lr.yaml`: d16 on the sa-bpe set at its max_ratio, ×¼ and ×4, 2 seeds; its ×1 arm is the tokenizer ablation's sa-bpe baseline (same run key), so 4 runs train | the tokenizer runs; user approval |
+| D5 softcap | `logit_softcap.yaml`: d16 at tokens_per_param 20.0 on the sa-bpe set, learning_rate_scale 2.7972 (the D1-rebased base multiplier at `mixture.MAX_STEPS`' tokens), final_logit_softcapping 15 vs none, 4 seeds | user approval |
+| Tokenizer ablation | 8 d16 runs at each arm's max_tokens_per_param (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer_split_merge`), decision, `adopt`, tokenize, pack | D5 and D7 decided; user approval |
+| D6 AdamW-group lr | `adamw_group_lr.yaml`: d16 on the sa-bpe set at its max_tokens_per_param, adamw_learning_rate_scale ¼ and 4, 2 seeds; its ×1 arm is the tokenizer ablation's sa-bpe baseline (same run name), so 4 runs train | the tokenizer runs; user approval |
 | Base model pre-training | `experiment=pretrain` (d24, the decided recipe and tokenizer) | every ablation above; its own user approval |
 
-Order: the user's permission → D7 at 20, D5, D7 at 200, tokenizer runs (with D6's arms) → adopt, compile, pack → base
+Order: the user's permission → D7 at 20, D5, D7 at 200, tokenizer runs (with D6's arms) → adopt, tokenize, pack → base
 model pre-training (its own approval).
 
 ## 1. Decisions: model and training (ArchitectureCheck; affect every run, so the tokenizer ablation)
@@ -317,16 +317,18 @@ ResFormer (which reuses the first layer's values); LaVE gains 0.016/0.010/0.010 
 ### Run configuration: Hydra (hydra-core 1.3.7)
 - Replaces `ablations/harness.py` (`Run`, `python -m ablations.harness '<json>'`), `scripts/pretrain.py` (both deleted in
   `679e7d9`), `config.run_tag`'s hashed tags, `suite.export`, the `variant` record field, peak_lr.py's driver and the tokenizer
-  ablation's `runs` verb. `run.py`'s `RunConfig` defaults are the base model's recipe (depth 24, ratio null =
-  `train/stages.py` max_ratio, seed 0, tokenizer corpus, scales 1.0, softcap null); `conf/run.yaml` composes them (the
+  ablation's `runs` verb. `run.py`'s `RunConfig` defaults are the base model's recipe (num_hidden_layers 24,
+  tokens_per_param null = `train/stages.py` max_tokens_per_param, seed 0, tokenizer corpus, scales 1.0,
+  final_logit_softcapping null); `conf/run.yaml` composes them (the
   `run_schema` ConfigStore node) with an experiment and Hydra's settings; `conf/experiment/<name>.yaml` sweeps fields
   against them (pretrain, tokenizer_split_merge, logit_softcap, adamw_group_lr, muon_wd_timescale_20tpp/200tpp).
-- A run's key is the fields differing from the defaults, sorted, `k=v` joined by `,` (e.g.
-  `depth=16,seed=1,tokenizer=sa-bpe`; `defaults` if none); a run shared by two experiments is one run. Everything of
-  it is in `artifacts/runs/<key>/`: `.hydra/`, `metrics.jsonl` (its run record holds `config` and `data_key`),
-  `step<N>.pt`, `eval-step<N>.json`, `run.log`. A recorded run whose plan or data key differs raises "recipe changed";
+- A run's name (`run_name`) is the fields differing from the defaults, sorted, `k=v` joined by `,` (e.g.
+  `num_hidden_layers=16,seed=1,tokenizer=sa-bpe`; `defaults` if none); a run shared by two experiments is one run.
+  Everything of it is in `artifacts/runs/<run_name>/`: `.hydra/`, `metrics.jsonl` (its run record holds `config` and
+  `data_key`), `checkpoint-<N>.pt`, `eval-<N>.json`, `run.log`. A recorded run whose plan or data key differs raises
+  "recipe changed";
   a finished or diverged run is skipped; training and each checkpoint's evaluation run in fresh spawned processes;
   any other failure stops the sweep. `ablations/records.py`'s callback writes `results/<experiment>.jsonl`,
   `-curves.jsonl` and, with an analysis, `results/<experiment>.json` = {"analysis": ...}.
 - Commands: `scripts/container.sh python run.py experiment=<name>`; ad hoc
-  `python run.py depth=8 ratio=0.5 tokenizer=sa-bpe`.
+  `python run.py num_hidden_layers=8 tokens_per_param=0.5 tokenizer=sa-bpe`.

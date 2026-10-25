@@ -11,7 +11,7 @@ hydra:
   mode: MULTIRUN
   sweep:
     dir: ${runs:}
-    subdir: ${run_key:}
+    subdir: ${run_name:}
   job:
     chdir: false
   sweeper:

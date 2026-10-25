@@ -24,11 +24,11 @@ import torch
 import torch.nn.functional as F
 
 from corpus.layout import packed_rows, stage_rows
-from corpus.loader import PretrainingBatches
-from corpus.mixture import FILE_STAGE, NON_CODE, REPO_STAGE, Stage
+from corpus.loader import IGNORE_INDEX, PretrainingBatches
+from corpus.mixture import FILE_LEVEL_STAGE, NON_CODE, REPO_LEVEL_STAGE, Stage
 from corpus.tokenizer import Tokenizer
 from metrics import mixture_bpb
-from model.gpt import GPT
+from model.modeling import CausalLM
 
 # Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the
 # whole split if smaller; models of one tokenizer are scored on identical rows (models of different tokenizers, on
@@ -36,7 +36,7 @@ from model.gpt import GPT
 VAL_TOKENS = 80 * 2**19
 # Context buckets of a target (its input's position in its piece + 1): positions both stages train (at most the
 # file-level context) and positions only the repo-level stage trains
-CONTEXTS = (FILE_STAGE.seq_len,)
+CONTEXTS = (FILE_LEVEL_STAGE.seq_len,)
 # Byte-offset buckets of a target (the bytes of its piece before it), doublings from 1 KiB to 128 KiB (beyond a 32K
 # row's span in bytes): loss at doubling context lengths, as arXiv 2308.12950 Fig. 4a samples perplexity,
 # in bytes so that tokenizers compare at the same context (arXiv 2503.13423 §3.1 fixes context in bytes for this
@@ -52,7 +52,8 @@ def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, step
          num_segments: int) -> dict[str, list[float]]:
     """{"bits", "bytes"} per context bucket (bucket i: contexts in (CONTEXTS[i-1], CONTEXTS[i]]) and {"offset_bits",
     "offset_bytes"} per byte-offset bucket (bucket i: targets after [OFFSETS[i-1], OFFSETS[i]) bytes of their segment)
-    of the targets of the first `steps` batches under losses (GPT.losses). token_bytes: bytes per token, 0 for special
+    of the targets of the first `steps` batches under losses (CausalLM.losses). token_bytes: bytes per token, 0 for
+    special
     tokens. cu_seqlens is padded to num_segments by repeating its last offset (one compiled shape across corpora; the
     attention reads only each batch's segments, corpus/loader.py PretrainingBatches); searchsorted(right) maps a
     position to its segment."""
@@ -64,7 +65,7 @@ def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, step
     for x, y, cu_seqlens, segments in islice(batches, steps):
         cu_seqlens = torch.cat([cu_seqlens, cu_seqlens[-1:].expand(num_segments + 1 - cu_seqlens.numel())])
         y = y.flatten()
-        nbytes = torch.where(y == PretrainingBatches.PAD, 0, token_bytes[y.clamp_min(0)])
+        nbytes = torch.where(y == IGNORE_INDEX, 0, token_bytes[y.clamp_min(0)])
         nats = torch.where(nbytes > 0, losses(x, y.view_as(x), cu_seqlens, segments), 0.0)
         t = torch.arange(y.numel(), dtype=torch.int32, device=device)
         start = cu_seqlens[torch.searchsorted(cu_seqlens, t, right=True) - 1]
@@ -83,7 +84,7 @@ def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, step
 def sample_rows(stage: Stage) -> int:
     """The most rows of a corpus's val split val_bits scores at a stage's rows: VAL_TOKENS' worth in whole
     micro-batches."""
-    return -(-VAL_TOKENS // (stage.batch_rows * stage.seq_len)) * stage.batch_rows
+    return -(-VAL_TOKENS // (stage.micro_batch_size * stage.seq_len)) * stage.micro_batch_size
 
 
 def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> dict:
@@ -101,12 +102,13 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
         num_rows = packed_rows(name, "val", tokenizer, stage.seq_len)
         n = sampled[name] = min(num_rows, sample_rows(stage))
         samples[name] = np.concatenate([np.arange(n, dtype=np.int64) * num_rows // n,
-                                        np.full(-n % stage.batch_rows, -1, dtype=np.int64)])
+                                        np.full(-n % stage.micro_batch_size, -1, dtype=np.int64)])
     loaders = {name: PretrainingBatches({name: 1.0}, "val", tokenizer, {name: rows}, seq_len=stage.seq_len,
-                                        batch_rows=stage.batch_rows, device=device, reading="left_to_right", start=0)
+                                        micro_batch_size=stage.micro_batch_size, device=device,
+                                        reading="left_to_right", start=0)
                for name, rows in samples.items()}
     num_segments = max(loader.num_segments for loader in loaders.values())
-    corpora = {name: {**sums(losses, loader, token_bytes, steps=len(samples[name]) // stage.batch_rows,
+    corpora = {name: {**sums(losses, loader, token_bytes, steps=len(samples[name]) // stage.micro_batch_size,
                              num_segments=num_segments),
                       "rows": sampled[name]} for name, loader in loaders.items()}
     rows = stage_rows(tokenizer, stage)
@@ -118,42 +120,43 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
 
 def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, device: torch.device
                   ) -> dict[str, dict[str, list[float]]]:
-    """{benchmark: bits and bytes (sums) of its reference solutions} for SOLUTION_BENCHMARKS, in FILE_STAGE's
+    """{benchmark: bits and bytes (sums) of its reference solutions} for SOLUTION_BENCHMARKS, in FILE_LEVEL_STAGE's
     micro-batches (one compiled shape), one example and one attention segment per row: BOS + the tokens of prompt +
     solution, scored from the token starting at the prompt's end (decode_with_offsets; none starting there raises).
     The solution's leading blank lines, through its last leading line break, count as prompt: EvalPlus's solutions
     begin with them, and a tokenizer joins them to the prompt's last line break, so the prompt would end inside a
     token and tokenizers would score different bytes."""
-    batch_rows, seq_len = FILE_STAGE.batch_rows, FILE_STAGE.seq_len
+    micro_batch_size, seq_len = FILE_LEVEL_STAGE.micro_batch_size, FILE_LEVEL_STAGE.seq_len
     bos = tokenizer.bos_token_id
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
-    cu_seqlens = torch.arange(0, batch_rows * seq_len + 1, seq_len, dtype=torch.int32, device=device)
-    segments = torch.tensor(batch_rows, dtype=torch.int32)
+    cu_seqlens = torch.arange(0, micro_batch_size * seq_len + 1, seq_len, dtype=torch.int32, device=device)
+    segments = torch.tensor(micro_batch_size, dtype=torch.int32)
     results = {}
     for name in SOLUTION_BENCHMARKS:
         seqs = []
         for t in benchmarks[name]:
-            prompt_end = len(t.prompt) + len(re.match(r"\s*[\r\n]|", t.solution).group())
-            ids = tokenizer.enc.encode_ordinary(t.prompt + t.solution)
+            prompt_end = len(t.prompt) + len(re.match(r"\s*[\r\n]|", t.canonical_solution).group())
+            ids = tokenizer.enc.encode_ordinary(t.prompt + t.canonical_solution)
             _, starts = tokenizer.enc.decode_with_offsets(ids)
             seqs.append(([bos, *ids], starts.index(prompt_end) + 1))  # + 1: the BOS before
         batches = []
-        for g in range(0, len(seqs), batch_rows):
-            x = torch.full((batch_rows, seq_len), bos, dtype=torch.int32)
-            y = torch.full((batch_rows, seq_len), PretrainingBatches.PAD, dtype=torch.int64)
-            for r, (ids, first) in enumerate(seqs[g:g + batch_rows]):
+        for g in range(0, len(seqs), micro_batch_size):
+            x = torch.full((micro_batch_size, seq_len), bos, dtype=torch.int32)
+            y = torch.full((micro_batch_size, seq_len), IGNORE_INDEX, dtype=torch.int64)
+            for r, (ids, first) in enumerate(seqs[g:g + micro_batch_size]):
                 x[r, :len(ids) - 1] = torch.tensor(ids[:-1])
                 y[r, first - 1:len(ids) - 1] = torch.tensor(ids[first:])
             batches.append((x.to(device), y.to(device), cu_seqlens, segments))
-        results[name] = sums(losses, batches, token_bytes, steps=len(batches), num_segments=batch_rows)
+        results[name] = sums(losses, batches, token_bytes, steps=len(batches), num_segments=micro_batch_size)
     return results
 
 
-def likelihood(model: GPT, tokenizer: Tokenizer, benchmarks: dict, *, device: torch.device) -> dict:
-    """{"8k": val_bits of FILE_STAGE, "32k": val_bits of REPO_STAGE (null for a model not at its context), "solution":
-    solution_bits} by the compiled GPT.losses, one graph per row shape; benchmarks: eval/code_eval.py tasks()."""
+def likelihood(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict, *, device: torch.device) -> dict:
+    """{"8k": val_bits of FILE_LEVEL_STAGE, "32k": val_bits of REPO_LEVEL_STAGE (null for a model not at its context),
+    "solution": solution_bits} by the compiled CausalLM.losses, one graph per row shape; benchmarks:
+    eval/code_eval.py tasks()."""
     losses = torch.compile(model.losses, dynamic=False, fullgraph=True)
-    return {"8k": val_bits(losses, tokenizer, stage=FILE_STAGE, device=device),
-            "32k": (val_bits(losses, tokenizer, stage=REPO_STAGE, device=device)
-                    if model.config.sequence_len == REPO_STAGE.seq_len else None),
+    return {"8k": val_bits(losses, tokenizer, stage=FILE_LEVEL_STAGE, device=device),
+            "32k": (val_bits(losses, tokenizer, stage=REPO_LEVEL_STAGE, device=device)
+                    if model.config.max_position_embeddings == REPO_LEVEL_STAGE.seq_len else None),
             "solution": solution_bits(losses, tokenizer, benchmarks, device=device)}

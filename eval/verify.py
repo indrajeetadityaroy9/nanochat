@@ -110,7 +110,7 @@ def python_diagnostics(programs: list[str]) -> list[list[str]]:
     return out
 
 
-def solution_diagnostics(source: str, solution: str, entry: str) -> list[str]:
+def solution_diagnostics(source: str, solution: str, entry_point: str) -> list[str]:
     """The certain failures of an EvalPlus solution (sanitize of source, prompt + completion, to the entry function and
     its dependencies) that its own checks miss, sanitize having kept a parseable span: source's syntax error, and the
     entry function (its last top-level definition) missing or without a `return <value>` in its own body (nested
@@ -120,9 +120,9 @@ def solution_diagnostics(source: str, solution: str, entry: str) -> list[str]:
     if unparsed:
         return [*found, *unparsed]
     functions = [n for n in ast.parse(solution).body
-                 if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef) and n.name == entry]
+                 if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef) and n.name == entry_point]
     if not functions:
-        return [*found, f"{entry}: not defined"]
+        return [*found, f"{entry_point}: not defined"]
     stack = list(functions[-1].body)
     while stack:
         node = stack.pop()
@@ -130,7 +130,7 @@ def solution_diagnostics(source: str, solution: str, entry: str) -> list[str]:
             return found
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
             stack.extend(ast.iter_child_nodes(node))
-    return [*found, f"{entry}: returns no value"]
+    return [*found, f"{entry_point}: returns no value"]
 
 
 def cpp_diagnostics(program: str) -> list[str]:
@@ -228,7 +228,7 @@ def search(decoder: NativeDecoder, request: Callable[[int], Request],
         for attempt in range(ATTEMPTS):
             sampling = {"temperature": 0.0 if attempt == 0 else TEMPERATURE, "seed": attempt}
             generated, checks = {}, {}
-            for k, ids in decoder.run(dataclasses.replace(request(i), **sampling) for i in pending):
+            for k, ids in decoder.generate(dataclasses.replace(request(i), **sampling) for i in pending):
                 generated[pending[k]], checks[pending[k]] = ids, pool.submit(check, pending[k], ids)
             results = verdicts([checks[i].result() for i in pending], language=language)
             for i, (diagnostics, passed) in zip(pending, results, strict=True):

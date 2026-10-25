@@ -1,5 +1,5 @@
 """
-The curated corpus to the Hub and back. The shards are text, independent of any tokenizer (compile and pack run after
+The curated corpus to the Hub and back. The shards are text, independent of any tokenizer (tokenize and pack run after
 the pull). The dataset (DATASET, private) holds CORPUS/curated's tree, <source>/<split>/<k>.parquet, beside its card;
 push replaces the whole tree and squashes the history into one commit; pull downloads the shards.
 
