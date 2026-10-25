@@ -45,13 +45,15 @@ if TYPE_CHECKING:
 
 @dataclass
 class RunConfig:
-    """A run: the base model's recipe (the defaults) except the fields set."""
+    """A run: the base model's recipe (the defaults, learning_rate_scale's conf/run.yaml's) except the fields set."""
     num_hidden_layers: int = 24
     # tokens per non-embedding parameter; None: train/stages.py max_tokens_per_param of the data
     tokens_per_param: float | None = None
     seed: int = 0                   # initialization and data order
     tokenizer: str = "corpus"       # "corpus": CORPUS/tokenizer; else an arm: CORPUS/tokenizer-ablation/<arm>
-    learning_rate_scale: float = 1.0  # times the law's peak learning rate (schedule.plan)
+    # times the law's peak learning rate (schedule.plan); 1.0 here is the law's own, so a run's name carries the base
+    # model's multiplier, conf/run.yaml's default (lr_multiplier)
+    learning_rate_scale: float = 1.0
     muon_tau_scale: float = 1.0     # Muon matrices' tau x scale (their weight decay / scale; train/optim.py)
     # AdamW groups' learning rate x scale, their weight decay / scale (decay timescale held)
     adamw_learning_rate_scale: float = 1.0
@@ -173,7 +175,8 @@ def job(config: RunConfig) -> None:
 
 
 def lr_multiplier() -> float:
-    """The base model's multiplier of the law's peak lr: ablations/peak_lr.py's estimator over its recorded runs."""
+    """The base model's multiplier of the law's peak lr, every run's default learning_rate_scale (conf/run.yaml):
+    ablations/peak_lr.py's estimator over its recorded runs."""
     from ablations.peak_lr import analysis
 
     lines = [json.loads(line) for line in (RESULTS / "peak_lr.jsonl").read_text(encoding="utf-8").splitlines()]

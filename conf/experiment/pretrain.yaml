@@ -1,10 +1,8 @@
 # @package _global_
-# Pre-training of the base model, RunConfig's defaults (run.py): d24 at the most tokens per non-embedding parameter its
-# data holds without rereading a document (tokens_per_param None: train/stages.py max_tokens_per_param), seed 0, both
-# stages; here its peak learning rate, the DeepSeek LLM law's (arXiv 2401.02954 §3.1 Eq. 1) times
-# ablations.peak_lr.analysis's "base_multiplier", and a checkpoint at each tenth of the run and at the repository
-# stage's start, each evaluated with every benchmark. No analysis.
-learning_rate_scale: ${lr_multiplier:}
+# Pre-training of the base model, the run app's defaults (run.py RunConfig, conf/run.yaml): d24 at the most tokens per
+# non-embedding parameter its data holds without rereading a document (tokens_per_param None: train/stages.py
+# max_tokens_per_param), seed 0, both stages, the base model's peak learning rate; here a checkpoint at each tenth of
+# the run and at the repository stage's start, each evaluated with every benchmark. No analysis.
 num_checkpoints: 10
 generate: benchmarks
 

@@ -26,7 +26,8 @@ tokenize, pack → `pretrain` (its own approval). `muon_wd_timescale_200tpp` rea
   code paths: `python run.py experiment=<name>`.
 - **Plans.** An arm differs from its baseline only in its yaml's fields. Its plan (batch, steps, peak lr) is the base
   model's at its `num_hidden_layers` and `tokens_per_param` (`run.base_plan`; `plan_of` applies
-  `learning_rate_scale`); `tokens_per_param: null` means the data's `max_tokens_per_param` (`train/stages.py`). Every
+  `learning_rate_scale`, by default the base model's multiplier of the law's lr, `${lr_multiplier:}` in
+  `conf/run.yaml`); `tokens_per_param: null` means the data's `max_tokens_per_param` (`train/stages.py`). Every
   run completes its own schedule (warmup, linear decay to zero). Weight decay follows each run's lr by the τ law, so
   an lr sweep varies η at a fixed EMA timescale (arXiv 2405.13698; Power Lines, arXiv 2505.13738).
 - **Divergence.** A non-finite loss or gradient norm is recorded with its step and drops that seed from the
@@ -78,7 +79,9 @@ An arm against its baseline over the seeds where both have an evaluation, `ALPHA
 | `results/<experiment>.json` | `{"analysis": ...}`: the experiment's pre-registered decision over the `.jsonl` |
 
 A run's name (`run.run_name`) is its fields that differ from `RunConfig()`'s, sorted, `k=v` joined by `,`, so a run
-two experiments share is trained once. Per-run artifacts and resumption: `docs/pretraining.md`, Runs.
+two experiments share is trained once. `RunConfig`'s `learning_rate_scale` is 1.0 (the law's lr), so every name
+carries the resolved multiplier (`learning_rate_scale=2.7970368997577726`). Per-run artifacts and resumption:
+`docs/pretraining.md`, Runs.
 
 ## peak_lr
 
@@ -90,8 +93,8 @@ model's width, no transfer), times the optimum's horizon trend measured at d8 be
 
 **Arms.** × 1, 2, 4, 8 at d8 at 5 and at 200; × 1, 2, 4 at d24 at 5; seed 0.
 
-**Rule** (`peak_lr.analysis`, evaluated by `run.py` `lr_multiplier` when `pretrain` launches, since it depends on
-the adopted tokenizer's `max_tokens_per_param`; no copy is stored):
+**Rule** (`peak_lr.analysis`, evaluated by `run.py` `lr_multiplier` when a run launches, since it depends on the
+adopted tokenizer's `max_tokens_per_param`; no copy is stored):
 - per setting (`fit`): the grid is extended × 2 while the lowest-code run is at an end; else the vertex of the
   parabola in ln(multiplier) through the lowest-code run and its two neighbours (arXiv 2409.19913 §3.1 fits quadratics
   in log lr). The vertices, multipliers of the law's lr the runs recorded, are re-based onto the current law's lr
@@ -112,7 +115,7 @@ the adopted tokenizer's `max_tokens_per_param`; no copy is stored):
 
 No run diverged. The best arm beats the law by 0.1253, 0.0118 and 0.0044. The d8 ratio is × 0.9105 (horizon exponent
 −0.0254, −0.1193 net of the batch): the optimum barely moves with the horizon, against both rules. The base model's
-multiplier is × 2.7970 at 102.6B tokens (`pretrain.yaml` and `logit_softcap.yaml` read it as `${lr_multiplier:}`).
+multiplier is × 2.7970 at 102.6B tokens, every run's default `learning_rate_scale` (`conf/run.yaml`).
 The records were written in an earlier format (a run's fields under `fields`: `n_layer`, `ratio`, `lr_scale`, `seed`;
 its setting under `setting`), on data no longer published (`docs/corpus.md`); `results/peak_lr.json` holds that
 format's paired differences, not the vertices, which `fit` computes from the `.jsonl`.
@@ -141,8 +144,8 @@ D = ln(m_200/m_20)/ln 10. The two points' depths differ, so the law takes m as i
 modded-nanogpt record #18 "lowers that to 15") against none.
 
 **Arms.** {none, 15} × seeds 0–3, d16 at 20 tokens per parameter (Chinchilla, arXiv 2203.15556 Table 3) on the sa-bpe
-arm's data, `learning_rate_scale` `${lr_multiplier:}` (the base model's multiplier, `peak_lr.analysis` at the corpus
-tokenizer's `max_tokens_per_param`, as `pretrain` resolves it; the cap's published effect is a high-lr one).
+arm's data, at the default `learning_rate_scale`, the base model's multiplier (the cap's published effect is a
+high-lr one).
 
 **Rule.** Adopt c = 15 iff `adopted`; else no cap (equal keeps none: the cap costs the loss, eval and decoder paths).
 

@@ -1,11 +1,16 @@
-# The run app's root config (run.py): the base model's recipe, RunConfig's defaults, then an experiment's
-# fields and sweep (conf/experiment/<name>.yaml, selected by experiment=<name>) and the command line's overrides.
+# The run app's root config (run.py): the base model's recipe, RunConfig's defaults and the base model's peak learning
+# rate, then an experiment's fields and sweep (conf/experiment/<name>.yaml, selected by experiment=<name>) and the
+# command line's overrides.
 defaults:
   - run_schema
   - _self_
   - experiment: null
   # Hydra's default job logging writes ${hydra.job.name}.log, RUNS/<run_name>/run.log, the phases' log (run.py)
   - override hydra/job_logging: none
+
+# the DeepSeek LLM law's peak lr (arXiv 2401.02954 §3.1 Eq. 1) times the base model's multiplier, the estimate of
+# ablations/peak_lr.py analysis over results/peak_lr.jsonl (run.py lr_multiplier); resolved, so run names carry it
+learning_rate_scale: ${lr_multiplier:}
 
 hydra:
   # every invocation a sweep: one job without sweep parameters

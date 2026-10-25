@@ -93,7 +93,7 @@ code:text:math 87:10:3 in both stages; an 8,192-token file stage, then a 32,768-
 |---|---|---|
 | Batch | 1,474,560 tokens (15 micro-batches of 98,304) at 102.6B tokens | DeepSeek LLM's law B = 0.2920·C^0.3271, C = M·D (`train/schedule.py` `plan`), rounded to whole micro-batches |
 | Steps | 69,580 (525.89 tokens per non-embedding parameter); repository stage from step 65,785 | `schedule.plan` (D11: `round(tokens_per_param · num_non_embedding_params)`) |
-| Peak lr | the law's η = 0.3118·C^-0.125 = 8.6295e-4 times `ablations/peak_lr.py`'s multiplier (2.79704 on the recorded runs, computed at launch) = 2.4137e-3 at 102.6B tokens | DeepSeek LLM §3.1 Eq. 1; `conf/experiment/pretrain.yaml`'s `learning_rate_scale` resolves `peak_lr.py`'s `analysis` at the corpus's `max_tokens_per_param` (`docs/ablations.md`, peak_lr) |
+| Peak lr | the law's η = 0.3118·C^-0.125 = 8.6295e-4 times `ablations/peak_lr.py`'s multiplier (2.79704 on the recorded runs, computed at launch) = 2.4137e-3 at 102.6B tokens | DeepSeek LLM §3.1 Eq. 1; `conf/run.yaml`'s default `learning_rate_scale`, every run's, resolves `peak_lr.py`'s `analysis` at the corpus's `max_tokens_per_param` (`docs/ablations.md`, peak_lr) |
 | Warmup | 40 steps, linear | 2/(1 − β₂) (arXiv 1910.04209, for Adam); nanochat 92d63d4's 40 steps at d24 |
 | Decay | linear to zero; the last step at 1/(69,580 − 40) = 1.44e-5 of peak (D10: exactly 0 is not required) | arXiv 2502.15938 §4 |
 | Optimizers | AdamW (fused) on tables, `lm_head` and vectors; Muon (`torch.optim.Muon`'s update, Newton–Schulz batched by shape) with `match_rms_adamw` on the other matrices, one lr for every group | Moonlight, arXiv 2502.16982 §2.2 (`train/optim.py`) |
@@ -117,10 +117,10 @@ warmup for Muon.
 ## Runs
 
 Every run, an ablation's or the base model's, is a `run.py` `RunConfig` (Hydra, hydra-core 1.3.7: `RunConfig`'s
-defaults are the base model's recipe, `conf/experiment/<name>.yaml` sweeps fields against them), trained by
-`train/loop.py` and evaluated by `eval/suite.py evaluate`: `python run.py experiment=<name>`. `pretrain.yaml` (d24 at
-`max_tokens_per_param`, seed 0, every benchmark) waits for every ablation; the ablations, their order and records:
-`docs/ablations.md`.
+defaults and `conf/run.yaml`'s base multiplier of the law's lr are the base model's recipe,
+`conf/experiment/<name>.yaml` sweeps fields against them), trained by `train/loop.py` and evaluated by
+`eval/suite.py evaluate`: `python run.py experiment=<name>`. `pretrain.yaml` (d24 at `max_tokens_per_param`, seed 0,
+every benchmark) waits for every ablation; the ablations, their order and records: `docs/ablations.md`.
 
 A run's name (`run.run_name`) is its `RunConfig` fields that differ from the defaults, sorted, `k=v` joined by `,`
 (e.g. `num_hidden_layers=16,seed=1,tokenizer=sa-bpe`; `defaults` if none). Per run, in `artifacts/runs/<run_name>/`:

@@ -14,8 +14,8 @@ arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law eta = 1.79 N^-0.713 D^0.30
 (arXiv 2503.04715 §1 Eq. 1), raises it. Alternatives: the law's lr times 2 and 4, and 8 at d8 at LONG, where Step-Law
 points; one seed per setting.
 
-Analysis, pre-registered, computed when the pretrain experiment launches (run.py lr_multiplier, from
-RESULTS/peak_lr.jsonl; it depends on the adopted tokenizer's max_tokens_per_param, so no copy is stored):
+Analysis, pre-registered, computed when a run launches (run.py lr_multiplier, from RESULTS/peak_lr.jsonl; it depends
+on the adopted tokenizer's max_tokens_per_param, so no copy is stored):
 - per setting, code bits per byte fitted as a parabola in u = ln(multiplier) (fit): its vertex u* or the grid extension
   the rule calls for;
 - the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@SHORT) against the SDE rule's and Step-Law's predictions, each over
@@ -26,13 +26,13 @@ RESULTS/peak_lr.jsonl; it depends on the adopted tokenizer's max_tokens_per_para
   factor; arXiv 2512.22382 Table 1), its exponent (horizon_exponent_net) carried to the base model's horizon range
   (every rule in play is a power law in D), and the base model's batch growth by the same rule.
 m_D,base is the base model's tokens over d24 at SHORT's, m_D,d8 d8 at LONG's over d8 at SHORT's. Batches, token counts
-and the law's lrs are the runs' recorded plans (the base model's: run.py plan_of(RunConfig()), d24 at its
-data's max_tokens_per_param).
+and the law's lrs are the runs' recorded plans (the base model's: run.py plan_of(RunConfig()), d24 at its data's
+max_tokens_per_param, RunConfig's learning_rate_scale 1.0 the law's lr).
 
 The recorded runs (RESULTS/peak_lr.jsonl, peak_lr-curves.jsonl, peak_lr.json) use an earlier record format: a run's
 fields under "fields" (n_layer, ratio, lr_scale, seed) and its setting under "setting" (depth, tokens_per_param,
 seeds); the grids: d8 at SHORT x1, 2, 4, 8, d8 at LONG x1, 2, 4, 8, d24 at SHORT x1, 2, 4, one seed each. The
-estimate is the pretrain experiment's learning_rate_scale (conf/experiment/pretrain.yaml, run.py lr_multiplier).
+estimate is every run's default learning_rate_scale (conf/run.yaml, run.py lr_multiplier).
 """
 import math
 
