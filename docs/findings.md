@@ -236,23 +236,29 @@ utilization 57% → 64–69%: separate cast passes and the transposed FP8 copies
 which at K = 768 outweigh the faster GEMMs); +8–10 GB from TE saving both the bf16 fc1 output and FP8 transposes;
 likely lost Inductor fusion around TE's graph breaks [inference]. Conclusion: FP8 does not pay at this model size.
 
-### 5.15 Optimizer screen (OptScreen, OptAdopt) — NorMuon passes, Polar Express's evaluation pending
-d16 at 20 tokens/param, 1 seed each (user-approved), each arm paired with base seed 0 (same data order). Outputs: base
-s0 matches the FimFix run within mean |Δloss| 0.0015 (median 832,695 tok/s); s1 − s0 last-200 train loss −0.0076, code
-bpb −0.0014 (8K) / −0.0016 (32K), paired Δ over the last 50% −0.0052. Same-configuration noise (NorMuon's stopped run
-vs its rerun, 3,450 common steps): 100-step window means sd 0.0005, max |Δ| 0.0010. NorMuon (arXiv 2510.05491), full
-rerun: last-200 loss 1.3223 vs 1.3244, paired Δ over the last 50% −0.0029 with all 23 windows negative, code bpb
-0.4385 / 0.4205 vs 0.4394 / 0.4212 (8K / 32K), all bpb 0.5210 / 0.5079 vs 0.5219 / 0.5087: passes the adoption rule
-(paired Δ ≤ −2× the paired noise, end bpb not worse). Polar Express (arXiv 2505.16932): last-200 loss 1.3217, paired
-Δ −0.0019, all 23 windows negative; its end-of-run evaluation ran out of GPU memory beside co-running jobs and is
-rerun from the checkpoint. Both arms' effects are smaller than the seed-to-seed difference (−0.0052; bpb −0.0014 /
-−0.0016), so with one seed each the evidence agrees with the published gains without being significant on its own.
-Cautious weight decay (arXiv 2510.12402): lower loss mid-run (−0.022 near 50%), worse at the end (last-200 +0.0108,
-code bpb +0.0023 / +0.0043; HumanEval+ 0.073/0.067 and MBPP+ 0.090/0.077 vs 0.067/0.055 and 0.074/0.061, within
-noise): closed (the paper finds the best λ unchanged under CWD). d16 tok/s: base 828.8K, NorMuon 827.5K (−0.15%),
-Polar Express 825.9K (−0.35%), CWD 818.5K (−1.25%). All three set modded-nanogpt records (NorMuon −15 steps, Polar
-Express −10 steps, CWD with an lr-tied schedule). Open: Polar Express's evaluation, the stack if both pass, and the
-landing of the adopted arms as the only implementation.
+### 5.15 Optimizer screen (OptScreen, OptAdopt) — NorMuon and Polar Express adopted; stack check at seed 1
+d16 at 20 tokens/param, 1 seed each (user-approved), each arm paired with base seed 0 (same init and data order).
+Outputs, end of run (bpb code 8K / 32K, all 8K / 32K; HumanEval+ and MBPP+ pass@1 base/plus):
+base s0 0.4394 / 0.4212, 0.5219 / 0.5087, 0.067/0.055, 0.074/0.061; base s1 0.4380 / 0.4196, 0.5205 / 0.5071,
+0.079/0.073, 0.085/0.063; NorMuon (arXiv 2510.05491) 0.4385 / 0.4205, 0.5210 / 0.5079, 0.073/0.061, 0.085/0.063;
+Polar Express (arXiv 2505.16932) 0.4385 / 0.4199, 0.5211 / 0.5076, 0.091/0.085, 0.087/0.058. Training loss, last 200
+steps: base s0 1.3244, s1 1.3168, NorMuon 1.3223, Polar Express 1.3217; paired Δ vs s0 over the last 50% of steps
+−0.0029 (NorMuon) and −0.0019 (Polar Express), negative in all 23 hundred-step windows. Both arms beat base s0 on
+every bpb measure (text and math too) by 0.0003–0.0013, with gradient norms comparable (max 4.45 / 4.46 vs 4.17) and
+no divergence. Statistics: the screen's "paired noise" (0.0006; NorMuon's stopped run vs its same-configuration
+rerun over 3,450 common steps: window sd 0.0005, max 0.0010) measures kernel nondeterminism only; an arm at the same
+seed shares init and batches but its trajectory diverges, so the relevant noise is the seed-to-seed spread of the
+treatment effect, which one seed cannot estimate (base s1 − s0: bpb −0.0014 to −0.0027, paired training-loss Δ
+−0.0052). The arms' gains are about half the seed difference; significance would need ~8 paired seeds per arm. The
+adoption rests instead on the literature (NorMuon: −11% steps vs Muon at 1.1B; modded-nanogpt measured NorMuon on
+top of Polar Express, PR #144 over #134: −15 steps over 20 runs; Polar Express −10 steps), a consistent direction on
+every measure, no sign of harm, and a small cost (d16 tok/s: base 828.8K, NorMuon 827.5K, −0.15%; Polar Express
+825.9K, −0.35%). Their interaction is untested here, so the stack runs at seed 1, paired with base s1 (interaction
+check and second-seed replication in one run; pre-registered: stack if its paired Δ over the last 50% is negative
+and code bpb not worse at 8K and 32K, else NorMuon alone). Polar Express's first end-of-run evaluation ran out of GPU
+memory beside co-running jobs and was rerun from its checkpoint. Cautious weight decay (arXiv 2510.12402): lower loss
+mid-run (−0.022 near 50%), worse at the end (last-200 +0.0108, code bpb +0.0023 / +0.0043): closed (the paper finds
+the best λ unchanged under CWD); 818.5K tok/s (−1.25%).
 
 ### 5.16 Decoder at d24 (DecoderD24, DecoderOwner) — measured, acceptance pending
 Target ≥ 2× NativeDecoder's 21.8K tok/s on the fixed-length d24 benchmark, accuracy within noise. Profile (1,024
