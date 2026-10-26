@@ -8,7 +8,7 @@ stages up to publication are text and independent of any tokenizer; the stages a
 | 1–2 | Prepare: fetch, standardize | `corpus.prepare` | `raw/<source>/`, `standardized/<source>/<k>.parquet` |
 | 3 | Curate: check, dedup, split, shards | `corpus.curate` | `checked/<source>/`, `curated/<source>/<split>/` |
 | 4 | Publish, pull | `corpus.publish push`, `pull` | `iaroy/nanochat-data` ↔ `curated/` |
-| 5 | Tokenizer | `ablations/tokenizer_split_merge.py` | `tokenizer/tokenizer.{tiktoken,pattern}` |
+| 5 | Tokenizer | `ablations/tokenizer_split_merge.py` (the arms; sa-bpe's copied) | `tokenizer/tokenizer.{tiktoken,pattern}` |
 | 6 | Tokenize | `corpus.tokenize` | `tokenized/<corpus>-<data key>/<split>.{bin,idx,json}` |
 | 7–8 | Mixture, pack, FIM | `corpus.pack` | `tokenized/<corpus>-<data key>/<split>-T<seq_len>.{pieces,rows,fim}` |
 | 9 | Load | `loader.PretrainingBatches` | micro-batches |
@@ -170,8 +170,8 @@ later commits removed a `manifest.json` and its mention in the card.
 ## 5. Tokenizer
 
 `corpus/tokenizer.py` loads the corpus's tokenizer from `CORPUS/tokenizer` (`tokenizer.tiktoken`, `tokenizer.pattern`),
-encoded by tiktoken; `ablations/tokenizer_split_merge.py` decides its split pattern and merge score and adopts it
-(`docs/ablations.md`, tokenizer_split_merge).
+encoded by tiktoken: the sa-bpe arm of `ablations/tokenizer_split_merge.py`, copied (the ablation's runs not run, user,
+Oct 26; `docs/ablations.md`, tokenizer_split_merge).
 
 - **Vocabulary: 32,768 ids** (`model/config.py` `VOCAB_SIZE`): the 256 bytes, 32,508 merges, then `<|bos|>` and the
   FIM sentinels `<｜fim▁begin｜>`, `<｜fim▁hole｜>`, `<｜fim▁end｜>` (DeepSeek-Coder's, arXiv 2401.14196 §3.1.2). SA-BPE

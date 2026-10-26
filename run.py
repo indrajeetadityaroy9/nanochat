@@ -54,9 +54,6 @@ class RunConfig:
     # times the law's peak learning rate (schedule.plan); 1.0 here is the law's own, so a run's name carries the base
     # model's multiplier, conf/run.yaml's default (lr_multiplier)
     learning_rate_scale: float = 1.0
-    muon_tau_scale: float = 1.0     # Muon matrices' tau x scale (their weight decay / scale; train/optim.py)
-    # AdamW groups' learning rate x scale, their weight decay / scale (decay timescale held)
-    adamw_learning_rate_scale: float = 1.0
     # output logits cap * tanh(logits / cap), cap 15 as karpathy/nanochat 92d63d4 gpt.py:511-515; None: no cap
     # (model/modeling.py)
     final_logit_softcapping: float | None = 15.0
@@ -130,7 +127,6 @@ def training(config: RunConfig, run: "RunPlan") -> None:
 
     model = meta_model(config.num_hidden_layers, config.final_logit_softcapping)
     train(model=model, run=run, tokenizer_path=tokenizer_path(config), seed=config.seed,
-          muon_tau_scale=config.muon_tau_scale, adamw_learning_rate_scale=config.adamw_learning_rate_scale,
           checkpoints=checkpoint_steps(config, run), run_name=run_name(config), config=asdict(config))
 
 

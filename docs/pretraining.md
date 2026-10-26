@@ -84,8 +84,8 @@ The corpus, its mixture and its two stages are specified in `docs/corpus.md`; th
 code:text:math 87:10:3 in both stages; an 8,192-token file stage, then a 32,768-token repository stage over the last
 `mixture.REPO_LEVEL_SHARE` (5.45%) of steps (Qwen2.5-Coder, arXiv 2409.12186 §3.2); 102.6B tokens in all
 (`mixture.MAX_STEPS` × `BATCH_SIZE`), what the curated corpus holds without any stage reading a document twice. A run's
-`tokens_per_param` defaults to its data's `train/stages.py` `max_tokens_per_param`. The tokenizer is decided by
-`docs/ablations.md`, tokenizer_split_merge.
+`tokens_per_param` defaults to its data's `train/stages.py` `max_tokens_per_param`. The tokenizer is sa-bpe (the
+tokenizer ablation's runs not run, user, Oct 26; `docs/ablations.md`, tokenizer_split_merge).
 
 ## Regime
 
@@ -260,17 +260,15 @@ then, after logging in again (docker group), each through `scripts/container.sh`
    ablations.tokenizer_split_merge vocabularies`, `intrinsic`, `data`. An arm's extent margin
    (`results/tokenizer_split_merge-intrinsic.json`) below 1 means a group
    read in part is too small for it: raise `mixture.SPREAD`, then prepare, curate and publish again on the GB10.
-2. **Recipe ablations and tokenizer decision** (the user's approval): `python run.py experiment=<name>` for
-   `muon_wd_timescale_20tpp`, `muon_wd_timescale_200tpp`, `tokenizer_split_merge`, `adamw_group_lr` (records in `results/<name>.*`; runs in
-   `artifacts/runs/<run_name>/`).
-3. **Adopt the tokenizer**: `python -m ablations.tokenizer_split_merge adopt` writes the decided vocabulary to `CORPUS/tokenizer`
-   (over any provisional one); every later step reads it.
-4. **Tokenize**: `python -m corpus.tokenize`, ending with the 32K stage's repository partitions
+2. **The corpus's tokenizer**: the sa-bpe arm's `tokenizer.tiktoken` and `tokenizer.pattern` copied from
+   `CORPUS/tokenizer-ablation/sa-bpe/` to `CORPUS/tokenizer` (the tokenizer ablation's runs and the D6/D7 recipe
+   ablations not run, user, Oct 26; `docs/ablations.md`); every later step reads it.
+3. **Tokenize**: `python -m corpus.tokenize`, ending with the 32K stage's repository partitions
    (`tokenize.tokenize_repo_level_stage`).
-5. **Pack**: `python -m corpus.pack`; it stops naming any source that holds fewer rows than its draw.
-6. **Smoke**: the first micro-batches of both stages (`loader.PretrainingBatches` at the stages' weights), decoded;
+4. **Pack**: `python -m corpus.pack`; it stops naming any source that holds fewer rows than its draw.
+5. **Smoke**: the first micro-batches of both stages (`loader.PretrainingBatches` at the stages' weights), decoded;
    each step's group composition and FIM share.
-7. **Train** (the user's approval): `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'`.
+6. **Train** (the user's approval): `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'`.
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored, created by
 `scripts/setup.sh`) holds `corpus/`, `runs/<run_name>/` and `cache/`; `results/` (tracked) holds the data the paper's
@@ -515,10 +513,9 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
   micro-batch and repository-stage share, `publish.py` the dataset, `train_tokenizer.py` the tokenizer's sample and
   trainer); `crate/`, its Rust crate (`native.py`): the SA-BPE trainer (and frequency BPE), repository samples and
   the packer.
-- `ablations/`: one module per experiment, named as it, each with its pre-registered `analysis` (`peak_lr.py`,
-  `tokenizer_split_merge.py` (the tokenizer ablation),
-  `adamw_group_lr.py`, `muon_wd_timescale.py`); `contrast.py` (the pre-registered tests and adoption rules they decide
-  by), `records.py` (an experiment's records in `results/`).
+- `ablations/`: one module per experiment, named as it (`peak_lr.py` with its pre-registered `analysis`;
+  `tokenizer_split_merge.py`, the tokenizer ablation's vocabularies, intrinsic measures and data), `records.py` (an
+  experiment's records in `results/`).
 - `docs/`: `pretraining.md` (this document), `corpus.md` (the corpus's specification), `ablations.md`.
 - `scripts/`: `setup.sh`, `container.sh`, `release.sh`. `docker/Dockerfile`: the image. `results/`: the records.
 

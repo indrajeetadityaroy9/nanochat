@@ -1,20 +1,21 @@
 # Ablations
 
 One pre-registered experiment per recipe decision the literature does not settle. Code: `ablations/<experiment>.py`
-(each module's docstring holds its rule), `ablations/contrast.py` (the shared tests), `ablations/records.py` (the
-records); arms in `conf/experiment/<experiment>.yaml`. Records in `results/`. No experiment runs without the user's
+(each module's docstring holds its rule), `ablations/records.py` (the records); arms in
+`conf/experiment/<experiment>.yaml`. Records in `results/`. No experiment runs without the user's
 approval. The corpus and its dataset: `docs/corpus.md`.
 
 | Experiment | Decides | Setting | Runs | State |
 |---|---|---|---|---|
 | `peak_lr` | the base model's peak lr multiplier | d8 at 5 and 200, d24 at 5 | 11 | done |
-| `muon_wd_timescale_20tpp` | Muon's weight-decay timescale (at 20) | d16 at 20, sa-bpe data | 3 × 2 seeds | stopped after 3 runs (user: the τ law on literature; `docs/findings.md` §5.23) |
-| `muon_wd_timescale_200tpp` | Muon's timescale law (with the 20 result) | d8 at 200, corpus tokenizer's data | 3 × 2 seeds | not run (user; §5.23) |
-| `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | intrinsic and data done; runs not run (user: sa-bpe stays; §5.23) |
-| `adamw_group_lr` | the AdamW groups' lr | d16 at sa-bpe's `max_tokens_per_param` | 3 × 2 seeds (× 1 shared) | ×¼/×4 not run; the scalar-lr arm ran once (user): not adopted (`ACTIONS.md` D6 row) |
+| `muon_wd_timescale_20tpp` | Muon's weight-decay timescale (at 20) | d16 at 20, sa-bpe data | 3 × 2 seeds | stopped after 3 runs (user, Oct 26: the τ law kept on literature; `docs/findings.md` §5.23); code removed |
+| `muon_wd_timescale_200tpp` | Muon's timescale law (with the 20 result) | d8 at 200, corpus tokenizer's data | 3 × 2 seeds | not run (user, Oct 26; §5.23); code removed |
+| `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | intrinsic and data done; runs not run (user, Oct 26: sa-bpe stays; §5.23); runs, decision and `adopt` removed |
+| `adamw_group_lr` | the AdamW groups' lr | d16 at sa-bpe's `max_tokens_per_param` | 3 × 2 seeds (× 1 shared) | ×¼/×4 not run (user, Oct 26); the scalar-lr arm ran once: not adopted (`ACTIONS.md` D6 row); code removed |
 
 Run order (`ACTIONS.md` §0 Open): `pretrain` (its own approval). The others were run, stopped or not run
-(`docs/findings.md` §5.23).
+(`docs/findings.md` §5.23); their experiments, knobs (`muon_tau_scale`, `adamw_learning_rate_scale`) and
+`ablations/contrast.py` are removed, and their designs below stay as the record.
 
 ## Method
 
@@ -47,7 +48,7 @@ Run order (`ACTIONS.md` §0 Open): `pretrain` (its own approval). The others wer
 - **Error bars** (`metrics.measure_errors`; Miller, arXiv 2411.00640): bits per byte by the val rows' weighted ratio
   (statsmodels WLS, HC1); shares and pass@1 by their CLT standard error over problems (Eq. 1).
 
-### Shared tests (`ablations/contrast.py`)
+### Shared tests (were `ablations/contrast.py`; removed with the experiments that used them, Oct 26)
 
 An arm against its baseline over the seeds where both have an evaluation, `ALPHA` = 0.05:
 
@@ -61,9 +62,6 @@ An arm against its baseline over the seeds where both have an evaluation, `ALPHA
   per parameter (two configurations × data seeds 0–2) on the reference tokenizer's data, assumed to carry to other
   depths and to the corpus; those runs' records are not in `results/`. Margin: 0.0067 at n = 2, 0.0047 at n = 4.
 - **`adopted`:** code better and parsing not worse.
-- **`scaled`** (a scale swept over {low, 1, high}): the vertex of the exact 3-point quadratic in ln(scale) through the
-  arms' mean code, clamped to [low, high] (a concave or flat fit: the lower-code end); adopted iff the lower-code end
-  is `adopted` against × 1, else 1.
 
 ### Records
 
@@ -117,28 +115,25 @@ The records were written in an earlier format (a run's fields under `fields`: `n
 its setting under `setting`), on data no longer published (`docs/corpus.md`); `results/peak_lr.json` holds that
 format's paired differences, not the vertices, which `fit` computes from the `.jsonl`.
 
-## muon_wd_timescale
+## muon_wd_timescale (stopped after 3 runs; removed)
 
-**Varies.** Muon's weight-decay EMA timescale × ½ and × 2 (its weight decay × 2 and × ½) under the τ law
+**Varied.** Muon's weight-decay EMA timescale × ½ and × 2 (its weight decay × 2 and × ½) under the τ law
 (`train/optim.py` `tau_weight_decay`; Power Lines, arXiv 2505.13738, fit with AdamW; its App. B extends the EMA view to
-decoupled-decay optimizers), AdamW's untouched (`muon_tau_scale`).
+decoupled-decay optimizers), AdamW's untouched.
 
-**Arms.** {½, 1, 2} × seeds 0, 1, in two experiments:
-- `muon_wd_timescale_20tpp`: d16 at 20 tokens per parameter on the sa-bpe arm's data;
-- `muon_wd_timescale_200tpp`: d8 at 200 on the corpus tokenizer's data (d8 at 200 reads 2.94B tokens, beyond the
-  sa-bpe set's 2.11B; d16 at 200 would read 13.4B, six runs ~29 GPU-h against ~2 h; `ACTIONS.md` §0).
+**Arms.** {½, 1, 2} × seeds 0, 1, in two experiments: d16 at 20 tokens per parameter on the sa-bpe arm's data; d8 at
+200 on the corpus tokenizer's data. Rule: per setting the scale's 3-point vertex in ln(scale), adopted iff its end
+beat × 1 by the shared tests; Muon's own law through both points unless both were 1.
 
-**Rule.** Per setting, m = `scaled` over {½, 1, 2} (`analysis`). `law` (the 200 half): if m_20 = m_200 = 1 the τ law
-stays for Muon; else Muon's own law through both points, τ* = c·TPP^e with c = `TAU_C`·m_20·20^-D, e = `TAU_E` + D,
-D = ln(m_200/m_20)/ln 10. The two points' depths differ, so the law takes m as independent of depth between d8 and d16
-(Power Lines' τ is a function of TPP alone, arXiv 2505.13738 §2.3).
-
-**State.** Waits.
+**State.** Stopped after τ×½ seeds 0, 1 and τ×1 seed 0 (user, Oct 26): the τ law stays for Muon on the literature
+(`docs/findings.md` §5.23). The experiments, `ablations/muon_wd_timescale.py` and `RunConfig.muon_tau_scale` are
+removed; Muon's weight decay is the τ law's.
 
 ## tokenizer_split_merge
 
-Decides the split pattern and merge score of the corpus's tokenizer. Code: `ablations/tokenizer_split_merge.py`
-(`python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack|adopt`, then the runs), over
+Was to decide the split pattern and merge score of the corpus's tokenizer; its runs were not run (user, Oct 26), so
+the corpus's tokenizer stays sa-bpe. Code: `ablations/tokenizer_split_merge.py`
+(`python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack`), over
 `corpus/train_tokenizer.py` (sample, trainer). Each step's record holds its provenance (commit, host, packages) and
 timings.
 
@@ -148,8 +143,7 @@ timings.
 | `intrinsic` | the arms' tokenized val splits; `results/tokenizer_split_merge-intrinsic.json` | done (`ebd8058`) |
 | `data` | each arm's tokenized and packed training set; `results/tokenizer_split_merge-data.json` | done (`ba01bb5`) |
 | `repack` | each arm's packs again from its tokenized splits (after a packer change); the data record's arms | done with FIM's line-start rule |
-| runs | `results/tokenizer_split_merge.{jsonl,json}` | waits |
-| `adopt` | `CORPUS/tokenizer` | after the runs |
+| runs, decision, `adopt` | | not run (user, Oct 26); removed |
 
 ### Fixed across arms
 
@@ -329,39 +323,27 @@ so they never bind. Whole shards hold more than the draw:
 | hybrid | 31.49 | 7,167 | 6,776 |
 | bpe | 31.42 | 7,151 | 6,761 |
 
-### Runs and decision
+### Runs and decision (not run; removed)
 
-**Runs:** 4 arms × seeds 0, 1 at d16, each at its `max_tokens_per_param` (equal bytes: each reads the set's code
-documents once; text and math by rows), so a better compressor trains on fewer tokens and steps. Contexts 8,192 and
-32,768; `offset_bpb` reports bits per byte by byte offset, the context a better compressor sees (arXiv 2503.13423
-§3.1, App. B.1).
-
-**Decision** (`analysis`; each challenger against sa-bpe by the shared tests; `-json` `"analysis" "decision"`):
-- the control gates: unless sa-bpe-fused parses worse, keep sa-bpe's pattern and score;
-- else a challenger qualifies iff it is worse on neither test and better on one (sa-bpe-fused, worse, never does);
-- pattern: the hybrid's iff it qualifies, else `SPLIT_PATTERN`;
-- score: frequency iff bpe qualifies, or ties on both and leaves fewer merged tokens read < 100 times than sa-bpe;
-  else F·ln R. With 84 against 54, frequency needs bpe to qualify.
-
-**`adopt`** writes the decided vocabulary to `CORPUS/tokenizer` over the provisional one (the sa-bpe arm's copy): the
-matching arm's files, or, for the frequency score on the hybrid's pattern (no arm), that pair trained on the sample.
-Tokenized and packed data are keyed by the vocabulary's data key, so adopting sa-bpe reuses the provisional corpus.
+The design, kept as the record: 4 arms × seeds 0, 1 at d16, each at its `max_tokens_per_param` (equal bytes), decided
+by the shared tests against sa-bpe with sa-bpe-fused as the positive control, then `adopt` of the decided vocabulary.
+Not run (user, Oct 26; `docs/findings.md` §5.23): sa-bpe stays, `CORPUS/tokenizer` is its copy. The experiment's
+yaml and the module's `analysis` and `adopt` are removed.
 
 **Limits.** One draw, one vocabulary size; two seeds at d16; the post's evidence is one ~1.27B model with 128K–131K
 ids, mostly on MBPP; σ from d8 runs on other data; the control's effect documented up to 50% code; document units of
 non-repository text untested; the hybrid changes three clauses at once.
 
-## adamw_group_lr
+## adamw_group_lr (not run; removed)
 
-**Varies.** The AdamW groups' (tables, `lm_head`, vectors) lr × ¼ and × 4 at their decay timescale, Muon's untouched
-(`adamw_learning_rate_scale`). Pre-training uses one lr for every group; karpathy/nanochat 92d63d4 uses per-group lrs.
+**Varied.** The AdamW groups' (tables, `lm_head`, vectors) lr × ¼ and × 4 at their decay timescale, Muon's untouched.
+Pre-training uses one lr for every group; karpathy/nanochat 92d63d4 uses per-group lrs.
 
-**Arms.** {¼, 1, 4} × seeds 0, 1, d16 on the sa-bpe arm's data at its `max_tokens_per_param`; × 1 is the tokenizer
-ablation's sa-bpe runs (same run names), so 4 runs train.
+**Arms.** {¼, 1, 4} × seeds 0, 1, d16 on the sa-bpe arm's data at its `max_tokens_per_param`; rule: the scale's
+3-point vertex, adopted iff its end beat × 1 by the shared tests.
 
-**Rule.** `scaled` over {¼, 1, 4}: `adamw_learning_rate_scale` the adopted scale, else one lr for all groups.
-
-**State.** Waits for the tokenizer runs.
+**State.** Not run (user, Oct 26). The experiment, `ablations/adamw_group_lr.py` and
+`RunConfig.adamw_learning_rate_scale` are removed; the AdamW groups train at the peak lr.
 
 ## References
 

@@ -69,8 +69,7 @@ the compute of the scaling plan, not an MFU numerator.
 Decoding latency as vLLM's benchmark reports it (vllm/benchmarks/serve.py calculate_metrics): time to first token from
 the request taking a decoder slot, time per output token after the first, end-to-end latency, output tokens per second.
 
-Fits (parabola_vertex): the vertex of a least-squares parabola, the optimum of a sweep (ablations/peak_lr.py,
-ablations/contrast.py scaled).
+Fits (parabola_vertex): the vertex of a least-squares parabola, the optimum of a sweep (ablations/peak_lr.py).
 """
 import difflib
 import json

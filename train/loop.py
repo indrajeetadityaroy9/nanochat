@@ -28,15 +28,15 @@ from train.schedule import RunPlan, lr_lambda
 from train.stages import stage_batches
 
 
-def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muon_tau_scale: float,
-          adamw_learning_rate_scale: float, checkpoints: frozenset[int], run_name: str, config: dict) -> None:
+def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, checkpoints: frozenset[int],
+          run_name: str, config: dict) -> None:
     """Train (or resume) run `run_name` of `model` (shapes on the meta device, at FILE_LEVEL_STAGE's context) by the
     plan `run` (schedule.plan at the caller's peak learning rate) on the packed data of the tokenizer in directory
     `tokenizer_path` (corpus/tokenizer.py get_tokenizer): initialization and data order by `seed`, decoupled weight
-    decay by the tau law at the run's learning rate (optim.tau_weight_decay; Muon's and AdamW's by optim.optimizers'
-    scales), each update clipped (optim.update), the stages by run.stage_at; `config` (run.py RunConfig as a dict)
-    and the tokenizer's data key recorded with the run. A checkpoint after each step count in `checkpoints`
-    (run.max_steps among them: the final model); a run resumes from its newest."""
+    decay by the tau law at the run's learning rate (optim.tau_weight_decay), each update clipped (optim.update), the
+    stages by run.stage_at; `config` (run.py RunConfig as a dict) and the tokenizer's data key recorded with the run.
+    A checkpoint after each step count in `checkpoints` (run.max_steps among them: the final model); a run resumes
+    from its newest."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer(tokenizer_path)
     model.to_empty(device=device)
@@ -47,8 +47,7 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, muo
         p.grad = torch.zeros_like(p)
     opts = optimizers(model, lr=run.learning_rate,
                       weight_decay=tau_weight_decay(lr=run.learning_rate, steps=run.max_steps,
-                                                    tokens_per_param=run.tokens_per_param),
-                      muon_tau_scale=muon_tau_scale, adamw_learning_rate_scale=adamw_learning_rate_scale)
+                                                    tokens_per_param=run.tokens_per_param))
     saved = [s for s in sorted(checkpoints) if checkpoint_path(run_name, s).exists()]
     start_step = stage_rows = 0
     if saved:  # resume: weights into the optimizers' parameters, then optimizer state
