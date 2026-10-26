@@ -9,7 +9,7 @@ or depth transfer is assumed; its parameterisation is standard, not muP) at SHOR
 optimum's horizon trend measured at d8 between SHORT and LONG, assumed width-independent (arXiv 2409.19913
 §4 finds its horizon exponent beta size-independent only for models of at least 760M parameters, larger for smaller
 ones). The published rules disagree on the trend's direction: Complete^(d)P's AdamW SDE rule eta ∝ sqrt(m_B / m_D), for
-batch ratio m_B and token ratio m_D (arXiv 2512.22382 Table 1, §2.3), lowers the lr with the horizon, as
+batch ratio m_B and token ratio m_D (arXiv 2512.22382 §2.1 Table 1), lowers the lr with the horizon, as
 arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law eta = 1.79 N^-0.713 D^0.307, fit over AdamW models
 (arXiv 2503.04715 §1 Eq. 1), raises it. Alternatives: the law's lr times 2 and 4, and 8 at d8 at LONG, where Step-Law
 points; one seed per setting.

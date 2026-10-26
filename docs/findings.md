@@ -1,9 +1,10 @@
 # Findings (working notes for the paper)
 
 One entry per agent execution: the question, the method, the measured outputs and the conclusion, with the commits
-that carry it. §1–§4 state the model, training, evaluation and hardware setup as built; §5 is the execution log,
-newest last. Numbers are measurements on the GH200 (one H100 96 GB, 72 Grace cores) on the real corpus unless marked
-[estimate]. Open items say so.
+that carry it. §1–§4 state the model, training, evaluation and hardware setup as built (master `c265fdd`); "Design
+decisions and their evidence" holds each design choice with its evidence; §5 is the execution log, newest last.
+Numbers are measurements on the GH200 (one H100 96 GB, 72 Grace cores) on the real corpus unless marked [estimate];
+derived numbers (parameter counts, FLOPs, plans) are computed from master's code on CPU.
 
 ## 1. Model architecture (as built, `model/modeling.py`)
 
@@ -11,67 +12,112 @@ karpathy/nanochat 92d63d4 `gpt.py` with the wins of its experiment log and learn
 
 | Component | Choice | Source |
 |---|---|---|
-| Embedding | RMS-normed token embedding, no positional embedding | 92d63d4 `gpt.py` |
+| Embedding | RMS-normed token embedding, no positional embedding | 92d63d4 `gpt.py:57-65` |
 | Residual | per layer x = resid_λ·x + x0_λ·x0, x0 the normed embedding | nanochat LOG 2026-01-11 |
-| Attention | MHA, head_dim 128; per-head RMS norm with a learned per-dimension weight shared across heads, then RoPE over the full head (θ = 1e6, rotation by −θ) | transformers `modeling_qwen3.py`; arXiv 2309.14322 §3.2.5 |
+| Attention | MHA, head_dim 128; per-head RMS norm with a learned per-dimension weight shared across heads, then RoPE over the full head (θ = 10^6, rotation by −θ) | transformers `modeling_qwen3.py`; arXiv 2309.14322 §3.2.5; QK gains: Design decisions D4; base: D9 |
 | Windows | SSSL: every fourth layer and the last see the full context, the others 512 keys before the query | nanochat LOG 2026-01-11; Gemma 3, arXiv 2503.19786 §5.2 |
-| Value embeddings | alternating layers (the last included), added to V behind a per-head gate 2σ(·) of the normed stream, zero init | modded-nanogpt record #14; MoVE LaVE, arXiv 2601.22887 §4.1 Eq. 6 |
+| Value embeddings | alternating layers (the last included): a per-layer token-indexed table added to V behind a per-head gate 2σ(W_g·) of the normed stream, W_g zero-initialised (gate 1) | modded-nanogpt record #14; MoVE LaVE, arXiv 2601.22887 §4.1 Eq. 6 |
 | MLP | ReLU², hidden 4C (SwiGLU worse at d12/d24 in nanochat's log) | nanochat LOG 2026-02-05 |
-| Norms, linears | gain-free RMS norm (eps = FLT_EPSILON), bias-free linears, untied lm_head | modded-nanogpt record #8 |
-| Output | plain cross entropy on logits capped c·tanh(z/c), c = 15 (adopted on the literature, §5.22, §5.24) | Gemma 2; modded-nanogpt; nanochat 92d63d4 |
-| Attention kernel | FlashAttention-4 (CuTe DSL) with document masking (varlen) | — |
+| Norms, linears | gain-free RMS norm (eps = FLT_EPSILON), bias-free linears, untied lm_head | 92d63d4 `gpt.py` |
+| Initialization | matrices and tables uniform with std C^−0.5; zero: o_proj, down_proj (record #5), lm_head (record #8), VE gates, x0_λ; one: resid_λ, QK-norm weights; each tensor seeded by the run's seed and crc32 of its name | `CausalLM.init_weights` |
+| Output | cross entropy on logits capped c·tanh(z/c), c = 15 (`RunConfig.final_logit_softcapping`; Design decisions D5), in training, evaluation losses and decoding | Gemma 2, arXiv 2408.00118 §2; 92d63d4 `gpt.py:511-515` |
+| Loss kernel | QuACK's scaled-exp linear cross entropy per 8,192-row chunk (`LCE_CHUNK`), the cap's tanh and its derivative fused into the logits GEMM's epilogue (`067e60b`, `e24333d`); evaluation losses by QuACK's `lse_target_epi` (capped: 8,192-row fp32 chunks) | `model/ops/cross_entropy.py` |
+| Attention kernel | FlashAttention-4 (CuTe DSL), varlen document masking; window layers: persistent forward and bf16 dQ (`0e627ff`); o_proj inside the op, FA4's dpsum from its dX epilogue and `fa4_rows.cu` in place of FA4's preprocess (`db1e90e`) | `model/ops/flash_attn.py`; ProLong, arXiv 2410.02660 |
+| GEMMs | QuACK at fixed per-width tile configurations (`CONFIGS`, no run-time autotuning, `fb86efc`); one fused q/k/v GEMM (`70025d8`); the gain-free norm as a row scale (rstd) in the epilogues, ReLU² and the saved activation in the up-projection's epilogue (`373b549`, `6299e84`); dW by cuBLAS addmm (β = 1) into the fp32 `.grad`, the forward on bf16 weight copies refreshed per update (`f499be7`) | `model/ops/linear.py` |
+| Precision | fp32 parameters, bf16 activations; gradients not bitwise reproducible (FA4's and the embedding backward's atomics) | `model/modeling.py` |
 | Vocabulary | 32,768 ids: 256 bytes, 32,508 merges, BOS, three DeepSeek-Coder FIM sentinels | `docs/corpus.md` §5 |
 
-Shape rule (92d63d4 `scripts/base_train.py`): width = 30 × depth rounded up to whole 128-wide heads.
+Shape rule (92d63d4 `scripts/base_train.py:51-52, 131-134`): width = 30 × depth (MobileLLM-350M's 32 × 960, arXiv
+2402.14905 Table 9) rounded up to whole 128-wide heads. Counts from `model/modeling.py` (CPU, meta device):
+non-embedding parameters (`num_non_embedding_params`: decoder layers + lm_head, what the token budget scales with), all
+parameters (adding the token table and the value-embedding tables), and DeepSeek LLM's M
+(`non_embedding_flops_per_token`, Eq. 2, at the file-level context 8,192; 32K in parentheses).
 
-| Model | Layers | Hidden | Heads | Non-embedding params |
-|---|---|---|---|---|
-| d8 | 8 | 256 | 2 | 14.7M (tokens at 20 tokens/param: 0.294B) |
-| d16 | 16 | 512 | 4 | 67.1M |
-| d24 (base model) | 24 | 768 | 6 | 195.1M |
+| Model | Layers | Hidden | Heads | VE tables | Non-embedding params | All params | M per token |
+|---|---|---|---|---|---|---|---|
+| d8 | 8 | 256 | 2 | 4 | 14,684,160 | 56,627,216 | 0.239G (0.843G) |
+| d16 | 16 | 512 | 4 | 8 | 67,129,344 | 218,124,320 | 1.107G (3.523G) |
+| d24 (base model) | 24 | 768 | 6 | 12 | 195,096,576 | 522,252,336 | 2.831G (8.267G) |
 
-Serving without architecture change (§5.8): an out-of-tree vLLM model needs only weight and config conversions —
-RoPE −θ folded into the q/k norm weights (negate their second half), HF/vLLM `sliding_window` = 513 for 512 keys
-before the query, rms_norm_eps = FLT_EPSILON.
+PaLM's nominal model FLOPs per token (`metrics.model_flops_per_token`, 6N + 12·C·Σ attended keys, N the matmul
+weights): d24 1.708G at 8K, 3.067G at 32K (d16 0.642G / 1.246G, d8 0.148G / 0.299G).
+
+Serving without architecture change: `inference/export_hf.py` writes a Hugging Face directory whose
+`modeling_nanochat.py` (trust_remote_code) transformers and vLLM's Transformers backend load: the −θ rotation computed
+by the model file itself, Gemma 3-style `layer_types` with `sliding_window` = 513 (512 keys before the query plus its
+own), rms_norm_eps = FLT_EPSILON. The earlier out-of-tree vLLM model (§5.8) was removed in `7794e2f` (§5.20).
 
 ## 2. Training setup
 
 - **Data**: `iaroy/nanochat-data` (private), shards committed at `a4ec1a08` ("nanochat corpus, curated", 2026-10-24):
-  19 sources, 1,812 parquet shards, 160,061,439,381 bytes; the local copy passes `hf cache verify` (1,812 checked,
-  revision `b091cb47`). Tokenized, then packed per stage (`corpus/pack.py`).
-- **Stages**: file level at 8,192 tokens, then repository level at 32,768 tokens (`corpus/mixture.py`); micro-batch
-  98,304 tokens. d24 plan: 69,611 steps × 1,474,560 tokens = 102.6B tokens (97.05B at 8K, 5.60B at 32K).
-- **FIM** (train splits of repository code): rate 0.5 per piece; middles 90% AST (Single-Node / Aligned-Span 50/50),
-  10% random character spans (arXiv 2506.00204 §3.3, §5.1); PSM/SPM 50/50 (arXiv 2207.14255); a line-initial AST
-  middle takes its indentation with probability 0.5 (§5.3).
-- **Optimizer**: Muon on matrices (batched Newton–Schulz) and AdamW groups, β = (0.9, 0.95), gradient clip 1.0;
-  weight decay by the τ law, τ* = 1.084·TPP^−0.527 (Power Lines, arXiv 2505.13738); peak learning-rate multiplier
-  from the `peak_lr` ablation (2.7970).
-- **Throughput metric**: MFU = executed model FLOPs (causal, per document, per window) / (seconds × 989.4 TFLOP/s);
-  the nominal count (DeepSeek's M) exceeds 100% "utilization" at 32K and is kept as the plan's compute only.
+  18 sources, 1,812 parquet shards, 160,061,439,381 bytes; the local copy passes `hf cache verify` (1,812 checked,
+  revision `b091cb47`). Tokenized, then packed per stage (`corpus/pack.py`); `docs/corpus.md` owns the details.
+- **Stages**: file level at 8,192 tokens, then repository level at 32,768 tokens for the last
+  `REPO_LEVEL_SHARE` = 0.3/5.5 of the steps (`corpus/mixture.py`; Qwen2.5-Coder, arXiv 2409.12186 §3.2); micro-batch
+  98,304 tokens.
+- **Plan** (`train/schedule.py` `plan`): tokens = round(TPP × non-embedding params); C = M·tokens; batch
+  B_opt = 0.2920·C^0.3271 in whole micro-batches, peak lr η_opt = 0.3118·C^−0.1250 (DeepSeek LLM, arXiv 2401.02954
+  §3.1 Eq. 1) times `learning_rate_scale`, whose default (`conf/run.yaml`) is `run.py` `lr_multiplier`:
+  `ablations/peak_lr.py` `analysis` over `results/peak_lr.jsonl`, 2.7970369. TPP defaults to `train/stages.py`
+  `max_tokens_per_param` (the most the packs hold without rereading a document). Derived on CPU from master and the
+  corpus packs (`CORPUS/tokenizer`: sa-bpe, the corpus's tokenizer):
+
+| Run | TPP | Micro-batches | Steps | Repo-level start | Tokens | Peak lr | Weight decay |
+|---|---|---|---|---|---|---|---|
+| d24 base | 526.127 | 15 | 69,611 | 65,814 | 102.65B (97.05B at 8K, 5.60B at 32K) | 2.4136e-3 | 0.1492 |
+| d16 at 20 | 19.998 | 3 | 4,552 | 4,304 | 1.342B | 4.6671e-3 | 0.2105 |
+| d8 at 20 | 19.997 | 1 | 2,987 | 2,824 | 0.294B | 6.8355e-3 | 0.2191 |
+| d8 at 200 | 199.99 | 2 | 14,937 | 14,122 | 2.937B | 5.1259e-3 | 0.1966 |
+
+  The d24 law lr at ×1 is 8.629e-4. `corpus/mixture.py` sizes the stages' token budgets with `MAX_STEPS` = 69,580
+  (D1's plan at the 102.6B-token budget the corpus was built for, Design decisions D1); the plan on the corpus packs
+  is 69,611 steps (+0.04%), whose stage draws `stage_batches` checks against the packs.
+- **Schedule** (`lr_lambda`): linear warmup over 2/(1 − β2) = 40 steps (arXiv 1910.04209), then linear decay to zero
+  through the repository stage (arXiv 2502.15938; D2); the last step trains at 1/(steps − 40) of peak (D10).
+- **Optimizer** (`train/optim.py`): Muon on the decoder layers' matrices (q/k/v/o, up/down, VE gates) —
+  `torch.optim.Muon`'s update (momentum 0.95, Nesterov, 5 Newton–Schulz steps with PyTorch's coefficients) batched by
+  shape, NorMuon's per-row normalization (arXiv 2510.05491; β2 0.95, eps 1e-10), scaled to AdamW's update RMS
+  (`match_rms_adamw`, 0.2·√max(fan_out, fan_in), Moonlight arXiv 2502.16982 §2.2); fused AdamW on the token table,
+  the VE tables and lm_head (decayed) and the 1-D parameters (QK-norm weights, resid_λ, x0_λ; not decayed),
+  β = (0.9, 0.95), PyTorch's eps. One peak lr and one weight decay for every group (D6). Weight decay by the τ law:
+  1/(lr·wd) = τ*·steps, τ* = 1.084·TPP^−0.527 (Power Lines, arXiv 2505.13738 App. E.3.1; D7). The accumulated
+  gradient's global norm is clipped to 1.0 before both optimizers (DeepSeek LLM §2.3; D3).
+- **Throughput metric**: MFU = executed model FLOPs (`metrics.executed_model_flops`: 6N per position + 12·C per
+  attended key per layer, causal, per document, per window) / (seconds × 989.4 TFLOP/s); the nominal count (DeepSeek's
+  M) exceeds 100% "utilization" at 32K and is kept as the plan's compute only.
 
 ## 3. Evaluation methodology
 
-- **Benchmarks**: HumanEval+ and MBPP+ (EvalPlus `26d6d00`, greedy, 768 new tokens, EvalPlus prompts and stops,
-  scored by `evalplus.evaluate`); MultiPL-E HumanEval/MBPP C++ (dataset pin `3a9e8d2`, T = 0.2, top-p 0.95, 20
-  samples, MultiPL-E's judge with `--max-workers 1`, `pass_k.py`); HumanEval infilling single-line / multi-line /
-  random-span in PSM and SPM (openai/human-eval-infilling, `check_correctness`); code bits per byte at 8K and 32K on
-  packed val splits with the training forward; parse rates.
+- **Benchmarks** (`eval/code_eval.py`): HumanEval+ and MBPP+ (EvalPlus `26d6d00`, greedy, 768 new tokens, EvalPlus
+  prompts and stops, scored by `evalplus.evaluate`); MultiPL-E HumanEval/MBPP C++ (dataset pin `3a9e8d2`, T = 0.2,
+  top-p 0.95, 20 samples, MultiPL-E's judge with `--max-workers 1`, `pass_k.py`); HumanEval infilling single-line /
+  multi-line / random-span in PSM and SPM (openai/human-eval-infilling, `check_correctness`); likelihoods
+  (`eval/bpb.py`): code bits per byte at 8K and 32K on packed val splits with the training forward and the benchmarks'
+  reference-solution bits (arXiv 2412.04403 §2.2); parse rates of healed greedy completions. Ablation runs evaluate
+  likelihoods and parse rates only (`generate: parse`); the base model every benchmark (`generate: benchmarks`).
 - **FIM protocol**: middles scored as generated (official); the reference-line cut is a separate record
   (`greedy_reference_lines`).
-- **Decoding**: NativeDecoder (`model/kernels/decode.cu`: continuous batching, prefix store, batched prefill, CUDA
-  graphs) for every pass; syntax-constrained ("filtered") passes with a Rust/LR mask over Python 3.12 syntax and a
-  verifier search (pyright, examples under `reliability_guard`, g++ `-fsyntax-only`).
+- **Decoding**: NativeDecoder (`inference/decoder.py`, `model/kernels/decode.cu`: continuous batching, a prompt store
+  reusing a prompt's K/V, batched prefill, CUDA graphs; an e4m3 KV cache with one fp32 scale per position and head,
+  otherwise the compiled forward's numerics op by op, the residual mix included, `ca18db5`) for every pass;
+  syntax-constrained ("filtered") passes with a complete Python 3.12 constraint (Rust crate `inference/syntax/`:
+  CPython's tokenizer as a lexer, an LALR(1) viable-prefix parser) and a verifier search over at most 10 samples
+  (`eval/verify.py`: ast.parse and basedpyright, the prompt's examples under EvalPlus's `reliability_guard`, g++
+  `-fsyntax-only`).
 - **Pipeline**: scoring runs on CPU pools while the GPU runs the next pass; decodes merged per mode (`a41415e`).
-- **Standard-protocol cross-check**: the unmodified EvalPlus and MultiPL-E CLIs through vLLM on an exported checkpoint
-  (`scripts/standard_eval.sh`).
-- **Statistics** (`metrics.py`): pass@k (Codex estimator), Miller CLT, clustered and paired errors (statsmodels),
-  Wilson intervals; CrossCodeEval exact match, edit similarity (difflib), identifier match, line exact match.
+- **Standard-protocol cross-check**: the unmodified EvalPlus and MultiPL-E CLIs through vLLM 0.32.0 (its Transformers
+  backend) on a checkpoint exported by `inference/export_hf.py` (`scripts/standard_eval.sh`).
+- **Statistics** (`metrics.py`): pass@k (Codex's unbiased estimator); Miller's CLT standard errors (arXiv 2411.00640
+  Eq. 1), clustered by problem (Eq. 4, statsmodels CR0) for the infilling benchmarks, 95% normal intervals; bpb with
+  row-level errors (statsmodels WLS, HC1); CrossCodeEval exact match, edit similarity (difflib), identifier match,
+  line exact match.
 
 ## 4. Hardware and measured throughput
 
-GH200 module: GPU power limit fixed at 700 W by the host (not changeable; default 900 W); under training the SM
-clock averages 1,647 MHz against 1,980 MHz in short benchmarks, so sustained GEMMs run ~14% below isolated speed.
+GH200 module: the GPU's power limit is enforced at 700 W outside the VM (a guest request of 900 W is accepted but not
+enforced; Design decisions E1), and the SM clock is locked at 1,980 MHz (`scripts/setup.sh`, E2). Under training the
+power cap throttles the clock: averages of 1,492–1,647 MHz across the recorded d24 profiles (E1; §5.14: 1,521 MHz),
+so sustained GEMMs run ~14% below their isolated speed. Oct 24 profile (TrainProfile, §5.10):
 
 | Model | 8K tokens/s (MFU) | 32K tokens/s (MFU) |
 |---|---|---|
@@ -81,7 +127,7 @@ clock averages 1,647 MHz against 1,980 MHz in short benchmarks, so sustained GEM
 
 d24 step at 8K (4,355 ms GPU, busy 99.4%): GEMM 60.5% (~680 TFLOP/s), FlashAttention-4 18.9% (34.7% at 32K; the
 window-512 layers at 283–336 TFLOP/s against 511–600 for full attention), memory-bound kernels 19.8%, optimizer 0.6%.
-Base-model pre-training ≈ 85 h at these rates.
+Base-model pre-training ≈ 85 h at these rates (97.05B / 338,039 + 5.60B / 273,536 s) [estimate].
 
 Kernel commits since, each against its parent in one session (d24, 8K / 32K tok/s): post-attention norm in the GEMM
 epilogues `373b549` 338,039 → 341,919 (+1.15%) / +0.5%; value-embedding gate `eaf14d0` 344,768 → 350,185 (+1.57%) /
@@ -89,7 +135,16 @@ epilogues `373b549` 338,039 → 341,919 (+1.15%) / +0.5%; value-embedding gate `
 `f499be7` 344,925 → 347,634 (+0.79%) / 275,613 → 277,383 (+0.64%); FA4 window layers with a persistent forward and bf16
 dQ accumulation `0e627ff` 344,967 → 348,218 (+0.94%) / 276,538 → 278,524 (+0.72%). Master measured as a whole (`w1`,
 `eeb0c53`; the later model and train commits are bitwise or SASS-identical): 356,259 tok/s (MFU 0.473) at 8K and
-282,256 (0.483) at 32K, +5.4% / +3.2% over 338,039 / 273,536; pre-training ≈ 81 h (97.1B tokens at 8K, 5.6B at 32K).
+282,256 (0.483) at 32K, +5.4% / +3.2% over 338,039 / 273,536; pre-training ≈ 81 h at these rates [estimate].
+Landed after `eeb0c53` (same convention; an arm run twice by its mean): the saved MLP activation `6299e84` 356,259 →
+361,324 (+1.42%) / 282,256 → 285,118 (+1.01%) (§5.19); NorMuon `646a986` −0.08% (§5.15); fused QKV `70025d8` +0.77%
+/ +0.85% (§5.12); linear cross entropy `067e60b` 362,988 → 365,466 (+0.68%) / 286,619 → 287,476 (+0.30%) (§5.21);
+FA4's dpsum and `fa4_rows.cu` `db1e90e` 363,087 → 364,399 (+0.36%) / 286,588 → 287,097 (+0.18%) (§5.21); fixed QuACK
+tiles `fb86efc` 362,972 → 364,278 (+0.36%) / 286,555 → 287,482 (+0.32%) (below); the fused softcap `e24333d` costs
+1.56 ms per micro-batch, 0.58% of the 8K step (§5.24). No run of `c265fdd` as a whole was timed: the last arms span
+362,972–365,466 tok/s at 8K and 286,555–287,482 at 32K, so with the cap's 0.58% at 8K (its 32K cost unmeasured)
+pre-training is ≈ 79–80 h of training
+(97.05B tokens at 8K, 5.60B at 32K) plus 11 benchmark evaluations [estimate].
 
 Sharing the GPU (d16 training, 150 steps): one run 808.7K tok/s; two time-sliced processes 743.9K together (−8.0%);
 two MPS clients 825.0K (+2.0%). Under MPS an illegal memory access in one client kills every client (a device-side
@@ -117,12 +172,146 @@ three runs of QuACK's own benchmark at d8/d16/d24 widths, M = 98,304; QuACK's `d
 5.4% / 26% of these GEMMs' time at d24 / d16 / d8). Exclusive A/B against `1f5cada` (warm cache, 2 runs per arm):
 8K 362,972 → 364,278 tok/s (+0.36%), 32K 286,555 → 287,482 (+0.32%); peak unchanged (76.99 / 76.84 GiB). Every
 op output is bitwise master's at C 768 and 512 (d8's dact reduce differs at the rounding level, 2.03e-3 against fp32
-either way). A cold cache's first step: 119 → 35 s; its peak stays 90.4 GiB, from the one remaining autotuned call,
-`cross_entropy.py`'s lm_head dX GEMM (its cache holds that key only). Step losses still differ between processes from
+either way). A cold cache's first step: 119 → 35 s; its peak stayed 90.4 GiB, from the one remaining autotuned call,
+`cross_entropy.py`'s lm_head dX GEMM, which the fused softcap path (`e24333d`, §5.24) removed: a cold start now peaks
+at the warm 71.11 GiB (§5.24's 10-step run). Step losses still differ between processes from
 step 3 (two of five 4-step runs, the GEMM configurations identical or bit-equivalent): FA4's and the embedding
 backward's atomics. C3 (`70025d8`) settled against an fp64 reference (a plain-PyTorch rewrite of the model, 4 layers,
 C 768, 2 × 2048 tokens; its fp32 run 2e-6 from it): per-parameter gradient relative error median 1.18e-2 / max
 1.95e-2 for `646a986`, 1.17e-2 / 1.96e-2 for C3, the two trees 3.75e-3 apart: bf16 rounding, no defect.
+
+## Design decisions and their evidence
+
+One entry per decision that shapes every run: what master does, the options weighed, the evidence (paper id with the
+section, table or equation checked against the paper's text, or a measurement with its provenance) and the outcome.
+Paper values the extracted text does not contain (tables reproduced only as captions) are marked [unverified].
+
+**D1 FLOP count M.** Code: `non_embedding_flops_per_token` is DeepSeek LLM's Eq. 2, M = 72·n_layer·d² +
+12·n_layer·d·l_seq, full attention over the model's context, windowed layers counted as full; `plan` uses it at the
+file-level context. Options: nanochat 92's per-window count including the VE gates (1.82× below Eq. 2 at d24/8K: B_opt
+12.06 vs 14.67 micro-batches, law lr ×1/0.928), or Eq. 2. Evidence: arXiv 2401.02954 §3.2 ("M includes the
+computational overhead of attention operation"), the definition the §3.1 Eq. 1 constants were fit with; its Table 3
+models run at l_seq 4,096 [unverified: caption only in the extracted text; Eq. 2 at 8 layers, d 512, 4,096 gives
+352.3M, the cited row's value]. No batch ablation: Muon's loss is flat across 2× batch at 8× Chinchilla (arXiv
+2509.02046 App. C.9 Table 85: 130M, batch 128 and 256 both 3.240; 512 3.257). Outcome: Eq. 2 adopted (`ba01bb5`,
+`b065ad7`). Plans: d16 at 20 from 2 to 3 micro-batches, 6,828 → 4,552 steps, law lr ×0.914; d24 base 12 → 15
+micro-batches, 86,975 → 69,580 steps on the same 102.6B tokens, the budget the corpus was built for
+(`mixture.MAX_STEPS`; 69,611 at the corpus packs' `max_tokens_per_param`, §2). The lr ablation's settings keep their
+batch and steps, so `ablations/peak_lr.py` `analysis` re-bases its vertices (×1.1186 at d8, ×1.0776 at d24): base
+multiplier 2.7970369, computed at launch (`run.py` `lr_multiplier`), base lr 2.4136e-3 on the corpus plan.
+
+**D2 Repository-stage learning rate.** Code: one linear decay to zero continues through the 32K stage
+(`lr_lambda`). Options: hold the final lr for long context (DeepSeek-Coder, arXiv 2401.14196 §3.6), or decay.
+Evidence: arXiv 2502.15938: linear decay to zero is "around 0.84% better than the optimal WSD" (§4.2, Fig. 8), ahead of
+cosine to zero at 20 TPP (§1), and its gap to a 10× decay "grows with TPP" (§4.2, Fig. 6), the base run being at 526.
+Qwen2.5-Coder (arXiv 2409.12186) gives no schedule for its repo-level stage. Outcome: kept; citation in
+`train/schedule.py` fixed (`ba01bb5`).
+
+**D3 Gradient clip before Muon.** Code: the global norm clipped to 1.0 before both optimizers (`optim.update`).
+Options: keep, or skip global clipping for Muon's matrices (Megatron-LM PR 5395, which reports a pre-Muon clip pushing
+gradients under Newton–Schulz's 1e-7 eps floor). Evidence: DeepSeek LLM §2.3 ("The gradient clipping during the
+training phase is set to 1.0"); the stall needs gradient norms ~5e7–2e11 [unverified: PR text, not a paper], while the
+largest recorded here is 10.76 (`results/peak_lr-curves.jsonl`, d8 at 200, ×1, step 14,202); Newton–Schulz divides its
+input by its norm and Adam is scale-invariant (arXiv 1412.6980 §2.1), so the clip damps only spikes. DeepSpeed #8439's
+bug clips after orthogonalization, which this code does not. Outcome: kept (`a81410c`).
+
+**D4 Learnable QK-norm gains.** Code: a per-dimension weight shared across heads, init 1, AdamW without decay.
+Options: keep, or a fixed scale. Evidence: per-head qk-layernorm is arXiv 2309.14322's default (§3.2.5), with
+head-dim learnable parameters (Fig. E.8); nGPT fixing its q/k scale is "comparable" (arXiv 2410.01131 App. A.9; its
+Table 5's 0.11% loss cost [unverified: table body not in the extracted text]); transformers' Qwen3, Gemma 3 and OLMo 2
+learn it. Resolving a ~0.0006 bpb effect would need ~247 seeds per arm [estimate]. Outcome: kept, cited
+(`ba01bb5`).
+
+**D5 Output-logit softcap.** Code: c·tanh(z/c), c = 15 (`RunConfig.final_logit_softcapping`), fused into the linear
+cross entropy (`e24333d`). Options: no cap (the earlier reason, "QK norm bounds the attention logits", does not cover
+the output logits), z-loss, or the cap. Evidence: QK-Norm "does not solve the problem of logit shift in the final
+softmax" (Chameleon, arXiv 2405.09818 §2.3); weight decay mitigates output-logit divergence "for the larger models we
+test" (arXiv 2309.14322 §3.1.2) and `lm_head` is decayed; no lr-sweep run diverged up to ×8
+(`results/peak_lr-curves.jsonl`). Gemma 2 caps the final layer at 30 (arXiv 2408.00118 §2); modded-nanogpt record #9
+added the cap at 30 as its last step, val loss 3.2844 → 3.2791 (−0.0053 nats, one run each), and record #18 lowered
+it to 15, cutting the steps to the 3.28 target from 1,490 to 1,390 (80 runs: mean 3.2791, p = 0.0001); nanochat's
+LOG 2026-03-02 at d24: caps from 5 to 30 about equal except 5 (much worse), 20 best by ~1e-3 val loss (0.716 →
+0.715), yet its code at 92d63d4 (2026-07-03) keeps 15 (`gpt.py:511`). The designed d16 ablation (4 paired seeds,
+adopt at > 0.0047 bpb) could detect record #9's effect only ~13% of the time (§5.22). Outcome: adopted on the
+literature at 0.58% of the 8K step (§5.22, §5.24).
+
+**D6 One learning rate and weight decay for every group.** Code: AdamW's groups and Muon at one peak lr and one
+weight decay (none on 1-D parameters); Muon's update scaled to AdamW's RMS. Options: nanochat 92's per-group lrs
+(embeddings, head, scalars: x0/resid λ at 0.5 and 0.005·√(B/2^19)). Evidence: Moonlight shares "learning rate η, weight
+decay λ … among matrix and non-matrix parameters" (arXiv 2502.16982 §2.2); its RMS matching covers Muon's update size,
+not the AdamW groups' lr. The ×¼/×4 AdamW arms were not run; the scalar-lr candidate ran once (d16 at 20, ×2.797,
+sa-bpe arm data, no cap; `results/scalar_learning_rates.json[l]`): 8K code bpb 0.42635 vs 0.42724 (−0.0009, inside
+the one-seed margin 0.0094: inconclusive), 32K repository code 0.40815 vs 0.40966, train loss over the last half
+−0.0022; MBPP+ parsing worse (9 problems parse only under it, 35 only under the baseline; exact sign test p = 1.1e-4,
+weak given the between-seed spread, §5.23); unparsed share of HumanEval+ and MBPP+ pooled 0.120 vs 0.054. Outcome: one
+lr kept (§5.23).
+
+**D7 τ weight-decay law on Muon.** Code: Muon's decay is the AdamW law's (`tau_weight_decay`). Options: the law, or
+a Muon-specific decay. Evidence: the law is fit on AdamW (arXiv 2505.13738 §2.3; form §2.2 Eq. 3, constants App.
+E.3.1, TPP 20–1280 per §1, the base run's 526 inside); under μP a fixed independent weight decay stays optimal across
+TPP for both its Adam and Muon sweeps, "consistent with Bergsma et al." (arXiv 2512.05620 App. H.5), and ×2
+perturbations do equal or worse (§4, App. H.3); Muon's only scaling-sensitive hyperparameter is its lr (arXiv
+2509.02046 §3.3 Table 4), and doubling its λ from 0.1 to 0.2 costs 0.009–0.020 loss (App. C.9 Tables 82–87). nanochat
+scales Muon's decay by arXiv 2405.13698's constant epoch timescale (§4.1 Eq. 10). Measured, 3 of 12 designed runs
+(d16 at 20; `results/muon_wd_timescale_20tpp.jsonl`): 8K code bpb τ×½ seeds 0/1 0.42535 / 0.42721 vs τ×1 0.42724;
+unparsed share 0.293 / 0.133 vs 0.054. Outcome: the law kept for Muon, the ablation stopped (§5.23).
+
+**D8 Synthetic code share.** 0.30 of code, kept without ablation; evidence and extents in `docs/corpus.md`.
+
+**D9 RoPE base.** Code: θ = 10^6 for both stages (`model/config.py` `ROPE_THETA`). Options: Qwen2.5-Coder's 10^4 at 8K
+raised to 10^6 at its repo-level stage (arXiv 2409.12186 §3.2.2), or large from the start. Evidence: Llama 3 pretrains
+at 500,000 (arXiv 2407.21783 §3.2); Gemma 2B at 8K, base 10k vs 500k (arXiv 2410.06205 §6 Table 2): perplexity
+4.4627 vs 4.4485 (Wiki, 0.32%) and 6.4429 vs 6.4593 (FlanV2, 0.25%), mixed sign; 10^6 exceeds arXiv 2405.14591's
+32K lower bound, 6.4e5 (Table 2) [unverified: caption only in the extracted text]. Outcome: kept (`ba01bb5`).
+
+**D10 Last-step learning rate.** Code: `lr_lambda` gives the last step 1/(steps − 40) of peak, not 0: 1.437e-5 at the
+corpus plan's 69,611 steps. Evidence: arXiv 2502.15938's smallest nonzero minimum is 0.1% of peak (App. C.7; App. C.8
+Fig. 22's 1000× decay), ~70× above. Outcome: kept, documented.
+
+**D11 Plan rounding.** Code: `plan` takes tokens = round(TPP × params). Evidence: `int` dropped a token in 119,167 of
+2M micro-batch counts at d24 (86,974 vs 86,975 steps on the pre-D1 plan). Outcome: `round` (`ba01bb5`).
+
+**Value embeddings.** Code: per-layer token-indexed tables on alternating layers, behind a per-head gate (§1).
+Options: cite ResFormer (which reuses the first layer's values, a different mechanism) or the per-layer tables'
+sources. Evidence: modded-nanogpt record #14; MoVE's LaVE, V = V + g ⊙ M_t (arXiv 2601.22887 §4.1 Eq. 6), gains
+0.016 / 0.010 / 0.010 validation bpb at D12 / D20 / D32 (§4.2 Table 1). Outcome: kept, citation fixed (`ba01bb5`).
+
+**Warmup.** Code: `WARMUP_STEPS` = 2/(1 − β2) = 40 (arXiv 1910.04209: "linear warmup over 2/(1−β2) training
+iterations", abstract, §4.3 Eq. 14). Measured: no lr-dependent warmup instability in the 11 `peak_lr` runs up to ×8.
+Outcome: kept.
+
+**FIM configuration.** Rate 0.5 per piece, PSM/SPM 50/50, AST middles; evidence (arXiv 2207.14255 §3.1, §4.3 Table 1,
+§8.1; arXiv 2506.00204) in `docs/corpus.md`.
+
+**E1 GPU power cap.** Measured: `nvidia-smi -pl 900` is accepted in the guest (power.limit 900 W) but the enforced
+limit stays 700 W, set outside the VM; during the d24 8K step the software power cap is active in every sample, SM
+clock 1,492–1,564 MHz of 1,980. The GH200 module (Grace + Hopper + memory) draws 888–910 W of its 1,000 W limit with
+the CPU busy, so a 900 W GPU fits only beside an idle CPU. Outcome: closed as a hardware constraint; no heavy CPU jobs
+beside measured runs (`tok_per_s`), which draw from the same module budget.
+
+**E2 SM clock lock.** Measured: locking at 1,980 MHz makes the d24 8K step 3.0% faster (3,585–3,590 vs
+3,682–3,696 ms) and d16 1.7%; speed only. Outcome: `scripts/setup.sh` locks it machine-wide (`4ade225`; the clock
+queried from the GPU since `9b094a8`); not persistent across reboot.
+
+**E3 Step-throughput plan (EfficiencyResearch, `a81410c`, `7ad594f`).** A d24 profile and a ranked CUDA/C plan, the
+GPU-bound step's GEMMs (~58% of it) at 703 TFLOP/s of 989, the 700 W cap's ceiling. (1) FA4 on the real
+`cu_seqlens` only (the loader had padded to 2,796 segments for ~94 real): losses bitwise, gradients within the
+reference's run-to-run spread. (2) Muon's Newton–Schulz batched by shape: momentum buffers bitwise, parameters at bf16
+GEMM rounding. Together, clock locked: d16 8K 266 → 239.5 ms (−10%), d24 8K 3,709 → 3,511 ms (−5.3%), rechecked on
+real rows, gradients and benchmark tasks. (3) FP8 MLP GEMMs (e4m3 rowwise, d16, 300 steps): loss over steps 250–299
++0.0048 over bf16 against a bf16 two-run spread of 0.0014, growing: rejected. Two concurrent d16 runs −8% aggregate,
++1.6% under MPS (a later measure, §4: −8.0% / +2.0%): not used. (4) The fused value-embedding gate kernel −0.5% d24
+step time, not bitwise (its fp32 reduction order moves ~15% of elements by one bf16 ulp): applied. (5)–(8), FA4's
+backward pre/post-processing, q/k norm + RoPE in the projection GEMM, RMSNorm in the next GEMM, weight-gradient
+accumulation in the GEMM, were rejected then as ≤ 1% each; later work landed (7) as `373b549` (+1.15%, §5.12), (8) as
+`f499be7` (+0.79%, §5.19) and the preprocess half of (5) as `db1e90e` (+0.36%, §5.21), while (6) lost (§5.21).
+
+**Engineering corrections (`ba01bb5`, `d0a2ec0`).** A1: `SyntaxConstraint` takes the caller's tokenizer, its tables
+cached per tokenizer (a mismatch had masked the true token in 1,475 of 3,199 steps). `viable_end`: an unparseable
+prefix is not viable, as `allowed` (no mask changed over 8,002,126 prefixes). I1: `tokenizers==0.23.3` (0.23.2
+conflicts with huggingface-hub 2.2.0; fidelity identical) and `regex==2026.9.29` declared and locked. `results/
+peak_lr.json`: keys `production_*` → `base_*`, its pre-D1 analysis (×2.3218) removed; the multiplier is computed at
+launch from `results/peak_lr.jsonl`.
 
 ## 5. Execution log
 
@@ -130,7 +319,8 @@ C 768, 2 × 2048 tokens; its fp32 run 2e-6 from it): per-parameter gradient rela
 Question: GPU time of every planned ablation with the current code. Method: `plan_of` for each config; measured d16
 and d24 throughput (8K and 32K). Outputs: per run d16 at 20 tokens/param ~33 min, d16 at 31.4 ~50 min, d8 at 200
 ~20 min; all ablations as planned ≈ 20 GPU-h (Muon at 20 on d16); Muon at 200 on d16 would be 13.4B tokens, ~29
-GPU-h. Conclusion (user): Muon's 20 tokens/param half moves to d16, the 200 half stays d8 (`df62b22`).
+GPU-h. Conclusion (user): Muon's 20 tokens/param half moves to d16, the 200 half stays d8 (`df62b22`). Later
+superseded: the queue was pruned to 4 d16 runs (§5.23).
 
 ### 5.2 FIM format (FimFormat)
 Question: is the PSM failure a format mismatch? Outputs: training rows and evaluation prompts match (sentinel ids,
@@ -158,8 +348,9 @@ packer: 63/72 cores busy, parsing 45%, FIM encoding 25%, no duplicate parses: no
 ### 5.5 Syntax-constrained decoding (SyntaxDecoding)
 Outputs: no false rejections (11.4M BPE and 9.2M random token steps, every real d16 output replayed, all 8,488
 reference middles); masks written by Rust into pinned rows without the GIL, ends confirmed once chosen, batched
-prefill, 1,024 slots; mask time per step 3.4–15.8 → 0.7–2.6 ms, filtered passes ~2× faster at ~0.9 GPU busy; pass@1
-equal or higher except MBPP C++ filtered 0.101 → 0.096. Commit `55e64de`.
+prefill, 1,024 slots; mask time per step 3.4–15.8 → 0.7–2.6 ms, filtered passes ~2× faster at ~0.9 GPU busy, end to
+end 887 → 808 s and 800 → 477 s; FIM line-cut ends checked (216 of 969 single-line and 2,287 of 5,331 multi-line cut
+middles had not parsed); pass@1 equal or higher except MBPP C++ filtered 0.101 → 0.096. Commit `55e64de`.
 
 ### 5.6 Evaluation audit against 2026 harnesses (EvalAudit)
 Outputs: prompts, stops, budgets and scorers match EvalPlus, MultiPL-E and human-eval-infilling; deviations fixed in
@@ -185,6 +376,8 @@ protocol through the unmodified CLIs (`evalplus.codegen --backend vllm --greedy`
 HumanEval+ 0.067/0.067, MBPP+ 0.053/0.042; the MultiPL-E half is deferred to the d24 checkpoints. Workarounds in the
 model code only: RoPE rotated in fp32 by the model itself (−θ), `sliding_window` 513, token ids passed to every layer
 for the value embeddings. Commits `3c03023`, `971b1b8`, `ac2b997`, `4214ae9`, `505dbc0`, `c38ed0c` through `ec1c841`.
+Superseded: the out-of-tree model was removed in `7794e2f` (§5.20); the export runs through vLLM's Transformers
+backend (§1, `scripts/standard_eval.sh`).
 
 ### 5.9 Pipelined evaluation (EvalOverlap)
 Outputs: full d16 benchmarks evaluation 1,472 → 1,064 s (−28%), GPU idle 57.4% → 34.2%, scoring time with no GPU work
@@ -205,7 +398,7 @@ per-group update RMS and parameter norm every 10th step (from optimizer state; e
 +0.4 GiB peak at d24; the interval held-out evaluation was removed (it added ~2.1 GiB and 0.24% of step time). Audit:
 the spike and clipped flags were removed (arbitrary 1.1x / 3x / 100-step thresholds; derivable from loss, grad_norm).
 
-### 5.11 Attention kernels (AttnKernel, AttnKernel2, AttnOwner) — in progress
+### 5.11 Attention kernels (AttnKernel, AttnKernel2, AttnOwner) — closed; `0e627ff` committed, GQA rejected
 Outputs: every FA4 forward/backward tile and scheduling variant tried is slower than the defaults; static persistent
 schedules lose to the hardware scheduler on varlen tiles. Per micro-batch at 8K: window layers 1.50 ms (fwd 285, bwd
 389 TFLOP/s), full layers 3.13 ms; backward pre/post 0.30 ms per call (20% of a window layer); real segments: median
@@ -262,7 +455,7 @@ summed gradient straight into the table's `.grad` (no zeroed 100 MB gradient, no
 gate-weight gradient one cuBLAS GEMM. Outputs (`eaf14d0`): d24 8K 344,768 → 350,185 tok/s (+1.57%), 32K 277,238 →
 280,201 (+1.07%); ve_gate 161.9 → 92.6 ms/step; 200-step loss last-20 +0.0095 (seed spread 0.035). QuACK's scaled-exp
 linear cross entropy (lm_head path 399 → 379 ms/step, +0.46%, peak −5 GiB; Cut Cross-Entropy, arXiv 2411.09009, is
-at best as fast as torch.compile, its gain memory) was first deferred and is now being landed (LinearCE, §5.21). Not
+at best as fast as torch.compile, its gain memory) was first deferred and later landed (`067e60b`, LinearCE, §5.21). Not
 pursued: a two-rows-per-warp gate forward 199 → 168 µs per call (identical output, ~0.13%); a fused clip-grad norm
 and optimizer pass (~13 ms/step).
 
@@ -292,7 +485,8 @@ rerun over 3,450 common steps: window sd 0.0005, max 0.0010) measures kernel non
 seed shares init and batches but its trajectory diverges, so the relevant noise is the seed-to-seed spread of the
 treatment effect, which one seed cannot estimate (base s1 − s0: bpb −0.0014 to −0.0027, paired training-loss Δ
 −0.0052). The arms' gains are about half the seed difference; significance would need ~8 paired seeds per arm. The
-adoption rests instead on the literature (NorMuon: −11% steps vs Muon at 1.1B; modded-nanogpt measured NorMuon on
+adoption rests instead on the literature (NorMuon: 11.31% over Muon at 1.1B, arXiv 2510.05491 abstract — Table 1's
+steps saved against AdamW, 21.74% vs Muon's 10.43%; modded-nanogpt measured NorMuon on
 top of Polar Express, PR #144 over #134: −15 steps over 20 runs; Polar Express −10 steps), a consistent direction on
 every measure, no sign of harm, and a small cost (d16 tok/s: base 828.8K, NorMuon 827.5K, −0.15%; Polar Express
 825.9K, −0.35%). Their interaction is untested here, so the stack runs at seed 1, paired with base s1 (interaction
@@ -381,7 +575,7 @@ TileKernels outcome (TileKernelsStudy, AttnKernel2): the qk prologue already run
 backward (~7% headroom: not ported); designs that remove bytes, recorded as follow-ups of the GEMM work: the q/k norm
 + RoPE in the fused-QKV GEMM's epilogue (no separate prologue pass; 302 MB per layer and micro-batch, ≤ 66 ms/step)
 and the next layer's residual mix + norm in the down projection's epilogue (≤ 58 ms/step); FA4's dpsum in the o_proj
-dX epilogue not pursued (it replaces part of a 178 µs/call preprocess).
+dX epilogue not pursued then (it replaces part of a 178 µs/call preprocess); later landed as `db1e90e` (+0.36%, §5.21).
 
 ### 5.18 Earlier executions (summary)
 - **Metrics** (MetricsValidation): edit similarity by difflib as cceval (rapidfuzz, thefuzz and torchmetrics disagree
@@ -397,11 +591,12 @@ dX epilogue not pursued (it replaces part of a 178 µs/call preprocess).
 ### 5.19 GEMMs (GemmDeep, DeepGemmStudy, GemmOwner) — C1+C2, postact committed; split-K, global cuBLASLt rejected
 Outputs: DeepGEMM on the d24 shapes (TFLOP/s, sequential bench): forward q/k/v/o QuACK 828, torch 705, DeepGEMM 710;
 up-projection without epilogue QuACK 652, torch 543, DeepGEMM 779 — a lead an interleaved rerun attributes to drift
-(per-shape interleaved table queued); dW C×C torch.mm fp32 662, DeepGEMM with fp32 accumulation 295–315, DeepGEMM
-through cuBLASLt 643. DeepGEMM's dW is slow here because its persistent scheduler has no split-K (a 768×768 fp32
-output in 128-row tiles gives at most 36 tiles for 132 SMs), its split-K kernel (`bmk_bnk_mn`) needs K-major operands
-(activations stored transposed), and on the 4C dW shapes (590–598) it neither prefetches across k-blocks nor overlaps
-the epilogue with the next tile: not adopted as a library. C1, dW added into the fp32 `.grad` by cuBLAS addmm with
+(the per-shape interleaved table's result is not recorded); dW C×C torch.mm fp32 662, DeepGEMM with fp32 accumulation
+295–315, DeepGEMM through cuBLASLt 643. DeepGEMM's dW is slow here because its persistent scheduler has no split-K (a
+768×768 fp32 output in 128-row tiles gives at most 36 tiles for 132 SMs), its split-K kernel (`bmk_bnk_mn`) needs
+K-major operands (activations stored transposed), and on the 4C dW shapes (590–598) it neither prefetches across
+k-blocks nor overlaps the epilogue with the next tile: not adopted as a library. C1, dW added into the fp32 `.grad` by
+cuBLAS addmm with
 β = 1 (Megatron-LM's gradient-accumulation fusion), and C2, one bf16 copy of each q/k/v/o/up/down weight refreshed per
 weight change instead of 12 casts per layer and micro-batch (`f499be7`): d24 8K 344,925 → 347,634 tok/s (+0.79%), 32K
 275,613 → 277,383 (+0.64%), peak 61.6 → 62.0 GiB; numerically neutral. `b59a22b` removes the casts C2 made no-ops.
@@ -430,11 +625,11 @@ process-global setting (every torch matmul, Muon's batched Newton–Schulz inclu
 361,284 → 359,376 tok/s (−0.53%, two alternated pairs), 32K 285,115 → 283,969 (−0.40%): rejected. Scoped to the two
 4C dW sites only (DeepGEMM's cuBLASLt call, ~0.38% estimated per shape), the A/B lost too: −0.09% / −0.03%: rejected.
 
-### 5.20 Code audit (user specification; one auditor per file) — in progress
+### 5.20 Code audit (user specification; one auditor per file) — done (last slices with `6299e84`, `70025d8`)
 Specification: every parameter, literal, branch and dependency justified by mathematics, the data, model or hardware
 structure, a library contract or an explicit experimental setting; arbitrary values removed at their source (not
 renamed), experimental settings kept; one implementation per mechanism; behavior verified (SASS diffs, byte-identical
-outputs, identical plans and analyses). Commits so far: `eeb0c53` native.py (the arch_specific flag; SASS identical for
+outputs, identical plans and analyses). Commits: `eeb0c53` native.py (the arch_specific flag; SASS identical for
 every kernel); `b59a22b` linear.py, modeling.py (casts C2 made no-ops, a guard, a wrapper); `141e44a` run.py, conf/
 (restated defaults; every experiment's plans and run keys byte-identical); `e8f3c85` ablations/ (swept scales read from
 the records; analyses identical, peak_lr 2.7970369); `9b094a8` setup.sh (the SM clock lock queried from the GPU, the
@@ -446,16 +641,17 @@ comments: RECURSION limits fissix's 2to3, not `ast.parse`) — curate, tokenize 
 sources (2,062 files) byte-identical, real shard 0 of six splits packs equal to the packs on disk, the tokenizer
 sample identical on the whole corpus; one intended change, the tokenizer ablation's fidelity check over a whole val
 row group instead of 200 documents (its recorded counts grow); `142eae3` makes logit_softcap's learning_rate_scale
-`${lr_multiplier:}` (the 2.7972 copy had drifted from the analysis' 2.79704; no softcap run exists), and `269e671`
-makes it every run's default in `conf/run.yaml` (user; §5.15), pretrain and softcap jobs byte-identical, the others
-exactly ×2.797 in lr. EarlierAudit: `7794e2f` vLLM serving (a second model implementation, `vllm_model.py` and its
-image, removed: vLLM's Transformers backend runs `modeling_nanochat.py` at the same speed and logits; export
-byte-identical but the unused pair template; transformers logits bitwise on 6-, 16- and 1,803-token prompts; the GPU
-vLLM check queued), `b483f1e` eval and metrics (engine/generator protocols, dead error-bar helpers, unread keys; 77,332
-cached judged items re-scored with 0 outcome differences), `865610e` syntax constraint (an unused mode, the crate's
-copy of `Reemit`, unused parameters; 47,166 recorded and fuzzed token streams, 8.38M steps, replayed identical; LTO
-kept, 13% faster). OptAdopt: `51c3dec` train/ (the spike and clipped flags, arbitrary thresholds over quantities the
-records already hold, removed; the update-statistics interval of 10 kept by measurement, every step −0.50% at d24;
+`${lr_multiplier:}` (the 2.7972 copy had drifted from the analysis' 2.79704; no softcap run existed; the experiment was
+later removed, §5.24), and `269e671` makes it every run's default in `conf/run.yaml` (user; §5.15), pretrain and
+softcap jobs byte-identical, the others exactly ×2.797 in lr. EarlierAudit: `7794e2f` vLLM serving (a second model
+implementation, `vllm_model.py` and its image, removed: vLLM's Transformers backend runs `modeling_nanochat.py` at the
+same speed and logits; export byte-identical but the unused pair template; transformers logits bitwise on 6-, 16- and
+1,803-token prompts; the GPU vLLM check was queued, its outcome not recorded here), `b483f1e` eval and metrics
+(engine/generator protocols, dead error-bar helpers, unread keys; 77,332 cached judged items re-scored with 0 outcome
+differences), `865610e` syntax constraint (an unused mode, the crate's copy of `Reemit`, unused parameters; 47,166
+recorded and fuzzed token streams, 8.38M steps, replayed identical; LTO kept, 13% faster). OptAdopt: `51c3dec` train/
+(the spike and clipped flags, arbitrary thresholds over quantities the records already hold, removed; the
+update-statistics interval of 10 kept by measurement, every step −0.50% at d24;
 step 0's diagnostics bitwise equal to master's; −38 lines), `646a986` train/optim.py (NorMuon as Muon's only path;
 β2 and eps cited to the paper and the official code). DecoderOwner: `4385748` decode.cu, decoder.py (the large-tile
 path, the rehead path, `NORM_WARPS` 4 → 2 derived from residency, every remaining launch constant measured or ISA).
@@ -464,8 +660,8 @@ GemmOwner's linear.py change with `6299e84` (its hand GEMM kernels did not land,
 attention files (C3Lander, AttnOwner's tables) with C3's commit. Integration check: a d8 run end to end through
 `run.py` at `300eca3` at ×1 (46 steps, tokens_per_param 0.31, sa-bpe), exit 0 in every phase, code bpb 2.69765 and
 last loss 6.1464, reproducing the two earlier runs of the same plan (E2EMetrics 2.69771 / 6.1463, RenameGPU 2.69771
-/ 6.1462) to 6e-5: the kernel and audit commits changed nothing measurable here. The 2.7011–2.7013 cited in ACTIONS
-for `d0a2ec0`, `9ea5037` and `860ac7b` came from a configuration not recorded with them (an earlier "−0.0035"
+/ 6.1462) to 6e-5: the kernel and audit commits changed nothing measurable here. The 2.7011–2.7013 code bpb quoted
+earlier for `d0a2ec0`, `9ea5037` and `860ac7b` came from a configuration not recorded with them (an earlier "−0.0035"
 attribution to kernel numerics was wrong). Noted, unchanged: `stack_edu_python`'s published row groups
 (~64,920 rows) are below the 65,536 the current curate writes, so an older version wrote them — tokens do not depend
 on row grouping (three shards re-cut at 122,880 rows tokenize identically).
@@ -478,7 +674,8 @@ GEMM epilogue (QkvEpi; register-local in the WGMMA fragment; ≤ 66 ms/step, flo
 and norm beside the down projection (MlpOutMix; ≤ 58, floor 15); the linear cross entropy (LinearCE; ~20 ms/step
 measured on an older base); Inductor's PDL setting and FA4's dpsum from the o_proj dX epilogue (PdlDpsum; ≤ 13 and
 ~15 ms/step). Ablations as GPU backfill (user): the queue runs from `646a986` one run at a time (Ablations-2), so an
-exclusive A/B waits at most one d16 run; the tokenizer ablation's pre-run data are already complete (`df62b22`).
+exclusive A/B waits at most one d16 run; the tokenizer ablation's pre-run data are already complete (`df62b22`). (The
+queue was later pruned to D7's first 3 runs and the scalar-lr candidate, §5.23.)
 Deterministic GEMM selection (QuackPin): every training GEMM runs QuACK with tuned=True, whose autotuner times the
 candidate configs per shape on first use and caches the winner (QUACK_CACHE_DIR/…/gemm_tuned.autotune.json), so the
 kernel, and with it the bf16 rounding, is chosen by timing noise among near-ties, the same reason the repository keeps
@@ -514,9 +711,10 @@ backward after fa4_rows: 600 passes, dk/dv bitwise, dq within atomic-order noise
 master. QuackPin: every config the autotuner chooses among gives
 bitwise-identical outputs (split_k 1), so selection sets throughput and the cold peak, not rounding; QuackPin landed
 (`fb86efc`, §4): each linear.py call at a fixed per-width configuration, +0.36% / +0.32%, a cold first step 119 → 35
-s. With LinearCE's explicit configurations no training GEMM autotunes, so a cold start's peak should now be the warm
-one [inference; unmeasured]. The fp64 check settles C3: both trees' gradient error vs an fp64 reference median
-1.18e-2 / 1.17e-2 (max 1.95e-2 / 1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no defect.
+s. With LinearCE's explicit configurations no training GEMM autotunes once the capped path's autotuned dX GEMM is gone
+(`e24333d`): a cold start then peaked at the warm 71.11 GiB (§5.24). The fp64 check settles C3: both trees' gradient
+error vs an fp64 reference median 1.18e-2 / 1.17e-2 (max 1.95e-2 / 1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no
+defect.
 
 MlpOutMix closed (user: master's Inductor mix and norm stay; branches `mlp-out-mix-land` `76e32e8`, `mlp-out-mix-v2`
 `ce30108` as records). The down projection's epilogue (`residual_mix`) stores x = fma(λr, bf16(h + acc), x0·λx), with
@@ -564,45 +762,51 @@ agreement 0.99182 → 0.99200, immaterial; max_new_tokens < 1 rejected, the Mult
 
 D5 (user): not run. The design adopts at > 0.0047 bpb; the only cap-vs-none measurement (modded-nanogpt record #9,
 −0.0053 nats/token, one run) is ≈ 0.002 bpb here [estimate: ~3.7 bytes/token], detected ~13% of the time. Decision:
-c = 15 adopted on literature (karpathy/nanochat keeps 15; its LOG 2026-03-02: caps 10–30 within 1e-3), a
+c = 15 adopted on literature (karpathy/nanochat keeps 15; its LOG 2026-03-02: 20 best of 5–30 by ~1e-3), a
 literature-backed engineering decision, not a measured improvement on this data, provided its training-loss forward
 and backward cost ≤ 0.3% of the 8K step and the cold peak stays ≤ 93 GiB. Master's softcap path keeps a second
 logits-sized buffer (≈ 6 GiB at d24 8K, over the cold limit), so the adoption rides on LinearCE's chunked path (bench
-queued with its A/B). D7 at 200 stays on D7's pinned tree (no softcap), so the law fit's two horizons share a recipe.
+and A/B in §5.24: 0.58%, above this 0.3% bar, adopted by the user). D7 at 200 stays on D7's pinned tree (no softcap),
+so the law fit's two horizons share a recipe.
 
 ### 5.23 Ablation pruning (user: are the ablations required, or settled by the literature?) — Oct 26
 A 2-seed d16 arm detects a code-bpb difference above 0.0067 (one seed: 0.0094, `docs/ablations.md` Method), and
 karpathy/nanochat's ~320-run optimizer sweep (dev/LOG.md 2026-01-19..22) found gains shrinking from ~0.002 bpb at d12
 to 0.0007 at d20, with d12-tuned values hurting at d20. Decisions:
 - D7 (Muon's weight-decay timescale) stopped after 3 of 12 runs (τ×½ seeds 0, 1; τ×1 seed 0, kept as a sanity
-  check and as the scalar-lr baseline): the τ law stays for Muon. arXiv 2512.05620 §H.5: as TPP varies at fixed FLOPs,
-  Muon's optimal independent weight decay stays constant, "consistent with Bergsma et al." (Power Lines); §H.3: ×2
-  perturbations of lr or weight decay do equal or worse. arXiv 2509.02046 Table 4: Muon's only scaling-sensitive
-  hyperparameter is its lr (130M–500M at 1×, 130M at 1–8× Chinchilla). Power Lines fit TPP 20–1280, the base run's 526
-  inside. Doubling Muon's decay cost 0.010–0.019 loss there, ≈ 0.004–0.008 bpb [estimate, 3.62 bytes/token], at or
+  check and as the scalar-lr baseline): the τ law stays for Muon. arXiv 2512.05620 App. H.5: under μP a fixed
+  independent weight decay stays optimal as TPP varies, for its Adam and Muon sweeps, "consistent with Bergsma et al."
+  (Power Lines); §4, App. H.3: ×2 perturbations of lr or weight decay do equal or worse. arXiv 2509.02046 §3.3
+  Table 4: Muon's only scaling-sensitive hyperparameter is its lr (130M–500M at 1×, 130M at 1–8× Chinchilla). Power
+  Lines fit TPP 20–1280, the base run's 526 inside. Doubling Muon's λ (0.1 → 0.2) cost 0.009–0.020 loss there (App.
+  C.9 Tables 82–87), ≈ 0.004–0.008 bpb [estimate, 3.62 bytes/token], at or
   below the margin; and a d8 point at 200 TPP is the small-proxy transfer nanochat's sweep warns against. nanochat
   itself scales Muon's decay by arXiv 2405.13698's constant τ_epoch (base_train.py:296-304), "blindly following AdamW
   theory". ~3.7 GPU-h saved. (§5.22's D7-at-200 recipe note is moot.)
 - The tokenizer ablation is not run: sa-bpe stays, its corpus already packed (the base plan fits). Its arms: bpe ties
   in compression (3.623 vs 3.624 bytes per token; the design expected a tie), the fused control's harm is documented
-  (TokEval's post: MBPP 0.22 vs 0.02–0.17), the hybrid compresses 0.2% worse and is untested as a whole. Merge scores
-  barely move the token count while pre-tokenization drives accuracy (arXiv 2402.18376 §5, §6.1); GPT-4-style and
-  Punct regexes score alike on code (2402.01035 App. E); sa-bpe already avoids the one documented large effect (no
-  punctuation fused with a line break). ~6.7 GPU-h and the adopt, tokenize, pack step saved; the hybrid stays an
-  untested idea, not a worse one.
+  (TokEval's post: MBPP 0.22 vs 0.02–0.17), the hybrid compresses 0.2% worse and is untested as a whole. Within a
+  vocabulary-construction method the corpus token count varies little while pre-tokenization and segmentation change
+  accuracy (arXiv 2402.18376 §5.3; §6.1's pre-tokenization result is PathPieceR's only); GPT-4-style and Punct regexes
+  tie on code at 7B (2402.01035 App. E Table 5; at 1.5B Punct^NL 32k scored higher, Table 11); sa-bpe already avoids
+  the one documented large effect (no punctuation fused with a line break). ~6.7 GPU-h and the adopt, tokenize, pack
+  step saved; the hybrid stays an untested idea, not a worse one.
 - D6's ×¼/×4 arms are not run (user: the scalar-lr arm only). The scalar-lr candidate runs once: this tree's
   x0_lambdas and resid_lambdas train at the shared AdamW lr, nanochat's at 0.5 and 0.005 × √(B/2^19) (0.375 and
   0.00375 at d16's 294,912 tokens per step), a gap too large to bound the effect from the literature. Adopt iff code
   bpb better than τ×1 seed 0 by > 0.0094 and MBPP+ parsing not worse; a smaller difference is inconclusive.
 - Outcome (`60b972d`; `results/scalar_learning_rates.json`): not adopted. 8K code bpb 0.42635 vs 0.42724 (−0.0009,
-  inside 0.0094: inconclusive), 32K repository code −0.0015, train loss over the last half −0.0022; MBPP+ unparsed
-  0.120 vs 0.054, worse by the exact sign test (9 vs 35 problems, p = 1.1e-4). That test treats problems as
-  independent within one model draw: two seeds of the same D7 arm differ 0.293 vs 0.133, so between-seed variance
-  dwarfs it and "worse" is weak evidence; the rule still keeps one lr (the status quo). The candidate's grad norm
-  spiked at step 6 (10.1 vs 2.78), recovered by step 10. The pre-flight confirmed the groups (lr 0.375 / 0.00375,
+  inside 0.0094: inconclusive), 32K repository code −0.0015, train loss over the last half −0.0022; unparsed share
+  of HumanEval+ and MBPP+ pooled (`metrics.measures` `unparsed`, 542 problems) 0.120 vs 0.054 (MBPP+ alone 0.106 vs
+  0.037), MBPP+ worse by the exact sign test (9 vs 35 problems, p = 1.1e-4). That test treats problems as
+  independent within one model draw: two seeds of the same D7 arm differ 0.293 vs 0.133 (pooled), so between-seed
+  variance dwarfs it and "worse" is weak evidence; the rule still keeps one lr (the status quo). The candidate's grad
+  norm spiked at step 6 (10.1 vs 2.78), recovered by step 10. The pre-flight confirmed the groups (lr 0.375 / 0.00375,
   every other group unchanged); the two trees differ by the field only. D7's sanity numbers (no decision), 8K code
-  bpb / MBPP+ unparsed: τ×½ seed 0 0.42535 / 0.293, seed 1 0.42721 / 0.133, τ×1 seed 0 0.42724 / 0.054 —
-  doubling Muon's decay cost nothing measurable in bpb here.
+  bpb / pooled unparsed share (MBPP+ alone): τ×½ seed 0 0.42535 / 0.293 (0.333), seed 1 0.42721 / 0.133 (0.143), τ×1
+  seed 0 0.42724 / 0.054 (0.037) — doubling Muon's decay cost nothing measurable in bpb here. All four runs: d16 at 20,
+  ×2.797, the sa-bpe arm's data, no softcap (`final_logit_softcapping` null in their records; the cap became the
+  default later, §5.24).
 
 ### 5.24 The output-logit softcap adopted (user) — Oct 26
 LinearCE fused the cap into the scaled-exp linear cross entropy (`e24333d`): tanh on the fp32 accumulator in the
@@ -616,6 +820,66 @@ loss 4.2e-3 vs 9.5e-6, logsumexp 7.8e-4 vs 2.5e-6, dx 5.5e-3 vs 3.1e-3, dW 2.2e-
 `067e60b`'s. 10 steps at ×2.797 capped: within max(spread, 1e-3), largest 8.0e-4 at step 9 against master-capped's
 run-to-run ≤ 7e-6 (the more accurate gradient diverging, as the uncapped path's 6.4e-4); the 10-step peak 82.67 →
 71.11 GiB, a cold start 71.11. The user adopted c = 15 at 0.58% (above the 0.3% bar, within the 0.5–0.7% expected;
-the base run trains a fixed token budget, so the cost is ~27 min of ~78 h): `RunConfig.final_logit_softcapping`
-15.0, the `logit_softcap` experiment removed. nanochat's code keeps 15 (`gpt.py:511`); its LOG 2026-03-02 found 20
-marginally best at d24 (val loss −1e-3, one run).
+the base run trains a fixed token budget, so the cost is ~27 min of ~79 h [estimate, §4]):
+`RunConfig.final_logit_softcapping` 15.0, the `logit_softcap` experiment removed. nanochat's code keeps 15
+(`gpt.py:511`); its LOG 2026-03-02 found 20 marginally best at d24 (val loss 0.716 → 0.715).
+
+### 5.25 Refactor slices and their equivalence (EvalInference-2, Ablations, TrainModel, CorpusCuration, CorpusTokens)
+Committed together (`4ade225`). Refactored: eval/inference (`warnings.catch_warnings(action=...)`, a list
+comprehension in `multipl_e`, a duplicate import, an unreachable `top_p` check, lexer constants, inlined helpers);
+ablations (one cached `shard_bytes`, Latin-1 in place of the GPT-2 byte alphabet, one to one: identical ids on 23,000
+pieces per arm; an unreachable `fit` guard); train/model (`layer_windows` as one expression, stale docstrings);
+corpus curation (one `undropped(paths)` SQL helper, one `pa.array` pass with nulls in `check_row_group`, the
+standardizer looked up once per file); corpus tokens (the crate's FIM line widening removed: its only caller passed
+`line=0.0` and `random_bool(0.0)` was each piece's last draw, so no ChaCha8 draw moves). Equivalence, reference vs new
+on the GH200: outputs identical, bitwise where deterministic, FA4 gradients within the reference's own spread, CUDA
+SASS/PTX identical, no interface or record-format change; `texts`/`text_bytes`/`curated_shards` on all 1,812 shards
+and 2.1M rows; `curate.main()` on synthetic standardized files for all 18 sources (1,822 files byte-identical);
+`prepare` on one real Hub file per category; `publish` push/pull against a faked Hub; compile, packs at both contexts,
+`PretrainingBatches`, `weights`, `mixture_rows`, the crate's `train` (both scores) and `repository_samples`
+byte-identical (141 files, 6.15 GB). Hazard found: reference and new shared `artifacts/cache/native`, and cargo's
+single fingerprint let a new build reuse the reference library; the poisoned `.so` was deleted and the comparisons
+redone with private caches.
+
+### 5.26 Closed engineering and measurement history (summary)
+- **Data provenance** (Oct 24): all 1,812 curated shards (160,061,439,381 bytes) SHA-256-identical to the Hub's
+  revision `b091cb47`, none missing or extra; the code reads no other data (loader: packed shards; bpb: packed val
+  splits and the train packs' row counts; evaluation: EvalPlus, HumanEval-X, MultiPL-E C++ at `3a9e8d2`,
+  HumanEval-Infilling); seeded RNGs (data order, init, FIM's ChaCha8, sampling) produce no data. `manifest.json`
+  withdrawn (`4ade225`).
+- **Unrecorded lr results**: d8 at 20 tokens/param ×2 lr numbers quoted in earlier docs came from H100 runs with no
+  record in `results/`; unrecoverable and not used.
+- **Run configuration** (`247067d`, `e27620b`): the Hydra run app (`hydra-core==1.3.7`) replaced the harness and
+  `scripts/pretrain.py` (deleted in `679e7d9`); a d8 run bitwise-equal to the harness's (records, evaluation). Checked:
+  a diverged job is recorded (`diverged_at`), the sweep continues, a rerun skips it; a changed recipe under the same
+  name raises "recipe changed" before training; `metrics.curves` of a run diverged at step 0 no longer raises.
+- **Evaluation-exit deadlock** (`247067d`): `code_eval.sanitizers()`'s cached forkserver pool was joined by a spawned
+  phase's exit before `concurrent.futures`' shutdown, so every job hung after its first evaluation; the pool now lives
+  for `suite.evaluate`'s call. `70b7934`: `run.py`'s heavy imports moved into its phase functions (64 sanitize
+  workers ~5.8 GiB in total, from ~1 GB each); the then softcap loss branch fused, 172 → 39 ms per micro-batch
+  (replaced by `e24333d`, §5.24).
+- **EvalPlus scoring** (`b8057ff`): no 20 s exit stall per call, all cores: HumanEval+ 22.5 → 9.6 s, MBPP+ 28.0 →
+  12.6 s. Re-checked with `247067d`'s parse-scoring overlap, each against its parent under `stack=67108864:-1` on a
+  d16 checkpoint's completions: identical per task (HumanEval+ base 82/82 pass/fail, plus 81/83, pass@1 0.5 /
+  0.4939; MBPP+ 188/190, 0.4974); smoke statuses under the old `stack=67108864` template (all "timeout") are invalid.
+- **Corpus CPU parallelism** (`b9769a8`, `9e40df4`, `4ce8004`, `a20d12a`, `737f2e1`; mechanism in `docs/corpus.md`):
+  C++ val partition 386.7 → 16.3 s, Python 712 → 61 s, pack 189 → 93 CPU-s per shard.
+- **Ablation audits** (`c100017`; second audit `b9769a8`, `7292351`, `9e40df4`, `b9da1da`): 8 findings fixed, among
+  them the softcap `lm_loss` held in two buffers (43.81 → 38.03 GiB) and `data()` packing sa-bpe's repositories
+  before compiling them.
+- **Metrics** (`c8e97a2`, `5d733a6`, `ee7b645`): `metrics.py` the only source; d8 executed MFU 0.294 at 2.81M tok/s;
+  d16 FIM single-line SPM greedy line EM 0.367 ± 0.020, pass@1 0.436. Fixed on the way: MultiPL-E judged 20 compiles
+  per core (sampled C++ pass@1 0.022 → 0.054, 0.039 → 0.090; `9d61a1b`) and decode.cu's prompt-store allocation (d16
+  FIM aborted). Measures identical to the previous code on four real d8 runs; MultiPL-E scoring of six real tasks
+  identical after the CSV parse moved to `csv.DictReader`.
+- **Layout and naming refactors**, each verified output-identical: `native.py`/`model/kernels` layout (SASS identical
+  for all three kernels; a cached library loads in 4 ms per process); repository layout `69a8cc1`; DeepSeek-Coder /
+  Hugging Face names `4315df4` (parameter renames change init seeds through crc32(name)); corpus code structure
+  `88c151e`; the comment sweep (comments only: SASS identical, crates build, every module imports). Their d8
+  end-to-end code bpb (2.6977–2.7013) came partly from configurations not recorded with them (§5.20).
+- **Corpus tokenizer**: sa-bpe copied to `CORPUS/tokenizer` (provisional until the tokenizer runs were dropped, §5.23),
+  compiled and packed; the d24 fit, `max_tokens_per_param` 526.13 → 69,611 steps of 15 micro-batches, repo-level
+  start 65,814, law lr 8.629e-4, re-derived on master in §2.
+- **Throughput at `c8e97a2`** (TrainProfile, the ablation-cost basis): d8 2.81M / 2.37M tok/s (8K / 32K), d16 0.80M /
+  0.64M, d24 0.34M / 0.27M; compile 20 s + 16 s (a cold d24 first step 182 s, later 35 s, §4); parse evaluation d8
+  ~1.7 min, d16 ~4.5 min; d16 benchmarks evaluation 1,064 s (862 s after `4385748`, §5.16).

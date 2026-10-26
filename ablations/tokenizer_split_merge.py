@@ -20,7 +20,7 @@ Arms (ARMS):
 - bpe: frequency alone (Table 3's F row, SA-BPE's baseline) within SPLIT_PATTERN, close to F·log R in compression,
   so a tie in the runs is likely (assumed), which the val coverage breaks.
 Not run: tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (arXiv 2409.04599
-Alg. 2) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.2); SuperBPE moved HumanEval and MBPP pass@10 in opposite
+Alg. 1) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.2); SuperBPE moved HumanEval and MBPP pass@10 in opposite
 directions, neither significantly (arXiv 2503.13423 Table 1).
 
 vocabularies: every arm trained at once on one draw of the sample (every merge is an argmax with fixed tie-breaks, so

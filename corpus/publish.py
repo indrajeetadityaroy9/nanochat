@@ -90,9 +90,9 @@ def card(rows: dict[str, dict[str, int]]) -> str:
 
 
 def push() -> None:
-    """Write the card, then replace the dataset's tree: one commit deleting every file it holds, the files' upload in
-    groups of at most PREUPLOAD bytes (the Hub skips an object it holds, so a rerun uploads only the rest), one commit
-    adding them all, and a squash of the history into one commit."""
+    """Write the card, then replace the dataset's tree: one commit deleting every file it holds but .gitattributes,
+    the files' upload in groups each closed once it reaches PREUPLOAD bytes (the Hub skips an object it holds, so a
+    rerun uploads only the rest), one commit adding them all, and a squash of the history into one commit."""
     (CORPUS / "README.md").write_text(card(curated()))
     api = HfApi()
     old = [f for f in api.list_repo_files(DATASET, repo_type="dataset") if f != ".gitattributes"]

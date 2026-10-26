@@ -71,9 +71,10 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The base model's run: schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens), its last REPO_LEVEL_SHARE of
-# steps at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run draws by the
-# stage's shares at its own size (weights)
+# The stages' sizes: schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens) at the corpus's planned budget,
+# the last REPO_LEVEL_SHARE of steps at 32K, rounded as schedule.plan rounds them; the base run itself takes run.py's
+# plan at max_tokens_per_param (69,611 steps), which the packed data holds. A Stage's tokens are this run's; any other
+# run draws by the stage's shares at its own size (weights)
 MAX_STEPS, BATCH_SIZE = 69_580, 15 * MICRO_BATCH_TOKENS
 REPO_LEVEL_STEPS = round(REPO_LEVEL_SHARE * MAX_STEPS)
 

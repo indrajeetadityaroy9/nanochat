@@ -121,7 +121,7 @@ fn statement_cuts(ids: &[u16], token_bytes: &[Vec<u8>], ends_line: &[bool], gram
 /// character span (random: Rand-FIM) rather than AST-aligned; of AST-aligned middles the share by Single-Node rather
 /// than Aligned-Span masking (single); of AST-aligned middles whose node starts its line, the share that take the
 /// line's indentation into the middle (line_start), so the prefix ends with the line break as in line-level infilling
-/// (HumanEval single-line and multi-line infilling, arXiv 2207.14255 §5.1); the share in SPM rather than PSM order
+/// (HumanEval single-line and multi-line infilling, arXiv 2207.14255 §2.2); the share in SPM rather than PSM order
 /// (spm); the ids of <｜fim▁begin｜>, <｜fim▁hole｜>, <｜fim▁end｜> (sentinels).
 #[derive(FromPyObject)]
 #[pyo3(from_item_all)]
