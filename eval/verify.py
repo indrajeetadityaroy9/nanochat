@@ -11,6 +11,7 @@ import doctest
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -64,7 +65,9 @@ print("EXAMPLES_DONE")
 
 def python_diagnostics(programs: list[str]) -> list[list[str]]:
     """Each program's syntax error or, if it parses, basedpyright's PYRIGHT_RULES errors ("line:col: rule: message").
-    One basedpyright process checks all, each program in a directory of its own (no program imports another)."""
+    One basedpyright process checks all, each program in a directory of its own (no program imports another). A
+    program whose check raises inside basedpyright (e.g. RangeError on deep inference chains) fails with that error:
+    basedpyright then aborts the whole run without a report, so the rest are checked again without it."""
     out, paths = [], {}
     with tempfile.TemporaryDirectory() as tmp:
         for i, program in enumerate(programs):
@@ -77,9 +80,20 @@ def python_diagnostics(programs: list[str]) -> list[list[str]]:
         config = Path(tmp, "pyrightconfig.json")
         config.write_text(json.dumps({"typeCheckingMode": "off", **dict.fromkeys(PYRIGHT_RULES, "error")}),
                           encoding="utf-8")
-        # exit status 1 when it reports errors; the JSON report is on stdout either way
-        report = subprocess.run([sys.executable, "-m", "basedpyright", "--outputjson", "--pythonpath", sys.executable,
-                                 "--project", config, *paths.values()], cwd=tmp, capture_output=True, text=True)
+        while True:
+            # exit status 1 when it reports errors; the JSON report is on stdout either way
+            report = subprocess.run([sys.executable, "-m", "basedpyright", "--outputjson", "--pythonpath",
+                                     sys.executable, "--project", config, *paths.values()], cwd=tmp,
+                                    capture_output=True, text=True)
+            if report.stdout.strip():
+                break
+            # pyright.js sourceFile.check rethrows after its internal-error diagnostic; analyzeProgram then exits 2
+            crash = re.search(r'internal error occurred while type checking file "([^"]+)": (.*)', report.stderr)
+            if crash is None:
+                raise RuntimeError(f"basedpyright exited {report.returncode} without a report: {report.stderr}")
+            i = int(Path(crash[1]).parent.name)
+            out[i].append(f"1:1: basedpyright: internal error: {crash[2]}")
+            del paths[i]
     for d in json.loads(report.stdout)["generalDiagnostics"]:
         if d["severity"] == "error" and d.get("rule") in PYRIGHT_RULES:
             start = d["range"]["start"]

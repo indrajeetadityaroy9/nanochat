@@ -313,7 +313,8 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
   `reportAttributeAccessIssue`, `reportCallIssue`, `reportReturnType` (definite runtime failures or annotation
   contradictions; style, unknown-type, possibly-unbound and optional-member rules are off because a correct program
   may trigger them, argument types because pyright also judges them against its own inferred types and rejects
-  HumanEval/130's canonical solution).
+  HumanEval/130's canonical solution). A program basedpyright cannot check (an exception inside its checker, e.g. a
+  d16 completion's chained assignments overflowing its stack) fails with that error.
   EvalPlus solutions (`solution_diagnostics`): the generated text's syntax error, an entry function missing or without
   a `return <value>` in its own body (sanitize keeps a parseable span and would hide both).
 - Examples (`examples_pass`): the prompt's doctest `>>>` examples and Python `assert` lines, run by value (equal to
@@ -547,7 +548,11 @@ Per module and symbol; what §1–§9 state is not repeated.
   (`reportArgumentType`) included. `python_diagnostics`: "line:col: SyntaxError: message" for unparsed programs
   ("MemoryError: …", "RecursionError: …" or "ValueError: …", as `syntax_error`); each parsed program written as
   `program.py` in its own directory; one process (`--pythonpath sys.executable`, so the installed packages resolve)
-  because its start dominates a check; exit status 1 on errors, the JSON report on stdout either way.
+  because its start dominates a check; exit status 1 on errors, the JSON report on stdout either way. An exception in
+  one file's check aborts the whole run (pyright.js `sourceFile.check` rethrows after its internal-error diagnostic,
+  `analyzeProgram` exits 2 without a report): the file named on stderr gets "1:1: basedpyright: internal error: …"
+  and the rest are checked again. Measured case: one program of a d16 checkpoint's 346-program filtered MBPP+ round
+  (`RangeError: Maximum call stack size exceeded`); the other 345 programs' results equal those of a run without it.
 - `solution_diagnostics`: sanitize reduces source (prompt + completion) to the entry function and its dependencies and
   keeps a parseable span; the entry function is its last top-level definition, nested functions, lambdas and classes
   excluded from the `return` search; a solution that does not parse returns its syntax error.
