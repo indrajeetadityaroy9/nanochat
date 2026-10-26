@@ -469,3 +469,45 @@ Inductor's coordinate-descent tuning off; a cold cache also sets d24 8K's memory
 and a 128–180 s first step. Planned: prove it with two cold-cache runs, then QuACK's default config or a pinned
 measured config per call and shape, landed if throughput is within 0.1%; an fp64-referenced gradient check settles
 whether C3's 4e-3–2e-2 single-step gradient difference from the pre-C3 tree is rounding.
+Results (Oct 26). QkvEpi rejected (branch `qkv-epi` = `0503800`, kept as a record): a QuACK fn epilogue on QuACK's
+SM90 mainloop (HeadRstd prepass, the RoPE partner column served from registers by HeadHalfValues, the gains as rowvecs,
+a QKStore predicating the v tiles' store off) is correct (q|k|v bitwise equal to master; normed q/k vs fp64 as master's,
+rel 1.661e-3; 6e-6 of elements differ from k_forward, the rstd square sum's order) but takes 2,065 µs per call at 8K
+(≥ 2,257 at 32K) against master's GEMM + k_forward 801 (816). The bar, +0.3% of a 4,058 ms step over 360 calls, is
+≤ 767 µs; the bisect (shared GPU) has plain store 544, + aux 660, + QKStore 649, + HeadRstd 771, + HeadHalfValues
+1,110, two gmem tables 1,044 µs: the norm alone spends the budget. Two TMA-staged tables in one QuACK epilogue deadlock
+the GEMM (one runs; two gmem→register loads run). MlpOutMix: route (a), the row's norm finished across CTAs in the
+epilogue, 969 µs per call against master's gemm_add 556 + Inductor's mix and norm 170 = 726: dropped; route (b), the
+mix in gemm_add's epilogue and the norm a separate pass, 587 + 85 = 671 µs, ≈ 19 ms per 8K step over 345 calls
+(forward only). LinearCE: QuACK's chunked linear cross entropy 24.2 ms per micro-batch against 27.13 (≈ 1.1% of the
+step), peak 6.38 → 0.82 GiB at 8,192-row chunks (8,192–65,536 rows time alike), losses and lse bitwise equal to
+master's. PdlDpsum: the candidate's q/k/v gradient error vs fp64 equals master's to four digits. QuackPin: every
+config the autotuner chooses among gives bitwise-identical outputs (split_k 1), so selection sets throughput and the
+cold peak, not rounding; at d24 3 of the 8 linear.py calls' cached picks are slower than the fastest measured (+1.07 ms
+per micro-batch, ~0.39% [expected]). The fp64 check settles C3: both trees' gradient error vs an fp64 reference median
+1.18e-2 / 1.17e-2 (max 1.95e-2 / 1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no defect. Equivalence and A/B of
+MlpOutMix (b), LinearCE, PdlDpsum and QuackPin's pins are queued.
+
+### 5.22 Review of every queued execution (user: required, or inferable?) — Oct 26
+Each queued GPU job was checked against the decision it feeds and the agents' own measurements. Cut: QkvEpi's remaining
+steps (§5.21); the parent's d24 battery at HEAD (each landing's exclusive A/B runs master's arms alternated, master's
+cold 8K peak is known, 90.4 GiB on C3 with no memory change since `70025d8`, and every candidate's equivalence window
+runs master's pair) and its d8 resume rerun (the stale guard's same_config verified on CPU by its author, the d8 run's
+own record included; the diagnostics fix bitwise on steps 0–3; resume unchanged since the `89b7e47` GPU test);
+QuackPin's op and 10-step checks of configs cfgbit proves bitwise-identical, and its extended config search (timed in
+shared mode, and the GEMMs run at the 700 W cap's ceiling, where every alternative lost: §5.19); WindowAttn's full
+Nsight Compute set on master (the sweep names the mechanism: computed forward throughput tracks key blocks per tile,
+8.44 → 614, 14.88 → 653, 32.5 → 686 TFLOP/s, plus the masked waste); DecoderOwner's decode-speed bench of an
+elementwise arithmetic change and the decoder optimization (the ablations evaluate from pinned trees, and a decoder
+change mid-queue would make arms incomparable); master cold-peak reruns inside candidate windows. Kept: every
+candidate's A/B and equivalence, QuackPin's cold-start run, the ablations. Landed: DecoderOwner's review fixes
+(`ca18db5`: the residual mix as the compiled forward computes it, all but 19 of 16,777,216 mixed elements bitwise;
+agreement 0.99182 → 0.99200, immaterial; max_new_tokens < 1 rejected, the MultiPL-E caller's empty completion).
+
+D5 (user): not run. The design adopts at > 0.0047 bpb; the only cap-vs-none measurement (modded-nanogpt record #9,
+−0.0053 nats/token, one run) is ≈ 0.002 bpb here [estimate: ~3.7 bytes/token], detected ~13% of the time. Decision:
+c = 15 adopted on literature (karpathy/nanochat keeps 15; its LOG 2026-03-02: caps 10–30 within 1e-3), a
+literature-backed engineering decision, not a measured improvement on this data, provided its training-loss forward
+and backward cost ≤ 0.3% of the 8K step and the cold peak stays ≤ 93 GiB. Master's softcap path keeps a second
+logits-sized buffer (≈ 6 GiB at d24 8K, over the cold limit), so the adoption rides on LinearCE's chunked path (bench
+queued with its A/B). D7 at 200 stays on D7's pinned tree (no softcap), so the law fit's two horizons share a recipe.
