@@ -107,6 +107,23 @@ reads as none (torch's cuBLASLt workspace is 1 MiB against DeepGEMM's 16 MiB, wh
 behind DeepGEMM's dW times; §5.19); and a check must run on the tree that lands (the decoder evaluation's file copy
 predated the syntax audit `865610e`, which rewrote the paths it was to cover; refreshed before it ran).
 
+QuACK tile configurations fixed (QuackPin, Oct 26): QuACK's autotuner (`tuned=True`, its default) timed every
+candidate configuration at a GEMM shape's first call and kept the fastest, so the choice was a per-process timing
+result: two cold d24 runs of master picked different configurations for 2 of 9 keys, the shared warm cache held a
+third, and the q/k/v forward's cached pick (256×192 cooperative) is 6.6% slower than the best. Configurations do not
+change the bits of the plain GEMMs (split-K 1, checked across the picks); reduce epilogues' partial sums follow
+tile_n. `model/ops/linear.py` now passes each call a fixed configuration per width (`CONFIGS`, the lowest mean of
+three runs of QuACK's own benchmark at d8/d16/d24 widths, M = 98,304; QuACK's `default_config` would cost 1.1% /
+5.4% / 26% of these GEMMs' time at d24 / d16 / d8). Exclusive A/B against `1f5cada` (warm cache, 2 runs per arm):
+8K 362,972 → 364,278 tok/s (+0.36%), 32K 286,555 → 287,482 (+0.32%); peak unchanged (76.99 / 76.84 GiB). Every
+op output is bitwise master's at C 768 and 512 (d8's dact reduce differs at the rounding level, 2.03e-3 against fp32
+either way). A cold cache's first step: 119 → 35 s; its peak stays 90.4 GiB, from the one remaining autotuned call,
+`cross_entropy.py`'s lm_head dX GEMM (its cache holds that key only). Step losses still differ between processes from
+step 3 (two of five 4-step runs, the GEMM configurations identical or bit-equivalent): FA4's and the embedding
+backward's atomics. C3 (`70025d8`) settled against an fp64 reference (a plain-PyTorch rewrite of the model, 4 layers,
+C 768, 2 × 2048 tokens; its fp32 run 2e-6 from it): per-parameter gradient relative error median 1.18e-2 / max
+1.95e-2 for `646a986`, 1.17e-2 / 1.96e-2 for C3, the two trees 3.75e-3 apart: bf16 rounding, no defect.
+
 ## 5. Execution log
 
 ### 5.1 Ablation cost (AblationTime)
