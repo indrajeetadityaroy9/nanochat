@@ -14,7 +14,7 @@ from corpus.layout import PIECE_COLUMNS, TOKEN_DTYPE, fim_packed, packed_path, s
 from corpus.mixture import mixture_rows
 from corpus.tokenizer import Tokenizer
 
-# An assembled row's padding: the loss's ignore index as a label, BOS as an input (DeepSeek-Coder's IGNORE_INDEX)
+# The label of an ignored position (padding, a BOS that is no target); as an input it becomes BOS
 IGNORE_INDEX = -1
 
 

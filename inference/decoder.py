@@ -51,10 +51,9 @@ class Request:
     """A continuation of input_ids (BOS and at least one more token) by at most max_new_tokens (at least 1) tokens.
     stopping_criteria: None or a predicate of the generated ids, true once the sequence is done. temperature 0: the
     greedy argmax (ties to the lowest id); > 0: a sample of softmax(logits / temperature), logits capped by
-    ModelConfig.final_logit_softcapping if set, its draw at
-    generated position i a function of (seed, i) only (decode.cu gumbel); top_p < 1 samples the fewest most likely
-    tokens holding top_p of the probability (nucleus sampling, arXiv 1904.09751 §3.1; decode.cu k_nucleus).
-    constraint: the tokens allowed at each step."""
+    ModelConfig.final_logit_softcapping if set, its draw at generated position i a function of (seed, i) only (decode.cu
+    gumbel); top_p < 1 samples the fewest most likely tokens holding top_p of the probability (nucleus sampling, arXiv
+    1904.09751 §3.1; decode.cu k_nucleus). constraint: the tokens allowed at each step."""
     input_ids: list[int]
     max_new_tokens: int
     stopping_criteria: Callable[[list[int]], bool] | None = None
@@ -102,9 +101,9 @@ class Reemit:
 
 def heal_tokens(tokenizer, input_ids: list[int]) -> tuple[list[int], Reemit, bytes]:
     """Token healing (Guidance, "The Art of Prompt Design: Prompt Boundaries and Token Healing", 2023), constrained
-    until the dropped token's bytes are re-emitted (TokEval, arXiv 2608.18062 App. C; Guidance constrains one token,
-    which forbids splitting those bytes over two): the prompt without its last token, its Reemit constraint, and the
-    dropped bytes. input_ids: BOS and at least two more tokens."""
+    until the dropped token's bytes are re-emitted, possibly over several tokens (TokEval, arXiv 2608.18062 App. C.1):
+    the prompt without its last token, its Reemit constraint, and the dropped bytes. input_ids: BOS and at least two
+    more tokens."""
     dropped = tokenizer.token_bytes[input_ids[-1]]
     return input_ids[:-1], Reemit(tokenizer, dropped), dropped
 
@@ -140,8 +139,8 @@ def step_masks(out: np.ndarray, constrained: list[tuple[int, Constraint, bool]])
     return masked, empty
 
 
-# the prompt store's page in positions: a stored prompt takes whole pages anywhere in the store (vLLM's PagedAttention,
-# arXiv 2309.06180, pages a KV cache likewise; 64 keeps a code prompt to a few copies, at most 63 positions unused)
+# the prompt store's page in positions: a stored prompt takes whole pages anywhere in the store, as vLLM's
+# PagedAttention (arXiv 2309.06180) pages a KV cache; at most 63 positions of a prompt unused
 PAGE = 64
 
 
@@ -170,19 +169,16 @@ class NativeDecoder:
     a sequence's tokens can differ from the bf16 forward's where two logits nearly tie.
     batch: dec_create's slot count, at most decode.cu's MAX_BATCH, bounded by free device memory.
     max_length: a slot's cache capacity in positions, at most the model's max_position_embeddings: the longest
-    len(input_ids) + max_new_tokens - 1 the caller will run (a slot's cache is 2 num_hidden_layers max_length
-    (hidden_size + 4 num_attention_heads) bytes, so a smaller max_length fits more slots; the tokens do not depend on
-    it).
+    len(input_ids) + max_new_tokens - 1 the caller will run. A slot's cache is 2 num_hidden_layers max_length
+    (hidden_size + 4 num_attention_heads) bytes; the tokens do not depend on max_length.
     prompt_store: positions requested for decode.cu's prompt store (at most the device memory left after the slots, 2
     num_hidden_layers (hidden_size + 4 num_attention_heads) bytes a position). A prompt's K and V at all but its last
     position are kept once prefilled; a later request with the same prompt copies them instead of prefilling, its
     tokens unchanged (K and V depend on the prompt alone). To free pages, prompts unused in this run and the previous
-    one are dropped, least recently used first, so a search's rounds keep the prompts they reuse and a too-small store
-    keeps a fixed part rather than cycling.
+    one are dropped, least recently used first.
     memory_fraction: the most device memory the decoder takes (slots, prefill rows, graphs and prompt store), as a
-    fraction of the device's total, capped by its free memory (vLLM's gpu_memory_utilization, but counting this
-    decoder alone); None: all free memory."""
-
+    fraction of the device's total, capped by its free memory (vLLM's gpu_memory_utilization, counting this decoder
+    alone); None: all free memory."""
     @torch.no_grad()
     def __init__(self, model: CausalLM, *, bos_token_id: int, max_length: int, prompt_store: int,
                  memory_fraction: float | None = None):
@@ -229,8 +225,8 @@ class NativeDecoder:
         # cap (0: none)
         lambdas = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).flatten().cpu()
         scal = np.append(lambdas.numpy(), np.float32(cfg.final_logit_softcapping or 0.0))
-        # F: up_proj is (F, C); the lazy row: BOS, a syntax constraint's end, confirmed once chosen (generate); the
-        # memory budget in MiB (0: none)
+        # config: L, C, F (up_proj is (F, C)), vocabulary, max_length, T, prompt store, BOS (the lazy row: a syntax
+        # constraint's end, confirmed once chosen in generate), memory budget in MiB (0: none)
         device = model.embed_tokens.weight.device
         budget = 0 if memory_fraction is None else max(1, int(
             memory_fraction * torch.cuda.get_device_properties(device).total_memory) >> 20)

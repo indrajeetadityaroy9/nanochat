@@ -1,18 +1,16 @@
 #!/bin/bash
 # The standard-protocol cross-check of eval/code_eval.py: the benchmarks' own harness CLIs, unmodified, on an exported
-# checkpoint (inference/export_hf.py) served by vLLM (vLLM's own image, vllm/vllm-openai at the pinned digest: vLLM
-# 0.32.0 on its own torch build, which the nanochat image cannot hold; the export's modeling_nanochat.py runs through
-# vLLM's Transformers backend, trust_remote_code):
-# - EvalPlus (evalplus pinned as pyproject.toml pins it): `evalplus.codegen --backend vllm --greedy` on HumanEval+ and
-#   MBPP+ (direct completion: the tokenizer has no chat template), scored by `evalplus.evaluate` in the nanochat image;
+# checkpoint (inference/export_hf.py) served by vLLM 0.32.0 in its own image (vllm/vllm-openai at the pinned digest,
+# its own torch build); the export's modeling_nanochat.py runs through vLLM's Transformers backend (trust_remote_code):
+# - EvalPlus (evalplus as pyproject.toml pins it): `evalplus.codegen --backend vllm --greedy` on HumanEval+ and MBPP+
+#   (direct completion: the tokenizer has no chat template), scored by `evalplus.evaluate` in the nanochat image;
 # - MultiPL-E (nuprl/MultiPL-E at docker/Dockerfile's commit): `automodel_vllm.py` on humaneval-cpp and mbpp-cpp at
 #   T = 0.2, top-p 0.95, 20 completions per problem, judged by its evaluation/src/main.py and pass_k.py in the nanochat
 #   image ($MULTIPL_E).
 # Results in <out dir>: evalplus/<dataset>/..._eval_results.json, multipl-e/<dataset>/ and pass_k.csv. Generation
-# requires an empty or new <out dir>: both harnesses skip samples and results already in it (evalplus codegen's
-# "already cached", MultiPL-E's completion_limit), and the model is always mounted at /model, so a reused directory
-# would report the previous model. Caches (Hugging Face datasets, vLLM's compiled graphs) in the checkout's
-# artifacts/cache, as the nanochat image's.
+# requires an empty or new <out dir>: both harnesses skip samples already in it (evalplus codegen's "already cached",
+# MultiPL-E's completion_limit) and the model is always /model. Caches (Hugging Face datasets, vLLM's compiled graphs)
+# in the checkout's artifacts/cache, as the nanochat image's.
 #
 #   scripts/standard_eval.sh <exported model dir> <out dir> [generate|score]   (mounted at /model and /out; default
 #   both: generate on the GPU, then score on the CPU)

@@ -3,13 +3,9 @@ Training a vocabulary of the corpus: VOCAB_SIZE ids (the mergeable tokens, then 
 trained by the corpus crate (SA-BPE's F·ln R, arXiv 2604.14053 §4.1, or frequency alone) within the chunks of a split
 pattern, on the sample, then encoded by tiktoken (corpus/tokenizer.py).
 
-Sample (sample): of each file-stage source's curated train split, its share of the stage's bytes (byte_shares: its
-share of the stage's tokens, Stage.shares, at the reference tokenizer's bytes per token) as its share of SAMPLE_BYTES,
-a systematic sample in shard order: tokenizer training data "representative of model training data"
-(arXiv 2405.05417 §5); across tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage
-points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); over languages, proportional tokenizer-training
-weights give lower bits per byte than equal ones (arXiv 2610.12144 App. D Table 6, §5.2). An authorship unit (SA-BPE's
-R) is the repository, its name lowercased, for repository files and functions; any other document is its own.
+Sample (sample): of each file-stage source's curated train split, its share of the stage's bytes (byte_shares) as its
+share of SAMPLE_BYTES, a systematic sample in shard order. An authorship unit (SA-BPE's R) is the repository, its name
+lowercased, for repository files and functions; any other document is its own.
 
 fidelity: a trained vocabulary's encoding checked against its merges (tiktoken encodes by merge rank).
 """

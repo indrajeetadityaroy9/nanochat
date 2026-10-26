@@ -1,38 +1,28 @@
 """
-Peak lr. The base model's peak lr is DeepSeek LLM's law eta = 0.3118 C^-0.125 (arXiv 2401.02954 §3.1 Eq. 1;
-train/schedule.py plan), fit for AdamW under a multi-step schedule (arXiv 2401.02954 §2.3) at compute below the base
-model's; pre-training applies it to Muon (matched to AdamW's update RMS, train/optim.py) as the peak of linear decay to
-zero, and at a fixed model it falls with tokens as D^-0.125.
-
-The base model's lr is measured, not swept at its length: its optimum at d24 (the base model, so no width
-or depth transfer is assumed; its parameterisation is standard, not muP) at SHORT tokens per parameter, times the
-optimum's horizon trend measured at d8 between SHORT and LONG, assumed width-independent (arXiv 2409.19913
-§4 finds its horizon exponent beta size-independent only for models of at least 760M parameters, larger for smaller
-ones). The published rules disagree on the trend's direction: Complete^(d)P's AdamW SDE rule eta ∝ sqrt(m_B / m_D), for
-batch ratio m_B and token ratio m_D (arXiv 2512.22382 §2.1 Table 1), lowers the lr with the horizon, as
-arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law eta = 1.79 N^-0.713 D^0.307, fit over AdamW models
-(arXiv 2503.04715 §1 Eq. 1), raises it. Alternatives: the law's lr times 2 and 4, and 8 at d8 at LONG, where Step-Law
-points; one seed per setting.
+Peak-lr calibration: the base model's multiplier of DeepSeek LLM's law eta = 0.3118 C^-0.125 (arXiv 2401.02954 §3.1
+Eq. 1; train/schedule.py plan), measured as the optimum at d24 at SHORT tokens per parameter times the optimum's
+horizon trend at d8 between SHORT and LONG, assumed width-independent. Grids: the law's lr x1, 2, 4, 8 at d8 at SHORT
+and at LONG, x1, 2, 4 at d24 at SHORT; one seed each.
 
 Analysis, pre-registered, computed when a run launches (run.py lr_multiplier, from RESULTS/peak_lr.jsonl; it depends
 on the adopted tokenizer's max_tokens_per_param, so no copy is stored):
 - per setting, code bits per byte fitted as a parabola in u = ln(multiplier) (fit): its vertex u* or the grid extension
   the rule calls for;
-- the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@SHORT) against the SDE rule's and Step-Law's predictions, each over
-  the law's own fall between the two plans;
+- the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@SHORT) against the predictions of Complete^(d)P's AdamW SDE rule
+  eta ∝ sqrt(m_B / m_D) (arXiv 2512.22382 §2.1 Table 1) and Step-Law eta = 1.79 N^-0.713 D^0.307 (arXiv 2503.04715
+  §1 Eq. 1), each over the law's own fall between the two plans;
 - the horizon exponent ln r / ln m_D,d8;
 - the base model's multiplier of the law's lr, exp(u*_d24@SHORT) * (r / sqrt(m_B,d8))^(ln m_D,base / ln m_D,d8)
-  * sqrt(m_B,base): d8's trend net of its batch growth by the square-root batch rule (arXiv 2205.10287 Def. 5.2, its lr
-  factor; arXiv 2512.22382 Table 1), its exponent (horizon_exponent_net) carried to the base model's horizon range
-  (every rule in play is a power law in D), and the base model's batch growth by the same rule.
-m_D,base is the base model's tokens over d24 at SHORT's, m_D,d8 d8 at LONG's over d8 at SHORT's. Batches, token counts
-and the law's lrs are the runs' recorded plans (the base model's: run.py plan_of(RunConfig()), d24 at its data's
-max_tokens_per_param, RunConfig's learning_rate_scale 1.0 the law's lr).
+  * sqrt(m_B,base): d8's trend net of its batch growth by the square-root batch rule (arXiv 2205.10287 Def. 5.2),
+  its exponent (horizon_exponent_net) carried to the base model's horizon, and the base model's batch growth by the
+  same rule.
+m_B and m_D are batch and token ratios: m_D,base the base model's tokens over d24 at SHORT's, m_D,d8 d8 at LONG's over
+d8 at SHORT's. Batches, token counts and the law's lrs are the runs' recorded plans (the base model's: run.py
+plan_of(RunConfig()), RunConfig's learning_rate_scale 1.0 the law's lr).
 
 The recorded runs (RESULTS/peak_lr.jsonl, peak_lr-curves.jsonl, peak_lr.json) use an earlier record format: a run's
 fields under "fields" (n_layer, ratio, lr_scale, seed) and its setting under "setting" (depth, tokens_per_param,
-seeds); the grids: d8 at SHORT x1, 2, 4, 8, d8 at LONG x1, 2, 4, 8, d24 at SHORT x1, 2, 4, one seed each. The
-estimate is every run's default learning_rate_scale (conf/run.yaml, run.py lr_multiplier).
+seeds).
 """
 import math
 
@@ -43,8 +33,8 @@ from run import RunConfig, base_plan, plan_of
 
 # The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords
 SHORT = 5
-# d8's long horizon: its law batch is 2 micro-batches there (schedule.plan's rounding), so the trend is measured under
-# batch co-scaling as the base model trains, its batch growth netted out by the square-root rule
+# d8's long horizon, where its law batch is 2 micro-batches (schedule.plan's rounding): the trend includes batch
+# growth, as the base model's does, netted out by the square-root rule
 LONG = 200
 # Step-Law's token exponent of the optimal lr (arXiv 2503.04715 §1 Eq. 1: eta = 1.79 N^-0.713 D^0.307)
 STEP_LAW_D = 0.307

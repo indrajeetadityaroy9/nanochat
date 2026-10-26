@@ -1,7 +1,7 @@
 /*
- * FA4's backward row statistics at its padded rows, from a precomputed dpsum (model/ops/flash_attn.py): the part of
- * FA4's backward preprocess (flash_attn/cute/flash_bwd_preprocess.py) that remains once the o_proj dX GEMM's epilogue
- * has summed dpsum = rowsum(dO O) per (row, head) (model/ops/linear.py dx_dpsum), so O and dO are not read again:
+ * FA4's backward row statistics at its padded rows (model/ops/flash_attn.py): FA4's backward preprocess
+ * (flash_attn/cute/flash_bwd_preprocess.py) with dpsum = rowsum(dO O) per (row, head) precomputed by the o_proj dX
+ * GEMM's epilogue (model/ops/linear.py dx_dpsum):
  *   dpsum_pad[h, p] = dpsum[r, h], lse_log2[h, p] = lse[h, r] log2(e) (0 where lse = -inf)
  * at FA4's padded row p = start_b + r - cu[b] of row r in segment b, start_b = (cu[b] + b m) / m * m
  * (seqlen_info.py offset_batch, padded=True), m FA4's backward m-block. Each segment's rows past its length up to a

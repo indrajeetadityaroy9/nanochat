@@ -44,8 +44,7 @@ from corpus.sources import (
     text_bytes,
 )
 
-# Hub files fetched at once: the throughput peak over 1, 2, 4 and 8 files in flight, reading one column of 8
-# UltraData-Code L3 files per setting
+# Hub files fetched at once: the highest throughput of 1, 2, 4 and 8 files in flight
 FETCHES = 4
 
 
@@ -89,10 +88,9 @@ def extent(source: str) -> list[str]:
 
 @functools.cache
 def swh_store() -> S3Store:
-    """This process's client of Software Heritage's bucket, created once so connections are reused; the file-descriptor
-    limit raised to its hard limit (a row group's requests are in flight at once). Retries back off from a second to a
-    minute, for up to 15 minutes, outlasting the bucket's repeated resets of one request, which exhaust obstore's
-    default (10 retries from 100 ms)."""
+    """This process's client of Software Heritage's bucket, made once so connections are reused, with the
+    file-descriptor limit raised to its hard limit (a row group's requests are in flight at once). Retries back off
+    from 1 s to 1 min for up to 15 min."""
     resource.setrlimit(resource.RLIMIT_NOFILE, (resource.getrlimit(resource.RLIMIT_NOFILE)[1],) * 2)
     return S3Store("softwareheritage", region="us-east-1", skip_signature=True,
                    retry_config={"max_retries": 15, "retry_timeout": timedelta(minutes=15),
@@ -178,8 +176,8 @@ def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
 
 
 def conversation(t: pa.Table, spec: Source) -> pa.Table:
-    """A finished Codeforces-CoTs trace (finish_reason "stop"; a truncated one mostly ends before its code): the R1
-    prompt (ending with a line end) followed by its generation, and the problem's id."""
+    """A finished Codeforces-CoTs trace (finish_reason "stop"): the R1 prompt (ending with a line end) followed by its
+    generation, and the problem's id."""
     t = t.filter(pc.equal(t["finish_reason"], "stop"))
     return document(spec, pc.binary_join_element_wise(t["prompt"], t[spec.text], ""), problem_id=t["id"])
 

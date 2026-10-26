@@ -1,74 +1,65 @@
 """
 Metrics: the run log every training process writes, the measures checkpoints are scored and runs compared by, their
-error bars, the hardware metrics of training and decoding, and the tokenizer metrics. Torch-free, so training,
-evaluation and the ablations' analyses import it alike; the one source of the repository's metrics.
+error bars, the hardware metrics of training and decoding, and the tokenizer metrics. Torch-free; the one source of
+the repository's metrics.
 
-The run log, RUNS/<run_name>/metrics.jsonl (run_name: run.py run_name): UTF-8 JSON lines, each an object parseable on
-its own: run_name, attempt (the run's process start it belongs to, 0-based: a resumed run repeats the steps after its
-checkpoint, and a step's record from the latest attempt supersedes the earlier ones; records are never rewritten),
-kind, time (Unix seconds), then the kind's fields. NaN and infinities are not JSON and are never written.
+The run log, RUNS/<run_name>/metrics.jsonl (run_name: run.py run_name): UTF-8 JSON lines, each an object: run_name,
+attempt (the run's 0-based process start; a resumed run repeats the steps after its checkpoint, and the latest
+attempt's record of a step supersedes earlier ones; records are never rewritten), kind, time (Unix seconds), then the
+kind's fields. NaN and infinities are never written.
 run (each process start): step (the first step it trains), plan (schedule.RunPlan), seed (initialization and data
-    order), config (run.py RunConfig, the run's fields), data_key (corpus/tokenizer.py Tokenizer.data_key of
-    the run's tokenizer; with plan, what run.py's stale guard compares), model (model/modeling.py ModelConfig at
-    the stage of the weights it starts from: the file-level stage, or its checkpoint's), num_parameters (the model's
-    parameters), flops_per_token (model/modeling.py non_embedding_flops_per_token of that model: DeepSeek LLM's M,
-    arXiv 2401.02954 §3.2 Eq. 2, the compute of the scaling plan), model_flops_per_token (model_flops_per_token at that
-    stage: PaLM's nominal per-token model FLOPs), max_grad_norm (the gradient clip threshold), learning_rate and
-    weight_decay ({"adamw": [per group], "muon": [per group]}, as the optimizers hold them; a resumed process's come
-    from its checkpoint), stage (corpus/mixture.py Stage as the model runs it, mixture as {corpus: row weight}).
+    order), config (run.py RunConfig fields), data_key (corpus/tokenizer.py Tokenizer.data_key; with plan, what
+    run.py's stale guard compares), model (model/modeling.py ModelConfig at the stage of the starting weights: the
+    file-level stage, or its checkpoint's), num_parameters, flops_per_token (model/modeling.py
+    non_embedding_flops_per_token: DeepSeek LLM's M, arXiv 2401.02954 §3.2 Eq. 2), model_flops_per_token (at that
+    stage), max_grad_norm (the clip threshold), learning_rate and weight_decay ({"adamw": [per group], "muon": [per
+    group]} as the optimizers hold them; a resumed process's from its checkpoint), stage (corpus/mixture.py Stage as
+    run, mixture as {corpus: row weight}).
 stage (switch to the repo-level stage): step, stage, model_flops_per_token (at the repo-level stage),
     peak_memory_bytes and peak_reserved_bytes (torch.cuda.max_memory_allocated and max_memory_reserved over the
-    file-level stage; both peaks reset at the switch, the stages' shapes differing).
+    file-level stage; both reset at the switch).
 train (each optimizer step, 0-based): step; num_input_tokens_seen (row positions after it, padding included); loss
     (mean next-token loss in nats over the step's valid labels, fp64); learning_rate (LambdaLR's at the step);
-    grad_norm (global L2 norm of the gradient before clipping, the norm global-norm clipping thresholds:
-    arXiv 1211.5063 §3.2); step_seconds (the step's device time between CUDA events at the previous step's end and its
-    own; train/loop.py reads a step's values one step late, so the host never drains the device);
-    tokens_per_second (row positions per second over step_seconds: the observed throughput of PaLM's model FLOPs
-    utilization, arXiv 2204.02311 App. B); model_flops (executed_model_flops of the step's micro-batches); mfu
+    grad_norm (global L2 norm before clipping, arXiv 1211.5063 §3.2); step_seconds (device time between CUDA events
+    at the previous step's end and its own; train/loop.py reads a step's values one step late); tokens_per_second
+    (row positions over step_seconds); model_flops (executed_model_flops of the step's micro-batches); mfu
     (model_flops per step_seconds over PEAK_FLOPS); train/diagnostics.py's: max_logsumexp and mean_square_logsumexp
-    (the output logits' logsumexp over the step's valid positions: maximum and mean square, PaLM's z-loss quantity,
-    arXiv 2204.02311 §5), qk_norm_gain_max (the largest QK-norm gain magnitude), corpus_loss ({corpus: mean loss of
-    the step's rows drawn from it}); every 10th step update_rms ({optimizer[group]: RMS of the step's update without
-    its decoupled weight decay}) and param_norm ({optimizer[group]: L2 norm after the step}).
+    (the logits' logsumexp over valid positions: maximum and mean square, PaLM's z-loss quantity, arXiv 2204.02311
+    §5), qk_norm_gain_max (largest QK-norm gain magnitude), corpus_loss ({corpus: mean loss of the step's rows from
+    it}); every 10th step update_rms ({optimizer[group]: RMS of the update without decoupled weight decay}) and
+    param_norm ({optimizer[group]: L2 norm after the step}).
 end (the last step trained): step; peak_memory_bytes and peak_reserved_bytes over the last stage (since the switch,
-    or the process start): the memory footprint FlashAttention reports (arXiv 2205.14135) and the allocator's.
+    or the process start).
 failure (a non-finite loss or gradient norm; the run stops): step, loss and grad_norm (null).
 
 Bits per byte (bpb, mixture_bpb): summed next-token loss in bits (nats / ln 2) over the summed UTF-8 bytes of the
-targets (The Pile's bits per UTF-8 byte, arXiv 2101.00027 §3.1; tokenizer-independent, so models and vocabularies
-compare), from the bits and bytes sums eval/bpb.py computes per context bucket, pooled exactly.
+targets (The Pile, arXiv 2101.00027 §3.1), from eval/bpb.py's bits and bytes sums per context bucket, pooled exactly.
 
 Parse outcome (parse_outcome, parse_shares): how a completion compiles. Compared measures (measures): a run's
 measures from its final checkpoint's evaluation and its train records.
 
-Completion similarity (no execution; per sample, averaged by the caller): line exact match (line_exact_match), the
-single-line infilling metric of SantaCoder (arXiv 2301.03988 §6.1.2; bigcode-evaluation-harness santacoder_fim.py
-process_results) and DeepSeek-Coder (arXiv 2401.14196 §4.2, Table 6); CrossCodeEval's exact match, edit similarity and
-identifier exact match / F1 (exact_match, edit_similarity, identifier_match; arXiv 2310.11248 §4, amazon-science/cceval
-@40c68d2 scripts/eval_metric.py process_examples and compute_metric_stmt, eval_utils.py cal_edit_sim; DeepSeek-Coder
-§4.3, Table 7), as cceval computes them on the same strings.
+Completion similarity (no execution; per sample): line exact match (line_exact_match: SantaCoder, arXiv 2301.03988
+§6.1.2, bigcode-evaluation-harness santacoder_fim.py process_results; DeepSeek-Coder, arXiv 2401.14196 §4.2, Table 6);
+CrossCodeEval's exact match, edit similarity and identifier exact match / F1 (exact_match, edit_similarity,
+identifier_match; arXiv 2310.11248 §4, amazon-science/cceval 40c68d2 scripts/eval_metric.py process_examples and
+compute_metric_stmt, eval_utils.py cal_edit_sim; DeepSeek-Coder §4.3, Table 7), on the same strings as cceval.
 
-pass@k (pass_at_k): Codex's unbiased estimator per problem (arXiv 2107.03374 §2.1), the implementation the benchmarks'
-own evaluators call (human-eval / human_eval_infilling estimate_pass_at_k).
+pass@k (pass_at_k): Codex's unbiased estimator per problem (arXiv 2107.03374 §2.1), human_eval_infilling's
+estimate_pass_at_k.
 
 Error bars (summary, bpb_summary; Miller, arXiv 2411.00640): each score is a mean of question-level scores (a
-problem's pass@k estimate, its mean over samples, Miller §3.1); its CLT standard error (Eq. 1), clustered by the
-problem a question derives from when several do (Eq. 4, as statsmodels' cluster-robust CR0: the infilling benchmarks'
-lines and spans of one HumanEval problem); 95% intervals by the normal quantile (Eq. 5-6).
+problem's pass@k estimate, §3.1); its CLT standard error (Eq. 1), clustered by the problem a question derives from
+when several do (Eq. 4, statsmodels' cluster-robust CR0: the infilling lines and spans of one HumanEval problem); 95%
+intervals by the normal quantile (Eq. 5-6).
 
 Hardware (model_flops_per_token, executed_model_flops, mfu, latency): model FLOPs utilization (PaLM, arXiv 2204.02311
-App. B: 6N + 12 L H Q T per token, 2 FLOPs per multiply-add, rematerialization not counted) at the GPU's dense BF16
-peak, N the matmul parameters. Nominal (model_flops_per_token): each layer's T the most keys a query attends, itself
-and up to its window before it, min(window + 1, context), without the causal halving (torchtitan
-quadratic_attention_flops_per_token). Executed
-(executed_model_flops): the keys each query attends within its segment (cu_seqlens: a document, a FIM example, a row's
-padding) and window, causally, the work FlashAttention does (Megatron-LM num_floating_point_operations' causal and
-per-document counting); torch.utils.flop_counter counts the same once each custom op registers its formula, but per
-step it would read cu_seqlens on the host (a device sync) and dispatch every op through Python. DeepSeek LLM's M stays
-the compute of the scaling plan, not an MFU numerator.
-Decoding latency as vLLM's benchmark reports it (vllm/benchmarks/serve.py calculate_metrics): time to first token from
-the request taking a decoder slot, time per output token after the first, end-to-end latency, output tokens per second.
+App. B: 6N + 12 L H Q T per token, rematerialization not counted) at the GPU's dense BF16 peak, N the matmul
+parameters. Nominal (model_flops_per_token): each layer's T the most keys a query attends, min(window + 1, context),
+without the causal halving (pytorch/torchtitan quadratic_attention_flops_per_token). Executed (executed_model_flops):
+the keys each query attends causally within its segment (cu_seqlens: a document, a FIM example, a row's padding) and
+window (NVIDIA/Megatron-LM num_floating_point_operations' causal, per-document counting).
+Decoding latency (vllm-project/vllm benchmarks/serve.py calculate_metrics): time to first token from the request taking
+a decoder slot, time per output token after the first, end-to-end latency, output tokens per second.
 
 Fits (parabola_vertex): the vertex of a least-squares parabola, the optimum of a sweep (ablations/peak_lr.py).
 """
@@ -143,9 +134,8 @@ def mixture_bpb(corpora: dict, weights: dict[str, float], *, buckets: slice = sl
 
 def offset_bpb(corpora: dict, weights: dict[str, float]) -> list[float | None]:
     """mixture_bpb per byte-offset bucket (eval/bpb.py OFFSETS: the targets after [OFFSETS[i-1], OFFSETS[i]) bytes of
-    their segment; None where no target is): bits per byte as a function of the context in bytes (arXiv 2308.12950
-    Fig. 4a; 2503.13423 App. B.1), from corpora {corpus: {"offset_bits", "offset_bytes", "rows"}}. A bucket pools the
-    documents long enough to reach it, so the curve mixes context use with document composition."""
+    their segment; None where no target is), from corpora {corpus: {"offset_bits", "offset_bytes", "rows"}} (arXiv
+    2308.12950 Fig. 4a; arXiv 2503.13423 App. B.1)."""
     n = len(next(iter(corpora.values()))["offset_bits"])
     bits = [sum(w * corpora[c]["offset_bits"][i] / corpora[c]["rows"] for c, w in weights.items()) for i in range(n)]
     nbytes = [sum(w * corpora[c]["offset_bytes"][i] / corpora[c]["rows"] for c, w in weights.items()) for i in range(n)]

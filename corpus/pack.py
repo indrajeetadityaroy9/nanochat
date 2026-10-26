@@ -39,13 +39,12 @@ from corpus.tokenize import repository_parts, shard_tokens
 from corpus.tokenizer import FIM_TOKENS, TOKENIZER, get_tokenizer
 from native import corpus_crate
 
-# FIM: rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv 2207.14255 §3);
-# 90% AST middles, 10% random character spans; PSM/SPM 50/50, as joint training matches or beats either mode alone
-# (arXiv 2207.14255 §3.1, §4.3 Table 1, §8.1; SPM as App. D's variant 2) and AST-FIM trains (arXiv 2506.00204v1 §5.1);
-# AST middles an equal mix of Single-Node and Aligned-Span masking (§3.3); an AST middle whose node starts its line
-# takes the line's indentation with probability 0.5, so both a prefix ending in the line break (line-level infilling,
-# as HumanEval infilling masks whole lines) and one ending in the indentation (a cursor after it) are trained. The
-# crate draws each piece's FIM from ChaCha8 keyed by document and piece, so packs do not depend on the order of work
+# FIM (the crate's Fim): a piece becomes an example at rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv
+# 2207.14255 §3); its middle a random character span at 0.1, else AST-FIM's (arXiv 2506.00204 §5.1), Single-Node or
+# Aligned-Span masking at 0.5 each (§3.3); an AST middle whose node starts its line takes the line's indentation at
+# 0.5, so the prefix ends in the line break as in line-level infilling (arXiv 2207.14255 §2.2); SPM at 0.5, else PSM
+# (arXiv 2207.14255 §3.1, App. D variant 2; arXiv 2506.00204 §5.1). The crate draws each piece's FIM from ChaCha8 keyed
+# by document and piece, so packs do not depend on the order of work
 FIM_RATE, RANDOM_SPAN_RATE, SINGLE_NODE_RATE, LINE_START_RATE, SPM_RATE = 0.5, 0.1, 0.5, 0.5, 0.5
 # Pack calls in flight: one per core (the crate releases the GIL)
 WINDOW = os.cpu_count()
@@ -155,7 +154,6 @@ def main() -> None:
     corpus_crate()  # built once, before the threads call it
     stages = (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE)
     with ThreadPoolExecutor() as threads:
-        # each val split packed whole
         vals = [threads.submit(write, corpus, "val", TOKENIZER,
                                packed_shards(corpus, "val", TOKENIZER, range(shard_count(corpus, "val", TOKENIZER)),
                                              stage.seq_len), stage.seq_len)

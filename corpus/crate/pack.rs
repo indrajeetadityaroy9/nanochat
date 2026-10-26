@@ -1,7 +1,7 @@
 //! The packer (corpus/pack.py): one curated shard of a tokenized split at a time, its documents cut into pieces
 //! that fit a training row, the pieces of a train split of a repository corpus drawn fill-in-the-middle examples
 //! (context-level FIM: per piece, after cutting; arXiv 2207.14255 §3.2) whose middles AST-FIM chooses
-//! (arXiv 2506.00204v1 §3.3, §5.1), and the pieces placed in rows by Best-Fit-Decreasing.
+//! (arXiv 2506.00204 §3.3, §5.1), and the pieces placed in rows by Best-Fit-Decreasing.
 
 use std::cell::OnceCell;
 use std::cmp::Reverse;
@@ -116,7 +116,7 @@ fn statement_cuts(ids: &[u16], token_bytes: &[Vec<u8>], ends_line: &[bool], gram
     cuts
 }
 
-/// Fill-in-the-middle as AST-FIM trains it (arXiv 2506.00204v1 §5.1 "FIM", §3.3 "Masking Algorithm"), extracted from
+/// Fill-in-the-middle as AST-FIM trains it (arXiv 2506.00204 §5.1 "FIM", §3.3 "Masking Algorithm"), extracted from
 /// pack.py's mapping: the share of pieces made FIM examples (rate); of those the share whose middle is a random
 /// character span (random: Rand-FIM) rather than AST-aligned; of AST-aligned middles the share by Single-Node rather
 /// than Aligned-Span masking (single); of AST-aligned middles whose node starts its line, the share that take the
@@ -154,7 +154,7 @@ fn random_span(text: &str, rng: &mut ChaCha8Rng) -> (usize, usize) {
     (bounds[i.min(j)], bounds[i.max(j)])
 }
 
-/// The middle [a, b) of text by AST-FIM's masking (arXiv 2506.00204v1 §3.3) on its tree-sitter parse, whose named
+/// The middle [a, b) of text by AST-FIM's masking (arXiv 2506.00204 §3.3) on its tree-sitter parse, whose named
 /// nodes are the syntax tree (keywords and punctuation are tree-sitter's anonymous nodes); None when text does not
 /// parse (§5.1: Rand-FIM for code that fails to parse) or has no subtree below its root (named nodes of a tree without
 /// errors span at least one byte). With probability single, Single-Node masking: a named node below the root drawn with

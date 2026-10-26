@@ -137,7 +137,7 @@ fn grammar_ends(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>) -> PyRe
 }
 
 /// The next masks of constraints, computed in parallel without the GIL into rows of the caller's buffer of uint32
-/// words at address (row r at address + 4 rows[r] words; bit t % 32 of word t / 32 set iff token t keeps the text
+/// words at address (row r at byte address + 4 words rows[r]; bit t % 32 of word t / 32 set iff token t keeps the text
 /// viable), each row's other bits cleared. BOS's bit is set iff it is a candidate end: a suffix follows or the grammar
 /// ends a module here; the caller decides a chosen candidate (grammar_ends, then ast.parse). Returns whether each row
 /// allows some token. The caller keeps the buffer alive, each row within it, and the rows distinct.

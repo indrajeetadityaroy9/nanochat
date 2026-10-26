@@ -1,19 +1,13 @@
 """
-Likelihood metrics of a checkpoint in bits per byte (metrics.bpb, metrics.mixture_bpb), targets of 0 bytes (special
-tokens, padding) excluded from both sums (karpathy/nanochat evaluate_bpb, nanochat/loss_eval.py).
-- val_bits: each training corpus's held-out val split, the test loss of autoregressive training (arXiv 2207.14255
-  §2: its "AR loss"; "AR test loss", §1.1), per context bucket (CONTEXTS: Code Llama's loss as a function of context
-  length, arXiv 2308.12950 §3.3, Fig. 4a), per corpus, per group (code, text, math) and overall, pooled by the stage's
-  mixture weights, as The Pile reports its BPB per component and over the whole.
-- solution_bits: each benchmark's reference solutions given their prompts, the task loss of arXiv 2412.04403 §2.2
-  (the correct answer's bits per byte; its tasks multiple-choice, without pass@1), a predictor of pass@1 at scales
-  where pass@1 is near zero (DataDecide, arXiv 2504.11393 §3.4, Fig. 6: the correct answer's probability makes
-  HumanEval and MBPP decisions predictable where accuracy is trivial; arXiv 2508.13144 §5.3: BPB raises the
-  signal-to-noise ratio of most benchmarks; arXiv 2604.07769 §3.3.1, Table 2: the loss on a benchmark's problems and
-  reference solutions, its "valid-loss", tracks pass@1 where held-out corpus loss does not).
-Each returns the bits and bytes sums per context bucket, so corpora, buckets and benchmarks pool exactly, and per
-sampled row (a row's bits and bytes over its targets), the units of the row-level standard errors
-(metrics.mixture_bpb_summary). Sums are fp64 on the device, reduced in a fixed order.
+Likelihood metrics of a checkpoint in bits per byte (metrics.bpb, metrics.mixture_bpb); targets of 0 bytes (special
+tokens, padding) are excluded from both sums (karpathy/nanochat evaluate_bpb, nanochat/loss_eval.py).
+- val_bits: each training corpus's held-out val split, the AR loss of arXiv 2207.14255 §2, per context bucket
+  (CONTEXTS; arXiv 2308.12950 §3.3, Fig. 4a), per corpus, per group (code, text, math) and overall, pooled by the
+  stage's mixture weights as The Pile pools its components.
+- solution_bits: each benchmark's reference solutions given their prompts, the task loss of arXiv 2412.04403 §2.2.
+Each returns bits and bytes sums per context bucket (corpora, buckets and benchmarks pool exactly) and per sampled
+row, the unit of the row-level standard errors (metrics.mixture_bpb_summary). Sums are fp64 on the device, reduced in
+a fixed order.
 """
 import math
 import re
@@ -31,20 +25,17 @@ from corpus.tokenizer import Tokenizer
 from metrics import mixture_bpb, mixture_bpb_summary, offset_bpb
 from model.modeling import CausalLM
 
-# Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the
-# whole split if smaller; models of one tokenizer are scored on identical rows (models of different tokenizers, on
-# identical documents when the split lies within the sample), so the subsample's sampling error cancels in differences
+# Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or
+# the whole split if smaller
 VAL_TOKENS = 80 * 2**19
 # Context buckets of a target (its input's position in its piece + 1): positions both stages train (at most the
 # file-level context) and positions only the repo-level stage trains
 CONTEXTS = (FILE_LEVEL_STAGE.seq_len,)
 # Byte-offset buckets of a target (the bytes of its piece before it), doublings from 1 KiB to 128 KiB (beyond a 32K
-# row's span in bytes): loss at doubling context lengths, as arXiv 2308.12950 Fig. 4a samples perplexity,
-# in bytes so that tokenizers compare at the same context (arXiv 2503.13423 §3.1 fixes context in bytes for this
-# reason; App. B.1, Fig. 6: BPB by bytes of context)
+# row's span in bytes): arXiv 2308.12950 Fig. 4a's loss by context length, in bytes (arXiv 2503.13423 §3.1, App. B.1)
 OFFSETS = tuple(2**k for k in range(10, 18))
-# The benchmarks with reference solutions (eval/code_eval.py tasks): Python's EvalPlus (arXiv 2305.01210) canonical
-# solutions, C++'s HumanEval-X's (arXiv 2303.17568; MultiPL-E, arXiv 2208.08227, has none)
+# Benchmarks with reference solutions (eval/code_eval.py tasks): EvalPlus's (arXiv 2305.01210) canonical solutions,
+# HumanEval-X's C++ ones (arXiv 2303.17568)
 SOLUTION_BENCHMARKS = ("humaneval_plus", "mbpp_plus", "humaneval_x_cpp")
 
 
@@ -101,9 +92,8 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     (Stage.shares at their total), the groups code (every code group), text and math. cu_seqlens is padded to the
     corpora's most segments: one compiled graph scores all."""
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
-    # the sample: n = min(num_rows, sample_rows) rows, row (j x num_rows) // n for j < n (the packer orders each shard's
-    # rows longest first, Best-Fit-Decreasing, so a prefix would over-represent long documents), its last micro-batch
-    # filled with empty rows: a split within the sample is scored whole, every row of it
+    # n = min(num_rows, sample_rows) rows, row (j x num_rows) // n for j < n (systematic: the packer orders each
+    # shard's rows longest first), the last micro-batch filled with empty rows
     sampled, samples = {}, {}
     for name in stage.sources:
         num_rows = packed_rows(name, "val", tokenizer, stage.seq_len)
@@ -136,9 +126,8 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
     SOLUTION_BENCHMARKS, in FILE_LEVEL_STAGE's micro-batches (one compiled shape), one example and one attention
     segment per row: BOS + the tokens of prompt + solution, scored from the token starting at the prompt's end
     (decode_with_offsets; none starting there raises).
-    The solution's leading blank lines, through its last leading line break, count as prompt: EvalPlus's solutions
-    begin with them, and a tokenizer joins them to the prompt's last line break, so the prompt would end inside a
-    token and tokenizers would score different bytes."""
+    The solution's leading blank lines, through its last leading line break, count as prompt (EvalPlus's solutions
+    begin with them; a tokenizer would join them to the prompt's last line break)."""
     micro_batch_size, seq_len = FILE_LEVEL_STAGE.micro_batch_size, FILE_LEVEL_STAGE.seq_len
     bos = tokenizer.bos_token_id
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)

@@ -1,23 +1,17 @@
 """
-The CausalLM: karpathy/nanochat 92d63d4 nanochat/gpt.py (a DecoderLayer applies pre-norm attention and MLP, each added
-back; CausalLM's layer loop mixes in x0 and looks up value embeddings) with the wins of its experiment log (dev/LOG.md,
-"LOG") and learnable per-dimension QK-norm weights (transformers modeling_qwen3.py; per-head QK norm with learnable
-parameters, arXiv 2309.14322 §3.2.5; a fixed scale costs 0.11% of loss in nGPT, arXiv 2410.01131 App. A.9 Table 5).
-- Normed token embedding, no positional embedding; RoPE over the full head (92d63d4 gpt.py:57-65).
-- Per layer x = resid_lambda x + x0_lambda x0, x0 the normed embedding (LOG 2026-01-11).
-- Attention: MHA, head_dim HEAD_DIM (model/config.py); per-head RMS norm, a per-dim weight shared across heads, then
-  RoPE (transformers modeling_qwen3.py Qwen3Attention.forward); SSSL windows; value embeddings on alternating layers
-  behind a per-head gate 2 sigmoid(.) of the normed stream, zero init (modded-nanogpt record #14's per-layer value
-  embeddings, MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6; nanochat e85db6b, whose gate read the stream's first 32
-  channels); FlashAttention-4 with document masking.
-- MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
-- Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy; the
-  output-logit cap c tanh(z / c) (ModelConfig.final_logit_softcapping; run.py's c = 15 is 92d63d4's).
-Not taken from 92d63d4: its smear and backout, its QK order (RoPE, norm, x 1.2) and its init (init_weights states this
-model's).
-fp32 parameters, bf16 activations; the GEMM ops multiply by bf16 copies of the weights (GemmLinear), the other ops
-round theirs to bf16. Gradient reductions run in no fixed order (FA4's and the embedding backward's atomic
-accumulation), so gradients are not bitwise reproducible.
+CausalLM after karpathy/nanochat 92d63d4 nanochat/gpt.py: pre-norm decoder layers (attention, MLP, each added back),
+x0 mixing and value embeddings in the layer loop.
+- Token embedding RMS-normed, no positional embedding; RoPE over the full head (nanochat 92d63d4 gpt.py:57-65).
+- Per layer x = resid_lambda x + x0_lambda x0, x0 the normed embedding (karpathy/nanochat dev/LOG.md 2026-01-11).
+- Attention: MHA, head_dim HEAD_DIM; per-head RMS norm with a learned per-dimension weight shared across heads
+  (arXiv 2309.14322 §3.2.5; transformers modeling_qwen3.py Qwen3Attention.forward), then RoPE; SSSL windows
+  (layer_windows); FlashAttention-4 with document masking.
+- Value embeddings on alternating layers behind a per-head gate 2 sigmoid(W_g n) of the normed stream n, W_g
+  zero-initialized (KellerJordan/modded-nanogpt record #14; MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6).
+- MLP ReLU^2, hidden 4C. Gain-free RMS norm, bias-free linears, untied lm_head; cross entropy on logits capped
+  c tanh(z / c) (ModelConfig.final_logit_softcapping).
+fp32 parameters, bf16 activations (GEMM ops multiply by bf16 weight copies, GemmLinear). Gradients are not bitwise
+reproducible: FA4's and the embedding backward's reductions are atomic.
 """
 
 import zlib
@@ -60,22 +54,20 @@ def has_ve(layer_idx: int, *, num_hidden_layers: int) -> bool:
 
 
 def layer_windows(config: ModelConfig) -> list[int]:
-    """Keys before each query, per layer: SSSL tiled (every fourth layer L), the last layer L too (LOG 2026-01-11;
-    92d63d4 gpt.py:287-314); L the full context, S = 512, the smallest local window Gemma 3 finds near-lossless
-    (arXiv 2503.19786 §5.2, Fig. 4)."""
+    """Keys before each query, per layer: SSSL tiled, L (the full context) on every fourth layer and the last, S = 512
+    (LOG 2026-01-11; 92d63d4 gpt.py:287-314; S after arXiv 2503.19786 §5.2)."""
     n = config.num_hidden_layers
     return [config.max_position_embeddings if i % 4 == 3 or i == n - 1 else 512 for i in range(n)]
 
 
 def norm(x: Tensor) -> Tensor:
-    """RMS norm, statistics in fp32, eps FLT_EPSILON (the convention of model/kernels/qk_prologue.cu and decode.cu)."""
+    """RMS norm, statistics in fp32, eps FLT_EPSILON (as model/kernels/qk_prologue.cu and decode.cu)."""
     return F.rms_norm(x, (x.size(-1),), eps=torch.finfo(torch.float32).eps)
 
 
 class GemmLinear(nn.Linear):
-    """A bias-free linear of the decoder layers' GEMM ops (model/ops/linear.py): the ops multiply by weight_bf16, a
-    bf16 copy of the fp32 master weight refreshed once per weight change (CausalLM.refresh_gemm_weights), not by a
-    cast per micro-batch, and accumulate dW into the master's .grad."""
+    """Bias-free linear of the GEMM ops (model/ops/linear.py): they multiply by weight_bf16, a bf16 copy of the fp32
+    weight refreshed per weight change (CausalLM.refresh_gemm_weights), and accumulate dW into weight.grad."""
 
     def __init__(self, in_features: int, out_features: int) -> None:
         super().__init__(in_features, out_features, bias=False)
@@ -89,8 +81,8 @@ class Attention(nn.Module):
         self.q_proj = nn.Linear(C, C, bias=False)
         self.k_proj = nn.Linear(C, C, bias=False)
         self.v_proj = nn.Linear(C, C, bias=False)
-        # q_proj, k_proj, v_proj as one GEMM (model/ops/linear.py qkv_proj) by their stacked bf16 copies, refreshed as
-        # the GemmLinears' (CausalLM.refresh_gemm_weights); dW accumulates into each weight's .grad
+        # Stacked bf16 [Wq; Wk; Wv] for one GEMM (model/ops/linear.py qkv_proj), refreshed as GemmLinear.weight_bf16;
+        # dW accumulates into each weight's .grad
         self.register_buffer("qkv_bf16", self.q_proj.weight.new_empty((3 * C, C), dtype=torch.bfloat16),
                              persistent=False)
         self.o_proj = GemmLinear(C, C)
@@ -105,12 +97,11 @@ class Attention(nn.Module):
     def forward(self, hidden_states: Tensor, residual: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
                 cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor,
                 segments: Tensor) -> tuple[Tensor, Tensor]:
-        """hidden_states: normed stream; residual: the stream; input_ids: the token ids; ve_table: this layer's value
-        embeddings or None -> (residual + o_proj(attention output), its rows' rstd; model/ops/flash_attn.py
-        attention, o_proj inside it: its backward takes FA4's dpsum from o_proj's dX epilogue)."""
+        """hidden_states: normed stream; residual: the stream; ve_table: this layer's value embeddings or None
+        -> (residual + o_proj(attention output), its rows' rstd) (model/ops/flash_attn.py attention, o_proj inside)."""
         qkv = qkv_proj(hidden_states, self.qkv_bf16, *(w.grad for w in self.qkv_weights()))
-        # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once
-        # (model/ops/ve_gate.py, inside the attention op; its backward visits the tokens in sorted order)
+        # Value embedding, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once
+        # (model/ops/ve_gate.py); the sorted ids order its backward by token
         ve = ((hidden_states, input_ids, ve_table, self.ve_gate.weight, *torch.sort(input_ids.flatten()))
               if ve_table is not None else (None,) * 6)
         return attention(qkv, self.q_norm_weight, self.k_norm_weight, *cos_sin, window_size, cu_seqlens, segments,
@@ -265,9 +256,7 @@ def num_matmul_params(model: CausalLM) -> int:
 
 
 def non_embedding_flops_per_token(model: CausalLM) -> int:
-    """DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72 n_layer d_model² + 12 n_layer d_model l_seq: full attention
-    over the model's context l_seq, the count the batch and lr laws' constants were fit with (§3.1-3.2; every Table 3
-    model at l_seq 4,096). Windowed layers are counted as full attention too, on the assumption that a model whose
-    local windows are near-lossless (arXiv 2503.19786 §5.2) shares its full-attention counterpart's hyperparameters."""
+    """DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72 n_layer d_model² + 12 n_layer d_model l_seq, l_seq the
+    model's context; windowed layers counted as full attention."""
     n, d = model.config.num_hidden_layers, model.config.hidden_size
     return 72 * n * d * d + 12 * n * d * model.config.max_position_embeddings

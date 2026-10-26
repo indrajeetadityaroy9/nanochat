@@ -20,43 +20,36 @@ Benchmarks:
   (program = prompt + completion + "\\n" + tests, main.py:34; g++ -std=c++17 then the binary, 15 s each,
   eval_cpp.py:9-36, safe_subprocess/__init__.py:33), pass@1 by its pass_k.py (status "OK" and exit code 0).
 - humaneval_x_cpp (164; HumanEval-X, arXiv 2303.17568): C++ reference solutions, which MultiPL-E lacks.
-- fill-in-the-middle: openai/human-eval-infilling (arXiv 2207.14255; installed in the image,
-  docker/Dockerfile), single-line, multi-line and random-span infilling of the 164 HumanEval solutions. Each problem's
-  prefix and suffix form a PSM or SPM prompt (inference.decoder.fim_prompt); the model writes the middle until BOS (its
-  end-of-middle target in training), at most the benchmark's longest reference middle in tokens, scored as written
-  (the package's protocol: no post-processing). The references' middles are whole lines, the model's (trained on
-  character-level and AST spans) rarely end at a line end; "greedy_reference_lines" scores the same greedy
-  single-line and multi-line middles cut to the reference's lines (fim_lines: the first line, the first k lines of a
-  k-line reference), the post-processing of arXiv 2505.18789 (Table 1, Fig. 4), which reads the reference's line
-  count, so it is a separate metric, not the benchmark's pass@1. FIM prompts are not healed: they end with a sentinel
-  (PSM) or with the prefix encoded on its own (SPM), the training format, whose character-level spans train mid-token
-  boundaries (corpus/crate/pack.rs random_span). Scored by the package's
-  check_correctness per middle (its 3 s timeout) in a worker process per CPU (INFILLING_EVALUATE); pass@1 by its
-  estimate_pass_at_k.
+- fill-in-the-middle: openai/human-eval-infilling (arXiv 2207.14255; installed in the image, docker/Dockerfile),
+  single-line, multi-line and random-span infilling of the 164 HumanEval solutions. Each problem's prefix and suffix
+  form a PSM or SPM prompt (inference.decoder.fim_prompt); the model writes the middle until BOS (its end-of-middle
+  target in training), at most the benchmark's longest reference middle in tokens, scored as written (the package's
+  protocol: no post-processing). "greedy_reference_lines" scores the greedy single-line and multi-line middles cut to
+  the reference's lines (fim_lines; arXiv 2505.18789 Table 1, Fig. 4), a separate metric. FIM prompts are not healed:
+  they end with a sentinel (PSM) or the prefix encoded on its own (SPM), the training format (corpus/crate/pack.rs
+  random_span). Scored by the package's check_correctness per middle (its 3 s timeout) in a worker process per CPU
+  (INFILLING_EVALUATE); pass@1 by its estimate_pass_at_k.
 
 Scores: pass@1 by three generation modes, each scored by the benchmark's evaluator. "greedy": one greedy completion per
-problem (the pass@1 of DeepSeek-Coder, arXiv 2401.14196 §4.1, and EvalPlus's leaderboard; FIM in PSM and SPM order).
-"sampled" (EvalPlus, MultiPL-E): pass@1 by Codex's unbiased estimator over N_SAMPLE samples per problem at
-TEMPERATURE from the nucleus TOP_P (the temperature and nucleus of Codex and MultiPL-E), each benchmark's
-evaluator computing the estimate. "filtered" (FIM in FILTERED_MODE order only): filtered
-pass@1 (Codex's filtered pass@k) over at most verify.ATTEMPTS samples, verify.search: the complete Python 3 syntax
-constraint (inference/syntax_constraint.py; FIM: given the prefix and suffix, the middle ending at BOS, uncut),
-left-to-right prompts healed (decoder.heal_tokens), the greedy candidate then seeded samples until one has no
-diagnostics (verify.python_diagnostics, solution_diagnostics, cpp_diagnostics) and passes its prompt's own examples,
-scored by the same evaluators. Selection reads only the prompt, but the prompts' examples overlap the scored base tests
-(verify.py), so it favours base over plus pass@1. Every evaluator runs as a fresh process (exec), never a fork of this
-torch/CUDA process.
-Each record also holds "scores": metrics.summary (standard errors, Miller arXiv 2411.00640) of its per-problem scores,
-the evaluator's pass@1 their mean: pass@1 and, with N_SAMPLE samples, pass@10 (Codex's estimator, metrics.pass_at_k);
-FIM's also CrossCodeEval's line exact match, exact match, edit similarity and identifier match against the reference
-middle (metrics.completion_scores), clustered by HumanEval problem. "latency": metrics.latency of the decoding.
+problem (DeepSeek-Coder, arXiv 2401.14196 §4.1; EvalPlus's leaderboard; FIM in PSM and SPM order). "sampled"
+(EvalPlus, MultiPL-E): Codex's unbiased estimator over N_SAMPLE samples per problem at TEMPERATURE from the nucleus
+TOP_P, computed by each benchmark's evaluator. "filtered" (FIM in FILTERED_MODE order only): Codex's filtered pass@k
+over at most verify.ATTEMPTS samples (verify.search): the Python 3 syntax constraint (inference/syntax_constraint.py;
+FIM: given prefix and suffix, the middle ending at BOS, uncut), left-to-right prompts healed (decoder.heal_tokens), the
+greedy candidate then seeded samples until one has no diagnostics (verify.python_diagnostics, solution_diagnostics,
+cpp_diagnostics) and passes its prompt's own examples. Every evaluator runs as a fresh process (exec), never a fork of
+this torch/CUDA process.
+Each record also holds "scores": metrics.summary (Miller, arXiv 2411.00640) of its per-problem scores: pass@1 and, with
+N_SAMPLE samples, pass@10 (metrics.pass_at_k); FIM's also CrossCodeEval's line exact match, exact match, edit
+similarity and identifier match against the reference middle (metrics.completion_scores), clustered by HumanEval
+problem. "latency": metrics.latency of the decoding.
 
-Generation and scoring: requests (inference.decoder.Request) in, token ids out, by a decoder.NativeDecoder per pass
-(decoder). A pass's independent requests share one generate call (generate_groups: parse_generation's two benchmarks,
-generation's greedy and sampled requests of every benchmark, fim_generation's requests of every benchmark in both
-orders); the searches (filtered_generation, fim_filtered_generation) run a benchmark at a time. Each benchmark's mode is
-scored on the caller's scorer thread as soon as its requests are generated, while the GPU works on: the functions return
-the futures of the records (suite.evaluate orders the GPU work and collects them).
+Generation: requests (inference.decoder.Request) in, token ids out, by a decoder.NativeDecoder per pass. A pass's
+independent requests share one generate call (generate_groups: parse_generation's two benchmarks, generation's greedy
+and sampled requests of every benchmark, fim_generation's requests of every benchmark in both orders); the searches
+(filtered_generation, fim_filtered_generation) run a benchmark at a time. Each benchmark's mode is scored on the
+caller's scorer thread once its requests are generated: the functions return futures of the records (suite.evaluate
+collects them).
 """
 
 import codecs
@@ -101,10 +94,8 @@ INFILLING = ("single-line", "multi-line", "random-span")
 FIM_MODES = ("psm", "spm")  # the two orders the packer trains (arXiv 2207.14255 App. D)
 # the FIM order of the filtered mode
 FILTERED_MODE = "spm"
-# The sampled mode (Codex, arXiv 2107.03374 §2.1: pass@k's unbiased estimator over n samples per problem; §3.2: nucleus
-# sampling at top p 0.95 for all its sampling; §3.3, Fig. 5: T = 0.2 the pass@1 optimum): MultiPL-E's pass@1
-# (arXiv 2208.08227: T = 0.2, its pass@1 stable from about 20 samples; completions.py --top-p 0.95). StarCoder2
-# (arXiv 2402.19173 §7.1.2) samples MultiPL-E at T = 0.2, top-p 0.95.
+# Sampled mode: Codex (arXiv 2107.03374 §2.1 unbiased pass@k; §3.2 top p 0.95; §3.3, Fig. 5: T = 0.2 for pass@1);
+# MultiPL-E's pass@1 (arXiv 2208.08227: T = 0.2; completions.py --top-p 0.95); StarCoder2 (arXiv 2402.19173 §7.1.2)
 N_SAMPLE, TEMPERATURE, TOP_P = 20, 0.2, 0.95
 # EvalPlus's most new tokens of a completion (evalplus/provider/base.py:13 max_new_tokens)
 EVALPLUS_MAX_NEW_TOKENS = 768
@@ -290,12 +281,11 @@ def filtered_middles(generator: NativeDecoder, tokenizer: Tokenizer, problems: l
 
 
 def sanitizers() -> ProcessPoolExecutor:
-    """EvalPlus's sanitize workers (evalplus, evalplus_check), a process per CPU (sanitize parses every line span of a
-    program), from a forkserver (never a fork of this torch/CUDA process), SyntaxWarnings of generated code ignored.
-    Each worker imports the main module (run.py, whose top level is light for this reason). The caller shuts the pool
-    down (suite.evaluate's `with`): in a spawned process (run.py's phases), multiprocessing's exit handler joins the
-    pool's workers before concurrent.futures' exit handler would stop them, so a pool left open never lets the process
-    exit."""
+    """EvalPlus's sanitize workers (evalplus, evalplus_check), a process per CPU, from a forkserver (never a fork of
+    this torch/CUDA process), SyntaxWarnings of generated code ignored. Each worker imports the main module (run.py,
+    whose top level must stay light). The caller shuts the pool down (suite.evaluate's `with`): in a spawned process,
+    multiprocessing's exit handler joins the workers before concurrent.futures' would stop them, so an open pool
+    blocks exit."""
     return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("forkserver"),
                                initializer=warnings.filterwarnings, initargs=("ignore", "", SyntaxWarning))
 
@@ -320,9 +310,9 @@ def multipl_e_check(task: Task, text: str) -> tuple[str, str, list[str]]:
     return task.prompt, task.prompt + text + "\n}", []
 
 
-# `python -m evalplus.evaluate` as a function call (its entry point, Fire(evaluate)) in a fresh isolated process, all
-# CPUs testing (its default: half), ended by os._exit once evaluate has written its output file: its stall warner
-# (evaluate.py stucking_checker, a non-daemon thread sleeping 20 s per check) would hold the exit up to 20 s
+# `python -m evalplus.evaluate` (Fire(evaluate)) as a call in a fresh isolated process, all CPUs testing (default: half),
+# ended by os._exit after the output file is written: evaluate.py's stucking_checker, a non-daemon thread sleeping
+# 20 s per check, would hold the exit up to 20 s
 EVALPLUS_EVALUATE = """
 import os, sys
 from evalplus.evaluate import evaluate
@@ -362,10 +352,9 @@ def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: l
 def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
     """MultiPL-E's evaluation of each problem's completions: {"pass@1" (pass_k.py: Codex's estimator over each
     problem's completions), "scores": pass_scores of pass_k.py's outcomes (status "OK" and exit code 0), "ids",
-    "status" (per problem, per completion)}. Each problem is a completions file as
-    multipl_e/completions.py writes it, judged by its own main.py --file process (--dir runs problems serially),
-    os.cpu_count() at once, each with one judge thread (--max-workers 1): main.py's default of cpu_count() - 1 threads
-    per file puts up to 20 g++ per core, and a compile past its wall-clock limit scores "SyntaxError" (eval_cpp.py).
+    "status" (per problem, per completion)}. Each problem is a completions file as multipl_e/completions.py writes
+    it, judged by its own main.py --file process, os.cpu_count() at once, each with one judge thread (--max-workers 1;
+    main.py's default is cpu_count() - 1, and a compile past its wall-clock limit scores "SyntaxError", eval_cpp.py).
     The scripts import siblings, so no -I."""
     root = Path(os.environ["MULTIPL_E"])
     main = root / "evaluation" / "src" / "main.py"
@@ -392,10 +381,9 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
 
 
 # human_eval_infilling's evaluation (evaluation.py evaluate_functional_correctness: check_correctness per sample at its
-# default timeout, 3 s) across a fork pool of worker processes, in a fresh isolated process: its CLI's thread pool forks
-# a Manager and a Process per sample from one interpreter, so its rate is bound by that interpreter's GIL (4 threads or
-# 64, about the same). The CLI's modules are imported first: a sample runs in a fork of this process, and what it
-# imports at run time depends on the modules already loaded (reliability_guard disables what an import would call).
+# default timeout, 3 s) across a fork pool of worker processes, in a fresh isolated process. The CLI's modules are
+# imported first: a sample runs in a fork of this process, and what it imports at run time depends on the modules
+# already loaded (reliability_guard disables what an import would call).
 INFILLING_EVALUATE = """
 import json, multiprocessing, os, sys
 from concurrent.futures import ProcessPoolExecutor
@@ -460,11 +448,10 @@ def codegen_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]],
     for name in MULTIPL_E_BENCHMARKS:
         items = benchmarks[name]
         prompts = [[bos, *tokenizer.enc.encode_ordinary(t.prompt.strip())] for t in items]
-        # MultiPL-E: at most 1024 tokens of prompt and completion (multipl_e/completions.py --max-tokens,
-        # automodel.py:67 generate(max_length=...)), the BOS among them. A prompt of 1024 tokens or more gets a budget
-        # below 1 and the empty completion (generate_groups, filtered_completions), as MultiPL-E's generator gives it:
-        # it truncates the prompt to max_length - 1 tokens (:56) and returns the decoded output past the full prompt's
-        # length (:114), empty but for a 1024-token prompt whose one generated token outspans the truncated one
+        # MultiPL-E: at most 1024 tokens of prompt and completion, BOS included (multipl_e/completions.py --max-tokens,
+        # automodel.py:67 generate(max_length=...)). A prompt of 1024 tokens or more gets a budget below 1 and the empty
+        # completion (generate_groups, filtered_completions), as automodel.py truncates it to max_length - 1 tokens
+        # (:56) and returns the output past the full prompt's length (:114)
         runs[name] = CodegenRun(items, prompts, [1024 - len(p) for p in prompts], "stop", multipl_e_check, "cpp",
                                 multipl_e)
     return runs
@@ -562,12 +549,9 @@ def parse_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str
     """{benchmark: {"parses", "indentation", "syntax" (shares of its problems: how prompt + completion compiles,
     parse_outcome), "outcomes", "completions", "latency" (generate_groups)} | EvalPlus's base and plus pass@1 of the
     completions (evalplus), sanitized by `pool` (sanitizers)} of HumanEval+ and MBPP+: one greedy completion per
-    problem, unconstrained, of the healed prompt (decoder.heal_tokens), TokEval's protocol (BOS, healing, greedy), so
-    the failures a vocabulary's line-break tokens cause (SyntaxError when punctuation fuses with a line break,
-    IndentationError when a line break fuses with the indentation after it, in arXiv 2608.18062's models) show where
-    pass@1 is near zero. One generate call runs both benchmarks; each one's parse_record, CPU work, runs on `scorers`
-    as soon as its completions exist, while the GPU decodes on (and the caller's GPU work runs): the futures of the
-    records."""
+    problem, unconstrained, of the healed prompt (decoder.heal_tokens): TokEval's protocol (BOS, healing, greedy;
+    arXiv 2608.18062 App. C.1). One generate call runs both benchmarks; each one's parse_record runs on `scorers` as
+    soon as its completions exist: the futures of the records."""
     bos = tokenizer.bos_token_id
     healed = {name: [heal_tokens(tokenizer, [bos, *tokenizer.enc.encode_ordinary(t.prompt)]) for t in benchmarks[name]]
               for name in EVALPLUS}

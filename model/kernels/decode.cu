@@ -3,9 +3,7 @@
  * active slot by one token, chosen greedily or sampled (optionally from its nucleus), optionally restricted to a
  * per-slot set of allowed tokens (inference/decoder.py).
  *
- * A many-slot step is bound by its KV reads (each active slot reads its window's keys and values in every layer) and
- * its GEMMs; a few-slot step by weight reads and kernel launches. The step's kernels replay as one CUDA graph, each a
- * programmatic dependent of the one before (launch).
+ * The step's kernels replay as one CUDA graph, each a programmatic dependent of the one before (launch).
  * Positions, input tokens, KV caches, the active-slot mask and each slot's sampling parameters and allowed tokens live
  * in device memory. A slot starts at its prompt's last token (dec_set_prompt), the positions before it cached: run as
  * rows of a prefill (dec_prefill: up to MAX_BATCH (slot, position, token) rows of any prompts through the step's body
@@ -78,8 +76,8 @@ constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thre
 constexpr int MAX_BATCH = 1024;
 constexpr int MASK_BITS = CHAR_BIT * sizeof(unsigned long long);  /* slots per word of a slot mask */
 constexpr int MASK_WORDS = MAX_BATCH / MASK_BITS;                 /* words of a slot mask */
-/* the narrow graphs' slots (Decoder::narrow): at d24 (256-token prompts) the fastest step time, or within 0.04 ms of
- * it, at 1, 64, 128 and 256 active slots, against 64, 128, 512 and no narrow graphs */
+/* the narrow graphs' slots (Decoder::narrow): the fastest step time, or within 0.04 ms of it, at d24 (256-token
+ * prompts) at 1, 64, 128 and 256 active slots */
 constexpr int SMALL_BATCH = 256;
 static_assert(MAX_BATCH % MASK_BITS == 0, "slot masks are whole words");
 /* mma.sync m16n8k16 (PTX ISA "Matrix Fragments for mma.m16n8k16"): lanes form MMA_N groups (groupID = lane / GROUP) of
@@ -156,8 +154,7 @@ static __device__ __forceinline__ unsigned long long choice_key(float score, int
  * counter-based Philox4x32-10 ("Parallel Random Numbers: As Easy as 1, 2, 3", SC '11; cuRAND's
  * curand_Philox4x32_10) at counter (row, i), key seed: so the draw depends on (seed, i, row) alone. u = (2r + 1)
  * 2^-DBL_MANT_DIG of DBL_MANT_DIG - 1 random bits r is exact in double and never 0 or 1. argmax over tokens of s / T +
- * noise samples softmax(s / T) (the Gumbel-max trick; "A* Sampling", arXiv 1411.0030,
- * §2). */
+ * noise samples softmax(s / T) (the Gumbel-max trick; "A* Sampling", arXiv 1411.0030 §2). */
 static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, int row) {
     const uint4 x = curand_Philox4x32_10(make_uint4((uint32_t)row, (uint32_t)i, 0u, 0u),
                                          make_uint2((uint32_t)seed, (uint32_t)(seed >> 32)));
@@ -313,9 +310,8 @@ template <bool CHOICE> static __device__ __forceinline__ void argmax_fold(const 
  * accumulators' layout is mma m16n8's per warp (16 rows) and n8 chunk (PTX ISA "Register Fragments: wgmma
  * .m64nNk16"), whose lanes epilogue and argmax_fold address. Slot tiles without an active slot exit. CHOICE: ARGMAX
  * honours each slot's allowed tokens and temperature (c; the head graph); without it, the logits' argmax (the
- * whole-step graph), so greedy steps run the GEMM compiled without the choice. Tile shape (WG_M x WG_N = 64 x 64,
- * against 128-row x 128-slot tiles where they cover every SM) and WG_STAGES (4, against 2, 3, 6 and 8): the fastest
- * step time at d24 (1,024 slots, 256-token prompts). */
+ * whole-step graph), so greedy steps run the GEMM compiled without the choice. Tile shape (WG_M x WG_N = 64 x 64) and
+ * WG_STAGES (4): the fastest step time at d24 (1,024 slots, 256-token prompts). */
 constexpr int WG_THREADS = 128, WG_M = 64, WG_N = MASK_BITS, WG_BK = 64, WG_STAGES = 4;
 static_assert(WG_BK * sizeof(bf16) == 128, "a K slice row is one 128-byte swizzle span");
 constexpr uint32_t WG_A_BYTES = WG_M * WG_BK * sizeof(bf16), WG_B_BYTES = WG_N * WG_BK * sizeof(bf16);
@@ -446,9 +442,9 @@ __global__ void __launch_bounds__(2 * WG_THREADS) k_wgmma(const __grid_constant_
 /* A nucleus-sampled slot's choice (top-p sampling: arXiv 1904.09751, "The Curious Case of Neural Text Degeneration",
  * §3.1): Gumbel-max at temperature T, as the GEMM's epilogue, over the fewest most likely allowed tokens whose
  * probability under softmax(s / T) reaches top_p; its key to argmax for k_commit. The nucleus is Hugging Face
- * transformers' TopPLogitsWarper's (the generator of MultiPL-E automodel.py and bigcode-evaluation-harness), which
- * sorts the probabilities ascending and drops every token whose cumulative probability is at most 1 - top_p; k_nucleus,
- * with e = exp(s / T - max s / T) (0 outside the allowed tokens) and C(x) the sum of e over the tokens with e <= x,
+ * transformers' TopPLogitsWarper's, which sorts the probabilities ascending and drops every token whose cumulative
+ * probability is at most 1 - top_p; k_nucleus, with e = exp(s / T - max s / T) (0 outside the allowed tokens) and C(x)
+ * the sum of e over the tokens with e <= x,
  * the tokens kept are those with e >= e*, the least e with C(e) > (1 - top_p) sum(e), found by bisection on the IEEE
  * bits of x in [0, 1] (C is a step function rising at each e, so the least such bits are an e's). Tokens of exactly
  * equal probability are kept or dropped together. The sums run in a fixed order, so the choice depends on the slot
@@ -632,7 +628,7 @@ static __device__ __forceinline__ float key_score(const float *q, const float *k
 }
 
 /* k_attn's keys per cp.async run (a commit group, double-buffered): one MMA_M tile per warp, the least a warp's MMA
- * scores; the fastest step time at d24 (1,024 slots, 256-token prompts) among one, two and four tiles per warp */
+ * scores; the fastest step time at d24 (1,024 slots, 256-token prompts) */
 constexpr int ATTN_RUN = ATTN_WARPS * MMA_M;
 constexpr int ROW_VECS = HEAD_DIM / (int)sizeof(uint4);  /* 16-byte vectors per e4m3 key row */
 constexpr float FP8_MAX = 448.f;  /* the largest finite e4m3 */

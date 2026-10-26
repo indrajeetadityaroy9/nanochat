@@ -109,7 +109,8 @@ authorship units and sa-bpe's own numbers). Steps (`python -m ablations.tokenize
   `[^\r\n\p{L}\p{N}]?+` a tab, `"\tif"`); (3) no contraction clause (Punct, arXiv 2402.01035 App. E, Fig. 3), so
   `'self` is not cut into `'s` `elf`. Kept: one leading punctuation character or space on a letter run (GPT-4's pattern
   gives "an additional 5% compression over Punct at no significant cost to performance", App. E), digit pairs,
-  punctuation runs.
+  punctuation runs. `HYBRID_PATTERN` has no lookahead, so a long whitespace run costs fancy-regex no backtracking,
+  where `SPLIT_PATTERN`'s `\s+(?!\S)` beside `\s*[\r\n]` can stop tiktoken past its backtrack limit.
 - **bpe:** SA-BPE's Table 3 F row; close to F·log R in compression, so a run tie was likely, which val coverage breaks.
 
 Not built: tiktoken encodes by merge rank alone, which cannot express PickyBPE's token removals (arXiv 2409.04599
@@ -126,7 +127,7 @@ opposite directions, neither significantly (arXiv 2503.13423 Table 1).
 | line-break entries | entries holding a line break; fusing punctuation with one (`[^\s\p{L}\p{N}][\r\n]`); ending in a line break and indentation | the post's most stable MBPP measurement (Spearman ρ = −0.719 over 58 tokenizers) |
 | depth invariance | of each program source's first 50,000 indented val lines, the share whose tokens are the indentation's then the statement's at depth 0 | the hybrid's clause (2) |
 | merged reads | merged tokens the val documents read never, < 10, < 100 times | the tie-break (SA-BPE's coverage, arXiv 2604.14053 Table 3, graded) |
-| TokEval | `metrics.tokeval` (`docs/evaluation.md` §5) on each source's leading val documents | recorded, read by no decision |
+| TokEval | `metrics.tokeval` (`docs/evaluation.md` §5) on each source's leading val documents | recorded, read by no decision: of its 14 metrics only AST alignment predicts MBPP, attributed "to the vocabulary's line-break handling" (arXiv 2608.18062 §5), measured directly above; Rényi efficiency predicts neither code bits per byte nor MBPP (Table 2) |
 
 **Intrinsic results** (`results/tokenizer_split_merge-intrinsic.json`, `ebd8058`). Every arm passed every validity
 check. The record predates the current `intrinsic` step: it holds no TokEval, its fidelity check covered each source's

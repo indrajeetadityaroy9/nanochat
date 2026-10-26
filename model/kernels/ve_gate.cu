@@ -17,9 +17,8 @@
  *
  * The backward visits rows in token order (order: a permutation sorting idx, ids = idx[order]), RUN consecutive
  * positions per warp: a run of equal tokens reads its table row once and sums its rows' dve in registers, then adds
- * the sum into dtable with one 16-byte atomic per lane and chunk (red.global.add.v4.f32), so a frequent token costs one
- * atomic per RUN rows instead of one per row. dtable is accumulated into, not overwritten. Design source: the Engram
- * gate and weight-gradient reduce of deepseek-ai/TileKernels.
+ * the sum into dtable with one 16-byte atomic per lane and chunk (red.global.add.v4.f32); dtable is accumulated into,
+ * not overwritten. Design source: deepseek-ai/TileKernels' Engram gate and weight-gradient reduce.
  */
 #include "common.cuh"
 

@@ -8,13 +8,9 @@ eval/code_eval.py: filtered pass@1, one candidate selected by these checks among
   generated text's syntax error, an entry function without a returned value;
 - cpp_diagnostics: g++ -std=c++17 -fsyntax-only's failure (its error lines), the MultiPL-E judge's compiler and
   standard (evaluation/src/eval_cpp.py) without code generation;
-- examples_pass: the prompt's own examples, run under EvalPlus's reliability_guard. Selection reads only the prompt,
-  but the prompts' examples overlap the scored base tests (MBPP+: nearly every prompt assert calls the entry function
-  on a base input, tuples compared as lists; HumanEval+: many tasks share a doctest input with the base tests), so it
-  favours base over plus pass@1;
+- examples_pass: the prompt's own examples, run under EvalPlus's reliability_guard;
 - search: per task a greedy candidate, then seeded samples, until one has no diagnostics and passes its prompt's
-  examples (Codex, arXiv 2107.03374 §3.5: filtering by the first sample which passes the public unit tests; AlphaCode's
-  filtering by the problem's example tests, arXiv 2203.07814 §4.5).
+  examples (Codex, arXiv 2107.03374 §3.5; AlphaCode, arXiv 2203.07814 §4.5).
 """
 
 import ast
@@ -39,33 +35,27 @@ from inference.syntax_constraint import syntax_error
 from metrics import latency
 
 # basedpyright rules (its configuration reference, config-files) whose errors on known types are runtime failures or
-# annotation contradictions: undefined variables (NameError), attribute accesses (AttributeError), call expressions and
-# their arguments (arity and keyword TypeErrors), return types against the declared return annotation. Every other rule
-# is off (typeCheckingMode "off"): style, unknown types, possibly-unbound or optional-member findings that a correct
-# program may legitimately trigger, and argument types (reportArgumentType), which pyright also judges against types it
-# inferred itself (basedpyright rejects the canonical solution of HumanEval/130).
+# annotation contradictions: undefined variables (NameError), attribute accesses (AttributeError), call expressions
+# (arity and keyword TypeErrors), return types against the declared annotation. Every other rule is off
+# (typeCheckingMode "off"), argument types (reportArgumentType) included.
 PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue", "reportReturnType")
 # the MultiPL-E judge's per-step timeout (safe_subprocess/__init__.py:33, eval_cpp.py: 15 s compile, 15 s run)
 CPP_TIMEOUT = 15
-# HumanEval's execution timeout (human_eval/evaluation.py:43 evaluate_functional_correctness timeout=3.0; the 3 s of
-# Codex §3.5 is its APPS timeout)
+# HumanEval's execution timeout (human_eval/evaluation.py:43 evaluate_functional_correctness timeout=3.0)
 EXAMPLES_TIMEOUT = 3
-# sampling temperature of the candidates after the greedy one: Codex's temperature for samples selected by unit tests
-# (arXiv 2107.03374 Fig. 1, §3.3: T = 0.8 is the pass@100 optimum, higher temperatures are optimal for larger k)
+# temperature of the candidates after the greedy one: Codex's for samples selected by unit tests (arXiv 2107.03374
+# Fig. 1, §3.3: T = 0.8 the pass@100 optimum)
 TEMPERATURE = 0.8
 # candidates per task, the greedy one included: pass@10, the intermediate budget Codex (Table 1) and EvalPlus
 # (arXiv 2305.01210 Table 3) report
 ATTEMPTS = 10
 # examples_pass's child process: reads its stdin JSON (program and source/want pairs), takes EvalPlus's reliability_guard
-# as EvalPlus's own test runs do (evalplus/eval/__init__.py unsafe_execute: destructive os, shutil and subprocess
-# functions disabled, its memory limit), then runs the program as a module named "program", then each example in a
-# copy of its namespace plus the modules the example names but the program does not bind (MBPP+ prompt asserts call
-# math.isclose, imported by the original MBPP's test_imports); a failing example raises (exit status 1); EXAMPLES_DONE,
-# printed after the last example, marks a run that was not ended early (exit(), sys.exit()).
-# Values, not doctest's output text: HumanEval writes some wants in an equal but differently printed form ("21" for
-# '21', a list split over lines; HumanEval/65, /113) and some examples as bare comparisons without output (/108, /145):
-# an example with a want passes iff its value equals the want's; one without, iff an expression's value is None or
-# True, a statement (assert) iff it runs.
+# as EvalPlus's test runs do (evalplus/eval/__init__.py unsafe_execute: destructive os, shutil and subprocess functions
+# disabled, its memory limit), runs the program as module "program", then each example in a copy of its namespace plus
+# the modules the example names but the program does not bind (MBPP+ asserts call math.isclose, imported by MBPP's
+# test_imports); a failing example raises (exit status 1); EXAMPLES_DONE, printed after the last example, marks a run
+# not ended early (exit(), sys.exit()). By value, not doctest's output text: an example with a want passes iff its value
+# equals the want's; one without, iff an expression's value is None or True, a statement (assert) iff it runs.
 RUN_EXAMPLES = """
 import ast, builtins, importlib, importlib.util, json, sys
 from evalplus.eval import query_maximum_memory_bytes

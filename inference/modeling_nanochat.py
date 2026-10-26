@@ -10,9 +10,9 @@ Layout as transformers' Qwen3 (modeling_qwen3.py): attention through ALL_ATTENTI
 runs in transformers (eager, sdpa, generate with a cache) and in vLLM. The training forward's precision, where its
 kernels keep fp32:
 - q/k (model/kernels/qk_row.cuh): per-head RMS norm (eps FLT_EPSILON), fp32 gain, rotation by -theta over the full
-  head ((m1, m2) -> (m1 cos + m2 sin, m2 cos - m1 sin), karpathy/nanochat 92d63d4 gpt.py:57-65), angles t theta^(-2i/D)
-  in fp64 rounded once to fp32 (CausalLM.init_buffers), one bf16 rounding. transformers' and vLLM's rotary embeddings
-  rotate by +theta, so none is used.
+  head ((m1, m2) -> (m1 cos + m2 sin, m2 cos - m1 sin), karpathy/nanochat 92d63d4 nanochat/gpt.py:57-65), angles
+  t theta^(-2i/D) in fp64 rounded once to fp32 (CausalLM.init_buffers), one bf16 rounding. transformers' and vLLM's
+  rotary embeddings rotate by +theta, so none is used.
 - value embeddings (model/kernels/ve_gate.cu): v + 2 sigmoid(n W^T) per head x table[input_ids], the gate's logits in
   fp32, the mix rounded once.
 - per layer h = resid_lambda h + x0_lambda x0 in fp32, rounded once; the per-dim and per-layer vectors and the gate
@@ -151,7 +151,7 @@ class NanochatPreTrainedModel(PreTrainedModel):
     base_model_prefix = "model"
     _supports_sdpa = True
     _supports_attention_backend = True  # vLLM's Transformers backend runs models that declare it
-    # export_hf.py writes these fp32 (FP32 there is this list)
+    # export_hf.py writes these fp32 (its fp32 set is this list)
     _keep_in_fp32_modules_strict: ClassVar[list[str]] = ["resid_lambdas", "x0_lambdas", "q_norm_weight",
                                                          "k_norm_weight", "ve_gate"]
 

@@ -1,41 +1,33 @@
 """The decoder layer's GEMMs as torch.library ops (traceable by fullgraph torch.compile): forward and dX on QuACK's
-(Dao-AILab/quack) GEMMs (quack.gemm_interface and quack.epilogue fused epilogues) at fixed tile configurations
-(CONFIGS) with W the bf16 copy of the fp32 master (model/modeling.py GemmLinear); dW accumulated in fp32 by cuBLAS
-straight into the fp32 master's .grad (aten addmm.dtype_out, beta = 1; NVIDIA/Megatron-LM's gradient-accumulation
+(Dao-AILab/quack) GEMMs (quack.gemm_interface, quack.epilogue fused epilogues) with W the bf16 copy of the fp32 weight
+(model/modeling.py GemmLinear), at fixed tile configurations (CONFIGS), never autotuned at run time; dW accumulated in
+fp32 by cuBLAS into the weight's .grad (aten addmm.dtype_out, beta = 1; NVIDIA/Megatron-LM's gradient-accumulation
 fusion, deepseek-ai/DeepGEMM's D = C + A B).
 
-Tile configurations: fixed per call and width, never chosen by timing at run time. QuACK's autotuner (tuned=True, its
-default) benchmarks every candidate at a shape's first call and keeps the fastest, so processes may pick different
-tiles and a cold first step spends time tuning; QuACK's default_config (tuned=False) is slower over these GEMMs,
-so each call takes the best of QuACK's own benchmark instead (CONFIGS).
-
-Weight gradients: each op takes its weights' .grad buffers (fp32, allocated and zeroed by train/loop.py) and its
-backward adds dW into them in place, so the gradient-accumulation micro-batches sum in the GEMM instead of a new dW per
-micro-batch plus autograd's AccumulateGrad add; autograd sees no gradient for those weights. Forward-only callers pass
-None.
+Weight gradients: each op takes its weights' .grad (fp32, allocated and zeroed by train/loop.py) and its backward adds
+dW into them in place, so micro-batches accumulate in the GEMM; autograd sees no gradient for those weights.
+Forward-only callers pass None.
 
 nanochat::qkv_proj (q_proj, k_proj, v_proj): one GEMM y = x [Wq; Wk; Wv]^T (..., 3C) against the stacked bf16 copy
 (model/modeling.py Attention.qkv_bf16), q, k, v its column blocks; backward dX = dY [Wq; Wk; Wv] (one GEMM, K = 3C),
 each dW = dY_block^T X on the block's strided view of dY.
 
 The post-attention half of a layer runs on the un-normed stream: the norm is gain-free, so
-norm(h) W^T = diag(rstd) (h W^T) exactly, and rstd rides the GEMM epilogues as a per-row (colvec) scale; the normed
+norm(h) W^T = diag(rstd) (h W^T) exactly, and rstd is a per-row (colvec) scale in the GEMM epilogues; the normed
 tensor is never stored.
-- residual_rms (o_proj; inside model/ops/flash_attn.py's attention op, whose backward needs its dX epilogue's row
-  sums): h = residual + x W^T and rstd = (mean(h^2) + eps)^-1/2 from the same epilogue
-  (quack.gemm_interface.gemm_rms: per-tile squared sums, finalized by quack.rms_final_reduce). Backward
-  (residual_rms_bwd): dO = dh W with FA4's dpsum = rowsum(dO O) per head in the epilogue (dx_dpsum, x = O): the
-  column tile is one head (DPSUM_CONFIG), so the per-tile reduce partials are dpsum per (row, head), and FA4's
-  backward does not read O and dO again for it (flash_bwd_preprocess.py).
+- residual_rms (o_proj, inside model/ops/flash_attn.py's attention op): h = residual + x W^T and
+  rstd = (mean(h^2) + eps)^-1/2 from the same epilogue (quack.gemm_interface.gemm_rms: per-tile squared sums,
+  finalized by quack.rms_final_reduce). Backward (residual_rms_bwd): dO = dh W with FA4's dpsum = rowsum(dO O) per
+  head in the epilogue (dx_dpsum, x = O); the column tile is one head (DPSUM_CONFIG), so the per-tile reduce partials
+  are dpsum per (row, head).
 - nanochat::relu2_mlp: h + down_proj(relu(rstd up_proj h)^2), the MLP of karpathy/nanochat 92d63d4 gpt.py:131-141 on
   the normed stream plus its residual: rstd and relu^2 in the up-projection's epilogue
-  (quack.gemm_interface.gemm_norm_act, which stores the scaled pre-activation and the activation, both saved for the
-  backward: dW_down's operand is the saved activation, not a recompute), the residual as the
-  down-projection's C (quack.gemm_interface.gemm_add). Its backward owns the norm's backward (residual_rms's rstd
-  gets no gradient of its own): with P = h W_up^T, preact = rstd P and dpreact from relu^2's derivative,
-  dP = rstd dpreact, d rstd = sum(dpreact preact) / rstd and d rstd/dh = -rstd^3 h / C, so
-  dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h; the row sum is a reduce of the dact epilogue, the rest the
-  dX GEMM's epilogue (C = dy, h a tile load)."""
+  (quack.gemm_interface.gemm_norm_act, storing the scaled pre-activation and the activation for the backward; dW_down's
+  operand is the saved activation), the residual as the down-projection's C (quack.gemm_interface.gemm_add). Its
+  backward owns the norm's backward (residual_rms's rstd gets no gradient of its own): with P = h W_up^T,
+  preact = rstd P and dpreact from relu^2's derivative, dP = rstd dpreact, d rstd = sum(dpreact preact) / rstd and
+  d rstd/dh = -rstd^3 h / C, so dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h; the row sum is a reduce of the
+  dact epilogue, the rest the dX GEMM's epilogue (C = dy, h a tile load)."""
 import torch
 from cutlass import BFloat16, Float32
 from quack.activation import drelu_sq
@@ -147,9 +139,8 @@ def residual_rms(x: Tensor, weight: Tensor, residual: Tensor) -> tuple[Tensor, T
     return r["D"], rstd
 
 
-# o_proj's dX tiling: tile_n = HEAD_DIM, so each column tile is one head and dx_dpsum's per-tile row sums are FA4's
-# dpsum; QuACK's tuner cannot pin tile_n (its sweep keeps any tile_n the partials buffer fits), so the config is
-# fixed: the fastest of QuACK's SM90 tile_n = 128 configs on the d24 shape (98,304 x 768 x 768, exclusive GPU)
+# o_proj's dX tiling: tile_n = HEAD_DIM, so dx_dpsum's per-tile row sums are FA4's dpsum; fixed, as QuACK's tuner does
+# not pin tile_n: the fastest QuACK SM90 tile_n = 128 config on the d24 shape (98,304 x 768 x 768)
 DPSUM_CONFIG = sm90(128, HEAD_DIM, 1, 2)
 
 

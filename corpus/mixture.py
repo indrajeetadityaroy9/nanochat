@@ -71,25 +71,22 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The stages' sizes: schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens) at the corpus's planned budget,
-# the last REPO_LEVEL_SHARE of steps at 32K, rounded as schedule.plan rounds them; the base run itself takes run.py's
-# plan at max_tokens_per_param (69,611 steps), which the packed data holds. A Stage's tokens are this run's; any other
-# run draws by the stage's shares at its own size (weights)
+# The stages' sizes: schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens), the last REPO_LEVEL_SHARE of
+# steps at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run draws by the
+# stage's shares at its own size (weights)
 MAX_STEPS, BATCH_SIZE = 69_580, 15 * MICRO_BATCH_TOKENS
 REPO_LEVEL_STEPS = round(REPO_LEVEL_SHARE * MAX_STEPS)
 
-# Code, text and math shares: DeepSeek-Coder's 87% code, 10% code-related English and 3% code-unrelated Chinese (arXiv
-# 2401.14196 §2: "87% source code, 10% English code-related natural language corpus, and 3% code-unrelated Chinese
-# natural language corpus"); its natural language is taken to cover web text and mathematics
+# Code share: DeepSeek-Coder's 87% source code, 10% English and 3% Chinese natural language (arXiv 2401.14196 §2), its
+# natural language taken as web text and mathematics
 CODE_SHARE = 0.87
 NON_CODE = ("text", "math")
 REPOSITORY_SOURCES = ("stack_edu_python", "ultradata_stack_v3_l2_python", "ultradata_code_l2_python",
                       "stack_edu_cpp", "ultradata_stack_v3_l2_cpp", "ultradata_code_l2_cpp")
 MATH_SOURCES = ("ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultradata_math_l3_multi_style",
                 "ultradata_math_l3_textbook_exercise")
-# Synthetic code: UltraData-Code L3's exercises and Nemotron's rewritten Python and Python transpiled into C++, 30% of
-# code: good mixtures' share of rephrased synthetic data, "converging to ~30%" (Kang et al., arXiv 2510.01631 §1),
-# their finding on rephrased web text, applied to code
+# Synthetic code, 30% of code: good mixtures' share of rephrased synthetic data, "converging to ~30%" (Kang et al.,
+# arXiv 2510.01631 §1), measured on web text
 SYNTHETIC_SOURCES = ("ultradata_code_l3_python", "ultradata_code_l3_cpp", "nemotron_rewriting_python",
                      "nemotron_transpilation_cpp")
 # The repository stage's documents per (repository, language) across REPOSITORY_SOURCES (tokenize.py), a corpus per
@@ -123,9 +120,9 @@ BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.
                    "nemotron_rewriting_python": 3.909, "nemotron_transpilation_cpp": 3.651, "codexglue_python": 4.028,
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
-# How much better a retrained tokenizer may compress a source than the reference tokenizer: "the NSL on any given
-# subset only varies by 5 to 6 percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035
-# §2.3); ablations/tokenizer_split_merge.py intrinsic measures each arm's margin (train_tokens_over_draw)
+# How much better a retrained tokenizer may compress a source than the reference tokenizer: NSL "only varies by 5 to 6
+# percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035 §2.3);
+# ablations/tokenizer_split_merge.py intrinsic measures each arm's margin (train_tokens_over_draw)
 SPREAD = 0.06
 
 

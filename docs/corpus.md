@@ -61,8 +61,9 @@ Software Heritage requests retry from 1 s to 1 min for up to 15 min (`prepare.sw
 (10 retries from 100 ms) the Stack-Edu fetch failed when the bucket reset one request 10 times within 8.2 s.
 
 **Extent** (`prepare.extent`): a source of a group read in part (`mixture.IN_PART`: synthetic code, ClimbMix,
-UltraData-Math L3) fetches the fewest Hub files, in the SHA-1 order of their paths, whose text bytes (Parquet footers,
-`sources.text_bytes`) reach
+UltraData-Math L3) fetches the fewest Hub files, in the SHA-1 order of their paths, whose text bytes (from Parquet
+footers, `sources.text_bytes`: an estimate, as pyarrow exposes no exact unencoded size and an exact count scans the
+column) reach
 
 $$\text{need} = \frac{\text{draw}(g)}{\sum_{s \in g} \text{bytes}_s / \text{BPT}_s} \cdot (1 + \text{SPREAD}) \cdot
 \frac{100}{99} \cdot \text{bytes}_s$$
@@ -110,8 +111,8 @@ extent's order), in the category's schema (`schema.py`; every column a non-null 
 - `prepare.lines`: CR LF and a lone CR become LF and every leading U+FEFF is dropped, as Python and C++ read a source
   file (Python Language Reference §2.1.2, §2.1.4; C++23 [lex.phases] phases 1–2). Otherwise the text is as published.
 - `id` is the hex SHA-1 of `content`'s UTF-8 bytes (`schema.sha1`); `language` is the source's, `Python` or `C++`.
-- Codeforces-CoTs keeps finished traces only (`finish_reason = 'stop'`); `content` is `prompt` followed by
-  `generation`, `problem_id` the dataset's `id`.
+- Codeforces-CoTs keeps finished traces only (`finish_reason = 'stop'`; a truncated trace mostly ends before its code
+  [unverified]); `content` is `prompt` followed by `generation`, `problem_id` the dataset's `id`.
 
 ## 3. Curation
 
@@ -236,7 +237,8 @@ and packed (§6, §8).
   to 6 percentage points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); proportional weights gave lower
   FLORES+ bits per byte than equal ones (arXiv 2610.12144 App. D Table 6, §5.2).
 - **Authorship units** (SA-BPE's R): the lowercased repository for repository files and functions (SA-BPE's unit);
-  every other document its own unit (suggested for natural language, arXiv 2604.14053 §6, untested there).
+  every other document its own unit (arXiv 2604.14053 §6 suggests "documents, books, or document collections" for
+  natural language, untested there).
 - **The draw** (`results/tokenizer_split_merge-vocabularies.json`): 3,988,600 documents, 13,444,424,046 bytes,
   3,429,396 units; code 85.6% of its bytes; drawn bytes 0.99–1.05 of the targets, as the draw takes a fraction of rows
   against footer byte targets and each repository file carries a path comment the footers omit (`sources.texts`, §6).

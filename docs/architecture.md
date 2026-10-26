@@ -56,8 +56,10 @@ QK-norm weights. Each random tensor draws from a generator seeded by seed·2^32 
 
 **Counts** (`num_non_embedding_params`: decoder layers + `lm_head`, what the token budget scales with,
 `docs/training.md` §2; `num_matmul_params`: every 2-D weight but the tables, PaLM's N; M:
-`non_embedding_flops_per_token`, DeepSeek LLM's 72·n_layer·C² + 12·n_layer·C·l_seq, arXiv 2401.02954 §3.2 Eq. 2,
-windowed layers counted as full; nominal: `metrics.model_flops_per_token`, 6N + 12·C·Σ_layers min(window + 1,
+`non_embedding_flops_per_token`, DeepSeek LLM's 72·n_layer·C² + 12·n_layer·C·l_seq, arXiv 2401.02954 §3.2 Eq. 2, the
+count its batch and lr laws were fit with (every Table 3 model at l_seq 4,096); windowed layers counted as full, on the
+assumption that a model with near-lossless local windows (arXiv 2503.19786 §5.2) shares its full-attention
+counterpart's hyperparameters [inference]; nominal: `metrics.model_flops_per_token`, 6N + 12·C·Σ_layers min(window + 1,
 context), each layer's most keys a query attends, itself included; defined in `docs/evaluation.md` §5). Recomputed
 on CPU from `model/modeling.py` on the meta device [arithmetic]:
 
@@ -204,15 +206,23 @@ Notes on the rows:
 - **The cap.** The removed capped path (bf16 capped logits, a logits-sized derivative buffer, a cross-entropy pass, an
   autotuned dX GEMM) cost +9.4 ms and +6 GiB over uncapped (28.04 → 37.44 ms, 6.14 → 12.14 GiB). Over the run, 0.58%
   of the 8K stage's 73.8 h is ~26 min [arithmetic, `docs/training.md` §7]; the cap's 32K cost is not measured.
-- **dpsum.** `DPSUM_CONFIG` is the fastest QuACK SM90 configuration with tile_n = 128 on the d24 shape (172.2 µs;
-  cluster (2, 1) 172.8, tile_m 192 212.4 / 218.3, cooperative 256 268.5 / 270.4); `fa4_rows` takes 7.5 µs.
+- **dpsum.** QuACK's autotuner does not pin tile_n, so `DPSUM_CONFIG` is fixed: the fastest QuACK SM90 configuration
+  with tile_n = 128 on the d24 shape (172.2 µs; cluster (2, 1) 172.8, tile_m 192 212.4 / 218.3, cooperative 256
+  268.5 / 270.4); `fa4_rows` takes 7.5 µs.
 - **Value-embedding backward.** RUN = 16 positions per warp (isolated backward 222 / 203 / 251 µs at RUN 8 / 16 / 32),
   2 blocks of 256 threads per SM (`ve_gate.cu`).
 - **q/k prologue forward.** Two heads' loads in flight per thread group: `k_forward` 250.3 → 183.6 µs per call at d24
   8K against one head per group (`qk_prologue.cu`, `62b50c2`).
-- **Window dQ in bf16.** A window dQ element sums at most 5 bf16 partials (one per 128-key block of the 512-key
-  window); full layers would sum T/128 (64 at 8K, 256 at 32K) and keep FA4's fp32 accumulator and FA4's own launch
-  and tile shapes (the persistent and tile variants measured for them: `docs/experiments.md` §5).
+- **Window layers.** FA4's SM90 forward launches one CTA per (segment m-block, head), and a 512-key window's m-block of
+  128 queries covers ~5 key blocks, so each CTA's launch, Q load and output store are exposed; the persistent forward
+  amortizes them. Full causal layers keep FA4's launch: their m-blocks' work differs up to T / 128-fold, which a static
+  stride balances worse than the hardware's CTA scheduling (measured on the d24 shapes). A window dQ element sums at
+  most 5 bf16 partials (one per 128-key block of the 512-key window); full layers would sum T/128 (64 at 8K, 256 at
+  32K) and keep FA4's fp32 accumulator and FA4's own launch and tile shapes, the fastest timed on the d24 shapes (the
+  persistent and tile variants measured for them: `docs/experiments.md` §5).
+- **Real segments only.** FA4 schedules work for every segment it is given, so padding segments cost time without
+  changing outputs (McCormick, "Optimizing Training with FlashAttention varlen", 2026); the op passes the first
+  `segments` + 1 offsets (`flash_attn.py` `segmented`).
 - **Design sources.** The gate kernel and its token-ordered backward follow TileKernels' Engram gate and
   weight-gradient reduce; the norm in GEMM epilogues follows TileKernels' mHC norm kernels and DeepGEMM's in-GEMM
   pre-norm statistics; dW into `.grad` follows DeepGEMM's D = C + A·B and Megatron-LM's gradient-accumulation fusion.

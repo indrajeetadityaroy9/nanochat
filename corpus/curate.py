@@ -52,15 +52,14 @@ from paths import CORPUS
 # The id of an empty text
 EMPTY = hashlib.sha1(b"").hexdigest()
 # The fewest files of a repository shard's row group (the last excepted), whole samples each, so a reader of row
-# groups never splits a sample; a row group is tokenize's task, and its tokens do not depend on the grouping. 2^16: the
-# published dataset's row groups (publish.DATASET), chosen by a task's peak memory on the largest row group
+# groups never splits a sample; a row group is a tokenize task, whose tokens do not depend on the grouping. 2^16: the
+# published dataset's (publish.DATASET), bounded by a task's peak memory on the largest row group
 # (ultradata_code_l2_python)
 SAMPLE_ROWS = 65_536
 PLACEHOLDER = re.compile(r"<(EMAIL|KEY|NAME|PASSWORD)>")
 LEADING = re.compile(r"^[ \t]+", re.MULTILINE)
-# Python's recursion limit in the check, which bounds fissix's 2to3 (pure Python, recursive over the parse tree), not
-# ast.parse (bounded by CPython 3.12's C limits): at the default 1,000, 2to3 fails on deeply nested blocks. 6,000: the
-# limit the published corpus (publish.DATASET) was checked with
+# Recursion limit of the check: bounds fissix's 2to3 (pure Python, recursive over the parse tree), not ast.parse
+# (CPython 3.12's C limits); the limit the published dataset (publish.DATASET) was checked with
 RECURSION = 6_000
 
 

@@ -2,10 +2,9 @@
 The training loop. train() trains (or resumes) a run: the file-level stage, then the repo-level stage from
 repo_level_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196
 §3.1; corpus/pack.py). Each start resumes from the run's newest checkpoint (weights, optimizer state, data position).
-What a step computes is this package's: the optimizers, weight decay and gradient clip (optim.py), each step's stage
-and learning rate (schedule.py), the stages' micro-batches in the run's data order (stages.py), the micro-batches'
-loss weights (model/ops/cross_entropy.py step_shares). Caller: run.py. Metrics: metrics.py; the step's diagnostics:
-diagnostics.py.
+A step uses optim.py (optimizers, weight decay, gradient clip), schedule.py (stage, learning rate), stages.py
+(micro-batches in the run's data order) and model/ops/cross_entropy.py step_shares (micro-batch loss weights).
+Caller: run.py. Metrics: metrics.py; diagnostics: diagnostics.py.
 """
 
 import gc
@@ -185,8 +184,8 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
             log(*pending)
         pending, previous_end = (step, learning_rate, model_flops, values, layout, previous_end, end), end
         if step == start_step:
-            # no cyclic garbage per step: the collector off after setup (its scans are slow; karpathy/nanochat 07c4dd4)
-            # except after saves
+            # the collector frozen and off after the first step, collecting only after saves (karpathy/nanochat
+            # 07c4dd4)
             gc.collect()
             gc.freeze()
             gc.disable()

@@ -5,8 +5,7 @@ the step's values one step late, as the loss is (no host synchronization):
   loader's assignment);
 - the output logits' logsumexp over the valid positions: its maximum and mean square (PaLM's z-loss quantity,
   arXiv 2204.02311 §5), from the cross-entropy kernel's per-row outputs (model/ops/cross_entropy.py lm_loss);
-- the QK-norm gains' largest magnitude (logit growth inside attention; Kimi K2's QK-clip trigger, arXiv 2507.20534
-  §2.1, bounds the same quantity);
+- the QK-norm gains' largest magnitude;
 - every UPDATE_STATS_EVERY steps, each optimizer group's update RMS (the step's update without its decoupled weight
   decay: AdamW's lr m_hat / (sqrt(v_hat) + eps) from its state, torch/optim/adamw.py; Muon's adjusted-lr update,
   optim.py Muon.update_square) and parameter norm.
@@ -20,8 +19,7 @@ from corpus.loader import IGNORE_INDEX
 from corpus.mixture import Stage, mixture_rows
 from model.modeling import CausalLM
 
-# Steps between update-RMS and parameter-norm measurements: every step costs measurable d24 throughput, every 10th is
-# within the spread of alternated 25-step windows (GH200)
+# Steps between update-RMS and parameter-norm measurements: every 10th step's cost is within throughput noise (GH200)
 UPDATE_STATS_EVERY = 10
 
 

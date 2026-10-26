@@ -1,8 +1,8 @@
 """
 The corpus's tokenizer in CORPUS/tokenizer (tokenizer.tiktoken, tokenizer.pattern), the sa-bpe arm of
-ablations/tokenizer_split_merge.py, copied:
-the mergeable tokens, then SPECIAL_TOKENS, encoded by tiktoken. A vocabulary's tokenized and packed data live in its
-directory's sibling tokenized/, keyed by its data key, so tokenize.py and pack.py serve every arm alike.
+ablations/tokenizer_split_merge.py, copied: the mergeable tokens, then SPECIAL_TOKENS, encoded by tiktoken. A
+vocabulary's tokenized and packed data live in its directory's sibling tokenized/, keyed by its data key, so
+tokenize.py and pack.py serve every arm alike.
 """
 
 import base64
@@ -21,9 +21,10 @@ TOKENIZER = CORPUS / "tokenizer"
 ABLATION = CORPUS / "tokenizer-ablation"
 
 BOS = "<|bos|>"  # starts every piece of a packed row (loader.py); as a target it ends a document or a FIM middle
-# Fill-in-the-middle sentinels (DeepSeek-Coder's; arXiv 2401.14196 §3.1.2): a FIM example is
-# <｜fim▁begin｜> prefix <｜fim▁hole｜> suffix <｜fim▁end｜> middle (PSM) or <｜fim▁begin｜> <｜fim▁hole｜> suffix
-# <｜fim▁end｜> prefix middle (SPM), its middle ended by BOS (loader.py)
+# Fill-in-the-middle sentinels, the names of DeepSeek-Coder's released tokenizer (deepseek-ai/deepseek-coder-6.7b-base
+# tokenizer.json; arXiv 2401.14196 §3.1.2): a FIM example is <｜fim▁begin｜> prefix <｜fim▁hole｜> suffix <｜fim▁end｜>
+# middle (PSM) or <｜fim▁begin｜> <｜fim▁hole｜> suffix <｜fim▁end｜> prefix middle (SPM), its middle ended by BOS
+# (loader.py)
 FIM_BEGIN, FIM_HOLE, FIM_END = ("<\uff5cfim\u2581begin\uff5c>", "<\uff5cfim\u2581hole\uff5c>",
                                 "<\uff5cfim\u2581end\uff5c>")
 FIM_TOKENS = (FIM_BEGIN, FIM_HOLE, FIM_END)

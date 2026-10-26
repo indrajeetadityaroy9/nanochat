@@ -1,41 +1,31 @@
 """
-Attention of model/modeling.py as one torch.library op over the fused q/k/v projection (model/ops/linear.py
-qkv_proj): the q/k prologue (model/ops/qk_prologue.py), the value embeddings' gate and mix (model/ops/ve_gate.py) and
-FlashAttention-4 (Dao-AILab/flash-attention flash_attn/cute), causal with `window_left` keys before each query; FA4's
-own autograd.Function cannot be traced by torch.compile. One op, so the backward writes every gradient of the projection
-into one (B, T, 3C) buffer: FA4's dv into the v block (the value embeddings' backward reads it there; the mix passes
-dv through to v), the prologue's dq, dk into the q and k blocks, with no concatenation and no autograd add.
+Attention of model/modeling.py as one torch.library op (FA4's own autograd.Function is not traceable by
+torch.compile): from the fused projection (model/ops/linear.py qkv_proj), the q/k prologue (model/ops/qk_prologue.py),
+the value embeddings' gate and mix (model/ops/ve_gate.py), FlashAttention-4 (Dao-AILab/flash-attention
+flash_attn/cute), causal with `window_left` keys before each query, and o_proj (linear.py residual_rms). The backward
+writes every projection gradient into one (B, T, 3C) buffer: FA4's dv into the v block (read there by the value
+embeddings' backward; the mix passes dv through to v), the prologue's dq, dk into the q and k blocks.
 
-Document masking (ProLong, arXiv 2410.02660): FA4's varlen kernels restrict attention to the segments in
-cu_seqlens, the int32 offsets of the flattened (B*T) tokens (corpus/loader.py PretrainingBatches). cu_seqlens has a
-fixed length per loader (one compiled shape), its unused entries empty segments; `segments`, a 0-dim int32 tensor on
-the host (no device synchronization), is how many are not, and the op passes FA4 only those: FA4 schedules work for
-every segment it is given, so padding segments cost time without changing outputs (McCormick, "Optimizing Training
-with FlashAttention varlen", 2026).
+Document masking (ProLong, arXiv 2410.02660 App. B.2): FA4's varlen kernels attend within the segments of cu_seqlens,
+int32 offsets into the flattened (B*T) tokens (corpus/loader.py PretrainingBatches), fixed in length per loader, unused
+entries empty segments. `segments` (0-dim int32 on the host, no device synchronization) counts the used ones; FA4 gets
+only those, since it schedules work for every segment it is given.
 
-Local layers' forward runs persistent. FA4's SM90 forward launches one CTA per (segment m-block, head)
-(flash_fwd_sm90.py FlashAttentionForwardSm90.__call__: SingleTileVarlenScheduler, "TODO: dispatch to
-DynamicPersistentVarlenScheduler"), and a window-512 m-block of 128 queries covers ~5 key blocks, so each CTA's launch,
-Q load and output store are exposed. PersistentVarlenScheduler runs one CTA per SM over those tiles, and
-PersistentForwardSm90 stages the output tile in its own shared buffer (FlashAttentionForwardSm90.kernel puts it in sQ,
-which the producer refills with the next tile's Q once released, FlashAttentionForwardSm90.mma). Full causal layers
-keep FA4's launch: their m-blocks' work differs up to T / 128-fold, which a static stride balances worse than the
-hardware's CTA scheduling (measured on the d24 shapes).
+Local layers' forward is persistent: FA4's SM90 forward launches one CTA per (segment m-block, head)
+(flash_fwd_sm90.py FlashAttentionForwardSm90.__call__, SingleTileVarlenScheduler); PersistentVarlenScheduler runs one
+CTA per SM over those tiles, and PersistentForwardSm90 stages the output tile in its own shared buffer (FA4 stages it in
+sQ, which the producer refills with the next tile's Q, FlashAttentionForwardSm90.mma). Full causal layers keep FA4's
+launch.
 
-Local layers' backward accumulates dQ in bf16 (BackwardSm90Bf16dQ): FA4's SM90 backward reduce-adds fp32 dQ partial
-tiles into a zeroed fp32 dq_accum and converts it in a postprocess kernel (flash_bwd_postprocess.py); in
-BackwardSm90Bf16dQ the consumers scale dQ by the softmax scale and stage it as bf16 rows, and the dQ warp reduce-adds
-each row straight into dq with cp.reduce.async.bulk .add.noftz.bf16 (PTX ISA, cp.reduce.async.bulk): no fp32 zero
-fill, no postprocess, interior tiles skip the mask. A dq element there sums <= 5 bf16-rounded partials (one per
-128-key block of the 512-key window); full layers would sum up to T / 128 (64 at 8K, 256 at 32K), so they keep FA4's
-fp32 accumulator. Tile shapes and stages are FA4's own (_tile_size_fwd_sm90, _tile_size_bwd_sm90), the fastest of the
-forward and backward configurations timed on the d24 shapes (GH200 at 700 W).
+Local layers' backward accumulates dQ in bf16 (BackwardSm90Bf16dQ): instead of FA4's fp32 dq_accum, zero-filled and
+converted by flash_bwd_postprocess.py, the consumers stage dQ times the softmax scale as bf16 rows and the dQ warp
+reduce-adds each row into dq (PTX ISA cp.reduce.async.bulk .add.noftz.bf16); interior tiles skip the mask. A dq element
+sums <= 5 bf16-rounded partials (one per 128-key block of the 512-key window); full layers, up to T / 128, keep FA4's
+fp32 accumulator. Tile shapes and stages are FA4's (_tile_size_fwd_sm90, _tile_size_bwd_sm90).
 
-The op ends with o_proj (model/ops/linear.py residual_rms: h = residual + out W_o^T and its rows' rstd), so its
-backward takes dO from o_proj's dX GEMM together with FA4's dpsum = rowsum(dO O) per (row, head), summed in that
-GEMM's epilogue (linear.py residual_rms_bwd), where dO is in registers and O one more tile load: FA4's backward
-preprocess (flash_bwd_preprocess.py), which reads O and dO again for dpsum, gives way to fa4_rows
-(model/kernels/fa4_rows.cu), which places dpsum and lse log2(e) at FA4's padded rows from (rows, H) and lse alone.
+The backward takes dO from o_proj's dX GEMM with FA4's dpsum = rowsum(dO O) per (row, head) summed in its epilogue
+(linear.py residual_rms_bwd); fa4_rows (model/kernels/fa4_rows.cu) places dpsum and lse log2(e) at FA4's padded rows
+in place of FA4's backward preprocess (flash_bwd_preprocess.py).
 """
 
 import contextlib
@@ -362,9 +352,8 @@ def bwd_bf16dq(q: Tensor, k: Tensor, v: Tensor, dout: Tensor, lse: Tensor, rows:
 
 
 def fa4_window_left(window_left: int, T: int) -> int | None:
-    """None (FA4's causal kernel) when the window spans T, else the local window: a window spanning T is plain causal
-    attention, so the cheaper causal kernel computes it; FA4 keeps the local kernel (interface.py
-    _resolve_causal_local_window)."""
+    """None (FA4's causal kernel) when the window spans T, plain causal attention that FA4 would run on its local kernel
+    (interface.py _resolve_causal_local_window); else the window."""
     return None if window_left >= T else window_left
 
 

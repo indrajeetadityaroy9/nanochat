@@ -28,7 +28,7 @@ rand_chacha = "0.10.0"
 rayon = "1.12.0"
 # FxHash maps and sets
 rustc-hash = "2.1.3"
-# OpenAI tiktoken's encoder (its core, fancy-regex 0.19 as tiktoken's), for the sections of fill-in-the-middle examples
+# OpenAI tiktoken's encoder core, for the sections of fill-in-the-middle examples
 tiktoken-rs = "0.12.1"
 # the grammars of the repository source files: imports (repository samples), statement cuts and AST-FIM (pack;
 # arXiv 2506.00204)

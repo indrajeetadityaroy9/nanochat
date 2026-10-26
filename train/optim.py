@@ -11,12 +11,9 @@ from collections.abc import Callable
 import torch
 from torch.optim._muon import _adjust_lr
 
-# DeepSeek LLM §2.3 (arXiv 2401.02954)
+# AdamW's betas (DeepSeek LLM, arXiv 2401.02954 §2.3)
 BETAS = (0.9, 0.95)
-# Global gradient-norm clip at 1.0, DeepSeek LLM's (arXiv 2401.02954 §2.3): Adam's update is
-# invariant to the gradient's scale (arXiv 1412.6980 §2.1) and Muon's Newton-Schulz divides its input by
-# its norm (torch/optim/_muon.py _zeropower_via_newtonschulz, after KellerJordan/Muon), so under a slowly varying
-# gradient scale the clip damps only spikes
+# Global gradient-norm clip (DeepSeek LLM, arXiv 2401.02954 §2.3)
 MAX_GRAD_NORM = 1.0
 # AdamW's EMA timescale law tau* = TAU_C TPP^TAU_E of the run's steps (Power Lines, arXiv 2505.13738 App. E.3.1)
 TAU_C, TAU_E = 1.084, -0.527
@@ -33,16 +30,14 @@ def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float
 
 class Muon(torch.optim.Muon):
     """NorMuon (arXiv 2510.05491 Alg. 1) on torch.optim.Muon's update (torch/optim/_muon.py _single_tensor_muon:
-    momentum lerp, Nesterov, bf16 Newton-Schulz, decoupled weight decay, adjusted lr), each step's Newton-Schulz batched
-    over a group's same-shape matrices: one bmm/baddbmm chain per shape instead of one mm/addmm chain per matrix
-    (torch.optim.Muon has no foreach path; the batched GEMMs may round differently from the per-matrix ones). NorMuon
-    (Alg. 1 lines 7-9): an EMA v (decay NORMUON_BETA2, state second_momentum_buffer, one fp32 per row: output neuron,
-    nn.Linear's (out, in) layout) of the orthogonalized update O's mean square per row, O divided row-wise by sqrt(v) +
-    NORMUON_EPS, then rescaled to O's Frobenius norm (zichongli5/NorMuon normuon.py normuon_update), so adjust_lr_fn
-    "match_rms_adamw" scales it as Muon's update (Alg. 1 line 10 rescales to RMS 0.2 lr directly: the same target).
-    State: torch.optim.Muon's momentum_buffer and second_momentum_buffer. After each step, update_square holds the
-    squared Frobenius norm of the step's updates times their adjusted lr, summed over the matrices (the update without
-    its decoupled weight decay), on the device."""
+    momentum lerp, Nesterov, bf16 Newton-Schulz, decoupled weight decay, adjusted lr), the Newton-Schulz batched over a
+    group's same-shape matrices: one bmm/baddbmm chain per shape, which may round differently from per-matrix mm/addmm.
+    NorMuon (Alg. 1 lines 7-9): v, an EMA (decay NORMUON_BETA2) of the orthogonalized update O's mean square per row
+    (output neuron, nn.Linear's (out, in) layout; state second_momentum_buffer, one fp32 per row); O divided row-wise by
+    sqrt(v) + NORMUON_EPS, then rescaled to O's Frobenius norm (zichongli5/NorMuon normuon.py normuon_update), so
+    adjust_lr_fn "match_rms_adamw" scales it as Muon's update (the target of Alg. 1 line 10's rescale to RMS 0.2 lr).
+    After each step, update_square holds on the device the sum over matrices of the squared Frobenius norm of the
+    update times its adjusted lr (weight decay excluded)."""
 
     @torch.no_grad()
     def step(self, closure: Callable[[], torch.Tensor] | None = None) -> torch.Tensor | None:

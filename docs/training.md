@@ -86,7 +86,8 @@ C.9 Table 85: 130M, batch 128 and 256 both 3.240, 512 3.257).
 
 - **Muon** (`Muon.step`): `torch.optim.Muon`'s update (momentum 0.95, Nesterov, 5 bf16 Newton–Schulz steps with
   PyTorch's coefficients, decoupled weight decay), the Newton–Schulz batched over same-shape matrices (one `baddbmm`
-  chain per shape, `a81410c`); NorMuon (arXiv 2510.05491 Alg. 1): each row of the orthogonalized update O divided by
+  chain per shape instead of `torch.optim.Muon`'s per-matrix `mm`/`addmm`, as it has no foreach path; `a81410c`);
+  NorMuon (arXiv 2510.05491 Alg. 1): each row of the orthogonalized update O divided by
   √v + 1e-10, v an EMA (β₂ 0.95) of the row's mean square, then rescaled to O's Frobenius norm; step size
   `match_rms_adamw`, lr·0.2·√max(fan_out, fan_in) (Moonlight, arXiv 2502.16982 §2.2).
 - **One lr and one weight decay** for every group, as Moonlight shares "learning rate η, weight decay λ" among matrix
@@ -99,9 +100,10 @@ C.9 Table 85: 130M, batch 128 and 256 both 3.240, 512 3.257).
   runs: `docs/experiments.md` §4.
 - **Clipping**: the accumulated gradient's global norm clipped to `MAX_GRAD_NORM` = 1.0 before both optimizers
   (DeepSeek LLM §2.3), the pre-clip norm logged every step. Adam is invariant to the gradient's scale (arXiv 1412.6980
-  §2.1) and Newton–Schulz normalizes its input, so the clip damps only spikes [inference]; the largest recorded norm
-  is 10.76 (`results/peak_lr-curves.jsonl`, d8 at 200, ×1, step 14,202), far below the ~5e7–2e11 at which
-  Megatron-LM PR 5395 reports pre-Muon clipping failing [unverified: PR text].
+  §2.1) and Newton–Schulz divides its input by its norm (`torch/optim/_muon.py` `_zeropower_via_newtonschulz`, after
+  KellerJordan/Muon), so under a slowly varying gradient scale the clip damps only spikes [inference]; the largest
+  recorded norm is 10.76 (`results/peak_lr-curves.jsonl`, d8 at 200, ×1, step 14,202), far below the ~5e7–2e11 at
+  which Megatron-LM PR 5395 reports pre-Muon clipping failing [unverified: PR text].
 
 | | The base model | Reference code models |
 |---|---|---|
@@ -129,8 +131,9 @@ other arms: `docs/experiments.md` §4.
   11 `peak_lr` runs (×1 to ×8) the largest gradient norm of the first 40 steps is 2.46–3.00 at d8 and 3.21–4.07 at
   d24, and none diverged (`results/peak_lr-curves.jsonl`). No paper fixes a warmup for Muon.
 - **Decay**: linear to zero, (steps − s)/(steps − 40), through the repository stage: linear decay to zero is "around
-  0.84% better than the optimal WSD", and its gap to a 10× decay grows with tokens per parameter (arXiv 2502.15938
-  §4.2, Figs. 6 and 8). DeepSeek-Coder instead holds its final lr for long context (arXiv 2401.14196 §3.6);
+  0.84% better than the optimal WSD", its gap to a 10× decay grows with tokens per parameter, and its gain over
+  cosine decay to zero is small but consistent across peak lrs (arXiv 2502.15938 §4.2, Figs. 6 and 8).
+  DeepSeek-Coder instead holds its final lr for long context (arXiv 2401.14196 §3.6);
   Qwen2.5-Coder states no schedule for its repository stage.
 - **Repository stage**: its first step at 3,797/69,571 = 5.46% of peak [arithmetic].
 - **Last step**: 1/(steps − 40) of peak, not 0: 1.437e-5 at 69,611 steps [arithmetic], ~70× below arXiv 2502.15938's
@@ -140,11 +143,13 @@ other arms: `docs/experiments.md` §4.
 
 **Varied.** The multiplier of DeepSeek LLM's law η = 0.3118·C^−0.125 (arXiv 2401.02954 §3.1 Eq. 1), fit for AdamW
 under a multi-step schedule (§2.3) at compute below the base model's, applied here to Muon (RMS-matched) as the peak
-of linear decay to zero. The transfer rules disagree on how the optimum moves with the horizon: Complete^(d)P's SDE
-rule η ∝ √(m_B/m_D) (arXiv 2512.22382 §2.1 Table 1) lowers it, Step-Law η = 1.79·N^−0.713·D^0.307 (arXiv 2503.04715
-§1 Eq. 1) raises it. So it is measured at d24 (the base model's shape: no width or depth transfer) over `SHORT` = 5
-tokens per parameter, times the optimum's horizon trend measured at d8 between 5 and `LONG` = 200 (where d8's law
-batch is 2 micro-batches, so the trend includes batch growth, as the base run's does).
+of linear decay to zero; at a fixed model it falls with tokens as D^−0.125 [arithmetic]. The transfer rules disagree
+on how the optimum moves with the horizon: Complete^(d)P's AdamW SDE rule η ∝ √(m_B/m_D) (arXiv 2512.22382 §2.1
+Table 1) lowers it, as arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law η = 1.79·N^−0.713·D^0.307, fit over AdamW
+models (arXiv 2503.04715 §1 Eq. 1), raises it. So it is measured at d24 (the base model's shape, standard
+parameterization, not μP: no width or depth transfer) over `SHORT` = 5 tokens per parameter, times the optimum's
+horizon trend measured at d8 between 5 and `LONG` = 200 (where d8's law batch is 2 micro-batches, so the trend
+includes batch growth, as the base run's does). The ×8 arm at d8 at 200 is where Step-Law points.
 
 **Arms.** × 1, 2, 4, 8 at d8 at 5 and at 200; × 1, 2, 4 at d24 at 5; seed 0; 11 runs.
 
@@ -162,7 +167,9 @@ batch is 2 micro-batches, so the trend includes batch growth, as the base run's 
   the base plan's tokens and batch over d24 at 5's.
 
 The trend is assumed width-independent: arXiv 2409.19913 §4 fits its horizon exponent on models of 760M parameters
-and more and observes a larger one at 50M and 125M (d8 has 14.7M non-embedding parameters).
+and more and observes a larger one at 50M and 125M (d8 has 14.7M non-embedding parameters). The net exponent is
+carried to the base model's horizon as every rule in play is a power law in D; the square-root batch rule is also
+Complete^(d)P's (arXiv 2512.22382 Table 1).
 
 **Result** (`results/peak_lr.jsonl`; code bits per byte; no run diverged; recomputed on the CPU):
 
@@ -235,7 +242,8 @@ the device never drains; its time runs between CUDA events at the previous step'
 
 **Diagnostics** (`train/diagnostics.py`, `7e77833`): per-corpus training loss (rows assigned by
 `mixture.mixture_rows`); the output logits' logsumexp maximum and mean square over valid positions (PaLM's z-loss
-quantity, arXiv 2204.02311 §5); the largest QK-norm gain; every `UPDATE_STATS_EVERY` = 10th step each optimizer
+quantity, arXiv 2204.02311 §5); the largest QK-norm gain (attention-logit growth, the quantity Kimi K2's QK-Clip
+bounds, arXiv 2507.20534 §2.1); every `UPDATE_STATS_EVERY` = 10th step each optimizer
 group's update RMS (without weight decay) and parameter norm, which cost 0.50% of d24 throughput when taken every step
 (351.4K / 351.8K against 349.9K / 349.8K tok/s, GH200, alternated 25-step windows after 8 warm-up steps; every 10th
 step within the windows' spread, 341,290–341,471 tok/s with or without, `7e77833`). The per-micro-batch statistics
@@ -329,8 +337,8 @@ loader's Weyl sequence (`mixture.mixture_rows`; `docs/corpus.md` §9). The order
 **Determinism.** Gradients are not bitwise across processes (FA4's and the embedding backwards' atomics;
 `docs/architecture.md` §4). Kernel choices do not depend on timing: QuACK runs fixed tile configurations
 (`docs/architecture.md` §3), and Inductor's coordinate-descent tuning, which picks configurations by timing, stays at
-its default, off (`scripts/container.sh`). Python's garbage collector is frozen and disabled after the first step and
-collects only after a checkpoint save (`train/loop.py`).
+its default, off (`scripts/container.sh`). Python's garbage collector, whose scans are slow, is frozen and disabled
+after the first step and collects only after a checkpoint save (`train/loop.py`; karpathy/nanochat 07c4dd4).
 
 ## 9. Reproducing the run
 
@@ -390,11 +398,13 @@ point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/p
 | 2502.16982 | Muon is Scalable for LLM Training |
 | 2503.04715 | Predictable Scale: Part I, Step Law – Optimal Hyperparameter Scaling Law in Large Language Model Pre-training |
 | 2505.13738 | Power Lines: Scaling Laws for Weight Decay and Batch Size in LLM Pre-training |
+| 2507.20534 | Kimi K2: Open Agentic Intelligence |
 | 2509.02046 | Fantastic Pretraining Optimizers and Where to Find Them |
 | 2510.05491 | NorMuon: Making Muon more efficient and scalable |
 | 2512.05620 | Hyperparameter Transfer Enables Consistent Gains of Matrix-Preconditioned Optimizers Across Scales |
 | 2512.22382 | Completed Hyperparameter Transfer across Modules, Width, Depth, Batch & Duration |
 
-Repositories: `karpathy/nanochat` (92d63d4, `dev/LOG.md` 2026-01-10); `KellerJordan/modded-nanogpt` (PR #144);
+Repositories: `karpathy/nanochat` (92d63d4, 07c4dd4, `dev/LOG.md` 2026-01-10); `KellerJordan/modded-nanogpt` (PR #144);
+`KellerJordan/Muon`;
 `NVIDIA/Megatron-LM` (PR 5395); `openai/human-eval-infilling`, `nuprl/MultiPL-E`, `evalplus/evalplus` (§8's commits);
 `OpenCoder-LLM/opc-sft-stage2`, `OpenCoder-LLM/opc-annealing-corpus` (datasets).

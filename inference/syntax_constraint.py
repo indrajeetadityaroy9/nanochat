@@ -1,15 +1,9 @@
 """
 Complete Python 3.12 syntax constraint for decoding (decoder.Constraint): after each token, exactly the tokens whose
 bytes keep the text a prefix of some module CPython 3.12's parser accepts (ast.parse), up to the over-approximations
-listed below, and BOS iff ast.parse accepts the text (followed by the FIM suffix). Incompleteness (rejecting a valid
-prefix) is the failure mode to avoid: an incomplete constrainer lowers functional correctness (arXiv 2606.21619); a
-complete one raises it, most for small models (arXiv 2504.09246).
+listed below, and BOS iff ast.parse accepts the text (followed by the FIM suffix). Never rejects a valid prefix.
 
-Why not a library: SynCode's (arXiv 2403.01632) Python grammar (Lark's python.lark lineage) lexes an f-string as one
-regex token, so PEP 701 f-strings ("f'{x["k"]}'") and PEP 695 type parameters are rejected, and it pins transformers and
-a HF tokenizer; llguidance has no INDENT/DEDENT (guidance-ai/llguidance issue #107: one byte may emit several DEDENTs);
-arXiv 2402.17988 ships no library. So the layers, in the Rust crate syntax/ (built on first use,
-native.crate_module):
+Layers, in the Rust crate syntax/ (built on first use, native.crate_module):
 - lexer (lexer.rs): CPython 3.12.3's tokenizer (Parser/tokenizer.c tok_get_normal_mode, tok_get_fstring_mode,
   verify_end_of_number) restated as a character-level machine whose states are values, so a prefix may end anywhere
   (mid-token, mid-indent, mid-UTF-8 character). Its input is the text as compile() sees it: "\\r\\n" and "\\r" read as

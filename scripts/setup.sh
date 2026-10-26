@@ -1,8 +1,7 @@
 #!/bin/bash
-# Prepare a fresh GH200 or H100 host with Docker and the NVIDIA driver (Lambda's Ubuntu image): the CDI spec
-# for scripts/container.sh's `--device nvidia.com/gpu=all`, docker group membership, the nanochat image, the
-# artifacts layout (paths.py) and the curated corpus (corpus/publish.py pull), from which the tokenizer ablation,
-# corpus.tokenize and corpus.pack build the training rows, before training with run.py. Idempotent: docker build
+# Prepare a fresh GH200 or H100 host with Docker and the NVIDIA driver (Lambda's Ubuntu image): the CDI spec for
+# scripts/container.sh's `--device nvidia.com/gpu=all`, the locked SM clock, docker group membership, the nanochat
+# image, the artifacts layout (paths.py) and the curated corpus (corpus/publish.py pull). Idempotent: docker build
 # cache, mkdir exist_ok.
 #
 #   HF_TOKEN=<read token> scripts/setup.sh

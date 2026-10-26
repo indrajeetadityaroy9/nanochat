@@ -1,28 +1,25 @@
 """
-LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z = x W^T (or, with an output-logit cap
-c, z = c tanh(x W^T / c): model/modeling.py ModelConfig.final_logit_softcapping; karpathy/nanochat 92d63d4
-nanochat/gpt.py:511-515, Gemma 2's final-logit softcapping, arXiv 2408.00118 §2):
+LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z = x W^T, or with an output-logit cap c
+z = c tanh(x W^T / c) (ModelConfig.final_logit_softcapping; karpathy/nanochat 92d63d4 nanochat/gpt.py:511-515; Gemma 2,
+arXiv 2408.00118 §2):
 
     loss = sum over rows with label t != IGNORE_INDEX of (logsumexp(z) - z[t]), divided by the valid count n.
 
-nanochat::lm_loss (training): QuACK's (Dao-AILab/quack) scaled-exp linear cross entropy (quack/linear_cross_entropy.py,
-scaled_exp_linear_cross_entropy_fwd's calls and tiles, run per LCE_CHUNK rows so that each row's label logit is kept
-for its logsumexp): the logits GEMM's epilogue stores E = bf16(2^(z log2 e - k)), k the rounded maximum of the row's
-TILE_N1-wide N tile, beside each tile's sum of exponentials and the label's fp32 logit, never z itself; QuACK's row
-kernel (lce_glue) turns those into the loss (logsumexp - z[t], from the fp32 accumulators), fixes E at the label and
-writes each row's power-of-two rescalings; dx = (1/n) dz W (bf16) and dW = (1/n) dz^T x (fp32, accumulated across
-chunks) are GEMMs on E whose A-operand load applies the rescalings (dz = v (u E) row-wise, u exact powers of two, v
-fp32). The logits are written once and read once per gradient GEMM, with no softmax pass over them. Uncapped, the
-epilogue is QuACK's scaled_exp_target_epi (quack/epilogue/scaled_exp.py); capped, capped_scaled_exp_epi: the cap's
-tanh on the fp32 accumulator in the epilogue (k from the capped tile maximum, tanh being increasing), and the cap's
-derivative 1 - tanh^2 folded into the stored E (sum_exp sums the plain exponentials), so the gradient GEMMs read
-dz = (softmax - onehot) (1 - tanh^2) with no extra pass; cap_label_fix applies the derivative to the label's entry
-that lce_glue rewrites.
+nanochat::lm_loss (training): QuACK's (Dao-AILab/quack) scaled-exp linear cross entropy
+(quack/linear_cross_entropy.py scaled_exp_linear_cross_entropy_fwd's calls and tiles), per LCE_CHUNK rows so that each
+row's label logit is kept for its logsumexp. The logits GEMM's epilogue stores E = bf16(2^(z log2 e - k)), k the
+rounded maximum of the row's TILE_N1-wide tile, with each tile's sum of exponentials and the label's fp32 logit, not z.
+lce_glue forms the loss (logsumexp - z[t]) from the fp32 accumulators, fixes E at the label and writes each row's
+power-of-two rescalings. dx = (1/n) dz W (bf16) and dW = (1/n) dz^T x (fp32, accumulated across chunks) are GEMMs on
+E whose A-operand load applies the rescalings (dz = v (u E) row-wise, u exact powers of two, v fp32). Epilogue:
+uncapped, scaled_exp_target_epi (quack/epilogue/scaled_exp.py); capped, capped_scaled_exp_epi: tanh on the fp32
+accumulator, k from the capped tile maximum (tanh is increasing), the derivative 1 - tanh^2 folded into E (sum_exp sums
+the plain exponentials), so the gradient GEMMs read dz = (softmax - onehot) (1 - tanh^2); cap_label_fix applies the
+derivative to the label entry lce_glue rewrites.
 
-nanochat::lm_losses (evaluation): QuACK's lse_target_epi GEMM epilogue (quack/epilogue/library.py) reduces each row's
-logsumexp and gathers the label's logit from the fp32 accumulators without storing z, so no bf16 rounding of the
-logits enters the loss. Capped: logsumexp minus the label's logit of the capped fp32 logits of each row chunk's GEMM
-(CHUNK rows), in one kernel Inductor fuses (capped_losses), as lse_target_epi has no tanh epilogue.
+nanochat::lm_losses (evaluation): uncapped, QuACK's lse_target_epi (quack/epilogue/library.py) reduces each row's
+logsumexp and gathers the label's logit from the fp32 accumulators, z not stored; capped (lse_target_epi has no tanh
+epilogue), per CHUNK rows an fp32 GEMM and the capped logsumexp in one Inductor-fused kernel (capped_losses).
 """
 
 import functools
@@ -45,16 +42,14 @@ from torch.autograd.function import FunctionCtx
 
 from corpus.loader import IGNORE_INDEX
 
-# Rows of lm_losses' capped fp32 logits per GEMM, a memory bound only (each row's loss is computed whole within its
-# chunk, so the losses do not depend on it): 8,192 x 2^15 x 4 bytes = 1 GiB
+# Rows of lm_losses' capped fp32 logits per GEMM, a memory bound (losses do not depend on it): 8,192 x 2^15 x 4 bytes
+# = 1 GiB
 CHUNK = 8192
-# Rows of lm_loss's scaled-exp chunks, a multiple of 128 (the gradient GEMMs' tile_M): of the chunk sizes equally fast
-# on a d24 micro-batch (98,304 rows, GH200), the one of least memory (E, LCE_CHUNK x 2^15 bf16, and the op's peak grow
-# with it); a 98,304-row chunk (E past 2^31 elements) faults in QuACK 0.6.5.
+# Rows of lm_loss's chunks, a multiple of 128 (the gradient GEMMs' tile_M): the least-memory size of those equally fast
+# on a d24 micro-batch (GH200); 98,304 rows (E past 2^31 elements) faults in QuACK 0.6.5
 LCE_CHUNK = 8192
-# The logits GEMM's N tile, each row's k and sum-of-exponentials granularity: a multiple of 64 (lce_glue's strip is
-# 64-column resolved) dividing the vocabulary 2^15, with QuACK's pingpong schedule (two consumer warp groups alternating
-# tiles, hiding the epilogue; tile_N <= 208): the fastest such tile on a d24 micro-batch (GH200).
+# The logits GEMM's N tile, the granularity of k and sum_exp: a multiple of 64 (lce_glue's strip resolution) dividing
+# 2^15, at most 208 for QuACK's pingpong schedule; the fastest such tile on a d24 micro-batch (GH200)
 TILE_N1 = 128
 # The gradient GEMMs' N tile over C, QuACK's rule (scaled_exp_linear_cross_entropy_fwd): 192 when it divides C (768)
 TILE_N2 = 192

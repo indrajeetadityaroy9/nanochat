@@ -1,8 +1,8 @@
 """Native libraries (CUDA kernels, the Rust crates' Python modules), built on first use, cached under NATIVE; pointer
-and stream, the ctypes arguments of model/kernels' entry points. model/kernels follows ThunderKittens'
-(HazyResearch/ThunderKittens) layout (header-only shared code, common.cuh and qk_row.cuh; one self-contained file per
-kernel, its C entry points beside its kernels); this module is its one build, with one nvcc command for every kernel.
-torch is imported by the CUDA paths alone, so the corpus's spawned workers, which load only the crates, import none."""
+and stream, the ctypes arguments of model/kernels' entry points. model/kernels follows HazyResearch/ThunderKittens'
+layout: shared header-only code (common.cuh, qk_row.cuh), one self-contained file per kernel with its C entry points;
+one nvcc command builds every kernel. torch is imported by the CUDA paths alone, so the corpus's spawned workers, which
+load only the crates, import none."""
 
 import ctypes
 import functools
@@ -34,7 +34,7 @@ def native_library(name: str, command: list[str], sources: list[Path], build: Ca
         digest.update(source.read_bytes())
     path = NATIVE / f"{name}-{digest.hexdigest()}.so"
     if not path.exists():
-        NATIVE.mkdir(parents=True, exist_ok=True)  # a fresh checkout has none, as the other kernel caches create theirs
+        NATIVE.mkdir(parents=True, exist_ok=True)  # absent in a fresh checkout
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         build(tmp)
         tmp.replace(path)

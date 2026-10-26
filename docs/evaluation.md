@@ -64,7 +64,9 @@ karpathy/nanochat's `evaluate_bpb`. Sums are fp64 on the device, reduced in a fi
 - **Sample** (`sample_rows`, `VAL_TOKENS = 80 × 2^19`, nanochat's `--eval-tokens`): per corpus, n = min(rows,
   ⌈VAL_TOKENS / (micro-batch × seq_len)⌉ × micro-batch) rows, row ⌊j · rows / n⌋ for j < n: systematic, because the
   packer orders each shard's rows longest first, so a prefix would over-represent long documents. Models of one
-  tokenizer are scored on identical rows. `cu_seqlens` is padded to the corpora's most segments (one compiled graph).
+  tokenizer are scored on identical rows, models of different tokenizers on identical documents when a split lies
+  within the sample (scored whole), so the subsample's sampling error cancels in differences. `cu_seqlens` is padded
+  to the corpora's most segments (one compiled graph).
 - **Reference solutions** (`solution_bits`, `SOLUTION_BENCHMARKS`): the bits of HumanEval+'s and MBPP+'s canonical
   solutions (EvalPlus) and HumanEval-X C++'s (arXiv 2303.17568; MultiPL-E has none) given their prompts, one example
   per 8K row, BOS first: the task loss of arXiv 2412.04403 §2.2. A continuous correct-answer likelihood makes
@@ -72,8 +74,8 @@ karpathy/nanochat's `evaluate_bpb`. Sums are fp64 on the device, reduced in a fi
   signal-to-noise ratio of most benchmarks (arXiv 2508.13144 §5.3); the loss on a benchmark's problems and reference
   solutions tracks pass@1 where held-out loss does not (arXiv 2604.07769 §3.3.1). A solution's leading blank lines
   count as prompt: EvalPlus's solutions begin with them and a tokenizer joins them to the prompt's last line break, so
-  the prompt would otherwise end inside a token. Scoring starts at the token that starts at the prompt's end
-  (`decode_with_offsets`; none raises).
+  the prompt would otherwise end inside a token and tokenizers would score different bytes. Scoring starts at the
+  token that starts at the prompt's end (`decode_with_offsets`; none raises).
 
 ## 3. Parse measure
 
@@ -119,7 +121,9 @@ decoding's `"latency"` (`metrics.latency`); a filtered record holds the attempts
   generated against 0.437 cut (`a41415e`). Infilling records add CrossCodeEval's similarity scores against the
   reference middle (§5), all clustered by HumanEval problem.
 - **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E drew 200 and the
-  BigCode leaderboard 50: the same estimate with more variance per problem [inference]. HumanEval infilling is greedy,
+  BigCode leaderboard 50: the same estimate with more variance per problem [inference] (MultiPL-E reports its pass@1
+  stable from about 20 samples, arXiv 2208.08227 [unverified: section not checked]). The filtered mode's T = 0.8 is
+  Codex's pass@100 optimum (higher temperatures are optimal for larger k, §3.3). HumanEval infilling is greedy,
   not arXiv 2207.14255's sampling. The prompts' examples overlap the scored base tests (MBPP+: nearly every prompt
   assert calls the entry function on a base input; HumanEval+: many tasks share a doctest input), so the filtered mode
   favours base over plus pass@1 (`verify.py`). Prompts, stops, budgets and scorers were checked against EvalPlus,
@@ -129,6 +133,12 @@ decoding's `"latency"` (`metrics.latency`); a filtered record holds the attempts
 - **Contamination.** `corpus/` has no decontamination step against the scored benchmarks (the only decontaminated
   data are the publisher's `*_decontaminated` splits of `open-r1/codeforces-cots`, `corpus/sources.py`): a benchmark
   problem present in the training data inflates its score.
+- **Evaluator processes.** EvalPlus's `sanitize` parses every line span of a program, hence a sanitize worker per
+  CPU. MultiPL-E's `main.py --dir` judges a directory's problems serially, hence a `--file` process per problem.
+  human-eval-infilling's CLI forks a Manager and a Process per sample from one interpreter's thread pool, so its rate
+  is bound by that interpreter's GIL (4 or 64 threads about the same), hence `INFILLING_EVALUATE`'s fork pool.
+  MultiPL-E's `automodel.py` returns the empty completion for a prompt of ≥ 1,024 tokens except a 1,024-token prompt
+  whose one generated token outspans the truncated prompt; this suite gives it the empty completion.
 
 ## 5. Metrics and statistics
 
@@ -181,7 +191,11 @@ Eq. 2) counts full attention in every layer and stays the scaling plan's compute
 values of M and the nominal count: `docs/architecture.md` §1. Executed FLOPs per token of a row holding one document
 are 1,479,503,808 at 8K and 2,160,975,600 at 32K [arithmetic, recomputed on CPU], below nominal (a query attends only
 its own segment's earlier keys) and lower still with packed documents; M is 3.8× the executed count at 32K
-[arithmetic], so an M-based utilization would exceed 100%. Measured MFU: `docs/training.md` §7.
+[arithmetic], so an M-based utilization would exceed 100%. `torch.utils.flop_counter` would count the same once each
+custom op registered its formula, but per step it would read `cu_seqlens` on the host (a device sync) and dispatch
+every op through Python. FLOPs count 2 per multiply-add. `tokens_per_second` is the observed throughput of PaLM's MFU;
+`peak_memory_bytes` is the footprint FlashAttention reports (arXiv 2205.14135), `peak_reserved_bytes` the allocator's.
+Measured MFU: `docs/training.md` §7.
 
 **TokEval** (`tokeval`): `UnifiedTokenizerAnalyzer.run_analysis` in its published form (`normalize_results`),
 MorphScore and plots off, CER unbudgeted (`cer_time_budget_s=0`). Inputs: prose by language, code by language (via
@@ -198,7 +212,9 @@ offsets from each token's byte length (`token_offsets`). Tree-sitter grammars: `
 - **Batching.** Up to `MAX_BATCH` = 1,024 slots (fewer if device memory is short), continuous: a finished slot takes
   the next request. Each step is one captured CUDA graph, its kernels programmatic dependents of each other (PDL); a
   second set of graphs over the first `SMALL_BATCH` = 256 slots runs while no higher slot is active. A slot's KV
-  cache holds 2 · L · max_length · (C + 4H) bytes, 38,016 bytes per position at d24 [arithmetic].
+  cache holds 2 · L · max_length · (C + 4H) bytes, 38,016 bytes per position at d24 [arithmetic]. A many-slot step is
+  bound by its KV reads (each active slot reads its window's K and V in every layer) and its GEMMs; a few-slot step by
+  weight reads and kernel launches [inference].
 - **Step.** The model's forward at one position (`docs/architecture.md` §1), GEMMs on wgmma tensor cores fed by TMA,
   attention streaming each slot's window through shared memory with the scores on tensor cores (f16, exact for e4m3
   keys and the bf16 q). Numerics follow the compiled training forward op by op (bf16 copies of the matrices; fp32
@@ -209,11 +225,14 @@ offsets from each token's byte length (`token_offsets`). Tree-sitter grammars: `
   the step's body (up to 1,024 rows of any prompts per launch, each row computed as a step would), so its slot starts
   at the prompt's last token. Its K and V are kept in a paged store (`PAGE` = 64 positions; vLLM's PagedAttention,
   arXiv 2309.06180, pages likewise; prefix reuse as SGLang's RadixAttention, arXiv 2312.07104), and a later request
-  with the same prompt copies them; prompts unused in the current and previous `generate` call are evicted first.
+  with the same prompt copies them; prompts unused in the current and previous `generate` call are evicted first (so a
+  search's rounds keep the prompts they reuse, and a too-small store keeps a fixed part rather than cycling)
+  [inference].
 - **Request** (`Request`): `input_ids`, `max_new_tokens`, `stopping_criteria`, `temperature` (0: argmax, ties to the
   lowest id; > 0: Gumbel-max sampling of softmax(z / T), the noise a Philox function of (seed, generated position,
   token) alone, arXiv 1411.0030 §2), `top_p` (< 1: the fewest most likely allowed tokens holding top_p of the
-  probability, arXiv 1904.09751 §3.1, `k_nucleus`), `seed`, `constraint`. Sampled logits are capped, z = c·tanh(s/c)
+  probability, arXiv 1904.09751 §3.1, `k_nucleus`; transformers' `TopPLogitsWarper`, the sampler of MultiPL-E's
+  `automodel.py` and bigcode-evaluation-harness), `seed`, `constraint`. Sampled logits are capped, z = c·tanh(s/c)
   with the model's `final_logit_softcapping`; a greedy choice needs no cap (tanh is increasing). Generation ends at
   BOS (excluded), the budget, or the stopping criteria (evaluated while the next step runs).
 - **Constraints.** A step with a sampled or constrained slot launches the body, writes the constraints' masks while it
@@ -244,12 +263,13 @@ offsets from each token's byte length (`token_offsets`). Tree-sitter grammars: `
 
 ## 7. Syntax-constrained decoding and post-generation checks
 
-**Syntax, not types.** Type-constrained decoding (arXiv 2504.09246) covers TypeScript only, and an incomplete
-constrainer lowers functional correctness while a complete syntax constrainer gained (arXiv 2606.21619 §5.3; its
-rejection as a design: `docs/experiments.md` §6). Python 3 syntax can be constrained completely, and every Python file
-of the code categories parses as Python 3 (`curate.repaired`, `docs/corpus.md` §3; UltraData-Code L3's exercises and
-the Kaggle notebooks are not checked), so the model's distribution of program files lies inside the constrainer's
-language [inference]. Types are checked after generation instead.
+**Syntax, not types.** Type-constrained decoding (arXiv 2504.09246) covers TypeScript only. An incomplete constrainer
+(one rejecting valid programs) lowers functional correctness below unconstrained decoding, while a complete one helps
+(arXiv 2606.21619, abstract; §5.3 and a larger gain for small models [unverified: paper text not in the extracted
+set]; its rejection as a design: `docs/experiments.md` §6). Python 3 syntax can be constrained completely, and every
+Python file of the code categories parses as Python 3 (`curate.repaired`, `docs/corpus.md` §3; UltraData-Code L3's
+exercises and the Kaggle notebooks are not checked), so the model's distribution of program files lies inside the
+constrainer's language [inference]. Types are checked after generation instead.
 
 **`SyntaxConstraint`** (`inference/syntax_constraint.py`, Rust crate `inference/syntax/`):
 `SyntaxConstraint(tokenizer, prefix, *, suffix, healing=None)` (bytes; the vocabulary tables are the caller's
@@ -271,8 +291,10 @@ prompt owes bytes, each mask is intersected with the `Reemit`'s. A prefix that c
 
 Where it is looser than CPython it accepts (over-approximations listed in the module docstring: assignment targets as
 expressions, free parameter order, unchecked escapes and nesting limits, among others); BOS is exact.
-Libraries not used: SynCode (arXiv 2403.01632; its one-regex f-strings reject valid 3.12 code), llguidance (no
-INDENT/DEDENT, guidance-ai/llguidance issue #107), arXiv 2402.17988 (no released library). C++ is not constrained.
+Libraries not used: SynCode (arXiv 2403.01632; its Python grammar, of Lark's `python.lark` lineage, lexes an f-string
+as one regex token, so PEP 701 f-strings such as `f'{x["k"]}'` and PEP 695 type parameters are rejected, and it pins
+transformers and a Hugging Face tokenizer), llguidance (no INDENT/DEDENT: one byte may emit several DEDENTs,
+guidance-ai/llguidance issue #107), arXiv 2402.17988 (no released library). C++ is not constrained.
 
 Checks (`55e64de`, `ba01bb5`, `d0a2ec0`): 0 false rejections over 11.4M token steps of 3,000 Python files (the
 standard library, site-packages, this repository; BPE) and 9.2M randomly segmented; no prefix that `ast.parse` accepts
@@ -286,13 +308,16 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
 
 - Python (`python_diagnostics`): the program parses (`ast.parse`, parser overflow a failure), then basedpyright 1.40.2
   (one process per batch) with every rule off but `reportUndefinedVariable`, `reportAttributeAccessIssue`,
-  `reportCallIssue`, `reportReturnType` (definite runtime failures or annotation contradictions; argument types are
-  off because pyright rejects HumanEval/130's canonical solution). EvalPlus solutions (`solution_diagnostics`): the
-  generated text's syntax error, an entry function missing or without a `return <value>` in its own body (sanitize
-  keeps a parseable span and would hide both).
+  `reportCallIssue`, `reportReturnType` (definite runtime failures or annotation contradictions; style, unknown-type,
+  possibly-unbound and optional-member rules are off because a correct program may trigger them, argument types
+  because pyright also judges them against its own inferred types and rejects HumanEval/130's canonical solution).
+  EvalPlus solutions (`solution_diagnostics`): the generated text's syntax error, an entry function missing or without
+  a `return <value>` in its own body (sanitize keeps a parseable span and would hide both).
 - Examples (`examples_pass`): the prompt's doctest `>>>` examples and Python `assert` lines, run by value (equal to
   the want, or None/True for a bare expression) in a fresh interpreter under EvalPlus's `reliability_guard`, 3 s
-  (HumanEval's timeout); true without examples.
+  (HumanEval's timeout; Codex §3.5's 3 s is its APPS timeout); true without examples. By value rather than doctest's
+  output text because HumanEval writes some wants in an equal but differently printed form (HumanEval/65, /113) and
+  some examples as bare comparisons without output (/108, /145); MBPP+ asserts compare tuples as lists.
 - C++ (`cpp_diagnostics`): `g++ -std=c++17 -fsyntax-only`, the MultiPL-E judge's compiler and standard, 15 s; C++
   prompts carry no examples here.
 
@@ -373,6 +398,7 @@ CLI gave HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 against this suite's greed
 | 2107.03374 | Evaluating Large Language Models Trained on Code |
 | 2203.07814 | Competition-Level Code Generation with AlphaCode |
 | 2204.02311 | PaLM: Scaling Language Modeling with Pathways |
+| 2205.14135 | FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness |
 | 2207.14255 | Efficient Training of Language Models to Fill in the Middle |
 | 2208.08227 | MultiPL-E: A Scalable and Extensible Approach to Benchmarking Neural Code Generation |
 | 2301.03988 | SantaCoder: don't reach for the stars! |

@@ -1,8 +1,7 @@
 """
 Run plan (batch, steps, repo-level start, peak learning rate) from DeepSeek LLM's compute-optimal laws, each step's
-stage, and the per-step learning-rate multiplier: one schedule across both stages, the linear decay to zero continuing
-through the repo-level stage (arXiv 2502.15938; DeepSeek-Coder instead holds its final lr for long context, arXiv
-2401.14196 §3.6).
+stage, and the per-step learning-rate multiplier: one schedule across both stages, the linear decay to zero
+continuing through the repo-level stage (arXiv 2502.15938 §4.2).
 """
 from dataclasses import dataclass
 
@@ -10,7 +9,7 @@ from corpus.mixture import FILE_LEVEL_STAGE, MICRO_BATCH_TOKENS, REPO_LEVEL_SHAR
 from model.modeling import CausalLM, non_embedding_flops_per_token, num_non_embedding_params
 from train.optim import BETAS
 
-# Linear warmup over 2 / (1 - beta2) steps (arXiv 1910.04209): 40 at beta2 = 0.95
+# Linear warmup over 2 / (1 - beta2) steps (arXiv 1910.04209 §4.3 Eq. 14): 40 at beta2 = 0.95
 WARMUP_STEPS = round(2 / (1 - BETAS[1]))
 
 
@@ -52,8 +51,7 @@ def plan(*, model: CausalLM, tokens_per_param: float) -> RunPlan:
 
 def lr_lambda(current_step: int, *, num_training_steps: int) -> float:
     """LambdaLR multiplier at step `current_step`: linear warmup over WARMUP_STEPS steps, then linear decay to 0
-    through the repo-level stage (arXiv 2502.15938 §4: its gain over a partial decay grows with tokens per parameter;
-    linear decay to zero beat WSD and cosine)."""
+    through the repo-level stage (arXiv 2502.15938 §4.2)."""
     if current_step < WARMUP_STEPS:
         return (current_step + 1) / WARMUP_STEPS
     return (num_training_steps - current_step) / (num_training_steps - WARMUP_STEPS)
