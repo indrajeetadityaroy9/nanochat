@@ -163,7 +163,7 @@ the decoder's `decode.cu`) and one self-contained file per kernel with its C ent
 | Tiles | `CONFIGS`: a fixed QuACK SM90 configuration per call and width (C 256, 512, 768) at M = 98,304, each the lowest mean of three runs of QuACK's own autotuning benchmark; QuACK's `default_config` elsewhere |
 | q/k prologue | `qk_prologue.cu`: norm → gain → RoPE in fp32, one bf16 rounding per output, one pass per direction; forward one thread group per position, its gains and cos/sin loaded once for the H heads, two heads in flight; gain gradient without atomics (persistent blocks, per-block partials summed in block order) |
 | Value-embedding gate and mix | `ve_gate.cu` (`ve_gate.py`): one warp per row, the gate logits in fp32, the mix rounded once; backward in token order (one `torch.sort` of `input_ids` per micro-batch, shared by the layers through CSE), 16 positions per warp, a run of equal tokens summed in registers and added into the table's `.grad` with one 16-byte atomic per 4 fp32 (two per lane and 8-wide chunk; the zeroed table gradient allocated once per step, when `.grad` is None, then accumulated into; no autograd add); the gate weight's gradient one cuBLAS GEMM from bf16 dz; compiled for H = 2, 4, 6 |
-| Cross entropy, training | `cross_entropy.py` `lm_loss`: QuACK's scaled-exp linear cross entropy per `LCE_CHUNK` = 8,192 rows: the logits GEMM's epilogue (N tile 128, pingpong) stores bf16 rescaled exponentials with each row's tile maxima, sums and the label's fp32 logit; `lce_glue` forms the loss from the fp32 accumulators; dX (bf16) and dW (fp32, accumulated across chunks) GEMMs rescale on the A-operand load. No logits tensor and no softmax pass. The cap in the same pipeline: tanh on the fp32 accumulator, the tile maximum capped likewise (tanh is increasing), 1 − tanh² folded into the stored exponentials, the label's entry fixed by one Triton kernel (`cap_label_fix`) |
+| Cross entropy, training | `cross_entropy.py` `lm_loss`: QuACK's scaled-exp linear cross entropy per `LCE_CHUNK` = 8,192 rows: the logits GEMM's epilogue (N tile 128, pingpong) stores bf16 rescaled exponentials with each row's tile maxima, sums and the label's fp32 logit; `lce_glue` forms the loss from the fp32 accumulators; dX (bf16) and dW (fp32, accumulated across chunks) GEMMs rescale on the A-operand load, their N tile over C by QuACK's rule (`strip_tile_n`: 192 when it divides C, else 256). No logits tensor and no softmax pass. The cap in the same pipeline: tanh on the fp32 accumulator, the tile maximum capped likewise (tanh is increasing), 1 − tanh² folded into the stored exponentials, the label's entry fixed by one Triton kernel (`cap_label_fix`) |
 | Cross entropy, evaluation | `lm_losses`: uncapped, QuACK's `lse_target_epi` (logsumexp and label logit from the fp32 accumulators, no logits stored); capped, per 8,192 rows (`CHUNK`) an fp32-output GEMM and the capped logsumexp in one Inductor-fused kernel (`capped_losses`) |
 | Embedding | `F.embedding` of the token table, the bf16 cast fused by Inductor; PyTorch's backward accumulates rows with atomics |
 | Optimizer | Muon's Newton–Schulz batched over same-shape matrices and NorMuon: `docs/training.md` §3 |
@@ -202,7 +202,16 @@ Notes on the rows:
   residual mix) run at ~3.6 TB/s.
 - **Linear cross entropy.** On a real d24 micro-batch, chunks of 8,192 to 65,536 rows time alike (24.1–24.4 ms per
   call) while the op's peak grows (0.82 → 4.59 GiB); a 98,304-row chunk faults in QuACK 0.6.5; N tile 128 with pingpong
-  24.2 ms against 256 without 25.5 (`cross_entropy.py` `LCE_CHUNK`, `TILE_N1`).
+  24.2 ms against 256 without 25.5 (`cross_entropy.py` `LCE_CHUNK`, `TILE_N1`); QuACK's own rule for this tile
+  (`_pick_tile_n1`: 256 at V = 2^15, no pingpong) times +5.8% at C = 768, +3.7% at 512 and −0.3% at 256 against 128
+  with pingpong (QuACK 0.6.5's `scaled_exp_linear_cross_entropy_fwd`, uncapped, 98,304 rows, median of 20 calls). The
+  strip GEMMs' N tile follows QuACK's rule (`strip_tile_n`); on a 98,304-row micro-batch with the cap (GH200,
+  exclusive, median of 5 alternated rounds of 20 calls) the op at C = 512 (d16) takes 19.06 ms with 256 against 23.60
+  ms with a fixed 192 (−19.2%; 192 leaves 3 N tiles, which the dW GEMM's cluster_N = 2 pads to 4 [inference]), at
+  C = 256 (d8) 15.71 against 15.05 ms (+4.4%; one 256-wide N tile gives the dX GEMM 64 CTAs per 8,192-row chunk on 132
+  SMs, 192 gives 128 [inference]), and at C = 768 (d24) the rule gives 192. Loss, dX and dW are bitwise equal at every
+  width whichever tile runs, and the uncapped op is bitwise QuACK 0.6.5's `scaled_exp_linear_cross_entropy_fwd` at the
+  same `tile_n1`.
 - **The cap.** The removed capped path (bf16 capped logits, a logits-sized derivative buffer, a cross-entropy pass, an
   autotuned dX GEMM) cost +9.4 ms and +6 GiB over uncapped (28.04 → 37.44 ms, 6.14 → 12.14 GiB). Over the run, 0.58%
   of the 8K stage's 73.8 h is ~26 min [arithmetic, `docs/training.md` §7]; the cap's 32K cost is not measured.
@@ -328,7 +337,8 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   `sum_exp` sums the plain exponentials while D carries 1 − tanh², so the gradient GEMMs read
   dz = (softmax − onehot)(1 − tanh²); `cap_label_fix` applies the derivative to the label entry `lce_glue` rewrote.
 - Constants: `LCE_CHUNK` the least-memory size among those equally fast on a d24 micro-batch; `TILE_N1` the fastest
-  admissible tile (§3 notes); `TILE_N2` = 192 at C = 768; `CHUNK` does not change the losses.
+  admissible tile (§3 notes); `strip_tile_n(C)` QuACK's tile_n2 rule (192 at C = 768, 256 at C = 256 and 512); `CHUNK`
+  does not change the losses.
 - `lm_loss` is opaque to `torch.compile` (CuTe DSL GEMMs, Triton kernels, gradients computed in the forward); labels
   int64, dx in x's dtype; `lm_loss_grad` multiplies the saved gradients by dloss, dx's product in fp32 rounded once.
   `step_shares` weights sum the micro-batch means to the mean over every valid label of the step.

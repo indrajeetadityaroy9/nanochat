@@ -28,8 +28,6 @@ CHUNK = 8192
 LCE_CHUNK = 8192
 # Granularity of k and sum_exp: multiple of 64 (lce_glue's strips) dividing 2^15, at most 208 for pingpong
 TILE_N1 = 128
-# QuACK's rule (scaled_exp_linear_cross_entropy_fwd): 192 when it divides C (768)
-TILE_N2 = 192
 # One warp, one row per lane
 FIX_ROWS = 32
 
@@ -89,6 +87,12 @@ def capped_losses(z: Tensor, labels: Tensor, c: float) -> Tensor:
     return torch.logsumexp(z, dim=1) - z.gather(1, labels[:, None]).squeeze(1)
 
 
+def strip_tile_n(C: int) -> int:
+    """The dx/dW strip GEMMs' tile_N over C: QuACK's rule (quack/linear_cross_entropy.py
+    scaled_exp_linear_cross_entropy_fwd tile_n2), 192 when it divides C, else 256."""
+    return 192 if C % 192 == 0 else 256
+
+
 def scaled_exp_loss(x: Tensor, w: Tensor, labels: Tensor, scale: Tensor,
                     cap: float | None) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """x (M, C), w (V, C) bf16 -> (per-position loss, dx bf16, dW fp32, per-position logsumexp; 0 at IGNORE_INDEX),
@@ -96,7 +100,7 @@ def scaled_exp_loss(x: Tensor, w: Tensor, labels: Tensor, scale: Tensor,
     (M, C), V = x.shape, w.size(0)
     if M % 128:
         raise ValueError(f"lm_loss: {M} rows, not a multiple of 128 (the gradient GEMMs' tile_M)")
-    epi = scaled_exp_target_epi if cap is None else capped_scaled_exp_epi(cap)
+    epi, tile_n2 = scaled_exp_target_epi if cap is None else capped_scaled_exp_epi(cap), strip_tile_n(C)
     rows = min(LCE_CHUNK, M)
     loss, zy = x.new_empty(M, dtype=torch.float32), x.new_empty(M, dtype=torch.float32)
     dx, dw = torch.empty_like(x), x.new_empty((V, C), dtype=torch.float32)
@@ -117,10 +121,10 @@ def scaled_exp_loss(x: Tensor, w: Tensor, labels: Tensor, scale: Tensor,
             cap_label_fix[(triton.cdiv(n, FIX_ROWS),)](E_c, t_c, zy[c], n, V, IGNORE_INDEX, 1 / cap, ROWS=FIX_ROWS,
                                                        num_warps=1)
         _lce_vscale_epi.gemm(transform_a_operand(_lce_dx_scale, E_c, {"u": strip}, 128, 64), w.mT, dx[c],
-                             epi_args={"v": v_c.unsqueeze(0)}, transform_a=_lce_dx_scale, tile_M=128, tile_N=TILE_N2,
+                             epi_args={"v": v_c.unsqueeze(0)}, transform_a=_lce_dx_scale, tile_M=128, tile_N=tile_n2,
                              tile_K=64, cluster_M=2, cluster_N=1)
         identity_epi.gemm(transform_a_operand(_lce_dw_scale, E_c.t(), {"u": strip}, 128, 64), xs_c.mT, dw,
-                          epi_args={}, transform_a=_lce_dw_scale, add_to_output=i > 0, tile_M=128, tile_N=TILE_N2,
+                          epi_args={}, transform_a=_lce_dw_scale, add_to_output=i > 0, tile_M=128, tile_N=tile_n2,
                           tile_K=64, cluster_M=1, cluster_N=2)
     return loss, dx, dw, torch.where(labels != IGNORE_INDEX, loss + zy, 0.0)
 
