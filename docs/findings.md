@@ -505,11 +505,12 @@ tok/s (+0.68%, MFU 0.4823 → 0.4857), 32K 286,619 → 287,476 (+0.30%); peak al
 dx 5.6e-3 → 2.6e-3, dW 2.2e-3 → 1.0e-3; 10 steps at ×2.797 within master's spread (largest 6.4e-4); the softcap arm
 unchanged (bitwise). PdlDpsum: Inductor's PDL setting −0.17% / −0.05% at 8K / 32K: rejected; the dpsum candidate's
 q/k/v gradient error vs fp64 equals master's to four digits. QuackPin: every config the autotuner chooses among gives
-bitwise-identical outputs (split_k 1), so selection sets throughput and the cold peak, not rounding; at d24 3 of the 8
-linear.py calls' cached picks are slower than the fastest measured (+1.07 ms per micro-batch, ~0.39% [expected]). The
-fp64 check settles C3: both trees' gradient error vs an fp64 reference median 1.18e-2 / 1.17e-2 (max 1.95e-2 /
-1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no defect. Equivalence and A/B of MlpOutMix (b), PdlDpsum's dpsum and
-QuackPin's pins are queued.
+bitwise-identical outputs (split_k 1), so selection sets throughput and the cold peak, not rounding; QuackPin landed
+(`fb86efc`, §4): each linear.py call at a fixed per-width configuration, +0.36% / +0.32%, a cold first step 119 → 35
+s. With LinearCE's explicit configurations no training GEMM autotunes, so a cold start's peak should now be the warm
+one [inference; unmeasured]. The fp64 check settles C3: both trees' gradient error vs an fp64 reference median
+1.18e-2 / 1.17e-2 (max 1.95e-2 / 1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no defect. Equivalence and A/B of
+MlpOutMix (b) and PdlDpsum's dpsum are queued.
 
 ### 5.22 Review of every queued execution (user: required, or inferable?) — Oct 26
 Each queued GPU job was checked against the decision it feeds and the agents' own measurements. Cut: QkvEpi's remaining
