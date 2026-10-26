@@ -11,9 +11,11 @@ SPAWN = multiprocessing.get_context("spawn")
 
 
 def memory() -> int:
-    """This process's memory: the machine's, or its container's cgroup v2 limit when lower ("max": no limit)."""
+    """This process's memory: the machine's, or its container's cgroup v2 limit when lower ("max", or no memory.max as
+    on a cgroup v1 host or at the root of the hierarchy: no limit)."""
     physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    text = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+    limit = Path("/sys/fs/cgroup/memory.max")
+    text = limit.read_text().strip() if limit.exists() else "max"
     return physical if text == "max" else min(physical, int(text))
 
 

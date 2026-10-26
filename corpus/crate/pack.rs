@@ -159,8 +159,8 @@ fn random_span(text: &str, rng: &mut ChaCha8Rng) -> (usize, usize) {
 /// parse (§5.1: Rand-FIM for code that fails to parse) or has no subtree below its root (named nodes of a tree without
 /// errors span at least one byte). With probability single, Single-Node masking: a named node below the root drawn with
 /// probability proportional to its bytes; else Aligned-Span masking: a random character span (random_span), the lowest
-/// named node holding it, and the run of that node's named children of the largest character intersection over union
-/// with the span (the node itself when it has no named child or none of them meets the span).
+/// named node holding it, and the run of that node's named children of the largest intersection over union with the
+/// span, measured in bytes (the node itself when it has no named child or none of them meets the span).
 fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) -> Option<(usize, usize)> {
     let tree = grammar.parse(text.as_bytes());
     let root = tree.root_node();

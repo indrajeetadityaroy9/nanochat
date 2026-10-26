@@ -8,13 +8,17 @@
 # - MultiPL-E (nuprl/MultiPL-E at docker/Dockerfile's commit): `automodel_vllm.py` on humaneval-cpp and mbpp-cpp at
 #   T = 0.2, top-p 0.95, 20 completions per problem, judged by its evaluation/src/main.py and pass_k.py in the nanochat
 #   image ($MULTIPL_E).
-# Results in <out dir>: evalplus/<dataset>/..._eval_results.json, multipl-e/<dataset>/ and pass_k.csv. Caches
-# (Hugging Face datasets, vLLM's compiled graphs) in the checkout's artifacts/cache, as the nanochat image's.
+# Results in <out dir>: evalplus/<dataset>/..._eval_results.json, multipl-e/<dataset>/ and pass_k.csv. Generation
+# requires an empty or new <out dir>: both harnesses skip samples and results already in it (evalplus codegen's
+# "already cached", MultiPL-E's completion_limit), and the model is always mounted at /model, so a reused directory
+# would report the previous model. Caches (Hugging Face datasets, vLLM's compiled graphs) in the checkout's
+# artifacts/cache, as the nanochat image's.
 #
 #   scripts/standard_eval.sh <exported model dir> <out dir> [generate|score]   (mounted at /model and /out; default
 #   both: generate on the GPU, then score on the CPU)
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+[ "${3:-both}" = score ] || [ -z "$(ls -A "$2" 2> /dev/null)" ] || { echo "$2 is not empty" >&2; exit 1; }
 mkdir -p "$2"
 MODEL=$(realpath "$1") OUT=$(realpath "$2") PHASE=${3:-both}
 # GitHub archives of the pinned commits (the vLLM image has no git; evalplus's version comes from setuptools-scm)
@@ -27,7 +31,7 @@ RUN=(docker run --rm --device nvidia.com/gpu=all --ipc=host --init --ulimit meml
 
 # generation: the harnesses' own vLLM generators, in a virtual environment over the image's vLLM
 [ "$PHASE" = score ] || "${RUN[@]}" -e VLLM_CACHE_ROOT=/workspace/nanochat/artifacts/cache/vllm --entrypoint bash \
-  "$VLLM" -euc "
+  "$VLLM" -o pipefail -euc "
   uv venv -q --system-site-packages /tmp/venv && . /tmp/venv/bin/activate
   SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 uv pip install -q 'evalplus @ $EVALPLUS' datasets
   for dataset in humaneval mbpp; do
@@ -42,8 +46,9 @@ RUN=(docker run --rm --device nvidia.com/gpu=all --ipc=host --init --ulimit meml
   done"
 
 # scoring: the harnesses' evaluators in the nanochat image
-[ "$PHASE" = generate ] || "${RUN[@]}" nanochat bash -euc "
+[ "$PHASE" = generate ] || "${RUN[@]}" nanochat bash -o pipefail -euc "
   for samples in /out/evalplus/*/*.jsonl; do
+    case \$samples in *.raw.jsonl) continue ;; esac  # evalplus codegen's unsanitized copy of the samples
     dataset=\$(basename \$(dirname \$samples)); python -m evalplus.evaluate --dataset \${dataset%%_*} --samples \$samples
   done
   for dataset in humaneval-cpp mbpp-cpp; do
