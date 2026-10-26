@@ -1,7 +1,13 @@
 """The decoder layer's GEMMs as torch.library ops (traceable by fullgraph torch.compile): forward and dX on QuACK's
-GEMMs (quack.gemm_interface and quack.epilogue fused epilogues, tuned) with W the bf16 copy of the fp32 master
-(model/modeling.py GemmLinear); dW accumulated in fp32 by cuBLAS straight into the fp32 master's .grad (aten
-addmm.dtype_out, beta = 1).
+GEMMs (quack.gemm_interface and quack.epilogue fused epilogues) at fixed tile configurations (CONFIGS) with W the bf16
+copy of the fp32 master (model/modeling.py GemmLinear); dW accumulated in fp32 by cuBLAS straight into the fp32
+master's .grad (aten addmm.dtype_out, beta = 1).
+
+Tile configurations: fixed per call and width, never chosen by timing at run time. QuACK's autotuner (tuned=True, its
+default) benchmarks every candidate at a shape's first call and keeps the fastest, so processes pick different tiles
+(two cold d24 runs chose differently for 2 of 9 GEMM keys; the shared cache's q/k/v forward pick is 6.6% slower than
+the best), and a cold first d24 step spends ~80 s in it. QuACK's default_config (tuned=False) is 1.1% / 5.4% / 26%
+slower over these GEMMs at d24 / d16 / d8, so each call takes the best of QuACK's own benchmark instead.
 
 Weight gradients: each op takes its weights' .grad buffers (fp32, allocated and zeroed by train/loop.py) and its
 backward adds dW into them in place, so the gradient-accumulation micro-batches sum in the GEMM instead of a new dW per
@@ -28,10 +34,12 @@ tensor is never stored.
   dX GEMM's epilogue (C = dy, h a tile load)."""
 import torch
 from quack.activation import drelu_sq
+from quack.cute_dsl_utils import get_device_capacity
 from quack.epilogue.frontend import gemm_epilogue
 from quack.epilogue.library import sq_reduce_mod
 from quack.epilogue.ops import ColVecLoad, ColVecReduce
-from quack.gemm_interface import gemm, gemm_add, gemm_norm_act
+from quack.gemm_config import GemmConfig
+from quack.gemm_interface import gemm_norm_act, gemm_tuned
 from quack.rms_final_reduce import rms_final_reduce
 from torch import Tensor
 from torch.autograd.function import FunctionCtx
@@ -40,11 +48,53 @@ from torch.autograd.function import FunctionCtx
 EPS = torch.finfo(torch.float32).eps
 
 
+def sm90(tile_m: int, tile_n: int, cluster_m: int, cluster_n: int, *, swap_ab: bool = False,
+         pingpong: bool = True) -> GemmConfig:
+    """An SM90 config of QuACK's autotuning space (quack/gemm_config.py _get_sm90_configs)."""
+    return GemmConfig(tile_m=tile_m, tile_n=tile_n, pingpong=pingpong, is_dynamic_persistent=False,
+                      cluster_m=cluster_m, cluster_n=cluster_n, swap_ab=swap_ab, device_capacity=9)
+
+
+# Per call, the hidden width C -> config: the d8, d16 and d24 widths (model/modeling.py model_config), M = 98,304
+# tokens (corpus/mixture.py MICRO_BATCH_TOKENS). Each is the lowest mean over three runs of QuACK's autotuning
+# benchmark (quack/autotuner.py: L2-cold CUDA-graph medians of every candidate, GH200 at 700 W, exclusive; QuackPin,
+# Oct 26); a single run's own winner is up to 2.1% slower than it. Other widths and GPUs: QuACK's default_config.
+CONFIGS: dict[str, dict[int, GemmConfig]] = {
+    "qkv": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(128, 192, 2, 1, swap_ab=True),
+            768: sm90(128, 192, 1, 2)},
+    "qkv_dx": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(192, 128, 1, 2),
+               768: sm90(128, 160, 1, 2, swap_ab=True)},
+    "o": {256: sm90(128, 128, 1, 2), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 1, 2)},
+    "o_dx": {256: sm90(128, 128, 1, 2), 512: sm90(128, 192, 2, 1, swap_ab=True),
+             768: sm90(128, 160, 2, 1, swap_ab=True)},
+    "up": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(128, 192, 2, 1, swap_ab=True),
+           768: sm90(128, 192, 1, 2)},
+    "down": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 1, 2)},
+    "down_dx": {256: sm90(128, 256, 2, 1, pingpong=False), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 2, 1)},
+    "up_dx": {256: sm90(128, 128, 1, 2), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 1, 2)},
+}
+
+
+def config(call: str, C: int, x: Tensor) -> GemmConfig | None:
+    """CONFIGS' entry for call at width C on x's GPU; None (QuACK's default_config, with tuned=False) where there is
+    none."""
+    return CONFIGS[call].get(C) if get_device_capacity(x)[0] == 9 else None
+
+
+def gemm(A: Tensor, B: Tensor, cfg: GemmConfig | None, C: Tensor | None = None) -> Tensor:
+    """A B (+ C) in A's dtype at configuration cfg: QuACK's gemm_tuned body, which gemm and gemm_add run with
+    config=None for tuned=False (quack/gemm_interface.py); neither takes a config."""
+    out = A.new_empty(A.shape[0], B.shape[1])
+    gemm_tuned.fn(A, B, out, C=C, config=cfg)
+    return out
+
+
 @torch.library.custom_op("nanochat::qkv_proj", mutates_args=(), device_types="cuda")
 def qkv_proj(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | None, gv: Tensor | None) -> Tensor:
     """x (..., C) bf16, weight (3C, C) the stacked bf16 [Wq; Wk; Wv], gq, gk, gv their fp32 .grad or None (forward
     only) -> (..., 3C) bf16: q, k, v the column blocks [0, C), [C, 2C), [2C, 3C)."""
-    y = gemm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=x.dtype)
+    x2 = x.reshape(-1, x.shape[-1])
+    y = gemm(x2, weight.t(), config("qkv", x.shape[-1], x))
     return y.view(*x.shape[:-1], weight.shape[0])
 
 
@@ -57,7 +107,7 @@ def qkv_proj_fake(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | Non
 def qkv_proj_bwd(dy: Tensor, x: Tensor, weight: Tensor, gq: Tensor, gk: Tensor, gv: Tensor) -> Tensor:
     """dX like x; each block's dW accumulated into its grad."""
     dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
-    dx = gemm(dy2, weight, out_dtype=x.dtype).view(x.shape)
+    dx = gemm(dy2, weight, config("qkv_dx", x.shape[-1], x)).view(x.shape)
     C = gq.shape[0]
     for i, grad in enumerate((gq, gk, gv)):
         torch.addmm(grad, dy2[:, i * C:(i + 1) * C].t(), x2, out_dtype=grad.dtype, out=grad)
@@ -85,7 +135,7 @@ qkv_proj.register_autograd(qkv_proj_grad, setup_context=qkv_proj_save)
 def linear_bwd(dy: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> Tensor:
     """dX like x; dW accumulated into grad."""
     dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
-    dx = gemm(dy2, weight, out_dtype=x.dtype).view(x.shape)
+    dx = gemm(dy2, weight, config("o_dx", x.shape[-1], x)).view(x.shape)
     torch.addmm(grad, dy2.t(), x2, out_dtype=grad.dtype, out=grad)
     return dx
 
@@ -102,10 +152,9 @@ def residual_rms(x: Tensor, weight: Tensor, grad: Tensor | None, residual: Tenso
     differentiates through it."""
     N = weight.shape[0]
     r = sq_reduce_mod(has_c=True, has_rowvec=False, has_aux=False)(
-        x.reshape(-1, x.shape[-1]), weight.t(), residual.reshape(-1, N))
-    # gemm_rms's epilogue and finalize (quack/gemm_interface.py _gemm_rms_call, _rms_finalize); the per-tile partials
-    # of a cold autotuned call are a strided slice, which rms_final_reduce rejects, hence contiguous()
-    rstd = rms_final_reduce(r["mColVecReduce"].contiguous(), scale=1 / N, eps=EPS)
+        x.reshape(-1, x.shape[-1]), weight.t(), residual.reshape(-1, N), config=config("o", N, x), tuned=False)
+    # gemm_rms's epilogue and finalize (quack/gemm_interface.py _gemm_rms_call, _rms_finalize)
+    rstd = rms_final_reduce(r["mColVecReduce"], scale=1 / N, eps=EPS)
     return r["D"].view(residual.shape), rstd
 
 
@@ -148,9 +197,10 @@ def relu2_mlp(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tenso
     """h (..., C) the un-normed stream, rstd (M,) fp32 its rows' (residual_rms), w_up (4C, C), w_down (C, 4C), g_up,
     g_down their fp32 .grad or None -> (h + MLP(norm(h)) like h, scaled pre-activation and activation (M, 4C) saved
     for the backward)."""
-    h2 = h.reshape(-1, h.shape[-1])
-    preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True)
-    y = gemm_add(postact, w_down.t(), C=h2)
+    h2, C = h.reshape(-1, h.shape[-1]), h.shape[-1]
+    preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True,
+                                    config=config("up", C, h), tuned=False)
+    y = gemm(postact, w_down.t(), config("down", C, h), C=h2)
     return y.view(h.shape), preact, postact
 
 
@@ -165,12 +215,13 @@ def relu2_mlp_fake(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: 
 def relu2_mlp_bwd(dy: Tensor, h: Tensor, rstd: Tensor, preact: Tensor, postact: Tensor, w_up: Tensor, w_down: Tensor,
                   g_up: Tensor, g_down: Tensor) -> Tensor:
     """dh like h, through the residual, the MLP and the norm; dW_up, dW_down accumulated into g_up, g_down."""
-    dy2, h2 = dy.reshape(-1, dy.shape[-1]), h.reshape(-1, h.shape[-1])
-    r = relu2_dact_rstd(dy2, w_down, preact, rstd=rstd, dynamic_scheduler=True)
+    dy2, h2, C = dy.reshape(-1, dy.shape[-1]), h.reshape(-1, h.shape[-1]), h.shape[-1]
+    r = relu2_dact_rstd(dy2, w_down, preact, rstd=rstd, dynamic_scheduler=True, config=config("down_dx", C, h),
+                        tuned=False)
     dp = r["D"]
     torch.addmm(g_down, dy2.t(), postact, out_dtype=g_down.dtype, out=g_down)
-    corr = rstd.square().mul_(r["dsum"]).mul_(-1 / h.shape[-1])
-    dh = norm_bwd_apply(dp, w_up, dy2, h=h2, corr=corr)["D"].view(h.shape)
+    corr = rstd.square().mul_(r["dsum"]).mul_(-1 / C)
+    dh = norm_bwd_apply(dp, w_up, dy2, h=h2, corr=corr, config=config("up_dx", C, h), tuned=False)["D"].view(h.shape)
     torch.addmm(g_up, dp.t(), h2, out_dtype=g_up.dtype, out=g_up)
     return dh
 
