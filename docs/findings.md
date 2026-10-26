@@ -410,8 +410,8 @@ reduction schemes NONE | COMPUTE_TYPE; torch's cuBLASLt path in this image has 1
 per split, so `preferred_blas_library("cublaslt")` alone cannot reach DeepGEMM's times. With a 16 MiB workspace torch
 matches DeepGEMM per shape on the 4C dW (4C×C 0.723 → 0.706 ms, C×4C 0.735 → 0.709; C×C no gain), but as a
 process-global setting (every torch matmul, Muon's batched Newton–Schulz included) the d24 exclusive A/B lost: 8K
-361,284 → 359,376 tok/s (−0.53%, two alternated pairs), 32K 285,115 → 283,969 (−0.40%): rejected. Open: DeepGEMM's
-cuBLASLt call at the two 4C dW sites only (~15.5 ms/step, ~0.38% [estimate]).
+361,284 → 359,376 tok/s (−0.53%, two alternated pairs), 32K 285,115 → 283,969 (−0.40%): rejected. Scoped to the two
+4C dW sites only (DeepGEMM's cuBLASLt call, ~0.38% estimated per shape), the A/B lost too: −0.09% / −0.03%: rejected.
 
 ### 5.20 Code audit (user specification; one auditor per file) — in progress
 Specification: every parameter, literal, branch and dependency justified by mathematics, the data, model or hardware
@@ -479,14 +479,20 @@ rel 1.661e-3; 6e-6 of elements differ from k_forward, the rstd square sum's orde
 the GEMM (one runs; two gmem→register loads run). MlpOutMix: route (a), the row's norm finished across CTAs in the
 epilogue, 969 µs per call against master's gemm_add 556 + Inductor's mix and norm 170 = 726: dropped; route (b), the
 mix in gemm_add's epilogue and the norm a separate pass, 587 + 85 = 671 µs, ≈ 19 ms per 8K step over 345 calls
-(forward only). LinearCE: QuACK's chunked linear cross entropy 24.2 ms per micro-batch against 27.13 (≈ 1.1% of the
-step), peak 6.38 → 0.82 GiB at 8,192-row chunks (8,192–65,536 rows time alike), losses and lse bitwise equal to
-master's. PdlDpsum: the candidate's q/k/v gradient error vs fp64 equals master's to four digits. QuackPin: every
-config the autotuner chooses among gives bitwise-identical outputs (split_k 1), so selection sets throughput and the
-cold peak, not rounding; at d24 3 of the 8 linear.py calls' cached picks are slower than the fastest measured (+1.07 ms
-per micro-batch, ~0.39% [expected]). The fp64 check settles C3: both trees' gradient error vs an fp64 reference median
-1.18e-2 / 1.17e-2 (max 1.95e-2 / 1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no defect. Equivalence and A/B of
-MlpOutMix (b), LinearCE, PdlDpsum and QuackPin's pins are queued.
+(forward only). LinearCE landed (`067e60b`): QuACK's scaled-exp linear cross entropy per 8,192-row chunk (bf16
+rescaled exponentials stored beside each 128-wide N tile's max and sum, the label's fp32 logit kept; dx and dW GEMMs
+rescale on the A-operand load), 24.2 ms per micro-batch against 26.6–27.1 (8,192–65,536-row chunks time alike; a
+98,304-row chunk faults in QuACK 0.6.5). One alternated exclusive window: 8K 362,951 / 363,024 → 365,467 / 365,465
+tok/s (+0.68%, MFU 0.4823 → 0.4857), 32K 286,619 → 287,476 (+0.30%); peak allocated 76.99 → 71.44 GiB at 8K, cold
+73.31 GiB reserved; at step 200 vs fp64 the loss's relative error 2.8e-5 → 3.3e-8, per-position loss 3.3e-3 → 5.8e-7,
+dx 5.6e-3 → 2.6e-3, dW 2.2e-3 → 1.0e-3; 10 steps at ×2.797 within master's spread (largest 6.4e-4); the softcap arm
+unchanged (bitwise). PdlDpsum: Inductor's PDL setting −0.17% / −0.05% at 8K / 32K: rejected; the dpsum candidate's
+q/k/v gradient error vs fp64 equals master's to four digits. QuackPin: every config the autotuner chooses among gives
+bitwise-identical outputs (split_k 1), so selection sets throughput and the cold peak, not rounding; at d24 3 of the 8
+linear.py calls' cached picks are slower than the fastest measured (+1.07 ms per micro-batch, ~0.39% [expected]). The
+fp64 check settles C3: both trees' gradient error vs an fp64 reference median 1.18e-2 / 1.17e-2 (max 1.95e-2 /
+1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no defect. Equivalence and A/B of MlpOutMix (b), PdlDpsum's dpsum and
+QuackPin's pins are queued.
 
 ### 5.22 Review of every queued execution (user: required, or inferable?) — Oct 26
 Each queued GPU job was checked against the decision it feeds and the agents' own measurements. Cut: QkvEpi's remaining
