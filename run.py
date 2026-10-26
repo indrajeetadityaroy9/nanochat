@@ -183,11 +183,15 @@ def lr_multiplier() -> float:
     return analysis(lines)["base_multiplier"]
 
 
-OmegaConf.register_new_resolver("runs", lambda: str(RUNS))
-OmegaConf.register_new_resolver(
-    "run_name", lambda *, _root_: run_name(RunConfig(**{f.name: _root_[f.name] for f in fields(RunConfig)})))
-OmegaConf.register_new_resolver("lr_multiplier", lr_multiplier, use_cache=True)
-ConfigStore.instance().store(name="run_schema", node=RunConfig)
+def register() -> None:
+    """The run app's resolvers and schema (conf/run.yaml), once per process: in the app's process only, since modules
+    the app imports (ablations/peak_lr.py through lr_multiplier, ablations/records.py) import this file again as `run`,
+    whose registrations would repeat __main__'s and fail."""
+    OmegaConf.register_new_resolver("runs", lambda: str(RUNS))
+    OmegaConf.register_new_resolver(
+        "run_name", lambda *, _root_: run_name(RunConfig(**{f.name: _root_[f.name] for f in fields(RunConfig)})))
+    OmegaConf.register_new_resolver("lr_multiplier", lr_multiplier, use_cache=True)
+    ConfigStore.instance().store(name="run_schema", node=RunConfig)
 
 
 @hydra.main(version_base="1.3", config_path=str(ROOT / "conf"), config_name="run")
@@ -196,4 +200,5 @@ def main(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
+    register()
     main()
