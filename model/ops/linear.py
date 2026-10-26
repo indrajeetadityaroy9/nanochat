@@ -282,31 +282,33 @@ def mul_rn(a: Float32, b: Float32, *, loc=None, ip=None) -> Float32:
 
 @gemm_epilogue(ops={"x0": TileLoad("x0"), "lr": Scalar("lr"), "lx": Scalar("lx")})
 def residual_mix(acc, c, x0, lr, lx):
-    """The down projection's epilogue with the next layer's mix: acc = postact W_down^T, c = h, x0 fp32 -> D = x =
-    fma(lr, h', x0 lx) with h' = h + acc rounded to bf16 first: the stored stream mixed as the compiled forward mixed it
-    (Inductor's fused mix contracts lr h' + lx x0 to this fma over the unrounded fp32 x0), bitwise."""
+    """The down projection's epilogue with the next layer's mix: acc = postact W_down^T, c = h -> D = x =
+    fma(lr, h', x0 lx) with h' = h + acc rounded to bf16 first (the stored stream mixed as the compiled forward mixes
+    it: one fma over lr h' and the rounded product x0 lx, no free contraction)."""
     return {"D": fma_rn(lr, round_bf16(acc + c), mul_rn(x0, lx))}
 
 
 @torch.library.custom_op("nanochat::relu2_mlp_mix", mutates_args=(), device_types="cuda")
 def relu2_mlp_mix(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tensor | None, g_down: Tensor | None,
-                  x0: Tensor, lr: Tensor, lx: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """relu2_mlp followed by the next layer's mix and norm: x = lr h' + lx x0 with h' = h + MLP(norm(h)) (x0 (..., C)
-    fp32, lr, lx 0-dim fp32), n = norm(x) -> (x, n, rstd (M,) fp32 of x's rows, preact, postact); x, rstd, preact and
-    postact are saved for the backward. The mix rides the down projection's epilogue (residual_mix), h' is never stored;
-    the norm is QuACK's RMSNorm over the stored x (statistics in fp32 of the bf16 x)."""
+                  x0: Tensor, x0_bf16: Tensor, lr: Tensor,
+                  lx: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """relu2_mlp followed by the next layer's mix and norm: x = lr h' + lx x0 with h' = h + MLP(norm(h)) (lr, lx 0-dim
+    fp32), n = norm(x) -> (x, n, rstd (M,) fp32 of x's rows, preact, postact); x, rstd, preact and postact are saved for
+    the backward. x0 is passed twice (materialize): x0_bf16 is the one read, x0 (fp32) only receives the gradient, so
+    that the layers' contributions to it sum in fp32 as the compiled forward's fp32 x0 got them. The mix rides the down
+    projection's epilogue (residual_mix), h' is never stored; the norm is QuACK's RMSNorm over the stored x."""
     h2, C = h.reshape(-1, h.shape[-1]), h.shape[-1]
     preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True,
                                     config=config("up", C, h), tuned=False)
-    x = residual_mix(postact, w_down.t(), h2, x0=x0.reshape(h2.shape), lr=lr, lx=lx, config=config("down_mix", C, h),
-                     tuned=False)["D"]
+    x = residual_mix(postact, w_down.t(), h2, x0=x0_bf16.reshape(h2.shape), lr=lr, lx=lx,
+                     config=config("down_mix", C, h), tuned=False)["D"]
     n, _, rstd_x = rmsnorm_fwd(x, eps=EPS, store_rstd=True)
     return x.view(h.shape), n.view(h.shape), rstd_x, preact, postact
 
 
 @relu2_mlp_mix.register_fake
 def relu2_mlp_mix_fake(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tensor | None,
-                       g_down: Tensor | None, x0: Tensor, lr: Tensor,
+                       g_down: Tensor | None, x0: Tensor, x0_bf16: Tensor, lr: Tensor,
                        lx: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     act = h.new_empty(h.numel() // h.shape[-1], w_up.shape[0])
     return h.new_empty(h.shape), h.new_empty(h.shape), rstd.new_empty(rstd.shape), act, torch.empty_like(act)
@@ -314,40 +316,45 @@ def relu2_mlp_mix_fake(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_
 
 def relu2_mlp_mix_save(ctx: FunctionCtx, inputs: tuple[Tensor, ...], output: tuple[Tensor, ...]) -> None:
     ctx.mark_non_differentiable(*output[2:])
-    ctx.save_for_backward(*inputs, output[0], *output[2:])
+    h, rstd, w_up, w_down, g_up, g_down, x0, _, lr, lx = inputs
+    ctx.save_for_backward(h, rstd, w_up, w_down, g_up, g_down, x0, lr, lx, output[0], *output[2:])
 
 
 def relu2_mlp_mix_grad(ctx: FunctionCtx, dx: Tensor, dn: Tensor, *_: None) -> tuple[Tensor | None, ...]:
-    """The mix and norm backward as PyTorch ops (fused by Inductor), then relu2_mlp's backward. x0's gradient in fp32
-    (summed over the layers without rounding, as the compiled forward's fp32 x0 got it); the mix's resid_lambda
-    gradient sum(dx h') takes h' from the stored x: lr h' = x - lx x0 (exact up to x's bf16 rounding); both lambda
-    gradients rounded to bf16 as autograd's bf16 sums of the mix were."""
+    """The mix and norm backward as PyTorch ops (fused by Inductor), then relu2_mlp's backward. x0's gradient in fp32;
+    the mix's resid_lambda gradient sum(dx h') takes h' from the stored x: lr h' = x - lx x0 (exact up to x's bf16
+    rounding); both lambda gradients rounded to bf16 as autograd's bf16 sums of the mix were."""
     h, rstd, w_up, w_down, g_up, g_down, x0, lr, lx, x, rstd_x, preact, postact = ctx.saved_tensors
     xf = x.float()
     r = rstd_x.view(*xf.shape[:-1], 1)
     dnf = dn.float()
     dxt = dx + (r * (dnf - xf * (r * r) * (dnf * xf).mean(-1, keepdim=True))).to(dx.dtype)
     dh = relu2_mlp_bwd(lr * dxt, h, rstd, preact, postact, w_up, w_down, g_up, g_down)
-    dxtf = dxt.float()
-    dlr = ((dxtf * (xf - lx * x0)).sum() / lr).to(dx.dtype).to(lr.dtype)
-    return dh, None, None, None, None, None, lx * dxtf, dlr, (dxtf * x0).sum().to(dx.dtype).to(lx.dtype)
+    dxtf, x0f = dxt.float(), x0.float()
+    dlr = ((dxtf * (xf - lx * x0f)).sum() / lr).to(dx.dtype).to(lr.dtype)
+    return (dh, None, None, None, None, None, lx * dxtf, None, dlr,
+            (dxtf * x0f).sum().to(dx.dtype).to(lx.dtype))
 
 
 relu2_mlp_mix.register_autograd(relu2_mlp_mix_grad, setup_context=relu2_mlp_mix_save)
 
 
 @torch.library.custom_op("nanochat::materialize", mutates_args=(), device_types="cuda")
-def materialize(x: Tensor) -> Tensor:
-    """x copied into one buffer, gradient passed through. For x0 (fp32), the input of every relu2_mlp_mix: Inductor
-    writes an elementwise result passed to a custom op once per call (23 copies of x0 per micro-batch at d24: 1.25 ms
-    against 0.16 ms for the layer-0 kernel), an op's output once; x0 itself stays Inductor's norm, forward and
-    backward."""
-    return x.clone()
+def materialize(x: Tensor) -> tuple[Tensor, Tensor]:
+    """x (fp32) copied once, as itself and rounded to bf16; the gradient passes through the fp32 copy. For x0, the input
+    of every relu2_mlp_mix: Inductor writes an elementwise result passed to a custom op once per call (23 copies of x0
+    per micro-batch at d24: 1.25 ms against 0.16 ms for the layer-0 kernel), an op's outputs once; x0 itself stays
+    Inductor's norm, forward and backward."""
+    return x.clone(), x.to(torch.bfloat16)
 
 
 @materialize.register_fake
-def materialize_fake(x: Tensor) -> Tensor:
-    return torch.empty_like(x)
+def materialize_fake(x: Tensor) -> tuple[Tensor, Tensor]:
+    return torch.empty_like(x), torch.empty_like(x, dtype=torch.bfloat16)
 
 
-materialize.register_autograd(lambda ctx, dx: dx)
+def materialize_save(ctx: FunctionCtx, inputs: tuple[Tensor], output: tuple[Tensor, Tensor]) -> None:
+    ctx.mark_non_differentiable(output[1])
+
+
+materialize.register_autograd(lambda ctx, dx, _: dx, setup_context=materialize_save)

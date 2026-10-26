@@ -129,8 +129,10 @@ class MLP(nn.Module):
         self.up_proj = GemmLinear(C, 4 * C)
         self.down_proj = GemmLinear(4 * C, C)
 
-    def forward(self, h: Tensor, rstd: Tensor, mix: tuple[Tensor, Tensor, Tensor] | None) -> tuple[Tensor, Tensor]:
-        """mix: the next layer's (x0, resid_lambda, x0_lambda), None after the last layer -> (the stream, normed)."""
+    def forward(self, h: Tensor, rstd: Tensor,
+                mix: tuple[Tensor, Tensor, Tensor, Tensor] | None) -> tuple[Tensor, Tensor]:
+        """mix: the next layer's (x0 fp32, x0 bf16, resid_lambda, x0_lambda) (model/ops/linear.py relu2_mlp_mix), None
+        after the last layer -> (the stream, normed)."""
         weights = (self.up_proj.weight_bf16, self.down_proj.weight_bf16, self.up_proj.weight.grad,
                    self.down_proj.weight.grad)
         if mix is None:
@@ -148,7 +150,7 @@ class DecoderLayer(nn.Module):
 
     def forward(self, hidden_states: Tensor, normed: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
                 cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor, segments: Tensor,
-                mix: tuple[Tensor, Tensor, Tensor] | None) -> tuple[Tensor, Tensor]:
+                mix: tuple[Tensor, Tensor, Tensor, Tensor] | None) -> tuple[Tensor, Tensor]:
         """hidden_states: the stream, normed: norm(hidden_states); mix: MLP.forward's -> (the stream, normed)."""
         h, rstd = self.self_attn(normed, hidden_states, input_ids, ve_table, cos_sin=cos_sin,
                                  window_size=window_size, cu_seqlens=cu_seqlens, segments=segments)
@@ -235,15 +237,15 @@ class CausalLM(nn.Module):
         hidden_states = x0 = norm(emb)
         # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 without fp32 copies of the mix; layer 0's
         # mix and norm fused by Inductor, every later layer's in the previous layer's down-projection epilogue
-        # (MLP.forward), which reads x0 in fp32, as Inductor's fused mix computes it (never rounded to bf16), from one
-        # buffer (model/ops/linear.py materialize)
+        # (MLP.forward), which reads x0 in bf16 from one buffer and sums x0's gradient in fp32 (model/ops/linear.py
+        # materialize)
         hidden_states = self.resid_lambdas[0] * hidden_states + self.x0_lambdas[0] * x0
         normed = norm(hidden_states)
         x0 = materialize(norm(emb.float()))
         n = len(self.layers)
         for i, layer in enumerate(self.layers):
             ve_table = self.value_embeds[str(i)].weight if str(i) in self.value_embeds else None
-            mix = (x0, self.resid_lambdas[i + 1], self.x0_lambdas[i + 1]) if i + 1 < n else None
+            mix = (*x0, self.resid_lambdas[i + 1], self.x0_lambdas[i + 1]) if i + 1 < n else None
             hidden_states, normed = layer(hidden_states, normed, input_ids, ve_table, cos_sin=(self.cos, self.sin),
                                           window_size=self.window_sizes[i], cu_seqlens=cu_seqlens, segments=segments,
                                           mix=mix)
