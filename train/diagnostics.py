@@ -51,14 +51,18 @@ class Diagnostics:
         self.rows_start, self.row_stats, self.lse_max, self.lse_square = stage_rows, [], [], []
         self.measured = step % UPDATE_STATS_EVERY == 0
 
+    @torch.no_grad()
     def micro_batch(self, labels: Tensor, losses: Tensor, lse: Tensor) -> None:
-        """One micro-batch's per-row loss sums and valid counts, and its logsumexp statistics (lm_loss outputs)."""
+        """One micro-batch's per-row loss sums and valid counts, and its logsumexp statistics (lm_loss outputs). No
+        autograd: lm_loss's per-position outputs require grad, and a graph from them copied into the pinned buffers
+        would chain every step's onto the last (~12.7 MiB per step at d24, never freed)."""
         valid = labels != IGNORE_INDEX
         self.row_stats.append(torch.stack([losses.view(labels.shape).sum(1), valid.sum(1).float()]))
         valid = valid.flatten()
         self.lse_max.append(torch.where(valid, lse, -torch.inf).amax())
         self.lse_square.append((lse.square() * valid).sum())
 
+    @torch.no_grad()
     def end_step(self, step: int, loss: Tensor, grad_norm: Tensor) -> tuple[Tensor, tuple]:
         """After the optimizers stepped (the groups' lr still the step's): the step's values copied to a pinned host
         buffer without blocking, and the layout record() reads them by."""
