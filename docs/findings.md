@@ -567,6 +567,15 @@ to 0.0007 at d20, with d12-tuned values hurting at d20. Decisions:
   x0_lambdas and resid_lambdas train at the shared AdamW lr, nanochat's at 0.5 and 0.005 × √(B/2^19) (0.375 and
   0.00375 at d16's 294,912 tokens per step), a gap too large to bound the effect from the literature. Adopt iff code
   bpb better than τ×1 seed 0 by > 0.0094 and MBPP+ parsing not worse; a smaller difference is inconclusive.
+- Outcome (`60b972d`; `results/scalar_learning_rates.json`): not adopted. 8K code bpb 0.42635 vs 0.42724 (−0.0009,
+  inside 0.0094: inconclusive), 32K repository code −0.0015, train loss over the last half −0.0022; MBPP+ unparsed
+  0.120 vs 0.054, worse by the exact sign test (9 vs 35 problems, p = 1.1e-4). That test treats problems as
+  independent within one model draw: two seeds of the same D7 arm differ 0.293 vs 0.133, so between-seed variance
+  dwarfs it and "worse" is weak evidence; the rule still keeps one lr (the status quo). The candidate's grad norm
+  spiked at step 6 (10.1 vs 2.78), recovered by step 10. The pre-flight confirmed the groups (lr 0.375 / 0.00375,
+  every other group unchanged); the two trees differ by the field only. D7's sanity numbers (no decision), 8K code
+  bpb / MBPP+ unparsed: τ×½ seed 0 0.42535 / 0.293, seed 1 0.42721 / 0.133, τ×1 seed 0 0.42724 / 0.054 —
+  doubling Muon's decay cost nothing measurable in bpb here.
 
 ### 5.24 The output-logit softcap adopted (user) — Oct 26
 LinearCE fused the cap into the scaled-exp linear cross entropy (`e24333d`): tanh on the fp32 accumulator in the
