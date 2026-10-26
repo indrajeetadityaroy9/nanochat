@@ -183,6 +183,46 @@ The best arm (× 2) beats the law (× 1) by 0.0078 code bpb; × 4 is 0.0005 behi
 law's lr, is the base multiplier, 2.8% below the earlier recipe's 2.7970369 [arithmetic]: peak lr 2.3465e-3 and
 weight decay 0.15342 on the base plan (§2).
 
+**Precision and robustness** (each evaluation's `errors`, `docs/evaluation.md` §5; marginal standard errors over val
+rows, the × 2 arm): 8K code 0.0008 (49,765 rows), 32K code 0.0035 (2,667 rows), 8K all 0.0013. × 1's deficit, 0.0078,
+is ≈ 10 of them; × 2 and × 4 differ by 0.00047, under one: the measure brackets a flat optimum over × 2–× 4, and
+× 2.7193 is the parabola's point estimate without an interval (the arms share val rows, so a paired difference would
+be tighter; not computed). The same fit on every other held-out measure of the three evaluations:
+
+| Measure | × 1 | × 2 | × 4 | Lowest | Vertex |
+|---|---|---|---|---|---|
+| code, 8K (the rule) | 0.41322 | 0.40544 | 0.40591 | × 2 | × 2.719 |
+| code, 32K | 0.40859 | 0.40131 | 0.40227 | × 2 | × 2.610 |
+| code, 8K and 32K by the base run's stage tokens (97.05B, 5.60B) | | | | | × 2.713 |
+| all, 8K / 32K | 0.49386 / 0.49250 | 0.48499 / 0.48403 | 0.48533 / 0.48479 | × 2 | × 2.756 / × 2.672 |
+| math, 8K / 32K | 0.53770 / 0.53733 | 0.52497 / 0.52459 | 0.52556 / 0.52518 | × 2 | × 2.743 / × 2.744 |
+| text, 8K / 32K | 1.07390 / 1.07466 | 1.05797 / 1.05881 | 1.05734 / 1.05821 | × 4 | × 2.910 / × 2.906 |
+
+The vertices span × 2.61–2.91: −4% to +7% of the base lr, ≤ 0.00004 bpb at the fitted curvature [arithmetic]. The
+parse measure's generations (single seed, greedy): HumanEval+ base pass@1 0.067 / 0.104 / 0.110 (standard error
+0.020–0.025), MBPP+ 0.114 / 0.132 / 0.127 (0.016–0.017), MBPP+ parse rate 0.825 / 0.894 / 0.775; none resolves × 2
+from × 4, and the rule reads none of them.
+
+**Dynamics** (the arms' `metrics.jsonl`, `train` records; × 1 / × 2 / × 4):
+- training loss (50-step means): × 4 leads until step 445, then trails × 2 (+0.011 at step 1,000, +0.002 at the
+  end); × 2 − × 1 holds at −0.022 from step ~1,500; final 1.229 / 1.207 / 1.209;
+- clipping: 41 / 35 / 25 steps above `MAX_GRAD_NORM`, the last at steps 45 / 40 / 26; median gradient norm after
+  step 40 0.181 / 0.131 / 0.110; every loss and norm finite;
+- 31 loss spikes (a step above the previous 50-step mean by 0.15) at the same steps in all three arms and of the
+  same size (+0.188 on average): batches of the fixed data order, not the lr; Stack-Edu Python's own loss exceeds
+  its mean by > 0.3 nats in 16 of them;
+- largest logsumexp 16.6 / 17.9 / 19.1 and largest QK-norm gain 1.69 / 1.93 / 2.25, each level from step ~3,000;
+  parameter norm of the Muon group at the end 377 / 719 / 1,426, roughly ∝ lr, as the τ law's fixed η·λ implies
+  [inference];
+- the repository stage (step 3,127, lr at 5.5% of peak): the 20-step mean loss falls by 0.012 in each arm;
+- 361–362K / 288K tok/s at 8K / 32K, MFU 0.483, peak 71.10 GiB, 2,739–2,774 s of training per arm, independent of
+  the lr. The sweep ran at `5e06eb8`: 10,322 s for the three arms with their evaluations (698 s each in parse mode).
+
+**Adopted** for the base run: `learning_rate_scale` = `lr_multiplier` = 2.7192599564485445 (records at `b7f5be9`) on
+the §2 plan (69,611 steps of 1,474,560 tokens, peak lr 2.3465e-3, weight decay 0.15342), run
+`generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10` (§6, §9). Its absolute peak lr lies
+between the × 1 and × 2 arms' (1.5443e-3, 3.0886e-3): the law lowers the lr with the base plan's compute.
+
 **Earlier recipe** (`results/peak_lr.jsonl` at `81fb386`, removed since; code bits per byte; no run diverged). 11 arms
 (× 1–8 at d8 at 5 and at 200, × 1–4 at d24 at 5) trained under an earlier recipe: the reference tokenizer's data
 (dataset revision `1e711aa7`), no output-logit cap, nanochat's per-window FLOP count for the law's lr (Eq. 2's M, §2,
