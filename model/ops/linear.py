@@ -8,7 +8,9 @@ backward adds dW into them in place, so the gradient-accumulation micro-batches 
 micro-batch plus autograd's AccumulateGrad add; autograd sees no gradient for those weights. Forward-only callers pass
 None.
 
-nanochat::linear (q_proj, k_proj, v_proj): y = x W^T; backward dX = dY W, dW = dY^T X.
+nanochat::qkv_proj (q_proj, k_proj, v_proj): one GEMM y = x [Wq; Wk; Wv]^T (..., 3C) against the stacked bf16 copy
+(model/modeling.py Attention.qkv_bf16), q, k, v its column blocks; backward dX = dY [Wq; Wk; Wv] (one GEMM, K = 3C),
+each dW = dY_block^T X on the block's strided view of dY.
 
 The post-attention half of a layer runs on the un-normed stream: the norm is gain-free, so
 norm(h) W^T = diag(rstd) (h W^T) exactly, and rstd rides the GEMM epilogues as a per-row (colvec) scale; the normed
@@ -38,16 +40,45 @@ from torch.autograd.function import FunctionCtx
 EPS = torch.finfo(torch.float32).eps
 
 
-@torch.library.custom_op("nanochat::linear", mutates_args=(), device_types="cuda")
-def linear(x: Tensor, weight: Tensor, grad: Tensor | None) -> Tensor:
-    """x (..., K), weight (N, K) bf16, grad: weight's fp32 .grad or None -> (..., N) in x's dtype."""
+@torch.library.custom_op("nanochat::qkv_proj", mutates_args=(), device_types="cuda")
+def qkv_proj(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | None, gv: Tensor | None) -> Tensor:
+    """x (..., C) bf16, weight (3C, C) the stacked bf16 [Wq; Wk; Wv], gq, gk, gv their fp32 .grad or None (forward
+    only) -> (..., 3C) bf16: q, k, v the column blocks [0, C), [C, 2C), [2C, 3C)."""
     y = gemm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=x.dtype)
     return y.view(*x.shape[:-1], weight.shape[0])
 
 
-@linear.register_fake
-def linear_fake(x: Tensor, weight: Tensor, grad: Tensor | None) -> Tensor:
+@qkv_proj.register_fake
+def qkv_proj_fake(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | None, gv: Tensor | None) -> Tensor:
     return x.new_empty(*x.shape[:-1], weight.shape[0])
+
+
+@torch.library.custom_op("nanochat::qkv_proj_bwd", mutates_args=("gq", "gk", "gv"), device_types="cuda")
+def qkv_proj_bwd(dy: Tensor, x: Tensor, weight: Tensor, gq: Tensor, gk: Tensor, gv: Tensor) -> Tensor:
+    """dX like x; each block's dW accumulated into its grad."""
+    dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
+    dx = gemm(dy2, weight, out_dtype=x.dtype).view(x.shape)
+    C = gq.shape[0]
+    for i, grad in enumerate((gq, gk, gv)):
+        torch.addmm(grad, dy2[:, i * C:(i + 1) * C].t(), x2, out_dtype=grad.dtype, out=grad)
+    return dx
+
+
+@qkv_proj_bwd.register_fake
+def qkv_proj_bwd_fake(dy: Tensor, x: Tensor, weight: Tensor, gq: Tensor, gk: Tensor, gv: Tensor) -> Tensor:
+    return x.new_empty(x.shape)
+
+
+def qkv_proj_save(ctx: FunctionCtx, inputs: tuple[Tensor, ...], output: Tensor) -> None:
+    ctx.save_for_backward(*inputs)
+
+
+def qkv_proj_grad(ctx: FunctionCtx, dy: Tensor) -> tuple[Tensor, None, None, None, None]:
+    x, weight, gq, gk, gv = ctx.saved_tensors
+    return qkv_proj_bwd(dy, x, weight, gq, gk, gv), None, None, None, None
+
+
+qkv_proj.register_autograd(qkv_proj_grad, setup_context=qkv_proj_save)
 
 
 @torch.library.custom_op("nanochat::linear_bwd", mutates_args=("grad",), device_types="cuda")
@@ -62,18 +93,6 @@ def linear_bwd(dy: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> Tensor:
 @linear_bwd.register_fake
 def linear_bwd_fake(dy: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> Tensor:
     return x.new_empty(x.shape)
-
-
-def linear_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor | None], output: Tensor) -> None:
-    ctx.save_for_backward(*inputs)
-
-
-def linear_grad(ctx: FunctionCtx, dy: Tensor) -> tuple[Tensor, None, None]:
-    x, weight, grad = ctx.saved_tensors
-    return linear_bwd(dy, x, weight, grad), None, None
-
-
-linear.register_autograd(linear_grad, setup_context=linear_save)
 
 
 @torch.library.custom_op("nanochat::residual_rms", mutates_args=(), device_types="cuda")

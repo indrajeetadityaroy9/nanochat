@@ -211,7 +211,7 @@ train loss 1.3358 vs 1.3244 (s0) / 1.3168 (s1); code bpb 8K/32K 0.4435/0.4254 vs
 all bpb 0.5263/0.5132 vs 0.5219/0.5087; HumanEval+ 0.067/0.061 vs 0.067/0.055, MBPP+ 0.090/0.071 vs 0.074/0.061
 (within noise); peak 28.7 vs 32.0 GiB. Loss and bpb worse beyond the seed spread: rejected, not committed.
 
-### 5.12 Norm folded into GEMMs, fused QKV (NormFusion, C3Lander) — B1 committed; C3 +0.77%, commit pending
+### 5.12 Norm folded into GEMMs, fused QKV (NormFusion, AttnOwner, C3Lander) — B1 and C3 committed
 Method: norm(x)Wᵀ = diag(rstd)·xWᵀ for the gain-free RMS norm, rstd applied as a row scale in QuACK epilogues; fused
 ops have lower error vs fp64 than the bf16 path (y 2.6e-3 vs 3.2e-3). Outputs: `373b549`, d24 8K 341,919 vs 338,039
 tok/s (+1.15%), 32K +0.5%, 200-step loss last-20 Δ −0.0071, peak 65.6 vs 69.3 GB. The rstd-scaled dact epilogue costs
@@ -225,15 +225,18 @@ op (the separate `linear` op deleted), one `attention` op holding the q/k prolog
 whose backward writes every q/k/v gradient into one buffer; against master's ops on real d24 8K segments, the output,
 dk, dv, the k-norm gradient and every value-embedding gradient are bitwise equal (window and full layers, with and
 without value embeddings), dq and the q-norm gradient differ by 1e-6 to 2e-5 (inside master's own run-to-run spread
-from FA4's atomic adds); a 2-step warm-up gave 355,980 vs 359,063 tok/s (a hint, not the A/B). The rebased candidate
-(`a3dc544` + C3) passed its smoke. d24 exclusive A/B (`c3ab`, 0e627ff trees, 25 steps / 8 warm-up at 8K, 12 / 6 at
-32K): 356,431 → 359,180 tok/s (+0.77%, MFU 0.4735 → 0.4777), 32K 283,357 → 285,776 (+0.85%). Numerics: the 200-step
-loss check was replaced by a 10-step equivalence at ×2.797 on the candidate rebased onto `6299e84` against two master
-runs there, with a bitwise assert that the stacked bf16 copy is refreshed after every update (single-step gradients
-were already equivalent, and master's own losses are bitwise through step 3, so a refresh or accumulation bug shows by
-step 2). Its q/k/v weight gradients are still three C×C `addmm` (36 tiles of 128 × 128 on 132 SMs at C = 768); one
-3C × C GEMM into a contiguous fp32 buffer is under test (~11 ms/step [estimate]). TileKernels' next fusion on this
-GEMM, QK-norm + RoPE in its epilogue (§5.21), builds on it.
+from FA4's atomic adds); a 2-step warm-up gave 355,980 vs 359,063 tok/s (a hint, not the A/B). d24 exclusive A/B
+(`c3ab`, 0e627ff trees, 25 steps / 8 warm-up, tok/s median, CUDA-event mean in parentheses): 8K 356,431 → 359,180
+(+0.77%; 340,690 → 343,804, +0.91%, both arms with one slow step; MFU 0.4735 → 0.4777), 32K 283,357 → 285,776
+(+0.85%; 283,773 → 286,058, +0.81%). Numerics: the 200-step loss check was replaced by a 10-step equivalence at
+×2.797 (d24 8K, seed 0) on the candidate rebased onto `6299e84` against two master runs there, with a bitwise assert
+that the stacked bf16 copy is refreshed after every update (single-step gradients were already equivalent, and
+master's own losses are bitwise through step 3, so a refresh or accumulation bug shows by step 2): steps 0–3 bitwise
+against master, then max |Δ| 1.6e-5 against master-master 1.3e-5; the assert held at every refresh. Peak memory
+(warm caches): 75.1 → 76.8 GiB at 8K; a tree's first run peaks at 88–90 GiB, master's included, from QuACK's
+cold autotune. Rejected: the q/k/v weight gradients as one 3C × C GEMM into a contiguous fp32 buffer (the .grad
+its row-block views) rather than three C × C `addmm`: −0.26% at 8K, −0.16% at 32K. TileKernels' next fusion on
+this GEMM, QK-norm + RoPE in its epilogue (§5.21), builds on C3.
 
 ### 5.13 Value embeddings and cross entropy (VeCeKernel) — gate committed
 Method (TileKernels' Engram gate and weight-gradient reduce, in CUDA): the backward visits rows in token order (one sort
@@ -303,8 +306,8 @@ are the right neurons here, `ve_gate` one row per head). Design (user: research 
 arms at ×2.797, seeds 0 and 1, each seed's arms one concurrent pair, parse evaluation only (HumanEval+/MBPP+ near
 0.07 at d16 inform nothing); adopt the stack iff its paired Δ over the last 50% is negative at both seeds and the
 seed-mean code bpb at 8K and 32K is not worse, otherwise plain Muon. The kernel loss checks ran at ×1 too (the
-harness's default; C3's reference l_cpb included), so the pending postact and C3 checks run at ×2.797 against one
-shared base curve.
+harness's default; C3's reference l_cpb included), so postact's check ran at ×2.797 against a shared base curve
+and C3's as a 10-step equivalence at ×2.797 (§5.12).
 Superseded (user): NorMuon alone, adopted on the literature (upstream karpathy/nanochat dev/LOG.md 2026-01-10:
 Polar Express in the noise, NorMuon a very small improvement, kept) and one d24 stability check; the 2-seed A/B was
 cancelled and Polar Express dropped. d24 (200 steps, ×2.797, seed 0, 8K, alone) vs master + postact: last-20 loss
@@ -441,7 +444,7 @@ step 0's diagnostics bitwise equal to master's; −38 lines), `646a986` train/op
 path, the rehead path, `NORM_WARPS` 4 → 2 derived from residency, every remaining launch constant measured or ISA).
 Per-file tables filed: RunAudit, EarlierAudit, CorpusAudit, VeCeKernel, OptAdopt (all of train/), DecoderOwner;
 GemmOwner's linear.py change with `6299e84` (its hand GEMM kernels did not land, so there is nothing to audit); the
-attention files (C3Lander) land with C3's commit. Integration check: a d8 run end to end through `run.py` at
+attention files (C3Lander, AttnOwner's tables) with C3's commit. Integration check: a d8 run end to end through `run.py` at
 `300eca3` at ×1, exit 0 in every phase, code bpb 2.6977 against 2.7011–2.7013 at the pre-kernel commits; the four
 numerics-changing kernel commits since (B1, the gate, C1, bf16 dQ) were each verified at d24 [inference: the
 −0.0035 not attributed among them]. Noted, unchanged: `stack_edu_python`'s published row groups

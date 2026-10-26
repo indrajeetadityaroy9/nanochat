@@ -1,69 +1,43 @@
 """
-Fused q/k prologue of model/modeling.py (model/kernels/qk_prologue.cu), one launch per direction covering q and k:
-per-head RMS norm with F.rms_norm's fp32 epsilon, fp32 per-dim norm weight (Qwen3, arXiv 2505.09388 §2), rotary by
--theta over the full head (karpathy/nanochat 92d63d4 gpt.py:57-65); fp32 math, one bf16 rounding per output.
+Fused q/k prologue of model/modeling.py's attention (model/kernels/qk_prologue.cu), one launch per direction covering
+q and k: per-head RMS norm with F.rms_norm's fp32 epsilon, fp32 per-dim norm weight (Qwen3, arXiv 2505.09388 §2),
+rotary by -theta over the full head (karpathy/nanochat 92d63d4 gpt.py:57-65); fp32 math, one bf16 rounding per
+output. Called inside model/ops/flash_attn.py's attention op.
+
+q, k are the (B, T, H, HEAD_DIM) bf16 q and k blocks of the fused (B, T, 3C) projection (heads contiguous, token
+stride 3C), dq, dk the same blocks of its gradient; norm weights (HEAD_DIM,) fp32; cos/sin (T_table >= T,
+HEAD_DIM / 2) fp32.
 """
 
 import ctypes
-from collections.abc import Callable
 
 import torch
 from torch import Tensor
-from torch.autograd.function import FunctionCtx
 
 from native import cuda_library, pointer, stream
 
 
-def launch(kernel: Callable[..., int], *tensors: Tensor) -> None:
-    """kernel(tensor pointers, rows and heads of tensors[0] = q, sequence length, current stream)."""
-    q = tensors[0]
-    kernel(*map(pointer, tensors), ctypes.c_longlong(q.numel() // q.size(-1)), q.size(2), q.size(1), stream())
-
-
-@torch.library.custom_op("nanochat::qk_norm_rope", mutates_args=(), device_types="cuda")
-def qk_norm_rope(q: Tensor, k: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor,
-                 sin: Tensor) -> tuple[Tensor, Tensor]:
-    """q, k contiguous (B, T, H, HEAD_DIM) bf16; norm weights (HEAD_DIM,) fp32; cos/sin (T_table >= T, HEAD_DIM/2)
-    fp32."""
+def qk_forward(q: Tensor, k: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor,
+               sin: Tensor) -> tuple[Tensor, Tensor]:
+    """(normed and rotated q, k), contiguous."""
+    B, T, H = q.shape[:3]
     q_out, k_out = q.new_empty(q.shape), k.new_empty(k.shape)
-    launch(cuda_library("qk_prologue").qkp_forward, q, k, q_norm_weight, k_norm_weight, q_out, k_out, cos, sin)
+    cuda_library("qk_prologue").qkp_forward(
+        pointer(q), pointer(k), pointer(q_norm_weight), pointer(k_norm_weight), pointer(q_out), pointer(k_out),
+        pointer(cos), pointer(sin), ctypes.c_longlong(B * T * H), H, T, stream())
     return q_out, k_out
 
 
-@qk_norm_rope.register_fake
-def qk_norm_rope_fake(q: Tensor, k: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor,
-                      sin: Tensor) -> tuple[Tensor, Tensor]:
-    return q.new_empty(q.shape), k.new_empty(k.shape)
-
-
-@torch.library.custom_op("nanochat::qk_norm_rope_backward", mutates_args=(), device_types="cuda")
-def qk_norm_rope_backward(q: Tensor, k: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, dq_out: Tensor,
-                          dk_out: Tensor, cos: Tensor, sin: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """(dq, dk, dq_norm_weight, dk_norm_weight); weight gradients summed in a fixed order (bitwise reproducible)."""
-    dq, dk = q.new_empty(q.shape), k.new_empty(k.shape)
+def qk_backward(q: Tensor, k: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, dq_out: Tensor, dk_out: Tensor,
+                cos: Tensor, sin: Tensor, dq: Tensor, dk: Tensor) -> tuple[Tensor, Tensor]:
+    """Writes q's and k's gradients into dq, dk from the outputs' gradients dq_out, dk_out (contiguous); returns the
+    norm weights' gradients, summed in a fixed order (bitwise reproducible)."""
+    B, T, H, D = q.shape
     dq_norm_weight, dk_norm_weight = torch.empty_like(q_norm_weight), torch.empty_like(k_norm_weight)
     lib = cuda_library("qk_prologue")
-    part = q_norm_weight.new_empty((2 * lib.qkp_backward_blocks(), q.size(-1)))  # per-block partial weight gradients
-    launch(lib.qkp_backward, q, k, q_norm_weight, k_norm_weight, dq_out, dk_out, dq, dk, dq_norm_weight,
-           dk_norm_weight, part, cos, sin)
-    return dq, dk, dq_norm_weight, dk_norm_weight
-
-
-@qk_norm_rope_backward.register_fake
-def qk_norm_rope_backward_fake(q: Tensor, k: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, dq_out: Tensor,
-                               dk_out: Tensor, cos: Tensor, sin: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    return (q.new_empty(q.shape), k.new_empty(k.shape), q_norm_weight.new_empty(q_norm_weight.shape),
-            k_norm_weight.new_empty(k_norm_weight.shape))
-
-
-def qk_norm_rope_save(ctx: FunctionCtx, inputs: tuple[Tensor, ...], output: tuple[Tensor, Tensor]) -> None:
-    ctx.save_for_backward(*inputs)
-
-
-def qk_norm_rope_grad(ctx: FunctionCtx, dq_out: Tensor,
-                      dk_out: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, None, None]:
-    q, k, q_norm_weight, k_norm_weight, cos, sin = ctx.saved_tensors
-    return *qk_norm_rope_backward(q, k, q_norm_weight, k_norm_weight, dq_out, dk_out, cos, sin), None, None
-
-
-qk_norm_rope.register_autograd(qk_norm_rope_grad, setup_context=qk_norm_rope_save)
+    part = q_norm_weight.new_empty((2 * lib.qkp_backward_blocks(), D))  # per-block partial weight gradients
+    lib.qkp_backward(
+        pointer(q), pointer(k), pointer(q_norm_weight), pointer(k_norm_weight), pointer(dq_out), pointer(dk_out),
+        pointer(dq), pointer(dk), pointer(dq_norm_weight), pointer(dk_norm_weight), pointer(part), pointer(cos),
+        pointer(sin), ctypes.c_longlong(B * T * H), H, T, stream())
+    return dq_norm_weight, dk_norm_weight

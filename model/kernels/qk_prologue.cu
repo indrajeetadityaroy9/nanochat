@@ -5,10 +5,13 @@
  * Backward, recomputing n from x: dm = R^T dy (dm1 = dy1 cos - dy2 sin, dm2 = dy1 sin + dy2 cos), dg = sum over rows of
  * dm * n, dn = dm * g, dx = rstd * (dn - n * mean(dn * n)).
  *
- * Layout: q, k, outputs, gradients contiguous (B, T, H, HEAD_DIM); position of row r = (r / H) % T. The first half of
- * the blocks takes q, the second k. Forward: a QK_LANES-thread group per position, its gains and cos/sin entries loaded
- * once for the position's H heads, two heads' loads in flight. Block size: the occupancy calculator's (a multiple of
- * WARP, so rows never straddle warps).
+ * Layout: q, k (B, T, H, HEAD_DIM) are the q and k blocks of model/ops/linear.py's fused (B, T, 3C) projection (heads
+ * contiguous, token stride 3C = 3 H HEAD_DIM), and the backward's dq, dk the same blocks of its gradient; the forward's
+ * outputs and the backward's incoming gradients contiguous. Position of token t = t % T. The first half of the blocks
+ * takes q, the second k. Forward: a QK_LANES-thread group per position, its gains and cos/sin entries loaded once for
+ * the position's H heads, two heads' loads in flight (k_forward 250.3 -> 183.6 us per call at d24 8K against one head
+ * per group, 62b50c2); the odd head of an odd H alone. Block size: the occupancy calculator's (a multiple of WARP, so
+ * rows never straddle warps).
  *
  * Deterministic gain gradient without atomics: persistent blocks (half the device's resident blocks per tensor) stride
  * over rows accumulating dm * n in registers, reduce their warps in order into a per-block partial, and k_gain_sum adds
@@ -24,9 +27,9 @@ __global__ void k_forward(const bf16 *__restrict__ q, const bf16 *__restrict__ k
     const int64_t g = (int64_t)(isq ? blockIdx.x : blockIdx.x - nb) * blockDim.x + threadIdx.x, p = g / QK_LANES;
     if (p * H >= rows) return;
     const int o = (int)(g % QK_LANES) * VEC;
-    const int64_t at = p * H * HEAD_DIM + o, tab = (p % T) * HALF + o;
-    const bf16 *x = (isq ? q : k) + at;
-    bf16 *y = (isq ? qo : ko) + at;
+    const int64_t tab = (p % T) * HALF + o;
+    const bf16 *x = (isq ? q : k) + p * 3 * H * HEAD_DIM + o;
+    bf16 *y = (isq ? qo : ko) + p * H * HEAD_DIM + o;
     const float *gain = (isq ? gq : gk) + o;
     float g1[VEC], g2[VEC], cs[VEC], sn[VEC];
     load(gain, g1); load(gain + HALF, g2);
@@ -60,9 +63,10 @@ __global__ void k_backward(const bf16 *q, const bf16 *k, const float *gq, const 
     load((isq ? gq : gk) + o, g1); load((isq ? gq : gk) + o + HALF, g2);
     float a1[VEC] = {}, a2[VEC] = {};  /* this lane's sum of dm * n over its rows */
     for (int64_t i = first * per_pass + threadIdx.x / QK_LANES; i < rows; i += (int64_t)nb * per_pass) {
-        const int64_t at = i * HEAD_DIM + o, tab = (i / H % T) * HALF + o;
+        const int64_t t = i / H, hd = t * 3 * H * HEAD_DIM + (i % H) * HEAD_DIM + o, at = i * HEAD_DIM + o,
+                      tab = (t % T) * HALF + o;
         float x1[VEC], x2[VEC], d1[VEC], d2[VEC], c[VEC], s[VEC];
-        load(x_in + at, x1); load(x_in + at + HALF, x2);
+        load(x_in + hd, x1); load(x_in + hd + HALF, x2);
         load(dy_in + at, d1); load(dy_in + at + HALF, d2);
         load(cos + tab, c); load(sin + tab, s);
         const float m = qk_rstd(x1, x2);
@@ -80,7 +84,7 @@ __global__ void k_backward(const bf16 *q, const bf16 *k, const float *gq, const 
             d1[j] = m * (d1[j] - x1[j] * b);
             d2[j] = m * (d2[j] - x2[j] * b);
         }
-        store(dx_out + at, d1); store(dx_out + at + HALF, d2);
+        store(dx_out + hd, d1); store(dx_out + hd + HALF, d2);
     }
     /* lanes QK_LANES apart hold the same dims; lanes 0..QK_LANES-1 keep the warp's sums */
     for (int w = QK_LANES; w < WARP; w <<= 1)

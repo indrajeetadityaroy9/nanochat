@@ -30,10 +30,8 @@ from torch import Tensor, nn
 from corpus.mixture import Stage
 from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.ops.cross_entropy import lm_loss, lm_losses
-from model.ops.flash_attn import flash_attn
-from model.ops.linear import linear, relu2_mlp, residual_rms
-from model.ops.qk_prologue import qk_norm_rope
-from model.ops.ve_gate import ve_mix
+from model.ops.flash_attn import attention
+from model.ops.linear import qkv_proj, relu2_mlp, residual_rms
 
 # Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 Table 9)
 ASPECT_RATIO = 960 // 32
@@ -88,14 +86,21 @@ class Attention(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int) -> None:
         super().__init__()
         C = config.hidden_size
-        self.q_proj = GemmLinear(C, C)
-        self.k_proj = GemmLinear(C, C)
-        self.v_proj = GemmLinear(C, C)
+        self.q_proj = nn.Linear(C, C, bias=False)
+        self.k_proj = nn.Linear(C, C, bias=False)
+        self.v_proj = nn.Linear(C, C, bias=False)
+        # q_proj, k_proj, v_proj as one GEMM (model/ops/linear.py qkv_proj) by their stacked bf16 copies, refreshed as
+        # the GemmLinears' (CausalLM.refresh_gemm_weights); dW accumulates into each weight's .grad
+        self.register_buffer("qkv_bf16", self.q_proj.weight.new_empty((3 * C, C), dtype=torch.bfloat16),
+                             persistent=False)
         self.o_proj = GemmLinear(C, C)
         self.q_norm_weight = nn.Parameter(torch.empty(HEAD_DIM))
         self.k_norm_weight = nn.Parameter(torch.empty(HEAD_DIM))
         self.ve_gate = (nn.Linear(C, C // HEAD_DIM, bias=False)
                         if has_ve(layer_idx, num_hidden_layers=config.num_hidden_layers) else None)
+
+    def qkv_weights(self) -> tuple[nn.Parameter, nn.Parameter, nn.Parameter]:
+        return self.q_proj.weight, self.k_proj.weight, self.v_proj.weight
 
     def forward(self, hidden_states: Tensor, residual: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
                 cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor,
@@ -103,15 +108,14 @@ class Attention(nn.Module):
         """hidden_states: normed stream; residual: the stream; input_ids: the token ids; ve_table: this layer's value
         embeddings or None -> (residual + attention output, its rows' rstd; model/ops/linear.py residual_rms)."""
         B, T, C = hidden_states.size()
-        q, k, v = (linear(hidden_states, m.weight_bf16, m.weight.grad).view(B, T, -1, HEAD_DIM)
-                   for m in (self.q_proj, self.k_proj, self.v_proj))
+        qkv = qkv_proj(hidden_states, self.qkv_bf16, *(w.grad for w in self.qkv_weights()))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once
-        # (model/ops/ve_gate.py)
-        if ve_table is not None:
-            v = ve_mix(hidden_states, v, input_ids, ve_table, self.ve_gate.weight)[0]
-        q, k = qk_norm_rope(q, k, self.q_norm_weight, self.k_norm_weight, *cos_sin)
-        return residual_rms(flash_attn(q, k, v, window_size, cu_seqlens, segments)[0].view(B, T, C),
-                            self.o_proj.weight_bf16, self.o_proj.weight.grad, residual)
+        # (model/ops/ve_gate.py, inside the attention op; its backward visits the tokens in sorted order)
+        ve = ((hidden_states, input_ids, ve_table, self.ve_gate.weight, *torch.sort(input_ids.flatten()))
+              if ve_table is not None else (None,) * 6)
+        out = attention(qkv, self.q_norm_weight, self.k_norm_weight, *cos_sin, window_size, cu_seqlens, segments,
+                        *ve)[0]
+        return residual_rms(out.view(B, T, C), self.o_proj.weight_bf16, self.o_proj.weight.grad, residual)
 
 
 class MLP(nn.Module):
@@ -184,14 +188,19 @@ class CausalLM(nn.Module):
 
     @torch.no_grad()
     def refresh_gemm_weights(self) -> None:
-        """The GemmLinears' bf16 copies from their fp32 weights: after init, load and every optimizer step; in place
-        (a compiled graph holds the copies), reallocated only where a load assigned weights on another device
-        (train/checkpoint.py load_model's meta model)."""
+        """The bf16 copies the GEMM ops multiply by (GemmLinear.weight_bf16, Attention.qkv_bf16) from their fp32
+        weights: after init, load and every optimizer step; in place (a compiled graph holds the copies), reallocated
+        only where a load assigned weights on another device (train/checkpoint.py load_model's meta model)."""
         linears = [m for m in self.modules() if isinstance(m, GemmLinear)]
+        attentions = [m for m in self.modules() if isinstance(m, Attention)]
         for m in linears:
             if m.weight_bf16.device != m.weight.device:
                 m.weight_bf16 = torch.empty_like(m.weight, dtype=torch.bfloat16)
-        torch._foreach_copy_([m.weight_bf16 for m in linears], [m.weight for m in linears])
+        for m in attentions:
+            if m.qkv_bf16.device != m.q_proj.weight.device:
+                m.qkv_bf16 = torch.empty_like(m.qkv_bf16, device=m.q_proj.weight.device)
+        torch._foreach_copy_([m.weight_bf16 for m in linears] + [b for m in attentions for b in m.qkv_bf16.chunk(3)],
+                             [m.weight for m in linears] + [w for m in attentions for w in m.qkv_weights()])
 
     def init_buffers(self) -> None:
         """Non-checkpointed buffers: the fp32 rotary tables cos/sin (max_position_embeddings, HEAD_DIM/2) of
@@ -243,9 +252,10 @@ def num_non_embedding_params(model: CausalLM) -> int:
 
 
 def accumulated_weights(model: CausalLM) -> list[nn.Parameter]:
-    """The weights whose fp32 .grad the ops of model/ops/linear.py accumulate into in place (the GemmLinears: q/k/v/o,
-    up, down of every layer): a training backward needs their .grad allocated."""
-    return [m.weight for m in model.modules() if isinstance(m, GemmLinear)]
+    """The weights whose fp32 .grad the ops of model/ops/linear.py accumulate into in place (q/k/v and the
+    GemmLinears o, up, down of every layer): a training backward needs their .grad allocated."""
+    return [w for m in model.modules()
+            for w in (m.qkv_weights() if isinstance(m, Attention) else (m.weight,) if isinstance(m, GemmLinear) else ())]
 
 
 def num_matmul_params(model: CausalLM) -> int:
