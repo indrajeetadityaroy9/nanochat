@@ -398,6 +398,15 @@ ms: rejected. Verdict: QuACK and cuBLAS `addmm` (`docs/architecture.md` §3). [u
 
 **Inductor's PDL setting.** −0.17% / −0.05% at 8K / 32K [unverified: no record]: rejected.
 
+**Linear cross entropy's strip GEMMs at d24.** The dX (8,192 × 768, K = 2^15) and dW (2^15 × 768, K = 8,192) GEMMs
+of `model/ops/cross_entropy.py` swept over QuACK 0.6.5's SM90 space (`quack/gemm_config.py` `_get_sm90_configs`: tile_N
+128–256, cooperative or pingpong, clusters (2, 1) and (1, 2); tile_M 128 and 256) on one real capped d24 chunk;
+every output bitwise the production config's. dX: production (128, 192, cluster (2, 1)) within noise of the best,
+(256, 192, (2, 1)) −2.3% isolated (0.18 ms per micro-batch); dW: (128, 256, (2, 1)) against production (128, 192,
+(1, 2)) −5.5% isolated on random operands, +0.8% on the real chunk, and −0.54 ms (−2.1%) for the whole 98,304-row op
+in 5 alternated rounds; tile_M 256 dW +15–45%. At most ~0.5 ms of a ~269 ms d24 micro-batch (≈ 0.2% [estimate]),
+below the §1 landing rule: the production config, QuACK's rule (`strip_tile_n`, `docs/architecture.md` §3), stays.
+
 **Smaller items not pursued.** A two-rows-per-warp VE-gate forward (199 → 168 µs per call, identical output, ~0.13%
 [estimate]); a fused clip-grad-norm and optimizer pass (~13 ms/step [estimate]); FA4's backward pre/post-processing,
 q/k norm + RoPE in the projection GEMM, RMSNorm in the next GEMM and dW accumulation in the GEMM, each estimated
