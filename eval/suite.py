@@ -1,13 +1,6 @@
 """
-A checkpoint's evaluation and a run's tracked metrics but the per-step ones.
-
-evaluate: RUNS/<run_name>/eval-<step>.json (evaluation_path), one JSON object: run_name, step, the likelihood metrics
-(eval/bpb.py likelihood: "8k", "32k", "solution"), the parse of healed greedy completions (eval/code_eval.py
-parse_generation: "parse") and, with generate "benchmarks", the generation benchmarks (eval/code_eval.py: "codegen",
-"fim"; null with generate "parse"). NaN and infinities raise.
-
-record: a run's non-train log records (metrics.py: run, stage, end, failure) and its checkpoints' evaluations
-verbatim, in step order; one per run in RESULTS/<experiment>.jsonl (ablations/records.py).
+A checkpoint's evaluation (RUNS/<run_name>/eval-<step>.json: likelihoods, the parse measure and the generation
+benchmarks) and a run's record (its non-train log records and evaluations).
 """
 import json
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -42,12 +35,8 @@ def resolved(records: dict) -> dict:
 
 def evaluate(model: CausalLM, tokenizer: Tokenizer, *, run_name: str, step: int,
              generate: Literal["benchmarks", "parse"]) -> None:
-    """evaluation_path(run_name, step) of `model` (on the GPU); EvalPlus's sanitize workers (code_eval.sanitizers)
-    live for the call. GPU order: the unconstrained decodes (parse_generation; with generate "benchmarks",
-    generation and fim_generation), the likelihood metrics, then the filtered searches (filtered_generation,
-    fim_filtered_generation). Each benchmark's scoring (CPU: its official evaluator, a worker per CPU) is queued on one
-    scorer thread as soon as its completions exist. Results do not depend on the order (decoder.NativeDecoder) except
-    timed checks, which heavy CPU load can fail (EvalPlus's time limits, verify.py's and the evaluators' timeouts)."""
+    """Write evaluation_path(run_name, step) of `model` (on the GPU); with generate "parse", codegen and fim are null.
+    Results do not depend on the GPU order except timed checks, which heavy CPU load can fail."""
     benchmarks = tasks()
     codegen = fim = None
     with sanitizers() as pool, ThreadPoolExecutor(1) as scorers:
@@ -68,8 +57,7 @@ def evaluate(model: CausalLM, tokenizer: Tokenizer, *, run_name: str, step: int,
 
 
 def record(run_name: str, log: list[dict]) -> dict:
-    """A run's non-train log records (metrics.records) and the evaluations (evaluate) of its checkpoints on disk, in
-    step order (a diverged run has none)."""
+    """A run's non-train log records and its checkpoints' evaluations in step order (a diverged run has none)."""
     paths = (RUNS / run_name).glob("eval-*.json")
     return {"run_name": run_name, "records": [r for r in log if r["kind"] != "train"],
             "evaluations": sorted((json.loads(p.read_text(encoding="utf-8")) for p in paths), key=lambda r: r["step"])}

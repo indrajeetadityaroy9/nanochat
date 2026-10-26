@@ -11,7 +11,7 @@ tokenized and packed data under the corpus's tokenizer.
 
 | File | § |
 |---|---|
-| `corpus/__init__.py` (run order, module map, the `CORPUS` layout; `CORPUS` = `paths.CORPUS` = `artifacts/corpus`) | 10 |
+| `corpus/__init__.py` (run order; `CORPUS` = `paths.CORPUS` = `artifacts/corpus`, its layout in §11) | 10, 11 |
 | `corpus/sources.py` (`SOURCES`, paths, `texts`, `repository_samples`) | 1, 3, 6 |
 | `corpus/prepare.py` (fetch, extent, standardize) | 1, 2 |
 | `corpus/schema.py` (categories, `SPLIT`, `SAMPLE_FILE`) | 2, 3 |
@@ -47,9 +47,12 @@ tokenized and packed data under the corpus's tokenizer.
 
 The four UltraData-Math formats are `qa`, `conversation`, `multi_style` and `textbook_exercise` (of L3's five; the
 persona-integrated one is not read); Codeforces-CoTs reads `solutions_py_decontaminated` (Python) and
-`solutions_short_and_long_decontaminated` (C++). Model-generated sources: UltraData-Code L3 (DeepSeek-v4-flash, arXiv
-2610.23960 §2.4), Nemotron rewriting and transpilation (Qwen3-32B, arXiv 2512.20848 §2.2.2), UltraData-Math L3 and
-Codeforces-CoTs (DeepSeek-R1 traces, per the dataset card [unverified]).
+`solutions_short_and_long_decontaminated` (C++). UltraData-Stack-v3-L2 holds The Stack v3's files that UltraData's L2
+classifiers select; UltraData-Code L3 holds exercises written from L2's algorithmic files; Nemotron rewriting is every
+Python file of NVIDIA's GitHub corpus rewritten by Qwen3-32B, and transpilation Python files transpiled into C++.
+Model-generated sources: UltraData-Code L3 (DeepSeek-v4-flash, arXiv 2610.23960 §2.4), Nemotron rewriting and
+transpilation (Qwen3-32B, arXiv 2512.20848 §2.2.2), UltraData-Math L3 and Codeforces-CoTs (DeepSeek-R1 traces, per the
+dataset card [unverified]).
 
 **Fetch** (`prepare.fetch`): only the columns the source's standardizer reads (`prepare.columns`), row group by row
 group, written to `<file>.partial` and renamed when whole; an existing raw file is kept. Stack-Edu's Hub files are
@@ -219,10 +222,10 @@ and packed (§6, §8).
   SA-BPE's F·log R, arXiv 2604.14053 §4.1, ln natural as in its released `scoring.py` (`math.log`);
   F the pair's frequency, R the number of authorship units holding it in the current segmentation, where
   the paper counts repositories; a pair of one unit scores 0); ties to the higher F, then the smaller pair; a merge
-  whose bytes are already a token is skipped. Every merge is an argmax with fixed tie-breaks, so the result does not
-  depend on the worker count. Of SA-BPE's Table 3 scores, F·log R has the highest compression (3.643) and far fewer
-  verified under-trained tokens than F (72 against 640); Table 4's F·log R·L is not used, as for natural language "the
-  language aspect must be avoided" (§6).
+  whose bytes are already a token is skipped, as a vocabulary maps bytes to one id. Every merge is an argmax with
+  fixed tie-breaks, so the result does not depend on the worker count. Of SA-BPE's Table 3 scores, F·log R has the
+  highest compression (3.643) and far fewer verified under-trained tokens than F (72 against 640); Table 4's F·log R·L
+  is not used, as for natural language "the language aspect must be avoided" (§6).
 - **`SPLIT_PATTERN`**: cl100k's with digit runs of one or two (karpathy/nanochat's) and no line break after a
   punctuation run, so no token joins `"):"` to its line break:
   `'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]|\s+(?!\S)|\s+`.
@@ -286,9 +289,9 @@ ordinary text), per corpus and split:
 **Documents.** A curated row, except in a repository source, where a document is one sample (§3): its files
 concatenated in the sample's order. Each repository file is preceded by a line comment with its path (`# path`,
 `// path`; DeepSeek-Coder: "a comment indicating the file's path is added at the beginning of each file", arXiv
-2401.14196 §2.2) and ends with a line end, added when missing (`sources.texts`); a line break in a path is written
-`\r` or `\n`, and a C++ file ending in a backslash gets an empty line, so phase 2 splices no comment onto it (C++23
-[lex.phases]).
+2401.14196 §2.2) and ends with a line end, added when missing (`sources.texts`; Python Language Reference §2.1.2, C++23
+[lex.phases] phase 2); a line break in a path is written `\r` or `\n`, and a C++ file ending in a backslash gets an
+empty line, so phase 2 splices no comment onto it (C++23 [lex.phases]).
 
 **The corpus crate** (`corpus/crate/`, pyo3 module `nanochat_crate`): `train` (§5), `topological_sort` (below) and
 `pack` (§8), built by cargo and imported through `native.corpus_crate` (`native.crate_module`).
@@ -317,8 +320,9 @@ master).
 task order (`pool.map` for row groups, `parallel.ordered` for repository tasks), so the output does not depend on the
 worker count; repository tasks in flight are
 bounded by `MEMORY` / (`PEAK` = 8.18 × the largest partition's text), each encoding on a thread per core;
-`PEAK` is the larger measured peak per text byte (`ru_maxrss` of a spawned worker, corpus tokenizer, `c1a7d7b`):
-6.52 for Python (partition 41: 3.02 GiB of text, 19.7 GiB at peak), 8.18 for C++ (partition 71: 2.40 GiB, 19.6 GiB).
+`PEAK` is the larger measured peak per text byte (`ru_maxrss` of a spawned worker, corpus tokenizer, `c1a7d7b`, on each
+language's largest train partition): 6.52 for Python (partition 41: 3.02 GiB of text, 19.7 GiB at peak), 8.18 for C++
+(partition 71: 2.40 GiB, 19.6 GiB).
 `topological_sort` parses a partition's files in parallel (rayon). Measured on the GH200 at commits `b9769a8`,
 `9e40df4`, `4ce8004`, `a20d12a`, `737f2e1` (before → after): tokenizing the C++ val partition 386.7 → 16.3 s, the
 Python one 712 → 61 s; pack 189 → 93 CPU-s per shard. The crate's release profile (`lto`, one codegen unit,
@@ -478,8 +482,9 @@ start position consumed.
   piece its document continues, the BOS is an input only and an ignored label (`IGNORE_INDEX` = −1). Padding is BOS
   as input, `IGNORE_INDEX` as label.
 - `cu_seqlens`: one attention segment per piece and per row's padding (FA4's varlen layout), a fixed count per loader
-  (micro-batch rows × (the most pieces in a row + 1)), the unused entries empty; `segments` is the count used and
-  `lengths` the segments' lengths (attention work for `metrics.executed_model_flops`, `docs/evaluation.md` §5).
+  (micro-batch rows × (the most pieces in a row + 1)) so a compiled model sees one shape, the unused entries empty;
+  `segments` is the count used and `lengths` the segments' lengths (attention work for `metrics.executed_model_flops`,
+  `docs/evaluation.md` §5).
 - Iteration stops when a corpus's rows run out, without the partial micro-batch.
 
 ## 10. Building the corpus
@@ -512,6 +517,168 @@ From a pull of the dataset (`python -m corpus.publish pull`, run by `scripts/set
 7. **Pack**: `python -m corpus.pack` (§7–§8); it stops naming any source that holds fewer rows than its draw.
 8. **Smoke** (a manual check; no module runs it): the first micro-batches of both stages (`loader.PretrainingBatches`
    at the stages' weights), decoded; each step's group composition and FIM share.
+
+## 11. Implementation reference
+
+Detail of the code not stated in §1–§10, by module and symbol.
+
+**`corpus/__init__.py`, `corpus/sources.py`, `corpus/schema.py`.** Files under `CORPUS`:
+
+| Path | Contents |
+|---|---|
+| `raw/<source>/<Hub path>` | fetched Hub columns (`prepare.fetch`) |
+| `standardized/<source>/<k>.parquet` | fetched file k in its category's schema |
+| `checked/<source>/<k>.parquet` | a Python source's standardized file after the check |
+| `curated/<source>/<split>/<k>.parquet` | curated shard k (the published dataset) |
+| `tokenizer/tokenizer.{tiktoken,pattern}` | the corpus's tokenizer |
+| `tokenizer-ablation/<arm>/`, `tokenizer-ablation/tokenized/` | the ablation's arms and their data |
+| `tokenized/<corpus>-<data key>/<split>.*` | tokenized split (`.bin`, `.idx`, `.json`), packs `-T<seq_len>.*` |
+
+- `Source`: `files` maps each language (a Linguist name for code) to the glob of its Hub files (`codeforces_cots` maps
+  two; `Source.language` requires one); `text` is the fetched column holding the text. `Category.name` keeps
+  categories with equal schemas, groups and flags distinct (EXERCISE and NOTEBOOK); `group` is a DuckDB expression;
+  `code`: the content is one whole program, which must parse when it is Python. `SAMPLE_FILE` numbers
+  import-connected samples per shard (`sample`).
+- `texts`: a path's `\r`/`\n` are escaped so the comment stays one line. `repository_samples` sorts with `content`
+  as `large_string` (64-bit offsets hold a partition beyond 2 GiB) and returns the table as one chunk.
+- `text_bytes` counts page headers, dictionary and level data where present (an overestimate of the text [inference]).
+- `COMPRESSION` = zstd for every file the corpus writes.
+
+**`corpus/prepare.py`.** `extent`'s SHA-1 path order is uniform and its prefixes nest as the extent grows.
+`swh_store` is one client per process (connections reused); the descriptor limit is raised to the hard limit because a
+row group's blob requests are all in flight at once (`blob_texts`). `fetch` reads only `columns(spec)` (Stack-Edu's
+metadata whole), row group by row group. `lines`: a file may begin with several U+FEFF (re-encoded once per mark);
+both languages drop one and reject a second, so all are dropped. Standardizers: `stack_edu`, `repository_file`,
+`conversation` (the R1 prompt ends with a line end), `function`, `text_only` (exercises, synthetic files, notebooks,
+web text). `prepare` removes the source's standardized and checked files before rebuilding.
+
+**`corpus/curate.py`.**
+- `parses` treats `ValueError` (a null byte), `MemoryError` and `RecursionError` as failures; `two_to_three` returns
+  None on any fissix exception (its grammar's parse and tokenize errors and more).
+- `repaired`: steps 1–2 enter only where they change the text, 2to3 always; a file 2to3 alone repairs keeps its tabs
+  and placeholders.
+- `check`: the remaining files' row groups are one stream (no file's slowest group idles the pool), as many in flight
+  as `MEMORY` holds of the largest (a checked group is about its standardized size); a result waits until every
+  earlier one is written; output via `.partial`.
+- `duplicates`: DuckDB `row_number() OVER (PARTITION BY id ORDER BY source, file, row)`; drops `n > 1` and the id of
+  the empty text (`EMPTY`). `undropped`: anti-join on (file index, row number).
+- `shuffle`: repository rows as Hive partitions `shuffle/<source>/part=<residue>/` (DuckDB `COPY … PARTITION_BY`
+  creates the partition directories, not their parent), removed after `curate_partition`. A partition worker holds
+  its partition twice at peak (table and sorted copy), so workers = min(cores, `MEMORY` / (2 × largest)).
+- `shard_documents`: `ntile(SPLIT) OVER (ORDER BY id)` over train rows. `database()` turns off
+  `preserve_insertion_order` (DuckDB documentation, Guides, Troubleshooting, "Out of Memory Errors", the guide of
+  `parallel.MEMORY`). `RECURSION` and `SAMPLE_ROWS` are the settings the published dataset was built with.
+
+**`corpus/publish.py`.** `CONTENTS` and `COLUMNS` are the card's account of each folder and column.
+
+**`corpus/tokenizer.py`.** `ABLATION` = `CORPUS/tokenizer-ablation`. BOS starts every piece of a packed row; as a target
+it ends a document or a FIM middle. `token_bytes` holds a special token's text; `token_lengths` its document length 0.
+`get_tokenizer` reads line i of `tokenizer.tiktoken` as token i (base64, rank i).
+
+**`corpus/train_tokenizer.py`.** `SAMPLE_BYTES` comes from the reference tokenizer's curated splits' footers (that
+data is not on the Hub). `byte_shares` counts tokens at `BYTES_PER_TOKEN`. A unit id is the lowercased repository
+(one unit across the sources holding it) or the document's `id` (a hex SHA-1, never a GitHub owner/name). `sample`
+reads row groups in parallel and keeps the sample in order. `fidelity`: tiktoken encodes a chunk by merge rank (the
+rank of the joined bytes), which need not equal the training segmentation, so the two are compared; Python `regex`
+chunks equal fancy-regex's; the reference segmentation is Hugging Face tokenizers' BPE model over the merges with each
+byte spelled as its Latin-1 character (pairs merged by rank, every occurrence from the left as `train.rs`
+`merge_pair`, never a pair whose bytes another made); the first val row group is the unit the split is read in.
+
+**`corpus/crate/train.rs`** (rustbpe's design, karpathy/rustbpe). Documents are split into chunks by the pattern (one
+fancy-regex per worker, one chunk table per worker and hash shard, shards merged in parallel); each distinct chunk is a
+`Word` (byte ids, count, sorted distinct sources). Pair frequencies update incrementally; a lazy max-heap requeues a
+popped entry whose frequency changed; entries hold the words a pair may occur in. R is exact without a per-(pair,
+source) table: R of a pair is the size of the union of its words' sources, counted (a `fixedbitset` per parallel task
+of `min_len` words, where marking costs about as much as clearing) only when its entry reaches the top. Between
+counts the entry keeps an upper bound (initially the number of sources): an existing pair's F and R only decrease (a
+merge only creates pairs holding the new token), R changes only when F does, and a created pair occurs only in words
+of the merged pair, so its R is at most the merged pair's. An entry is taken only when F and R are exact, so every
+merge is the argmax of the exact score; a pair seen in one source scores 0 and merges only after every pair seen in
+several; ln instead of log changes no argmax. Ties: higher F, then the smaller pair (rustbpe's order). `"frequency"`
+never counts R.
+
+**`corpus/crate/repository.rs`.**
+- Queries: Python pattern 0 `import_statement`, 1 `import_from_statement` (`from __future__` is its own node kind,
+  §7.11.1); C++ pattern 0 a quoted header name (q-char-sequence), 1 an angled one; an include of a macro
+  (`[cpp.include]` 4) names no path.
+- `Index`: an exact path matches every file with that path (paths may repeat).
+- `python`: `import a.b.c` matches `a/b/c.py`, `a/b/c/__init__.py` (not the parent packages' `__init__.py`, which the
+  import also runs, §5.2.1); `from a.b import n` adds `a/b/n.py`, `a/b/n/__init__.py`; relative level l (dots,
+  `importlib.util.resolve_name`): base = the file's l-th ancestor (`Path::ancestors`; above the root no file), target
+  = base/m, exact paths `target.py` (with a module m), `target/__init__.py`, per name `target/n.py`,
+  `target/n/__init__.py`.
+- `cpp`: a quoted include is searched first in the including file's directory as GCC and Clang do; `cleaned` (Pike's
+  cleanname) rejects a leading `..`.
+- `topological_sort`: every import node of a tree is used, also of a tree with syntax errors (error recovery keeps the
+  nodes it parsed); a file's dependencies exclude itself, sorted and deduplicated.
+
+**`corpus/crate/pack.rs`.**
+- `Grammar`: containers are Python `module`, `block`; C++ `translation_unit`, `compound_statement`,
+  `declaration_list` (namespace, linkage specification), `field_declaration_list`, `preproc_if`, `preproc_ifdef`,
+  `preproc_else`, `preproc_elif`, `preproc_elifdef`, `case_statement`. Everything else is one item (a compound
+  statement with its clauses, a decorated or template declaration, a directive). Header fields `condition`, `name`,
+  `value`, `alternative` (a directive's condition or name, its `#else`/`#elif` branch, a case value; a Python match
+  block's first case clause) are not items: the first child of a container in each field (`child_by_field_id`).
+- `statement_gaps`: an item ends before its final line break when its span holds it (a directive), as a Python
+  statement does; a syntax error breaks only its own sequence; comment lines ending a block belong to it (tree-sitter
+  attaches them); walked with a stack (nesting depth unbounded). Gaps are disjoint (a container's gaps lie inside an
+  item of its parent). `statement_cuts`: the cut follows the first line end in the gap, after the item before it (in
+  the root's leading range, the first line), so the gap's other comments and blank lines stay with the item after it.
+- `fim_draw`: the key's first 16 bytes are (document, piece) as little-endian u64; the first draw decides FIM.
+- `ast_middle`: named nodes are the syntax tree (keywords, punctuation anonymous). Single-Node draws a node below the
+  root with probability proportional to its bytes (named nodes of a tree without errors span at least one byte).
+  Aligned-Span takes a `random_span`, its lowest named node, and the run of that node's named children of largest
+  byte IoU with the span (the node itself if no child meets it). For a fixed last child IoU is largest at the last
+  start ≤ s or the first start ≥ s (moving the start further out grows the union only, further in shrinks the
+  intersection only), likewise for the end, so four candidates suffice.
+- `fim_example`: line-start extension applies only when the text between the line start and the node is spaces or
+  tabs; sections are encoded with tiktoken-rs's `CoreBPE` (OpenAI tiktoken's core, fancy-regex) one encoder per
+  worker (`lib.rs` `PerWorker`: a Regex's clones share one scratch pool that workers contend for).
+- `pieces`: the statement cuts are computed once per document on first need; a cut leaves at least one token to the
+  rest; a left-to-right piece ends its document when at most row_len − 2 tokens remain, else is cut within
+  row_len − 1; a FIM window starts at row_len − 5 and shrinks by the built example's excess.
+- `best_fit_decreasing`: a stable sort (equal lengths keep document order); rows of one kind with equal room wait
+  LIFO; at equal free slots a targeted-only row is taken before a row with a cut piece.
+- `pack_shard`: a piece takes the longer of its range and its example in its row; documents are cut one task each
+  (`with_max_len(1)`), longest first, so no long document starts last or queues behind others on one worker.
+- `pack`: the mmaps are safe as nothing writes a tokenized split's `.bin` or `.idx` while `pack` runs (it writes only
+  the `-T<seq_len>` files); a token starts a character unless its first byte is a UTF-8 continuation byte `10xxxxxx`
+  (RFC 3629 §3); `token_bytes` index = rank.
+
+**`corpus/crate/lib.rs`, `Cargo.toml`.** The pool's stack is the soft `RLIMIT_STACK` (the main thread's stack and
+glibc's default for threads), as `std::thread::Builder` ignores the limit. Dependencies: `bytemuck` (typed views of
+mapped and returned buffers), `fancy-regex` 0.19 (tiktoken 0.14's engine), `fixedbitset` (R), `libc` (`getrlimit`),
+`memmap2`, `path-clean`, `petgraph` (SCCs by `kosaraju_scc`, iterative; union-find), `rand`/`rand_chacha` (FIM draws),
+`rayon`, `rustc-hash`, `tiktoken-rs`, `tree-sitter` with the Python and C++ grammars.
+
+**`corpus/tokenize.py`.** `encode` runs longest first (LPT); tiktoken releases the GIL, so a repository task encodes on
+a thread per core. `repository_documents` ranks sources so the first source's file of a (repository, path) sorts
+first. `main` submits every split at once (the pool runs row groups in submission order, so no core waits on a small
+split), then runs the 32K stage in a pool of `repository_window()` workers, so idle workers hold no memory beyond the
+tasks in flight. `tokenize_repo_level_stage` runs val partition 0, then train partitions from the last, both languages
+each, and writes the chosen ones from the tokens already computed. Output directories are new per corpus and data key
+(no resume).
+
+**`corpus/pack.py`.** `packed_shards` packs a shard only as the window reaches it. `write` offsets each shard's FIM
+range into the split's FIM tokens and writes each row's first piece. `pack_stage` starts each corpus read in part with
+one shard; `fit` takes more while `weights` reports an overdraw, and raises if a whole corpus overdraws. Val splits
+are packed in threads beside the stages, so a val shard's longest document does not hold up the cores.
+
+**`corpus/loader.py`.** `orders`: per corpus, row ids in read order, −1 an empty (all-padding) row; `start` skips each
+corpus's rows `mixture_rows` assigns to the consumed run rows; `reading` = `"fim"` or `"left_to_right"`. `segments` is
+a host tensor because the attention reads only the first `segments + 1` entries of `cu_seqlens`
+(`model/ops/flash_attn.py`), FA4 spending time on every segment given; `lengths` is read without a device
+synchronization. Batches are copied from page-locked memory, asynchronously. `assemble` identifies a document end by
+the piece's end in `.idx` offsets.
+
+**`corpus/mixture.py`.** `Stage.shares` takes amounts in tokens (before packing: extents, the tokenizer sample) or
+packed rows (after); a Stage's `tokens` are the `MAX_STEPS` plan's, and any other run draws by its shares at its size.
+`PART` maps each source of a group read in part to its group (such a group has the same sources in both stages);
+`IN_PART` groups read the same fraction of each source (`prepare.extent`). `REPOSITORIES` is one corpus per language,
+as a pack call parses one grammar. `SPREAD` is checked per arm by the intrinsic step (`train_tokens_over_draw`).
+
+**`corpus/parallel.py`.** Workers are spawned (no inherited threads or state). `memory`: no `memory.max` (a cgroup v1
+host, the hierarchy's root) or `max` means no limit. The other half of memory is left to other processes.
 
 ## References
 

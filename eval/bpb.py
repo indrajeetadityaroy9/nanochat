@@ -1,13 +1,7 @@
 """
-Likelihood metrics of a checkpoint in bits per byte (metrics.bpb, metrics.mixture_bpb); targets of 0 bytes (special
-tokens, padding) are excluded from both sums (karpathy/nanochat evaluate_bpb, nanochat/loss_eval.py).
-- val_bits: each training corpus's held-out val split, the AR loss of arXiv 2207.14255 §2, per context bucket
-  (CONTEXTS; arXiv 2308.12950 §3.3, Fig. 4a), per corpus, per group (code, text, math) and overall, pooled by the
-  stage's mixture weights as The Pile pools its components.
-- solution_bits: each benchmark's reference solutions given their prompts, the task loss of arXiv 2412.04403 §2.2.
-Each returns bits and bytes sums per context bucket (corpora, buckets and benchmarks pool exactly) and per sampled
-row, the unit of the row-level standard errors (metrics.mixture_bpb_summary). Sums are fp64 on the device, reduced in
-a fixed order.
+Likelihood metrics of a checkpoint in bits per byte: held-out val splits (arXiv 2207.14255 §2) per context and
+byte-offset bucket, and reference solutions given their prompts (arXiv 2412.04403 §2.2). Targets of 0 bytes are
+excluded from both sums (karpathy/nanochat 92d63d4 nanochat/loss_eval.py evaluate_bpb).
 """
 import math
 import re
@@ -25,30 +19,22 @@ from corpus.tokenizer import Tokenizer
 from metrics import mixture_bpb, mixture_bpb_summary, offset_bpb
 from model.modeling import CausalLM
 
-# Val sample per corpus: nanochat's --eval-tokens 80 x 2^19 (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or
-# the whole split if smaller
+# nanochat's --eval-tokens (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the whole split if smaller
 VAL_TOKENS = 80 * 2**19
-# Context buckets of a target (its input's position in its piece + 1): positions both stages train (at most the
-# file-level context) and positions only the repo-level stage trains
+# Positions both stages train, and positions only the repo-level stage trains
 CONTEXTS = (FILE_LEVEL_STAGE.seq_len,)
-# Byte-offset buckets of a target (the bytes of its piece before it), doublings from 1 KiB to 128 KiB (beyond a 32K
-# row's span in bytes): arXiv 2308.12950 Fig. 4a's loss by context length, in bytes (arXiv 2503.13423 §3.1, App. B.1)
+# 1 KiB to 128 KiB: arXiv 2308.12950 Fig. 4a's loss by context length, in bytes (arXiv 2503.13423 §3.1, App. B.1)
 OFFSETS = tuple(2**k for k in range(10, 18))
-# Benchmarks with reference solutions (eval/code_eval.py tasks): EvalPlus's (arXiv 2305.01210) canonical solutions,
-# HumanEval-X's C++ ones (arXiv 2303.17568)
+# EvalPlus (arXiv 2305.01210) and HumanEval-X C++ (arXiv 2303.17568) reference solutions
 SOLUTION_BENCHMARKS = ("humaneval_plus", "mbpp_plus", "humaneval_x_cpp")
 
 
 @torch.no_grad()
 def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, steps: int,
          num_segments: int) -> dict[str, list[float]]:
-    """{"bits", "bytes"} per context bucket (bucket i: contexts in (CONTEXTS[i-1], CONTEXTS[i]]), {"offset_bits",
-    "offset_bytes"} per byte-offset bucket (bucket i: targets after [OFFSETS[i-1], OFFSETS[i]) bytes of their segment)
-    and {"row_bits", "row_bytes"} per row of the batches in order, of the targets of the first `steps` batches under
-    losses (CausalLM.losses). batches: corpus/loader.py PretrainingBatches' tuples. token_bytes: bytes per token, 0 for
-    special tokens. cu_seqlens is padded to num_segments by repeating its last offset (one compiled shape across
-    corpora; the attention reads only each batch's segments, corpus/loader.py PretrainingBatches); searchsorted(right)
-    maps a position to its segment."""
+    """Bits and bytes sums of the first `steps` batches per context bucket, byte-offset bucket and row.
+    token_bytes: bytes per token, 0 for special tokens; cu_seqlens is padded to num_segments by repeating its last
+    offset (one compiled shape)."""
     device = token_bytes.device
     edges = torch.tensor(CONTEXTS, dtype=torch.int32, device=device)
     offset_edges = torch.tensor(OFFSETS, dtype=torch.int64, device=device)
@@ -63,7 +49,7 @@ def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, step
         t = torch.arange(y.numel(), dtype=torch.int32, device=device)
         start = cu_seqlens[torch.searchsorted(cu_seqlens, t, right=True) - 1]
         context = t - start + 1
-        before = nbytes.cumsum(0, dtype=torch.int64) - nbytes  # bytes of the targets before each one
+        before = nbytes.cumsum(0, dtype=torch.int64) - nbytes
         offset = before - before[start]
         scored = torch.stack([nats.double(), nbytes.double()])[:, :, None]
         total += (scored * F.one_hot(torch.bucketize(context, edges), len(CONTEXTS) + 1).double()).sum(1)
@@ -78,22 +64,15 @@ def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, step
 
 
 def sample_rows(stage: Stage) -> int:
-    """The most rows of a corpus's val split val_bits scores at a stage's rows: VAL_TOKENS' worth in whole
-    micro-batches."""
+    """The most rows of a val split val_bits scores: VAL_TOKENS' worth in whole micro-batches."""
     return -(-VAL_TOKENS // (stage.micro_batch_size * stage.seq_len)) * stage.micro_batch_size
 
 
 def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> dict:
-    """Val evaluation of a stage's corpora in its rows: {"corpora": {corpus: {"bits", "bytes", "offset_bits",
-    "offset_bytes", "row_bits", "row_bytes" (sums: its sampled rows), "rows"}}, "bpb": {group: mixture_bpb, "all":
-    mixture_bpb of every corpus}, "errors": {group: metrics.mixture_bpb_summary}, "offset_bpb": {group:
-    metrics.offset_bpb}, "weights": {corpus: weight} mixture_bpb pools by}, each corpus's packed val split read left
-    to right over a systematic sample of its rows. The weights are the stage's shares of its train packed rows
-    (Stage.shares at their total), the groups code (every code group), text and math. cu_seqlens is padded to the
-    corpora's most segments: one compiled graph scores all."""
+    """Val evaluation of a stage's corpora over a systematic sample of their packed val rows.
+    Returns {"corpora", "bpb", "errors", "offset_bpb", "weights"}, pooled by the stage's train row shares."""
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
-    # n = min(num_rows, sample_rows) rows, row (j x num_rows) // n for j < n (systematic: the packer orders each
-    # shard's rows longest first), the last micro-batch filled with empty rows
+    # Systematic: the packer orders each shard's rows longest first, so a prefix is biased
     sampled, samples = {}, {}
     for name in stage.sources:
         num_rows = packed_rows(name, "val", tokenizer, stage.seq_len)
@@ -109,7 +88,7 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     for name, loader in loaders.items():
         scored = sums(losses, loader, token_bytes, steps=len(samples[name]) // stage.micro_batch_size,
                       num_segments=num_segments)
-        n = sampled[name]  # the sample's rows, without the empty rows filling its last micro-batch
+        n = sampled[name]
         corpora[name] = scored | {"row_bits": scored["row_bits"][:n], "row_bytes": scored["row_bytes"][:n], "rows": n}
     rows = stage_rows(tokenizer, stage)
     weights = stage.shares(rows, sum(rows.values()))
@@ -122,12 +101,8 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
 
 def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, device: torch.device
                   ) -> dict[str, dict[str, list[float]]]:
-    """{benchmark: sums of its reference solutions ("row_bits", "row_bytes": per solution, in benchmark order)} for
-    SOLUTION_BENCHMARKS, in FILE_LEVEL_STAGE's micro-batches (one compiled shape), one example and one attention
-    segment per row: BOS + the tokens of prompt + solution, scored from the token starting at the prompt's end
-    (decode_with_offsets; none starting there raises).
-    The solution's leading blank lines, through its last leading line break, count as prompt (EvalPlus's solutions
-    begin with them; a tokenizer would join them to the prompt's last line break)."""
+    """{benchmark: per-solution "row_bits", "row_bytes"}: BOS + prompt + solution, one per row, scored from the token
+    starting at the prompt's end (none raises); the solution's leading blank lines count as prompt."""
     micro_batch_size, seq_len = FILE_LEVEL_STAGE.micro_batch_size, FILE_LEVEL_STAGE.seq_len
     bos = tokenizer.bos_token_id
     token_bytes = torch.from_numpy(tokenizer.token_lengths).to(device=device, dtype=torch.int32)
@@ -155,9 +130,7 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
 
 
 def likelihood(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict, *, device: torch.device) -> dict:
-    """{"8k": val_bits of FILE_LEVEL_STAGE, "32k": val_bits of REPO_LEVEL_STAGE (null for a model not at its context),
-    "solution": solution_bits} by the compiled CausalLM.losses, one graph per row shape; benchmarks:
-    eval/code_eval.py tasks()."""
+    """{"8k", "32k" (null for a model not at the 32K context), "solution"} by the compiled CausalLM.losses."""
     losses = torch.compile(model.losses, dynamic=False, fullgraph=True)
     return {"8k": val_bits(losses, tokenizer, stage=FILE_LEVEL_STAGE, device=device),
             "32k": (val_bits(losses, tokenizer, stage=REPO_LEVEL_STAGE, device=device)

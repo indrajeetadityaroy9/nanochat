@@ -1,6 +1,5 @@
 # @package _global_
-# Pre-training of the base model: the run app's defaults (run.py RunConfig, conf/run.yaml), plus a checkpoint at each
-# tenth of the run and at the repository stage's start, each evaluated with every benchmark. No analysis.
+# Base-model pre-training: the defaults, checkpoints at each tenth and the repository stage's start, all benchmarks
 num_checkpoints: 10
 generate: benchmarks
 

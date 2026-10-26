@@ -1,20 +1,7 @@
 /*
- * q/k prologue of model/modeling.py, forward and backward, one pass over memory each: qk_row.cuh's row math in Qwen3's
- * norm -> gain -> RoPE order (arXiv 2505.09388 §2; transformers modeling_qwen3.py Qwen3Attention.forward).
- *
- * Backward, recomputing n from x: dm = R^T dy (dm1 = dy1 cos - dy2 sin, dm2 = dy1 sin + dy2 cos), dg = sum over rows of
- * dm * n, dn = dm * g, dx = rstd * (dn - n * mean(dn * n)).
- *
- * Layout: q, k (B, T, H, HEAD_DIM) are the q and k blocks of model/ops/linear.py's fused (B, T, 3C) projection (heads
- * contiguous, token stride 3C = 3 H HEAD_DIM), and the backward's dq, dk the same blocks of its gradient; the forward's
- * outputs and the backward's incoming gradients contiguous. Position of token t = t % T. The first half of the blocks
- * takes q, the second k. Forward: a QK_LANES-thread group per position, its gains and cos/sin entries loaded once for
- * the position's H heads, two heads' loads in flight; the odd head of an odd H alone. Block size: the occupancy
- * calculator's (a multiple of WARP, so rows never straddle warps).
- *
- * Deterministic gain gradient without atomics: persistent blocks (half the device's resident blocks per tensor) stride
- * over rows accumulating dm * n in registers, reduce their warps in order into a per-block partial, and k_gain_sum adds
- * the partials in block order.
+ * q/k prologue, norm -> gain -> RoPE (arXiv 2505.09388 §2), forward and backward in one pass each. Backward from
+ * recomputed n: dm1 = dy1 cos - dy2 sin, dm2 = dy1 sin + dy2 cos, dg = sum_rows dm n, dn = dm g,
+ * dx = rstd (dn - n mean(dn n)); dg without atomics: per-block partials summed in block order (k_gain_sum).
  */
 #include "qk_row.cuh"
 
@@ -133,8 +120,8 @@ extern "C" void qkp_forward(const void *q, const void *k, const void *gq, const 
         (const float *)cos, (const float *)sin, rows, nb, H, T);
 }
 
-/* Blocks per tensor: half the device's resident k_backward blocks, fixed per device, so the summation order is fixed;
- * blocks past the last row contribute exact zeros. */
+/* Half the device's resident blocks per tensor, fixed per device, so the summation order is fixed; blocks past the
+ * last row contribute exact zeros. */
 extern "C" int qkp_backward_blocks() {
     static const int half = resident_blocks(k_backward, backward_threads()) / 2;
     return half;

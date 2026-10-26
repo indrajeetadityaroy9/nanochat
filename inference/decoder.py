@@ -1,11 +1,6 @@
-"""
-Batched decoding of a CausalLM (model/modeling.py) by model/kernels/decode.cu: a request's prompt is prefilled (its
-positions run as rows of one batched pass, with any other new requests' prompts), then captured CUDA graphs advance
-every active slot a token per step (the greedy argmax or a seeded sample, optionally from its nucleus, within its
-constraint's allowed tokens) until BOS, the token budget or the caller's stopping criteria; a freed slot takes the next
-request (continuous batching). The decoder snapshots the model's weights, context, windows and rotary tables at
-construction (a stage change needs a new decoder). fim_prompt builds FIM prompts; heal_tokens builds the healing
-constraint.
+"""Batched decoding of a CausalLM by model/kernels/decode.cu: batched prefill, then CUDA-graph steps over slots.
+
+Continuous batching; weights, context, windows and rotary tables are snapshotted at construction.
 """
 
 import bisect
@@ -31,11 +26,9 @@ type Constraint = Reemit | SyntaxConstraint
 
 
 def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm"]) -> list[int]:
-    """The token ids of a fill-in-the-middle prompt for the text between prefix and suffix (strings, each encoded on its
-    own), in the layout the packer trains (corpus/pack.py, loader.py; arXiv 2207.14255 §3, App. D):
-        psm: BOS <fim_begin> prefix <fim_hole> suffix <fim_end>
-        spm: BOS <fim_begin> <fim_hole> suffix <fim_end> prefix
-    The model continues with the middle and ends it with BOS (NativeDecoder.generate stops there)."""
+    """The token ids of a fill-in-the-middle prompt (arXiv 2207.14255 §3, App. D), prefix and suffix encoded apart:
+    psm: BOS <fim_begin> prefix <fim_hole> suffix <fim_end>; spm: BOS <fim_begin> <fim_hole> suffix <fim_end> prefix.
+    The model continues with the middle and ends it with BOS."""
     special = tokenizer.special_tokens
     pre, suf, mid = special[FIM_BEGIN], special[FIM_HOLE], special[FIM_END]
     p, s = tokenizer.enc.encode_ordinary(prefix), tokenizer.enc.encode_ordinary(suffix)
@@ -48,12 +41,9 @@ def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm
 
 @dataclass(frozen=True, kw_only=True)
 class Request:
-    """A continuation of input_ids (BOS and at least one more token) by at most max_new_tokens (at least 1) tokens.
-    stopping_criteria: None or a predicate of the generated ids, true once the sequence is done. temperature 0: the
-    greedy argmax (ties to the lowest id); > 0: a sample of softmax(logits / temperature), logits capped by
-    ModelConfig.final_logit_softcapping if set, its draw at generated position i a function of (seed, i) only (decode.cu
-    gumbel); top_p < 1 samples the fewest most likely tokens holding top_p of the probability (nucleus sampling, arXiv
-    1904.09751 §3.1; decode.cu k_nucleus). constraint: the tokens allowed at each step."""
+    """A continuation of input_ids (BOS and at least one more token) by at most max_new_tokens (≥ 1) tokens.
+    temperature 0: argmax (ties to the lowest id); > 0: a softmax(logits / temperature) sample drawn from (seed,
+    generated position) alone; top_p < 1: nucleus sampling (arXiv 1904.09751 §3.1)."""
     input_ids: list[int]
     max_new_tokens: int
     stopping_criteria: Callable[[list[int]], bool] | None = None
@@ -65,16 +55,14 @@ class Request:
 
 @functools.cache
 def prefix_index(tokenizer) -> tuple[list[bytes], np.ndarray]:
-    """The mergeable tokens' bytes sorted, and their ids in that order: the tokens whose bytes start with a given string
-    are one contiguous run of it (Reemit)."""
+    """The mergeable tokens' bytes sorted, and their ids: the tokens starting with a string are one contiguous run."""
     ids = np.array(sorted(range(tokenizer.bos_token_id), key=tokenizer.token_bytes.__getitem__))
     return [tokenizer.token_bytes[i] for i in ids], ids
 
 
 class Reemit:
-    """heal_tokens's constraint: while bytes of the dropped token are owed, each token's bytes are a non-empty proper
-    prefix of them or start with them (BOS excluded); once they are re-emitted, no restriction. (A healed Python
-    prompt's SyntaxConstraint holds it: syntax_constraint.masks intersects its masks with this one's.)"""
+    """heal_tokens's constraint: while bytes are owed, each token's bytes are a non-empty proper prefix of them or
+    start with them (BOS excluded); once they are re-emitted, no restriction."""
 
     def __init__(self, tokenizer, owed: bytes):
         self.tokenizer, self.owed = tokenizer, owed
@@ -100,19 +88,15 @@ class Reemit:
 
 
 def heal_tokens(tokenizer, input_ids: list[int]) -> tuple[list[int], Reemit, bytes]:
-    """Token healing (Guidance, "The Art of Prompt Design: Prompt Boundaries and Token Healing", 2023), constrained
-    until the dropped token's bytes are re-emitted, possibly over several tokens (TokEval, arXiv 2608.18062 App. C.1):
-    the prompt without its last token, its Reemit constraint, and the dropped bytes. input_ids: BOS and at least two
-    more tokens."""
+    """Token healing (Guidance 2023) over several tokens (arXiv 2608.18062 App. C.1): the prompt without its last token,
+    its Reemit constraint, and the dropped bytes. input_ids: BOS and at least two more tokens."""
     dropped = tokenizer.token_bytes[input_ids[-1]]
     return input_ids[:-1], Reemit(tokenizer, dropped), dropped
 
 
 def step_masks(out: np.ndarray, constrained: list[tuple[int, Constraint, bool]]) -> tuple[list[int], list[int]]:
-    """Writes each (slot, constraint, eager)'s next mask into the slot's row of out (the decoder's mask rows): the
-    syntax constraints' by one syntax_constraint.masks call (in parallel, without the GIL, straight into the rows), a
-    BOS candidate decided there (syntax_constraint.ends) only if eager, else by the caller once BOS is chosen. The
-    slots whose rows restrict their choice, and those whose rows allow no token."""
+    """Writes each (slot, constraint, eager)'s next mask into its row of out; returns the masked slots and those whose
+    rows allow no token. A syntax BOS candidate is decided here (syntax_constraint.ends) only if eager."""
     syntax = [(b, c, eager) for b, c, eager in constrained if isinstance(c, SyntaxConstraint)]
     masked, empty = [], []
     if syntax:
@@ -139,8 +123,7 @@ def step_masks(out: np.ndarray, constrained: list[tuple[int, Constraint, bool]])
     return masked, empty
 
 
-# the prompt store's page in positions: a stored prompt takes whole pages anywhere in the store, as vLLM's
-# PagedAttention (arXiv 2309.06180) pages a KV cache; at most 63 positions of a prompt unused
+# prompt-store page in positions (pages as vLLM's PagedAttention, arXiv 2309.06180)
 PAGE = 64
 
 
@@ -153,8 +136,7 @@ class Stored:
 
 @dataclass
 class Slot:
-    """A request in a decoder slot: its index, the request, when it took the slot and when its first generated token
-    reached the host (time.perf_counter), the generated tokens."""
+    """A request in a slot: index, request, slot and first-token host times (time.perf_counter), generated tokens."""
     index: int
     request: Request
     start: float
@@ -163,22 +145,9 @@ class Slot:
 
 
 class NativeDecoder:
-    """Decoding by decode.cu of up to `batch` sequences at once (slots); a sequence's tokens do not depend on the batch
-    (decode.cu computes each slot and each prefill row alone, in a fixed order) and a sample's noise depends only on its
-    request's seed and the generated position. The KV cache is e4m3 with a scale per position and head (decode.cu), so
-    a sequence's tokens can differ from the bf16 forward's where two logits nearly tie.
-    batch: dec_create's slot count, at most decode.cu's MAX_BATCH, bounded by free device memory.
-    max_length: a slot's cache capacity in positions, at most the model's max_position_embeddings: the longest
-    len(input_ids) + max_new_tokens - 1 the caller will run. A slot's cache is 2 num_hidden_layers max_length
-    (hidden_size + 4 num_attention_heads) bytes; the tokens do not depend on max_length.
-    prompt_store: positions requested for decode.cu's prompt store (at most the device memory left after the slots, 2
-    num_hidden_layers (hidden_size + 4 num_attention_heads) bytes a position). A prompt's K and V at all but its last
-    position are kept once prefilled; a later request with the same prompt copies them instead of prefilling, its
-    tokens unchanged (K and V depend on the prompt alone). To free pages, prompts unused in this run and the previous
-    one are dropped, least recently used first.
-    memory_fraction: the most device memory the decoder takes (slots, prefill rows, graphs and prompt store), as a
-    fraction of the device's total, capped by its free memory (vLLM's gpu_memory_utilization, counting this decoder
-    alone); None: all free memory."""
+    """Decoding by decode.cu of up to `batch` slots; a request's tokens depend on neither the batch nor the store.
+    max_length: a slot's cache positions, at most max_position_embeddings; prompt_store: positions requested for the
+    prompt store; memory_fraction: the decoder's device-memory cap as a fraction of the total (None: all free)."""
     @torch.no_grad()
     def __init__(self, model: CausalLM, *, bos_token_id: int, max_length: int, prompt_store: int,
                  memory_fraction: float | None = None):
@@ -208,9 +177,7 @@ class NativeDecoder:
         if not 1 < max_length <= T:
             raise ValueError(f"max_length {max_length} outside (1, max_position_embeddings {T}]")
         self.max_length = max_length
-        # bf16 copies of the matrices and tables (the forward's rounding at use); the fp32 embedding table (the compiled
-        # forward's x0 is the fp32 row's norm, decode.cu k_norm); fp32 q/k norm weights, gate weights and rotary table,
-        # as modeling.py uses them
+        # bf16 matrices (the forward's rounding at use); fp32 embedding, q/k norms, gate, rotary as modeling.py has them
         weights = [model.embed_tokens.weight.clone(), model.cos, model.sin, model.lm_head.weight.bfloat16()]
         for i, layer in enumerate(model.layers):
             attn, mlp = layer.self_attn, layer.mlp
@@ -221,18 +188,16 @@ class NativeDecoder:
                         attn.ve_gate.weight.clone() if ve else None, attn.q_norm_weight.clone(),
                         attn.k_norm_weight.clone()]
         self.weights = weights  # referenced while the decoder reads them through pointers
-        # per layer (resid, x0), fp32 as the compiled forward computes the mix (decode.cu k_norm); then the output-logit
-        # cap (0: none)
+        # per layer (resid, x0) in fp32 (decode.cu k_norm), then the output-logit cap (0: none)
         lambdas = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).flatten().cpu()
         scal = np.append(lambdas.numpy(), np.float32(cfg.final_logit_softcapping or 0.0))
-        # config: L, C, F (up_proj is (F, C)), vocabulary, max_length, T, prompt store, BOS (the lazy row: a syntax
-        # constraint's end, confirmed once chosen in generate), memory budget in MiB (0: none)
+        # config, dec_create's layout: L, C, F, vocabulary, max_length, T, prompt store, BOS, budget in MiB (0: none)
         device = model.embed_tokens.weight.device
         budget = 0 if memory_fraction is None else max(1, int(
             memory_fraction * torch.cuda.get_device_properties(device).total_memory) >> 20)
         config = np.array([L, C, model.layers[0].mlp.up_proj.weight.size(0), VOCAB_SIZE, max_length, T, prompt_store,
                            bos_token_id, budget], dtype=np.int32)
-        # the prompt store: {prompt: its pages}, the free pages (once the decoder exists), the runs started
+        # the prompt store: {prompt: its pages}, the free pages, the runs started
         self.stored: dict[tuple[int, ...], Stored] = {}
         self.runs = 0
         self.timings: dict[int, tuple[float, float, float]] = {}  # generate's request timestamps
@@ -255,8 +220,7 @@ class NativeDecoder:
         self.pending: list[tuple[int, list[int]]] = []  # started slots whose prompts await prefill
 
     def start(self, b: int, index: int, request: Request) -> Slot:
-        """Start request `index` in slot b at its prompt's last token: the positions before it loaded from the prompt
-        store, else prefilled (NativeDecoder.prefill) before the next step."""
+        """Start request `index` in slot b at its prompt's last token; earlier positions loaded or queued to prefill."""
         n = len(request.input_ids) - 1  # the positions before the prompt's last token
         stored = self.stored.get(tuple(request.input_ids))
         if stored is not None:
@@ -270,8 +234,7 @@ class NativeDecoder:
         return Slot(index, request, start=time.perf_counter())
 
     def prefill(self) -> None:
-        """The pending slots' prompts but their last tokens through decode.cu's prefill (dec_prefill: every position a
-        row, prefill_rows rows a launch, a prompt's positions in order), each prompt then kept in the store (save)."""
+        """Prefill the pending prompts but their last tokens (prefill_rows rows a launch), then store each (save)."""
         if not self.pending:
             return
         rows = np.concatenate([np.array([ids[:-1], range(len(ids) - 1), [b] * (len(ids) - 1)], dtype=np.int32)
@@ -284,9 +247,8 @@ class NativeDecoder:
         self.pending = []
 
     def save(self, b: int, input_ids: list[int]) -> None:
-        """Keep slot b's prompt K and V (all but the last position, written by the launched prefill) in free pages,
-        dropping prompts unused in this run and the previous one (least recently used first) if pages are short; not
-        kept if still short, or if a request with the same prompt kept it meanwhile."""
+        """Keep slot b's prompt K and V in free pages, evicting prompts unused in this and the previous run (least
+        recently used first) if pages are short; not kept if still short or already stored."""
         key, n = tuple(input_ids), len(input_ids) - 1
         need = -(-n // PAGE)
         if key in self.stored:
@@ -304,10 +266,8 @@ class NativeDecoder:
         self.stored[key] = Stored(pages, self.runs)
 
     def confirm(self, slots: list[Slot | None], chosen: list[int], *, eager: set[int]) -> None:
-        """Among chosen (syntax-constrained slots, their step's tokens in self.tokens), a chosen BOS candidate that does
-        not end the program (syntax_constraint.ends; the eager slots' decided before the step) gives way to the step's
-        alternative (dec_take_alt: the same choice as BOS masked). Raises ValueError when such a slot's mask allows no
-        other token."""
+        """A chosen lazy BOS that syntax_constraint.ends rejects gives way to the step's alternative (dec_take_alt).
+        Raises ValueError when the slot's mask allows no other token."""
         B, bos = self.batch, self.bos
         lazy = [b for b in chosen if self.tokens[b] == bos and b not in eager]
         if lazy:
@@ -322,22 +282,9 @@ class NativeDecoder:
 
     @torch.no_grad()
     def generate(self, requests: Iterable[Request]) -> Iterator[tuple[int, list[int]]]:
-        """Continuations of requests, consumed lazily. Yields (request index, generated ids) in completion order: at BOS
-        (excluded), after max_new_tokens, or once stopping_criteria holds (that token included). The prompts of the
-        requests that took a slot since the last step are prefilled before the next. A step's stopping criteria are
-        evaluated while the next step runs; a stopped slot's extra token is dropped. A step with a sampled or
-        constrained slot launches decode.cu's body, writes the constraints' masks meanwhile (step_masks: a mask
-        follows from the previous token; the syntax constraints' masks in one parallel batch), then its head, the
-        choice by mask and temperature; other steps launch the whole greedy step. A syntax constraint's ends are
-        confirmed only once chosen (confirm): a rejected BOS gives way to the step's best other allowed token
-        (decode.cu's alternative: the same choice as BOS masked; a nucleus-sampled slot's BOS is decided before the
-        step).
-        Raises ValueError when len(input_ids) + max_new_tokens - 1 > max_length or a constraint allows no token (not
-        even BOS).
-        timings: {request index: (start, first, end)} of this call's requests yielded so far (time.perf_counter
-        seconds, read on the host once each step's tokens arrive, no further device synchronization): when the request
-        took its slot, when its first generated token arrived (end for a request without one), and the step that
-        finished it."""
+        """Continuations of requests, consumed lazily; yields (request index, generated ids) in completion order.
+        Raises ValueError when len(input_ids) + max_new_tokens - 1 > max_length or a constraint allows no token.
+        Sets timings: {request index: (start, first, end)}, host time.perf_counter seconds."""
         lib, handle, B, bos, max_length = self.lib, self.handle, self.batch, self.bos, self.max_length
         self.runs += 1
         self.timings = {}

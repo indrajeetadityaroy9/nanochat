@@ -423,6 +423,74 @@ generation (basis: `docs/evaluation.md` §7).
 
 **Self-correction prompting.** Not used: the model is a base model without instruction tuning.
 
+## 7. Implementation reference
+
+**`ablations/tokenizer_split_merge.py`** (the tokenizer ablation, §2). Each arm's vocabulary is trained by the corpus
+trainer (`corpus/train_tokenizer.py`: one sample, one trainer, `VOCAB_SIZE` ids); the corpus tokenizer is sa-bpe
+(`corpus/tokenizer.py` `TOKENIZER`). SA-BPE's F·ln R: F the pair's frequency, R the authorship units holding it in
+the current segmentation, a pair of one unit scoring 0; ln as in pchizhov/sa-bpe 9fff32d `sabpe/scoring.py`.
+
+- **`FUSED_PATTERN`**: `SPLIT_PATTERN` with cl100k's punctuation clause; the positive control (arXiv 2608.18062
+  companion post, App. C.1).
+- **`HYBRID_PATTERN`** derivation. BPE merges never cross a chunk end (tiktoken encodes chunk by chunk), so every chunk
+  end is a token end; no clause looks behind, so the chunks after a chunk end j are the chunks of the text from j
+  alone. Clause (1) `\n+`, `\r+`: a line break shares a chunk only with line breaks of its kind. Clause (2) ` +`,
+  `\t+`, `[^\S\r\n\t ]+`: runs of spaces, tabs and other whitespace are chunks, and a letter run takes no tab or line
+  break before it, so an indentation of d ≥ 2 spaces or d ≥ 1 tabs ends at a chunk end; a single space before a
+  letter run stays its prefix (`" foo"`). Clause (3): the letter clause takes a whole letter run. `[^\S\r\n\t ]+` puts
+  every character in some chunk (tiktoken drops unmatched text); without lookahead fancy-regex does not backtrack on
+  long whitespace runs.
+- **Constants.** `NUM_HIDDEN_LAYERS` = 16: the d16 run the set is sized for. `MARGIN` = 1.5 sits above whole-shard
+  rounding of the code shards and the arms' spread in compression. `PROGRAMS` feeds depth invariance and
+  `tokeval_group`. `INDENTED`: an indented line is its leading spaces and tabs, then its statement; `INDENTED_LINES`
+  are the first such lines of each program source's val split. `TOKEVAL_LANGUAGES`: tree-sitter's names.
+- **`vocabularies`**: all arms trained at once in threads on one draw of the sample (each merge an argmax with fixed
+  tie-breaks, so arms are independent); writes `ABLATION/<arm>/{tokenizer.tiktoken, tokenizer.pattern, merges.json}`.
+  Record: `sample` (documents, bytes, units, seconds, per source: target bytes, fraction of rows taken, documents,
+  bytes and units taken), `arms` (pattern, score, merges, seconds, data_key), `seconds`, `provenance`.
+- **`provenance`**: commit, UTC time, host, machine, cpus, memory_gb, Python and the versions of tiktoken, tokenizers,
+  numpy, scipy, pyarrow, regex, tokenizer-intrinsic-evals and tree-sitter-language-pack.
+- **`val_split`/`describe`**: per-token counts and per-document bytes of an arm's tokenized val split; `describe`
+  writes `sources` (bytes, tokens, bytes_per_token), `file_stage_bytes_per_token` (all and per group: the weighted
+  harmonic mean over `byte_shares`), `train_tokens_over_draw` per group read in part (`mixture.PART`, `IN_PART`;
+  `prepare.extent`, `mixture.SPREAD`), `line_break_entries` (line_break, punctuation_line_break,
+  line_break_indentation: a line break then indentation ending the entry, the companion post's MinGram `cb`) and
+  `merged_reads`. Validity (`train_tokenizer.fidelity`) runs on the first row group of each source's val split.
+- **TokEval sample** (`tokeval_documents`, `tokeval_group`, `tokeval`): each source's leading val documents (as
+  `corpus/tokenize.py` `row_group_documents` forms them: a repository sample's files concatenated) until their UTF-8
+  bytes reach `TOKEVAL_BYTES` = 2,000,000, the crossing document included; grouped in `TOKEVAL_GROUPS` order (python,
+  cpp, text, math, mixed); `tokeval_group` tests in turn: a program source's language, math (`mixture.MATH_SOURCES`),
+  text (other web documents), mixed (Codeforces reasoning traces, Kaggle notebooks). Prose languages are the groups
+  suffixed `_val` (TokEval reports code and math under the domain keys python, cpp, math); the code corpus is the
+  python and cpp groups, the math corpus the math group. Record:
+  `sample` (per source group, documents, bytes, split_exhausted) and `metrics` (global values of compression_rate,
+  fertility, renyi_efficiency, bigram/trigram_entropy, utf8_token_integrity, ast_boundary_alignment,
+  identifier_fragmentation, indentation_consistency, vocabulary_utilization, reconstruction_fidelity;
+  `ast_boundary_alignment_per_category`; `utf8_char_split`).
+- **`intrinsic`**: one process pool runs depth invariance per program source, fidelity per arm and source and TokEval
+  per arm (none reads tokenized data) beside the tokenize jobs; every val split is tokenized at once (a val split is a
+  few row groups, so one at a time would leave the pool idle) and counted as it finishes. Record: `arms` (describe's
+  keys, `depth_invariance`, `fidelity`, `tokeval`), `tokeval_sample`, `seconds` (`tokenized`: wall time to the last
+  tokenize job's end, the checks overlapping; `all`), `provenance`.
+- **`document_set`**: shard tokens estimated from text bytes at sa-bpe's val bytes per token; each corpus's draw is its
+  share of the base model's stage (`Stage.shares` of the sources' train tokens; the repositories corpora, unestimated,
+  alike within their group) at the run's tokens in the stage. Code sources take the fewest leading train shards
+  holding the file-stage draw; supply sources (`REPO_LEVEL_STAGE.supply`) their draw, read whole once; the others
+  `MARGIN` × draw. Returns `file` (leading shards), `repository` (shards after those), `draws` per seq_len; the
+  repositories corpora's partitions come from `data`.
+- **`pack_corpus`**: the repositories corpora pack all their train shards; other corpora the set's shards for the
+  stage; the val split whole.
+- **`data`**: each corpus of each arm tokenized then packed as its own job in one process pool;
+  `tokenize_repo_level_stage` (under sa-bpe, the trailing partitions holding `MARGIN` × the 32K draws) chooses the
+  partitions and tokenizes sa-bpe's repositories corpora while the sources the set check does not gate tokenize; then
+  the set check (the file stage's repository shards must not reach the partitions), the repository sources' jobs, and
+  the other arms' repositories corpora one arm after another (each fills the cores). Record: `run`, `set` (file,
+  repository, partitions, draws), `arms` (`arm_record`: data_key, tokens_per_param, max_steps, batch_size,
+  repo_level_start, learning_rate, per stage each corpus's rows, weight, read share), `seconds` (`tokenized`, packs
+  overlapping; `all`), `provenance`.
+- **`repack`**: after a packer change (`corpus/pack.py`, the crate's `pack.rs`), each corpus of each arm a thread job
+  (the crate releases the GIL); rewrites `arms` and `seconds.repacked`.
+
 ## References
 
 | arXiv | Paper |

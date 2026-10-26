@@ -1,22 +1,7 @@
-"""
-model/modeling.py's CausalLM as a transformers model, for inference from the directory inference/export_hf.py writes
-(this file is copied there and named in config.json's auto_map, Hugging Face's custom-code convention; torch and
-transformers only). vLLM runs it through its Transformers backend (vLLM docs, "Transformers backend"), which honors
-_keep_in_fp32_modules_strict, the per-layer sliding windows (layer_types) and final_logit_softcapping with its own
-attention, KV cache, torch.compile and CUDA graphs.
+"""model/modeling.py's CausalLM as a transformers model, for the directory inference/export_hf.py writes (auto_map).
 
-Layout as transformers' Qwen3 (modeling_qwen3.py): attention through ALL_ATTENTION_FUNCTIONS with each layer's window
-(config.layer_types "sliding_attention" / "full_attention" and sliding_window, as Qwen3 and Gemma 3), so the same code
-runs in transformers (eager, sdpa, generate with a cache) and in vLLM. The training forward's precision, where its
-kernels keep fp32:
-- q/k (model/kernels/qk_row.cuh): per-head RMS norm (eps FLT_EPSILON), fp32 gain, rotation by -theta over the full
-  head ((m1, m2) -> (m1 cos + m2 sin, m2 cos - m1 sin), karpathy/nanochat 92d63d4 nanochat/gpt.py:57-65), angles
-  t theta^(-2i/D) in fp64 rounded once to fp32 (CausalLM.init_buffers), one bf16 rounding. transformers' and vLLM's
-  rotary embeddings rotate by +theta, so none is used.
-- value embeddings (model/kernels/ve_gate.cu): v + 2 sigmoid(n W^T) per head x table[input_ids], the gate's logits in
-  fp32, the mix rounded once.
-- per layer h = resid_lambda h + x0_lambda x0 in fp32, rounded once; the per-dim and per-layer vectors and the gate
-  stay fp32 (_keep_in_fp32_modules_strict).
+Qwen3's layout (transformers modeling_qwen3.py), run by transformers and vLLM's Transformers backend; q/k rotate by
+-theta (karpathy/nanochat 92d63d4 nanochat/gpt.py:57-65), so no library rotary is used; fp32 where training keeps it.
 """
 
 from typing import ClassVar
@@ -38,10 +23,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 
 class NanochatConfig(PreTrainedConfig):
-    """inference/export_hf.py's config.json, every field explicit there: vocab_size, hidden_size, intermediate_size,
-    num_hidden_layers, num_attention_heads (= num_key_value_heads), head_dim, max_position_embeddings,
-    rope_parameters {"rope_theta"}, sliding_window (keys attended including the query's own), layer_types,
-    value_embedding_layers, final_logit_softcapping, rms_norm_eps."""
+    """inference/export_hf.py's config.json; every field is explicit there."""
     model_type = "nanochat"
 
 
@@ -79,9 +61,8 @@ def eager_attention_forward(module: nn.Module, query: torch.Tensor, key: torch.T
 
 
 class Gate(nn.Module):
-    """The value-embedding gate's weight W (H, C), held outside nn.Linear: vLLM's Transformers backend swaps every
-    nn.Linear for its own layer, whose weight _keep_in_fp32_modules_strict does not upcast (its keep_in_fp32 skips
-    tensors with a weight_loader), so an nn.Linear gate would be read in bf16 there instead of training's fp32."""
+    """The value-embedding gate's weight W (H, C), outside nn.Linear so that vLLM's Transformers backend keeps it fp32:
+    its linear layers' weights carry a weight_loader, which _keep_in_fp32_modules_strict skips."""
 
     def __init__(self, C: int, H: int) -> None:
         super().__init__()

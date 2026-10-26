@@ -1,18 +1,6 @@
 """
-Curate every source from its standardized files:
-
-1. check: every Python file (a category whose content is code) must parse with ast.parse (Python 3.12); one that
-   does not is repaired by the smallest set of steps that makes it parse (repaired): Stack v3's placeholders <EMAIL>,
-   <KEY>, <NAME>, <PASSWORD> become the bare word; leading tabs expand to 8 columns (Python 2 Language Reference
-   §2.1.8); fissix's 2to3 fixers. The repaired text is kept with its id recomputed; a file that never parses is dropped.
-2. dedup: one row per id over every source and split, the first in SOURCES order, then file and row; empty
-   texts dropped.
-3. split: val iff md5_number(group) % SPLIT = 0 (schema.py).
-4. shards: a repository source's files by that residue's partitions (0 val, 1..SPLIT-1 train), each sorted by
-   (repository, path, id) and cut into import-connected samples (the crate's topological_sort; SAMPLE_FILE); any
-   other source's train rows in id order (a uniform order, id being a hash) over SPLIT shards, its val rows in one.
-
-Every output, rows, order and row groups, is a function of the standardized files.
+Curate every source from its standardized files: Python 3 check with repair, exact deduplication, the val/train split
+by md5_number(group) % SPLIT, and the curated shards; every output is a function of the standardized files.
 
 python -m corpus.curate
 """
@@ -49,17 +37,12 @@ from corpus.sources import (
 from native import corpus_crate
 from paths import CORPUS
 
-# The id of an empty text
 EMPTY = hashlib.sha1(b"").hexdigest()
-# The fewest files of a repository shard's row group (the last excepted), whole samples each, so a reader of row
-# groups never splits a sample; a row group is a tokenize task, whose tokens do not depend on the grouping. 2^16: the
-# published dataset's (publish.DATASET), bounded by a task's peak memory on the largest row group
-# (ultradata_code_l2_python)
+# Fewest files per repository row group (the last excepted), whole samples each: a reader never splits a sample
 SAMPLE_ROWS = 65_536
 PLACEHOLDER = re.compile(r"<(EMAIL|KEY|NAME|PASSWORD)>")
 LEADING = re.compile(r"^[ \t]+", re.MULTILINE)
-# Recursion limit of the check: bounds fissix's 2to3 (pure Python, recursive over the parse tree), not ast.parse
-# (CPython 3.12's C limits); the limit the published dataset (publish.DATASET) was checked with
+# Bounds fissix's recursive 2to3, not ast.parse; the published dataset's (publish.DATASET) setting
 RECURSION = 6_000
 
 
@@ -86,7 +69,7 @@ def parses(text: str) -> bool:
 
 @functools.cache
 def fixers() -> refactor.RefactoringTool:
-    """fissix's tool with every fixer of fissix.fixes, made once per process."""
+    """fissix's tool with every fixer of fissix.fixes, once per process."""
     return refactor.RefactoringTool(refactor.get_fixers_from_package("fissix.fixes"))
 
 
@@ -107,9 +90,8 @@ def expanded_tabs(text: str) -> str:
 
 
 def repaired(text: str) -> str | None:
-    """text if it parses, else its smallest repair that parses, else None: of the steps that change it (placeholders,
-    tabs, 2to3, in that order), every subset by size and then in step order, its steps applied in step order; so a file
-    that 2to3 alone repairs keeps its tabs and placeholders."""
+    """text if it parses, else its smallest repair that parses (every subset of the changing steps by size, then in
+    step order), else None."""
     if parses(text):
         return text
     steps = [step for step in (bare_placeholders, expanded_tabs) if step(text) != text] + [two_to_three]
@@ -126,8 +108,7 @@ def repaired(text: str) -> str | None:
 
 
 def check_row_group(task: tuple[str, int, int]) -> pa.Table:
-    """Row group g of a Python source's standardized file k: the files that parse after repair, repaired, ids
-    recomputed."""
+    """Row group g of a Python source's standardized file k: the files that parse after repair, ids recomputed."""
     source, k, g = task
     sys.setrecursionlimit(RECURSION)
     schema = SOURCES[source].category.schema
@@ -140,10 +121,8 @@ def check_row_group(task: tuple[str, int, int]) -> pa.Table:
 
 
 def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
-    """checked_path of each of a Python source's standardized files (written to .partial, then renamed; an existing
-    file is kept), the remaining files' row groups as one stream so no file's slowest group idles the pool, as many in
-    flight as MEMORY holds of the largest (a checked row group is about its standardized size; its result waits until
-    every earlier one is written)."""
+    """checked_path of each of a Python source's standardized files not yet checked (via .partial), as many row groups
+    in flight as MEMORY holds of the largest."""
     metadata = {k: pq.read_metadata(standardized_path(source, k)) for k in range(files)
                 if not checked_path(source, k).exists()}
     groups = {k: md.num_row_groups for k, md in metadata.items()}
@@ -166,8 +145,8 @@ def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
 # ---- 2. dedup
 
 def duplicates(paths: dict[str, list[Path]]) -> dict[str, pa.Table]:
-    """{source: (file, row) of each row to drop}: every row that is not the first of its id (the first in the order of
-    paths' sources, then file and row), and every empty text."""
+    """{source: (file, row) of each row to drop}: every row but the first of its id (in paths' order), every empty
+    text."""
     union = " UNION ALL ".join(
         f"SELECT id, {i} AS source, file_index AS file, file_row_number AS row "
         f"FROM read_parquet({[str(p) for p in files]}, file_row_number = true)"
@@ -193,8 +172,7 @@ def undropped(paths: list[Path]) -> str:
 
 
 def shuffle(source: str, paths: list[Path], drops: pa.Table) -> None:
-    """A repository source's rows without the duplicates, as Hive partitions shuffle/<source>/part=<p>/ by the residue
-    of its repository (DuckDB COPY ... PARTITION_BY, which creates the partition directories, not their parent)."""
+    """A repository source's undropped rows as Hive partitions shuffle/<source>/part=<residue>/."""
     shuffle_dir(source).parent.mkdir(exist_ok=True)
     with database() as con:
         con.register("drops", drops)
@@ -204,8 +182,7 @@ def shuffle(source: str, paths: list[Path], drops: pa.Table) -> None:
 
 
 def curate_partition(task: tuple[str, int]) -> None:
-    """One partition as a curated shard (partition 0 is val): its files sorted by (lowercased repository, path, id),
-    cut into samples (sources.repository_samples) and written in sample order, a row group per SAMPLE_ROWS files or
+    """One partition as a curated shard (partition 0 is val), in sample order, a row group per SAMPLE_ROWS files or
     more of whole samples."""
     source, part = task
     table = pq.read_table(shuffle_dir(source) / f"part={part}",
@@ -227,8 +204,7 @@ def curate_partition(task: tuple[str, int]) -> None:
 
 
 def shard_documents(source: str, paths: list[Path], drops: pa.Table) -> None:
-    """A document source's rows without the dropped ones: val rows in one shard, train rows in id order over SPLIT
-    shards."""
+    """A document source's undropped rows: val in one shard, train in id order over SPLIT shards."""
     category = SOURCES[source].category
     columns = ", ".join(f"n.{name}" for name in category.schema.names)
     names = ", ".join(category.schema.names)

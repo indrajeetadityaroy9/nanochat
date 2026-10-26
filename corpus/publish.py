@@ -1,7 +1,5 @@
 """
-The curated corpus to the Hub and back. The shards are text, independent of any tokenizer (tokenize and pack run after
-the pull). The dataset (DATASET, private) holds CORPUS/curated's tree, <source>/<split>/<k>.parquet, beside its card;
-push replaces the whole tree and squashes the history into one commit; pull downloads the shards.
+The curated corpus to the Hub (DATASET) and back: push replaces the tree and squashes the history; pull downloads it.
 
 python -m corpus.publish push | pull
 """
@@ -14,13 +12,10 @@ from corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
 from corpus.sources import SOURCES, curated_dir, footer_rows
 from paths import CORPUS
 
-# The published corpus
 DATASET = "iaroy/nanochat-data"
 
-# Bytes per preupload call: an upload URL the Hub's LFS batch call returns expires 15 minutes after the call
-# (X-Amz-Expires=900), so every file of a call must start uploading within them: 4 GiB needs at least 4.6 MiB/s
+# An LFS upload URL expires 900 s after its batch call (X-Amz-Expires=900): 4 GiB needs at least 4.6 MiB/s
 PREUPLOAD = 4 * 1024**3
-# The card's account of each folder and each column
 CONTENTS = {
     "stack_edu_python": "GitHub Python files filtered for educational value",
     "stack_edu_cpp": "GitHub C++ files filtered for educational value",
@@ -53,15 +48,13 @@ COLUMNS = {
 
 
 def curated() -> dict[str, dict[str, int]]:
-    """{source: {split: rows (Parquet footers)}} of every read source."""
+    """{source: {split: rows}} of every source."""
     return {source: {split: footer_rows(curated_dir(source, split).iterdir()) for split in ("train", "val")}
             for source in SOURCES}
 
 
 def card(rows: dict[str, dict[str, int]]) -> str:
-    """The dataset card: what the dataset is, its layout and schema, and per folder its contents, columns, origin and
-    rows. The Hub's viewer is off: its Parquet converter would copy every shard into one configuration of mixed
-    schemas."""
+    """The dataset card; the Hub's viewer is off, as its Parquet converter would merge mixed schemas."""
     folders = []
     for source, splits in rows.items():
         repo = SOURCES[source].repo
@@ -90,9 +83,8 @@ def card(rows: dict[str, dict[str, int]]) -> str:
 
 
 def push() -> None:
-    """Write the card, then replace the dataset's tree: one commit deleting every file it holds but .gitattributes,
-    the files' upload in groups each closed once it reaches PREUPLOAD bytes (the Hub skips an object it holds, so a
-    rerun uploads only the rest), one commit adding them all, and a squash of the history into one commit."""
+    """Write the card, then replace the dataset's tree in one delete commit, preuploads of PREUPLOAD bytes, one add
+    commit and a history squash."""
     (CORPUS / "README.md").write_text(card(curated()))
     api = HfApi()
     old = [f for f in api.list_repo_files(DATASET, repo_type="dataset") if f != ".gitattributes"]
@@ -114,7 +106,6 @@ def push() -> None:
 
 
 def pull() -> None:
-    """The dataset's shards into CORPUS/curated."""
     snapshot_download(DATASET, repo_type="dataset", local_dir=CORPUS / "curated",
                       allow_patterns=[f"{source}/**" for source in SOURCES])
 

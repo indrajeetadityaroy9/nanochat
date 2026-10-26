@@ -1,10 +1,7 @@
 """
-AdamW (fused) on token tables, lm_head and 1-D parameters; Muon (torch.optim.Muon's update, its Newton-Schulz batched
-over same-shape matrices) on all other matrices, its update scaled to AdamW's RMS (adjust_lr_fn "match_rms_adamw":
-0.2 sqrt(max(fan_out, fan_in)), Moonlight, arXiv 2502.16982 §2.2) so all groups share one lr and weight decay;
-momentum 0.95 Nesterov, Newton-Schulz coefficients and 5 steps PyTorch's defaults; NorMuon's per-neuron normalization
-of the orthogonalized update (arXiv 2510.05491). AdamW's eps is PyTorch's default. Each update clips the accumulated
-gradient's global norm first.
+AdamW (fused) on token tables, lm_head and 1-D parameters; NorMuon (arXiv 2510.05491) on all other matrices, its
+update scaled to AdamW's RMS (0.2 sqrt(max(fan_out, fan_in)), Moonlight, arXiv 2502.16982 §2.2) so all groups share
+one lr and weight decay. Each update clips the accumulated gradient's global norm first.
 """
 from collections.abc import Callable
 
@@ -17,8 +14,7 @@ BETAS = (0.9, 0.95)
 MAX_GRAD_NORM = 1.0
 # AdamW's EMA timescale law tau* = TAU_C TPP^TAU_E of the run's steps (Power Lines, arXiv 2505.13738 App. E.3.1)
 TAU_C, TAU_E = 1.084, -0.527
-# NorMuon's second-moment decay beta2 (arXiv 2510.05491 §4.1.1) and the eps of its normalizer (zichongli5/NorMuon
-# normuon.py normuon_update)
+# NorMuon's beta2 (arXiv 2510.05491 §4.1.1); normalizer eps of zichongli5/NorMuon normuon.py normuon_update
 NORMUON_BETA2, NORMUON_EPS = 0.95, 1e-10
 
 
@@ -29,15 +25,9 @@ def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float
 
 
 class Muon(torch.optim.Muon):
-    """NorMuon (arXiv 2510.05491 Alg. 1) on torch.optim.Muon's update (torch/optim/_muon.py _single_tensor_muon:
-    momentum lerp, Nesterov, bf16 Newton-Schulz, decoupled weight decay, adjusted lr), the Newton-Schulz batched over a
-    group's same-shape matrices: one bmm/baddbmm chain per shape, which may round differently from per-matrix mm/addmm.
-    NorMuon (Alg. 1 lines 7-9): v, an EMA (decay NORMUON_BETA2) of the orthogonalized update O's mean square per row
-    (output neuron, nn.Linear's (out, in) layout; state second_momentum_buffer, one fp32 per row); O divided row-wise by
-    sqrt(v) + NORMUON_EPS, then rescaled to O's Frobenius norm (zichongli5/NorMuon normuon.py normuon_update), so
-    adjust_lr_fn "match_rms_adamw" scales it as Muon's update (the target of Alg. 1 line 10's rescale to RMS 0.2 lr).
-    After each step, update_square holds on the device the sum over matrices of the squared Frobenius norm of the
-    update times its adjusted lr (weight decay excluded)."""
+    """NorMuon (arXiv 2510.05491 Alg. 1 lines 7-9) on torch.optim.Muon's update, Newton-Schulz batched per shape (may
+    round differently from per-matrix mm): rows of O divided by sqrt(v) + eps, v an EMA of their mean square, then
+    rescaled to O's Frobenius norm. Sets update_square: sum of squared (adjusted lr x update) norms, on the device."""
 
     @torch.no_grad()
     def step(self, closure: Callable[[], torch.Tensor] | None = None) -> torch.Tensor | None:
@@ -99,10 +89,8 @@ def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tup
 
 def update(model: torch.nn.Module, opts: tuple[torch.optim.Optimizer, ...],
            accumulated: list[torch.nn.Parameter]) -> torch.Tensor:
-    """One update from the accumulated gradients: their global norm clipped to MAX_GRAD_NORM before every optimizer,
-    each optimizer stepped, the gradients zeroed: those of `accumulated` (parameters whose .grad the ops accumulate into
-    in place, model/modeling.py accumulated_weights) in place, the rest freed. Returns the norm before clipping, on the
-    device (no host synchronization)."""
+    """Clip the accumulated gradients' global norm to MAX_GRAD_NORM, step every optimizer, zero `accumulated`'s grads in
+    place and free the rest. Returns the pre-clip norm on the device."""
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
     for opt in opts:
         opt.step()

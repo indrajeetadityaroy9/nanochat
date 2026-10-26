@@ -1,10 +1,6 @@
 """
-The training loop. train() trains (or resumes) a run: the file-level stage, then the repo-level stage from
-repo_level_start; next-token loss with the packs' FIM pieces read as FIM examples (DeepSeek-Coder, arXiv 2401.14196
-§3.1; corpus/pack.py). Each start resumes from the run's newest checkpoint (weights, optimizer state, data position).
-A step uses optim.py (optimizers, weight decay, gradient clip), schedule.py (stage, learning rate), stages.py
-(micro-batches in the run's data order) and model/ops/cross_entropy.py step_shares (micro-batch loss weights).
-Caller: run.py. Metrics: metrics.py; diagnostics: diagnostics.py.
+Training loop: next-token loss over the file-level, then the repo-level stage, the packs' FIM pieces read as FIM
+examples (DeepSeek-Coder, arXiv 2401.14196 §3.1); each start resumes from the run's newest checkpoint.
 """
 
 import gc
@@ -29,13 +25,9 @@ from train.stages import stage_batches
 
 def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, checkpoints: frozenset[int],
           run_name: str, config: dict) -> None:
-    """Train (or resume) run `run_name` of `model` (shapes on the meta device, at FILE_LEVEL_STAGE's context) by the
-    plan `run` (schedule.plan at the caller's peak learning rate) on the packed data of the tokenizer in directory
-    `tokenizer_path` (corpus/tokenizer.py get_tokenizer): initialization and data order by `seed`, decoupled weight
-    decay by the tau law at the run's learning rate (optim.tau_weight_decay), each update clipped (optim.update), the
-    stages by run.stage_at; `config` (run.py RunConfig as a dict) and the tokenizer's data key recorded with the run.
-    A checkpoint after each step count in `checkpoints` (run.max_steps among them: the final model); a run resumes
-    from its newest."""
+    """Train (or resume) run `run_name` of `model` (meta-device shapes at the file-level context) by plan `run` on CUDA.
+    Checkpoints after each step count in `checkpoints` (run.max_steps among them); `config` (RunConfig as a dict) and
+    the tokenizer's data key are recorded with the run."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer(tokenizer_path)
     model.to_empty(device=device)
@@ -65,7 +57,7 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
     # A checkpoint holds the context its weights trained in; stage_rows counts that stage's consumed rows
     stage = run.stage_at(start_step - 1)
     model.set_stage(stage)
-    if start_step == run.max_steps:  # finished
+    if start_step == run.max_steps:
         return
     compiled = torch.compile(model, dynamic=False, fullgraph=True)
     read = partial(stage_batches, tokenizer, run=run, seed=seed, device=device)
@@ -76,8 +68,7 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
     batches = [next(train_iter) for _ in range(run.gradient_accumulation_steps)]
     diagnostics = Diagnostics(model, opts, gradient_accumulation_steps=run.gradient_accumulation_steps)
     diagnostics.set_stage(first, mixture)
-    # the attempt this process is (the run's process starts before it); learning rate and weight decay as the
-    # optimizers hold them (a resumed run's come from its checkpoint)
+    # this process's attempt index; lr and weight decay as the optimizers hold them (a resumed run's: its checkpoint's)
     attempt = sum(r["kind"] == "run" for r in metrics.records(run_name))
     matmul_params, hidden_size = num_matmul_params(model), model.config.hidden_size
 
@@ -98,10 +89,8 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
                                                for name, opt in zip(("adamw", "muon"), opts, strict=True)},
                               "stage": asdict(first) | {"mixture": mixture}}, attempt=attempt)
 
-    # A step's values (loss, grad norm, diagnostics.py's) are copied to the host without blocking and read after the next
-    # step is launched, so the device always has the next step queued (no per-step drain); a step's time runs between
-    # CUDA events at the previous step's end and its own. pending: the last step's (step, learning rate, model FLOPs,
-    # host values, their layout, start event, end event).
+    # A step's values reach the host without blocking and are logged after the next step launches (no per-step drain);
+    # pending: the last step's log() arguments
     pending, previous_end = None, torch.cuda.Event(enable_timing=True)
     previous_end.record()
 
@@ -151,8 +140,7 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
                                       "peak_reserved_bytes": torch.cuda.max_memory_reserved()}, attempt=attempt)
             torch.cuda.reset_peak_memory_stats()
 
-        # the next step's micro-batches are read during this step's backward (the repo-level stage's if the next step
-        # starts it), none after the last step
+        # the next step's micro-batches are read during this step's backward (the repo-level stage's if it starts it)
         reading = step + 1 < run.max_steps
         if reading and run.stage_at(step + 1) is not stage:
             mixture, train_iter = read(stage=run.stage_at(step + 1), start=0)
@@ -172,7 +160,6 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
                 upcoming.append(next(train_iter))
         grad_norm = update(model, opts, accumulated)
         model.refresh_gemm_weights()
-        # the step's values to the host without blocking; the previous step is logged while this one runs
         values, layout = diagnostics.end_step(step, torch.stack(losses).sum(), grad_norm)
         for scheduler in schedulers:
             scheduler.step()
@@ -184,8 +171,7 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
             log(*pending)
         pending, previous_end = (step, learning_rate, model_flops, values, layout, previous_end, end), end
         if step == start_step:
-            # the collector frozen and off after the first step, collecting only after saves (karpathy/nanochat
-            # 07c4dd4)
+            # collector frozen and off after the first step, collecting only after saves (karpathy/nanochat 07c4dd4)
             gc.collect()
             gc.freeze()
             gc.disable()

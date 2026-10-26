@@ -1,12 +1,9 @@
-//! The lexer: CPython 3.12.3's tokenizer (Parser/tokenizer.c tok_get_normal_mode, tok_get_fstring_mode,
-//! verify_end_of_number) restated as a character-level machine whose states are values, so a prefix may end anywhere
-//! (mid-token, mid-indent, mid-UTF-8 character). Its input is the text as compile() sees it: "\r\n" and "\r" read as
-//! "\n" (translate_newlines), a final "\n" implied at the end.
+//! The lexer: CPython 3.12.3's Parser/tokenizer.c as a character-level machine whose states are values, so a prefix
+//! may end anywhere; input as compile() sees it ("\r\n", "\r" read as "\n", a final "\n" implied).
 
 use rustc_hash::FxHashMap;
 
-/// A lexeme: an index into Lexicon::lexemes, the terminals a token may be (two for a soft keyword: a name and the
-/// keyword, read both ways by the parser).
+/// A lexeme: an index into Lexicon::lexemes, the terminals a token may be (a soft keyword's two: name and keyword).
 pub type Lexeme = u16;
 /// A set of lexeme sequences a partial token must begin with: an index into Lexicon::terms.
 pub type Terms = u32;
@@ -17,8 +14,8 @@ const STRING: Lexeme = 2;
 const FSTRING_START: Lexeme = 3;
 const FSTRING_END: Lexeme = 4;
 
-/// What the lexer emits: lexemes, line ends outside brackets' concern (NL; the parser decides NEWLINE), a backslash
-/// continuation (CONT), and the whitespace characters at a line's start (indentation).
+/// What the lexer emits: lexemes, line ends (NL; the parser decides NEWLINE), a backslash continuation (CONT), and
+/// the whitespace at a line's start.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ev {
     Lex(Lexeme),
@@ -29,8 +26,7 @@ pub enum Ev {
     FormFeed,
 }
 
-/// A number literal's sub-state: what was read last (tokenizer.c, Number); an underscore state ends in U, a digit
-/// state in D.
+/// A number literal's sub-state: what was read last (tokenizer.c, Number).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Num {
     Zero1,
@@ -68,8 +64,7 @@ pub enum Kind {
     Fr,
 }
 
-/// What an f-string's literal text waits for: "{" after "{", "}" after "}", the character after a backslash, "{" after
-/// "\N", the end of "\N{...}".
+/// What an f-string's literal text waits for after "{", "}", a backslash, "\N", or inside "\N{...}".
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pend {
     No,
@@ -87,7 +82,6 @@ const NONE: u16 = u16::MAX;
 pub enum Sub {
     /// between tokens at a line's start (true: after a backslash continuation)
     Bol(bool),
-    /// between tokens
     Sp,
     /// a name: its spelled prefix (a node of Lexicon::spelled_next) or NONE
     Name(u16),
@@ -96,7 +90,6 @@ pub enum Sub {
     Op(u16),
     /// a string's first quote(s): n of them
     Q { kind: Kind, quote: u8, n: u8 },
-    /// a string's body
     S { ascii_only: bool, quote: u8, size: u8, escaped: bool, endq: u8 },
     /// the innermost f-string's literal text or format spec
     Fl { pend: Pend, endq: u8 },
@@ -139,8 +132,7 @@ const CLOSE: &[u8] = b")]}";
 /// tokenizer.c tok_get_normal_mode: b, r, u, f with u alone, f and b exclusive, any case
 const STRING_PREFIXES: [&str; 8] = ["r", "u", "b", "br", "rb", "f", "fr", "rf"];
 
-/// The lexical tables: lexemes and their terminals, the spelled names (keywords, soft keywords, string prefixes) and
-/// operator prefixes as tries over ASCII, the partial tokens' beginnings, Python's identifier classes.
+/// The lexical tables: lexemes and terminals, tries of spelled names and operators, partial-token beginnings.
 pub struct Lexicon {
     /// lexeme -> its terminals
     pub lexemes: Vec<Vec<u16>>,
@@ -225,8 +217,8 @@ fn first_in(ranges: &[(u32, u32)], lo: u32, hi: u32) -> Option<u32> {
 }
 
 impl Lexicon {
-    /// keywords, soft keywords and operators with their terminals (Lark's names resolved to indices by the caller),
-    /// the terminals of NAME, NUMBER, STRING, FSTRING_START and FSTRING_END, and the identifier classes.
+    /// The lexicon from keywords, soft keywords and operators with their terminals, the basic terminals, and the
+    /// identifier classes.
     pub fn new(keywords: Vec<(String, Vec<u16>)>, soft: Vec<(String, Vec<u16>)>, operators: Vec<(String, Vec<u16>)>,
                basic: [u16; 5], xid_start: Vec<(u32, u32)>, xid_continue: Vec<(u32, u32)>) -> Lexicon {
         let mut lexemes: Vec<Vec<u16>> = basic.iter().map(|&t| vec![t]).collect();
@@ -411,8 +403,7 @@ impl Lexicon {
         None
     }
 
-    /// The first character of an operator: brackets and a replacement field's ':' and '}' act at once (tokenizer.c:
-    /// the f-string punctuation check precedes the two-character operators).
+    /// An operator's first character: brackets and a field's ':' and '}' act at once (tokenizer.c's f-string check).
     fn operator_start(&self, mut frames: Vec<Frame>, c: char, ev: &mut Vec<Ev>) -> Step {
         let field = frames.last().and_then(|f| f.fields.last()).map(|f| f.0);
         let op = self.op_first[c as usize];
@@ -594,7 +585,6 @@ impl Lexicon {
             return Some((frames, Sub::Q { kind, quote, n: 2 }));
         }
         if is_quote {
-            // a triple quote
             if fstring {
                 ev.push(Ev::Lex(FSTRING_START));
                 frames.push(Frame { quote, size: 3, raw: kind == Kind::Fr, fields: Vec::new() });
@@ -696,8 +686,8 @@ impl Lexicon {
         lit(frames, if c == '\\' { Pend::Esc } else { Pend::No })
     }
 
-    /// The state after byte b of UTF-8 text (events appended to ev): a character once its bytes are complete, "\r\n"
-    /// and "\r" read as "\n" (translate_newlines); None if no module continues this way (also: invalid UTF-8, NUL).
+    /// The state after byte b of UTF-8 text (events appended to ev); None if no module continues (also invalid UTF-8,
+    /// NUL).
     pub fn byte(&self, state: &Lex, b: u8, ev: &mut Vec<Ev>) -> Option<Lex> {
         let c = if state.npend == 0 && b < 0x80 {
             b as char
@@ -727,8 +717,7 @@ impl Lexicon {
         Some(Lex { pend: [0; 3], npend: 0, cr: c == '\r', frames, sub })
     }
 
-    /// The most permissive completion of a pending UTF-8 sequence: an identifier start if one completes it, else an
-    /// identifier character, else any character (contexts take non-ASCII characters by these classes alone).
+    /// The most permissive completion of a pending UTF-8 sequence: an identifier start, else continue, else any.
     fn representative(&self, pend: &[u8]) -> char {
         let size = if pend[0] < 0xE0 { 2 } else if pend[0] < 0xF0 { 3 } else { 4 };
         let mut value = (pend[0] & (0x7F >> size)) as u32;
@@ -743,9 +732,8 @@ impl Lexicon {
         char::from_u32(c).unwrap()
     }
 
-    /// (events, beginnings) for a state's viability: the events still to come from a pending UTF-8 character (its
-    /// representative) and the lexeme sequences one of which the partial token must begin with (none: no partial
-    /// token); None if no character completes it.
+    /// The pending UTF-8 character's events (by its representative) and the lexeme sequences the partial token must
+    /// begin with; None if no character completes it.
     pub fn partial(&self, state: &Lex, ev: &mut Vec<Ev>) -> Option<Terms> {
         let sub = if state.npend > 0 {
             let c = self.representative(&state.pend[..state.npend as usize]);

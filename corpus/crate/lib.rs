@@ -1,6 +1,5 @@
-//! The corpus crate, Python module nanochat_crate (built by native.py): SA-BPE (arXiv 2604.14053)
-//! tokenizer training (train.rs; train_tokenizer.py), repository samples (repository.rs; curate.py, tokenize.py)
-//! and the packer of training rows (pack.rs; pack.py).
+//! The corpus crate (Python module nanochat_crate): SA-BPE tokenizer training (arXiv 2604.14053), repository samples
+//! and the packer of training rows.
 
 mod pack;
 mod repository;
@@ -13,9 +12,8 @@ use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use tree_sitter::Language;
 
-/// A value per worker of rayon's global pool, made on the worker's first get (only rayon workers call it). Clones of a
-/// fancy-regex Regex (also inside tiktoken-rs's CoreBPE) share its pool of matching scratch space, which workers
-/// sharing one regex contend for; a regex made per worker has its own.
+/// A value per worker of rayon's global pool, made on first get (rayon workers only): a fancy-regex Regex's clones
+/// share one scratch pool that workers would contend for.
 pub(crate) struct PerWorker<'a, T> {
     make: Box<dyn Fn() -> T + Sync + 'a>,
     values: Vec<OnceLock<T>>,
@@ -31,7 +29,7 @@ impl<'a, T> PerWorker<'a, T> {
     }
 }
 
-/// A repository source's language, extracted from its name (sources.Source.language: "Python" or "C++").
+/// A repository source's language ("Python" or "C++").
 #[derive(Clone, Copy)]
 pub(crate) enum Lang {
     Python,
@@ -39,7 +37,6 @@ pub(crate) enum Lang {
 }
 
 impl Lang {
-    /// Its tree-sitter grammar.
     pub(crate) fn language(self) -> Language {
         match self {
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
@@ -60,14 +57,11 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lang {
     }
 }
 
-/// The workers' stack when RLIMIT_STACK is unlimited: scripts/container.sh's soft limit (--ulimit stack=67108864).
+/// The workers' stack when RLIMIT_STACK is unlimited (scripts/container.sh's --ulimit stack=67108864).
 const UNLIMITED_STACK: usize = 64 << 20;
 
-/// The module, with rayon's global pool built here first, its workers' stack the process's RLIMIT_STACK soft limit (the
-/// main thread's stack and glibc's default for every thread it creates), not std's 2 MiB (std::thread::Builder ignores
-/// the limit): a worker waiting in a join runs stolen jobs on its own stack, so the nesting deepens with the pack calls
-/// in flight from Python threads (corpus/pack.py). An unlimited limit gives no size (glibc's default thread stack
-/// under it is 2 MiB in the image), so the pool then takes UNLIMITED_STACK.
+/// The module; rayon's global pool is built first with the RLIMIT_STACK soft limit as its workers' stack, not std's
+/// 2 MiB: workers run stolen jobs on their own stack while waiting in a join, and nesting grows with pack calls.
 #[pymodule]
 fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut stack = libc::rlimit { rlim_cur: 0, rlim_max: 0 };

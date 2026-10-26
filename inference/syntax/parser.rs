@@ -1,16 +1,12 @@
-//! The parser: Lark's LALR(1) tables of the grammar (inference/syntax/python.lark) read as a viable-prefix
-//! recognizer, with tokenizer.c's INDENT/DEDENT (tab size 8, the tab-consistency check at tab size 1, a backslash
-//! line's first column) and its bracket level (newlines inside brackets are not NEWLINE tokens). A soft keyword's
-//! lexeme has two terminals (a name and the keyword): every stack takes each, so the stacks fork until one dies.
+//! The parser: Lark's LALR(1) tables of python.lark as a viable-prefix recognizer, with CPython tokenizer.c's
+//! INDENT/DEDENT and bracket level; a soft keyword's two terminals fork the LR stacks until one dies.
 
 use crate::lexer::{Ev, Lexicon, Terms};
 
 const TAB_SIZE: u32 = 8; // tokenizer.c TABSIZE; ALTTABSIZE is 1: a tab is one alt column, as a space
-/// an action table entry with no action
 const NO_ACTION: i32 = i32::MIN;
 
-/// Lark's parse table: actions[state * terminals + terminal] a state to shift to (>= 0) or !rule to reduce by (or
-/// NO_ACTION); goto[state * nonterminals + nonterminal]; each rule's (length, left-hand side).
+/// Lark's parse table: actions[state * terminals + terminal] a shift state (>= 0), !rule to reduce by, or NO_ACTION.
 pub struct Tables {
     pub terminals: usize,
     pub nonterminals: usize,
@@ -25,8 +21,7 @@ pub struct Tables {
     pub t_dedent: u16,
 }
 
-/// A parser state: the LR stacks (bottom first), bracket depth, indentation stack of (column, alt column), whether the
-/// line has tokens, the line's column and alt column so far, the column of the line's first backslash (0: none).
+/// A parser state: LR stacks (bottom first), bracket depth, indentation stack of (column, alt column), line status.
 #[derive(Clone)]
 pub struct Parse {
     pub stacks: Vec<Vec<u32>>,
@@ -51,8 +46,7 @@ impl Tables {
         Parse { stacks: vec![vec![self.start]], depth: 0, indents: vec![(0, 0)], line: false, col: 0, alt: 0, cont: 0 }
     }
 
-    /// The LR stack after terminal (reductions, then its shift), None on a syntax error. The stack is
-    /// stack[..base] + tail while reducing, so only the result is allocated.
+    /// The LR stack after terminal (reductions, then its shift), None on a syntax error.
     pub fn shift(&self, stack: &[u32], terminal: u16) -> Option<Vec<u32>> {
         let mut base = stack.len();
         let mut tail: Vec<u32> = Vec::new();
@@ -107,8 +101,7 @@ impl Tables {
                 let mut indents_changed = None;
                 let mut stacks_changed: Option<Vec<Vec<u32>>> = None;
                 if !state.line {
-                    // the line's first token (outside brackets: a bracket's lexeme sets line): tokenizer.c's
-                    // indentation check
+                    // the line's first token outside brackets: tokenizer.c's indentation check
                     let (col, alt) = if state.cont != 0 { (state.cont, state.cont) } else { (state.col, state.alt) };
                     let (top, top_alt) = *state.indents.last().unwrap();
                     if col == top {

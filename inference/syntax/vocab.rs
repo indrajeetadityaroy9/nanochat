@@ -1,7 +1,5 @@
-//! Masks: for each lexer state, every vocabulary token's events (lexemes emitted, newlines, line-start whitespace) and
-//! end state are computed once over a byte trie of the vocabulary, the subtrie after each first byte shared by the
-//! lexer states that byte takes to one state (Syntax::grouping, Syntax::subtree); a step then runs the parser once per
-//! distinct event sequence and maps the verdicts back to tokens.
+//! Masks: each token's lexer events and end state computed once per lexer state over the vocabulary's byte trie; a
+//! step runs the parser once per distinct event sequence and maps the verdicts back to tokens.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -10,8 +8,8 @@ use rustc_hash::FxHashMap;
 use crate::lexer::{Ev, Lex, Lexicon, Sub, Terms};
 use crate::parser::{Parse, Tables};
 
-/// A key of a token's verdict: its events, and the beginnings of the partial token it ends with. A token after which
-/// no character completes the pending UTF-8 sequence (no module continues) has no key.
+/// A key of a token's verdict: its events and its trailing partial token's beginnings. A token after which no
+/// character completes the pending UTF-8 sequence (no module continues) has no key.
 type Key = (Vec<Ev>, Terms);
 
 struct Node {
@@ -26,8 +24,8 @@ struct Subtree {
     index: Vec<u32>,
 }
 
-/// A lexer state's vocabulary: each token's group (NO_GROUP: lexically invalid), the event-prefix tree of the groups'
-/// event sequences (node 0 the empty sequence; a node's parent comes first), each group's node and partial-token terms.
+/// A lexer state's vocabulary: each token's group (NO_GROUP: lexically invalid), the groups' event-prefix tree (node 0
+/// empty; parents first), each group's node and partial-token terms.
 struct Grouping {
     group_of: Vec<u16>,
     parent: Vec<u32>,
@@ -56,8 +54,7 @@ fn by_index(keys: FxHashMap<Key, u32>) -> Vec<Key> {
     out
 }
 
-/// The Python 3.12 syntax of a tokenizer's vocabulary: the lexicon, the LALR tables, the vocabulary's byte trie, and
-/// the per-lexer-state token groupings, filled on first use and shared by every constraint (and thread).
+/// The Python 3.12 syntax of a tokenizer's vocabulary, its per-lexer-state groupings filled on first use; shared.
 pub struct Syntax {
     lexicon: Lexicon,
     tables: Tables,
@@ -134,8 +131,7 @@ impl Syntax {
         self.feed_all(&state.parse, &ev).is_some_and(|parse| self.tables.viable(&self.lexicon, &parse, terms))
     }
 
-    /// Whether the state (ends_line: its text ends with a line end) ends a module: the implied final line end, then
-    /// EOF (tokenizer.c: DEDENTs, ENDMARKER).
+    /// Whether the state ends a module: the implied final line end, then EOF (tokenizer.c: DEDENTs, ENDMARKER).
     pub fn complete(&self, state: &State, ends_line: bool) -> bool {
         let (lex, parse) = if ends_line {
             (state.lex.clone(), state.parse.clone())
@@ -155,9 +151,8 @@ impl Syntax {
         stacks.iter().any(|s| self.tables.accepts_end(s))
     }
 
-    /// The tokens below trie node root (a first byte's), read from the lexer state after that byte. Shared by every
-    /// lexer state that the byte takes to state: from most states, the first byte ends the partial token and the
-    /// lexers converge.
+    /// The tokens below a first byte's trie node, from the lexer state after it; shared by the lexer states the byte
+    /// takes to one state.
     fn subtree(&self, root: u32, state: &Lex) -> Arc<Subtree> {
         memoized(&self.subtrees, &(root, state.clone()), || {
             let mut sub = Subtree { ids: Vec::new(), keys: Vec::new(), index: Vec::new() };

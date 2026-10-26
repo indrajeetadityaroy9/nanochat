@@ -1,16 +1,7 @@
 """
-Post-generation checks of a program and the resampling search that uses them (the "filtered" generation mode,
-eval/code_eval.py: filtered pass@1, one candidate selected by these checks among at most ATTEMPTS samples, Codex's
-"filtered pass@k"):
-- python_diagnostics: Python 3 syntax errors (ast.parse), else the errors of a static type checker (basedpyright,
-  pyproject.toml) limited to rules whose findings are definite runtime failures or contradict an annotation;
-- solution_diagnostics: the certain failures an EvalPlus solution hides (sanitize keeps a parseable span): the
-  generated text's syntax error, an entry function without a returned value;
-- cpp_diagnostics: g++ -std=c++17 -fsyntax-only's failure (its error lines), the MultiPL-E judge's compiler and
-  standard (evaluation/src/eval_cpp.py) without code generation;
-- examples_pass: the prompt's own examples, run under EvalPlus's reliability_guard;
-- search: per task a greedy candidate, then seeded samples, until one has no diagnostics and passes its prompt's
-  examples (Codex, arXiv 2107.03374 §3.5; AlphaCode, arXiv 2203.07814 §4.5).
+Post-generation checks (syntax, basedpyright, g++ -fsyntax-only, the prompt's own examples) and the resampling search
+of the filtered mode: a greedy candidate, then seeded samples until one passes (Codex, arXiv 2107.03374 §3.5;
+AlphaCode, arXiv 2203.07814 §4.5).
 """
 
 import ast
@@ -34,28 +25,19 @@ from inference.decoder import NativeDecoder, Request
 from inference.syntax_constraint import syntax_error
 from metrics import latency
 
-# basedpyright rules (its configuration reference, config-files) whose errors on known types are runtime failures or
-# annotation contradictions: undefined variables (NameError), attribute accesses (AttributeError), call expressions
-# (arity and keyword TypeErrors), return types against the declared annotation. Every other rule is off
-# (typeCheckingMode "off"), argument types (reportArgumentType) included.
+# basedpyright rules whose errors are runtime failures (NameError, AttributeError, call TypeErrors) or contradict a
+# return annotation; every other rule is off (typeCheckingMode "off")
 PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue", "reportReturnType")
-# the MultiPL-E judge's per-step timeout (safe_subprocess/__init__.py:33, eval_cpp.py: 15 s compile, 15 s run)
+# MultiPL-E judge's per-step timeout (safe_subprocess/__init__.py:33, eval_cpp.py)
 CPP_TIMEOUT = 15
-# HumanEval's execution timeout (human_eval/evaluation.py:43 evaluate_functional_correctness timeout=3.0)
+# HumanEval's execution timeout (human_eval/evaluation.py:43)
 EXAMPLES_TIMEOUT = 3
-# temperature of the candidates after the greedy one: Codex's for samples selected by unit tests (arXiv 2107.03374
-# Fig. 1, §3.3: T = 0.8 the pass@100 optimum)
+# Codex's temperature for samples selected by unit tests (arXiv 2107.03374 §3.3, Fig. 1: the pass@100 optimum)
 TEMPERATURE = 0.8
-# candidates per task, the greedy one included: pass@10, the intermediate budget Codex (Table 1) and EvalPlus
-# (arXiv 2305.01210 Table 3) report
+# Candidates per task, the greedy one included: pass@10 (Codex Table 1; EvalPlus, arXiv 2305.01210 Table 3)
 ATTEMPTS = 10
-# examples_pass's child process: reads its stdin JSON (program and source/want pairs), takes EvalPlus's reliability_guard
-# as EvalPlus's test runs do (evalplus/eval/__init__.py unsafe_execute: destructive os, shutil and subprocess functions
-# disabled, its memory limit), runs the program as module "program", then each example in a copy of its namespace plus
-# the modules the example names but the program does not bind (MBPP+ asserts call math.isclose, imported by MBPP's
-# test_imports); a failing example raises (exit status 1); EXAMPLES_DONE, printed after the last example, marks a run
-# not ended early (exit(), sys.exit()). By value, not doctest's output text: an example with a want passes iff its value
-# equals the want's; one without, iff an expression's value is None or True, a statement (assert) iff it runs.
+# examples_pass's child: the program under evalplus.eval.utils reliability_guard, applied as EvalPlus's test runs do
+# (evalplus/eval/__init__.py unsafe_execute); examples checked by value; EXAMPLES_DONE marks a run not ended by exit()
 RUN_EXAMPLES = """
 import ast, builtins, importlib, importlib.util, json, sys
 from evalplus.eval import query_maximum_memory_bytes
@@ -81,10 +63,8 @@ print("EXAMPLES_DONE")
 
 
 def python_diagnostics(programs: list[str]) -> list[list[str]]:
-    """Each program's syntax error ("line:col: SyntaxError: message") or, if it parses, basedpyright's PYRIGHT_RULES
-    errors ("line:col: rule: message") against this interpreter's environment (its installed packages resolve). The
-    programs that parse are checked by one basedpyright process (its start dominates a check), each as program.py in a
-    directory of its own, so no program imports another."""
+    """Each program's syntax error or, if it parses, basedpyright's PYRIGHT_RULES errors ("line:col: rule: message").
+    One basedpyright process checks all, each program in a directory of its own (no program imports another)."""
     out, paths = [], {}
     with tempfile.TemporaryDirectory() as tmp:
         for i, program in enumerate(programs):
@@ -109,10 +89,8 @@ def python_diagnostics(programs: list[str]) -> list[list[str]]:
 
 
 def solution_diagnostics(source: str, solution: str, entry_point: str) -> list[str]:
-    """The certain failures of an EvalPlus solution (sanitize of source, prompt + completion, to the entry function and
-    its dependencies) that its own checks miss, sanitize having kept a parseable span: source's syntax error, and the
-    entry function (its last top-level definition) missing or without a `return <value>` in its own body (nested
-    functions and classes excluded): its every call returns None; a solution that does not parse, its syntax error."""
+    """Certain failures of an EvalPlus solution its own checks miss: the source's syntax error, and an entry function
+    missing or without `return <value>` in its own body (every call returns None)."""
     found = syntax_error(source)
     unparsed = syntax_error(solution)
     if unparsed:
@@ -132,9 +110,7 @@ def solution_diagnostics(source: str, solution: str, entry_point: str) -> list[s
 
 
 def cpp_diagnostics(program: str) -> list[str]:
-    """`g++ -std=c++17 -fsyntax-only`'s failure on the program: [] if it compiles, else its error lines
-    ("program.cpp:line:col: error: ..." or "... fatal error: ...") or, without one, its last stderr line; ["timeout"]
-    past CPP_TIMEOUT."""
+    """`g++ -std=c++17 -fsyntax-only`'s error lines on the program ([] if it compiles; ["timeout"] past CPP_TIMEOUT)."""
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, "program.cpp").write_text(program, encoding="utf-8")
         try:
@@ -149,13 +125,8 @@ def cpp_diagnostics(program: str) -> list[str]:
 
 
 def examples(prompt: str) -> list[tuple[str, str]]:
-    """The prompt's own examples as (source, want) pairs, read from its string literals (docstrings): their doctest
-    `>>>` examples (HumanEval) and their `assert` lines that are Python (EvalPlus MBPP+ prompts: the task description
-    and one assert in a docstring; HumanEval/149 writes `assert f(x) => y` prose). A literal that doctest rejects
-    (inconsistent indentation of an example, doctest.py _check_prefix) contributes no `>>>` examples, as
-    `python -m doctest` would run none of it. A prompt is a program's beginning, possibly mid-statement: the literals
-    are those tokenize yields before it stops (TokenError at an open bracket or string, IndentationError at a partial
-    dedent)."""
+    """The prompt's own examples as (source, want) pairs from its string literals: doctest `>>>` examples and Python
+    `assert` lines. Tokenizing stops where the prompt ends mid-statement; a literal doctest rejects adds none."""
     found = []
     with contextlib.suppress(tokenize.TokenError, SyntaxError):
         for token in tokenize.generate_tokens(io.StringIO(prompt).readline):
@@ -169,9 +140,8 @@ def examples(prompt: str) -> list[tuple[str, str]]:
 
 
 def examples_pass(prompt: str, program: str) -> bool:
-    """Whether the Python program passes the prompt's examples (RUN_EXAMPLES: by value, to the end, under EvalPlus's
-    reliability_guard), run in a fresh isolated interpreter in an empty directory within EXAMPLES_TIMEOUT. True without
-    examples."""
+    """Whether the program passes the prompt's examples (RUN_EXAMPLES) in a fresh isolated interpreter within
+    EXAMPLES_TIMEOUT; True without examples."""
     found = examples(prompt)
     if not found:
         return True
@@ -187,10 +157,8 @@ def examples_pass(prompt: str, program: str) -> bool:
 
 def verdicts(checks: list[tuple[str, str, list[str]]], *,
              language: Literal["python", "cpp"]) -> list[tuple[list[str], bool]]:
-    """Each (prompt, program, diagnostics found already)'s (all its diagnostics, whether the program passes the prompt's
-    examples), the examples run only without diagnostics (C++ prompts have none here): search's check of its
-    candidates. Python's diagnostics come from one python_diagnostics call, C++'s and the examples from a thread pool
-    (each a child process)."""
+    """Each (prompt, program, known diagnostics)'s (all diagnostics, whether the prompt's examples pass); examples run
+    only without diagnostics, and not for C++."""
     programs = [program for _, program, _ in checks]
     with ThreadPoolExecutor(os.cpu_count()) as pool:
         found = python_diagnostics(programs) if language == "python" else list(pool.map(cpp_diagnostics, programs))
@@ -202,8 +170,7 @@ def verdicts(checks: list[tuple[str, str, list[str]]], *,
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Candidate:
-    """A generated candidate: a task's candidates[0] is greedy, candidates[a] for a > 0 a sample with seed a at
-    TEMPERATURE."""
+    """A task's candidates[0] is greedy, candidates[a] for a > 0 a sample with seed a at TEMPERATURE."""
     ids: list[int]
     diagnostics: list[str]
     examples: bool  # the prompt's examples pass (checked only without diagnostics)
@@ -216,12 +183,8 @@ class Candidate:
 def search(generator: NativeDecoder, request: Callable[[int], Request],
            check: Callable[[int, list[int]], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
            count: int) -> tuple[list[list[Candidate]], dict]:
-    """The candidates of tasks 0..count-1 in attempt order, and metrics.latency of the generator's requests over every
-    round (duration: the rounds' decoding): request(i) is task i's greedy request (a fresh constraint each call),
-    check(i, ids) the (prompt, program, diagnostics) that verdicts checks for generated ids. Each round decodes every
-    task without an accepted candidate yet (attempt a: request(i) at temperature 0 for a = 0, TEMPERATURE with seed a
-    after), at most ATTEMPTS rounds, each candidate's check built by a thread as it completes (while the generator runs
-    the round's others), then checks the round's candidates at once (verdicts)."""
+    """Each task's candidates in attempt order and metrics.latency over every round. Each round decodes the tasks
+    without an accepted candidate (at most ATTEMPTS rounds); request(i) must build a fresh constraint per call."""
     tried = [[] for _ in range(count)]
     pending = list(range(count))
     stamps, duration = [], 0.0

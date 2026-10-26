@@ -1,18 +1,5 @@
-"""
-A checkpoint as a Hugging Face model directory, which transformers and vLLM (its Transformers backend) load by
-trust_remote_code through inference/modeling_nanochat.py:
-- model.safetensors: the training state dict's names under "model." (lm_head.weight as is); matrices and tables bf16,
-  as the training ops round them; modeling_nanochat's _keep_in_fp32_modules_strict (the per-dim and per-layer vectors
-  and the value-embedding gates) fp32, as they read them.
-- config.json: model_type "nanochat", architectures NanochatForCausalLM, auto_map to modeling_nanochat.py (copied
-  beside it); model.modeling.layer_windows as Gemma 3's layer_types + sliding_window (keys attended including the
-  query's own: FA4's window_left + 1); model.modeling.has_ve's layers; the MLP width 4C (model.modeling); eps
-  FLT_EPSILON (model.modeling.norm).
-- generation_config.json: BOS ends a generation (a document's and a FIM middle's end in training).
-- tokenizer.json + tokenizer_config.json: transformers' TikTokenConverter of the tiktoken ranks and split pattern
-  (ByteLevel BPE, the pattern as an Oniguruma Split; its possessive quantifiers are Oniguruma syntax), the special
-  tokens after the mergeable ones in corpus.tokenizer.SPECIAL_TOKENS order (the converter's order: the same ids), BOS
-  prepended to an encoded text (TemplateProcessing).
+"""A checkpoint as a Hugging Face model directory (weights, config, generation config, tokenizer), which transformers
+and vLLM load by trust_remote_code through inference/modeling_nanochat.py.
 
     python -m inference.export_hf <checkpoint.pt> <out dir> [<tokenizer dir>]   (default corpus.tokenizer.TOKENIZER)
 """

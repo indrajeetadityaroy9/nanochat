@@ -1,8 +1,6 @@
-"""Native libraries (CUDA kernels, the Rust crates' Python modules), built on first use, cached under NATIVE; pointer
-and stream, the ctypes arguments of model/kernels' entry points. model/kernels follows HazyResearch/ThunderKittens'
-layout: shared header-only code (common.cuh, qk_row.cuh), one self-contained file per kernel with its C entry points;
-one nvcc command builds every kernel. torch is imported by the CUDA paths alone, so the corpus's spawned workers, which
-load only the crates, import none."""
+"""Native libraries (CUDA kernels, the Rust crates' Python modules), built on first use and cached under NATIVE;
+pointer and stream are the kernels' ctypes arguments. torch is imported by the CUDA paths alone (the corpus workers
+load only the crates)."""
 
 import ctypes
 import functools
@@ -27,8 +25,8 @@ CORPUS_CRATE = Path(__file__).resolve().parent / "corpus" / "crate"
 
 
 def native_library(name: str, command: list[str], sources: list[Path], build: Callable[[Path], None]) -> Path:
-    """NATIVE/<name>-<sha256(command, sources)>.so, built once per version of its build command and sources by
-    build(tmp) and renamed atomically, so concurrent first builds never share a file. The toolchain is the image's."""
+    """NATIVE/<name>-<sha256(command, sources)>.so, built by build(tmp) and renamed atomically, so concurrent first
+    builds never share a file."""
     digest = hashlib.sha256(" ".join(command).encode())
     for source in sources:
         digest.update(source.read_bytes())
@@ -54,9 +52,8 @@ def stream() -> ctypes.c_void_p:
 
 @functools.cache
 def cuda_library(name: str) -> ctypes.CDLL:
-    """model/kernels/<name>.cu built by nvcc for the current device's architecture-specific target (sm_90a: wgmma,
-    setmaxnreg; CUDA C++ Programming Guide, "Feature Availability") with HEAD_DIM (model/config.py), keyed by the
-    command, the file and every model/kernels header, loaded by ctypes once per process."""
+    """model/kernels/<name>.cu built by nvcc for the device's arch-specific target (sm_90a: wgmma, setmaxnreg) with
+    HEAD_DIM, keyed by the command, the file and every header; loaded once per process."""
     import torch
 
     major, minor = torch.cuda.get_device_capability()
@@ -73,9 +70,8 @@ def cuda_library(name: str) -> ctypes.CDLL:
 
 @functools.cache
 def crate_module(crate: Path) -> ModuleType:
-    """The Python module nanochat_<crate.name> of the Rust crate in directory crate (pyo3), built by cargo in its target
-    directory NATIVE/<crate.name>-target, keyed by the cargo command and the crate's files, imported once per
-    process."""
+    """Module nanochat_<crate.name> of the pyo3 crate in crate, built by cargo into NATIVE/<crate.name>-target, keyed by
+    the command and the crate's files; imported once per process."""
     name = f"nanochat_{crate.name}"
     target = NATIVE / f"{crate.name}-target"
     command = ["cargo", "build", "--release", "--locked", "--manifest-path", str(crate / "Cargo.toml"),
@@ -94,6 +90,5 @@ def crate_module(crate: Path) -> ModuleType:
 
 
 def corpus_crate() -> ModuleType:
-    """The corpus's Rust crate (corpus/crate): train (corpus/train_tokenizer.py), topological_sort
-    (corpus/sources.py), pack (corpus/pack.py)."""
+    """The corpus's Rust crate (corpus/crate)."""
     return crate_module(CORPUS_CRATE)

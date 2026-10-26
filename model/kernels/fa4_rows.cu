@@ -1,21 +1,13 @@
 /*
- * FA4's backward row statistics at its padded rows (model/ops/flash_attn.py): FA4's backward preprocess
- * (flash_attn/cute/flash_bwd_preprocess.py) with dpsum = rowsum(dO O) per (row, head) precomputed by the o_proj dX
- * GEMM's epilogue (model/ops/linear.py dx_dpsum):
- *   dpsum_pad[h, p] = dpsum[r, h], lse_log2[h, p] = lse[h, r] log2(e) (0 where lse = -inf)
- * at FA4's padded row p = start_b + r - cu[b] of row r in segment b, start_b = (cu[b] + b m) / m * m
- * (seqlen_info.py offset_batch, padded=True), m FA4's backward m-block. Each segment's rows past its length up to a
- * multiple of m, which the backward's last m-block loads, get dpsum 0 and lse_log2 +inf (the preprocess's lse = +inf
- * there), so their P is 0; the rows between start_b + round_up(len_b, m) and start_{b+1} are never read.
- *
- * Layout: dpsum (rows, H) fp32 (the epilogue's per-(row, 128-column tile) partials), lse (H, lse_stride) fp32 (FA4's
- * forward lse over the micro-batch's rows), dpsum_pad and lse_log2 (H, padded) fp32, cu (segments + 1) int32. One
- * thread per padded row: the segment from a binary search over start_b, then H loads and stores.
+ * FA4's backward row statistics at its padded rows, replacing flash_bwd_preprocess.py with dpsum from the o_proj dX
+ * epilogue: dpsum_pad[h, p] = dpsum[r, h], lse_log2[h, p] = lse[h, r] log2(e) (0 where lse = -inf), p = start_b + r -
+ * cu[b], start_b = (cu[b] + b m) / m * m (seqlen_info.py offset_batch, padded=True); rows past a segment's length up
+ * to a multiple of m get dpsum 0 and lse_log2 +inf (P = 0).
  */
 #include "common.cuh"
 
 constexpr int THREADS = 256;
-/* log2(e) rounded to fp32: the preprocess's LOG2_E = math.log2(math.e) as a Float32 constant */
+/* The preprocess's LOG2_E = math.log2(math.e) as a Float32 constant */
 constexpr float LOG2_E = 1.4426950408889634f;
 
 static __device__ __forceinline__ long long start(const int *cu, int b, int m) {

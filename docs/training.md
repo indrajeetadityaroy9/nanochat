@@ -31,9 +31,9 @@ repository stage's first step the loop sets the 32K context and recompiles the m
 
 `train/stages.py` `stage_batches`: a stage's micro-batches in the run's order, each corpus's packed rows permuted once
 by the seed and drawn by the stage's weights at the rows the run draws (`mixture.weights`); a run that would draw more
-rows of a corpus than its packs hold raises. `max_tokens_per_param`: by bisection, the most whole micro-batches of
-tokens per non-embedding parameter at which no stage overdraws (not monotone, since the batch steps up with the count:
-a larger fitting count may exist). A run's `tokens_per_param` defaults to it, so no stage reads a document twice.
+rows of a corpus than its packs hold raises. `max_tokens_per_param`: the tokens per non-embedding parameter of the most
+whole micro-batches bisection finds at which no stage overdraws, not necessarily the largest (not monotone, since the
+batch steps up with the count). A run's `tokens_per_param` defaults to it, so no stage reads a document twice.
 
 | | The base model | Reference code models |
 |---|---|---|
@@ -161,10 +161,10 @@ includes batch growth, as the base run's does). The ×8 arm at d8 at 200 is wher
 - the vertices, multipliers of the law's lr the runs recorded, re-based onto the current law's lr (`base_plan`), whose
   batch and steps must equal the recorded runs' (else it raises);
 - r = vertex(d8 at 200)/vertex(d8 at 5), against the SDE rule's √(m_B/m_D) and Step-Law's m_D^0.307, each divided by
-  the law's own fall between the two plans;
+  the law's own fall between the two plans; m_B,d8 and m_D,d8 are the batch and token ratios of d8 at 200 over d8 at 5;
 - the net horizon exponent h = ln(r/√m_B,d8)/ln m_D,d8 (d8's trend net of its batch growth by the square-root rule,
   arXiv 2205.10287 Def. 5.2), and the base multiplier vertex(d24 at 5)·m_D,base^h·√m_B,base, m_D,base and m_B,base
-  the base plan's tokens and batch over d24 at 5's.
+  the token and batch ratios of the base plan over d24 at 5.
 
 The trend is assumed width-independent: arXiv 2409.19913 §4 fits its horizon exponent on models of 760M parameters
 and more and observes a larger one at 50M and 125M (d8 has 14.7M non-embedding parameters). The net exponent is
@@ -223,11 +223,12 @@ tokens_per_param=0.5 tokenizer=sa-bpe`. The one experiment in `conf/` is `pretra
 `generate` "benchmarks", the `Records` callback without an analysis).
 
 **Names.** `run_name`: the fields that differ from `RunConfig()`, sorted, `k=v` joined by `,` (`defaults` if none), so
-a run two experiments share is trained once. The base model's run is `learning_rate_scale=2.7970368997577726`, a d16
+a run two experiments share is trained once. The base model's run (`experiment=pretrain`) is
+`generate=benchmarks,learning_rate_scale=2.7970368997577726,num_checkpoints=10`, a d16
 seed-1 run `learning_rate_scale=2.7970368997577726,num_hidden_layers=16,seed=1`. Its directory
 `artifacts/runs/<run_name>/` holds `.hydra/` (the composed config), `metrics.jsonl` (the run log; each line carries
 `run_name`, `attempt`, `kind`, `time`), `checkpoint-<step>.pt`, `eval-<step>.json` and `run.log`. The run log's
-records (`train/loop.py`; field definitions in the `metrics.py` docstring):
+records (`train/loop.py`; field definitions in `docs/evaluation.md` §10):
 
 | `kind` | When | Content |
 |---|---|---|
@@ -337,8 +338,10 @@ loader's Weyl sequence (`mixture.mixture_rows`; `docs/corpus.md` §9). The order
 **Determinism.** Gradients are not bitwise across processes (FA4's and the embedding backwards' atomics;
 `docs/architecture.md` §4). Kernel choices do not depend on timing: QuACK runs fixed tile configurations
 (`docs/architecture.md` §3), and Inductor's coordinate-descent tuning, which picks configurations by timing, stays at
-its default, off (`scripts/container.sh`). Python's garbage collector, whose scans are slow, is frozen and disabled
-after the first step and collects only after a checkpoint save (`train/loop.py`; karpathy/nanochat 07c4dd4).
+PyTorch's default, off (`torch._inductor.config.coordinate_descent_tuning`, on only with
+`TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`, which neither the image nor `scripts/container.sh` sets). Python's
+garbage collector, whose scans are slow, is frozen and disabled after the first step and collects only after a
+checkpoint save (`train/loop.py`; karpathy/nanochat 07c4dd4).
 
 ## 9. Reproducing the run
 
@@ -376,6 +379,91 @@ and MBPP+ 58.7 to 61.9 base to instruct (arXiv 2411.04905 Tables 6, 7; not contr
 completion, not chat (no chat tokens, `corpus/tokenizer.py` `SPECIAL_TOKENS`), the loss on the solution and BOS alone;
 candidate data `OpenCoder-LLM/opc-sft-stage2` and `opc-annealing-corpus`; preconditions: decontamination by entry
 point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/pack.py`'s format in the mix.
+
+## 11. Implementation reference
+
+**`run.py`.** The app process plans on the meta device (`meta_model`) and never initializes CUDA. Its top level
+imports no torch, model, training or evaluation code because the workers of `eval/code_eval.py`'s sanitize pool (a
+forkserver) import it as the phases' main module. `register` runs only in the app's process: `ablations/peak_lr.py`
+and `ablations/records.py` import the file again as `run`, whose registrations would fail. `run_name` omits default
+fields, so a field added with a default renames no run, and a changed default would keep a run's name under a new
+meaning; `same_config` closes that gap. `final_logit_softcapping` None disables the cap. `job`: a training phase that
+fails without a `failure` record raises `ChildProcessError`; one that diverged ends the job. `evaluation` silences
+`ast.parse`'s `SyntaxWarning`s on generated code (`eval/verify.py`, `inference/`). `conf/run.yaml` disables Hydra's
+job logging, whose default file `${hydra.job.name}.log` would be `RUNS/<run_name>/run.log`, the phases' log.
+
+**`ablations/peak_lr.py`.** `fit` returns `{runs, curvature, vertex, extend}`; the parabola through the lowest-code run
+and its neighbours has positive curvature by construction; a diverged lower neighbour raises (extend the grid down by
+hand). `analysis` also reports the unnetted horizon exponent ln r / ln m_D,d8. Batches and token counts are the runs'
+recorded plans (it raises unless they equal the current plans'); the law's lrs are the current `base_plan`'s, the
+recorded ones only re-base the vertices. The base model's plan is `plan_of(RunConfig())`, whose
+`learning_rate_scale` 1.0 is the law's lr. The records' `setting` holds `depth`, `tokens_per_param`, `seeds`.
+
+**`train/loop.py`.** A step composes `optim.py` (optimizers, weight decay, clip), `schedule.py` (stage, lr),
+`stages.py` (micro-batches in data order) and `model/ops/cross_entropy.py` `step_shares` (micro-batch loss weights).
+`pending` holds the last step's `log` arguments (step, lr, model FLOPs, host values, layout, start and end events).
+
+**`train/diagnostics.py`.** Groups are named `adamw[i]`, `muon[i]` in step order. The logsumexp statistics come from
+`lm_loss`'s per-position outputs (`model/ops/cross_entropy.py`), which require grad. AdamW's update RMS is computed
+from its state as lr·m̂/(√v̂ + eps) (`torch/optim/adamw.py`), Muon's from `Muon.update_square`; `end_step` runs after
+the optimizers stepped but before the schedulers, so each group's lr is still the step's. Host values (two pinned
+fp64 buffers, alternating by step): 5 scalars, then each group's update and parameter squared norms (measured steps
+only), then each row's loss sum and valid count.
+
+**`train/optim.py`.** `Muon` follows `torch/optim/_muon.py` `_single_tensor_muon` (momentum lerp, Nesterov, bf16
+Newton–Schulz, decoupled weight decay, `_adjust_lr`, imported privately); the batched `bmm`/`baddbmm` chain may round
+differently from per-matrix `mm`/`addmm`. State `second_momentum_buffer` is one fp32 per row (output neuron in
+`nn.Linear`'s (out, in) layout). The rescale to O's Frobenius norm (zichongli5/NorMuon `normuon.py` `normuon_update`)
+lets `match_rms_adamw` scale the update as Muon's, the target of Alg. 1 line 10's rescale to RMS 0.2·lr.
+`update_square` excludes weight decay. `update`'s in-place gradients are those the ops accumulate into
+(`model/modeling.py` `accumulated_weights`); it never synchronizes the host.
+
+**`train/stages.py`.** `corpus/pack.py` packs each stage's documents apart, so no document is read twice;
+`PretrainingBatches` stops at an exhausted corpus, hence the overdraw check.
+
+**`ablations/records.py`.** The peak memory is the maximum over the `stage` record (the file-level stage's peak) and
+the `end` record (the last stage's). Each run's log is read once.
+
+**`paths.py`.** `artifacts/` is gitignored; a missing directory fails at first use (Hydra creates
+`RUNS/<run_name>` before its job starts). `CORPUS` holds the corpus pipeline's stages (`corpus/__init__.py`), filled
+by `python -m corpus.publish pull`; `NATIVE` sits beside the image's compiler caches in `artifacts/cache`; `results/`
+is tracked (`results/.gitkeep`).
+
+**Scripts.** `setup.sh` (Lambda's Ubuntu image): the CDI spec serves `container.sh`'s `--device nvidia.com/gpu=all`;
+the docker group applies at the next login, so `sg docker` runs the script's docker commands; idempotent through the
+build cache and `mkdir(exist_ok=True)`. `container.sh`: `--ipc=host --ulimit memlock=-1 --ulimit stack=67108864` are
+NGC's documented flags, the stack hard limit unlimited (`:-1`) for `evalplus/eval/utils.py`'s `setrlimit`; the Hub
+token is `artifacts/cache/huggingface/token` (`HF_HOME`), written by `scripts/container.sh hf auth login`.
+`release.sh` needs a write token; `<run_name>` is the directory name under `artifacts/runs`.
+
+**`docker/Dockerfile`.**
+- NGC supplies torch, Triton, the CUDA libraries, nvcc (`native.py`) and numpy (the image's numba pins it below 2.5).
+  The venv (`--system-site-packages`) gives every locked package the lock's version over the image's copy. Digests
+  are each tag as resolved when pinned.
+- The image's regular `flash_attn` package (FA2 with an FA4 beta inside) is uninstalled: it would hide
+  `flash_attn.cute`. `UV_COMPILE_BYTECODE`: the container's user cannot write bytecode into `/opt/venv`;
+  `UV_LINK_MODE=copy`: the uv cache is a separate build mount, which hard links cannot cross. The dependency layer
+  rebuilds only when `pyproject.toml` or `uv.lock` change.
+- Rust: rustup's minimal profile; crates fetched on first build go to `CARGO_HOME` in `artifacts/cache`, since the
+  container's user cannot write `/usr/local`.
+- openai/human-eval-infilling: `read_problems` reads `<package>/../data`, outside the package, so the checkout goes on
+  `sys.path` through a `.pth` file (its `setup.py` declares a console script uv rejects). Its README's "enable
+  execution" step uncomments `execution.py:84` `exec(check_program, exec_globals)`; `data.py:13` names
+  `HumanEval-RandomSpan.jsonl.gz`, the repository ships `HumanEval-RandomSpanInfilling.jsonl.gz` (symlinked).
+  Dependencies (fire, tqdm, numpy) are in the image.
+- nuprl/MultiPL-E: `evaluation/src/main.py` (`eval_cpp.py`: `g++ -std=c++17`, the image's g++) and `pass_k.py`;
+  dependencies (tqdm, numpy) in the image.
+- `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1` (NGC's) would run every fp32 cuBLAS matmul in TF32 (10-bit mantissa).
+  `OMP_NUM_THREADS=1`: pipeline and evaluation parallelize by process (pools of `os.cpu_count()` workers, rayon).
+  `HF_XET_HIGH_PERFORMANCE` saturates network and CPUs on Hub pulls. Inductor, Triton, quack, FlashAttention-4 CuTe
+  and cargo caches and `XDG_CACHE_HOME` (evalplus's data releases and ground truth via appdirs; TokEval's grammars)
+  live in `artifacts/cache`, reused by every later container.
+
+**`pyproject.toml`.** `lark[interegular]`: `Lark(strict=True)` checks terminal collisions
+(`inference/syntax_constraint.py`). `tokenizer-intrinsic-evals` is TokEval (`metrics.py` `tokeval`); its AST metrics
+parse with `tree-sitter-language-pack==1.22.1`, above its declared <1, as its reference numbers on the corpus were
+computed; 1.x downloads grammar libraries on first use into `XDG_CACHE_HOME`. Excluded: torch and numpy (the image's)
+and evalplus's model-provider clients, which only its code generation uses.
 
 ## References
 

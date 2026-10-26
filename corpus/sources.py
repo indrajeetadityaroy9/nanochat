@@ -1,17 +1,5 @@
 """
-The corpus's sources and its file paths under paths.CORPUS. A source: a Hub dataset, its files per
-language (a Linguist name for code), its category (schema.py) and the column holding a document's text. SOURCES is in
-deduplication's keep-first order (curate.py).
-- Stack-Edu (arXiv 2502.02737): The Stack v2's educational files, by Software Heritage blob id (prepare.fetch).
-- UltraData-Stack-v3-L2: The Stack v3's files that UltraData's L2 classifiers select.
-- UltraData-Code (arXiv 2610.23960): L2, selected source files; L3, exercises written from L2's algorithmic files.
-- Nemotron-Pretraining-Code-v2 (arXiv 2512.20848 §2.2.2): every Python file of NVIDIA's GitHub corpus rewritten by
-  Qwen3-32B, and Python files transpiled into C++.
-- CodeXGLUE code-to-text (arXiv 2102.04664): CodeSearchNet's functions with their docstrings; its train split only.
-- UltraData-Math L3 (arXiv 2602.09003): synthesized mathematics in four formats.
-- Codeforces-CoTs: DeepSeek-R1's reasoning traces and Python or C++ solutions to Codeforces problems.
-- issues-kaggle-notebooks: StarCoder2's Kaggle notebooks (arXiv 2402.19173 §2.4.2) as text.
-- ClimbMix: English web text.
+The corpus's sources (SOURCES, in deduplication's keep-first order) and its file paths under paths.CORPUS.
 """
 
 from collections.abc import Iterable
@@ -36,7 +24,7 @@ from corpus.schema import (
 from native import corpus_crate
 from paths import CORPUS
 
-# The line comment of each repository-file language: Python Language Reference §2.1.3 "Comments", C++23 [lex.comment]
+# Python Language Reference §2.1.3, C++23 [lex.comment]
 COMMENTS = {"Python": "#", "C++": "//"}
 
 
@@ -95,34 +83,32 @@ SOURCES = {
 
 
 def raw_dir(source: str) -> Path:
-    """The source's fetched Hub files at their Hub paths (prepare.fetch)."""
+    """The source's fetched Hub files at their Hub paths."""
     return CORPUS / "raw" / source
 
 
 def standardized_path(source: str, k: int) -> Path:
-    """The source's fetched Hub file k (prepare.extent's order) in its category's schema (prepare.standardize)."""
+    """The source's fetched Hub file k (prepare.extent's order), standardized."""
     return CORPUS / "standardized" / source / f"{k}.parquet"
 
 
 def checked_path(source: str, k: int) -> Path:
-    """A Python source's standardized file k with every file parsing as Python 3, repaired where it did not
-    (curate.check)."""
+    """A Python source's standardized file k after the Python 3 check (curate.check)."""
     return CORPUS / "checked" / source / f"{k}.parquet"
 
 
 def curated_dir(source: str, split: str) -> Path:
-    """The source's curated shards of a split, <k>.parquet (curate.py)."""
+    """The source's curated shards of a split, <k>.parquet."""
     return CORPUS / "curated" / source / split
 
 
 def curated_shards(source: str, split: str) -> list[Path]:
-    """The source's curated shards of a split in the order of their number k."""
     return sorted(curated_dir(source, split).iterdir(), key=lambda path: int(path.stem))
 
 
 def text_bytes(metadata: pq.FileMetaData, column: str) -> int:
-    """Text bytes of a Parquet file's string column, estimated from its footer: the column's uncompressed size less
-    each value's 4-byte length prefix (page headers, and dictionary and level data where present, still counted)."""
+    """Text bytes of a Parquet string column estimated from its footer: uncompressed size less 4-byte length prefixes
+    (page headers, dictionary and level data still counted)."""
     index = metadata.schema.to_arrow_schema().get_field_index(column)
     return sum(metadata.row_group(g).column(index).total_uncompressed_size
                for g in range(metadata.num_row_groups)) - 4 * metadata.num_rows
@@ -134,10 +120,8 @@ def footer_rows(paths: Iterable[Path]) -> int:
 
 
 def texts(source: str, table: pa.Table) -> list[str]:
-    """Each curated row's text: its content; a repository file's is preceded by a line comment with its path
-    (DeepSeek-Coder, arXiv 2401.14196 §2.2) and ends with a line end (C++23 [lex.phases] phase 2; Python Language
-    Reference §2.1.2). A path's line breaks are escaped (\\r, \\n) so the comment stays one line; a C++ file ending in
-    a backslash gets an empty line, so phase 2 does not splice the next file's comment onto it."""
+    """Each curated row's text; a repository file's after a line comment with its path (arXiv 2401.14196 §2.2), ending
+    with a line end, a C++ file ending in a backslash with one more (C++23 [lex.phases] phase 2)."""
     contents = table["content"].to_pylist()
     spec = SOURCES[source]
     if spec.category != REPOSITORY_FILE:
@@ -151,10 +135,8 @@ def texts(source: str, table: pa.Table) -> list[str]:
 
 def repository_samples(table: pa.Table, keys: tuple[str, ...], language: str, *, one_per_path: bool
                        ) -> tuple[pa.Table, list[int], list[list[int]]]:
-    """Repository files (repo_name, relative_path, content; content large_string, whose 64-bit offsets hold a
-    partition beyond 2 GiB) sorted by lowercased repository, then `keys`, so a repository is a run of rows; with
-    one_per_path, only the first row of each (repository, path). Returns the table in one chunk, each repository's end
-    row, and its import-connected samples, each its rows in dependency order (the crate's topological_sort)."""
+    """Repository files sorted by lowercased repository, then `keys` (with one_per_path, the first row per path).
+    Returns the table in one chunk, each repository's end row and its import-connected samples (topological_sort)."""
     table = table.append_column("repository", pc.utf8_lower(table["repo_name"]))
     table = table.sort_by([(key, "ascending") for key in ("repository", *keys)]).combine_chunks()
     if one_per_path:
@@ -168,5 +150,5 @@ def repository_samples(table: pa.Table, keys: tuple[str, ...], language: str, *,
 
 
 def sample_starts(samples: np.ndarray) -> list[int]:
-    """The first row of each sample, given each row's sample number (a sample's rows consecutive)."""
+    """The first row of each sample, given each row's sample number."""
     return np.flatnonzero(np.diff(samples, prepend=-1)).tolist()

@@ -1,14 +1,7 @@
 """
-Per-step training diagnostics beyond the loss and gradient norm (train/loop.py), computed on the device and read with
-the step's values one step late, as the loss is (no host synchronization):
-- per-corpus training loss: the step's rows by the corpus each was drawn from (corpus/mixture.py mixture_rows, the
-  loader's assignment);
-- the output logits' logsumexp over the valid positions: its maximum and mean square (PaLM's z-loss quantity,
-  arXiv 2204.02311 §5), from the cross-entropy kernel's per-row outputs (model/ops/cross_entropy.py lm_loss);
-- the QK-norm gains' largest magnitude;
-- every UPDATE_STATS_EVERY steps, each optimizer group's update RMS (the step's update without its decoupled weight
-  decay: AdamW's lr m_hat / (sqrt(v_hat) + eps) from its state, torch/optim/adamw.py; Muon's adjusted-lr update,
-  optim.py Muon.update_square) and parameter norm.
+Per-step training diagnostics, computed on the device and read one step late with the loss: per-corpus loss,
+logsumexp max and mean square (PaLM's z-loss quantity, arXiv 2204.02311 §5), the largest QK-norm gain and, every
+UPDATE_STATS_EVERY steps, each optimizer group's update RMS (without weight decay) and parameter norm.
 """
 
 import numpy as np
@@ -19,7 +12,7 @@ from corpus.loader import IGNORE_INDEX
 from corpus.mixture import Stage, mixture_rows
 from model.modeling import CausalLM
 
-# Steps between update-RMS and parameter-norm measurements: every 10th step's cost is within throughput noise (GH200)
+# every 10th step's cost is within throughput noise (GH200)
 UPDATE_STATS_EVERY = 10
 
 
@@ -29,7 +22,6 @@ class Diagnostics:
         self.adamw, self.muon = opts
         self.gains = [p for layer in model.layers for p in (layer.self_attn.q_norm_weight,
                                                              layer.self_attn.k_norm_weight)]
-        # optimizer groups in step order: (name, parameters)
         self.groups = [(f"{name}[{i}]", group["params"]) for name, opt in zip(("adamw", "muon"), opts, strict=True)
                        for i, group in enumerate(opt.param_groups)]
         self.numel = [sum(p.numel() for p in params) for _, params in self.groups]
@@ -50,9 +42,8 @@ class Diagnostics:
 
     @torch.no_grad()
     def micro_batch(self, labels: Tensor, losses: Tensor, lse: Tensor) -> None:
-        """One micro-batch's per-row loss sums and valid counts, and its logsumexp statistics (lm_loss outputs). No
-        autograd: lm_loss's per-position outputs require grad, and a graph from them copied into the pinned buffers
-        would chain every step's onto the last, never freed."""
+        """One micro-batch's per-row loss sums, valid counts and logsumexp statistics. No autograd: a graph copied into
+        the pinned buffers would chain every step's onto the last, never freed."""
         valid = labels != IGNORE_INDEX
         self.row_stats.append(torch.stack([losses.view(labels.shape).sum(1), valid.sum(1).float()]))
         valid = valid.flatten()
@@ -61,8 +52,8 @@ class Diagnostics:
 
     @torch.no_grad()
     def end_step(self, step: int, loss: Tensor, grad_norm: Tensor) -> tuple[Tensor, tuple]:
-        """After the optimizers stepped (the groups' lr still the step's): the step's values copied to a pinned host
-        buffer without blocking, and the layout record() reads them by."""
+        """After the optimizers stepped: the step's values copied to a pinned host buffer without blocking, and their
+        layout."""
         scalars = [loss, grad_norm, torch.stack(self.lse_max).amax(), torch.stack(self.lse_square).sum(),
                    torch.stack(torch._foreach_norm(self.gains, float("inf"))).amax()]
         if self.measured:

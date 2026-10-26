@@ -1,18 +1,6 @@
-"""
-CausalLM after karpathy/nanochat 92d63d4 nanochat/gpt.py: pre-norm decoder layers (attention, MLP, each added back),
-x0 mixing and value embeddings in the layer loop.
-- Token embedding RMS-normed, no positional embedding; RoPE over the full head (nanochat 92d63d4 gpt.py:57-65).
-- Per layer x = resid_lambda x + x0_lambda x0, x0 the normed embedding (karpathy/nanochat dev/LOG.md 2026-01-11).
-- Attention: MHA, head_dim HEAD_DIM; per-head RMS norm with a learned per-dimension weight shared across heads
-  (arXiv 2309.14322 §3.2.5; transformers modeling_qwen3.py Qwen3Attention.forward), then RoPE; SSSL windows
-  (layer_windows); FlashAttention-4 with document masking.
-- Value embeddings on alternating layers behind a per-head gate 2 sigmoid(W_g n) of the normed stream n, W_g
-  zero-initialized (KellerJordan/modded-nanogpt record #14; MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6).
-- MLP ReLU^2, hidden 4C. Gain-free RMS norm, bias-free linears, untied lm_head; cross entropy on logits capped
-  c tanh(z / c) (ModelConfig.final_logit_softcapping).
-fp32 parameters, bf16 activations (GEMM ops multiply by bf16 weight copies, GemmLinear). Gradients are not bitwise
-reproducible: FA4's and the embedding backward's reductions are atomic.
-"""
+"""CausalLM after karpathy/nanochat 92d63d4 nanochat/gpt.py: pre-norm decoder layers with x0 mixing, QK-norm with
+learned per-dimension gains (arXiv 2309.14322 §3.2.5), SSSL windows, gated value embeddings (arXiv 2601.22887 §4.1),
+ReLU^2 MLP and a capped output c tanh(z / c); fp32 parameters, bf16 activations."""
 
 import zlib
 from dataclasses import dataclass, replace
@@ -36,8 +24,7 @@ class ModelConfig:
     max_position_embeddings: int
     num_hidden_layers: int
     hidden_size: int
-    # Output logits capped as c tanh(z / c), c = final_logit_softcapping, in every loss and sample
-    # (model/ops/cross_entropy.py, model/kernels/decode.cu); None: uncapped
+    # Logit cap c in every loss and sample (cross_entropy.py, decode.cu); None: uncapped
     final_logit_softcapping: float | None = None
 
 
@@ -54,7 +41,7 @@ def has_ve(layer_idx: int, *, num_hidden_layers: int) -> bool:
 
 
 def layer_windows(config: ModelConfig) -> list[int]:
-    """Keys before each query, per layer: SSSL tiled, L (the full context) on every fourth layer and the last, S = 512
+    """Keys before each query per layer: SSSL, full context on every fourth layer and the last, else S = 512
     (LOG 2026-01-11; 92d63d4 gpt.py:287-314; S after arXiv 2503.19786 §5.2)."""
     n = config.num_hidden_layers
     return [config.max_position_embeddings if i % 4 == 3 or i == n - 1 else 512 for i in range(n)]
@@ -66,8 +53,7 @@ def norm(x: Tensor) -> Tensor:
 
 
 class GemmLinear(nn.Linear):
-    """Bias-free linear of the GEMM ops (model/ops/linear.py): they multiply by weight_bf16, a bf16 copy of the fp32
-    weight refreshed per weight change (CausalLM.refresh_gemm_weights), and accumulate dW into weight.grad."""
+    """Bias-free linear whose GEMM ops multiply by weight_bf16 and accumulate dW into weight.grad."""
 
     def __init__(self, in_features: int, out_features: int) -> None:
         super().__init__(in_features, out_features, bias=False)
@@ -81,8 +67,6 @@ class Attention(nn.Module):
         self.q_proj = nn.Linear(C, C, bias=False)
         self.k_proj = nn.Linear(C, C, bias=False)
         self.v_proj = nn.Linear(C, C, bias=False)
-        # Stacked bf16 [Wq; Wk; Wv] for one GEMM (model/ops/linear.py qkv_proj), refreshed as GemmLinear.weight_bf16;
-        # dW accumulates into each weight's .grad
         self.register_buffer("qkv_bf16", self.q_proj.weight.new_empty((3 * C, C), dtype=torch.bfloat16),
                              persistent=False)
         self.o_proj = GemmLinear(C, C)
@@ -97,11 +81,9 @@ class Attention(nn.Module):
     def forward(self, hidden_states: Tensor, residual: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
                 cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor,
                 segments: Tensor) -> tuple[Tensor, Tensor]:
-        """hidden_states: normed stream; residual: the stream; ve_table: this layer's value embeddings or None
-        -> (residual + o_proj(attention output), its rows' rstd) (model/ops/flash_attn.py attention, o_proj inside)."""
+        """-> (residual + o_proj(attention(hidden_states)), rstd of its rows); hidden_states is the normed stream."""
         qkv = qkv_proj(hidden_states, self.qkv_bf16, *(w.grad for w in self.qkv_weights()))
-        # Value embedding, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once
-        # (model/ops/ve_gate.py); the sorted ids order its backward by token
+        # Gate 2 sigmoid(.) in (0, 2), 1 at zero init; sorted ids order the backward by token
         ve = ((hidden_states, input_ids, ve_table, self.ve_gate.weight, *torch.sort(input_ids.flatten()))
               if ve_table is not None else (None,) * 6)
         return attention(qkv, self.q_norm_weight, self.k_norm_weight, *cos_sin, window_size, cu_seqlens, segments,
@@ -109,8 +91,7 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
-    """h + down_proj(relu(up_proj(norm(h)))^2) from the stream h and its rows' rstd; norm, activation, residual and
-    their derivatives run in QuACK GEMM epilogues (model/ops/linear.py relu2_mlp)."""
+    """h + down_proj(relu(up_proj(norm(h)))^2) from the stream h and its rows' rstd, in GEMM epilogues."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -150,17 +131,14 @@ class CausalLM(nn.Module):
         self.x0_lambdas = nn.Parameter(torch.empty(n))
         self.value_embeds = nn.ModuleDict({str(i): nn.Embedding(VOCAB_SIZE, C) for i in range(n)
                                            if has_ve(i, num_hidden_layers=n)})
-        # Rotary tables, set by init_buffers
         for name in ("cos", "sin"):
             self.register_buffer(name, None, persistent=False)
         self.register_load_state_dict_post_hook(lambda module, _: module.refresh_gemm_weights())
 
     @torch.no_grad()
     def init_weights(self, *, seed: int) -> None:
-        """Stream-reading matrices and tables: uniform, std C^-0.5 ("Efficient BackProp" §4.6).
-        Zero: o_proj, down_proj (layers start as identity, modded-nanogpt record #5), lm_head (record #8), VE gates
-        (gate 1), x0_lambdas. One: resid_lambdas (LOG 2026-01-11), QK-norm weights (transformers Qwen3RMSNorm). Each
-        random tensor draws from a generator seeded by `seed` and its name."""
+        """Uniform ±sqrt(3/C) ("Efficient BackProp" §4.6); zero o_proj, down_proj (modded-nanogpt record #5), lm_head
+        (record #8), VE gates, x0_lambdas; one resid_lambdas, QK-norm gains; per-tensor seed seed 2^32 + crc32(name)."""
         bound = (3 / self.config.hidden_size) ** 0.5
         zero = ("self_attn.o_proj.weight", "mlp.down_proj.weight", "lm_head.weight", "self_attn.ve_gate.weight",
                 "x0_lambdas")
@@ -178,9 +156,8 @@ class CausalLM(nn.Module):
 
     @torch.no_grad()
     def refresh_gemm_weights(self) -> None:
-        """The bf16 copies the GEMM ops multiply by (GemmLinear.weight_bf16, Attention.qkv_bf16) from their fp32
-        weights: after init, load and every optimizer step; in place (a compiled graph holds the copies), reallocated
-        only where a load assigned weights on another device (train/checkpoint.py load_model's meta model)."""
+        """Copy fp32 weights into the bf16 GEMM copies in place (a compiled graph holds them); after init, load, step.
+        Reallocated only where a load moved weights to another device."""
         linears = [m for m in self.modules() if isinstance(m, GemmLinear)]
         attentions = [m for m in self.modules() if isinstance(m, Attention)]
         for m in linears:
@@ -193,9 +170,8 @@ class CausalLM(nn.Module):
                              [m.weight for m in linears] + [w for m in attentions for w in m.qkv_weights()])
 
     def init_buffers(self) -> None:
-        """Non-checkpointed buffers: the fp32 rotary tables cos/sin (max_position_embeddings, HEAD_DIM/2) of
-        t ROPE_THETA^(-2i/HEAD_DIM) (92d63d4 gpt.py:270-285), computed in fp64 and rounded once (an fp32 angle errs by
-        up to t 2^-24)."""
+        """fp32 rotary tables (T, HEAD_DIM/2) of t ROPE_THETA^(-2i/HEAD_DIM) (92d63d4 gpt.py:270-285), computed in fp64
+        and rounded once (an fp32 angle errs by up to t 2^-24)."""
         device = self.embed_tokens.weight.device
         exponent = torch.arange(0, HEAD_DIM, 2, dtype=torch.float64, device=device) / HEAD_DIM
         t = torch.arange(self.config.max_position_embeddings, dtype=torch.float64, device=device)
@@ -209,9 +185,8 @@ class CausalLM(nn.Module):
         self.init_buffers()
 
     def hidden(self, input_ids: Tensor, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-        """Final normed hidden states (B*T, C) of input_ids (B, T) int32; cu_seqlens: int32 document bounds in
-        flattened input_ids, the first segments + 1 of them in use (segments: 0-dim int32 on the host;
-        corpus/loader.py PretrainingBatches)."""
+        """Final normed hidden states (B*T, C) of input_ids (B, T) int32; cu_seqlens int32 document bounds, the first
+        segments + 1 in use (segments: 0-dim int32 on the host)."""
         hidden_states = x0 = norm(F.embedding(input_ids, self.embed_tokens.weight).to(torch.bfloat16))
         for i, layer in enumerate(self.layers):
             # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 without fp32 copies of the mix
@@ -223,9 +198,8 @@ class CausalLM(nn.Module):
 
     def forward(self, input_ids: Tensor, labels: Tensor, cu_seqlens: Tensor,
                 segments: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """(mean next-token loss over the non-padding labels fp32; per-position loss (B*T,) fp32, 0 at padding labels;
-        per-position logsumexp of the logits (B*T,) fp32), the last two without gradient (model/ops/cross_entropy.py
-        lm_loss)."""
+        """-> (mean loss over non-padding labels, per-position loss (B*T,) 0 at padding, per-position logsumexp), fp32;
+        the last two without gradient."""
         loss, _, _, losses, lse = lm_loss(self.hidden(input_ids, cu_seqlens, segments), self.lm_head.weight,
                                           labels.flatten(), self.config.final_logit_softcapping)
         return loss, losses, lse
@@ -242,21 +216,19 @@ def num_non_embedding_params(model: CausalLM) -> int:
 
 
 def accumulated_weights(model: CausalLM) -> list[nn.Parameter]:
-    """The weights whose fp32 .grad the ops of model/ops/linear.py accumulate into in place (q/k/v and the
-    GemmLinears o, up, down of every layer): a training backward needs their .grad allocated."""
+    """Weights whose fp32 .grad the GEMM ops accumulate into in place; a training backward needs it allocated."""
     return [w for m in model.modules()
             for w in (m.qkv_weights() if isinstance(m, Attention) else (m.weight,) if isinstance(m, GemmLinear) else ())]
 
 
 def num_matmul_params(model: CausalLM) -> int:
-    """The weights the forward multiplies by, the N of PaLM's model FLOPs (metrics.py): every matrix but the embedding
-    tables (lookups); norm gains and scalars are elementwise."""
+    """PaLM's N: every 2-D weight the forward multiplies by (the embedding tables are lookups)."""
     return sum(p.numel() for m in model.modules() if not isinstance(m, nn.Embedding)
                for p in m.parameters(recurse=False) if p.ndim == 2)
 
 
 def non_embedding_flops_per_token(model: CausalLM) -> int:
-    """DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72 n_layer d_model² + 12 n_layer d_model l_seq, l_seq the
-    model's context; windowed layers counted as full attention."""
+    """DeepSeek LLM's M = 72 n_layer d_model^2 + 12 n_layer d_model l_seq (arXiv 2401.02954 §3.2 Eq. 2); windowed
+    layers counted as full attention."""
     n, d = model.config.num_hidden_layers, model.config.hidden_size
     return 72 * n * d * d + 12 * n * d * model.config.max_position_embeddings

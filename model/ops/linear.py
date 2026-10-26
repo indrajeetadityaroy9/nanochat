@@ -1,33 +1,7 @@
-"""The decoder layer's GEMMs as torch.library ops (traceable by fullgraph torch.compile): forward and dX on QuACK's
-(Dao-AILab/quack) GEMMs (quack.gemm_interface, quack.epilogue fused epilogues) with W the bf16 copy of the fp32 weight
-(model/modeling.py GemmLinear), at fixed tile configurations (CONFIGS), never autotuned at run time; dW accumulated in
-fp32 by cuBLAS into the weight's .grad (aten addmm.dtype_out, beta = 1; NVIDIA/Megatron-LM's gradient-accumulation
-fusion, deepseek-ai/DeepGEMM's D = C + A B).
-
-Weight gradients: each op takes its weights' .grad (fp32, allocated and zeroed by train/loop.py) and its backward adds
-dW into them in place, so micro-batches accumulate in the GEMM; autograd sees no gradient for those weights.
-Forward-only callers pass None.
-
-nanochat::qkv_proj (q_proj, k_proj, v_proj): one GEMM y = x [Wq; Wk; Wv]^T (..., 3C) against the stacked bf16 copy
-(model/modeling.py Attention.qkv_bf16), q, k, v its column blocks; backward dX = dY [Wq; Wk; Wv] (one GEMM, K = 3C),
-each dW = dY_block^T X on the block's strided view of dY.
-
-The post-attention half of a layer runs on the un-normed stream: the norm is gain-free, so
-norm(h) W^T = diag(rstd) (h W^T) exactly, and rstd is a per-row (colvec) scale in the GEMM epilogues; the normed
-tensor is never stored.
-- residual_rms (o_proj, inside model/ops/flash_attn.py's attention op): h = residual + x W^T and
-  rstd = (mean(h^2) + eps)^-1/2 from the same epilogue (quack.gemm_interface.gemm_rms: per-tile squared sums,
-  finalized by quack.rms_final_reduce). Backward (residual_rms_bwd): dO = dh W with FA4's dpsum = rowsum(dO O) per
-  head in the epilogue (dx_dpsum, x = O); the column tile is one head (DPSUM_CONFIG), so the per-tile reduce partials
-  are dpsum per (row, head).
-- nanochat::relu2_mlp: h + down_proj(relu(rstd up_proj h)^2), the MLP of karpathy/nanochat 92d63d4 gpt.py:131-141 on
-  the normed stream plus its residual: rstd and relu^2 in the up-projection's epilogue
-  (quack.gemm_interface.gemm_norm_act, storing the scaled pre-activation and the activation for the backward; dW_down's
-  operand is the saved activation), the residual as the down-projection's C (quack.gemm_interface.gemm_add). Its
-  backward owns the norm's backward (residual_rms's rstd gets no gradient of its own): with P = h W_up^T,
-  preact = rstd P and dpreact from relu^2's derivative, dP = rstd dpreact, d rstd = sum(dpreact preact) / rstd and
-  d rstd/dh = -rstd^3 h / C, so dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h; the row sum is a reduce of the
-  dact epilogue, the rest the dX GEMM's epilogue (C = dy, h a tile load)."""
+"""Decoder-layer GEMMs as torch.library ops on QuACK (Dao-AILab/quack) at fixed tiles: q/k/v projection, o_proj with
+the post-attention RMS statistics, and the ReLU^2 MLP on the un-normed stream (norm(h) W^T = diag(rstd) h W^T for a
+gain-free norm). Backwards add fp32 dW into the weights' .grad in place (cuBLAS addmm, beta = 1; Megatron-LM's
+gradient-accumulation fusion); forward-only callers pass None for the grads."""
 import torch
 from cutlass import BFloat16, Float32
 from quack.activation import drelu_sq
@@ -43,7 +17,7 @@ from torch.autograd.function import FunctionCtx
 
 from model.config import HEAD_DIM
 
-# model/modeling.py norm's epsilon
+# modeling.py norm's epsilon
 EPS = torch.finfo(torch.float32).eps
 
 
@@ -54,10 +28,8 @@ def sm90(tile_m: int, tile_n: int, cluster_m: int, cluster_n: int, *, swap_ab: b
                       cluster_m=cluster_m, cluster_n=cluster_n, swap_ab=swap_ab, device_capacity=9)
 
 
-# Per call, the hidden width C -> config: the d8, d16 and d24 widths (model/modeling.py model_config), M = 98,304
-# tokens (corpus/mixture.py MICRO_BATCH_TOKENS). Each is the lowest mean over three runs of QuACK's autotuning
-# benchmark (quack/autotuner.py: L2-cold CUDA-graph medians of every candidate, GH200 at 700 W, exclusive). Other
-# widths and GPUs: QuACK's default_config.
+# Per call, width C -> config at M = 98,304: the lowest mean of three runs of QuACK's autotuning benchmark
+# (GH200 at 700 W); other widths and GPUs: QuACK's default_config.
 CONFIGS: dict[str, dict[int, GemmConfig]] = {
     "qkv": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(128, 192, 2, 1, swap_ab=True),
             768: sm90(128, 192, 1, 2)},
@@ -73,14 +45,12 @@ CONFIGS: dict[str, dict[int, GemmConfig]] = {
 
 
 def config(call: str, C: int, x: Tensor) -> GemmConfig | None:
-    """CONFIGS' entry for call at width C on x's GPU; None (QuACK's default_config, with tuned=False) where there is
-    none."""
+    """CONFIGS' entry for call at width C on x's GPU; None (QuACK's default_config) where there is none."""
     return CONFIGS[call].get(C) if get_device_capacity(x)[0] == 9 else None
 
 
 def gemm(A: Tensor, B: Tensor, cfg: GemmConfig | None, C: Tensor | None = None) -> Tensor:
-    """A B (+ C) in A's dtype at configuration cfg: QuACK's gemm_tuned body, which gemm and gemm_add run with
-    config=None for tuned=False (quack/gemm_interface.py); neither takes a config."""
+    """A B (+ C) in A's dtype at config cfg: gemm_tuned's body (QuACK's gemm and gemm_add take no config)."""
     out = A.new_empty(A.shape[0], B.shape[1])
     gemm_tuned.fn(A, B, out, C=C, config=cfg)
     return out
@@ -88,8 +58,8 @@ def gemm(A: Tensor, B: Tensor, cfg: GemmConfig | None, C: Tensor | None = None) 
 
 @torch.library.custom_op("nanochat::qkv_proj", mutates_args=(), device_types="cuda")
 def qkv_proj(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | None, gv: Tensor | None) -> Tensor:
-    """x (..., C) bf16, weight (3C, C) the stacked bf16 [Wq; Wk; Wv], gq, gk, gv their fp32 .grad or None (forward
-    only) -> (..., 3C) bf16: q, k, v the column blocks [0, C), [C, 2C), [2C, 3C)."""
+    """x (..., C), weight (3C, C) stacked bf16 [Wq; Wk; Wv], gq/gk/gv fp32 .grad or None -> (..., 3C) bf16, q, k, v
+    the column blocks."""
     x2 = x.reshape(-1, x.shape[-1])
     y = gemm(x2, weight.t(), config("qkv", x.shape[-1], x))
     return y.view(*x.shape[:-1], weight.shape[0])
@@ -129,8 +99,7 @@ qkv_proj.register_autograd(qkv_proj_grad, setup_context=qkv_proj_save)
 
 
 def residual_rms(x: Tensor, weight: Tensor, residual: Tensor) -> tuple[Tensor, Tensor]:
-    """x (M, K), weight (N, K), residual (M, N) -> (h = residual + x W^T in x's dtype, rstd (M,) fp32 of h's rows
-    before rounding)."""
+    """x (M, K), weight (N, K), residual (M, N) -> (h = residual + x W^T, rstd (M,) fp32 of h before rounding)."""
     N = weight.shape[0]
     r = sq_reduce_mod(has_c=True, has_rowvec=False, has_aux=False)(
         x, weight.t(), residual, config=config("o", N, x), tuned=False)
@@ -139,23 +108,20 @@ def residual_rms(x: Tensor, weight: Tensor, residual: Tensor) -> tuple[Tensor, T
     return r["D"], rstd
 
 
-# o_proj's dX tiling: tile_n = HEAD_DIM, so dx_dpsum's per-tile row sums are FA4's dpsum; fixed, as QuACK's tuner does
-# not pin tile_n: the fastest QuACK SM90 tile_n = 128 config on the d24 shape (98,304 x 768 x 768)
+# tile_n = HEAD_DIM so per-tile row sums are FA4's per-head dpsum; QuACK's tuner does not pin tile_n
 DPSUM_CONFIG = sm90(128, HEAD_DIM, 1, 2)
 
 
 @gemm_epilogue(reduces={"dpsum": ColVecReduce("dpsum", scaled=True)})
 def dx_dpsum(acc, c):
-    """acc = dh W (dO), c = O, FA4's output: D = dO, dpsum = the row sums per column tile of bf16(dO) O (bf16(dO):
-    the dO FA4's backward reads)."""
+    """acc = dO, c = O: D = dO, dpsum = per-tile row sums of bf16(dO) O (the dO FA4's backward reads)."""
     d = acc.to(BFloat16).to(Float32)
     return {"D": d, "dpsum": (d, c)}
 
 
 def residual_rms_bwd(dh: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> tuple[Tensor, Tensor]:
-    """dh (M, N); x (M, K) FA4's output (heads of HEAD_DIM); weight (N, K); grad its fp32 .grad -> (dx = dh W bf16,
-    dpsum (M, K / HEAD_DIM) fp32: the sum over each head's dims of dx x, FA4's backward dpsum); dW accumulated into
-    grad."""
+    """dh (M, N), x (M, K) FA4's output, grad W's fp32 .grad -> (dx = dh W bf16, dpsum (M, K / HEAD_DIM) fp32);
+    dW accumulated into grad."""
     dpsum = dh.new_empty((dh.shape[0], x.shape[1] // HEAD_DIM), dtype=torch.float32)
     dx = dx_dpsum(dh, weight, x, dpsum=dpsum, config=DPSUM_CONFIG)["D"]
     torch.addmm(grad, dh.t(), x, out_dtype=grad.dtype, out=grad)
@@ -164,24 +130,22 @@ def residual_rms_bwd(dh: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> tup
 
 @gemm_epilogue(ops={"rstd": ColVecLoad("rstd")}, reduces={"dsum": ColVecReduce("dsum", scaled=True)})
 def relu2_dact_rstd(acc, c, rstd):
-    """acc = dY W_down (d postact), c = the stored preact: D = dP = rstd dpreact, dsum = sum over the row of
-    dpreact preact."""
+    """acc = d postact, c = preact: D = dP = rstd dpreact, dsum = row sum of dpreact preact."""
     dpreact, _ = drelu_sq(c, acc)
     return {"D": dpreact * rstd, "dsum": (dpreact, c)}
 
 
 @gemm_epilogue(ops={"corr": ColVecLoad("corr")})
 def norm_bwd_apply(acc, c, h, corr):
-    """acc = dP W_up, c = dy (the residual's gradient), h the stream, corr = -rstd^2 dsum / C: D = dh."""
+    """acc = dP W_up, c = dy, corr = -rstd^2 dsum / C: D = dh."""
     return {"D": acc + c + h * corr}
 
 
 @torch.library.custom_op("nanochat::relu2_mlp", mutates_args=(), device_types="cuda")
 def relu2_mlp(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tensor | None,
               g_down: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
-    """h (..., C) the un-normed stream, rstd (M,) fp32 its rows' (residual_rms), w_up (4C, C), w_down (C, 4C), g_up,
-    g_down their fp32 .grad or None -> (h + MLP(norm(h)) like h, scaled pre-activation and activation (M, 4C) saved
-    for the backward)."""
+    """h (..., C) un-normed stream, rstd (M,) fp32, g_up/g_down fp32 .grad or None -> (h + MLP(norm(h)), preact,
+    postact (M, 4C) saved for the backward); MLP of karpathy/nanochat 92d63d4 gpt.py:131-141."""
     h2, C = h.reshape(-1, h.shape[-1]), h.shape[-1]
     preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True,
                                     config=config("up", C, h), tuned=False)
@@ -199,7 +163,7 @@ def relu2_mlp_fake(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: 
 @torch.library.custom_op("nanochat::relu2_mlp_bwd", mutates_args=("g_up", "g_down"), device_types="cuda")
 def relu2_mlp_bwd(dy: Tensor, h: Tensor, rstd: Tensor, preact: Tensor, postact: Tensor, w_up: Tensor, w_down: Tensor,
                   g_up: Tensor, g_down: Tensor) -> Tensor:
-    """dh like h, through the residual, the MLP and the norm; dW_up, dW_down accumulated into g_up, g_down."""
+    """dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h, dP = rstd dpreact; dW accumulated into g_up, g_down."""
     dy2, h2, C = dy.reshape(-1, dy.shape[-1]), h.reshape(-1, h.shape[-1]), h.shape[-1]
     r = relu2_dact_rstd(dy2, w_down, preact, rstd=rstd, dynamic_scheduler=True, config=config("down_dx", C, h),
                         tuned=False)

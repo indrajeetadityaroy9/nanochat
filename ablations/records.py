@@ -1,10 +1,6 @@
 """
-An experiment's records (the Records callback of conf/experiment/<name>.yaml; run.py) once every job of its
-sweep has ended: RESULTS/<experiment>.jsonl, a record per run (eval/suite.py record, the run's config, its compared
-measures (metrics.measures) and their error bars (metrics.measure_errors), the 32K code bits per byte by byte offset
-(eval/bpb.py "offset_bpb"), efficiency, the step it diverged at), RESULTS/<experiment>-curves.jsonl (per run,
-metrics.curves) and, with an analysis (the experiment's pre-registered decision, a function of the .jsonl's records),
-RESULTS/<experiment>.json = {"analysis": analysis(lines)}. Each run's log (metrics.records) is read once.
+An experiment's records once its sweep has ended (Hydra callback): results/<experiment>.jsonl, -curves.jsonl and, with
+an analysis, <experiment>.json.
 """
 import dataclasses
 import json
@@ -22,21 +18,17 @@ from run import RunConfig, plan_of, run_name
 
 
 def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
-    """A run's line of RESULTS/<experiment>.jsonl from its run log; its measures from its final checkpoint's
-    evaluation."""
+    """A run's line of results/<experiment>.jsonl; its measures from its final checkpoint's evaluation."""
     name, run = run_name(config), plan_of(config)
     stopped = metrics.diverged(log)
-    # the first attempt's run record (step 0, the file-level stage): a resumed attempt's holds its own stage's context,
-    # so its flops_per_token would not be the scaling plan's compute
+    # the first attempt's run record: a resumed attempt's flops_per_token is at its own stage's context
     started = next(r for r in log if r["kind"] == "run")
-    # the stages' peaks: the stage switch's (the file-level stage) and the end's (the last stage)
     peaks = [r for r in log if r["kind"] in ("stage", "end")]
     measured = errors = offset = efficiency = None
     if stopped is None:
         evaluation = json.loads(suite.evaluation_path(name, run.max_steps).read_text(encoding="utf-8"))
         measured = metrics.measures(evaluation, metrics.train_steps(log), repo_level_start=run.repo_level_start)
         errors, offset = metrics.measure_errors(evaluation), evaluation["32k"]["offset_bpb"]["code"]
-        # model size and cost (metrics.py run, stage and end records)
         efficiency = {"num_parameters": started["num_parameters"], "flops_per_token": started["flops_per_token"],
                       "model_flops_per_token": started["model_flops_per_token"],
                       "peak_memory_bytes": max(r["peak_memory_bytes"] for r in peaks),

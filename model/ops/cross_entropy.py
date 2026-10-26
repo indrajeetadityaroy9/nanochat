@@ -1,26 +1,6 @@
-"""
-LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z = x W^T, or with an output-logit cap c
-z = c tanh(x W^T / c) (ModelConfig.final_logit_softcapping; karpathy/nanochat 92d63d4 nanochat/gpt.py:511-515; Gemma 2,
-arXiv 2408.00118 §2):
-
-    loss = sum over rows with label t != IGNORE_INDEX of (logsumexp(z) - z[t]), divided by the valid count n.
-
-nanochat::lm_loss (training): QuACK's (Dao-AILab/quack) scaled-exp linear cross entropy
-(quack/linear_cross_entropy.py scaled_exp_linear_cross_entropy_fwd's calls and tiles), per LCE_CHUNK rows so that each
-row's label logit is kept for its logsumexp. The logits GEMM's epilogue stores E = bf16(2^(z log2 e - k)), k the
-rounded maximum of the row's TILE_N1-wide tile, with each tile's sum of exponentials and the label's fp32 logit, not z.
-lce_glue forms the loss (logsumexp - z[t]) from the fp32 accumulators, fixes E at the label and writes each row's
-power-of-two rescalings. dx = (1/n) dz W (bf16) and dW = (1/n) dz^T x (fp32, accumulated across chunks) are GEMMs on
-E whose A-operand load applies the rescalings (dz = v (u E) row-wise, u exact powers of two, v fp32). Epilogue:
-uncapped, scaled_exp_target_epi (quack/epilogue/scaled_exp.py); capped, capped_scaled_exp_epi: tanh on the fp32
-accumulator, k from the capped tile maximum (tanh is increasing), the derivative 1 - tanh^2 folded into E (sum_exp sums
-the plain exponentials), so the gradient GEMMs read dz = (softmax - onehot) (1 - tanh^2); cap_label_fix applies the
-derivative to the label entry lce_glue rewrites.
-
-nanochat::lm_losses (evaluation): uncapped, QuACK's lse_target_epi (quack/epilogue/library.py) reduces each row's
-logsumexp and gathers the label's logit from the fp32 accumulators, z not stored; capped (lse_target_epi has no tanh
-epilogue), per CHUNK rows an fp32 GEMM and the capped logsumexp in one Inductor-fused kernel (capped_losses).
-"""
+"""LM-head next-token loss on z = x W^T, optionally capped z = c tanh(x W^T / c) (arXiv 2408.00118 §2): the mean over
+valid labels t of logsumexp(z) - z[t]. Training: QuACK's (Dao-AILab/quack) scaled-exp linear cross entropy with the
+cap fused into its epilogue; evaluation: QuACK's lse_target_epi, or an fp32 GEMM per CHUNK rows when capped."""
 
 import functools
 
@@ -42,24 +22,20 @@ from torch.autograd.function import FunctionCtx
 
 from corpus.loader import IGNORE_INDEX
 
-# Rows of lm_losses' capped fp32 logits per GEMM, a memory bound (losses do not depend on it): 8,192 x 2^15 x 4 bytes
-# = 1 GiB
+# Capped evaluation rows per fp32 GEMM, a memory bound: 8,192 x 2^15 x 4 bytes = 1 GiB
 CHUNK = 8192
-# Rows of lm_loss's chunks, a multiple of 128 (the gradient GEMMs' tile_M): the least-memory size of those equally fast
-# on a d24 micro-batch (GH200); 98,304 rows (E past 2^31 elements) faults in QuACK 0.6.5
+# Multiple of 128 (gradient GEMMs' tile_M); 98,304 rows (E past 2^31 elements) faults in QuACK 0.6.5
 LCE_CHUNK = 8192
-# The logits GEMM's N tile, the granularity of k and sum_exp: a multiple of 64 (lce_glue's strip resolution) dividing
-# 2^15, at most 208 for QuACK's pingpong schedule; the fastest such tile on a d24 micro-batch (GH200)
+# Granularity of k and sum_exp: multiple of 64 (lce_glue's strips) dividing 2^15, at most 208 for pingpong
 TILE_N1 = 128
-# The gradient GEMMs' N tile over C, QuACK's rule (scaled_exp_linear_cross_entropy_fwd): 192 when it divides C (768)
+# QuACK's rule (scaled_exp_linear_cross_entropy_fwd): 192 when it divides C (768)
 TILE_N2 = 192
-# cap_label_fix's rows per program: one warp's 32 lanes, one row each
+# One warp, one row per lane
 FIX_ROWS = 32
 
 
 class CappedMaxLog2(MaxLog2):
-    """MaxLog2 (quack/epilogue/scaled_exp.py) of the capped logits: k = rne(c tanh(max / c) log2 e) from the tile's raw
-    maximum, c tanh(z / c) being increasing in z."""
+    """MaxLog2 of the capped logits: k = rne(c tanh(max / c) log2 e), valid since c tanh(z / c) is increasing."""
 
     def __init__(self, name: str, cap: float):
         super().__init__(name)
@@ -115,9 +91,8 @@ def capped_losses(z: Tensor, labels: Tensor, c: float) -> Tensor:
 
 def scaled_exp_loss(x: Tensor, w: Tensor, labels: Tensor, scale: Tensor,
                     cap: float | None) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """lm_loss on QuACK's scaled-exp pipeline, x (M, C) and w (V, C) bf16 -> (per-position loss, dx bf16, dW fp32,
-    per-position logsumexp; 0 at IGNORE_INDEX labels), the gradients times scale. One chunk's buffers serve every chunk
-    (one stream orders them)."""
+    """x (M, C), w (V, C) bf16 -> (per-position loss, dx bf16, dW fp32, per-position logsumexp; 0 at IGNORE_INDEX),
+    gradients times scale. One chunk's buffers serve every chunk (one stream orders them)."""
     (M, C), V = x.shape, w.size(0)
     if M % 128:
         raise ValueError(f"lm_loss: {M} rows, not a multiple of 128 (the gradient GEMMs' tile_M)")
@@ -150,13 +125,11 @@ def scaled_exp_loss(x: Tensor, w: Tensor, labels: Tensor, scale: Tensor,
     return loss, dx, dw, torch.where(labels != IGNORE_INDEX, loss + zy, 0.0)
 
 
-# Opaque to torch.compile: QuACK's CuTe DSL GEMMs and Triton kernels, and its gradients computed in the forward.
 @torch.library.custom_op("nanochat::lm_loss", mutates_args=(), device_types="cuda")
 def lm_loss(x: Tensor, weight: Tensor, labels: Tensor,
             final_logit_softcapping: float | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """x (M, C) bf16, M a multiple of 128, fp32 weight (V, C), labels (M,) int64 -> (mean loss fp32, dloss/dx in x's
-    dtype, dloss/dW fp32, per-position loss (M,) fp32, per-position logsumexp of the (capped) logits (M,) fp32; both 0
-    at IGNORE_INDEX labels); the last two without gradient."""
+    """x (M, C) bf16, M a multiple of 128, weight (V, C) fp32 -> (mean loss, dx in x's dtype, dW fp32, per-position
+    loss and logsumexp (M,) fp32, 0 at IGNORE_INDEX, without gradient); gradients are computed in the forward."""
     scale = 1 / (labels != IGNORE_INDEX).sum().float()
     loss, dx, dw, lse = scaled_exp_loss(x, weight.to(x.dtype), labels, scale, final_logit_softcapping)
     return loss.sum() * scale, dx, dw, loss, lse
@@ -185,16 +158,14 @@ lm_loss.register_autograd(lm_loss_grad, setup_context=lm_loss_save)
 
 
 def step_shares(labels: list[Tensor]) -> Tensor:
-    """Each micro-batch's share of a step's valid (non-IGNORE_INDEX) labels, fp32: lm_loss's per-micro-batch means
-    weighted by it sum to the mean over every valid label of the step."""
+    """Each micro-batch's share of the step's valid labels, fp32: weights that make micro-batch means a step mean."""
     valid = torch.stack([(t != IGNORE_INDEX).sum() for t in labels]).double()
     return (valid / valid.sum()).float()
 
 
 @torch.library.custom_op("nanochat::lm_losses", mutates_args=(), device_types="cuda")
 def lm_losses(x: Tensor, weight: Tensor, labels: Tensor, final_logit_softcapping: float | None) -> Tensor:
-    """Per-position loss (M,) fp32, 0 at IGNORE_INDEX labels; no gradient. QuACK's default tile config
-    (tuned=False)."""
+    """Per-position loss (M,) fp32, 0 at IGNORE_INDEX labels; no gradient; QuACK's default tile config."""
     valid, w = labels != IGNORE_INDEX, weight.to(x.dtype).t()
     if final_logit_softcapping is None:
         res = lse_target_epi(x, w, store_d=False, target=labels, tuned=False)

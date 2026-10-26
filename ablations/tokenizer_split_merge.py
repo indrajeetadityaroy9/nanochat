@@ -1,52 +1,5 @@
-"""
-Tokenizer ablation EXPERIMENT (pre-tokenizer split pattern x BPE merge score): trains each arm's vocabulary of the
-corpus's tokenizer (corpus/train_tokenizer.py: one sample, one trainer, VOCAB_SIZE ids), measures the arms on the
-curated val splits and builds each arm's training set (corpus mixture.py, tokenize.py, pack.py). The corpus's tokenizer
-is sa-bpe (corpus/tokenizer.py TOKENIZER).
-
-Arms (ARMS):
-- sa-bpe: SPLIT_PATTERN and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the pair's frequency, R the authorship
-  units holding it in the current segmentation, a pair of one unit scoring 0; ln as in pchizhov/sa-bpe 9fff32d
-  sabpe/scoring.py); the baseline;
-- sa-bpe-fused: FUSED_PATTERN, whose punctuation clause takes the line breaks after it (cl100k's); the positive control
-  (arXiv 2608.18062 companion post, App. C.1);
-- hybrid: HYBRID_PATTERN, whose statement chunks are the same at every indentation depth;
-- bpe: frequency alone within SPLIT_PATTERN (arXiv 2604.14053 Table 3, F row).
-
-vocabularies: every arm trained at once on one draw of the sample (each merge an argmax with fixed tie-breaks, so arms
-are independent); ABLATION/<arm>: vocabulary, pattern, merges; RESULTS/tokenizer_split_merge-vocabularies.json: the
-sample's composition per source (target bytes, fraction of rows taken, documents, bytes and units taken) and each arm's
-training time.
-
-intrinsic: every arm's tokenized val split of every source; RESULTS/tokenizer_split_merge-intrinsic.json:
-- planning: each source's bytes per token, the file stage's over its byte shares, and each group read in part's train
-  tokens over its draw (below 1 the corpus's extent is too small for the arm: prepare.extent, mixture.SPREAD);
-- validity, asserted: every arm holds the same bytes per document; on the first row group of each source's val split
-  the pattern's chunks cover every text, the encoding matches the merges replayed and every text decodes
-  (corpus/train_tokenizer.py fidelity);
-- mechanism: vocabulary entries holding a line break, fusing punctuation with one, and ending in a line break and
-  indentation (the companion post's MinGram cb); depth invariance (HYBRID_PATTERN clause (2)): of each program
-  source's first INDENTED_LINES indented val lines, those whose tokens are the indentation's, then the statement's as
-  at depth 0;
-- tie-break: merged tokens the val documents read never, under 10 and under 100 times (arXiv 2604.14053 Table 3
-  Coverage, graded);
-- TokEval (arXiv 2608.18062, metrics.tokeval), recorded only: global compression, fertility, Rényi efficiency, bigram
-  and trigram entropy, UTF-8 integrity and character splits, AST boundary alignment and its per-category rates,
-  identifier fragmentation, indentation consistency, vocabulary utilization and reconstruction, on each source's
-  leading val documents up to TOKEVAL_BYTES, grouped as TokEval languages (tokeval_group).
-
-data: the same documents (the set) tokenized and packed under each arm (corpus tokenize.py, pack.py, given the arm's
-directory); RESULTS/tokenizer_split_merge-data.json: the set and, per arm, its packed rows per stage, d16
-max_tokens_per_param and plan, and the share of each corpus's packed rows its run reads. The set holds a d16 run at
-TOKENS_PER_PARAM tokens per non-embedding parameter under sa-bpe (arXiv 2203.15556 Table 3), each source at its share
-of the base model's stage (Stage.shares of the sources' train tokens), a shard's tokens estimated from its text bytes
-at sa-bpe's val bytes per token: of each code source the leading train shards filling its file-stage draw (code binds
-every arm's max_tokens_per_param); of a "supply" source (notebooks, functions, traces) its draw, read whole once; of
-text and math the leading shards of each stage, and of the repositories corpora the trailing partitions
-(tokenize.tokenize_repo_level_stage, under sa-bpe), holding MARGIN times their draws, so they never bind.
-
-repack: every arm's set packed again from its tokenized splits after a packer change (corpus/pack.py, the corpus
-crate's pack.rs); the data record's arms rewritten.
+"""Tokenizer ablation: pre-tokenizer split pattern x BPE merge score (ARMS); trains, measures and packs each arm.
+Scores: SA-BPE's F·ln R (arXiv 2604.14053 §4.1) and frequency F (Table 3); measures include TokEval (arXiv 2608.18062).
 
 python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack
 """
@@ -81,56 +34,35 @@ from corpus.train_tokenizer import Score, byte_shares, fidelity, sample, shard_b
 from native import corpus_crate
 from paths import RESULTS, ROOT
 
-# Record names: RESULTS/<EXPERIMENT>-{vocabularies,intrinsic,data}.json
+# Records: RESULTS/<EXPERIMENT>-{vocabularies,intrinsic,data}.json
 EXPERIMENT = "tokenizer_split_merge"
 
-# karpathy/nanochat 92d63d4 split pattern: SPLIT_PATTERN with cl100k's punctuation clause, whose [\r\n]* takes the line
-# breaks after a punctuation run ("):\n" one chunk)
+# karpathy/nanochat 92d63d4 split pattern: cl100k's punctuation clause [\r\n]* takes the line breaks after it ("):\n")
 FUSED_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]"""
                  r"""|\s+(?!\S)|\s+""")
-# BPE merges never cross a chunk end (tiktoken encodes chunk by chunk), so every chunk end is a token end; no clause
-# looks behind, so the chunks after a chunk end j are the chunks of the text from j alone. Clauses:
-# (1) \n+, \r+: a line break shares a chunk only with line breaks of its kind, never with the punctuation or
-#     whitespace before it or the indentation after it (companion post's MinGram cb_nl; token-boundary bias,
-#     arXiv 2412.19437 §4.1);
-# (2)  +, \t+, [^\S\r\n\t ]+: runs of spaces, of tabs, of other whitespace are chunks, and a letter run takes no tab
-#     or line break before it, so an indentation of d >= 2 spaces or d >= 1 tabs ends at a chunk end and
-#     chunks(indent + s) = (indent,) + chunks(s); a single space before a letter run stays its prefix (" foo");
-# (3) no contraction clause (Punct, arXiv 2402.01035 App. E, Fig. 3): the letter clause takes a whole letter run.
-# Kept from cl100k: one leading punctuation character or space on a letter run, digit pairs, punctuation runs.
-# [^\S\r\n\t ]+ puts every character in some chunk (tiktoken drops unmatched text). No lookahead, so fancy-regex does
-# not backtrack on long whitespace runs
+# Line breaks, space runs and tab runs are chunks of their own, so chunks(indent + s) = (indent,) + chunks(s) for an
+# indent of >= 2 spaces or >= 1 tab; no contraction clause (arXiv 2402.01035 App. E); no lookahead
 HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\n+|\r+|\t+| +|[^\S\r\n\t ]+"""
-# arm: (pattern, merge score)
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
-# The d16 num_hidden_layers the set is sized for
 NUM_HIDDEN_LAYERS = 16
-# The set's size: a d16 run at Chinchilla's 20 tokens per non-embedding parameter under sa-bpe (arXiv 2203.15556
-# Table 3)
+# Chinchilla tokens per non-embedding parameter (arXiv 2203.15556 Table 3), d16 under sa-bpe
 TOKENS_PER_PARAM = 20
-# The set's margin over the draws of the corpora that must not bind (text, math, repositories): above whole-shard
-# rounding of the code shards and the arms' spread in compression (assumed)
+# The set's margin over the draws of the corpora that must not bind (text, math, repositories); assumed
 MARGIN = 1.5
-# The categories whose documents are whole program texts in their source's language (depth invariance)
+# Categories whose documents are whole program texts in their source's language
 PROGRAMS = (REPOSITORY_FILE, EXERCISE, SYNTHETIC_FILE, FUNCTION)
-# The depth-invariance check's lines: the first indented lines of each program source's val split; the rate's standard
-# error at most √(1/(4n)) ≈ 0.0022
+# Rate standard error <= √(1/(4n)) ≈ 0.0022
 INDENTED_LINES = 50_000
-# An indented line: its leading spaces and tabs, then its statement
 INDENTED = regex.compile(r"([ \t]+)(\S.*)")
-# TokEval's sample: each source's leading val documents until their UTF-8 bytes reach TOKEVAL_BYTES (the document
-# crossing it included), as TokEval languages in TOKEVAL_GROUPS order (tokeval_group)
 TOKEVAL_BYTES = 2_000_000
 TOKEVAL_GROUPS = ("python", "cpp", "text", "math", "mixed")
-# The code languages' TokEval names (tree-sitter's)
 TOKEVAL_LANGUAGES = {"Python": "python", "C++": "cpp"}
 
 
 def provenance() -> dict:
-    """Where and when a step ran: the checkout's commit, the UTC time, the host, its cores and memory, and the versions
-    of Python and of the packages that compute the measures."""
+    """Commit, UTC time, host, cores, memory and the measuring packages' versions of a step."""
     commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
                             check=True).stdout.strip()
     return {"commit": commit, "utc": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
@@ -142,8 +74,7 @@ def provenance() -> dict:
 
 
 def vocabularies() -> None:
-    """Every arm's tokenizer.tiktoken, tokenizer.pattern and merges.json in ABLATION/<arm>, trained at once on one draw
-    of the sample, and RESULTS/<EXPERIMENT>-vocabularies.json (module docstring)."""
+    """Train every arm on one draw of the sample; write ABLATION/<arm> and the vocabularies record."""
     for arm in ARMS:
         (ABLATION / arm).mkdir(parents=True)
     start, began = time.perf_counter(), provenance()
@@ -183,8 +114,7 @@ def val_split(task: tuple[str, str]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def describe(arm: str, counts: dict[str, np.ndarray]) -> dict:
-    """An arm's planning, mechanism and tie-break measures from its token counts on each source's val split
-    (val_split; module docstring)."""
+    """An arm's planning, mechanism and tie-break measures from its val token counts per source."""
     tokenizer = get_tokenizer(ABLATION / arm)
     lengths = tokenizer.token_lengths[:tokenizer.bos_token_id]
     held = np.zeros(tokenizer.bos_token_id, dtype=np.int64)
@@ -197,11 +127,11 @@ def describe(arm: str, counts: dict[str, np.ndarray]) -> dict:
     shares = byte_shares()
 
     def mixed(members: tuple[str, ...] | list[str]) -> float:
-        """Bytes per token over the members' file-stage byte shares: their weighted harmonic mean."""
+        """Weighted harmonic mean of the members' bytes per token over their file-stage byte shares."""
         return float(hmean([sources[s]["bytes_per_token"] for s in members], weights=[shares[s] for s in members]))
 
     entries = [b.decode("utf-8", "ignore") for b in tokenizer.token_bytes[:tokenizer.bos_token_id]]
-    # a line break and the indentation after it ending the token (\Z: $ also matches before a final line break)
+    # \Z: $ also matches before a final line break
     fused, indented = regex.compile(r"[^\s\p{L}\p{N}][\r\n]"), regex.compile(r"[\r\n][ \t]+\Z")
     merged = held[256:]
     return {"data_key": tokenizer.data_key, "sources": sources,
@@ -231,8 +161,7 @@ def indented_lines(source: str) -> list[tuple[str, str]]:
 
 
 def depth_invariance(source: str) -> dict[str, dict[str, float]]:
-    """{arm: lines, invariant, rate} of a program source: its indented lines (indented_lines) whose tokens are the
-    indentation's, then the statement's as at depth 0."""
+    """{arm: lines, invariant, rate}: indented lines tokenized as the indentation's then the statement's at depth 0."""
     lines = indented_lines(source)
     result = {}
     for arm in ARMS:
@@ -246,8 +175,7 @@ def depth_invariance(source: str) -> dict[str, dict[str, float]]:
 
 
 def tokeval_group(source: str) -> str:
-    """A source's TokEval language: a program source's language, math (mixture.MATH_SOURCES), text (other web
-    documents) or mixed (prose with fenced code: Codeforces reasoning traces, Kaggle notebooks)."""
+    """A source's TokEval language: its code language, math, text or mixed (prose with fenced code)."""
     spec = SOURCES[source]
     if spec.category in PROGRAMS:
         return TOKEVAL_LANGUAGES[spec.language]
@@ -257,8 +185,7 @@ def tokeval_group(source: str) -> str:
 
 
 def tokeval_documents(source: str) -> tuple[list[str], bool]:
-    """A source's leading val documents (corpus/tokenize.py row_group_documents' documents: a repository sample's files
-    concatenated) until their UTF-8 bytes reach TOKEVAL_BYTES, and whether the split ran out first."""
+    """A source's leading val documents up to TOKEVAL_BYTES, and whether the split ran out first."""
     taken, size = [], 0
     for path in curated_shards(source, "val"):
         f = pq.ParquetFile(path)
@@ -277,10 +204,7 @@ def tokeval_documents(source: str) -> tuple[list[str], bool]:
 
 
 def tokeval(arm: str) -> dict:
-    """An arm's TokEval record (module docstring): "sample", per source its group, documents, bytes and whether its
-    split ran out; "metrics", TokEval's global values per metric, the per-category AST alignment and the character
-    splits. Prose languages are the groups suffixed "_val" (TokEval reports the code and math corpora under the domain
-    keys python, cpp and math); the code corpus is the python and cpp groups, the math corpus the math group."""
+    """An arm's TokEval record: "sample" per source and "metrics" (global values, AST per category, char splits)."""
     sample = {source: tokeval_documents(source) for source in SOURCES}
     grouped = {group: [d for s, (docs, _) in sample.items() if tokeval_group(s) == group for d in docs]
                for group in TOKEVAL_GROUPS}
@@ -300,11 +224,7 @@ def tokeval(arm: str) -> dict:
 
 
 def intrinsic() -> None:
-    """Every arm's tokenized val split of every source, the equal-bytes check, and RESULTS/<EXPERIMENT>-intrinsic.json
-    (module docstring), all in one process pool: depth invariance per program source, fidelity per arm and source and
-    TokEval per arm (which read no tokenized data) beside the tokenize jobs, every split at once, each split's counts as
-    it is tokenized. "tokeval_sample": TokEval's documents per source (tokeval). "seconds": "tokenized", the wall time
-    to the last tokenize job's end (the checks overlap them), and "all"."""
+    """Tokenize every arm's val splits, check equal bytes, run the measures in one pool; write the intrinsic record."""
     start, began = time.perf_counter(), provenance()
     programs = [s for s, spec in SOURCES.items() if spec.category in PROGRAMS]
     checks = [(arm, source) for arm in ARMS for source in SOURCES]
@@ -319,7 +239,6 @@ def intrinsic() -> None:
             tokenize_source(check[1], "val", ABLATION / check[0], pool)
             return pool.submit(val_split, check)
 
-        # a val split is a few row groups: one split at a time would leave the pool idle
         splits = dict(zip(checks, threads.map(tokenized, checks), strict=True))
         tokenized_seconds = time.perf_counter() - start
         counts, sizes = {}, {}
@@ -344,25 +263,21 @@ def intrinsic() -> None:
 
 
 def document_set(run) -> dict:
-    """The set's shards (module docstring) for the d16 run `run` at TOKENS_PER_PARAM under sa-bpe: {"file": {source:
-    its leading train shards, the file stage's}, "repository": {source: its train shards after those, the repository
-    stage's},
-    "draws": {seq_len: {corpus: its tokens in the run}}}; the repositories corpora's partitions: data."""
+    """The set's shards for the d16 run `run` under sa-bpe: {"file", "repository", "draws"}."""
     from train.stages import drawn
 
     measured = json.loads((RESULTS / f"{EXPERIMENT}-intrinsic.json").read_text(encoding="utf-8"))["arms"]["sa-bpe"]
     estimate = {s: np.array(shard_bytes(s)) / measured["sources"][s]["bytes_per_token"] for s in SOURCES}
 
     def shards(source: str, tokens: float, start: int) -> int:
-        """The fewest train shards of a source from shard `start` whose estimated sa-bpe tokens hold `tokens`."""
+        """The fewest train shards of a source from `start` whose estimated sa-bpe tokens hold `tokens`."""
         held = np.cumsum(estimate[source][start:])
         if held[-1] < tokens:
             raise RuntimeError(f"{source}: its train shards from {start} hold {held[-1]:,.0f} of {tokens:,.0f} tokens")
         return int(np.searchsorted(held, tokens)) + 1
 
     def draws(stage: mixture.Stage) -> dict[str, float]:
-        """Each corpus's tokens in the run: its share of the base model's stage (Stage.shares of the sources' train
-        tokens; the repositories corpora, unestimated, alike within their group) at the run's tokens in the stage."""
+        """Each corpus's tokens in the run at its share of the base model's stage."""
         shares = stage.shares({s: estimate[s].sum() if s in SOURCES else 1.0 for s in stage.sources}, stage.tokens)
         return {s: share * drawn(stage, run) * stage.seq_len for s, share in shares.items()}
 
@@ -375,8 +290,7 @@ def document_set(run) -> dict:
 
 
 def pack_corpus(corpus: str, directory: Path, shards: dict) -> None:
-    """A tokenized corpus's packs in each stage that reads it (shards: the set, data's "set" record): its train split's
-    shards in the set, its val split whole."""
+    """Pack a tokenized corpus in each stage that reads it: its train shards in the set, its val split whole."""
     for stage in (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE):
         if corpus not in stage.sources:
             continue
@@ -393,8 +307,7 @@ def pack_corpus(corpus: str, directory: Path, shards: dict) -> None:
 
 
 def arm_record() -> dict:
-    """Each arm's run and data at its max_tokens_per_param: data key, plan, and per stage each corpus's packed rows,
-    weight and the share of its rows the run reads."""
+    """Each arm's run at its max_tokens_per_param: data key, plan, per stage each corpus's rows, weight and read share."""
     from run import base_plan
     from train.stages import drawn, max_tokens_per_param
 
@@ -419,12 +332,7 @@ def arm_record() -> dict:
 
 
 def data() -> None:
-    """Every arm's training set, tokenized and packed, and RESULTS/<EXPERIMENT>-data.json (module docstring): each
-    corpus of each arm tokenized, then packed, as its own job, every job into one process pool;
-    tokenize_repo_level_stage, beside the other sources' tokenize jobs, chooses the partitions and tokenizes sa-bpe's
-    repositories corpora, then the set check, then the repository sources' jobs and the other arms' repositories
-    corpora, one arm after another (each fills the cores). "seconds": "tokenized", the wall time to the last tokenize
-    job's end (packs overlap them), and "all"."""
+    """Tokenize and pack every arm's set, each corpus a job in one process pool; write the data record."""
     # the training stack (the model's kernels) here alone: the measures' spawned workers import this module
     from run import base_plan
 
@@ -432,7 +340,7 @@ def data() -> None:
     run = base_plan(num_hidden_layers=NUM_HIDDEN_LAYERS, tokens_per_param=TOKENS_PER_PARAM)
     shards = document_set(run)
     leading = {s: shards["file"].get(s, 0) + shards["repository"].get(s, 0) for s in SOURCES}
-    tokenized = []  # each tokenize job's end
+    tokenized = []
 
     def source(arm: str, corpus: str) -> None:
         tokenize_source(corpus, "train", ABLATION / arm, pool, leading=leading[corpus])
@@ -452,7 +360,6 @@ def data() -> None:
           ThreadPoolExecutor(len(ARMS) * len(SOURCES) + 2) as threads):  # source jobs, repositories, the 32K stage's
         partitions = threads.submit(tokenize_repo_level_stage, ABLATION / "sa-bpe", pool,
                                     MARGIN * sum(shards["draws"]["32768"][c] for c in mixture.REPOSITORIES.values()))
-        # the sources the set check does not gate tokenize while tokenize_repo_level_stage chooses the partitions
         jobs = [threads.submit(source, arm, corpus) for arm in ARMS for corpus in SOURCES
                 if corpus not in mixture.REPOSITORY_SOURCES]
         parts = partitions.result()
@@ -475,9 +382,7 @@ def data() -> None:
 
 
 def repack() -> None:
-    """Every arm's set packed again from its tokenized splits (the set RESULTS/<EXPERIMENT>-data.json records), after a
-    change to the packer (corpus/pack.py, the corpus crate's pack.rs), each corpus of each arm a job (the crate releases
-    the GIL); the record's arms and its "seconds" "repacked" rewritten."""
+    """Repack every arm's set from its tokenized splits after a packer change; rewrite the data record's arms."""
     start = time.perf_counter()
     path = RESULTS / f"{EXPERIMENT}-data.json"
     record = json.loads(path.read_text(encoding="utf-8"))

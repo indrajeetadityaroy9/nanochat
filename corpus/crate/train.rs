@@ -1,27 +1,7 @@
-//! nanochat's tokenizer trainer: byte-level BPE merges by source-attributed BPE (SA-BPE, arXiv 2604.14053). Each merge
-//! takes the pair of highest F·ln(R) (§4.1's F·log R without its default's language count; ln as in pchizhov/sa-bpe
-//! scoring.py, the base changing no argmax), F the pair's frequency, R the number of distinct sources (authorship
-//! units: a repository or a document) whose documents hold the pair in the current segmentation. A pair seen in one
-//! source scores 0: it merges only after every pair seen in several. Ties (equal f64 scores) go to the higher F, then
-//! the smaller pair (rustbpe's order). Text is split by fancy-regex, the regex engine of tiktoken (openai/tiktoken),
-//! which encodes with the trained vocabulary (corpus/tokenizer.py), so training splits text as encoding does.
-//!
-//! The trainer is rustbpe's (karpathy/rustbpe): the documents are split into chunks by the pattern, each
-//! distinct chunk is a word of byte ids with its count, and the merge loop keeps pair frequencies up to date
-//! incrementally, with a lazy max-heap (a popped entry whose frequency changed is requeued) whose entries hold the
-//! words a pair may occur in.
-//!
-//! R is exact without a per-(pair, source) table: a word also holds the sources of its chunk, and R of a pair is the
-//! size of the union of the sources of the words that contain it, counted over its words only when its heap entry
-//! reaches the top. Between counts the entry keeps an upper bound: an existing pair's F and R only decrease (a merge
-//! only creates pairs holding the new token), R changes only when F does, and a pair the merge creates occurs only in
-//! words of the merged pair, so it has at most the merged pair's R. An entry is taken only when its F and R are exact,
-//! so every merge is the argmax of the exact score.
-//!
-//! A merge whose bytes are already a token (made by another pair) is refused, as a vocabulary maps bytes to one id.
-//!
-//! With score "frequency" a merge takes the pair of highest F alone, ties as above: rustbpe's BPE, R never counted (the
-//! frequency-BPE arm of ablations/tokenizer_split_merge.py).
+//! Byte-level BPE training by source-attributed BPE (SA-BPE, arXiv 2604.14053 §4.1): each merge takes the pair of
+//! highest F·ln(R) (ln as in pchizhov/sa-bpe scoring.py), F the pair's frequency, R its distinct sources; ties to the
+//! higher F, then the smaller pair. Trainer after rustbpe (karpathy/rustbpe), text split by fancy-regex as tiktoken
+//! (openai/tiktoken) does; R is exact at each merge via a lazy heap of upper bounds.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -39,8 +19,7 @@ use crate::PerWorker;
 
 type Pair = (u32, u32);
 
-/// A distinct chunk of the documents: its token ids, its number of occurrences, and the sorted distinct sources of the
-/// documents that hold it.
+/// A distinct chunk: its token ids, occurrences and sorted distinct sources.
 struct Word {
     ids: Vec<u32>,
     count: i64,
@@ -52,9 +31,8 @@ impl Word {
         self.ids.windows(2).any(|w| (w[0], w[1]) == pair)
     }
 
-    /// Merges every non-overlapping occurrence of pair, left to right, into new_id; returns the change of each pair's
-    /// number of occurrences in this word, one entry per removed (-1) or created (+1) occurrence (rustbpe's
-    /// merge_pair).
+    /// Merges every non-overlapping occurrence of pair, left to right, into new_id; returns each pair occurrence's
+    /// change (-1 removed, +1 created; rustbpe's merge_pair).
     fn merge_pair(&mut self, pair: Pair, new_id: u32) -> Vec<(Pair, i64)> {
         let (a, b) = pair;
         let n = self.ids.len();
@@ -85,8 +63,7 @@ impl Word {
     }
 }
 
-/// A pair's heap entry: its F, its R (exact when `exact`, else an upper bound), its score, and the words it may occur
-/// in.
+/// A pair's heap entry: F, R (exact when `exact`, else an upper bound), score, and the words it may occur in.
 struct Job {
     pair: Pair,
     freq: i64,
@@ -116,9 +93,7 @@ impl PartialEq for Job {
 
 impl Eq for Job {}
 
-/// The distinct chunks of the documents (document d from source sources[d]) as words of byte ids. Documents are split
-/// in parallel, each worker by its own regex, into one chunk table per worker and hash shard; each shard's tables are
-/// then merged in parallel.
+/// The distinct chunks of the documents (document d from source sources[d]) as words of byte ids.
 fn count_words<'a>(texts: &'a [PyBackedStr], sources: &[u32], pattern: &PerWorker<Regex>) -> Vec<Word> {
     struct Chunk {
         count: i64,
@@ -197,8 +172,7 @@ fn count_pairs(words: &[Word]) -> FxHashMap<Pair, (i64, Vec<u32>)> {
         })
 }
 
-/// The number of distinct sources over the given words: one bitset over the sources (fixedbitset) per parallel task,
-/// each task covering enough words (min_len) that marking their sources costs about as much as clearing its bitset.
+/// The number of distinct sources over the given words (a fixedbitset per task of at least min_len words).
 fn count_sources(words: &[Word], of: &[u32], n_sources: usize, min_len: usize) -> u32 {
     of.par_iter()
         .with_min_len(min_len)
@@ -241,8 +215,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Score {
     }
 }
 
-/// The merge loop: pops the lazy heap until its top entry's F and R are exact, then merges that pair in the words that
-/// hold it and queues the pairs the merge creates.
+/// The merge loop: pops the lazy heap until its top entry's F and R are exact, then merges that pair.
 fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &PerWorker<Regex>, n_merges: usize, score: Score) -> Vec<Pair> {
     let n_sources = *sources.iter().max().unwrap() as usize + 1;
     let mut words = count_words(texts, sources, pattern);
@@ -315,9 +288,8 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &PerWorker<Rege
     merges
 }
 
-/// Trains n_merges merges on the documents texts[d], from source sources[d] (source ids dense from 0), within the
-/// chunks of the regex pattern, by score "sa-bpe" or "frequency". Returns the merges (merge i makes token id 256 + i);
-/// a merge whose bytes are already a token is skipped and does not count.
+/// Trains n_merges merges on texts[d] from source sources[d] (dense from 0) within the chunks of pattern, by score
+/// "sa-bpe" or "frequency"; merge i makes token id 256 + i, and a merge whose bytes are already a token is skipped.
 #[pyfunction]
 #[pyo3(signature = (texts, sources, *, pattern, n_merges, score))]
 pub(crate) fn train(py: Python<'_>, texts: Vec<PyBackedStr>, sources: Vec<u32>, pattern: &str, n_merges: usize,

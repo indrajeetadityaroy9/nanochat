@@ -1,9 +1,6 @@
 """
-The training mixture: the run's tokens, its two stages, each stage's groups of sources. A group's
-share is a fixed fraction of the stage's tokens, "supply" (read whole once), or "rest" (the code group taking what the
-other code groups leave of CODE_SHARE). Within a group, sources weigh by their amounts: tokens before packing, packed
-rows after. Groups read in part (IN_PART) read the same fraction of each source (prepare.extent fetches only that).
-A run's weights in a stage (weights) and its mixture of packed corpora row by row (mixture_rows).
+The training mixture: two stages, each a set of source groups with a fixed, "supply" or "rest" share; a run's weights
+per stage (weights) and its row-by-row assignment to packed corpora (mixture_rows).
 """
 
 import math
@@ -13,12 +10,12 @@ from typing import Literal
 
 import numpy as np
 
-# Tokens per micro-batch: whole rows of both contexts, 12 x 8,192 and 3 x 32,768
+# Whole rows of both contexts: 12 x 8,192 and 3 x 32,768
 MICRO_BATCH_TOKENS = 98_304
 # Repo-level share of steps: Qwen2.5-Coder's 300B of 5.2T + 300B (arXiv 2409.12186 §3.2.1-3.2.2)
 REPO_LEVEL_SHARE = 300e9 / (5.2e12 + 300e9)
 
-# the Weyl sequence frac(n * GOLDEN) spreads every prefix of itself most evenly over [0, 1) (Knuth, TAOCP Vol. 3 §6.4)
+# Weyl sequence frac(n * GOLDEN): low-discrepancy prefixes (Knuth, TAOCP Vol. 3 §6.4)
 GOLDEN = (math.sqrt(5) - 1) / 2
 
 
@@ -60,8 +57,7 @@ class Stage:
 
     def shares(self, amounts: Mapping[str, float], total: float) -> dict[str, float]:
         """{source: its share of the stage}, given each source's amount (tokens, or packed rows) and the stage's total
-        of that amount: a fixed group share; a "supply" group's amount over the total; the "rest" group, CODE_SHARE less
-        the stage's other code groups; each group's share split among its sources by their amounts."""
+        of that amount."""
         groups = {name: group.share for name, group in self.groups.items() if isinstance(group.share, float)}
         groups |= {name: sum(amounts[s] for s in group.sources) / total
                    for name, group in self.groups.items() if group.share == "supply"}
@@ -71,28 +67,23 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The stages' sizes: schedule.plan's 69,580 steps of 15 micro-batches (102.6B tokens), the last REPO_LEVEL_SHARE of
-# steps at 32K, rounded as schedule.plan rounds them. A Stage's tokens are this run's; any other run draws by the
-# stage's shares at its own size (weights)
+# schedule.plan's 69,580 steps of 15 micro-batches; the last REPO_LEVEL_SHARE of steps at 32K
 MAX_STEPS, BATCH_SIZE = 69_580, 15 * MICRO_BATCH_TOKENS
 REPO_LEVEL_STEPS = round(REPO_LEVEL_SHARE * MAX_STEPS)
 
-# Code share: DeepSeek-Coder's 87% source code, 10% English and 3% Chinese natural language (arXiv 2401.14196 §2), its
-# natural language taken as web text and mathematics
+# DeepSeek-Coder's 87% source code (arXiv 2401.14196 §2)
 CODE_SHARE = 0.87
 NON_CODE = ("text", "math")
 REPOSITORY_SOURCES = ("stack_edu_python", "ultradata_stack_v3_l2_python", "ultradata_code_l2_python",
                       "stack_edu_cpp", "ultradata_stack_v3_l2_cpp", "ultradata_code_l2_cpp")
 MATH_SOURCES = ("ultradata_math_l3_qa", "ultradata_math_l3_conversation", "ultradata_math_l3_multi_style",
                 "ultradata_math_l3_textbook_exercise")
-# Synthetic code, 30% of code: good mixtures' share of rephrased synthetic data, "converging to ~30%" (Kang et al.,
-# arXiv 2510.01631 §1), measured on web text
+# 30% of code: rephrased synthetic share "converging to ~30%" (arXiv 2510.01631 §1)
 SYNTHETIC_SOURCES = ("ultradata_code_l3_python", "ultradata_code_l3_cpp", "nemotron_rewriting_python",
                      "nemotron_transpilation_cpp")
-# The repository stage's documents per (repository, language) across REPOSITORY_SOURCES (tokenize.py), a corpus per
-# language, as a pack call parses one grammar
+# One corpus per language: a pack call parses one grammar
 REPOSITORIES = {"Python": "repositories_python", "C++": "repositories_cpp"}
-# Each stage's context: Qwen2.5-Coder's 8,192 and 32,768 (arXiv 2409.12186 §3.2.1, §3.2.2)
+# Contexts 8,192 and 32,768 (arXiv 2409.12186 §3.2.1, §3.2.2)
 FILE_LEVEL_STAGE = Stage(8192, (MAX_STEPS - REPO_LEVEL_STEPS) * BATCH_SIZE, {
     "repository": Group("rest", REPOSITORY_SOURCES),
     "synthetic": Group(0.30 * CODE_SHARE, SYNTHETIC_SOURCES),
@@ -109,10 +100,8 @@ REPO_LEVEL_STAGE = Stage(32_768, REPO_LEVEL_STEPS * BATCH_SIZE, {
 })
 
 IN_PART = ("synthetic", "text", "math")
-# {source: its group} of every source of a group read in part (such a group has the same sources in both stages)
 PART = {source: group for group in IN_PART for source in FILE_LEVEL_STAGE.groups[group].sources}
-# Bytes per token of the reference tokenizer (SA-BPE within SPLIT_PATTERN, trained before this corpus) on each source,
-# for token counts that precede the corpus's tokenizer (extents, the tokenizer sample)
+# Bytes per token of the reference tokenizer, for token counts made before the corpus's tokenizer exists
 BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.638,
                    "ultradata_code_l2_python": 3.709, "stack_edu_cpp": 3.065, "ultradata_stack_v3_l2_cpp": 3.015,
                    "ultradata_code_l2_cpp": 2.935, "kaggle_notebooks": 3.459, "codeforces_cots": 3.536,
@@ -120,9 +109,7 @@ BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.
                    "nemotron_rewriting_python": 3.909, "nemotron_transpilation_cpp": 3.651, "codexglue_python": 4.028,
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
-# How much better a retrained tokenizer may compress a source than the reference tokenizer: NSL "only varies by 5 to 6
-# percentage points" across tokenizer training mixes (Dagan et al., arXiv 2402.01035 §2.3);
-# ablations/tokenizer_split_merge.py intrinsic measures each arm's margin (train_tokens_over_draw)
+# NSL "only varies by 5 to 6 percentage points" across tokenizer training mixes (arXiv 2402.01035 §2.3)
 SPREAD = 0.06
 
 
@@ -134,10 +121,8 @@ def draw(group: str) -> float:
 
 def weights(stage: Stage, rows: dict[str, int], count: int
             ) -> tuple[dict[str, float], dict[str, int], dict[str, int]]:
-    """A run's {corpus: weight} in a stage of `count` rows given each corpus's packed rows, {corpus: the rows it draws}
-    and {corpus: the rows it draws beyond its packed rows} (empty when the run fits): the stage's shares (Stage.shares)
-    of the packed rows, replayed by mixture_rows; a "supply" corpus that draws beyond its rows weighs as many rows less,
-    so it is read whole once and never overdraws."""
+    """A run's ({corpus: weight}, {corpus: rows drawn}, {corpus: rows drawn beyond its packed rows}) in a stage of
+    `count` rows; a "supply" corpus is reweighted until it never overdraws."""
     supply, weighed = set(stage.supply), dict(rows)
     while True:
         shares = stage.shares(weighed, count)
@@ -153,10 +138,7 @@ def weights(stage: Stage, rows: dict[str, int], count: int
 
 
 def mixture_rows(weights: np.ndarray, *, start: int, count: int) -> np.ndarray:
-    """Corpus index (into weights) of each run row start..start+count-1: row n goes to the corpus whose share of the
-    cumulative weights holds the Weyl point frac((n + 1) * GOLDEN), so every prefix of the run holds each corpus nearly
-    in proportion to its weight (the sequence's low discrepancy), and any stretch of the run is computed without the
-    rows before it."""
+    """Corpus index (into weights) of each run row start..start+count-1, by the Weyl point frac((n + 1) * GOLDEN)."""
     bounds = np.cumsum(weights)
     bounds /= bounds[-1]
     points = np.modf(np.arange(start + 1, start + count + 1) * GOLDEN)[0]

@@ -1,24 +1,8 @@
 /*
- * Value-embedding gate and mix of model/modeling.py Attention (per-layer token-indexed value embeddings behind a
- * per-head gate), forward and backward, one pass over each row's memory:
- *   z = n W^T (fp32; W the gate's (H, C) fp32 weight), gate = 2 sigmoid(z),
- *   ve = bf16(table[idx]), out = bf16(v + gate[head] ve).
- * Backward from dout (dv = dout, passed through by the op):
- *   dgate[h] = sum over head h's dims of dout ve, dz = 2 dgate (1 - s) s with s = gate / 2 (sigmoid's derivative as
- *   torch's sigmoid_backward writes it), dn = bf16(dz W), dve = bf16(gate[head] dout) added into the table's fp32
- *   gradient at row idx, dz written as bf16 for the gate weight's gradient dW = dz^T n (a GEMM, model/ops/ve_gate.py).
- *
- * Layout: n, out, dn contiguous (rows, C), C = H * HEAD_DIM; v and dout rows v_stride / dout_stride elements apart (C,
- * or 3C for a slice of a fused q/k/v projection or its gradient); idx (rows,) int32; table, dtable (V, C) fp32;
- * gate (rows, H) fp32, dz (rows, H) bf16. A row is one warp; lane l holds the VEC-wide chunks l, l + WARP, ... of the
- * row, each inside one head (HEAD_DIM is a multiple of VEC). H is a template parameter, so per-head arrays stay in
- * registers; it is instantiated for H = 2, 4, 6, the head counts of the configured num_hidden_layers
- * (model/modeling.py model_config).
- *
- * The backward visits rows in token order (order: a permutation sorting idx, ids = idx[order]), RUN consecutive
- * positions per warp: a run of equal tokens reads its table row once and sums its rows' dve in registers, then adds
- * the sum into dtable with one 16-byte atomic per lane and chunk (red.global.add.v4.f32); dtable is accumulated into,
- * not overwritten. Design source: deepseek-ai/TileKernels' Engram gate and weight-gradient reduce.
+ * Value-embedding gate and mix: z = n W^T (fp32), gate = 2 sigmoid(z), out = bf16(v + gate[head] bf16(table[idx])).
+ * Backward: dgate[h] = sum_head dout ve, dz = 2 dgate (1 - s) s with s = gate / 2, dn = bf16(dz W), dve =
+ * bf16(gate[head] dout) summed per run of equal tokens (token order) and added into dtable with 16-byte atomics.
+ * Design source: deepseek-ai/TileKernels' Engram gate and weight-gradient reduce.
  */
 #include "common.cuh"
 
@@ -41,8 +25,7 @@ static __device__ __forceinline__ void unpack(const uint4 &u, float *v) {
     }
 }
 
-/* The launch configuration, the fastest measured at d24 (GH200): THREADS per block, the backward at 2 blocks per SM
- * (128 registers per thread), RUN positions per warp. */
+/* Fastest measured at d24 (GH200); the backward at 2 blocks per SM (128 registers per thread). */
 constexpr int THREADS = 256;  /* warps per block: THREADS / WARP */
 constexpr int RUN = 16;       /* backward: consecutive token-order positions per warp */
 static_assert(RUN <= WARP, "a warp's positions are held one per lane");
@@ -242,9 +225,8 @@ extern "C" int ve_forward(const void *n, const void *v, long long v_stride, cons
     }
 }
 
-/* dout_stride: elements between dout's rows; ids: int32 (rows,) the tokens in visiting order, idx[order]; order: int64
- * (rows,) a permutation of the rows sorting idx; dtable: fp32 (table_rows, C), accumulated into; dz: bf16 (rows, H).
- * H: one ve_forward accepted. */
+/* ids: int32 tokens in visiting order, idx[order]; order: int64 permutation sorting idx; dtable fp32, accumulated
+ * into; dz bf16 (rows, H). */
 extern "C" void ve_backward(const void *dout, long long dout_stride, const void *ids, const void *order,
                             const void *table, const void *w, const void *gate, void *dn, void *dtable, void *dz,
                             long long rows, int H, void *stream) {

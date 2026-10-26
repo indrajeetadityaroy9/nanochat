@@ -1,19 +1,10 @@
 #!/bin/bash
-# The standard-protocol cross-check of eval/code_eval.py: the benchmarks' own harness CLIs, unmodified, on an exported
-# checkpoint (inference/export_hf.py) served by vLLM 0.32.0 in its own image (vllm/vllm-openai at the pinned digest,
-# its own torch build); the export's modeling_nanochat.py runs through vLLM's Transformers backend (trust_remote_code):
-# - EvalPlus (evalplus as pyproject.toml pins it): `evalplus.codegen --backend vllm --greedy` on HumanEval+ and MBPP+
-#   (direct completion: the tokenizer has no chat template), scored by `evalplus.evaluate` in the nanochat image;
-# - MultiPL-E (nuprl/MultiPL-E at docker/Dockerfile's commit): `automodel_vllm.py` on humaneval-cpp and mbpp-cpp at
-#   T = 0.2, top-p 0.95, 20 completions per problem, judged by its evaluation/src/main.py and pass_k.py in the nanochat
-#   image ($MULTIPL_E).
-# Results in <out dir>: evalplus/<dataset>/..._eval_results.json, multipl-e/<dataset>/ and pass_k.csv. Generation
-# requires an empty or new <out dir>: both harnesses skip samples already in it (evalplus codegen's "already cached",
-# MultiPL-E's completion_limit) and the model is always /model. Caches (Hugging Face datasets, vLLM's compiled graphs)
-# in the checkout's artifacts/cache, as the nanochat image's.
+# Standard-protocol cross-check: the benchmarks' own harness CLIs, unmodified (EvalPlus codegen --greedy; MultiPL-E
+# automodel_vllm.py, T = 0.2, top-p 0.95, 20 completions), on an exported checkpoint served by vLLM 0.32.0 through its
+# Transformers backend; scored by the harnesses' evaluators in the nanochat image. <out dir> must be empty or new:
+# both harnesses skip samples already in it.
 #
-#   scripts/standard_eval.sh <exported model dir> <out dir> [generate|score]   (mounted at /model and /out; default
-#   both: generate on the GPU, then score on the CPU)
+#   scripts/standard_eval.sh <exported model dir> <out dir> [generate|score]   (default both)
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 [ "${3:-both}" = score ] || [ -z "$(ls -A "$2" 2> /dev/null)" ] || { echo "$2 is not empty" >&2; exit 1; }

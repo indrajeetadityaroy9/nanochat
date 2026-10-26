@@ -162,7 +162,7 @@ the decoder's `decode.cu`) and one self-contained file per kernel with its C ent
 | MLP | `linear.py` `relu2_mlp`: the norm as a row scale, since norm(h)Wᵀ = diag(rstd)·hWᵀ for a gain-free norm: rstd and relu² in the up projection's epilogue (`gemm_norm_act`, pre-activation and activation both stored for the backward), the residual as the down projection's C (`gemm_add`); backward: relu²'s derivative × rstd and the norm's row sum in one epilogue (`relu2_dact_rstd`), the norm's backward in the up projection's dX epilogue (`norm_bwd_apply`); the normed stream is never stored |
 | Tiles | `CONFIGS`: a fixed QuACK SM90 configuration per call and width (C 256, 512, 768) at M = 98,304, each the lowest mean of three runs of QuACK's own autotuning benchmark; QuACK's `default_config` elsewhere |
 | q/k prologue | `qk_prologue.cu`: norm → gain → RoPE in fp32, one bf16 rounding per output, one pass per direction; forward one thread group per position, its gains and cos/sin loaded once for the H heads, two heads in flight; gain gradient without atomics (persistent blocks, per-block partials summed in block order) |
-| Value-embedding gate and mix | `ve_gate.cu` (`ve_gate.py`): one warp per row, the gate logits in fp32, the mix rounded once; backward in token order (one `torch.sort` of `input_ids` per micro-batch, shared by the layers through CSE), 16 positions per warp, a run of equal tokens summed in registers and added into the table's `.grad` with one 16-byte atomic per lane and chunk (no zeroed gradient, no autograd add); the gate weight's gradient one cuBLAS GEMM from bf16 dz; compiled for H = 2, 4, 6 |
+| Value-embedding gate and mix | `ve_gate.cu` (`ve_gate.py`): one warp per row, the gate logits in fp32, the mix rounded once; backward in token order (one `torch.sort` of `input_ids` per micro-batch, shared by the layers through CSE), 16 positions per warp, a run of equal tokens summed in registers and added into the table's `.grad` with one 16-byte atomic per 4 fp32 (two per lane and 8-wide chunk; the zeroed table gradient allocated once per step, when `.grad` is None, then accumulated into; no autograd add); the gate weight's gradient one cuBLAS GEMM from bf16 dz; compiled for H = 2, 4, 6 |
 | Cross entropy, training | `cross_entropy.py` `lm_loss`: QuACK's scaled-exp linear cross entropy per `LCE_CHUNK` = 8,192 rows: the logits GEMM's epilogue (N tile 128, pingpong) stores bf16 rescaled exponentials with each row's tile maxima, sums and the label's fp32 logit; `lce_glue` forms the loss from the fp32 accumulators; dX (bf16) and dW (fp32, accumulated across chunks) GEMMs rescale on the A-operand load. No logits tensor and no softmax pass. The cap in the same pipeline: tanh on the fp32 accumulator, the tile maximum capped likewise (tanh is increasing), 1 − tanh² folded into the stored exponentials, the label's entry fixed by one Triton kernel (`cap_label_fix`) |
 | Cross entropy, evaluation | `lm_losses`: uncapped, QuACK's `lse_target_epi` (logsumexp and label logit from the fp32 accumulators, no logits stored); capped, per 8,192 rows (`CHUNK`) an fp32-output GEMM and the capped logsumexp in one Inductor-fused kernel (`capped_losses`) |
 | Embedding | `F.embedding` of the token table, the bf16 cast fused by Inductor; PyTorch's backward accumulates rows with atomics |
@@ -275,6 +275,123 @@ bitwise `067e60b`'s.
 fp32 run 2e-6 from it): per-parameter gradient relative error median 1.17e-2, max 1.96e-2 at `70025d8`, against
 1.18e-2 / 1.95e-2 at `646a986` (the model code of its parent `cf0aff5`), the two trees 3.75e-3 apart: bf16 rounding,
 not a defect.
+
+## 5. Implementation reference
+
+Per-module detail behind the code's docstrings (paper-facing facts are in §1–§4 and not repeated).
+
+**`model/modeling.py`**
+- `init_weights`: the zero-initialized gate weight gives gate 1; `resid_lambdas` = 1 follows LOG 2026-01-11, the
+  QK-norm gains = 1 transformers' `Qwen3RMSNorm`.
+- `GemmLinear.weight_bf16`, `Attention.qkv_bf16` (the stacked [Wq; Wk; Wv] for `qkv_proj`): non-persistent buffers
+  refreshed by `refresh_gemm_weights` after init, after a load (a `load_state_dict` post-hook) and after every
+  optimizer step; copied in place because a compiled graph holds them; reallocated only when a load assigned weights
+  on another device (`train/checkpoint.py` `load_model`'s meta model). dW accumulates into each fp32 `.grad`.
+- `Attention.forward`: the value-embedding arguments are (n, `input_ids`, table, W_g, `torch.sort(input_ids)`); the
+  sort runs once per micro-batch, every layer's identical sort merged by AOTAutograd's common-subexpression
+  elimination (`torch/_functorch/compile_utils.py` `fx_graph_cse`).
+- `hidden`: `cu_seqlens` come from `corpus/loader.py` `PretrainingBatches`, fixed in length per loader, unused entries
+  empty segments; `segments` is a 0-dim int32 host tensor (no device synchronization).
+- `num_matmul_params`: norm gains and scalars are elementwise, so excluded with the embedding tables.
+
+**`model/ops/linear.py`**
+- Weight gradients: each op takes its weights' fp32 `.grad` (allocated as zeros by `train/loop.py`, zeroed after each
+  step by `train/optim.py` `update`) and adds dW in place, so micro-batches accumulate in the GEMM; autograd sees no
+  gradient for those weights. The ops are `torch.library` custom ops so fullgraph `torch.compile` traces them;
+  QuACK's fused epilogues come from `quack.gemm_interface` and `quack.epilogue`.
+- `qkv_proj`: q, k, v are the column blocks [0, C), [C, 2C), [2C, 3C); `qkv_proj_bwd` dX = dY [Wq; Wk; Wv] (one GEMM,
+  K = 3C), each dW = dY_blockᵀ X on the block's strided view of dY.
+- `residual_rms`: QuACK's `gemm_rms` epilogue and finalize (`quack/gemm_interface.py` `_gemm_rms_call`,
+  `_rms_finalize`) via `sq_reduce_mod` and `rms_final_reduce`: per-tile squared sums, finalized to
+  rstd = (mean(h²) + eps)^−½; called inside the attention op. `residual_rms_bwd`: x = O (FA4's output, heads of
+  `HEAD_DIM`); dpsum is the sum over each head's dims of dx·x.
+- `relu2_mlp`: `gemm_norm_act` stores the scaled pre-activation and the activation (dW_down's operand is the saved
+  activation); the residual is the down projection's C (`gemm_add`'s body). Its backward owns the norm's backward
+  (rstd gets no gradient of its own): with P = h W_upᵀ, preact = rstd·P, dP = rstd·dpreact,
+  d rstd = Σ(dpreact·preact) / rstd and ∂rstd/∂h = −rstd³ h / C, giving the docstring's dh; the row sum is a reduce
+  of the dact epilogue (`relu2_dact_rstd`), the rest the dX GEMM's epilogue (`norm_bwd_apply`, C = dy, h a tile load).
+- `sm90`: a point of QuACK's SM90 space (`quack/gemm_config.py` `_get_sm90_configs`) with QuACK's static persistent
+  scheduler (`is_dynamic_persistent=False`; the `down_dx` GEMM of `relu2_mlp_bwd` passes `dynamic_scheduler=True`).
+  `CONFIGS` covers the d8, d16 and d24 widths (`model_config`) at M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`; the
+  benchmark is `quack/autotuner.py` (L2-cold CUDA-graph medians of every candidate, exclusive GPU). `gemm` calls
+  `gemm_tuned.fn` because QuACK's `gemm`/`gemm_add` run `config=None` for `tuned=False`. `DPSUM_CONFIG` is the fastest
+  tile_n = 128 configuration on 98,304 × 768 × 768.
+
+**`model/ops/cross_entropy.py`**
+- `lm_loss` follows `quack/linear_cross_entropy.py` `scaled_exp_linear_cross_entropy_fwd` (its calls and tiles), per
+  `LCE_CHUNK` rows. The logits GEMM's epilogue stores E = bf16(2^(z·log2 e − k)), k the rounded maximum of the row's
+  `TILE_N1`-wide tile, with each tile's sum of exponentials and the label's fp32 logit (not z). `lce_glue` forms
+  logsumexp − z[t] from the fp32 accumulators, fixes E at the label and writes each row's power-of-two rescalings.
+  dx = (1/n)·dz W (bf16) and dW = (1/n)·dzᵀ x (fp32, accumulated across chunks, `add_to_output`) are GEMMs on E whose
+  A-operand load applies the rescalings: dz = v·(u·E) row-wise, u exact powers of two, v fp32.
+- Epilogues: uncapped `scaled_exp_target_epi` (`quack/epilogue/scaled_exp.py`); capped `capped_scaled_exp_epi`, whose
+  `sum_exp` sums the plain exponentials while D carries 1 − tanh², so the gradient GEMMs read
+  dz = (softmax − onehot)(1 − tanh²); `cap_label_fix` applies the derivative to the label entry `lce_glue` rewrote.
+- Constants: `LCE_CHUNK` the least-memory size among those equally fast on a d24 micro-batch; `TILE_N1` the fastest
+  admissible tile (§3 notes); `TILE_N2` = 192 at C = 768; `CHUNK` does not change the losses.
+- `lm_loss` is opaque to `torch.compile` (CuTe DSL GEMMs, Triton kernels, gradients computed in the forward); labels
+  int64, dx in x's dtype; `lm_loss_grad` multiplies the saved gradients by dloss, dx's product in fp32 rounded once.
+  `step_shares` weights sum the micro-batch means to the mean over every valid label of the step.
+- `lm_losses`: uncapped, `lse_target_epi` (`quack/epilogue/library.py`) reduces logsumexp and gathers the label logit
+  from the fp32 accumulators (z not stored); capped, `lse_target_epi` has no tanh epilogue, hence the fp32 GEMM and
+  `capped_losses`; `tuned=False`.
+
+**`model/ops/flash_attn.py`**
+- One op because FA4's own `autograd.Function` is not traceable by `torch.compile`. The backward writes every
+  projection gradient into one (B, T, 3C) buffer: FA4's dv into the v block (read there by the value embeddings'
+  backward; the mix passes dv through to v), the prologue's dq, dk into the q and k blocks.
+- `attention` arguments: norm weights (`HEAD_DIM`,) fp32; cos/sin (T_table ≥ T, `HEAD_DIM`/2) fp32; `o_weight` o_proj's
+  bf16 copy (C, C); value-embedding inputs n, `input_ids`, table, W_g and the sort's `ids`, `order`. Outputs: rstd is
+  non-differentiable because `relu2_mlp`, its one consumer, differentiates through it; out (B, T, H, `HEAD_DIM`), lse
+  (H, B·T) fp32; mixed v and gate empty without value embeddings (likewise dn, dw_gate in `attention_bwd`).
+- `PersistentVarlenScheduler`: FA4's SM90 forward launches one CTA per (segment m-block, head)
+  (`flash_fwd_sm90.py` `FlashAttentionForwardSm90.__call__`, `SingleTileVarlenScheduler`); the subclass reuses
+  `VarlenDecoder.decode`. `PersistentForwardSm90` doubles sQ's allocation (the rest of `_get_shared_storage_cls`
+  unchanged) because FA4 stages O in sQ, which the producer refills (`FlashAttentionForwardSm90.mma`).
+- `BackwardSm90Bf16dQ`: replaces FA4's fp32 `dq_accum` (zero-filled, converted by `flash_bwd_postprocess.py`): the
+  consumers stage dQ × softmax scale as bf16 rows and the dQ warp reduce-adds each row into dq (PTX ISA
+  `cp.reduce.async.bulk .add.noftz.bf16`). `mma_one_m_block` restates FA4's (`mma_dkv_is_rs`,
+  Q_stage = dO_stage = PdS_stage, no score_mod); FA4's `mma` masks every tile, `_needs_mask` only boundary tiles. Tile
+  shapes and stages are FA4's (`_tile_size_fwd_sm90`, `_tile_size_bwd_sm90`).
+- `precomputed_dpsum` replaces FA4's `_bwd_preprocess` (`interface.py`, `flash_bwd_preprocess.py`), which reads O and
+  dO for dpsum. `fa4_window_left` → None also avoids plain causal attention running on FA4's local kernel
+  (`interface.py` `_resolve_causal_local_window`). `heads` views have token stride 3C.
+
+**`model/ops/qk_prologue.py`, `model/kernels/qk_prologue.cu`, `model/kernels/qk_row.cuh`**
+- Called inside the attention op; norm → gain → RoPE is transformers' `modeling_qwen3.py` `Qwen3Attention.forward`
+  order; eps is `F.rms_norm`'s fp32 epsilon. dq, dk are the q, k blocks of the projection's gradient; the forward's
+  outputs and the incoming gradients are contiguous.
+- Layout: token stride 3C = 3·H·`HEAD_DIM`; position of token t = t mod T; the first half of the blocks takes q, the
+  second k. Forward: a `QK_LANES`-thread group per position, its gains and cos/sin loaded once for the H heads, two
+  heads' loads in flight, the odd head of an odd H alone; block size from the occupancy calculator (a multiple of
+  `WARP`, so rows never straddle warps). Row sums reduce by shuffles within a row's lanes.
+- Gain gradient: persistent blocks stride over rows accumulating dm·n in registers, reduce their warps in order into a
+  per-block partial (`part`, fp32 (2·`qkp_backward_blocks()`, `HEAD_DIM`)), and `k_gain_sum` adds them in block order.
+
+**`model/ops/ve_gate.py`, `model/kernels/ve_gate.cu`**
+- v is the fused projection's v block and FA4's dv sits in place in the projection's gradient (token stride 3C);
+  the mixed v's gradient is v's own. The op owns the lookup, so autograd receives None for the table. The gate
+  weight's gradient dzᵀ n is a cuBLAS GEMM from bf16 dz, fp32 out. Sigmoid's derivative is written as torch's
+  `sigmoid_backward` writes it.
+- Layout: n, out, dn contiguous (rows, C), C = H·`HEAD_DIM`; v and dout rows `v_stride`/`dout_stride` apart (C, or 3C
+  for the fused projection); idx int32; table, dtable (V, C) fp32; gate (rows, H) fp32; dz (rows, H) bf16. A row is
+  one warp; lane l holds the `VEC`-wide chunks l, l + `WARP`, …, each inside one head. H is a template parameter
+  (per-head arrays in registers), instantiated for 2, 4, 6, the head counts of d8, d16, d24.
+- Backward: rows in token order, `RUN` positions per warp; a run of equal tokens reads its table row once, sums its
+  dve in registers and adds the sum with one `red.global.add.v4.f32` per 4 fp32 (two per lane and `VEC` = 8 chunk);
+  dtable is accumulated into.
+
+**`model/kernels/fa4_rows.cu`**
+- Inputs: dpsum (rows, H) fp32 (the epilogue's per-(row, 128-column tile) partials), lse (H, `lse_stride`) fp32, cu
+  (segments + 1) int32; outputs (H, padded) fp32. One thread per padded row finds its segment by binary search over
+  start_b. Each segment's rows past its length up to a multiple of m, which the segment's last backward m-block loads,
+  get dpsum 0 and lse_log2 +inf (the preprocess's lse = +inf), so their P is 0; rows between
+  start_b + round_up(len_b, m) and start_{b+1} are never read.
+
+**`native.py`**
+- The same nvcc command line builds each kernel (one invocation per kernel, on first use); the toolchain is the
+  image's; sm_90a per the CUDA C++ Programming Guide, "Feature Availability". `corpus_crate` exposes `train`
+  (`corpus/train_tokenizer.py`), `topological_sort` (`corpus/sources.py`) and `pack` (`corpus/pack.py`).
 
 ## References
 

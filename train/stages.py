@@ -1,9 +1,6 @@
 """
-A run's training rows per stage: the packed train rows of the stage's corpora (corpus/pack.py packs each stage's
-documents apart, so no document is read twice), drawn by the run's weights in the stage (corpus/mixture.py weights: the
-stage's shares of the packed rows at the rows the run draws there). max_tokens_per_param: the most tokens per
-non-embedding parameter at which no stage draws more rows of a corpus than it holds (PretrainingBatches stops at an
-exhausted corpus). stage_batches: a stage's training micro-batches in the run's data order.
+A run's training rows per stage: each corpus's packed rows, drawn by the stage's mixture weights; the most tokens per
+parameter bisection finds that overdraws no corpus.
 """
 
 import bisect
@@ -29,10 +26,8 @@ def drawn(stage: Stage, run: RunPlan) -> int:
 def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int, device: torch.device, start: int
                   ) -> tuple[dict[str, float], Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
                                                           np.ndarray]]]:
-    """({corpus: weight}, the stage's training micro-batches from run row `start` on): each corpus's packed rows
-    permuted once by `seed` (RandomState's stream is frozen across numpy versions, so a resume sees the same order),
-    FIM pieces read as FIM examples. A run that would overdraw a corpus raises (max_tokens_per_param bounds the
-    tokens per parameter)."""
+    """({corpus: weight}, the stage's micro-batches from run row `start` on), each corpus's rows permuted once by `seed`
+    (RandomState: stream frozen across numpy versions, so a resume sees the same order). Raises on an overdraw."""
     rows = stage_rows(tokenizer, stage)
     mixture, _, over = weights(stage, rows, drawn(stage, run))
     if over:

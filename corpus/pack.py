@@ -1,16 +1,6 @@
 """
-Pack the tokenized corpus into training rows of seq_len + 1 tokens, stage by stage: the crate's pack, one curated shard
-per call (Best-Fit-Decreasing, each piece its own attention segment, long documents cut between statements), with
-FIM examples in repository code's train splits. Output per corpus and stage:
-<split>-T<seq_len>.pieces, .rows and .fim beside the tokenized split (layout.py).
-
-A stage's train packs hold at least the rows the base model's run reads (mixture.MAX_STEPS), each document at most once:
-- file stage: the repository partitions before the 32K stage's, and the supply sources, whole; a source read in part
-  (mixture.IN_PART), its leading shards;
-- repository stage: the repositories corpora and Codeforces-CoTs, whole; ClimbMix and UltraData-Math L3, the shards
-  after the file stage's.
-A source read in part takes shards until the stage's weights (mixture.weights) draw no more than it holds. Val splits
-are packed whole at each reading stage's seq_len.
+Pack the tokenized corpus into training rows of seq_len + 1 tokens, stage by stage, one curated shard per crate call,
+with FIM examples in repository code's train splits; each document is packed at most once.
 
 python -m corpus.pack
 """
@@ -39,23 +29,18 @@ from corpus.tokenize import repository_parts, shard_tokens
 from corpus.tokenizer import FIM_TOKENS, TOKENIZER, get_tokenizer
 from native import corpus_crate
 
-# FIM (the crate's Fim): a piece becomes an example at rate 0.5 (DeepSeek-Coder, arXiv 2401.14196 §3.1.2; arXiv
-# 2207.14255 §3); its middle a random character span at 0.1, else AST-FIM's (arXiv 2506.00204 §5.1), Single-Node or
-# Aligned-Span masking at 0.5 each (§3.3); an AST middle whose node starts its line takes the line's indentation at
-# 0.5, so the prefix ends in the line break as in line-level infilling (arXiv 2207.14255 §2.2); SPM at 0.5, else PSM
-# (arXiv 2207.14255 §3.1, App. D variant 2; arXiv 2506.00204 §5.1). The crate draws each piece's FIM from ChaCha8 keyed
-# by document and piece, so packs do not depend on the order of work
+# FIM rate 0.5 (arXiv 2401.14196 §3.1.2); Rand-FIM 0.1, Single-Node 0.5 (arXiv 2506.00204 §5.1, §3.3); line-start
+# 0.5 (line-level infilling, arXiv 2207.14255 §2.2); SPM 0.5 (arXiv 2207.14255 §3.1, App. D variant 2)
 FIM_RATE, RANDOM_SPAN_RATE, SINGLE_NODE_RATE, LINE_START_RATE, SPM_RATE = 0.5, 0.1, 0.5, 0.5, 0.5
-# Pack calls in flight: one per core (the crate releases the GIL)
+# One pack call per core (the crate releases the GIL)
 WINDOW = os.cpu_count()
 
 Shard = tuple[np.ndarray, np.ndarray, np.ndarray]
 
 
 def pack_shard(task: tuple[str, str, int, int, Path]) -> Shard:
-    """Curated shard i of a tokenized split of the vocabulary in directory `tokenizer_path` packed into rows of
-    seq_len + 1 tokens: its pieces (PIECE_COLUMNS int64 each, the FIM range within the shard's FIM tokens), the pieces
-    of each row, the shard's FIM tokens."""
+    """Curated shard i of a tokenized split packed into rows of seq_len + 1 tokens: (pieces, pieces per row, FIM
+    tokens), the FIM range within the shard's FIM tokens."""
     corpus, split, i, seq_len, tokenizer_path = task
     tokenizer = get_tokenizer(tokenizer_path)
     tokenized = split_path(corpus, split, tokenizer)
@@ -75,7 +60,7 @@ def pack_shard(task: tuple[str, str, int, int, Path]) -> Shard:
 
 def packed_shards(corpus: str, split: str, tokenizer_path: Path, shards: Iterable[int], seq_len: int
                   ) -> Generator[Shard]:
-    """pack_shard of each shard, in order, WINDOW in flight; a shard is packed only as the window reaches it."""
+    """pack_shard of each shard, in order, WINDOW in flight."""
     with ThreadPoolExecutor(WINDOW) as pool:
         yield from ordered(pool, pack_shard, [(corpus, split, i, seq_len, tokenizer_path) for i in shards], WINDOW)
 
@@ -112,8 +97,7 @@ def take(corpus: str, more: Iterator[Shard]) -> Shard:
 
 def fit(stage: mixture.Stage, rows: dict[str, int], more: dict[str, Generator[Shard]],
         held: dict[str, list[Shard]]) -> dict[str, float]:
-    """The stage's weights once every corpus holds its draw over the stage's rows (mixture.weights): a corpus read in
-    part (more) packs its next shard into held while it draws more rows than it holds."""
+    """The stage's weights once every corpus read in part (more) has packed shards into held to cover its draw."""
     while True:
         shares, _, over = weights(stage, rows, stage.rows)
         if not over:
@@ -129,15 +113,14 @@ def fit(stage: mixture.Stage, rows: dict[str, int], more: dict[str, Generator[Sh
 
 def pack_stage(stage: mixture.Stage, tokenizer_path: Path, whole: dict[str, list[int]], part: dict[str, list[int]]
                ) -> tuple[dict[str, float], dict[str, int]]:
-    """Pack a stage's train splits: the whole corpora's listed shards, written as packed; the corpora read in part,
-    their listed shards in order until they hold their draw (fit), written then. Returns the weights and, of each
-    corpus read in part, the shards it took."""
+    """Pack a stage's train splits: whole corpora's listed shards, then corpora read in part until they hold their
+    draw (fit). Returns the weights and the shards each corpus read in part took."""
     rows = {corpus: write(corpus, "train", tokenizer_path,
                           packed_shards(corpus, "train", tokenizer_path, shards, stage.seq_len), stage.seq_len)
             for corpus, shards in whole.items()}
     more = {corpus: packed_shards(corpus, "train", tokenizer_path, shards, stage.seq_len)
             for corpus, shards in part.items()}
-    held = {corpus: [take(corpus, more[corpus])] for corpus in part}  # one shard each; fit takes more as draws need
+    held = {corpus: [take(corpus, more[corpus])] for corpus in part}
     rows |= {corpus: len(shards[0][1]) for corpus, shards in held.items()}
     shares = fit(stage, rows, more, held)
     for corpus, shards in held.items():
@@ -149,8 +132,7 @@ def pack_stage(stage: mixture.Stage, tokenizer_path: Path, whole: dict[str, list
 
 
 def main() -> None:
-    """The corpus tokenizer's packs for the base model's run; val splits in threads beside the stages, so a val
-    shard's longest document does not hold up the cores."""
+    """The corpus tokenizer's packs for the base model's run; val splits in threads beside the stages."""
     corpus_crate()  # built once, before the threads call it
     stages = (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE)
     with ThreadPoolExecutor() as threads:

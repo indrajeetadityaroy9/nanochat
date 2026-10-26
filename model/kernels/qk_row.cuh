@@ -1,15 +1,13 @@
 /*
- * q/k row math shared by qk_prologue.cu (training) and decode.cu (decoding), so the decoder's q and k equal
- * the training forward's bitwise. On one head row x: n = x / sqrt(mean(x^2) + eps) (F.rms_norm's fp32 epsilon),
- * m = n * g, y = m rotated by -theta over the full head (m1, m2 the halves; y1 = m1 cos + m2 sin,
- * y2 = -m1 sin + m2 cos; karpathy/nanochat 92d63d4 gpt.py:57-65). A row is QK_LANES threads, each holding dims
- * o..o+VEC-1 and their rotation partners o+HALF..; row sums reduce by shuffles within those lanes.
+ * q/k row math shared by qk_prologue.cu and decode.cu, so the decoder's q and k equal training's bitwise:
+ * n = x / sqrt(mean(x^2) + FLT_EPSILON), m = n g, y1 = m1 cos + m2 sin, y2 = -m1 sin + m2 cos (m1, m2 the halves;
+ * karpathy/nanochat 92d63d4 gpt.py:57-65). A row is QK_LANES threads, each holding dims o.. and partners o+HALF..
  */
 #pragma once
 
 #include "common.cuh"
 
-/* HEAD_DIM: model/config.py HEAD_DIM, defined by native.py's nvcc command */
+/* HEAD_DIM is defined by native.py's nvcc command */
 constexpr int HALF = HEAD_DIM / 2;    /* rotation pairs per head: dims i and i + HALF */
 constexpr int QK_LANES = HALF / VEC;  /* threads per head row, one rotation pair of vectors each */
 

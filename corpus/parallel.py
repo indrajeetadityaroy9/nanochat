@@ -11,22 +11,20 @@ SPAWN = multiprocessing.get_context("spawn")
 
 
 def memory() -> int:
-    """This process's memory: the machine's, or its container's cgroup v2 limit when lower ("max", or no memory.max as
-    on a cgroup v1 host or at the root of the hierarchy: no limit)."""
+    """This process's memory: the machine's, or its cgroup v2 memory.max when lower."""
     physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     limit = Path("/sys/fs/cgroup/memory.max")
     text = limit.read_text().strip() if limit.exists() else "max"
     return physical if text == "max" else min(physical, int(text))
 
 
-# Half: DuckDB's guidance, as some operations bypass its memory limit (DuckDB documentation, Guides, Troubleshooting,
-# "Out of Memory Errors"); the rest is left to other processes
+# Half: DuckDB documentation, Guides, Troubleshooting, "Out of Memory Errors" (some operations bypass its limit)
 MEMORY = memory() // 2
 
 
 def ordered[T, R](pool: Executor, fn: Callable[[T], R], tasks: Iterable[T], window: int) -> Iterator[R]:
-    """fn of each task, in task order, with at most `window` results outstanding. Closed early, it cancels the tasks
-    not started and waits for the running ones."""
+    """fn of each task, in task order, at most `window` outstanding; closed early, it cancels unstarted tasks and waits
+    for running ones."""
     pending: collections.deque[Future[R]] = collections.deque()
     try:
         for task in tasks:

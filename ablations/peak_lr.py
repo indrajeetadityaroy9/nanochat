@@ -1,28 +1,8 @@
 """
-Peak-lr calibration: the base model's multiplier of DeepSeek LLM's law eta = 0.3118 C^-0.125 (arXiv 2401.02954 §3.1
-Eq. 1; train/schedule.py plan), measured as the optimum at d24 at SHORT tokens per parameter times the optimum's
-horizon trend at d8 between SHORT and LONG, assumed width-independent. Grids: the law's lr x1, 2, 4, 8 at d8 at SHORT
-and at LONG, x1, 2, 4 at d24 at SHORT; one seed each.
-
-Analysis, pre-registered, computed when a run launches (run.py lr_multiplier, from RESULTS/peak_lr.jsonl; it depends
-on the adopted tokenizer's max_tokens_per_param, so no copy is stored):
-- per setting, code bits per byte fitted as a parabola in u = ln(multiplier) (fit): its vertex u* or the grid extension
-  the rule calls for;
-- the measured d8 ratio r = exp(u*_d8@LONG - u*_d8@SHORT) against the predictions of Complete^(d)P's AdamW SDE rule
-  eta ∝ sqrt(m_B / m_D) (arXiv 2512.22382 §2.1 Table 1) and Step-Law eta = 1.79 N^-0.713 D^0.307 (arXiv 2503.04715
-  §1 Eq. 1), each over the law's own fall between the two plans;
-- the horizon exponent ln r / ln m_D,d8;
-- the base model's multiplier of the law's lr, exp(u*_d24@SHORT) * (r / sqrt(m_B,d8))^(ln m_D,base / ln m_D,d8)
-  * sqrt(m_B,base): d8's trend net of its batch growth by the square-root batch rule (arXiv 2205.10287 Def. 5.2),
-  its exponent (horizon_exponent_net) carried to the base model's horizon, and the base model's batch growth by the
-  same rule.
-m_B and m_D are batch and token ratios: m_D,base the base model's tokens over d24 at SHORT's, m_D,d8 d8 at LONG's over
-d8 at SHORT's. Batches, token counts and the law's lrs are the runs' recorded plans (the base model's: run.py
-plan_of(RunConfig()), RunConfig's learning_rate_scale 1.0 the law's lr).
-
-The recorded runs (RESULTS/peak_lr.jsonl, peak_lr-curves.jsonl, peak_lr.json) use an earlier record format: a run's
-fields under "fields" (n_layer, ratio, lr_scale, seed) and its setting under "setting" (depth, tokens_per_param,
-seeds).
+Peak-lr calibration (pre-registered): the base model's multiplier of DeepSeek LLM's law eta = 0.3118 C^-0.125
+(arXiv 2401.02954 §3.1 Eq. 1), exp(u*_d24@SHORT) (r / sqrt(m_B,d8))^(ln m_D,base / ln m_D,d8) sqrt(m_B,base), with
+r = exp(u*_d8@LONG - u*_d8@SHORT); r / sqrt(m_B,d8) nets d8's batch growth by the square-root batch rule (arXiv
+2205.10287 Def. 5.2). r is compared with arXiv 2512.22382 §2.1 Table 1 and Step-Law (arXiv 2503.04715 §1 Eq. 1).
 """
 import math
 
@@ -31,10 +11,9 @@ import numpy as np
 import metrics
 from run import RunConfig, base_plan, plan_of
 
-# The short horizon in tokens per scaling parameter: the longest d24 run a sweep affords
+# short horizon in tokens per parameter: the longest d24 run a sweep affords
 SHORT = 5
-# d8's long horizon, where its law batch is 2 micro-batches (schedule.plan's rounding): the trend includes batch
-# growth, as the base model's does, netted out by the square-root rule
+# d8's long horizon, where its law batch is 2 micro-batches (batch growth netted out by the square-root rule)
 LONG = 200
 # Step-Law's token exponent of the optimal lr (arXiv 2503.04715 §1 Eq. 1: eta = 1.79 N^-0.713 D^0.307)
 STEP_LAW_D = 0.307
@@ -47,11 +26,9 @@ def setting(lines: list[dict], num_hidden_layers: int, tokens_per_param: float) 
 
 
 def fit(lines: list[dict]) -> dict:
-    """A setting's optimum from its runs in lr order, a diverged run counting as worse than any evaluated one: the grid
-    extension by a factor of 2 ("down" or "up") while its lowest-code run is at an end of the grid; else the vertex (as
-    a multiplier) of the parabola in u = ln(multiplier) through the lowest-code run and its two neighbours (positive
-    curvature by construction; a local bracket, as arXiv 2409.19913 §3.1 fits quadratics in log lr), or the lowest-code
-    run itself when the neighbour above it diverged."""
+    """A setting's optimum: grid extension x2 ("down"/"up") while the lowest-code run is at a grid end, else the vertex
+    of the parabola in u = ln(multiplier) through it and its neighbours (as arXiv 2409.19913 §3.1), or that run itself
+    if its upper neighbour diverged; a diverged run counts as worse than any evaluated one."""
     runs = sorted(lines, key=lambda line: line["fields"]["lr_scale"])
     u = [math.log(line["fields"]["lr_scale"]) for line in runs]
     code = [math.inf if line["measures"] is None else line["measures"]["code"] for line in runs]
@@ -68,12 +45,10 @@ def fit(lines: list[dict]) -> dict:
 
 
 def analysis(lines: list[dict]) -> dict:
-    """The pre-registered estimator over RESULTS/peak_lr.jsonl's records (module docstring); the derived values are
-    None while any setting's grid needs extending. The vertices are multipliers of the law's lr the runs recorded; they
-    are re-based onto the current law's lr (base_plan), whose batch and steps must be the recorded runs'."""
+    """The estimator over results/peak_lr.jsonl's records; derived values None while a grid needs extending. Vertices
+    are re-based onto the current law's lr; raises unless the recorded batch and steps are the current plan's."""
     def recorded_plan(num_hidden_layers, tokens_per_param):
-        """The setting's current plan (every arm's batch and steps are the same), with the law's lr its runs
-        recorded; the old record keys of RESULTS/peak_lr.jsonl."""
+        """The setting's recorded plan (old record keys) with the current and the recorded law's lr."""
         line = setting(lines, num_hidden_layers, tokens_per_param)[0]
         recorded = next(r for r in line["records"] if r["kind"] == "run")["plan"]
         current = base_plan(num_hidden_layers=num_hidden_layers, tokens_per_param=tokens_per_param)

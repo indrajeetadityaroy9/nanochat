@@ -1,11 +1,6 @@
 """
-Prepare every source: fetch the Hub files it reads, then standardize each into its category's schema, one
-standardized file per fetched file. Fetching reads only the standardizer's columns (ranged reads, several files at
-once) and keeps fetched files; standardized and checked files are rebuilt. A source read in part (mixture.IN_PART)
-fetches only the files that hold its share of the draw (extent). Stack-Edu's Hub files are metadata: each blob's text
-comes from Software Heritage's public S3 bucket by blob id, decoded with its src_encoding (The Stack v2 dataset card);
-a blob the bucket lacks or that does not decode has no text. Standardization keeps rows with text, normalizes line
-ends and byte-order marks (lines), sets id to the text's SHA-1, and of Codeforces-CoTs keeps finished traces only.
+Prepare every source: fetch the Hub files of its extent (only the standardizer's columns; Stack-Edu's blobs from
+Software Heritage's public S3 bucket, The Stack v2 dataset card), then standardize each into its category's schema.
 
 python -m corpus.prepare
 """
@@ -44,7 +39,7 @@ from corpus.sources import (
     text_bytes,
 )
 
-# Hub files fetched at once: the highest throughput of 1, 2, 4 and 8 files in flight
+# The highest throughput of 1, 2, 4 and 8 files in flight
 FETCHES = 4
 
 
@@ -70,10 +65,8 @@ def file_bytes(source: str) -> dict[str, int]:
 
 
 def extent(source: str) -> list[str]:
-    """The Hub files prepare fetches: all, sorted; of a source read in part, the fewest in the order of their paths'
-    SHA-1 (a uniform order whose prefixes nest as the extent grows) whose text bytes hold the group's fraction of the
-    source: its draw over its sources' tokens at mixture.BYTES_PER_TOKEN, widened by mixture.SPREAD and by the train
-    split's share of groups (schema.SPLIT)."""
+    """The Hub files prepare fetches: all, sorted; of a source read in part, the fewest in the SHA-1 order of their
+    paths whose text bytes hold its draw widened by mixture.SPREAD and SPLIT / (SPLIT - 1)."""
     if source not in mixture.PART:
         return hub_files(source)
     group = mixture.PART[source]
@@ -88,9 +81,8 @@ def extent(source: str) -> list[str]:
 
 @functools.cache
 def swh_store() -> S3Store:
-    """This process's client of Software Heritage's bucket, made once so connections are reused, with the
-    file-descriptor limit raised to its hard limit (a row group's requests are in flight at once). Retries back off
-    from 1 s to 1 min for up to 15 min."""
+    """This process's client of Software Heritage's bucket, with the file-descriptor limit raised to its hard limit;
+    retries back off from 1 s to 1 min for up to 15 min."""
     resource.setrlimit(resource.RLIMIT_NOFILE, (resource.getrlimit(resource.RLIMIT_NOFILE)[1],) * 2)
     return S3Store("softwareheritage", region="us-east-1", skip_signature=True,
                    retry_config={"max_retries": 15, "retry_timeout": timedelta(minutes=15),
@@ -118,8 +110,7 @@ def blob_texts(task: tuple[Path, int]) -> pa.Table:
 
 
 def fetch(source: str, file: str) -> Path:
-    """The local path of one of the source's Hub files: its standardizer's columns (Stack-Edu: metadata and each blob's
-    text), written to a .partial file and renamed, so only a complete file exists; an existing file is kept."""
+    """The local path of one of the source's Hub files, written via .partial; an existing file is kept."""
     spec = SOURCES[source]
     path = raw_dir(source) / file
     if path.exists():
@@ -145,19 +136,15 @@ def fetch(source: str, file: str) -> Path:
     return path
 
 
-# ---- standardize: a raw table into its category's schema
-
 def lines(texts: pa.ChunkedArray) -> pa.ChunkedArray:
-    """texts with CR LF and a lone CR as LF and every leading U+FEFF dropped, as Python and C++ read a source file
-    (Python Language Reference §2.1.2, §2.1.4; C++23 [lex.phases] phases 1-2). A file may begin with several marks
-    (re-encoded once per mark); both languages drop one and reject a second."""
+    """texts with CR LF and a lone CR as LF and every leading U+FEFF dropped (Python Language Reference §2.1.2, §2.1.4;
+    C++23 [lex.phases] phases 1-2)."""
     texts = pc.replace_substring_regex(texts, "^\ufeff+", "")
     return pc.replace_substring(pc.replace_substring(texts, "\r\n", "\n"), "\r", "\n")
 
 
 def document(spec: Source, content: pa.ChunkedArray, **fields: pa.ChunkedArray) -> pa.Table:
-    """A table of the source's category: content with its line ends normalized (lines), its sha1 as id, the given
-    fields, and the source's language where the category records one."""
+    """A table of the source's category: content normalized (lines), its sha1 as id, the given fields and language."""
     content = lines(content)
     fields |= {"id": sha1(content), "content": content}
     if "language" in spec.category.schema.names:
@@ -170,25 +157,23 @@ def repository_file(t: pa.Table, spec: Source) -> pa.Table:
 
 
 def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
-    """A Stack-Edu file: its metadata path, which begins with "/", taken relative to the repository's root."""
+    """A Stack-Edu file, its path without leading "/"."""
     return document(spec, t["text"], repo_name=t["repo_name"],
                     relative_path=pc.utf8_ltrim(t["path"], characters="/"))
 
 
 def conversation(t: pa.Table, spec: Source) -> pa.Table:
-    """A finished Codeforces-CoTs trace (finish_reason "stop"): the R1 prompt (ending with a line end) followed by its
-    generation, and the problem's id."""
+    """A finished Codeforces-CoTs trace (finish_reason "stop"): prompt followed by generation, and the problem's id."""
     t = t.filter(pc.equal(t["finish_reason"], "stop"))
     return document(spec, pc.binary_join_element_wise(t["prompt"], t[spec.text], ""), problem_id=t["id"])
 
 
 def function(t: pa.Table, spec: Source) -> pa.Table:
-    """A CodeSearchNet function: its code, which holds its docstring, and its repository."""
+    """A CodeSearchNet function (code with its docstring) and its repository."""
     return document(spec, t["code"], repo_name=t["repo"])
 
 
 def text_only(t: pa.Table, spec: Source) -> pa.Table:
-    """An exercise, a synthetic file, a notebook or a web document: its text alone."""
     return document(spec, t[spec.text])
 
 
@@ -219,8 +204,7 @@ def standardize(task: tuple[str, int, Path]) -> None:
 
 
 def prepare(source: str, files: list[str]) -> None:
-    """Fetch the source's files and standardize them in parallel into a fresh standardized directory (its checked
-    files, derived from them, removed)."""
+    """Fetch and standardize the source's files into a fresh standardized directory (its checked files removed)."""
     spec = SOURCES[source]
     directory = standardized_path(source, 0).parent
     shutil.rmtree(directory, ignore_errors=True)

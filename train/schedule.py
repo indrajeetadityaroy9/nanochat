@@ -1,7 +1,6 @@
 """
-Run plan (batch, steps, repo-level start, peak learning rate) from DeepSeek LLM's compute-optimal laws, each step's
-stage, and the per-step learning-rate multiplier: one schedule across both stages, the linear decay to zero
-continuing through the repo-level stage (arXiv 2502.15938 §4.2).
+Run plan from DeepSeek LLM's compute-optimal laws, each step's stage, and the learning-rate multiplier: warmup, then
+linear decay to zero through the repo-level stage (arXiv 2502.15938 §4.2).
 """
 from dataclasses import dataclass
 
@@ -16,25 +15,22 @@ WARMUP_STEPS = round(2 / (1 - BETAS[1]))
 @dataclass(frozen=True, kw_only=True)
 class RunPlan:
     batch_size: int                   # tokens per optimizer step
-    gradient_accumulation_steps: int  # micro-batches per step
+    gradient_accumulation_steps: int
     max_steps: int
-    repo_level_start: int             # first step of the repo-level stage
-    num_non_embedding_params: int     # model.modeling.num_non_embedding_params
+    repo_level_start: int
+    num_non_embedding_params: int
     tokens_per_param: float           # max_steps x batch_size / num_non_embedding_params
     learning_rate: float              # peak learning rate of every optimizer group
 
     def stage_at(self, step: int) -> Stage:
-        """The stage step `step` trains in: the repo-level stage from repo_level_start on (Qwen2.5-Coder,
-        arXiv 2409.12186 §3.2)."""
+        """The stage step `step` trains in (repo-level stage as Qwen2.5-Coder, arXiv 2409.12186 §3.2)."""
         return REPO_LEVEL_STAGE if step >= self.repo_level_start else FILE_LEVEL_STAGE
 
 
 def plan(*, model: CausalLM, tokens_per_param: float) -> RunPlan:
-    """Plan of `model` (any device, its file-level stage's context) at `tokens_per_param` tokens per non-embedding
-    parameter. With C = M D (M: DeepSeek LLM's Eq. 2 FLOPs per token at the file-level stage's context,
-    model/modeling.py), B_opt = 0.2920 C^0.3271 tokens, rounded to whole micro-batches, at least one, and
-    eta_opt = 0.3118 C^-0.1250 (DeepSeek LLM, arXiv 2401.02954 §3.1 Eq. 1). Each run uses its own compute's batch and
-    learning rate for both stages."""
+    """Plan of `model` at `tokens_per_param`: C = M D (M: Eq. 2 FLOPs per token at the file-level context),
+    B_opt = 0.2920 C^0.3271 tokens in whole micro-batches (at least one), eta_opt = 0.3118 C^-0.1250 (DeepSeek LLM,
+    arXiv 2401.02954 §3.1 Eq. 1), for both stages."""
     params = num_non_embedding_params(model)
     tokens = round(tokens_per_param * params)
     compute = non_embedding_flops_per_token(model) * tokens

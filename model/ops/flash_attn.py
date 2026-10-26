@@ -1,32 +1,6 @@
-"""
-Attention of model/modeling.py as one torch.library op (FA4's own autograd.Function is not traceable by
-torch.compile): from the fused projection (model/ops/linear.py qkv_proj), the q/k prologue (model/ops/qk_prologue.py),
-the value embeddings' gate and mix (model/ops/ve_gate.py), FlashAttention-4 (Dao-AILab/flash-attention
-flash_attn/cute), causal with `window_left` keys before each query, and o_proj (linear.py residual_rms). The backward
-writes every projection gradient into one (B, T, 3C) buffer: FA4's dv into the v block (read there by the value
-embeddings' backward; the mix passes dv through to v), the prologue's dq, dk into the q and k blocks.
-
-Document masking (ProLong, arXiv 2410.02660 App. B.2): FA4's varlen kernels attend within the segments of cu_seqlens,
-int32 offsets into the flattened (B*T) tokens (corpus/loader.py PretrainingBatches), fixed in length per loader, unused
-entries empty segments. `segments` (0-dim int32 on the host, no device synchronization) counts the used ones; FA4 gets
-only those, since it schedules work for every segment it is given.
-
-Local layers' forward is persistent: FA4's SM90 forward launches one CTA per (segment m-block, head)
-(flash_fwd_sm90.py FlashAttentionForwardSm90.__call__, SingleTileVarlenScheduler); PersistentVarlenScheduler runs one
-CTA per SM over those tiles, and PersistentForwardSm90 stages the output tile in its own shared buffer (FA4 stages it in
-sQ, which the producer refills with the next tile's Q, FlashAttentionForwardSm90.mma). Full causal layers keep FA4's
-launch.
-
-Local layers' backward accumulates dQ in bf16 (BackwardSm90Bf16dQ): instead of FA4's fp32 dq_accum, zero-filled and
-converted by flash_bwd_postprocess.py, the consumers stage dQ times the softmax scale as bf16 rows and the dQ warp
-reduce-adds each row into dq (PTX ISA cp.reduce.async.bulk .add.noftz.bf16); interior tiles skip the mask. A dq element
-sums <= 5 bf16-rounded partials (one per 128-key block of the 512-key window); full layers, up to T / 128, keep FA4's
-fp32 accumulator. Tile shapes and stages are FA4's (_tile_size_fwd_sm90, _tile_size_bwd_sm90).
-
-The backward takes dO from o_proj's dX GEMM with FA4's dpsum = rowsum(dO O) per (row, head) summed in its epilogue
-(linear.py residual_rms_bwd); fa4_rows (model/kernels/fa4_rows.cu) places dpsum and lse log2(e) at FA4's padded rows
-in place of FA4's backward preprocess (flash_bwd_preprocess.py).
-"""
+"""Attention as one torch.library op: q/k prologue, value-embedding mix, FlashAttention-4 (Dao-AILab/flash-attention
+flash_attn/cute) varlen over the real document segments (arXiv 2410.02660 App. B.2), and o_proj. Window layers run a
+persistent forward and a bf16-dQ backward (subclasses of FA4's SM90 kernels); full layers run FA4's own."""
 
 import contextlib
 import ctypes
@@ -63,8 +37,7 @@ from native import cuda_library, pointer, stream
 
 
 class PersistentVarlenScheduler(SingleTileVarlenScheduler):
-    """SingleTileVarlenScheduler's tile decode (VarlenDecoder.decode) with one CTA per SM, CTA i taking the tiles
-    i, i + grid, i + 2 grid, ..."""
+    """SingleTileVarlenScheduler's tile decode with one CTA per SM, CTA i taking tiles i, i + grid, ..."""
 
     @staticmethod
     def get_grid_shape(params, *, loc=None, ip=None):
@@ -95,8 +68,8 @@ class PersistentVarlenScheduler(SingleTileVarlenScheduler):
 
 
 class PersistentForwardSm90(flash_fwd_sm90.FlashAttentionForwardSm90):
-    """FlashAttentionForwardSm90 with the output tile in its own shared buffer after sQ (sQ's allocation doubled;
-    the rest of FlashAttentionForwardSm90._get_shared_storage_cls unchanged)."""
+    """FlashAttentionForwardSm90 with the output tile in its own shared buffer after sQ (FA4 stages it in sQ, which
+    the producer refills with the next Q)."""
 
     def _get_shared_storage_cls(self):
         q_t, k_t, v_t = (cute.struct.Align[cute.struct.MemRange[self.dtype, n], self.buffer_align_bytes]
@@ -133,7 +106,7 @@ BF16DQ_CACHE = get_jit_cache(f"bwd_bf16dq_{SOURCE_HASH}")
 
 @contextlib.contextmanager
 def persistent_forward():
-    """_flash_attn_fwd compiling PersistentForwardSm90 with PersistentVarlenScheduler, cached apart from FA4's own
+    """_flash_attn_fwd compiling PersistentForwardSm90 with PersistentVarlenScheduler, cached apart from FA4's
     kernels (interface.py and flash_fwd_sm90.py look both classes up by module name)."""
     saved = fa4.FlashAttentionForwardSm90, flash_fwd_sm90.SingleTileVarlenScheduler, _flash_attn_fwd.compile_cache
     fa4.FlashAttentionForwardSm90 = PersistentForwardSm90
@@ -146,9 +119,8 @@ def persistent_forward():
 
 
 def fa4_rows(rows: Tensor, lse: Tensor, cu: Tensor, m: int, dpsum: Tensor, lse_log2: Tensor) -> None:
-    """FA4's backward row statistics (H, padded) fp32 at its padded rows (m: its backward m-block) into dpsum and
-    lse_log2, from rows (total, H) fp32, the o_proj epilogue's dpsum, and lse (H, total) fp32
-    (model/kernels/fa4_rows.cu); cu int32 (segments + 1)."""
+    """FA4's backward row statistics (H, padded) fp32 at its padded rows (m its backward m-block) into dpsum and
+    lse_log2, from rows (total, H) and lse (H, total) fp32 (fa4_rows.cu)."""
     H, padded = dpsum.shape
     cuda_library("fa4_rows").fa4_rows(pointer(rows), pointer(lse), ctypes.c_longlong(lse.stride(0)), pointer(cu),
                                       cu.shape[0] - 1, H, m,
@@ -157,8 +129,7 @@ def fa4_rows(rows: Tensor, lse: Tensor, cu: Tensor, m: int, dpsum: Tensor, lse_l
 
 @contextlib.contextmanager
 def precomputed_dpsum(rows: Tensor):
-    """_flash_attn_bwd with its preprocess (interface.py _bwd_preprocess, looked up by module name), which reads O and
-    dO for dpsum, replaced by fa4_rows from rows (total, H), and the preprocess's zero fill of dq_accum."""
+    """_flash_attn_bwd with its preprocess (looked up by module name) replaced by fa4_rows and dq_accum's zero fill."""
     saved = fa4._bwd_preprocess
 
     def preprocess(out, dout, dpsum, lse, lse_log2, dq_accum, cu_seqlens_q, seqused_q, dlse, dtype, head_dim,
@@ -193,15 +164,13 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
         # The staging and store below are written for FA4's hdim-128 causal/local config (_tile_size_bwd_sm90)
         assert self.tile_m == 64 and self.tile_hdim == 128 and not self.dQ_swapAB and self.num_wg_dQ == 2
         assert self.AtomLayoutMdQ == 1 and self.mma_dkv_is_rs
-        # Staged dQ rows tile_hdim + one 16-byte vector apart: 16-byte aligned, and the MMA C layout's rows fall in
-        # different banks
+        # Rows tile_hdim + one 16-byte vector apart: 16-byte aligned, MMA C rows in different banks
         self.pitch = self.tile_hdim + 128 // self.dtype.width
         self.row_bytes = self.tile_hdim * self.dtype.width // 8
 
     @cute.jit
     def _needs_mask(self, mask_fn, m_block):
-        """Whether the (m_block, n_block) tile crosses the causal diagonal, the window's left edge or a segment end
-        (FlashAttentionBackwardSm90.mma masks every tile)."""
+        """Whether the tile crosses the causal diagonal, the window's left edge or a segment end."""
         mask, n_block = mask_fn.func.__self__, mask_fn.keywords["n_block"]
         m0, n0 = m_block * self.tile_m, n_block * self.tile_n
         need = (m0 + self.tile_m > mask.seqlen_q) or (n0 + self.tile_n > mask.seqlen_k)
@@ -234,9 +203,8 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
                         tLSEsLSE, tLSEsdPsum, tdQsdQaccum, softmax_scale_log2, PdS_barrier,
                         is_dQ_wg: cutlass.Constexpr[bool] = True, mask_fn=None, score_mod_fn=None,
                         score_mod_bwd_fn=None, dKV_accumulate=True):
-        # FlashAttentionBackwardSm90.mma_one_m_block (mma_dkv_is_rs, Q_stage == dO_stage == PdS_stage, so one
-        # pipeline state and stage index serve Q, dO, P and dS; no score_mod) with dQ staged as scaled bf16 rows
-        # instead of fp32 accumulator fragments, and the mask applied only to tiles that cross a boundary
+        # FlashAttentionBackwardSm90.mma_one_m_block (one pipeline state serves Q, dO, P, dS; no score_mod) with dQ
+        # staged as scaled bf16 rows and the mask only on boundary tiles
         smem_idx = consumer_state_Q.index
         pipeline_Q.consumer_wait(consumer_state_Q, pipeline_Q.consumer_try_wait(consumer_state_Q))
         acc_S = mma_qk_fn(A_idx=smem_idx, wg_wait=-1)
@@ -284,8 +252,8 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
     @cute.jit
     def dQaccum_store(self, mdQaccum, sdQaccum, block_info, TileSchedulerCls, SeqlenInfoCls,
                       blocksparse_tensors=None, mdQ_semaphore=None):
-        """The dQ warp: per m-block, once the previous m-block's bulk group has been read releases the dQ warpgroups'
-        staging buffers, waits for their staged rows and reduce-adds every valid row (token, head) into dq."""
+        """dQ warp: per m-block, after the previous bulk group is read, release the staging buffers, wait for the
+        staged rows and reduce-add each valid (token, head) row into dq."""
         lane = cute.arch.lane_idx()
         sdQ = self._sdQ(sdQaccum)
         dq = cute.recast_ptr(mdQaccum.iterator, dtype=self.dtype)
@@ -318,9 +286,8 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
 
 def bwd_bf16dq(q: Tensor, k: Tensor, v: Tensor, dout: Tensor, lse: Tensor, rows: Tensor, cu: Tensor, window: int,
                dv: Tensor) -> tuple[Tensor, Tensor]:
-    """q, k, dout (total, H, D) bf16, contiguous; v and dv (total, H, D) with heads contiguous, any token stride;
-    lse (H, total) fp32; rows (total, H) fp32 the dpsum of o_proj's epilogue; cu int32 (segments + 1); window: the
-    left window -> (dq, dk); dv written in place."""
+    """q, k, dout (total, H, D) bf16 contiguous; v, dv heads contiguous, any token stride; lse (H, total), rows
+    (total, H) fp32; cu int32 -> (dq, dk); dv written in place."""
     total, H, D = q.shape
     causal, local, wl, wr = fa4._resolve_causal_local_window(True, window, None)
     cfg = fa4._tile_size_bwd_sm90(D, D, causal, local)
@@ -352,18 +319,17 @@ def bwd_bf16dq(q: Tensor, k: Tensor, v: Tensor, dout: Tensor, lse: Tensor, rows:
 
 
 def fa4_window_left(window_left: int, T: int) -> int | None:
-    """None (FA4's causal kernel) when the window spans T, plain causal attention that FA4 would run on its local kernel
-    (interface.py _resolve_causal_local_window); else the window."""
+    """None (FA4's causal kernel) when the window spans T, else the window."""
     return None if window_left >= T else window_left
 
 
 def segmented(cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-    """cu_seqlens' first segments + 1 offsets: the segments that are not padding."""
+    """cu_seqlens' first segments + 1 offsets: the non-padding segments."""
     return cu_seqlens[:int(segments) + 1]
 
 
 def heads(qkv: Tensor, i: int) -> Tensor:
-    """Block i (q 0, k 1, v 2) of the fused (B, T, 3C) projection as a (B, T, H, HEAD_DIM) view, token stride 3C."""
+    """Block i (q, k, v) of the fused (B, T, 3C) projection as a (B, T, H, HEAD_DIM) view."""
     C = qkv.size(-1) // 3
     return qkv[..., i * C:(i + 1) * C].unflatten(-1, (-1, HEAD_DIM))
 
@@ -374,13 +340,9 @@ def attention(qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Te
               n: Tensor | None, input_ids: Tensor | None, table: Tensor | None, w_gate: Tensor | None,
               ids: Tensor | None,
               order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """qkv (B, T, 3C) bf16; norm weights (HEAD_DIM,) fp32; cos/sin (T_table >= T, HEAD_DIM / 2) fp32; o_weight (C, C)
-    o_proj's bf16 copy, o_grad its fp32 .grad or None (forward only), residual (B, T, C) the stream; value embeddings
-    when table is given (model/ops/ve_gate.py: n the normed stream, input_ids, table, w_gate; ids, order torch.sort
-    of input_ids, for the backward) -> (h = residual + o_proj(out) (B, T, C), its rows' rstd (B*T,) fp32
-    (non-differentiable: relu2_mlp, its one consumer, differentiates through it), out (B, T, H, HEAD_DIM), lse fp32
-    (H, B*T), normed q, k, mixed v, gate), the last six for the backward (mixed v and gate empty without value
-    embeddings)."""
+    """qkv (B, T, 3C) bf16, residual (B, T, C), o_grad o_proj's fp32 .grad or None; value-embedding args or None ->
+    (h = residual + o_proj(out), rstd (B*T,) fp32 non-differentiable, then out, lse, qn, kn, vmix, gate for the
+    backward)."""
     T, cu = qkv.size(1), segmented(cu_seqlens, segments)
     window = fa4_window_left(window_left, T)
     qn, kn = qk_forward(heads(qkv, 0), heads(qkv, 1), q_norm_weight, k_norm_weight, cos, sin)
@@ -417,10 +379,8 @@ def attention_bwd(dh: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weight:
                   cu_seqlens: Tensor, segments: Tensor, o_weight: Tensor, o_grad: Tensor, n: Tensor | None,
                   table: Tensor | None, w_gate: Tensor | None, ids: Tensor | None,
                   order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """(d qkv (B, T, 3C), d q_norm_weight, d k_norm_weight, dn, dw_gate; the last two empty without value
-    embeddings, whose table's gradient is added into table.grad; o_proj's dW accumulated into o_grad); FA4's
-    backward on dO and dpsum from o_proj's dX GEMM, local layers' dq accumulated in bf16 (bwd_bf16dq), atomically
-    (not bitwise reproducible)."""
+    """(d qkv, d q_norm_weight, d k_norm_weight, dn, dw_gate); the table's gradient added into table.grad, o_proj's
+    dW into o_grad; not bitwise reproducible (atomics)."""
     T, cu = qkv.size(1), segmented(cu_seqlens, segments)
     window = fa4_window_left(window_left, T)
     dout, rows = residual_rms_bwd(dh.flatten(0, 1), out.flatten(2).flatten(0, 1), o_weight, o_grad)
@@ -463,8 +423,7 @@ def attention_save(ctx: FunctionCtx, inputs: tuple, output: tuple[Tensor, ...]) 
 
 
 def attention_grad(ctx: FunctionCtx, dh: Tensor, *_: Tensor) -> tuple:
-    """Gradients of qkv, the norm weights, the residual (dh), the normed stream and the gate weight (the table's goes
-    to table.grad, o_proj's to its .grad); the outputs other than h and rstd are for the backward only."""
+    """Gradients of qkv, the norm weights, the residual (dh), the normed stream and the gate weight."""
     (qkv, qnw, knw, cos, sin, out, lse, qn, kn, vmix, gate, cu_seqlens, segments, o_weight, o_grad, n, table, w, ids,
      order) = ctx.saved_tensors
     dqkv, dqnw, dknw, dn, dw = attention_bwd(dh, qkv, qnw, knw, cos, sin, out, lse, qn, kn, vmix, gate,

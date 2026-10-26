@@ -1,6 +1,5 @@
 """
-Training's reading of the packed data (layout.py): a run's mixture of packed corpora (mixture.weights, row by row
-mixture.mixture_rows) assembled into micro-batches (PretrainingBatches).
+Training's reader of the packed data: a run's mixture of packed corpora assembled into micro-batches.
 """
 
 import itertools
@@ -14,15 +13,13 @@ from corpus.layout import PIECE_COLUMNS, TOKEN_DTYPE, fim_packed, packed_path, s
 from corpus.mixture import mixture_rows
 from corpus.tokenizer import Tokenizer
 
-# The label of an ignored position (padding, a BOS that is no target); as an input it becomes BOS
+# Label of an ignored position (padding, a BOS that is no target); as an input it becomes BOS
 IGNORE_INDEX = -1
 
 
 class PackedSplit(NamedTuple):
-    """A packed split, memory-mapped: the split's tokens; each document's first token, then the number of tokens; each
-    piece's PIECE_COLUMNS in row order; each row's first piece, then the number of pieces (row r is
-    pieces[rows[r]:rows[r + 1]]); the FIM examples' tokens of a split packed with them (fim_packed), else None (the file
-    is empty, which cannot be memory-mapped)."""
+    """A packed split, memory-mapped; fim is None when the split has no FIM examples (an empty file cannot be
+    memory-mapped)."""
     tokens: np.memmap
     offsets: np.memmap
     pieces: np.memmap
@@ -42,23 +39,9 @@ def packed(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Packe
 
 
 class PretrainingBatches:
-    """Re-iterable micro-batches (input_ids, labels, cu_seqlens, segments, lengths) of a mixture {corpus: weight} of
-    packed corpora.
-    orders: {corpus: row ids in read order, -1 an empty row (all padding)}; start: the run rows already consumed
-    (resume), whose rows of each corpus (mixture_rows) are skipped; iteration stops when a
-    corpus's order is exhausted, without the partial micro-batch. reading: "fim" reads the packed fill-in-the-middle
-    examples in place of their pieces' tokens, "left_to_right" every piece left to right (assemble).
-    - input_ids (int32), labels (int64): on the device
-    - cu_seqlens: the attention segments of the micro-batch (document masking), int32 offsets into its flattened
-      micro_batch_size x seq_len input_ids (FA4's varlen layout) on the device: each piece (its BOS and its tokens: a
-      document, a document's cut part, or a fill-in-the-middle example) and each row's padding is a segment. Their
-      number is fixed per loader, so a compiled model sees one shape: num_segments, the unused entries repeating the
-      last offset (empty segments).
-    - segments: the micro-batch's segments, a 0-dim int32 tensor on the host: the attention reads cu_seqlens'
-      first segments + 1 entries only (model/ops/flash_attn.py), as FA4 spends time on every segment it is given,
-      empty or not.
-    - lengths: the segments' lengths (cu_seqlens' differences), int64 on the host: the micro-batch's attention work
-      (metrics.executed_model_flops), read without a device synchronization."""
+    """Re-iterable micro-batches (input_ids int32, labels int64, cu_seqlens int32 on the device; segments 0-dim int32
+    and lengths int64 on the host) of a mixture {corpus: weight}; cu_seqlens has a fixed num_segments + 1 entries,
+    unused ones repeating the last offset. Stops when a corpus's order is exhausted, without the partial micro-batch."""
 
     def __init__(self, mixture: dict[str, float], split: str, tokenizer: Tokenizer, orders: dict[str, np.ndarray], *,
                  seq_len: int, micro_batch_size: int, device: torch.device | str,
@@ -70,18 +53,13 @@ class PretrainingBatches:
         self.bos = tokenizer.bos_token_id
         self.fim = reading == "fim"
         self.start = start
-        # segments per micro-batch: micro_batch_size x (the most pieces in a row + 1 for the padding)
+        # micro_batch_size x (the most pieces in a row + 1 for the padding)
         self.num_segments = micro_batch_size * (
             max(int(np.diff(packing.rows).max()) for packing in self.packed.values()) + 1)
 
     def assemble(self, out: np.ndarray, name: str, row: int) -> list[int]:
-        """Write a corpus's row into out (its padding already in place): every piece after a BOS, and a BOS after the
-        last piece when that BOS is its target. A piece is its tokens or, reading "fim", the tokens of its
-        fill-in-the-middle example if it is packed as one (pack.py: FIM_BEGIN P FIM_HOLE S FIM_END M or
-        FIM_BEGIN FIM_HOLE S FIM_END P M). A piece that ends its document, and a fill-in-the-middle
-        example, has the BOS after it as its label (end of document, end of the middle); a piece read left to right that
-        its document continues after has none: the BOS after it is written as IGNORE_INDEX, an input BOS and an ignored
-        label (or nothing, at the row's end). Returns where each piece starts in the row, then where the pieces end."""
+        """Write a corpus's row into out (padding in place): each piece after a BOS (IGNORE_INDEX when the previous
+        piece's BOS is no target). Returns each piece's start in the row, then the pieces' end."""
         tokens, offsets, pieces, rows, fim = self.packed[name]
         row_pieces = pieces[rows[row]:rows[row + 1]]
         examples = (row_pieces[:, 3] > row_pieces[:, 2]) & self.fim

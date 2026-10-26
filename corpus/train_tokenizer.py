@@ -1,13 +1,6 @@
 """
-Training a vocabulary of the corpus: VOCAB_SIZE ids (the mergeable tokens, then SPECIAL_TOKENS) of byte-level BPE merges
-trained by the corpus crate (SA-BPE's F·ln R, arXiv 2604.14053 §4.1, or frequency alone) within the chunks of a split
-pattern, on the sample, then encoded by tiktoken (corpus/tokenizer.py).
-
-Sample (sample): of each file-stage source's curated train split, its share of the stage's bytes (byte_shares) as its
-share of SAMPLE_BYTES, a systematic sample in shard order. An authorship unit (SA-BPE's R) is the repository, its name
-lowercased, for repository files and functions; any other document is its own.
-
-fidelity: a trained vocabulary's encoding checked against its merges (tiktoken encodes by merge rank).
+Train a vocabulary of the corpus: byte-level BPE merges by SA-BPE's F·ln R (arXiv 2604.14053 §4.1) or frequency,
+on a systematic sample of the file stage's curated train splits; fidelity checks the encoding against the merges.
 """
 import functools
 import json
@@ -29,20 +22,18 @@ from native import corpus_crate
 
 Score = Literal["sa-bpe", "frequency"]
 
-# The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers; that data is not on the
-# Hub), so a vocabulary trains on as much text as the reference tokenizer did
+# The reference tokenizer's sample size, so every vocabulary trains on as much text
 SAMPLE_BYTES = 13.38e9
 
 
 @functools.cache
 def shard_bytes(source: str) -> list[int]:
-    """The text bytes of each shard of the source's curated train split (Parquet footers)."""
+    """The text bytes of each shard of the source's curated train split."""
     return [text_bytes(pq.read_metadata(path), "content") for path in curated_shards(source, "train")]
 
 
 def byte_shares() -> dict[str, float]:
-    """Each file-stage source's share of the stage's bytes: its share of the stage's tokens (Stage.shares, tokens
-    counted at the reference tokenizer's bytes per token) at its bytes per token."""
+    """Each file-stage source's share of the stage's bytes: its token share (Stage.shares) at its bytes per token."""
     sources, per_token = mixture.FILE_LEVEL_STAGE.sources, mixture.BYTES_PER_TOKEN
     shares = mixture.FILE_LEVEL_STAGE.shares({s: sum(shard_bytes(s)) / per_token[s] for s in sources},
                                              mixture.FILE_LEVEL_STAGE.tokens)
@@ -51,11 +42,8 @@ def byte_shares() -> dict[str, float]:
 
 
 def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str], list[str], int]:
-    """Row group g of a curated train shard: the texts (sources.texts), authorship units and total UTF-8 bytes of its
-    rows that the source's systematic sample takes, `start` the source's rows before the group: row i when
-    floor((i + 1) * fraction) exceeds floor(i * fraction). A row naming its repository (a repository file, a function)
-    has that repository as its unit, its name lowercased (one unit across the sources that hold it); any other document
-    is its own, by its id (a hex SHA-1, never a GitHub owner/name)."""
+    """Row group g of a curated train shard: (texts, authorship units, UTF-8 bytes) of the rows the systematic sample
+    takes, row i when floor((i + 1) * fraction) > floor(i * fraction), `start` the source's rows before the group."""
     source, path, g, start, fraction = task
     group = pq.ParquetFile(path).read_row_group(g)
     rows = np.arange(start, start + group.num_rows)
@@ -69,9 +57,8 @@ def sample_row_group(task: tuple[str, Path, int, int, float]) -> tuple[list[str]
 
 
 def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
-    """The training sample (texts, unit ids) and its composition per source (its target bytes, the fraction of its rows
-    taken, and the documents, bytes and authorship units taken), row groups read in parallel, the sample kept in
-    order (module docstring)."""
+    """The training sample (texts, unit ids) and its composition per source (target bytes, fraction, documents, bytes,
+    units)."""
     tasks, composition = [], {}
     for s, share in byte_shares().items():
         fraction, at = share * SAMPLE_BYTES / sum(shard_bytes(s)), 0
@@ -95,15 +82,13 @@ def sample() -> tuple[list[str], list[int], dict[str, dict[str, float]]]:
 
 
 def train(docs: list[str], units: list[int], *, pattern: str, score: Score) -> list[tuple[int, int]]:
-    """VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 merges (merge i makes token 256 + i) trained on the documents (each from
-    its authorship unit) within the chunks of `pattern`, by SA-BPE's F·ln R or by frequency alone (the crate's
-    train)."""
+    """VOCAB_SIZE - len(SPECIAL_TOKENS) - 256 merges (merge i makes token 256 + i) by the crate's train."""
     return corpus_crate().train(docs, units, pattern=pattern, n_merges=VOCAB_SIZE - len(SPECIAL_TOKENS) - 256,
                                 score=score)
 
 
 def vocabulary(merges: list[tuple[int, int]]) -> list[bytes]:
-    """The mergeable tokens of merges, bytes in rank order: the 256 bytes, then each merge's."""
+    """The mergeable tokens of merges in rank order: the 256 bytes, then each merge's."""
     mergeable = [bytes([i]) for i in range(256)]
     for left, right in merges:
         mergeable.append(mergeable[left] + mergeable[right])
@@ -111,13 +96,9 @@ def vocabulary(merges: list[tuple[int, int]]) -> list[bytes]:
 
 
 def fidelity(task: tuple[Path, str]) -> dict[str, int]:
-    """The vocabulary in `directory` (its merges.json beside it) checked on the texts of the first row group of a
-    source's val split, the unit the split is read in (the documents and chunks checked): its pattern's chunks (Python
-    regex, whose chunks fancy-regex's equal) cover every text, tiktoken's encoding (by the rank of the joined bytes)
-    equals the training segmentation chunk by chunk, and every text decodes back. The training segmentation is Hugging
-    Face tokenizers' BPE model over the merges, each byte spelled as the Latin-1 character of its value: listed pairs
-    merged by rank, each over every occurrence from the left (corpus/crate train.rs merge_pair), never a pair whose
-    bytes another made."""
+    """The vocabulary in `directory` checked on the first val row group of a source: chunks cover every text, tiktoken
+    equals the merges replayed (Hugging Face tokenizers' BPE over Latin-1-spelled bytes), every text decodes back.
+    Raises RuntimeError on a mismatch."""
     directory, source = task
     tokenizer = get_tokenizer(directory)
     spelled = [entry.decode("latin-1") for entry in tokenizer.token_bytes[:tokenizer.bos_token_id]]
