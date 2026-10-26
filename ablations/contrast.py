@@ -9,9 +9,13 @@ diverged run drops its seed from the arm's contrasts on both sides):
   bits per byte "shows no association with MBPP at any level");
 - code bits per byte: the difference of the arms' means, better or worse beyond its 1 - ALPHA two-sided normal bound
   z CODE_SIGMA √(1 / n + 1 / n), z = scipy.stats.norm.ppf(1 - ALPHA / 2), n the contrast's seeds per arm, else equal.
+An arm every seed of which diverged (no evaluation) counts as worse than any evaluated one, as ablations/peak_lr.py fit
+counts a diverged run: no seeds, so parsing equal (untested) and code worse (better if the baseline is the one without
+an evaluation), its difference and bound None.
 An arm is adopted iff its code is better and its parsing not worse (adopted). A scale swept over {low, 1, high}
 (scaled): the vertex of the exact 3-point quadratic in ln(scale) through the arms' mean code bits per byte, clamped to
-[low, high] (a concave or flat fit: the lower-code end), adopted iff the lower-code arm is adopted against 1; else 1.
+[low, high] (a concave or flat fit, or an arm without an evaluation, whose mean is +inf, reported None: the lower-code
+end), adopted iff the lower-code arm is adopted against 1; else 1.
 """
 import math
 import statistics
@@ -41,20 +45,29 @@ def evaluated(lines: list[dict], field: str) -> dict[tuple, tuple[float, list[bo
 
 def contrast(runs: dict[tuple, tuple[float, list[bool]]], arm: object, baseline: object) -> dict:
     """An arm against the baseline (module docstring; evaluated's runs) over the seeds where both have an evaluation:
-    parsing by the exact sign test, code bits per byte by the difference of the means beyond its bound."""
+    parsing by the exact sign test, code bits per byte by the difference of the means beyond its bound; an arm without
+    an evaluation (every seed diverged) worse."""
     seeds = sorted(seed for value, seed in runs if value == arm and (baseline, seed) in runs)
-    code = {v: statistics.fmean(runs[v, seed][0] for seed in seeds) for v in (arm, baseline)}
-    # per problem, the seeds whose completion parses under the arm minus under the baseline
+    # per problem, the seeds whose completion parses under the arm minus under the baseline (0 without seeds)
     seeds_parsing = (np.sum([runs[arm, seed][1] for seed in seeds], axis=0)
                      - np.sum([runs[baseline, seed][1] for seed in seeds], axis=0))
     here, there = int((seeds_parsing > 0).sum()), int((seeds_parsing < 0).sum())
     p = binomtest(here, here + there).pvalue if here + there else 1.0
-    difference = code[arm] - code[baseline]
-    margin = norm.ppf(1 - ALPHA / 2) * CODE_SIGMA * math.sqrt(2 / len(seeds))
+    difference = margin = None
+    if seeds:
+        difference = (statistics.fmean(runs[arm, seed][0] for seed in seeds)
+                      - statistics.fmean(runs[baseline, seed][0] for seed in seeds))
+        margin = norm.ppf(1 - ALPHA / 2) * CODE_SIGMA * math.sqrt(2 / len(seeds))
+        code = "better" if difference < -margin else "worse" if difference > margin else "equal"
+    elif all(value != arm for value, _ in runs):
+        code = "worse"
+    elif all(value != baseline for value, _ in runs):
+        code = "better"
+    else:
+        raise ValueError(f"{arm} and {baseline} have evaluations at no common seed")
     return {"seeds": seeds, "problems_parsing_more_here": here, "problems_parsing_more_in_baseline": there, "p": p,
             "parsing": "equal" if p >= ALPHA else "better" if here > there else "worse",
-            "code_difference": difference, "code_margin": margin,
-            "code": "better" if difference < -margin else "worse" if difference > margin else "equal"}
+            "code_difference": difference, "code_margin": margin, "code": code}
 
 
 def adopted(c: dict) -> bool:
@@ -67,10 +80,12 @@ def scaled(lines: list[dict], field: str) -> dict:
     "scale" the adopted scale."""
     runs = evaluated(lines, field)
     scales = low, _, high = sorted({line["config"][field] for line in lines})
-    means = {s: statistics.fmean(code for (v, _), (code, _) in runs.items() if v == s) for s in scales}
-    curvature, x = metrics.parabola_vertex([math.log(s) for s in scales], [means[s] for s in scales])
+    codes = {s: [code for (v, _), (code, _) in runs.items() if v == s] for s in scales}
+    means = {s: statistics.fmean(c) if c else math.inf for s, c in codes.items()}
+    curvature, x = (metrics.parabola_vertex([math.log(s) for s in scales], [means[s] for s in scales])
+                    if all(map(math.isfinite, means.values())) else (None, None))
     end = min((low, high), key=means.__getitem__)
-    vertex = min(max(math.exp(x), low), high) if curvature > 0 else end
+    vertex = min(max(math.exp(x), low), high) if curvature is not None and curvature > 0 else end
     contrasts = {str(s): contrast(runs, s, 1.0) for s in (low, high)}
-    return {"means": {str(s): m for s, m in means.items()}, "curvature": curvature, "vertex": vertex,
-            "contrasts": contrasts, "scale": vertex if adopted(contrasts[str(end)]) else 1.0}
+    return {"means": {str(s): m if math.isfinite(m) else None for s, m in means.items()}, "curvature": curvature,
+            "vertex": vertex, "contrasts": contrasts, "scale": vertex if adopted(contrasts[str(end)]) else 1.0}

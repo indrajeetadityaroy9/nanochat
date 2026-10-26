@@ -546,15 +546,16 @@ def repack() -> None:
 
 def analysis(lines: list[dict]) -> dict:
     """The runs' analysis (RESULTS/<EXPERIMENT>.json "analysis", ablations/records.py): each challenger's contrast with
-    sa-bpe, with the difference of the arms' MBPP+ unparsed shares, and the decision (module docstring), over
-    RESULTS/<EXPERIMENT>.jsonl's records."""
+    sa-bpe, with the difference of the arms' MBPP+ unparsed shares (None for a contrast without seeds: an arm every
+    seed of which diverged, ablations/contrast.py), and the decision (module docstring), over RESULTS/<EXPERIMENT>.jsonl's
+    records."""
     runs = evaluated(lines, "tokenizer")
     contrasts = {}
     for arm in CHALLENGERS:
         c = contrast(runs, arm, "sa-bpe")
         unparsed = {v: 1 - statistics.fmean(itertools.chain.from_iterable(runs[v, seed][1] for seed in c["seeds"]))
-                    for v in (arm, "sa-bpe")}
-        contrasts[arm] = c | {"unparsed_difference": unparsed[arm] - unparsed["sa-bpe"]}
+                    for v in (arm, "sa-bpe")} if c["seeds"] else None
+        contrasts[arm] = c | {"unparsed_difference": unparsed[arm] - unparsed["sa-bpe"] if unparsed else None}
     verdicts = {arm: (c["parsing"], c["code"]) for arm, c in contrasts.items()}
     qualified = {arm for arm, v in verdicts.items() if "worse" not in v and "better" in v}
     record = json.loads((RESULTS / f"{EXPERIMENT}-intrinsic.json").read_text(encoding="utf-8"))

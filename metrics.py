@@ -119,11 +119,13 @@ def diverged(log: list[dict]) -> int | None:
 
 
 def curves(log: list[dict]) -> dict[str, list]:
-    """train_steps as columns, one per train record field (module docstring), in step order; none for a run without
+    """train_steps as columns, one per train record field (module docstring) in first-seen order, in step order, None
+    at the steps whose record lacks the field (update_rms and param_norm: every 10th step); none for a run without
     train steps (diverged at step 0)."""
     by_step = train_steps(log)
     steps = [by_step[s] for s in sorted(by_step)]
-    return {k: [s[k] for s in steps] for k in (steps[0] if steps else ()) if k not in ("run_name", "kind")}
+    columns = dict.fromkeys(k for s in steps for k in s if k not in ("run_name", "kind"))
+    return {k: [s.get(k) for s in steps] for k in columns}
 
 
 def bpb(*pooled: dict) -> float:
@@ -377,9 +379,9 @@ def parabola_vertex(x: Sequence[float], y: Sequence[float]) -> tuple[float, floa
 
 def latency(starts: ArrayLike, firsts: ArrayLike, ends: ArrayLike, new_tokens: ArrayLike, *, duration: float) -> dict:
     """Decoding latency of requests (seconds; vLLM calculate_metrics): ttft (first token - start), tpot ((end - first)
-    / (new tokens - 1), requests of more than one token), e2el (end - start), each {"mean", "median", "p99"} (the
-    percentile serve.py reports by default, --metric-percentiles 99),
-    and output_throughput (output tokens / duration)."""
+    / (new tokens - 1), requests of more than one token; None if no request has more than one, where vLLM reports 0),
+    e2el (end - start), each {"mean", "median", "p99"} (the percentile serve.py reports by default,
+    --metric-percentiles 99), and output_throughput (output tokens / duration)."""
     start, first, end = (np.asarray(t, dtype=np.float64) for t in (starts, firsts, ends))
     n = np.asarray(new_tokens)
     many = n > 1
@@ -387,7 +389,8 @@ def latency(starts: ArrayLike, firsts: ArrayLike, ends: ArrayLike, new_tokens: A
     def describe(x: np.ndarray) -> dict:
         return {"mean": float(x.mean()), "median": float(np.median(x)), "p99": float(np.percentile(x, 99))}
 
-    return {"ttft": describe(first - start), "tpot": describe((end - first)[many] / (n[many] - 1)),
+    return {"ttft": describe(first - start),
+            "tpot": describe((end - first)[many] / (n[many] - 1)) if many.any() else None,
             "e2el": describe(end - start), "output_throughput": float(n.sum() / duration),
             "requests": int(n.size)}
 

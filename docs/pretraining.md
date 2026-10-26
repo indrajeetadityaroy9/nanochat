@@ -130,9 +130,9 @@ per token, `max_grad_norm`, the plan, `learning_rate` and weight decay per group
 learning rate, gradient norm, step time, tokens per second, executed model FLOPs and MFU; the stage switch's and the
 end record each stage's peak allocated and reserved memory; a failure record the step a run diverged at),
 `checkpoint-<N>.pt`, `eval-<N>.json` and `run.log`. A rerun resumes: a run with a final evaluation or a divergence
-is skipped, a stopped one resumes from its newest checkpoint, and a run whose recorded plan or data key differs stops
-the sweep ("recipe changed") until its directory is deleted. Training and each checkpoint's evaluation run in fresh
-spawned processes.
+is skipped, a stopped one resumes from its newest checkpoint, and a run whose recorded plan, data key or `RunConfig`
+differs (a field added since at its default matches; `run.same_config`) stops the sweep ("recipe changed") until its
+directory is deleted. Training and each checkpoint's evaluation run in fresh spawned processes.
 
 **Model FLOPs** (`metrics.py`): per PaLM (arXiv 2204.02311 App. B), 6 × the matmul parameters + 12 · hidden size per
 attended key per layer. *Nominal* (`model_flops_per_token`): every key a query can attend, min(window, context), as
@@ -209,8 +209,8 @@ micro-batches. The GEMMs run at the 700 W power cap's ceiling (703 of 989 dense 
   to a temporary file and renamed, so a kill mid-save leaves the previous one.
 - **Environment.** `docker/Dockerfile` pins base images by digest and git dependencies by commit; `uv.lock` the Python
   packages; fp32 matmuls stay fp32 (`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0`).
-- **Run identity.** The run's key and its recorded configuration (Runs); a run recorded under a different plan or
-  data key stops its experiment.
+- **Run identity.** The run's key and its recorded configuration (Runs); a run recorded under a different plan, data
+  key or `RunConfig` stops its experiment.
 - **Data order.** Each corpus's packed rows are permuted once by the run's seed (NumPy `RandomState`; `train/stages.py`
   `stage_batches`), which also seeds its initialization; rows go to corpora by the loader's Weyl sequence
   (`mixture.mixture_rows`).

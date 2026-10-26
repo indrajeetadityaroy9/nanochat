@@ -8,10 +8,10 @@ learning_rate_scale, so runs differing in other fields match in hyperparameters 
 the first failed job stops the sweep.
 
 A run's name (run_name) names its directory RUNS/<run_name> (paths.py), so a run two experiments share is one run. Its
-job (job): the stale guard, which raises when a recorded run record's plan or tokenizer data key is not the current
-one; then the run is skipped if its final checkpoint's evaluation exists or it diverged (metrics.py failure: a
-non-finite loss or gradient norm, an outcome of a learning-rate sweep's high end, arXiv 2309.14322 §3.1); else
-training, then each checkpoint's evaluation, each in a fresh process (torch.compile's recompile limit and the CUDA
+job (job): the stale guard, which raises when a recorded run record's plan, tokenizer data key or config (same_config)
+is not the current one; then the run is skipped if its final checkpoint's evaluation exists or it diverged (metrics.py
+failure: a non-finite loss or gradient norm, an outcome of a learning-rate sweep's high end, arXiv 2309.14322 §3.1);
+else training, then each checkpoint's evaluation, each in a fresh process (torch.compile's recompile limit and the CUDA
 caching allocator's reservations are per process), their output appended to RUNS/<run_name>/run.log. A training
 process that fails without a failure record raises; one that diverged ends the job, recorded as diverged. A stopped run
 resumes from its newest checkpoint. This process plans on the meta device and never initializes CUDA. The module's top
@@ -70,6 +70,15 @@ def run_name(config: RunConfig) -> str:
     changed = sorted((f.name, getattr(config, f.name)) for f in fields(config)
                      if getattr(config, f.name) != getattr(default, f.name))
     return ",".join(f"{name}={value}" for name, value in changed) or "defaults"
+
+
+def same_config(recorded: dict, config: RunConfig) -> bool:
+    """Whether a run record's config (train/loop.py: the RunConfig it ran, as a dict) is `config`, field by field.
+    run_name omits default-valued fields, so a changed default keeps a run's name under a new meaning; this catches it.
+    A field the record lacks (added to RunConfig since) matches iff `config` holds its RunConfig() default: a field
+    added with a default renames no run (run_name) and invalidates none."""
+    default = RunConfig()
+    return all(recorded.get(f.name, getattr(default, f.name)) == getattr(config, f.name) for f in fields(config))
 
 
 def tokenizer_path(config: RunConfig) -> Path:
@@ -160,7 +169,8 @@ def job(config: RunConfig) -> None:
     name, run = run_name(config), plan_of(config)
     data_key = get_tokenizer(tokenizer_path(config)).data_key
     log = metrics.records(name)
-    if any(r["plan"] != asdict(run) or r["data_key"] != data_key for r in log if r["kind"] == "run"):
+    if any(r["plan"] != asdict(run) or r["data_key"] != data_key or not same_config(r["config"], config)
+           for r in log if r["kind"] == "run"):
         raise RuntimeError(f"recipe changed since {name} ran: delete {RUNS / name}")
     if evaluation_path(name, run.max_steps).exists() or metrics.diverged(log) is not None:
         return
