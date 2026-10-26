@@ -447,9 +447,6 @@ sanitize pool (a forkserver) import it as the phases' main module. `register` ru
 `run_name` omits default fields, so a field added with a default renames no run, and a changed default would keep a
 run's name under a new meaning; the stale guard's `config` comparison closes that gap. `job`:
 a training phase that fails without a `failure` record raises `ChildProcessError`; one that diverged ends the job.
-`evaluations` runs the checkpoints' evaluations in fresh processes, checkpoint k + 1's started once k's has released
-the GPU (`eval/suite.py` `released_path`, `docs/evaluation.md` §1) or ended; a failure starts no further evaluation,
-and `ChildProcessError` is raised once every started one has ended.
 `evaluation` silences `ast.parse`'s `SyntaxWarning`s on generated code (`eval/verify.py`, `inference/`).
 `conf/run.yaml` disables Hydra's job logging, whose default file `${hydra.job.name}.log` would be
 `RUNS/<run_name>/run.log`, the phases' log.
