@@ -11,10 +11,10 @@ approval. The corpus and its dataset: `docs/corpus.md`.
 | `muon_wd_timescale_20tpp` | Muon's weight-decay timescale (at 20) | d16 at 20, sa-bpe data | 3 × 2 seeds | stopped after 3 runs (user: the τ law on literature; `docs/findings.md` §5.23) |
 | `muon_wd_timescale_200tpp` | Muon's timescale law (with the 20 result) | d8 at 200, corpus tokenizer's data | 3 × 2 seeds | not run (user; §5.23) |
 | `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | intrinsic and data done; runs not run (user: sa-bpe stays; §5.23) |
-| `adamw_group_lr` | the AdamW groups' lr | d16 at sa-bpe's `max_tokens_per_param` | 3 × 2 seeds (× 1 shared) | ×¼/×4 not run; the scalar-lr arm runs once (user) |
+| `adamw_group_lr` | the AdamW groups' lr | d16 at sa-bpe's `max_tokens_per_param` | 3 × 2 seeds (× 1 shared) | ×¼/×4 not run; the scalar-lr arm ran once (user): not adopted (`ACTIONS.md` D6 row) |
 
-Run order (`ACTIONS.md` §0 Open): the scalar-lr candidate (one d16 run against `muon_wd_timescale_20tpp`'s τ×1 seed
-0) → `pretrain` (its own approval). The others were stopped or not run (`docs/findings.md` §5.23).
+Run order (`ACTIONS.md` §0 Open): `pretrain` (its own approval). The others were run, stopped or not run
+(`docs/findings.md` §5.23).
 
 ## Method
 

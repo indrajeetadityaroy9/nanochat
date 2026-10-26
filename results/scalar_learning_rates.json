@@ -1,0 +1,1 @@
+{"analysis": {"seeds": [0], "problems_parsing_more_here": 9, "problems_parsing_more_in_baseline": 35, "p": 0.00010604466626773501, "parsing": "worse", "code_difference": -0.0008968570231568385, "code_margin": 0.009424146005577809, "code": "equal", "adopted": false, "train_loss_last_half_delta": -0.002237662175418098}}
