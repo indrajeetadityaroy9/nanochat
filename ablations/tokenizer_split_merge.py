@@ -1,9 +1,9 @@
 """
 The tokenizer ablation (experiment EXPERIMENT: pre-tokenizer split pattern x BPE merge score): it trains every
 candidate vocabulary of the corpus's tokenizer (corpus/train_tokenizer.py: one sample, one trainer, VOCAB_SIZE ids),
-measures them on the corpus, and builds each arm's training set. Its runs were not run (user, Oct 26): the corpus's
-tokenizer stays sa-bpe (corpus/tokenizer.py TOKENIZER). The val splits and the packs come from the curated shards
-through corpus (mixture.py, tokenize.py, pack.py).
+measures them on the corpus, and builds each arm's training set. Its runs were not run (docs/experiments.md §2): the
+corpus's tokenizer stays sa-bpe (corpus/tokenizer.py TOKENIZER). The val splits and the packs come from the curated
+shards through corpus (mixture.py, tokenize.py, pack.py).
 
 Arms (ARMS):
 - sa-bpe: the reference tokenizer's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the

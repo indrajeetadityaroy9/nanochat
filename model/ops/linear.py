@@ -64,8 +64,8 @@ def sm90(tile_m: int, tile_n: int, cluster_m: int, cluster_n: int, *, swap_ab: b
 
 # Per call, the hidden width C -> config: the d8, d16 and d24 widths (model/modeling.py model_config), M = 98,304
 # tokens (corpus/mixture.py MICRO_BATCH_TOKENS). Each is the lowest mean over three runs of QuACK's autotuning
-# benchmark (quack/autotuner.py: L2-cold CUDA-graph medians of every candidate, GH200 at 700 W, exclusive; QuackPin,
-# Oct 26); a single run's own winner is up to 2.1% slower than it. Other widths and GPUs: QuACK's default_config.
+# benchmark (quack/autotuner.py: L2-cold CUDA-graph medians of every candidate, GH200 at 700 W, exclusive; fb86efc);
+# a single run's own winner is up to 2.1% slower than it. Other widths and GPUs: QuACK's default_config.
 CONFIGS: dict[str, dict[int, GemmConfig]] = {
     "qkv": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(128, 192, 2, 1, swap_ab=True),
             768: sm90(128, 192, 1, 2)},

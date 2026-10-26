@@ -19,8 +19,8 @@ DynamicPersistentVarlenScheduler"), and a window-512 m-block of 128 queries cove
 Q load and output store are exposed. PersistentVarlenScheduler runs one CTA per SM over those tiles, and
 PersistentForwardSm90 stages the output tile in its own shared buffer (FlashAttentionForwardSm90.kernel puts it in sQ,
 which the producer refills with the next tile's Q once released, FlashAttentionForwardSm90.mma): d24 8K +0.32%
-(docs/findings.md §5.11). Full causal layers keep FA4's launch: their m-blocks' work differs up to T / 128-fold, which
-a static stride balances worse than the hardware's CTA scheduling (measured slower, §5.11).
+(docs/architecture.md §3). Full causal layers keep FA4's launch: their m-blocks' work differs up to T / 128-fold, which
+a static stride balances worse than the hardware's CTA scheduling (measured slower, the same section).
 
 Local layers' backward accumulates dQ in bf16 (BackwardSm90Bf16dQ): FA4's SM90 backward reduce-adds fp32 dQ partial
 tiles into a zeroed fp32 dq_accum and converts it in a postprocess kernel (flash_bwd_postprocess.py); here the
@@ -30,7 +30,7 @@ interior tiles skip the mask; with the persistent forward d24 8K +0.94%, 32K +0.
 bf16-rounded partials (one per 128-key block of the 512-key window; norm rel 2.45e-3 against fp32 accumulation);
 full layers would sum up to T / 128 (64 at 8K, 256 at 32K), so they keep FA4's fp32 accumulator. Tile shapes and
 stages are FA4's own (_tile_size_fwd_sm90, _tile_size_bwd_sm90): every other forward and backward configuration
-measured on the d24 shapes was slower (§5.11).
+measured on the d24 shapes was slower (docs/experiments.md §5).
 
 The op ends with o_proj (model/ops/linear.py residual_rms: h = residual + out W_o^T and its rows' rstd), so its
 backward takes dO from o_proj's dX GEMM together with FA4's dpsum = rowsum(dO O) per (row, head), summed in that
