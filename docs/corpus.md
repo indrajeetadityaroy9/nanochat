@@ -436,7 +436,7 @@ give ≈25% of its source files (arXiv 2402.19173 §5.1) [arithmetic].
 |---|---|---|
 | Rate, per piece, drawn before its cut (context-level) | 0.5 | [1] |
 | Middle: random character span, else AST | 0.1 | "90% use our AST-FIM, and 10% use Rand-FIM" (arXiv 2506.00204 §5.1) |
-| AST middle: Single-Node, else Aligned-Span | 0.5 | "an equal mix of two masking methods" (arXiv 2506.00204 §3.3) |
+| AST middle: Single-Node (node weighted by its bytes), else Aligned-Span (character IoU) | 0.5 | "an equal mix of two masking methods" (arXiv 2506.00204 §3.3) |
 | AST middle starting its line: the line's indentation in the middle | 0.5 | [3] |
 | SPM, else PSM | 0.5 | [2]; AST-FIM's "50% PSM and 50% SPM", untested there (arXiv 2506.00204 §5.1) |
 
@@ -470,7 +470,11 @@ the d16 retrained on the repacked data (`1671b56`) infills single lines in PSM a
 - Prefix, suffix and middle are encoded separately (arXiv 2207.14255 §3): PSM `<｜fim▁begin｜> P <｜fim▁hole｜> S
   <｜fim▁end｜> M`, SPM `<｜fim▁begin｜> <｜fim▁hole｜> S <｜fim▁end｜> P M` (App. D, variant 2); the BOS after the middle
   is its target.
-- Every draw comes from ChaCha8 keyed by (document, piece), so packs do not depend on the order of work.
+- Every draw comes from ChaCha8 keyed by (document, piece, corpus), so packs do not depend on the order of work, and
+  equal (document, piece) in two FIM-packed corpora draw independently; the corpus enters as its name's hash, so every
+  tokenizer arm draws a corpus's examples alike. Under a (document, piece) key such pairs shared every draw (agreement
+  1.0 on 182K–19.0M pairs per corpus pair), yet shared a training step no more often than independent draws (22
+  against 19.7 ± 4.2 over the base plan's first 2,000 steps).
 
 ## 9. Loading
 
@@ -626,12 +630,15 @@ never counts R.
   attaches them); walked with a stack (nesting depth unbounded). Gaps are disjoint (a container's gaps lie inside an
   item of its parent). `statement_cuts`: the cut follows the first line end in the gap, after the item before it (in
   the root's leading range, the first line), so the gap's other comments and blank lines stay with the item after it.
-- `fim_draw`: the key's first 16 bytes are (document, piece) as little-endian u64; the first draw decides FIM.
+- `fim_draw`: the key's first 24 bytes are (document, piece, corpus) as little-endian u64 (`pack.py`: the first 8
+  bytes of the corpus name's SHA-256); the first draw decides FIM.
 - `ast_middle`: named nodes are the syntax tree (keywords, punctuation anonymous). Single-Node draws a node below the
   root with probability proportional to its bytes (named nodes of a tree without errors span at least one byte).
   Aligned-Span takes a `random_span`, its lowest named node, and the run of that node's named children of largest
-  byte IoU with the span (the node itself if no child meets it). For a fixed last child IoU is largest at the last
-  start ≤ s or the first start ≥ s (moving the start further out grows the union only, further in shrinks the
+  character IoU with the span (arXiv 2506.00204 §3.3, "character-level Intersection over Union"; characters counted as
+  the bytes that are no UTF-8 continuation byte), the node itself if no child meets it; byte IoU would choose another
+  middle in 204 of 160,000 sampled FIM examples (1.3e-3 of FIM tokens). For a fixed last child IoU is largest at the
+  last start ≤ s or the first start ≥ s (moving the start further out grows the union only, further in shrinks the
   intersection only), likewise for the end, so four candidates suffice.
 - `fim_example`: line-start extension applies only when the text between the line start and the node is spaces or
   tabs; sections are encoded with tiktoken-rs's `CoreBPE` (OpenAI tiktoken's core, fancy-regex) one encoder per

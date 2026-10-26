@@ -5,6 +5,7 @@ with FIM examples in repository code's train splits; each document is packed at 
 python -m corpus.pack
 """
 
+import hashlib
 import os
 from collections.abc import Generator, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -44,9 +45,10 @@ def pack_shard(task: tuple[str, str, int, int, Path]) -> Shard:
     tokenizer = get_tokenizer(tokenizer_path)
     tokenized = split_path(corpus, split, tokenizer)
     bounds = shard_bounds(corpus, split, tokenizer)
+    # the corpus in the FIM key: its name's hash, so every tokenizer arm draws a corpus's FIM examples alike
     fim = ({"rate": FIM_RATE, "random": RANDOM_SPAN_RATE, "single": SINGLE_NODE_RATE, "line_start": LINE_START_RATE,
-            "spm": SPM_RATE,
-            "sentinels": [tokenizer.special_tokens[name] for name in FIM_TOKENS]}
+            "spm": SPM_RATE, "sentinels": [tokenizer.special_tokens[name] for name in FIM_TOKENS],
+            "corpus": int.from_bytes(hashlib.sha256(corpus.encode()).digest()[:8], "little")}
            if fim_packed(corpus, split) else None)
     pieces, counts, tokens = corpus_crate().pack(str(tokenized.with_suffix(".bin")),
                                                  str(tokenized.with_suffix(".idx")),

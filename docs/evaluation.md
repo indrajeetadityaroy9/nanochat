@@ -357,15 +357,29 @@ CUDA graphs, torch.compile, `_keep_in_fp32_modules_strict` honored). Layout as t
 change was needed. The model's own pieces are PyTorch expressions at the training kernels' precision: q/k RMS norm,
 fp32 gain and rotation by −θ with fp64-computed fp32 tables (transformers' and vLLM's rotary embeddings rotate by +θ,
 so neither is used), the value embeddings (they read `input_ids` in every layer), the residual mix in fp32
-(`docs/architecture.md` §1, §4). vLLM runs in its own image (`vllm/vllm-openai:v0.32.0` at a pinned digest,
-`scripts/standard_eval.sh`), which the NGC-based nanochat image cannot hold.
+(`docs/architecture.md` §1, §4), and the head as the evaluation computes it (fp32 output, the cap in fp32; vLLM via
+`config.json`'s `head_dtype`); the MLP and the residual additions stay bf16. vLLM runs in its own image
+(`vllm/vllm-openai:v0.32.0` at a pinned digest, `scripts/standard_eval.sh`), which the NGC-based nanochat image cannot
+hold.
 
-**Agreement** (a d16 checkpoint served by the earlier native vLLM class, commits `3c03023`–`ec1c841`; its logit
-agreement and speed: `docs/experiments.md` §6): `tokenizer.json` encodes 108,026 held-out texts exactly as tiktoken;
-greedy HumanEval+ 0.067/0.067, MBPP+ 0.056/0.045 (base/plus), FIM single-line line exact match PSM 0.022, SPM 0.368,
-against `NativeDecoder`'s (before `4385748`) 0.061/0.061, 0.045/0.037, 0.022, 0.367 (standard error of HumanEval+
-≈ 0.019). The Transformers backend that replaced the class (`7794e2f`) ran at its rate and, in the same execution
-mode, gave the same logits (eager: mean KL 4.25·10⁻⁴ on HumanEval+ for both) [unverified: no record or commit].
+**Agreement with the training forward** (a d16 checkpoint at 5 tokens per parameter, step 1,707; 16 val rows of 8K
+from 8 corpora, 130,911 scored tokens; greedy continuations of the 542 HumanEval+/MBPP+ prompts; GH200, `2d49bb1`
+and the head variant): the bf16 head was the main difference. With the fp32 head the export's mean KL(train ‖
+export) under transformers is 1.97·10⁻⁴ (bf16 head 3.09·10⁻⁴), top-1 agreement 0.9940 (0.9903), the bpb bias
+5·10⁻⁶ (6.3·10⁻⁵, its interval excluding 0); under vLLM top-1 0.9941 (0.9904) and 379 of 542 greedy continuations
+identical to the training forward's (306). For scale: the uncompiled training forward against the compiled one, KL
+3.06·10⁻⁴, top-1 0.9926, 340 identical; `NativeDecoder` (§6), 216 identical. ReLU² and x0 in fp32 changed KL by −1%
+and −0.6%, inside their intervals; fp32 residual additions by −14%, with no gain in greedy agreement or pass@1 under
+vLLM and 7–10% slower transformers prefill and decode. EvalPlus pass@1 of the export's greedy continuations stays
+within one standard error (HumanEval+ 0.0488/0.0488 for every variant; MBPP+ 0.0265/0.0238 → 0.0238/0.0212).
+
+**Agreement of the removed class** (a d16 checkpoint served by the earlier native vLLM class, commits
+`3c03023`–`ec1c841`, the bf16 head; its logit agreement and speed: `docs/experiments.md` §6): `tokenizer.json`
+encodes 108,026 held-out texts exactly as tiktoken; greedy HumanEval+ 0.067/0.067, MBPP+ 0.056/0.045 (base/plus),
+FIM single-line line exact match PSM 0.022, SPM 0.368, against `NativeDecoder`'s (before `4385748`) 0.061/0.061,
+0.045/0.037, 0.022, 0.367 (standard error of HumanEval+ ≈ 0.019). The Transformers backend that replaced the class
+(`7794e2f`) ran at its rate and, in the same execution mode, gave the same logits (eager: mean KL 4.25·10⁻⁴ on
+HumanEval+ for both) [unverified: no record or commit].
 
 **Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir> [generate|score]`): the
 harnesses' own CLIs, unmodified, on the export served by vLLM: `evalplus.codegen --backend vllm --greedy` on
@@ -682,8 +696,9 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 - Copied into the export directory and named in `config.json`'s `auto_map` (Hugging Face's custom-code convention);
   torch and transformers only. vLLM's Transformers backend (vLLM docs, "Transformers backend") honors
-  `_keep_in_fp32_modules_strict`, the per-layer sliding windows (`layer_types`) and `final_logit_softcapping` with its
-  own attention, KV cache, torch.compile and CUDA graphs.
+  `_keep_in_fp32_modules_strict`, the per-layer sliding windows (`layer_types`), `final_logit_softcapping` and
+  `head_dtype` (`LogitsProcessor._apply_head`: the head's fp32 output, the cap in fp32) with its own attention, KV
+  cache, torch.compile and CUDA graphs.
 - Attention through `ALL_ATTENTION_FUNCTIONS` with each layer's window (`layer_types` "sliding_attention" /
   "full_attention" and `sliding_window`, as Qwen3 and Gemma 3), so the same code runs in transformers (eager, sdpa,
   `generate` with a cache) and in vLLM.
@@ -695,6 +710,8 @@ Per module and symbol; what §1–§9 state is not repeated.
     the mix rounded once.
   - per layer h = resid_lambda·h + x0_lambda·x0 in fp32, rounded once; the per-dim and per-layer vectors and the gate
     stay fp32 (`_keep_in_fp32_modules_strict`).
+  - head: `torch.mm(…, out_dtype=float32)` of the bf16 weight, the cap in fp32, as `model/ops/cross_entropy.py`
+    `lm_losses`.
 - `NanochatConfig` fields: vocab_size, hidden_size, intermediate_size, num_hidden_layers, num_attention_heads
   (= num_key_value_heads), head_dim, max_position_embeddings, rope_parameters {"rope_theta"}, sliding_window (keys
   attended including the query's own), layer_types, value_embedding_layers, final_logit_softcapping, rms_norm_eps.

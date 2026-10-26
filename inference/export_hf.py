@@ -48,7 +48,8 @@ def export(checkpoint: Path, out: Path, tokenizer_dir: Path = TOKENIZER) -> None
         "layer_types": ["sliding_attention" if w < T else "full_attention" for w in windows],
         "value_embedding_layers": [i for i in range(n) if has_ve(i, num_hidden_layers=n)],
         "final_logit_softcapping": config.final_logit_softcapping, "rms_norm_eps": EPS,
-        "tie_word_embeddings": False, "torch_dtype": "bfloat16",
+        # vLLM's head (LogitsProcessor._apply_head) and cap in fp32, as the evaluation computes them
+        "head_dtype": "float32", "tie_word_embeddings": False, "torch_dtype": "bfloat16",
         "bos_token_id": tokenizer.bos_token_id, "eos_token_id": tokenizer.bos_token_id,
     }, indent=2) + "\n")
     (out / "generation_config.json").write_text(json.dumps(

@@ -105,7 +105,7 @@ fn statement_cuts(ids: &[u16], token_bytes: &[Vec<u8>], ends_line: &[bool], gram
 }
 
 /// Fill-in-the-middle shares (arXiv 2506.00204 §5.1, §3.3), from pack.py: FIM rate, Rand-FIM middles, Single-Node vs
-/// Aligned-Span, line-start extension, SPM vs PSM; ids of <｜fim▁begin｜>, <｜fim▁hole｜>, <｜fim▁end｜>.
+/// Aligned-Span, line-start extension, SPM vs PSM; ids of <｜fim▁begin｜>, <｜fim▁hole｜>, <｜fim▁end｜>; the corpus's key.
 #[derive(FromPyObject)]
 #[pyo3(from_item_all)]
 pub(crate) struct Fim {
@@ -115,13 +115,16 @@ pub(crate) struct Fim {
     line_start: f64,
     spm: f64,
     sentinels: [u32; 3],
+    corpus: u64,
 }
 
-/// ChaCha8 keyed by (document, piece), the rest of the key zero: Some(the example's generator) with probability rate.
+/// ChaCha8 keyed by (document, piece, corpus), the rest of the key zero: Some(the example's generator) with probability
+/// rate. The corpus makes equal (document, piece) of two corpora draw independently.
 fn fim_draw(fim: &Fim, document: usize, piece: usize) -> Option<ChaCha8Rng> {
     let mut key = [0; 32];
     key[..8].copy_from_slice(&(document as u64).to_le_bytes());
     key[8..16].copy_from_slice(&(piece as u64).to_le_bytes());
+    key[16..24].copy_from_slice(&fim.corpus.to_le_bytes());
     let mut rng = ChaCha8Rng::from_seed(key);
     rng.random_bool(fim.rate).then_some(rng)
 }
@@ -133,8 +136,9 @@ fn random_span(text: &str, rng: &mut ChaCha8Rng) -> (usize, usize) {
     (bounds[i.min(j)], bounds[i.max(j)])
 }
 
-/// The AST-FIM middle [a, b) of text (arXiv 2506.00204 §3.3): Single-Node with probability single (byte-weighted node),
-/// else Aligned-Span (max-IoU run of children); None when text has errors or no named child (§5.1: Rand-FIM).
+/// The AST-FIM middle [a, b) of text (arXiv 2506.00204 §3.3): Single-Node with probability single (node weighted by its
+/// bytes), else Aligned-Span (the run of children of maximal character IoU with a uniform character span); None when
+/// text has errors or no named child (§5.1: Rand-FIM).
 fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) -> Option<(usize, usize)> {
     let tree = grammar.parse(text.as_bytes());
     let root = tree.root_node();
@@ -158,11 +162,14 @@ fn ast_middle(text: &str, grammar: &Grammar, fim: &Fim, rng: &mut ChaCha8Rng) ->
         // For a fixed end, IoU peaks at the last start <= s or the first start >= s; likewise the end: four candidates.
         let first = [starts.partition_point(|&a| a <= s).checked_sub(1), Some(starts.partition_point(|&a| a < s)).filter(|&i| i < children.len())];
         let last = [ends.partition_point(|&b| b <= e).checked_sub(1), Some(ends.partition_point(|&b| b < e)).filter(|&j| j < children.len())];
+        // characters of text[lo..hi): its bytes that are no UTF-8 continuation byte (RFC 3629 §3)
+        let chars = |lo: usize, hi: usize| text.as_bytes()[lo..hi].iter().filter(|&&c| c & 0xC0 != 0x80).count();
         let (mut best, mut best_iou) = ((node.start_byte(), node.end_byte()), (0, 1));
         for i in first.into_iter().flatten() {
             for j in last.into_iter().flatten().filter(|&j| j >= i) {
                 let (a, b) = (starts[i], ends[j]);
-                let iou = (b.min(e).saturating_sub(a.max(s)), b.max(e) - a.min(s));
+                let inter = if b.min(e) > a.max(s) { chars(a.max(s), b.min(e)) } else { 0 };
+                let iou = (inter, chars(a.min(s), b.max(e)));
                 if iou.0 * best_iou.1 > best_iou.0 * iou.1 {
                     (best, best_iou) = ((a, b), iou);
                 }
