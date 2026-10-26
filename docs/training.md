@@ -52,15 +52,16 @@ file-level context (`non_embedding_flops_per_token`, Eq. 2, arXiv 2401.02954 §3
 
 Every run, an ablation arm included, takes the base model's plan at its `num_hidden_layers` and `tokens_per_param`
 (`run.base_plan`), so runs differing in other fields match in batch, steps and lr. Recomputed on the CPU from master,
-the corpus's packs (peak lr at the earlier recipe's base multiplier 2.7970369, §5; weight decay by §3's law):
+the corpus's packs and `results/peak_lr_d24.jsonl` (peak lr at the base multiplier 2.7192600, §5; weight decay by §3's
+law):
 
 | Run | Tokens/param | Micro-batches | Steps | Repo start | Tokens | Law lr | Peak lr | Weight decay |
 |---|---|---|---|---|---|---|---|---|
-| d24 base (`max_tokens_per_param` 526.134) | 526.127 | 15 (1,474,560 tokens) | 69,611 | 65,814 | 102.65B (97.05B at 8K, 5.60B at 32K) | 8.6290e-4 | 2.4136e-3 | 0.14916 |
-| d24 at `mixture.MAX_STEPS` | 525.893 | 15 | 69,580 | 65,785 | 102.60B | 8.6295e-4 | 2.4137e-3 | 0.14918 |
-| d16 at 20 | 19.998 | 3 | 4,552 | 4,304 | 1.342B | 1.6686e-3 | 4.6671e-3 | 0.2105 |
-| d8 at 20 | 19.997 | 1 | 2,987 | 2,824 | 0.294B | 2.4438e-3 | 6.8355e-3 | 0.2191 |
-| d8 at 200 | 199.993 | 2 | 14,937 | 14,122 | 2.937B | 1.8326e-3 | 5.1259e-3 | 0.1966 |
+| d24 base (`max_tokens_per_param` 526.134) | 526.127 | 15 (1,474,560 tokens) | 69,611 | 65,814 | 102.65B (97.05B at 8K, 5.60B at 32K) | 8.6290e-4 | 2.3465e-3 | 0.15342 |
+| d24 at `mixture.MAX_STEPS` | 525.893 | 15 | 69,580 | 65,785 | 102.60B | 8.6295e-4 | 2.3466e-3 | 0.15345 |
+| d16 at 20 | 19.998 | 3 | 4,552 | 4,304 | 1.342B | 1.6686e-3 | 4.5373e-3 | 0.2166 |
+| d8 at 20 | 19.997 | 1 | 2,987 | 2,824 | 0.294B | 2.4438e-3 | 6.6455e-3 | 0.2253 |
+| d8 at 200 | 199.993 | 2 | 14,937 | 14,122 | 2.937B | 1.8326e-3 | 4.9834e-3 | 0.2022 |
 | d24 at 5 (`peak_lr`) | 4.999 | 3 | 3,307 | 3,127 | 0.975B | 1.5443e-3 | | |
 
 N and M per depth: `docs/architecture.md` §1. `max_tokens_per_param` of the corpus's tokenizer is 6,990 at d8 and
@@ -92,7 +93,7 @@ C.9 Table 85: 130M, batch 128 and 256 both 3.240, 512 3.257).
 - **One lr and one weight decay** for every group, as Moonlight shares "learning rate η, weight decay λ" among matrix
   and non-matrix parameters (§2.2). Per-group candidates were not adopted (`docs/experiments.md` §4).
 - **Weight decay** by the τ law (`tau_weight_decay`): the EMA timescale 1/(η·λ) is τ* = 1.084·TPP^−0.527 of the run's
-  steps (Power Lines, arXiv 2505.13738 Finding 3, App. E.3.1; arXiv 2405.13698), so λ = 1/(η·τ*·steps), 0.14916 for
+  steps (Power Lines, arXiv 2505.13738 Finding 3, App. E.3.1; arXiv 2405.13698), so λ = 1/(η·τ*·steps), 0.15342 for
   the base run. The law is fit on AdamW over TPP 20–1280 (the base run's 526 inside). Muon takes the same law: under
   μP a fixed independent weight decay stays optimal across TPP for both Adam and Muon (arXiv 2512.05620 App. H.5), and
   Muon's only scaling-sensitive hyperparameter is its lr (arXiv 2509.02046 §3.3 Table 4). The Muon-specific timescale
@@ -108,7 +109,7 @@ C.9 Table 85: 130M, batch 128 and 256 both 3.240, 512 3.257).
 |---|---|---|
 | Optimizer | NorMuon on matrices, AdamW on tables and vectors | AdamW, β = (0.9, 0.95) (DeepSeek LLM §2.3, followed by DeepSeek-Coder §3.4; Code Llama) |
 | Peak lr | the law × the measured multiplier (§5), peak of linear decay to zero | the law's lr held for 80% of tokens, then 31.6% and 10% of it (DeepSeek LLM §2.3; DeepSeek-Coder §3.4) |
-| Weight decay | τ law, 0.149 | 0.1 (DeepSeek LLM §2.3) |
+| Weight decay | τ law, 0.153 | 0.1 (DeepSeek LLM §2.3) |
 | Gradient clip | 1.0 | 1.0 (DeepSeek LLM §2.3) |
 
 **NorMuon's adoption (`646a986`).** A screen at d16 at 20 tokens per parameter, one seed per arm paired with base seed
@@ -117,9 +118,9 @@ the base's (negative in all 23 hundred-step windows), every bits-per-byte measur
 cannot resolve that: base seeds 1 and 0 differ by 0.0014–0.0027 bpb and the treatment effect's seed spread is
 unestimated. NorMuon is adopted on the literature: 11.31% over Muon at 1.1B (arXiv 2510.05491 abstract);
 modded-nanogpt PR #144 (on top of Polar Express, −15 steps over 20 runs); karpathy/nanochat `dev/LOG.md` 2026-01-10
-("a very small improvement", kept). A d24 check (200 steps, ×2.797, seed 0, 8K): last-20 loss 2.2946 against 2.2967,
-largest gradient norm after step 40 1.153 against 1.387, no spike, −0.08% tok/s, equal peak (77.5 GiB). The screen's
-other arms: `docs/experiments.md` §4.
+("a very small improvement", kept). A d24 check (200 steps, the earlier recipe's ×2.797, seed 0, 8K): last-20 loss
+2.2946 against 2.2967, largest gradient norm after step 40 1.153 against 1.387, no spike, −0.08% tok/s, equal peak
+(77.5 GiB). The screen's other arms: `docs/experiments.md` §4.
 
 ## 4. Schedule
 
@@ -168,6 +169,19 @@ cap, `generate` "parse"): `conf/experiment/peak_lr_d24.yaml`, whose records are 
   neighbours (`metrics.parabola_vertex`, `docs/evaluation.md` §5; arXiv 2409.19913 §3.1 fits quadratics in log lr),
   or that run itself when its upper neighbour diverged;
 - the base multiplier is the vertex; the base lr is it times the law's lr on the base plan.
+
+**Result** (`results/peak_lr_d24.jsonl`; 3,307 steps of 294,912 tokens; bits per byte; no run diverged; `check`
+passes on every record):
+
+| Measure | × 1 | × 2 | × 4 | Vertex | Curvature | Base multiplier | Base peak lr |
+|---|---|---|---|---|---|---|---|
+| code (8K, the fitted measure) | 0.41322 | 0.40544 | 0.40591 | × 2.7193 | 0.0086 | 2.7192600 | 2.3465e-3 |
+| code at 32K (`repo_32k`) | 0.40859 | 0.40131 | 0.40227 | | | | |
+| solutions | 0.49200 | 0.48710 | 0.48498 | | | | |
+
+The best arm (× 2) beats the law (× 1) by 0.0078 code bpb; × 4 is 0.0005 behind it. The vertex, 2.7192600 times the
+law's lr, is the base multiplier, 2.8% below the earlier recipe's 2.7970369 [arithmetic]: peak lr 2.3465e-3 and
+weight decay 0.15342 on the base plan (§2).
 
 **Earlier recipe** (`results/peak_lr.jsonl` at `81fb386`, removed since; code bits per byte; no run diverged). 11 arms
 (× 1–8 at d8 at 5 and at 200, × 1–4 at d24 at 5) trained under an earlier recipe: the reference tokenizer's data
@@ -220,12 +234,12 @@ e.g. `python run.py num_hidden_layers=8 tokens_per_param=0.5 tokenizer=sa-bpe`. 
 output-logit cap is the model's, not a run field (`docs/architecture.md` §1).
 
 **Names.** `run_name`: the fields that differ from `RunConfig()`, sorted, `k=v` joined by `,` (`defaults` if none), so
-a run two experiments share is trained once. With m the resolved multiplier (§5), the base model's run
-(`experiment=pretrain`) is `generate=benchmarks,learning_rate_scale=<m>,num_checkpoints=10`, a d16 seed-1 run
-`learning_rate_scale=<m>,num_hidden_layers=16,seed=1`. Its directory
-`artifacts/runs/<run_name>/` holds `.hydra/` (the composed config), `metrics.jsonl` (the run log; each line carries
-`run_name`, `attempt`, `kind`, `time`), `checkpoint-<step>.pt`, `eval-<step>.json` and `run.log`. The run log's
-records (`train/loop.py`; field definitions in `docs/evaluation.md` §10):
+a run two experiments share is trained once. The base model's run (`experiment=pretrain`) is
+`generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10` (the multiplier resolved by
+`lr_multiplier`, §5), a d16 seed-1 run `learning_rate_scale=2.7192599564485445,num_hidden_layers=16,seed=1`. Its
+directory `artifacts/runs/<run_name>/` holds `.hydra/` (the composed config), `metrics.jsonl` (the run log; each line
+carries `run_name`, `attempt`, `kind`, `time`), `checkpoint-<step>.pt`, `eval-<step>.json` and `run.log`. The run
+log's records (`train/loop.py`; field definitions in `docs/evaluation.md` §10):
 
 | `kind` | When | Content |
 |---|---|---|

@@ -42,9 +42,9 @@ The removed experiments' yamls, modules and knobs went in `f05d17c`; the designs
 `docs/training.md` §2). Ranking at a single small size (150M parameters) picks the better of two data recipes at the
 1B target in ~80% of comparisons (DataDecide, arXiv 2504.11393 Abstract); architecture rankings can change with scale
 (arXiv 2207.10551 §1). The d16 proxy at 20 tokens per parameter on the sa-bpe arm's data trains 4,552 steps of 294,912
-tokens at peak lr 4.667e-3 (law × 2.797; `docs/training.md` §2 plan table); karpathy/nanochat's ~320-run optimizer
-sweep (`dev/LOG.md` 2026-01-19..22) found gains shrinking from ~0.002 bpb at d12 to 0.0007 at d20, with d12-tuned
-values hurting at d20 [unverified: external log].
+tokens at peak lr 4.667e-3 (law × 2.797, the earlier recipe's multiplier, `docs/training.md` §5); karpathy/nanochat's
+~320-run optimizer sweep (`dev/LOG.md` 2026-01-19..22) found gains shrinking from ~0.002 bpb at d12 to 0.0007 at d20,
+with d12-tuned values hurting at d20 [unverified: external log].
 
 **Shared tests** (were `ablations/contrast.py`, removed in `f05d17c`). An arm against its baseline over the seeds where
 both have an evaluation, α = 0.05:
@@ -62,8 +62,8 @@ both have an evaluation, α = 0.05:
 
 **Kernel landing rule** (§5). A kernel change lands at ≥ +0.3% tok/s at d24 8K in an exclusive A/B (GH200 at 700 W,
 arms alternated, arm means), with an op check against fp64 (or bitwise to master) and a 10-step loss equivalence at
-the base lr (× 2.797) within master's run-to-run spread. The softcap's adoption bar was its loss cost ≤ 0.3% of the
-8K step with a cold peak ≤ 93 GiB. The measured effects of what landed: `docs/architecture.md` §3.
+the base lr (the earlier recipe's × 2.797) within master's run-to-run spread. The softcap's adoption bar was its loss
+cost ≤ 0.3% of the 8K step with a cold peak ≤ 93 GiB. The measured effects of what landed: `docs/architecture.md` §3.
 
 **Cost.** At `c8e97a2`: d8 2.81M / 2.37M tok/s (8K / 32K), d16 0.80M / 0.64M, d24 0.34M / 0.27M; compile 20 s + 16 s;
 parse evaluation d8 ~1.7 min, d16 ~4.5 min; d16 benchmark evaluation 1,064 s (862 s after `4385748`) [unverified: no
@@ -241,10 +241,10 @@ MHA baselines (§4): last-200 train loss 1.3358 against 1.3244 (s0) / 1.3168 (s1
 against 0.4394 / 0.4212 (s1 0.4380 / 0.4196); all bpb 0.5263 / 0.5132 against 0.5219 / 0.5087; HumanEval+ 0.067 /
 0.061 against 0.067 / 0.055, MBPP+ 0.090 / 0.071 against 0.074 / 0.061 (within noise); peak 28.7 against 32.0 GiB
 [unverified: no record]. Verdict: rejected, loss and bpb worse beyond the seed spread; not committed. All arms ran at
-the law's lr (× 1), not the base × 2.797 [inference: the screen's baselines; §4]. The code keeps MHA with the KV-cache
-arithmetic of `docs/architecture.md` §2. Other attention levers ranked with it (more local layers, attention sinks,
-gated attention) were not run; full-efficiency short windows in the literature align the window to tiles, an
-architecture change (§5, window attention).
+the law's lr (× 1), not the earlier recipe's base × 2.797 [inference: the screen's baselines; §4]. The code keeps MHA
+with the KV-cache arithmetic of `docs/architecture.md` §2. Other attention levers ranked with it (more local layers,
+attention sinks, gated attention) were not run; full-efficiency short windows in the literature align the window to
+tiles, an architecture change (§5, window attention).
 
 **Block Attention Residuals** (arXiv 2603.15031 §3.2): Block AttnRes matches a baseline trained with 1.25× more compute
 (Abstract); a 1.1% loss gain at 194M parameters [unverified: not stated in the extracted text, only its scaling table's

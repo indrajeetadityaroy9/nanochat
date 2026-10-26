@@ -171,8 +171,8 @@ the decoder's `decode.cu`) and one self-contained file per kernel with its C ent
 **Landed changes** (d24 tok/s, each against its parent commit in one exclusive A/B: GH200 at 700 W, SM clock locked,
 `docs/training.md` §7; 25 steps after 8 warm-up, median, an arm run twice by its mean; 32K arms of `6299e84` 12 after
 6). Rates of different rows come from different measurement windows and do not chain. Loss checks: 200 steps against
-the d24 seed spread (seed 0 vs 1, last-20 mean Δ 0.035), or 10 steps at the base lr multiplier ×2.797 against the
-parent tree's run-to-run spread (§4).
+the d24 seed spread (seed 0 vs 1, last-20 mean Δ 0.035), or 10 steps at the earlier recipe's base multiplier ×2.797
+against the parent tree's run-to-run spread (§4).
 
 | Change | Commit | 8K tok/s | 32K tok/s | Memory, other | Numerics |
 |---|---|---|---|---|---|
@@ -264,9 +264,9 @@ not change the bits of plain GEMMs (split-K 1, checked across the autotuner's pi
 follow tile_n. PyTorch's deterministic mode is rejected for its cost (`docs/experiments.md` §5).
 
 **Op checks against fp64.** Each landing since `70025d8` carries an op check (against an fp64 reference, or bitwise
-against its parent's op) and a 10-step run at ×2.797 against the parent tree's run-to-run spread (the landing bar:
-`docs/experiments.md` §1); results in the §3 table. The linear cross entropy and the fused cap against fp64 on real
-captures at step 200 (relative error, previous path → landed):
+against its parent's op) and a 10-step run at the earlier recipe's ×2.797 against the parent tree's run-to-run spread
+(the landing bar: `docs/experiments.md` §1); results in the §3 table. The linear cross entropy and the fused cap
+against fp64 on real captures at step 200 (relative error, previous path → landed):
 
 | Quantity | `067e60b` uncapped (bf16-logit path → scaled-exp) | `e24333d` capped (removed capped path → fused) |
 |---|---|---|
