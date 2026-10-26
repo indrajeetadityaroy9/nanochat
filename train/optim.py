@@ -90,22 +90,16 @@ class Muon(torch.optim.Muon):
         return loss
 
 
-def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float, muon_tau_scale: float,
-               adamw_learning_rate_scale: float) -> tuple[torch.optim.Optimizer, ...]:
+def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tuple[torch.optim.Optimizer, ...]:
     """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, not 1-D parameters (karpathy/nanoGPT
-    model.py configure_optimizers). Two scales, each the identity at 1: muon_tau_scale divides Muon's weight decay, so
-    its EMA timescale 1 / (lr wd) grows by it (the tau law was fit with AdamW; Power Lines, arXiv 2505.13738 App. B);
-    adamw_learning_rate_scale multiplies AdamW's lr and divides its weight decay, holding its timescale (Moonlight's
-    one lr and weight decay for every group, arXiv 2502.16982 §2.2, matches Muon's update RMS, not the AdamW groups'
-    lr)."""
+    model.py configure_optimizers)."""
     tables = [model.embed_tokens.weight, model.lm_head.weight, *model.value_embeds.parameters()]
     table_ids = {id(p) for p in tables}
     vectors = [p for p in model.parameters() if p.ndim == 1]
     matrices = [p for p in model.parameters() if p.ndim == 2 and id(p) not in table_ids]
-    adamw = torch.optim.AdamW([{"params": tables, "weight_decay": weight_decay / adamw_learning_rate_scale},
-                               {"params": vectors, "weight_decay": 0.0}], lr=lr * adamw_learning_rate_scale,
-                              betas=BETAS, fused=True)
-    return adamw, Muon(matrices, lr=lr, weight_decay=weight_decay / muon_tau_scale, adjust_lr_fn="match_rms_adamw")
+    adamw = torch.optim.AdamW([{"params": tables, "weight_decay": weight_decay},
+                               {"params": vectors, "weight_decay": 0.0}], lr=lr, betas=BETAS, fused=True)
+    return adamw, Muon(matrices, lr=lr, weight_decay=weight_decay, adjust_lr_fn="match_rms_adamw")
 
 
 def update(model: torch.nn.Module, opts: tuple[torch.optim.Optimizer, ...],

@@ -88,14 +88,14 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | Standard engine for benchmark generation (user: vLLM/SGLang) | No architecture change: d16 serves through vLLM 0.32.0 as a native out-of-tree model (`3c03023`, `971b1b8`; precedent `nanoswe-vllm`; RoPE −θ folded into the q/k norm weights, `sliding_window` 513, eps FLT_EPSILON; image `nanochat-vllm`); tokenizer.json matches tiktoken on 108,026 texts; pass@1 and FIM line EM equal to NativeDecoder's within noise. Throughput on the d16 request sets: NativeDecoder 175 s vs vLLM 312 s (vLLM host-bound at 19% GPU on a 0.1B model; FIM 1.7× faster, sampled codegen 2.7× slower), so NativeDecoder stays the evaluation engine. Next: the unmodified harness CLIs through vLLM as the standard-protocol cross-check; d24 throughput of both engines | VllmServe |
 | Training-step throughput (d24 pre-training ≈ 81 h at master's measured 356,259 / 282,256 tok/s, 8K / 32K, before postact; ~85 h at the Oct 24 rates) | GPU-bound (busy 99%). Done: FA4 persistent window forward and bf16 dQ in the window layers (+0.94% d24 8K, +0.72% 32K); master as a whole +5.4% / +3.2% over the Oct 24 profile; the MLP postact saved in the forward with QuACK's dact epilogue (`6299e84`), +1.42% / +1.01% (MFU 0.473 → 0.480), peak 66.4 → 80.9 GB, 200-step loss at ×2.797 −0.0027 (the hand sm_90a relu² GEMMs are bitwise but slower and do not land); NorMuon (`646a986`, −0.08% tok/s, `docs/findings.md` §5.15); fused QKV (C3, +0.77% / +0.85%, warm peak +1.7 GiB, 10-step equivalence passed; one 3C×C dW GEMM rejected, −0.26%); the decoder (`4385748`, 4.35× main at d24, full d16 evaluation 862 s vs 1,064 s, §5.16); the linear cross entropy (`067e60b`, +0.68% / +0.30%, 365,466 / 287,476 tok/s, peak −5.5 GiB, §5.21); fixed QuACK tile configurations in linear.py (`fb86efc`, +0.36% / +0.32%, no run-time autotuning, cold first step 119 → 35 s, §4); FA4's dpsum from the o_proj dX epilogue, FA4's preprocess replaced by `fa4_rows.cu` (`db1e90e`, +0.36% / +0.18%, §5.21). Rejected: split-K dW (only C×C gains, inside the spread); every torch matmul on cuBLASLt with a 16 MiB workspace (−0.53% / −0.40%: it also re-selects Muon's and the other GEMMs) and cuBLASLt at the two 4C dW calls only (−0.09% / −0.03%); Inductor PDL (−0.17% / −0.05%); QK-norm + RoPE in the fused-QKV epilogue (2,065 vs 801 µs per call, §5.21). Open (§5.21): mix + norm beside the down projection (route b), the window-layer attention (WindowAttn); the code audit's last slice (§5.20) | MlpOutMix, WindowAttn |
 | Ablation queue | done (user pruned it, Oct 26; findings §5.23): D7 stopped after 3 of its 12 runs, the tokenizer ablation and D6's ×¼/×4 arms not run, D5 settled on literature, the scalar-lr candidate run and not adopted (D6 row; pinned trees `.worktrees/Ablations` `acb1e5e`, `.worktrees/ScalarLr` `61e316a`: the scalar-lr change only). Every run trained at the base recipe's lr: `conf/run.yaml` sets `learning_rate_scale: ${lr_multiplier:}` (`269e671`) | done |
-| D7 Muon τ | stopped (user, Oct 26): τ×½ seeds 0, 1 and τ×1 seed 0 trained (a sanity check, no decision; `results/muon_wd_timescale_20tpp.jsonl`): 8K code bpb 0.42535 / 0.42721 against 0.42724, MBPP+ unparsed 0.293 / 0.133 against 0.054 (τ×½ seed 0 alone against τ×1 seed 0: code −0.0019, margin 0.0094; parsing worse, 7 vs 119 problems); τ×½ seed 0 trained with diagnostics' memory leak (memory only; `acb1e5e` from seed 1 on). The τ law stays for Muon on arXiv 2512.05620 §H.3, §H.5 and 2509.02046 Table 4 (findings §5.23); ~3.7 GPU-h saved | done |
+| D7 Muon τ | stopped (user, Oct 26): τ×½ seeds 0, 1 and τ×1 seed 0 trained (a sanity check, no decision; `results/muon_wd_timescale_20tpp.jsonl`): 8K code bpb 0.42535 / 0.42721 against 0.42724, MBPP+ unparsed 0.293 / 0.133 against 0.054 (τ×½ seed 0 alone against τ×1 seed 0: code −0.0019, margin 0.0094; parsing worse, 7 vs 119 problems); τ×½ seed 0 trained with diagnostics' memory leak (memory only; `acb1e5e` from seed 1 on). The τ law stays for Muon on arXiv 2512.05620 §H.3, §H.5 and 2509.02046 Table 4 (findings §5.23); ~3.7 GPU-h saved; `muon_wd_timescale_20tpp`/`_200tpp`, `ablations/muon_wd_timescale.py` and `RunConfig.muon_tau_scale` removed (Muon's weight decay the τ law's) | done |
 | D5 softcap | adopted (user, Oct 26; findings §5.22, §5.24): c = 15 on literature, `RunConfig.final_logit_softcapping` 15.0 by default; the cap fused into the linear cross entropy (`e24333d`: +1.56 ms per micro-batch, 0.58% of the 8K step, no extra memory; master's old path, 3.5% and +6 GiB, removed); `logit_softcap` experiment removed | done |
-| Tokenizer ablation | not run (user, Oct 26; findings §5.23): sa-bpe stays, its corpus already tokenized and packed (`CORPUS/tokenizer`, the provisional copy; the base plan fits); ~6.7 GPU-h and the adopt, tokenize, pack step saved | done |
-| D6 AdamW-group lr | ×¼/×4 arms not run (user: only the scalar-lr arm, one candidate run). Scalar-lr candidate (92d63d4's x0/resid lambda groups; `results/scalar_learning_rates.json[l]`): not adopted. 8K code bpb 0.42635 against D7's τ×1 seed 0 0.42724 (−0.0009, inside the one-seed margin 0.0094: inconclusive, not "no effect"); 32K repository code 0.40815 against 0.40966; train loss over the last half −0.0022; MBPP+ parsing worse (exact sign test: 9 problems parse more under it, 35 under the baseline, p = 1.1e-4; unparsed 0.120 against 0.054). One lr and weight decay for every group stays | done |
+| Tokenizer ablation | not run (user, Oct 26; findings §5.23): sa-bpe stays, its corpus already tokenized and packed (`CORPUS/tokenizer`, the provisional copy; the base plan fits); ~6.7 GPU-h and the adopt, tokenize, pack step saved; `conf/experiment/tokenizer_split_merge.yaml` and the module's `analysis` and `adopt` removed (`vocabularies`, `intrinsic`, `data`, `repack` and their records kept) | done |
+| D6 AdamW-group lr | ×¼/×4 arms not run (user: only the scalar-lr arm, one candidate run); `adamw_group_lr`, `ablations/adamw_group_lr.py` and `RunConfig.adamw_learning_rate_scale` removed (the AdamW groups at the peak lr). Scalar-lr candidate (92d63d4's x0/resid lambda groups; `results/scalar_learning_rates.json[l]`): not adopted. 8K code bpb 0.42635 against D7's τ×1 seed 0 0.42724 (−0.0009, inside the one-seed margin 0.0094: inconclusive, not "no effect"); 32K repository code 0.40815 against 0.40966; train loss over the last half −0.0022; MBPP+ parsing worse (exact sign test: 9 problems parse more under it, 35 under the baseline, p = 1.1e-4; unparsed 0.120 against 0.054). One lr and weight decay for every group stays | done |
 | Base model pre-training | `experiment=pretrain` (d24, sa-bpe, the decided recipe) | the softcap bench; its own user approval |
 
-Order: the obsolete experiments' code removed (Ablations-2, branch `ablation-cleanup`) → base model pre-training (its
-own approval).
+Order: base model pre-training (its own approval). The obsolete experiments' code is removed (D7, D6, the tokenizer
+ablation's runs; `ablations/contrast.py` with them).
 
 ## 1. Decisions: model and training (ArchitectureCheck; affect every run, so the tokenizer ablation)
 
@@ -193,12 +193,12 @@ dataset holds the 1,812 shards, the regenerated card and `.gitattributes` (commi
 - Trigger for a data change: a §1 decision that raises the base run's token budget (`mixture.STEPS`) or a mixture share
   (D8) beyond the extents' margins → extend on the GB10, prepare, curate, `publish push`.
 
-## 7. Tokenizer ablation (`data` done, `679e7d9`; runs wait for the user's approval)
+## 7. Tokenizer ablation (`data` done, `679e7d9`; runs not run, user, Oct 26)
 
-`python -m ablations.tokenizer_split_merge data` (the d16 set compiled and packed under every arm,
-`results/tokenizer_split_merge-data.json`), then `python run.py experiment=tokenizer_split_merge` (8 d16 runs: 4 arms ×
-seeds 0 and 1; the decision in `results/tokenizer_split_merge.json`), then `adopt`, compile, pack, pre-training
-(`python run.py experiment=pretrain`).
+`python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack` built and measured the arms
+(`results/tokenizer_split_merge-{vocabularies,intrinsic,data}.json`). The 8 d16 runs, their decision and `adopt` were
+not run (user, Oct 26; findings §5.23) and are removed: the corpus's tokenizer stays sa-bpe (`CORPUS/tokenizer`), and
+pre-training is `python run.py experiment=pretrain`.
 
 ## 8. Answers and ablation designs
 
@@ -247,20 +247,19 @@ Gemma 3 and OLMo 2 learn it; per-head QK norm with learnable parameters in arXiv
   D1, computed at launch: 2.79704), since the
   corpus tokenizer does not exist before the tokenizer ablation's adopt.
 
-### D6 one lr/weight decay for all groups (OptimizerAnswers): source found; ablation after the tokenizer runs
+### D6 one lr/weight decay for all groups (OptimizerAnswers): not run (user, Oct 26); design kept as the record
 Moonlight §2.2 shares lr and weight decay "among matrix and non-matrix parameters" (its matched-RMS argument covers
-Muon's update size, not the AdamW groups' lr). Design: `RunConfig.adamw_lr_scale` (AdamW lr × s, weight decay / s;
-`conf/experiment/adamw_group_lr.yaml`) ×¼ and ×4 at d16, 2 seeds, decay
+Muon's update size, not the AdamW groups' lr). Design (not run; its knob `RunConfig.adamw_learning_rate_scale` and
+`conf/experiment/adamw_group_lr.yaml` removed): AdamW lr × s, weight decay / s, ×¼ and ×4 at d16, 2 seeds, decay
 timescale of the tables held; adopt iff better by > 0.0067 bpb and MBPP+ not worse; ~4 GPU-h.
 
-### D7 τ weight-decay law on Muon (OptimizerAnswers): ablation, before the tokenizer runs
+### D7 τ weight-decay law on Muon (OptimizerAnswers): stopped after 3 runs (user, Oct 26); the τ law kept
 The law's form carries to Muon (Power Lines App. B; arXiv 2512.05620 App. H.5 reproduces it for Muon), its constants
-do not (no Muon fit; doubling Muon's decay cost 0.010-0.019 loss in arXiv 2509.02046). Design:
-`RunConfig.muon_tau_scale` (Muon weight decay / s; `conf/experiment/muon_wd_timescale_20tpp.yaml` on the sa-bpe arm's
-data, then `muon_wd_timescale_200tpp.yaml` on the corpus's packs, as d8 at 200 reads 2.94B tokens, beyond the arm's set) ×½ and ×2 on Muon
-matrices only, d8 at 20 and at 200, 2 seeds each (user: 4 seeds at 20 judged wasteful; the code margin widens from
-0.0047 to 0.0067, so a smaller effect keeps the law); keep the law unless an arm clears its margin, else fit Muon's
-own law through the two horizons (`ablations/muon_wd_timescale.py` `law`); ~2.8 GPU-h.
+do not (no Muon fit; doubling Muon's decay cost 0.010-0.019 loss in arXiv 2509.02046). Design (stopped after 3 runs,
+the τ law kept on the literature, §0; its knob `RunConfig.muon_tau_scale`, `conf/experiment/muon_wd_timescale_*.yaml`
+and `ablations/muon_wd_timescale.py` removed): Muon weight decay / s, ×½ and ×2 on Muon matrices only, at 20 (d16, the
+sa-bpe arm's data) and at 200 (d8, the corpus's packs), 2 seeds each; keep the law unless an arm clears its margin,
+else fit Muon's own law through the two horizons; ~2.8 GPU-h.
 
 ### D9 RoPE base (ArchitectureAnswers): answered; keep 10^6 from the start
 Barbero et al. (arXiv 2410.06205 Table 2) Gemma 2B at 8K, 10k vs 500k: differences under 0.3%, mixed sign; Llama 3,
@@ -335,10 +334,10 @@ ResFormer (which reuses the first layer's values); LaVE gains 0.016/0.010/0.010 
 - Replaces `ablations/harness.py` (`Run`, `python -m ablations.harness '<json>'`), `scripts/pretrain.py` (both deleted in
   `679e7d9`), `config.run_tag`'s hashed tags, `suite.export`, the `variant` record field, peak_lr.py's driver and the tokenizer
   ablation's `runs` verb. `run.py`'s `RunConfig` defaults are the base model's recipe (num_hidden_layers 24,
-  tokens_per_param null = `train/stages.py` max_tokens_per_param, seed 0, tokenizer corpus, scales 1.0,
+  tokens_per_param null = `train/stages.py` max_tokens_per_param, seed 0, tokenizer corpus, learning_rate_scale 1.0,
   final_logit_softcapping 15.0); `conf/run.yaml` composes them (the
   `run_schema` ConfigStore node) with an experiment and Hydra's settings; `conf/experiment/<name>.yaml` sweeps fields
-  against them (pretrain, tokenizer_split_merge, adamw_group_lr, muon_wd_timescale_20tpp/200tpp).
+  against them (pretrain).
 - A run's name (`run_name`) is the fields differing from the defaults, sorted, `k=v` joined by `,` (e.g.
   `num_hidden_layers=16,seed=1,tokenizer=sa-bpe`; `defaults` if none); a run shared by two experiments is one run.
   Everything of it is in `artifacts/runs/<run_name>/`: `.hydra/`, `metrics.jsonl` (its run record holds `config` and

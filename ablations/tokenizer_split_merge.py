@@ -1,9 +1,9 @@
 """
 The tokenizer ablation (experiment EXPERIMENT: pre-tokenizer split pattern x BPE merge score): it trains every
 candidate vocabulary of the corpus's tokenizer (corpus/train_tokenizer.py: one sample, one trainer, VOCAB_SIZE ids),
-measures them on the corpus, decides the split pattern and merge score, and adopts the decided vocabulary as the
-corpus's tokenizer (corpus/tokenizer.py TOKENIZER). The val splits and the packs come from the curated shards through
-corpus (mixture.py, tokenize.py, pack.py).
+measures them on the corpus, and builds each arm's training set. Its runs were not run (user, Oct 26): the corpus's
+tokenizer stays sa-bpe (corpus/tokenizer.py TOKENIZER). The val splits and the packs come from the curated shards
+through corpus (mixture.py, tokenize.py, pack.py).
 
 Arms (ARMS):
 - sa-bpe: the reference tokenizer's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the
@@ -59,32 +59,10 @@ traces), its draw, read whole once; of text and math the leading shards of each 
 the trailing partitions (tokenize.tokenize_repo_level_stage, under sa-bpe), holding MARGIN times their draws, so they
 never bind.
 
-runs (conf/experiment/tokenizer_split_merge.yaml: `python run.py experiment=tokenizer_split_merge`): every arm at d16,
-seeds 0 and 1, at equal bytes: each at its max_tokens_per_param (tokens_per_param null), so it reads the set's code
-documents once and its tokens are their bytes over its bytes per token; text and math are drawn by rows. Each run's
-plan is its own (schedule.plan at its tokens), its contexts the corpus's 8,192 and 32,768 tokens (eval/bpb.py's
-byte-offset buckets: the bytes of
-context a better compressor sees, arXiv 2503.13423 §3.1, App. B.1), trained and evaluated through run.py,
-the records by ablations/records.py. RESULTS/tokenizer_split_merge.json "analysis" (analysis): each challenger's
-contrasts with sa-bpe, the baseline, and the decision.
-
-Decisions, pre-registered (analysis), each challenger (CHALLENGERS) against sa-bpe by ablations/contrast.py's tests
-(parsing: the exact sign test on MBPP+; code bits per byte: the normal bound):
-- the positive control gates the decision: unless sa-bpe-fused parses worse, the corpus keeps sa-bpe's pattern and
-  score. Else a challenger qualifies iff it is worse on neither and better on one; sa-bpe-fused, worse on parsing,
-  never qualifies (the control detects, it is not a candidate). Pattern: the hybrid's iff it qualifies, else sa-bpe's.
-  Score: bpe iff it qualifies, or is equal on both and the val documents read fewer of its merged tokens under 100
-  times than of sa-bpe's (SA-BPE's claimed benefit, a higher coverage than BPE's), carried to the adopted pattern
-  (assumed); otherwise SA-BPE.
-
 repack: every arm's set packed again from its tokenized splits, the set data recorded, after a change to the packer
 (corpus/pack.py, the corpus crate's pack.rs); the data record's arms rewritten.
 
-adopt: the decided vocabulary (RESULTS/tokenizer_split_merge.json "analysis" "decision") as the corpus's tokenizer:
-the arm of the decided pattern and score, or, bpe's score carried to another arm's pattern, that pair trained on the
-sample.
-
-python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack|adopt
+python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack
 """
 import argparse
 import datetime
@@ -93,8 +71,6 @@ import itertools
 import json
 import os
 import platform
-import shutil
-import statistics
 import subprocess
 import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
@@ -106,7 +82,6 @@ import regex
 from scipy.stats import hmean
 
 import metrics
-from ablations.contrast import contrast, evaluated
 from corpus import mixture
 from corpus.layout import TOKEN_DTYPE, split_path, stage_rows
 from corpus.mixture import weights
@@ -115,13 +90,12 @@ from corpus.parallel import SPAWN, memory
 from corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE, TEXT
 from corpus.sources import SOURCES, curated_shards, sample_starts, texts
 from corpus.tokenize import tokenize_repo_level_stage, tokenize_repositories, tokenize_source, train_parts
-from corpus.tokenizer import ABLATION, SPLIT_PATTERN, TOKENIZER, get_tokenizer, save
+from corpus.tokenizer import ABLATION, SPLIT_PATTERN, get_tokenizer, save
 from corpus.train_tokenizer import Score, byte_shares, fidelity, sample, shard_bytes, train, vocabulary
 from native import corpus_crate
 from paths import RESULTS, ROOT
 
-# The experiment's name (conf/experiment/<EXPERIMENT>.yaml): its records and analysis, RESULTS/<EXPERIMENT>.jsonl and
-# .json, and this module's results, RESULTS/<EXPERIMENT>-{vocabularies,intrinsic,data}.json
+# The experiment's name: this module's results, RESULTS/<EXPERIMENT>-{vocabularies,intrinsic,data}.json
 EXPERIMENT = "tokenizer_split_merge"
 
 # karpathy/nanochat's split pattern (92d63d4): SPLIT_PATTERN with cl100k's punctuation clause, whose [\r\n]* takes the
@@ -153,11 +127,11 @@ FUSED_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}|
 # whitespace run costs fancy-regex no backtracking, where SPLIT_PATTERN's \s+(?!\S) beside \s*[\r\n] stops tiktoken past
 # its backtrack limit
 HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\n+|\r+|\t+| +|[^\S\r\n\t ]+"""
-# arm: (pattern, merge score); every arm is trained on, sa-bpe the runs' baseline (analysis)
+# arm: (pattern, merge score); every arm is trained on, sa-bpe the baseline
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
 CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
-# The runs' num_hidden_layers, which the set is sized for (conf/experiment/tokenizer_split_merge.yaml)
+# The d16 num_hidden_layers the set is sized for
 NUM_HIDDEN_LAYERS = 16
 # The set's size: a d16 run at Chinchilla's 20 tokens per non-embedding parameter under sa-bpe (arXiv 2203.15556
 # Table 3)
@@ -544,53 +518,8 @@ def repack() -> None:
     path.write_text(json.dumps(record, indent=1), encoding="utf-8")
 
 
-def analysis(lines: list[dict]) -> dict:
-    """The runs' analysis (RESULTS/<EXPERIMENT>.json "analysis", ablations/records.py): each challenger's contrast with
-    sa-bpe, with the difference of the arms' MBPP+ unparsed shares (None for a contrast without seeds: an arm every
-    seed of which diverged, ablations/contrast.py), and the decision (module docstring), over RESULTS/<EXPERIMENT>.jsonl's
-    records."""
-    runs = evaluated(lines, "tokenizer")
-    contrasts = {}
-    for arm in CHALLENGERS:
-        c = contrast(runs, arm, "sa-bpe")
-        unparsed = {v: 1 - statistics.fmean(itertools.chain.from_iterable(runs[v, seed][1] for seed in c["seeds"]))
-                    for v in (arm, "sa-bpe")} if c["seeds"] else None
-        contrasts[arm] = c | {"unparsed_difference": unparsed[arm] - unparsed["sa-bpe"] if unparsed else None}
-    verdicts = {arm: (c["parsing"], c["code"]) for arm, c in contrasts.items()}
-    qualified = {arm for arm, v in verdicts.items() if "worse" not in v and "better" in v}
-    record = json.loads((RESULTS / f"{EXPERIMENT}-intrinsic.json").read_text(encoding="utf-8"))
-    rare = {arm: measures["merged_reads"]["under 100"] for arm, measures in record["arms"].items()}
-    frequency = "bpe" in qualified or (verdicts["bpe"] == ("equal", "equal") and rare["bpe"] < rare["sa-bpe"])
-    # the positive control gates the decision: undetected, the corpus keeps sa-bpe's pattern and score; detected, it
-    # parses worse, so it never qualifies and the hybrid is the only pattern that can
-    control = verdicts["sa-bpe-fused"][0] == "worse"
-    decision = {"pattern": "hybrid" if control and "hybrid" in qualified else "sa-bpe",
-                "score": "frequency" if control and frequency else "sa-bpe",
-                "control_detected": control}
-    return {"contrasts": contrasts, "decision": decision}
-
-
-def adopt() -> None:
-    """The decided vocabulary (RESULTS/<EXPERIMENT>.json "analysis" "decision") as the corpus's tokenizer, TOKENIZER:
-    the arm of the decided pattern and score, copied, or that pair trained on the sample when no arm holds it. It writes
-    over the provisional tokenizer (the sa-bpe arm's copy) in place: tokenized and packed data are keyed by a
-    vocabulary's data key, so adopting sa-bpe reuses the provisional corpus and any other vocabulary tokenizes into new
-    directories (run.py's stale guard rejects a run recorded under the replaced one)."""
-    decision = json.loads((RESULTS / f"{EXPERIMENT}.json").read_text(encoding="utf-8"))["analysis"]["decision"]
-    pattern, score = ARMS[decision["pattern"]][0], decision["score"]
-    arm = next((arm for arm, spec in ARMS.items() if spec == (pattern, score)), None)
-    if arm is None:
-        docs, units, _ = sample()
-        save(TOKENIZER, vocabulary(train(docs, units, pattern=pattern, score=score)), pattern)
-    else:
-        for name in ("tokenizer.tiktoken", "tokenizer.pattern"):
-            shutil.copyfile(ABLATION / arm / name, TOKENIZER / name)
-    print(f"the corpus's tokenizer: {decision['pattern']}'s pattern, score {score}, data key "
-          f"{get_tokenizer(TOKENIZER).data_key}", flush=True)
-
-
 if __name__ == "__main__":
-    steps = {"vocabularies": vocabularies, "intrinsic": intrinsic, "data": data, "repack": repack, "adopt": adopt}
+    steps = {"vocabularies": vocabularies, "intrinsic": intrinsic, "data": data, "repack": repack}
     parser = argparse.ArgumentParser(prog="python -m ablations.tokenizer_split_merge",
                                      description="A step of the tokenizer ablation.")
     parser.add_argument("step", choices=steps)
