@@ -23,8 +23,6 @@ dependencies = [
     "scipy==1.18.1",
     "statsmodels==0.15.0",
     "tiktoken==0.14.0",
-    # TokEval (arXiv 2608.18062); imports transformers at import time
-    "tokenizer-intrinsic-evals",
     "tokenizers==0.23.3",
     "transformers==5.20.2",
 ]
@@ -32,9 +30,6 @@ dependencies = [
 [tool.uv]
 # torch and numpy from the NGC image; evalplus's model-provider clients serve only its unused code generation
 exclude-dependencies = ["torch", "numpy", "openai", "anthropic", "google-generativeai", "boto3", "ollama"]
-# TokEval's reference numbers on the corpus were computed with 1.22.1, above its declared <1
-override-dependencies = ["tree-sitter-language-pack==1.22.1"]
 
 [tool.uv.sources]
 evalplus = { git = "https://github.com/evalplus/evalplus", rev = "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e" }
-tokenizer-intrinsic-evals = { git = "https://github.com/cimeister/tokenizer-intrinsic-evals", rev = "7d03a61c2e2b4b557b796519141ccb52d144e10f" }

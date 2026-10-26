@@ -3,7 +3,6 @@ Run app (Hydra, conf/run.yaml): each job trains a RunConfig (train/loop.py) and 
 (eval/suite.py), each phase in a fresh process. The top level imports no torch, model, training or evaluation code:
 eval/code_eval.py's forkserver workers import this module.
 """
-import json
 import multiprocessing
 import os
 import warnings
@@ -18,7 +17,7 @@ from omegaconf import DictConfig, OmegaConf
 
 import metrics
 from corpus.tokenizer import ABLATION, TOKENIZER, get_tokenizer
-from paths import RESULTS, ROOT, RUNS
+from paths import ROOT, RUNS
 
 if TYPE_CHECKING:
     from train.schedule import RunPlan
@@ -32,8 +31,6 @@ class RunConfig:
     seed: int = 0
     tokenizer: str = "corpus"
     learning_rate_scale: float = 1.0  # times the law's peak lr; conf/run.yaml sets the measured multiplier
-    # cap 15 as karpathy/nanochat 92d63d4 nanochat/gpt.py:511-515
-    final_logit_softcapping: float | None = 15.0
     num_checkpoints: int = 1
     generate: str = "parse"
 
@@ -46,12 +43,6 @@ def run_name(config: RunConfig) -> str:
     return ",".join(f"{name}={value}" for name, value in changed) or "defaults"
 
 
-def same_config(recorded: dict, config: RunConfig) -> bool:
-    """Whether a recorded config dict equals `config`; a field the record lacks matches its RunConfig() default."""
-    default = RunConfig()
-    return all(recorded.get(f.name, getattr(default, f.name)) == getattr(config, f.name) for f in fields(config))
-
-
 def tokenizer_path(config: RunConfig) -> Path:
     return TOKENIZER if config.tokenizer == "corpus" else ABLATION / config.tokenizer
 
@@ -61,8 +52,7 @@ def base_plan(*, num_hidden_layers: int, tokens_per_param: float) -> "RunPlan":
     from model.modeling import meta_model
     from train.schedule import plan
 
-    return plan(model=meta_model(num_hidden_layers=num_hidden_layers, final_logit_softcapping=None),
-                tokens_per_param=tokens_per_param)
+    return plan(model=meta_model(num_hidden_layers=num_hidden_layers), tokens_per_param=tokens_per_param)
 
 
 def plan_of(config: RunConfig) -> "RunPlan":
@@ -87,8 +77,7 @@ def training(config: RunConfig, run: "RunPlan") -> None:
     from model.modeling import meta_model
     from train.loop import train
 
-    model = meta_model(num_hidden_layers=config.num_hidden_layers,
-                       final_logit_softcapping=config.final_logit_softcapping)
+    model = meta_model(num_hidden_layers=config.num_hidden_layers)
     train(model=model, run=run, tokenizer_path=tokenizer_path(config), seed=config.seed,
           checkpoints=checkpoint_steps(config, run), run_name=run_name(config), config=asdict(config))
 
@@ -130,7 +119,7 @@ def job(config: RunConfig) -> None:
     name, run = run_name(config), plan_of(config)
     data_key = get_tokenizer(tokenizer_path(config)).data_key
     log = metrics.records(name)
-    if any(r["plan"] != asdict(run) or r["data_key"] != data_key or not same_config(r["config"], config)
+    if any(r["plan"] != asdict(run) or r["data_key"] != data_key or r["config"] != asdict(config)
            for r in log if r["kind"] == "run"):
         raise RuntimeError(f"recipe changed since {name} ran: delete {RUNS / name}")
     if evaluation_path(name, run.max_steps).exists() or metrics.diverged(log) is not None:
@@ -146,11 +135,10 @@ def job(config: RunConfig) -> None:
 
 
 def lr_multiplier() -> float:
-    """The base multiplier of the law's peak lr: ablations/peak_lr.py analysis over results/peak_lr.jsonl."""
-    from ablations.peak_lr import analysis
+    """The base multiplier of the law's peak lr: ablations/peak_lr.py analysis over the peak_lr experiments' records."""
+    from ablations.peak_lr import analysis, records
 
-    lines = [json.loads(line) for line in (RESULTS / "peak_lr.jsonl").read_text(encoding="utf-8").splitlines()]
-    return analysis(lines)["base_multiplier"]
+    return analysis(records())["base_multiplier"]
 
 
 def register() -> None:

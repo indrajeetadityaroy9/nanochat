@@ -121,7 +121,7 @@ typedef struct {
     const int32_t *pos, *first;      /* [B]: the input's position and the first generated token's (i = pos - first) */
     float *logits;                   /* [B][rows]: a nucleus-sampled slot's logits, -inf outside its allowed rows */
     float *probs;                    /* [B][rows]: k_nucleus's exp(s / T - max) */
-    float softcap;                   /* logit cap c: sampled logits c tanh(s / c), 0 none; argmax needs none */
+    float softcap;                   /* logit cap c: sampled logits c tanh(s / c); argmax needs none */
     unsigned long long *alt;         /* [B]: the best allowed key but lazy's (0 none), if the host rejects lazy */
     int lazy;                        /* the row the host confirms after the step (BOS) */
 } Choice;
@@ -180,8 +180,7 @@ template <bool CHOICE> static __device__ __forceinline__ void epilogue(const Gem
     if constexpr (CHOICE) {
         const bool allowed = !live(a.active + MASK_WORDS, b) ||
             ((c.allow[(size_t)b * (a.rows / WORD_BITS) + row / WORD_BITS] >> (row % WORD_BITS)) & 1u);
-        const float z = c.softcap > 0.f && c.temperature[b] > 0.f
-            ? __fmul_rn(c.softcap, tanhf(__fdiv_rn(s, c.softcap))) : s;
+        const float z = c.temperature[b] > 0.f ? __fmul_rn(c.softcap, tanhf(__fdiv_rn(s, c.softcap))) : s;
         if (c.temperature[b] > 0.f && c.top_p[b] < 1.f) {
             c.logits[at] = allowed ? z : -INFINITY;
             return;
@@ -717,7 +716,7 @@ typedef struct {
     float *top_p;
     unsigned long long *seed;
     float *logits, *probs;    /* [B][vocab]: k_nucleus's inputs (Choice) */
-    float softcap;            /* the output-logit cap (Choice), 0 none */
+    float softcap;            /* the output-logit cap (Choice) */
     uint32_t *allow;          /* [B][vocab / WORD_BITS]: each masked slot's allowed tokens */
     uint32_t *host_allow;     /* pinned host, as allow: written by the caller (dec_masks), copied by dec_set_active */
     unsigned long long *active;  /* device [2][MASK_WORDS]: the active slots' mask, then the masked slots' */
@@ -903,7 +902,7 @@ extern "C" void dec_destroy(void *handle) {
 
 extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
 
-/* cfg: L, C, F, vocab, max_len (<= context), store (positions requested), lazy, budget (MiB, 0: none). ptrs: wte
+/* cfg: L, C, F, vocab, max_len (<= context), store (positions requested), lazy. ptrs: wte
  * (fp32), cos, sin ([context][HALF] fp32), lm_head; per layer qkv, o, fc, proj, ve table, ve gate (0 if none),
  * q norm, k norm. scal: per layer resid, x0 lambda; then the logit cap. window: per layer, keys before a query.
  * stream: the caller's (not the legacy default stream: it is captured), alive past dec_destroy. */
@@ -928,14 +927,11 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     for (const void *kernel : {(const void *)k_wgmma<false>, (const void *)k_wgmma<true>})
         CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, WG_SMEM));
     CUDA_CHECK(cudaFuncSetAttribute(k_attn, cudaFuncAttributeMaxDynamicSharedMemorySize, ATTN_SMEM));
-    /* free memory, at most the budget; B: the most slots (<= MAX_BATCH) that fit after the prefill's MAX_BATCH rows */
+    /* B: the most slots (<= MAX_BATCH) that fit in free memory after the prefill's MAX_BATCH rows */
     size_t slot = 0, row = 0, free_bytes, total_bytes;
     slot_buffers(d, [&](void **, size_t bytes) { slot += bytes; });
     row_buffers(d, [&](void **, size_t bytes) { row += bytes; });
     cudaMemGetInfo(&free_bytes, &total_bytes);
-    const size_t free_start = free_bytes, budget = (size_t)cfg[7] << 20;
-    if (budget > 0 && budget < free_bytes) free_bytes = budget;
-    const size_t limit = free_bytes;  /* the bytes this decoder may take */
     free_bytes -= MAX_BATCH * row < free_bytes ? MAX_BATCH * row : free_bytes;
     d->B = (int)(free_bytes / slot < (size_t)MAX_BATCH ? free_bytes / slot : MAX_BATCH);
     d->capacity = d->B;
@@ -975,8 +971,6 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
      * at a time until one allocation succeeds (cudaMemGetInfo's free bytes need not fit one allocation) */
     const size_t position = 2 * (size_t)L * (d->C + d->H * sizeof(float));
     cudaMemGetInfo(&free_bytes, &total_bytes);
-    const size_t taken = free_start > free_bytes ? free_start - free_bytes : 0;
-    if (limit - (taken < limit ? taken : limit) < free_bytes) free_bytes = limit - (taken < limit ? taken : limit);
     if ((size_t)d->store > free_bytes / position) d->store = (int)(free_bytes / position);
     while (d->store > 0 && cudaMalloc((void **)&d->store_k, position * d->store) != cudaSuccess) {
         cudaGetLastError();  /* clear the failed allocation's error */

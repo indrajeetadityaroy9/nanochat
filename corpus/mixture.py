@@ -122,10 +122,14 @@ def draw(group: str) -> float:
 def weights(stage: Stage, rows: dict[str, int], count: int
             ) -> tuple[dict[str, float], dict[str, int], dict[str, int]]:
     """A run's ({corpus: weight}, {corpus: rows drawn}, {corpus: rows drawn beyond its packed rows}) in a stage of
-    `count` rows; a "supply" corpus is reweighted until it never overdraws."""
+    `count` rows. A "supply" corpus is read whole (its rows over `count`), reweighted until it never overdraws; when
+    that leaves a share negative (a run too short to read it whole), every supply share is the base run's (its rows
+    over stage.rows)."""
     supply, weighed = set(stage.supply), dict(rows)
     while True:
         shares = stage.shares(weighed, count)
+        if min(shares.values()) < 0:
+            shares = stage.shares(weighed, stage.rows)
         names = list(shares)
         counts = np.bincount(mixture_rows(np.array([shares[n] for n in names]), start=0, count=count),
                              minlength=len(names))

@@ -18,7 +18,6 @@ class RunPlan:
     gradient_accumulation_steps: int
     max_steps: int
     repo_level_start: int
-    num_non_embedding_params: int
     tokens_per_param: float           # max_steps x batch_size / num_non_embedding_params
     learning_rate: float              # peak learning rate of every optimizer group
 
@@ -40,8 +39,7 @@ def plan(*, model: CausalLM, tokens_per_param: float) -> RunPlan:
         batch_size=batch_size, gradient_accumulation_steps=batch_size // MICRO_BATCH_TOKENS,
         max_steps=max_steps,
         repo_level_start=max_steps - round(REPO_LEVEL_SHARE * max_steps),
-        num_non_embedding_params=params, tokens_per_param=max_steps * batch_size / params,
-        learning_rate=0.3118 * compute ** -0.1250,
+        tokens_per_param=max_steps * batch_size / params, learning_rate=0.3118 * compute ** -0.1250,
     )
 
 

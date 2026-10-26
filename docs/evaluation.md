@@ -98,7 +98,7 @@ App. C.1), its budget and stops (the post: 256 tokens) and in compiling the unsa
 | Benchmark | Problems | Prompt; budget; stops | Evaluator | Data pin |
 |---|---|---|---|---|
 | HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) | 164, 378 | `prompt.strip() + "\n"`; 768 new tokens; EvalPlus's EOS + `extra_eos_for_direct_completion`, special tokens skipped, tabs → 4 spaces, `sanitize(prompt + completion, entry point)` (EvalPlus's base-model codegen) | `evalplus.evaluate` (all CPUs, `EVALPLUS_EVALUATE`): base and plus pass@1 | evalplus `26d6d00` (`pyproject.toml`); HumanEvalPlus v0.1.10, MbppPlus v0.2.0 |
-| HumanEval, MBPP in C++ (MultiPL-E, arXiv 2208.08227) | 161, 397 | `prompt.strip()`; 1,024 positions of prompt and completion, BOS included (a prompt of ≥ 1,024 tokens gets the empty completion, as MultiPL-E's `automodel.py` returns); the row's stop tokens, the first special token ends it | MultiPL-E `evaluation/src/main.py --file … --max-workers 1` per problem, `os.cpu_count()` at once (g++ -std=c++17, 15 s compile, 15 s run); `pass_k.py` | dataset `nuprl/MultiPL-E` at `3a9e8d2` (the revision MultiPL-E's `completions.py` pins); evaluator `3025a53` (`docker/Dockerfile`) |
+| HumanEval, MBPP in C++ (MultiPL-E, arXiv 2208.08227) | 161, 397 | `prompt.strip()`; 1,024 positions of prompt and completion, BOS included (the longest prompt is 600 tokens under the corpus tokenizer [arithmetic], so `automodel.py`'s empty completion for a prompt of ≥ 1,024 tokens never applies); the row's stop tokens, the first special token ends it | MultiPL-E `evaluation/src/main.py --file … --max-workers 1` per problem, `os.cpu_count()` at once (g++ -std=c++17, 15 s compile, 15 s run); `pass_k.py` | dataset `nuprl/MultiPL-E` at `3a9e8d2` (the revision MultiPL-E's `completions.py` pins); evaluator `3025a53` (`docker/Dockerfile`) |
 | HumanEval-X C++ (arXiv 2303.17568) | 164 | reference solutions only (§2) | — | `zai-org/humaneval-x` at `62c7862` |
 | HumanEval infilling single-line, multi-line, random-span (arXiv 2207.14255) | 1,033, 5,815, 1,640 [arithmetic: `read_problems`] | PSM and SPM prompts (`decoder.fim_prompt`, the packer's layout, `docs/corpus.md` §8); middle until BOS, at most the benchmark's longest reference middle in tokens; not healed (a FIM prompt ends with a sentinel or with the prefix encoded alone, the training format) | the package's `check_correctness` per middle (3 s) in a fork pool of `os.cpu_count()` workers (`INFILLING_EVALUATE`) | `openai/human-eval-infilling` `88062ff` (`docker/Dockerfile`) |
 
@@ -137,8 +137,6 @@ decoding's `"latency"` (`metrics.latency`); a filtered record holds the attempts
   CPU. MultiPL-E's `main.py --dir` judges a directory's problems serially, hence a `--file` process per problem.
   human-eval-infilling's CLI forks a Manager and a Process per sample from one interpreter's thread pool, so its rate
   is bound by that interpreter's GIL (4 or 64 threads about the same), hence `INFILLING_EVALUATE`'s fork pool.
-  MultiPL-E's `automodel.py` returns the empty completion for a prompt of ≥ 1,024 tokens except a 1,024-token prompt
-  whose one generated token outspans the truncated prompt; this suite gives it the empty completion.
 
 ## 5. Metrics and statistics
 
@@ -170,7 +168,6 @@ alike. Every public function:
 | `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12, the H100 SXM5 / GH200 dense BF16 peak) | PaLM App. B |
 | `parabola_vertex(x, y)` | (a, −b/2a) of the least-squares parabola (numpy `polyfit`, degree 2); used by `docs/training.md` §5 | — |
 | `latency(starts, firsts, ends, new_tokens, duration=)` | `ttft` (first − start), `tpot` ((end − first)/(n − 1), requests of > 1 token; None if none), `e2el`, each mean, median, p99; `output_throughput` | vLLM `benchmarks/serve.py` `calculate_metrics` |
-| `token_offsets`, `tokeval_wrapper`, `tokeval` | TokEval's full analysis of repository tokenizers (below) | arXiv 2608.18062; cimeister/tokenizer-intrinsic-evals `7d03a61` |
 
 **Measures** (`measures`, the quantities experiments compare; bits per byte unless stated):
 
@@ -196,14 +193,6 @@ its formula, but per step it would read `cu_seqlens` on the host (a device sync)
 FLOPs count 2 per multiply-add; rematerialization is not counted (PaLM App. B's MFU definition). `tokens_per_second` is
 the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint FlashAttention reports (arXiv 2205.14135),
 `peak_reserved_bytes` the allocator's. Measured MFU: `docs/training.md` §7.
-
-**TokEval** (`tokeval`): `UnifiedTokenizerAnalyzer.run_analysis` in its published form (`normalize_results`), MorphScore
-off (it needs its git submodule and data) and plots off, CER unbudgeted (`cer_time_budget_s=0`). Inputs: prose by
-language, code by language (via TokEval's `CodeDataLoader`: CRLF → LF, trailing whitespace stripped; read by the AST,
-identifier and indentation metrics) and math. `tokeval_wrapper`: `encode` is `encode_ordinary`; vocabulary keys are
-GPT-2's byte-to-unicode rendering of each token's bytes (a bijection, so partial characters survive); `pretokenize` is
-the split pattern; offsets from each token's byte length (`token_offsets`). Tree-sitter grammars:
-`tree-sitter-language-pack==1.22.1` (`pyproject.toml` override). Results per tokenizer: `docs/experiments.md` §2.
 
 ## 6. Decoder
 
@@ -248,8 +237,7 @@ the split pattern; offsets from each token's byte length (`token_offsets`). Tree
   batched, `4385748`). The FP8 cache makes them differ from the bf16 forward's where two logits nearly tie: agreement
   with the training forward's greedy choice 0.9916 at `4385748` (137 of 16,261 tokens; every mismatch a top-2 gap
   < 0.57, median 0.0625) and 0.9920 at `ca18db5`.
-- **Memory.** `memory_fraction` caps the decoder's device memory (slots, prefill rows, graphs, store) at a fraction of
-  the device's total (`NANOCHAT_DECODER_MEMORY_FRACTION`; unset: all free memory), so a job can share the GPU.
+- **Memory.** The decoder takes the device's free memory (slots, prefill rows, graphs, store).
 - **Speed** (`4385748`, GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens):
   94,778 tok/s at d24 and 189,307 at d16, against 21,809 and 66,559 for the per-slot-group GEMV decoder it replaced
   (4.35×, 2.84×); d24 step 8.27 ms at 1,024 slots, one slot 1.29 ms (GEMV decoder 3.16 ms). A d16 checkpoint's
@@ -338,8 +326,8 @@ biases these problems' filtered pass@1 down.
 
 ## 8. Export, vLLM and the standard-protocol cross-check
 
-**Export** (`python -m inference.export_hf <checkpoint.pt> <dir> [<tokenizer dir>]`, nanochat image) writes a Hugging
-Face directory:
+**Export** (`python -m inference.export_hf <checkpoint.pt> <dir>`, nanochat image; a model trained with the corpus
+tokenizer, `corpus.tokenizer.TOKENIZER`) writes a Hugging Face directory:
 
 - `model.safetensors`: matrices and tables bf16; `_keep_in_fp32_modules_strict` (the per-dim and per-layer vectors,
   the value-embedding gates) fp32;
@@ -398,8 +386,6 @@ CLI gave HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 against this suite's greed
   (torchmetrics `SumMetric` differs); `measures` identical to the previous code on four real d8 runs; MultiPL-E
   scoring of six real tasks identical after the CSV parse moved to `csv.DictReader`. A d16 checkpoint's FIM
   single-line SPM greedy line exact match 0.367 ± 0.020, pass@1 0.436.
-- **TokEval dependency**: `tree-sitter-language-pack` 1.22.1, as TokEval's reference numbers were computed; 0.13.0
-  changes 35 of 135 values [unverified: no record or commit].
 - **MultiPL-E judging** (`9d61a1b`): 64 concurrent `main.py` processes × 63 threads oversubscribed g++, and a compile
   past its wall-clock limit is scored "SyntaxError"; with `--max-workers 1` per file, HumanEval C++ sampled "OK"
   completions 70 → 175 of 3,220 and pass@1 0.022 → 0.054 (the other C++ benchmark 0.039 → 0.090 [inference:
@@ -426,11 +412,11 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 | Kind | Fields |
 |---|---|
-| `run` (each process start) | `step` (first step it trains), `plan` (`schedule.RunPlan`), `seed` (initialization and data order), `config` (`run.py` `RunConfig`), `data_key` (`Tokenizer.data_key`; with `plan`, what the stale guard compares), `model` (`ModelConfig` at the stage of the starting weights: file-level, or the checkpoint's), `num_parameters`, `flops_per_token` (`non_embedding_flops_per_token`, M of arXiv 2401.02954 §3.2 Eq. 2), `model_flops_per_token` (at that stage), `max_grad_norm`, `learning_rate` and `weight_decay` (`{"adamw": [per group], "muon": [per group]}` as the optimizers hold them; a resumed process's from its checkpoint), `stage` (`corpus/mixture.py` `Stage` as run, mixture as {corpus: row weight}) |
+| `run` (each process start) | `step` (first step it trains), `plan` (`schedule.RunPlan`), `config` (`run.py` `RunConfig`; its `seed` sets initialization and data order), `data_key` (`Tokenizer.data_key`; with `plan`, what the stale guard compares), `model` (`ModelConfig` at the stage of the starting weights: file-level, or the checkpoint's), `num_parameters`, `flops_per_token` (`non_embedding_flops_per_token`, M of arXiv 2401.02954 §3.2 Eq. 2), `model_flops_per_token` (at that stage), `learning_rate` and `weight_decay` (`{"adamw": [per group], "muon": [per group]}` as the optimizers hold them; a resumed process's from its checkpoint), `stage` (`corpus/mixture.py` `Stage` as run, mixture as {corpus: row weight}) |
 | `stage` (switch to the repo-level stage) | `step`, `stage`, `model_flops_per_token` (repo-level), `peak_memory_bytes`, `peak_reserved_bytes` (`torch.cuda.max_memory_allocated`/`max_memory_reserved` over the file-level stage; both reset at the switch) |
 | `train` (each optimizer step, 0-based) | `step`; `num_input_tokens_seen` (row positions after it, padding included); `loss` (mean next-token loss in nats over valid labels, fp64); `learning_rate` (LambdaLR's); `grad_norm` (global L2 before clipping, arXiv 1211.5063 §3.2); `step_seconds` (device time between CUDA events at the previous step's end and its own; `train/loop.py` reads a step's values one step late); `tokens_per_second` (row positions / `step_seconds`); `model_flops` (`executed_model_flops` of the step's micro-batches); `mfu`; `train/diagnostics.py`'s `max_logsumexp`, `mean_square_logsumexp` (logits' logsumexp over valid positions: maximum and mean square, PaLM's z-loss quantity, arXiv 2204.02311 §5), `qk_norm_gain_max`, `corpus_loss` ({corpus: mean loss of its rows}); every 10th step `update_rms` ({optimizer[group]: update RMS without decoupled weight decay}) and `param_norm` ({optimizer[group]: L2 norm after the step}) |
 | `end` (last step trained) | `step`, `peak_memory_bytes`, `peak_reserved_bytes` over the last stage (since the switch or the process start) |
-| `failure` (non-finite loss or gradient norm; the run stops) | `step`, `loss`, `grad_norm` (null) |
+| `failure` (non-finite loss or gradient norm; the run stops) | `step` |
 
 - `train_steps`: attempts only grow down the file, so the last record per step wins. `curves`: columns in first-seen
   field order; none for a run diverged at step 0.
@@ -462,20 +448,6 @@ Per module and symbol; what §1–§9 state is not repeated.
 - `latency`: tpot = (end − first)/(new tokens − 1); p99 is serve.py's default `--metric-percentiles 99`; `requests`
   counts the requests; ttft is measured from the request taking a decoder slot.
 - `parabola_vertex`: the optimum of a sweep (`ablations/peak_lr.py`).
-- TokEval (`token_offsets`, `tokeval_wrapper`, `tokeval`): tokens' bytes are the text's UTF-8 bytes in order; a byte's
-  character is the count of lead and ASCII bytes up to it, less one. The wrapper's `encode` is tiktoken
-  `encode_ordinary` (special tokens' text encodes as ordinary text, as `corpus/tokenize.py` does), `decode` joins token
-  bytes (special ids skipped by default), `pretokenize` is the split pattern, `get_unk_token_id` None (byte-level),
-  `from_config({"path"})` loads `corpus/tokenizer.py` `get_tokenizer`. Vocabulary keys: transformers' `bytes_to_unicode`
-  of each mergeable token's bytes (HuggingFace's ByteLevel form of tiktoken vocabularies), a bijection on byte strings,
-  so keys are distinct and keep partial characters; special tokens (ids after the mergeable ones, in order) keep their
-  text. TokEval relies on this form: `utf8_token_integrity` (`metrics/utf8_integrity.py` `_detect_gpt2_encoding`)
-  recognizes the marker keys and maps them back to bytes; `indentation_consistency` (`metrics/code_ast.py`
-  `_is_whitespace_token`) and `BaseMetrics._build_char_decode_table` read space, LF, tab, CR as Ġ, Ċ, ĉ, č. `tokeval`
-  inputs: `texts` names must differ from the code languages and "math" (the domain keys of `metrics/basic.py`); `code`
-  goes through `code_ast_config` and `math` through `math_data_path` (the digit metrics and operator isolation's math
-  domain), written to a temporary directory; tree-sitter parsers run in subprocesses; non-finite floats become null
-  (`cli/run_analysis.py` `_convert_for_json_public`).
 
 ### `eval/suite.py`
 
@@ -523,16 +495,18 @@ Per module and symbol; what §1–§9 state is not repeated.
   an empty middle stays empty.
 - `decoder`: `max_length` = len(input_ids) + max_new_tokens − 1; created after `torch.cuda.empty_cache()`, since slots
   and prompt store are sized by free memory (for the filtered passes, which run after the likelihood pass, this returns
-  that pass's blocks); `NANOCHAT_DECODER_MEMORY_FRACTION` unset = all free memory, so a job sharing the GPU keeps the
-  rest. Prompt stores: codegen, each prompt shared by its greedy request and samples; filtered, the healed prompts a
-  search's rounds repeat (the healed prompt a token shorter, its budget a token longer); FIM greedy none (no repeats);
-  FIM filtered the prompts.
+  that pass's blocks). Prompt stores: codegen, each prompt shared by its greedy request and samples; filtered, the
+  healed prompts a search's rounds repeat (the healed prompt a token shorter, its budget a token longer); FIM greedy
+  none (no repeats); FIM filtered the prompts.
 - `generate_groups`: `done(g, ids in request order, latency)`, latency's duration from the group's first start to its
   last end with other groups interleaved; groups finish as soon as their last request ends.
 - `filtered`: record `{"attempts", "accepted", "latency"}` per task; unaccepted tasks score the greedy candidate.
   `filtered_completions`: healed candidates get one more token of budget, the dropped token's bytes re-emitted by
   `Reemit`, or for Python by the `SyntaxConstraint` built with `healing=`; a fresh constraint per candidate.
-- `sanitizers`: workers import the main module (`run.py`, whose top level must stay light); in a spawned process,
+- `sanitizers`: the forkserver and its workers import the caller's main module (`run.py`, whose top level must stay
+  light), so a script that calls `evaluate` at import time, outside `if __name__ == "__main__"`, loads the model and
+  runs the evaluation again inside the forkserver, which aborts (SIGABRT and a 4 GB core dump of the forkserver,
+  observed with a d16 checkpoint); in a spawned process,
   multiprocessing's exit handler joins the workers before concurrent.futures' would stop them, hence the caller's
   `with`. `sanitizer_init` makes EvalPlus's `syntax_check` (which catches SyntaxError and MemoryError) count that
   ValueError as a syntax error, so `code_extract` skips such spans: uncaught, one d16 completion ended a benchmark
@@ -638,7 +612,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 - `fim_prompt`: the layout the packer trains (`corpus/pack.py`, `corpus/loader.py`); `NativeDecoder.generate` stops at
   the BOS ending the middle.
 - `Request`: `stopping_criteria` is None or a predicate of the generated ids, true once done; sampled logits are capped
-  by `ModelConfig.final_logit_softcapping` if set; the draw at generated position i is a function of (seed, i) only
+  by `ModelConfig.final_logit_softcapping`; the draw at generated position i is a function of (seed, i) only
   (`decode.cu` `gumbel`); nucleus in `decode.cu` `k_nucleus`; `constraint`: the tokens allowed at each step.
 - `Reemit`: a healed Python prompt's `SyntaxConstraint` holds it; `syntax_constraint.masks` intersects with its mask.
   Proper prefixes found by bisect over `prefix_index`; the returned mask is the decoder's layout.
@@ -659,14 +633,12 @@ Per module and symbol; what §1–§9 state is not repeated.
   - `prompt_store`: at most the memory left after the slots, 2 · num_hidden_layers · (hidden_size + 4 ·
     num_attention_heads) bytes a position. A prompt's K and V at all but its last position are kept once prefilled; a
     later request with the same prompt copies them (K and V depend on the prompt alone, so tokens are unchanged).
-  - `memory_fraction`: covers slots, prefill rows, graphs and the prompt store, capped by free memory (as vLLM's
-    `gpu_memory_utilization`, counting this decoder alone).
   - Weights: the matrices are the model's bf16 GEMM copies (`CausalLM.refresh_gemm_weights`: q/k/v concatenated per
     layer, o, up, down), read in place, with bf16 copies of `lm_head` and the value-embedding tables; the embedding
     table stays fp32 because the compiled forward's x0 is the fp32 row's norm (`decode.cu` `k_norm`); value-embedding
     table and gate only on VE layers.
   - `dec_create` config: L, C, F (`up_proj` is (F, C)), vocabulary, max_length, prompt store, BOS (the lazy row: a
-    syntax constraint's end, confirmed once chosen in `generate`), memory budget in MiB (0: none).
+    syntax constraint's end, confirmed once chosen in `generate`).
 - `NativeDecoder.prefill`: `dec_prefill` takes every position as a row, `prefill_rows` rows a launch, a prompt's
   positions in order; `save` reads the K and V the launched prefill wrote.
 - `NativeDecoder.confirm`: `chosen` are the syntax-constrained slots, their tokens in `self.tokens`; eager (nucleus)
@@ -783,7 +755,7 @@ Per module and symbol; what §1–§9 state is not repeated.
   block of this grid has started.
 - `epilogue`: STORE/RESID/RELU2 write the output; ARGMAX: largest score, lowest row among exact ties (`choice_key`), the
   fp32 logit, or with `CHOICE` over a masked slot's allowed rows (at every temperature) and at T > 0 the score z/T +
-  gumbel, z the capped logit (c·tanh(s/c) when a cap is set); nucleus-sampled slots' logits go to `k_nucleus`.
+  gumbel, z the capped logit c·tanh(s/c); nucleus-sampled slots' logits go to `k_nucleus`.
   `argmax_fold`: accumulator columns b0 + 2t + p.
 - `k_wgmma`: PTX ISA "Asynchronous Warpgroup Level Matrix Multiply-Accumulate"; shared tiles aligned to 1,024 bytes
   (a 128-byte swizzle atom's 8 rows: PTX ISA "Shared Memory Matrix Layout"); TMA is `cp.async.bulk.tensor`, one
@@ -817,11 +789,10 @@ Per module and symbol; what §1–§9 state is not repeated.
 - `dec_create` ABI (`decoder.py` `NativeDecoder.__init__`): `cfg` = L, C, MLP width F (fc [F][C], proj [C][F]), vocab
   (lm_head's rows), max_len (a slot's cache positions, at most the context), store (the prompt store's positions
   requested: at most the device memory left after the slots and graphs), lazy (the row whose choice the host confirms
-  after a step, `Choice::lazy`), budget (MiB the decoder takes at most: slots, prefill rows, graphs and prompt store;
-  0 all free memory). `ptrs`: `GLOBAL_PTRS` = 4 (wte fp32, cos, sin: the fp32 rotary table [context][HALF] of every
-  layer, lm_head), then `LAYER_PTRS` = 8 per layer (qkv, o, fc, proj, value-embedding table, gate (0 if none), q norm
-  weight, k norm weight). `scal`: per layer resid lambda, x0 lambda (fp32), then the output-logit cap
-  (`ModelConfig.final_logit_softcapping`, 0 none). `window`: per layer, the keys before each query that it attends
+  after a step, `Choice::lazy`). `ptrs`: `GLOBAL_PTRS` = 4 (wte fp32, cos, sin: the fp32 rotary table [context][HALF]
+  of every layer, lm_head), then `LAYER_PTRS` = 8 per layer (qkv, o, fc, proj, value-embedding table, gate (0 if
+  none), q norm weight, k norm weight). `scal`: per layer resid lambda, x0 lambda (fp32), then the output-logit cap
+  (`ModelConfig.final_logit_softcapping`). `window`: per layer, the keys before each query that it attends
   (FlashAttention's `window_size` left).
 - Graph pairs (`dec_create`): the narrow set exists because the blocks of inactive slots exit at once, but a mostly
   idle batch of MAX_BATCH slots still pays their launch. The prompt store's 2 MiB step is the device allocation
@@ -927,7 +898,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 Repositories and other sources, at the commit or file cited: `evalplus/evalplus` (`26d6d00`), `nuprl/MultiPL-E`
 (`3025a53`; dataset `3a9e8d2`), `openai/human-eval-infilling` (`88062ff`), `zai-org/humaneval-x` (`62c7862`),
 `amazon-science/cceval` (`40c68d2`), `bigcode-project/bigcode-evaluation-harness` (`santacoder_fim.py`),
-`cimeister/tokenizer-intrinsic-evals` (`7d03a61`), `karpathy/nanochat` (`evaluate_bpb`, `--eval-tokens`),
+`karpathy/nanochat` (`evaluate_bpb`, `--eval-tokens`),
 `python/cpython` 3.12.3 (`Parser/tokenizer.c`, `Grammar/python.gram`), `guidance-ai/llguidance` (issue #107),
 `vllm-project/vllm` (`benchmarks/serve.py`, Transformers backend), `huggingface/transformers` (`modeling_qwen3.py`,
 `TikTokenConverter`). Token healing: "The Art of Prompt Design: Prompt Boundaries and Token Healing" (Guidance, 2023).

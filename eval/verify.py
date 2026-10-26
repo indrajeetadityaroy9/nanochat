@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import tokenize
+import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -63,15 +64,32 @@ print("EXAMPLES_DONE")
 """
 
 
+def compile_error(program: str) -> list[str]:
+    """syntax_constraint.syntax_error, then the compiler's own errors on a parsed program ("line:col: SyntaxError:
+    message", or the exception's type and message): 'return' outside function, duplicate argument and the like, which
+    ast.parse (the syntax constraint's end) accepts and every run of the program raises."""
+    found = syntax_error(program)
+    if found:
+        return found
+    with warnings.catch_warnings(action="ignore"):
+        try:
+            compile(program, "program.py", "exec")
+        except SyntaxError as e:
+            return [f"{e.lineno}:{e.offset}: SyntaxError: {e.msg}"]
+        except (MemoryError, RecursionError) as e:
+            return [f"{type(e).__name__}: {e}"]
+    return []
+
+
 def python_diagnostics(programs: list[str]) -> list[list[str]]:
-    """Each program's syntax error or, if it parses, basedpyright's PYRIGHT_RULES errors ("line:col: rule: message").
+    """Each program's compile error or, if it compiles, basedpyright's PYRIGHT_RULES errors ("line:col: rule: message").
     One basedpyright process checks all, each program in a directory of its own (no program imports another). A
     program whose check raises inside basedpyright (e.g. RangeError on deep inference chains) fails with that error:
     basedpyright then aborts the whole run without a report, so the rest are checked again without it."""
     out, paths = [], {}
     with tempfile.TemporaryDirectory() as tmp:
         for i, program in enumerate(programs):
-            out.append(syntax_error(program))
+            out.append(compile_error(program))
             if out[-1]:
                 continue
             paths[i] = Path(tmp, str(i), "program.py")

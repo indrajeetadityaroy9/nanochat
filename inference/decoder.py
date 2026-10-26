@@ -146,12 +146,11 @@ class Slot:
 
 
 class NativeDecoder:
-    """Decoding by decode.cu of up to `batch` slots; a request's tokens depend on neither the batch nor the store.
-    max_length: a slot's cache positions, at most max_position_embeddings; prompt_store: positions requested for the
-    prompt store; memory_fraction: the decoder's device-memory cap as a fraction of the total (None: all free)."""
+    """Decoding by decode.cu of up to `batch` slots sized by free device memory; a request's tokens depend on neither
+    the batch nor the store. max_length: a slot's cache positions, at most max_position_embeddings; prompt_store:
+    positions requested for the prompt store."""
     @torch.no_grad()
-    def __init__(self, model: CausalLM, *, bos_token_id: int, max_length: int, prompt_store: int,
-                 memory_fraction: float | None):
+    def __init__(self, model: CausalLM, *, bos_token_id: int, max_length: int, prompt_store: int):
         lib = cuda_library("decode")
         lib.dec_create.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dec_create.restype = ctypes.c_void_p
@@ -188,15 +187,13 @@ class NativeDecoder:
                         model.value_embeds[str(i)].weight.bfloat16() if ve else None,
                         attn.ve_gate.weight if ve else None, attn.q_norm_weight, attn.k_norm_weight]
         self.weights = weights  # referenced while the decoder reads them through pointers
-        # per layer (resid, x0) in fp32 (decode.cu k_norm), then the output-logit cap (0: none)
+        # per layer (resid, x0) in fp32 (decode.cu k_norm), then the output-logit cap
         lambdas = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).flatten().cpu()
-        scal = np.append(lambdas.numpy(), np.float32(cfg.final_logit_softcapping or 0.0))
-        # config, dec_create's layout: L, C, F, vocabulary, max_length, prompt store, BOS, budget in MiB (0: none)
+        scal = np.append(lambdas.numpy(), np.float32(cfg.final_logit_softcapping))
+        # config, dec_create's layout: L, C, F, vocabulary, max_length, prompt store, BOS
         device = model.embed_tokens.weight.device
-        budget = 0 if memory_fraction is None else max(1, int(
-            memory_fraction * torch.cuda.get_device_properties(device).total_memory) >> 20)
         config = np.array([L, C, model.layers[0].mlp.up_proj.weight.size(0), VOCAB_SIZE, max_length, prompt_store,
-                           bos_token_id, budget], dtype=np.int32)
+                           bos_token_id], dtype=np.int32)
         # the prompt store: {prompt: its pages}, the free pages, the runs started
         self.stored: dict[tuple[int, ...], Stored] = {}
         self.runs = 0

@@ -59,13 +59,6 @@ class PersistentVarlenScheduler(SingleTileVarlenScheduler):
         self._tile_idx += cute.arch.grid_dim()[0]
         return self.get_current_work()
 
-    def __new_from_mlir_values__(self, values):
-        objs = []
-        for obj, n in zip((self.params, self._tile_idx, self._split_idx), self._values_pos, strict=True):
-            objs.append(cutlass.new_from_mlir_values(obj, values[:n]))
-            values = values[n:]
-        return PersistentVarlenScheduler(*objs, loc=self._loc)
-
 
 class PersistentForwardSm90(flash_fwd_sm90.FlashAttentionForwardSm90):
     """FlashAttentionForwardSm90 with the output tile in its own shared buffer after sQ (FA4 stages it in sQ, which
@@ -178,9 +171,6 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
         if const_expr(self.is_local and mask.window_size_left is not None):
             need = need or (n0 < m0 + self.tile_m - 1 + mask.seqlen_k - mask.seqlen_q - mask.window_size_left)
         return need
-
-    def _check_type(self, *types):
-        pass  # mdQaccum is dq (bf16) viewed as fp32
 
     def _sdQ(self, sdQaccum):
         return cute.make_tensor(cute.recast_ptr(sdQaccum.iterator, dtype=self.dtype),
@@ -296,14 +286,12 @@ def bwd_bf16dq(q: Tensor, k: Tensor, v: Tensor, dout: Tensor, lse: Tensor, rows:
     dpsum = torch.empty(H, padded, dtype=torch.float32, device=q.device)
     lse_log2 = torch.empty(H, padded, dtype=torch.float32, device=q.device)
     dq, dk = torch.zeros_like(q), torch.empty_like(k)
-    dtype = fa4.torch2cute_dtype_map[q.dtype]
     fa4_rows(rows, lse, cu, m, dpsum, lse_log2)
     dq_as_f32 = dq.view(torch.float32).view(total, H * D // 2)
-    key = H
     softmax_scale = 1.0 / math.sqrt(D)
-    if key not in BF16DQ_CACHE:
+    if H not in BF16DQ_CACHE:
         obj = BackwardSm90Bf16dQ(
-            dtype, D, D, 1, causal, is_local=local, deterministic=False, tile_m=m, tile_n=cfg.n_block_size,
+            cutlass.BFloat16, D, D, 1, causal, is_local=local, deterministic=False, tile_m=m, tile_n=cfg.n_block_size,
             Q_stage=cfg.num_stages_Q, dO_stage=cfg.num_stages_dO, PdS_stage=cfg.num_stages_PdS,
             SdP_swapAB=cfg.SdP_swapAB, dKV_swapAB=cfg.dKV_swapAB, dQ_swapAB=cfg.dQ_swapAB,
             AtomLayoutMSdP=cfg.AtomLayoutMSdP, AtomLayoutNdKV=cfg.AtomLayoutNdKV, AtomLayoutMdQ=cfg.AtomLayoutMdQ,
@@ -311,10 +299,10 @@ def bwd_bf16dq(q: Tensor, k: Tensor, v: Tensor, dout: Tensor, lse: Tensor, rows:
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         ts = [to_cute_tensor(t) for t in (q, k, v, dout, lse_log2, dpsum, dq_as_f32, dk, dv)]
         cu_t = to_cute_tensor(cu, assumed_align=4)
-        BF16DQ_CACHE[key] = cute.compile(obj, *ts, softmax_scale, cu_t, cu_t, None, None, wl, wr, None, None, None,
-                                         AuxData(None, None), None, None, stream, options="--enable-tvm-ffi")
-    BF16DQ_CACHE[key](q, k, v, dout, lse_log2, dpsum, dq_as_f32, dk, dv, softmax_scale, cu, cu, None, None, wl, wr,
-                      None, None, None, AuxData(None, None), None, None)
+        BF16DQ_CACHE[H] = cute.compile(obj, *ts, softmax_scale, cu_t, cu_t, None, None, wl, wr, None, None, None,
+                                       AuxData(None, None), None, None, stream, options="--enable-tvm-ffi")
+    BF16DQ_CACHE[H](q, k, v, dout, lse_log2, dpsum, dq_as_f32, dk, dv, softmax_scale, cu, cu, None, None, wl, wr,
+                    None, None, None, AuxData(None, None), None, None)
     return dq, dk
 
 

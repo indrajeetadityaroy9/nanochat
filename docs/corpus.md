@@ -60,8 +60,7 @@ metadata, downloaded whole; each row group's blobs are read from Software Herita
 gunzipped and decoded with their `src_encoding` (`prepare.blob_texts`); a blob the bucket lacks or that does not decode
 has no text. `FETCHES` = 4 files at once (Stack-Edu one at a time, `prepare.prepare`): the throughput peak reading one
 column of 8 UltraData-Code L3 files, 8.5, 11.5, 12.4 and 10.5 MB/s at 1, 2, 4 and 8 files in flight (`c1a7d7b`).
-Software Heritage requests retry from 1 s to 1 min for up to 15 min (`prepare.swh_store`): under obstore's default
-(10 retries from 100 ms) the Stack-Edu fetch failed when the bucket reset one request 10 times within 8.2 s.
+A request that fails under obstore's default retries fails its file, and `prepare` is run again (fetched files kept).
 
 **Extent** (`prepare.extent`): a source of a group read in part (`mixture.IN_PART`: synthetic code, ClimbMix,
 UltraData-Math L3) fetches the fewest Hub files, in the SHA-1 order of their paths, whose text bytes (from Parquet
@@ -345,7 +344,7 @@ more file-stage step overdraws four synthetic sources by 1–7 rows; the 32K sta
 
 | Stage | Context | Steps | Tokens | Rows | Packed train rows |
 |---|---|---|---|---|---|
-| `FILE_LEVEL_STAGE` | 8,192 | 0–65,785 | 97,003,929,600 | 11,841,300 | 19,349,512 |
+| `FILE_LEVEL_STAGE` | 8,192 | 0–65,785 | 97,003,929,600 | 11,841,300 | 19,349,521 |
 | `REPO_LEVEL_STAGE` | 32,768 | 65,785–69,580 (3,795) | 5,595,955,200 | 170,775 | 201,494 |
 
 Weights: `mixture.weights` of each stage at its rows on sa-bpe's packs; tokens: weight × the stage's tokens (computed
@@ -381,7 +380,14 @@ on master; no supply corpus overdraws).
   distribution" against "catastrophic forgetting" (arXiv 2411.04905 §2.2).
 - **"supply"** sources are read whole once: a fixed share of these small sources would repeat them, and repeating "0.1%
   of the data 100 times" degrades an 800M model to a 400M one (arXiv 2205.10487 Abstract). A supply group's share is
-  its packed rows over the stage's rows; "rest" is `CODE_SHARE` less the stage's other code groups (`Stage.shares`).
+  its packed rows over the run's rows in the stage; "rest" is `CODE_SHARE` less the stage's other code groups
+  (`Stage.shares`). A run too short to read its supply whole (a supply share that would leave "rest" negative) takes
+  the base run's supply shares instead, the packed rows over the stage's sizing rows (`Stage.rows`), in `weights`:
+  the base run and the d16 ablation sets (whose supply is packed at the run's draw, `docs/experiments.md` §2) read
+  supply whole; a short run on the corpus's packs trains on the base run's mixture. Before this rule such runs got
+  negative repository weights and drew no repository rows in the 32K stage (d24 and d8 at 5 tokens per parameter,
+  d8 at 200 and 2.7: Codeforces-CoTs ≈ 88% of the stage); the `peak_lr` records predate the supply groups (`d068c80`,
+  `6e11acf`) and are unaffected.
 - **Within a group** sources weigh by their packed rows. `mixture.weights` replays a stage's shares through
   `mixture_rows`; a supply corpus that draws more rows than it holds weighs that many rows less, until none does.
 - **Row order** (`mixture.mixture_rows`): run row n goes to the corpus whose interval of the cumulative weights holds
@@ -416,10 +422,9 @@ masking: IntraDoc lowers perplexity over UniChunk, arXiv 2402.13991 §3.2). A sh
 (rayon), longest first.
 
 **Worker stack** (`crate/lib.rs` `nanochat_crate`): rayon's global pool takes the process's `RLIMIT_STACK` soft limit
-(64 MiB under `scripts/container.sh`'s `--ulimit stack=67108864:-1`; 64 MiB when unlimited), not std's 2 MiB: a worker
-waiting in a join runs stolen jobs on its own stack, so nesting deepens with the pack calls in flight, and at 2 MiB
-`pack` overflowed a worker's stack (core dump; fixed in `0de5dfb`, the limit taken from the process since `03d131e`).
-glibc's default thread stack under an unlimited limit is 2 MiB in the image (`4720b9b`).
+(64 MiB under `scripts/container.sh`'s `--ulimit stack=67108864:-1`), not std's 2 MiB: a worker waiting in a join runs
+stolen jobs on its own stack, so nesting deepens with the pack calls in flight, and at 2 MiB `pack` overflowed a
+worker's stack (core dump; fixed in `0de5dfb`, the limit taken from the process since `03d131e`).
 
 **Rows** (`best_fit_decreasing`): pieces longest first, each into the row with the fewest free slots that holds it,
 else a new row (Best-Fit-Decreasing, arXiv 2404.10830 §3.1), so no piece is truncated. Within a row the pieces whose
@@ -428,8 +433,9 @@ one curated shard.
 
 **FIM** (`pack.FIM_RATE`, `RANDOM_SPAN_RATE`, `SINGLE_NODE_RATE`, `LINE_START_RATE`, `SPM_RATE`), in the train splits
 of repository code only (`layout.fim_packed`: the six repository sources and the repositories corpora). On sa-bpe's
-packs FIM examples hold 50.0% of each such corpus's piece tokens, 29.6% of the 8K stage's tokens and 40.8% of the 32K
-stage's (pieces' tokens at the stage weights, computed on master); StarCoder2's two 50% draws (repository, then chunk)
+packs FIM examples hold 50.0–50.4% of each such corpus's piece tokens, 29.7% of the 8K stage's tokens and 40.9% of the
+32K stage's (each corpus's FIM share of its piece tokens weighted by the stage weights, computed on the packs of
+`81fb386`); StarCoder2's two 50% draws (repository, then chunk)
 give ≈25% of its source files (arXiv 2402.19173 §5.1) [arithmetic].
 
 | Parameter | Value | Evidence |
@@ -461,7 +467,7 @@ against 0.367; 0.023 against 0.353 on the 982 prompts the 512-key window covers 
 after a line break, and the model opened a new definition or file after the end sentinel. AST-FIM's Limitations:
 "Better matching training and testing distributions still result in stronger performance" (arXiv 2506.00204 §7).
 With `LINE_START_RATE` = 0.5 (`dc76110`: 15.6% of PSM examples on train shards have the line-level layout; on
-sa-bpe's packs 15.1–15.7% for Python and 8.6–12.6% for C++, first 100k FIM examples per corpus, computed on master),
+the packs before `81fb386` 15.1–15.7% for Python and 8.6–12.6% for C++, first 100k FIM examples per corpus),
 the d16 retrained on the repacked data (`1671b56`) infills single lines in PSM at line exact match 0.175 (pass@1
 0.037 → 0.161; multi-line 0.008 → 0.045), SPM 0.367 → 0.356, code bpb unchanged (8K 0.4392; 32K 0.4210 → 0.4208).
 
@@ -559,8 +565,9 @@ both languages drop one and reject a second, so all are dropped. Standardizers: 
 web text). `prepare` removes the source's standardized and checked files before rebuilding.
 
 **`corpus/curate.py`.**
-- `parses` treats `ValueError` (a null byte), `MemoryError` and `RecursionError` as failures; `two_to_three` returns
-  None on any fissix exception (its grammar's parse and tokenize errors and more).
+- `parses` treats `ValueError` (CPython 3.12.3's for `f"{x:{y=}}"`, python/cpython#121130; a null byte is a
+  `SyntaxError` since 3.12), `MemoryError` and `RecursionError` as failures; `two_to_three` returns None on any fissix
+  exception (its grammar's parse and tokenize errors and more).
 - `repaired`: steps 1–2 enter only where they change the text, 2to3 always; a file 2to3 alone repairs keeps its tabs
   and placeholders.
 - `check`: the remaining files' row groups are one stream (no file's slowest group idles the pool), as many in flight

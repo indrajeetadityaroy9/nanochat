@@ -194,6 +194,5 @@ class NanochatForCausalLM(NanochatPreTrainedModel, GenerationMixin):
         # the evaluation's head (model/ops/cross_entropy.py lm_losses): fp32 GEMM output, the cap in fp32
         logits = torch.mm(hidden.flatten(0, -2), self.lm_head.weight.t(), out_dtype=torch.float32)
         logits = logits.view(*hidden.shape[:-1], -1)
-        if (c := self.config.final_logit_softcapping) is not None:
-            logits = c * torch.tanh(logits / c)
-        return CausalLMOutputWithPast(logits=logits, past_key_values=out.past_key_values)
+        c = self.config.final_logit_softcapping
+        return CausalLMOutputWithPast(logits=c * torch.tanh(logits / c), past_key_values=out.past_key_values)

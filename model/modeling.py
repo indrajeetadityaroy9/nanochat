@@ -17,6 +17,8 @@ from model.ops.linear import EPS, qkv_proj, relu2_mlp
 
 # Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 Table 9)
 ASPECT_RATIO = 960 // 32
+# Output-logit cap c, as karpathy/nanochat 92d63d4 nanochat/gpt.py:511-515
+FINAL_LOGIT_SOFTCAPPING = 15.0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -24,8 +26,8 @@ class ModelConfig:
     max_position_embeddings: int
     num_hidden_layers: int
     hidden_size: int
-    # Logit cap c in every loss and sample (cross_entropy.py, decode.cu); None: uncapped
-    final_logit_softcapping: float | None
+    # Logit cap c in every loss and sample (cross_entropy.py, decode.cu)
+    final_logit_softcapping: float
 
 
 def has_ve(layer_idx: int, *, num_hidden_layers: int) -> bool:
@@ -203,12 +205,12 @@ class CausalLM(nn.Module):
                          self.config.final_logit_softcapping)
 
 
-def meta_model(*, num_hidden_layers: int, final_logit_softcapping: float | None) -> CausalLM:
+def meta_model(*, num_hidden_layers: int) -> CausalLM:
     """The model on the meta device at the file-level stage's context, by nanochat's shape rule (92d63d4
     scripts/base_train.py:51-52, 131-134): width ASPECT_RATIO x num_hidden_layers, rounded up to whole heads."""
     config = ModelConfig(max_position_embeddings=FILE_LEVEL_STAGE.seq_len, num_hidden_layers=num_hidden_layers,
                          hidden_size=-(-num_hidden_layers * ASPECT_RATIO // HEAD_DIM) * HEAD_DIM,
-                         final_logit_softcapping=final_logit_softcapping)
+                         final_logit_softcapping=FINAL_LOGIT_SOFTCAPPING)
     with torch.device("meta"):
         return CausalLM(config)
 

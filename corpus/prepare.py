@@ -15,7 +15,6 @@ import resource
 import shutil
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from datetime import timedelta
 from pathlib import Path
 
 import obstore
@@ -81,13 +80,9 @@ def extent(source: str) -> list[str]:
 
 @functools.cache
 def swh_store() -> S3Store:
-    """This process's client of Software Heritage's bucket, with the file-descriptor limit raised to its hard limit;
-    retries back off from 1 s to 1 min for up to 15 min."""
+    """This process's client of Software Heritage's bucket, with the file-descriptor limit raised to its hard limit."""
     resource.setrlimit(resource.RLIMIT_NOFILE, (resource.getrlimit(resource.RLIMIT_NOFILE)[1],) * 2)
-    return S3Store("softwareheritage", region="us-east-1", skip_signature=True,
-                   retry_config={"max_retries": 15, "retry_timeout": timedelta(minutes=15),
-                                 "backoff": {"init_backoff": timedelta(seconds=1), "max_backoff": timedelta(minutes=1),
-                                             "base": 2}})
+    return S3Store("softwareheritage", region="us-east-1", skip_signature=True)
 
 
 def blob_texts(task: tuple[Path, int]) -> pa.Table:

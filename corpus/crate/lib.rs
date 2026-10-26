@@ -57,18 +57,15 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lang {
     }
 }
 
-/// The workers' stack when RLIMIT_STACK is unlimited (scripts/container.sh's --ulimit stack=67108864).
-const UNLIMITED_STACK: usize = 64 << 20;
-
-/// The module; rayon's global pool is built first with the RLIMIT_STACK soft limit as its workers' stack, not std's
-/// 2 MiB: workers run stolen jobs on their own stack while waiting in a join, and nesting grows with pack calls.
+/// The module; rayon's global pool is built first with the RLIMIT_STACK soft limit as its workers' stack (64 MiB under
+/// scripts/container.sh's --ulimit stack=67108864:-1), not std's 2 MiB: workers run stolen jobs on their own stack
+/// while waiting in a join, and nesting grows with pack calls.
 #[pymodule]
 fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut stack = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: getrlimit writes the limit into the struct it is given
     unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut stack) };
-    let size = if stack.rlim_cur == libc::RLIM_INFINITY { UNLIMITED_STACK } else { stack.rlim_cur as usize };
-    rayon::ThreadPoolBuilder::new().stack_size(size).build_global()
+    rayon::ThreadPoolBuilder::new().stack_size(stack.rlim_cur as usize).build_global()
         .map_err(|e| PyValueError::new_err(format!("rayon's global pool: {e}")))?;
     m.add_function(wrap_pyfunction!(train::train, m)?)?;
     m.add_function(wrap_pyfunction!(repository::topological_sort, m)?)?;

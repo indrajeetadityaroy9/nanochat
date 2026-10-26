@@ -63,7 +63,7 @@ def parses(text: str) -> bool:
     try:
         ast.parse(text)
         return True
-    except (SyntaxError, ValueError, MemoryError, RecursionError):  # ValueError: a null byte
+    except (SyntaxError, ValueError, MemoryError, RecursionError):  # ValueError: f"{x:{y=}}" (python/cpython#121130)
         return False
 
 

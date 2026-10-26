@@ -115,43 +115,27 @@ def completion(tokenizer: Tokenizer, task: Task, ids: list[int], *, special: Lit
 
 
 def decoder(model: CausalLM, tokenizer: Tokenizer, *, max_length: int, prompt_store: int) -> NativeDecoder:
-    """A NativeDecoder for requests of at most max_length positions, keeping up to prompt_store prompt positions.
-    Sized by free device memory after empty_cache; NANOCHAT_DECODER_MEMORY_FRACTION caps the share it takes."""
+    """A NativeDecoder for requests of at most max_length positions, keeping up to prompt_store prompt positions,
+    sized by free device memory after empty_cache."""
     torch.cuda.empty_cache()
-    fraction = os.environ.get("NANOCHAT_DECODER_MEMORY_FRACTION")
-    return NativeDecoder(model, bos_token_id=tokenizer.bos_token_id, max_length=max_length, prompt_store=prompt_store,
-                         memory_fraction=None if fraction is None else float(fraction))
+    return NativeDecoder(model, bos_token_id=tokenizer.bos_token_id, max_length=max_length, prompt_store=prompt_store)
 
 
 def generate_groups(generator: NativeDecoder, groups: list[list[Request]],
-                    done: Callable[[int, list[list[int]], dict | None], None]) -> None:
-    """One generator.generate call over every group's independent requests; done(g, ids, latency) once group g ends.
-    Requests with max_new_tokens < 1 are not run and generate nothing; latency is None if none ran."""
+                    done: Callable[[int, list[list[int]], dict], None]) -> None:
+    """One generator.generate call over every group's independent requests; done(g, ids, latency) once group g ends."""
     requests = [r for group in groups for r in group]
     bounds = [0, *itertools.accumulate(map(len, groups))]
     owner = [g for g, group in enumerate(groups) for _ in group]
-    run = [j for j, r in enumerate(requests) if r.max_new_tokens >= 1]
-    out, left, timings = [[] for _ in requests], [0] * len(groups), {}
-    for j in run:
-        left[owner[j]] += 1
-
-    def finish(g: int) -> None:
-        timed = [j for j in range(bounds[g], bounds[g + 1]) if j in timings]
-        if not timed:
-            done(g, out[bounds[g]:bounds[g + 1]], None)
-            return
-        starts, firsts, ends, n = zip(*[(*timings[j], len(out[j])) for j in timed], strict=True)
-        done(g, out[bounds[g]:bounds[g + 1]], latency(starts, firsts, ends, n, duration=max(ends) - min(starts)))
-
-    for g in range(len(groups)):
-        if not left[g]:
-            finish(g)
-    for k, ids in generator.generate([requests[j] for j in run]):
-        j = run[k]
-        out[j], timings[j], g = ids, generator.timings[k], owner[j]
+    out, left = [[] for _ in requests], list(map(len, groups))
+    for j, ids in generator.generate(requests):
+        out[j], g = ids, owner[j]
         left[g] -= 1
         if not left[g]:
-            finish(g)
+            span = range(bounds[g], bounds[g + 1])
+            starts, firsts, ends = zip(*(generator.timings[k] for k in span), strict=True)
+            done(g, out[bounds[g]:bounds[g + 1]],
+                 latency(starts, firsts, ends, [len(out[k]) for k in span], duration=max(ends) - min(starts)))
 
 
 def pass_scores(passed: list[list[bool]]) -> dict[str, dict]:
@@ -175,11 +159,8 @@ def filtered_completions(generator: NativeDecoder, tokenizer: Tokenizer, items: 
                          language: Literal["python", "cpp"]) -> tuple[list[str], dict]:
     """filtered of left-to-right prompts, healed (one more token of budget; Python under the syntax constraint)."""
     dropped = [heal_tokens(tokenizer, p)[2] for p in prompts]
-    # A task with budget < 1 (a MultiPL-E prompt of at least its 1,024-token limit) is not searched: empty completion
-    run = [i for i, b in enumerate(budgets) if b >= 1]
 
-    def request(k: int) -> Request:
-        i = run[k]
+    def request(i: int) -> Request:
         input_ids, constraint, _ = heal_tokens(tokenizer, prompts[i])  # a fresh constraint per candidate
         if language == "python":
             constraint = SyntaxConstraint(tokenizer, tokenizer.enc.decode_bytes(input_ids[1:]), suffix=b"",
@@ -187,14 +168,9 @@ def filtered_completions(generator: NativeDecoder, tokenizer: Tokenizer, items: 
         return Request(input_ids=input_ids, max_new_tokens=budgets[i] + 1, constraint=constraint,
                        stopping_criteria=KeywordsStoppingCriteria(tokenizer, items[i].stopwords, healed=dropped[i]))
 
-    texts, record = filtered(generator, request,
-                             lambda k, ids: completion(tokenizer, items[run[k]], ids, special=special,
-                                                       healed=dropped[run[k]]),
-                             lambda k, text: check(items[run[k]], text), language=language, count=len(run))
-    at = dict(zip(run, range(len(run)), strict=True))
-    return [texts[at[i]] if i in at else "" for i in range(len(items))], record | {
-        "attempts": [record["attempts"][at[i]] if i in at else 0 for i in range(len(items))],
-        "accepted": [record["accepted"][at[i]] if i in at else False for i in range(len(items))]}
+    return filtered(generator, request,
+                    lambda i, ids: completion(tokenizer, items[i], ids, special=special, healed=dropped[i]),
+                    lambda i, text: check(items[i], text), language=language, count=len(items))
 
 
 def filtered_middles(generator: NativeDecoder, tokenizer: Tokenizer, problems: list[dict], prompts: list[list[int]], *,
@@ -228,8 +204,9 @@ def sanitizer_init() -> None:
 
 
 def sanitizers() -> ProcessPoolExecutor:
-    """EvalPlus sanitize workers (sanitizer_init), one per CPU, from a forkserver. The caller must shut the pool down:
-    an open pool blocks a spawned process's exit."""
+    """EvalPlus sanitize workers (sanitizer_init), one per CPU, from a forkserver, which imports the caller's main
+    module: it must not evaluate at import time. The caller must shut the pool down: an open pool blocks a spawned
+    process's exit."""
     return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("forkserver"),
                                initializer=sanitizer_init)
 
@@ -374,8 +351,8 @@ def codegen_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]],
     for name in MULTIPL_E_BENCHMARKS:
         items = benchmarks[name]
         prompts = [[bos, *tokenizer.enc.encode_ordinary(t.prompt.strip())] for t in items]
-        # At most 1024 tokens of prompt and completion, BOS included (automodel.py:67); a prompt of 1024 tokens or more
-        # gets the empty completion, as automodel.py:56,114 returns
+        # At most 1024 tokens of prompt and completion, BOS included (automodel.py:67); the longest prompt is 600 tokens
+        # under the corpus tokenizer
         runs[name] = CodegenRun(items, prompts, [1024 - len(p) for p in prompts], "stop", multipl_e_check, "cpp",
                                 multipl_e)
     return runs

@@ -213,15 +213,15 @@ template <int H> static void backward(const void *dout, long long dout_stride, c
                                                      rows);
 }
 
-/* H: heads per row (C = H * HEAD_DIM); 0 when H is not compiled (2, 4, 6). v_stride: elements between v's rows. */
-extern "C" int ve_forward(const void *n, const void *v, long long v_stride, const void *idx, const void *table,
-                          const void *w, void *out, void *gate, long long rows, int H, void *stream) {
+/* H: heads per row (C = H * HEAD_DIM), the widths model/ops/linear.py CONFIGS holds (2, 4, 6). v_stride: elements
+ * between v's rows. */
+extern "C" void ve_forward(const void *n, const void *v, long long v_stride, const void *idx, const void *table,
+                           const void *w, void *out, void *gate, long long rows, int H, void *stream) {
     const cudaStream_t s = (cudaStream_t)stream;
     switch (H) {
-        case 2: forward<2>(n, v, v_stride, idx, table, w, out, gate, rows, s); return 1;
-        case 4: forward<4>(n, v, v_stride, idx, table, w, out, gate, rows, s); return 1;
-        case 6: forward<6>(n, v, v_stride, idx, table, w, out, gate, rows, s); return 1;
-        default: return 0;
+        case 2: forward<2>(n, v, v_stride, idx, table, w, out, gate, rows, s); break;
+        case 4: forward<4>(n, v, v_stride, idx, table, w, out, gate, rows, s); break;
+        case 6: forward<6>(n, v, v_stride, idx, table, w, out, gate, rows, s); break;
     }
 }
 

@@ -27,8 +27,8 @@ def sm90(tile_m: int, tile_n: int, cluster_m: int, cluster_n: int, *, swap_ab: b
                       cluster_m=cluster_m, cluster_n=cluster_n, swap_ab=swap_ab, device_capacity=9)
 
 
-# Per call, width C -> config at M = 98,304: the lowest mean of three runs of QuACK's autotuning benchmark
-# (GH200 at 700 W); other widths: QuACK's default_config.
+# Per call, width C (d8, d16, d24: ve_gate.cu's head counts 2, 4, 6) -> config at M = 98,304: the lowest mean of three
+# runs of QuACK's autotuning benchmark (GH200 at 700 W); an explicit config overrides QuACK's tuner.
 CONFIGS: dict[str, dict[int, GemmConfig]] = {
     "qkv": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(128, 192, 2, 1, swap_ab=True),
             768: sm90(128, 192, 1, 2)},
@@ -43,7 +43,7 @@ CONFIGS: dict[str, dict[int, GemmConfig]] = {
 }
 
 
-def gemm(A: Tensor, B: Tensor, cfg: GemmConfig | None, C: Tensor | None = None) -> Tensor:
+def gemm(A: Tensor, B: Tensor, cfg: GemmConfig, C: Tensor | None = None) -> Tensor:
     """A B (+ C) in A's dtype at config cfg: gemm_tuned's body (QuACK's gemm and gemm_add take no config)."""
     out = A.new_empty(A.shape[0], B.shape[1])
     gemm_tuned.fn(A, B, out, C=C, config=cfg)
@@ -55,7 +55,7 @@ def qkv_proj(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | None, gv
     """x (..., C), weight (3C, C) stacked bf16 [Wq; Wk; Wv], gq/gk/gv fp32 .grad or None -> (..., 3C) bf16, q, k, v
     the column blocks."""
     x2 = x.reshape(-1, x.shape[-1])
-    y = gemm(x2, weight.t(), CONFIGS["qkv"].get(x.shape[-1]))
+    y = gemm(x2, weight.t(), CONFIGS["qkv"][x.shape[-1]])
     return y.view(*x.shape[:-1], weight.shape[0])
 
 
@@ -68,7 +68,7 @@ def qkv_proj_fake(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | Non
 def qkv_proj_bwd(dy: Tensor, x: Tensor, weight: Tensor, gq: Tensor, gk: Tensor, gv: Tensor) -> Tensor:
     """dX like x; each block's dW accumulated into its grad."""
     dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
-    dx = gemm(dy2, weight, CONFIGS["qkv_dx"].get(x.shape[-1])).view(x.shape)
+    dx = gemm(dy2, weight, CONFIGS["qkv_dx"][x.shape[-1]]).view(x.shape)
     C = gq.shape[0]
     for i, grad in enumerate((gq, gk, gv)):
         torch.addmm(grad, dy2[:, i * C:(i + 1) * C].t(), x2, out_dtype=grad.dtype, out=grad)
@@ -95,8 +95,7 @@ qkv_proj.register_autograd(qkv_proj_grad, setup_context=qkv_proj_save)
 def residual_rms(x: Tensor, weight: Tensor, residual: Tensor) -> tuple[Tensor, Tensor]:
     """x (M, K), weight (N, K), residual (M, N) -> (h = residual + x W^T, rstd (M,) fp32 of h before rounding)."""
     N = weight.shape[0]
-    r = sq_reduce_mod(has_c=True, has_rowvec=False, has_aux=False)(
-        x, weight.t(), residual, config=CONFIGS["o"].get(N), tuned=False)
+    r = sq_reduce_mod(has_c=True, has_rowvec=False, has_aux=False)(x, weight.t(), residual, config=CONFIGS["o"][N])
     # gemm_rms's epilogue and finalize (quack/gemm_interface.py _gemm_rms_call, _rms_finalize)
     rstd = rms_final_reduce(r["mColVecReduce"], scale=1 / N, eps=EPS)
     return r["D"], rstd
@@ -142,8 +141,8 @@ def relu2_mlp(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tenso
     postact (M, 4C) saved for the backward); MLP of karpathy/nanochat 92d63d4 gpt.py:131-141."""
     h2, C = h.reshape(-1, h.shape[-1]), h.shape[-1]
     preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True,
-                                    config=CONFIGS["up"].get(C), tuned=False)
-    y = gemm(postact, w_down.t(), CONFIGS["down"].get(C), C=h2)
+                                    config=CONFIGS["up"][C])
+    y = gemm(postact, w_down.t(), CONFIGS["down"][C], C=h2)
     return y.view(h.shape), preact, postact
 
 
@@ -159,12 +158,11 @@ def relu2_mlp_bwd(dy: Tensor, h: Tensor, rstd: Tensor, preact: Tensor, postact: 
                   g_up: Tensor, g_down: Tensor) -> Tensor:
     """dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h, dP = rstd dpreact; dW accumulated into g_up, g_down."""
     dy2, h2, C = dy.reshape(-1, dy.shape[-1]), h.reshape(-1, h.shape[-1]), h.shape[-1]
-    r = relu2_dact_rstd(dy2, w_down, preact, rstd=rstd, dynamic_scheduler=True, config=CONFIGS["down_dx"].get(C),
-                        tuned=False)
+    r = relu2_dact_rstd(dy2, w_down, preact, rstd=rstd, dynamic_scheduler=True, config=CONFIGS["down_dx"][C])
     dp = r["D"]
     torch.addmm(g_down, dy2.t(), postact, out_dtype=g_down.dtype, out=g_down)
     corr = rstd.square().mul_(r["dsum"]).mul_(-1 / C)
-    dh = norm_bwd_apply(dp, w_up, dy2, h=h2, corr=corr, config=CONFIGS["up_dx"].get(C), tuned=False)["D"].view(h.shape)
+    dh = norm_bwd_apply(dp, w_up, dy2, h=h2, corr=corr, config=CONFIGS["up_dx"][C])["D"].view(h.shape)
     torch.addmm(g_up, dp.t(), h2, out_dtype=g_up.dtype, out=g_up)
     return dh
 

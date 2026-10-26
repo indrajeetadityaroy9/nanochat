@@ -127,11 +127,11 @@ opposite directions, neither significantly (arXiv 2503.13423 Table 1).
 | line-break entries | entries holding a line break; fusing punctuation with one (`[^\s\p{L}\p{N}][\r\n]`); ending in a line break and indentation | the post's most stable MBPP measurement (Spearman ρ = −0.719 over 58 tokenizers) |
 | depth invariance | of each program source's first 50,000 indented val lines, the share whose tokens are the indentation's then the statement's at depth 0 | the hybrid's clause (2) |
 | merged reads | merged tokens the val documents read never, < 10, < 100 times | the tie-break (SA-BPE's coverage, arXiv 2604.14053 Table 3, graded) |
-| TokEval | `metrics.tokeval` (`docs/evaluation.md` §5) on each source's leading val documents | recorded, read by no decision: of its 14 metrics only AST alignment predicts MBPP, attributed "to the vocabulary's line-break handling" (arXiv 2608.18062 §5), measured directly above; Rényi efficiency predicts neither code bits per byte nor MBPP (Table 2) |
 
 **Intrinsic results** (`results/tokenizer_split_merge-intrinsic.json`, `ebd8058`). Every arm passed every validity
-check. The record predates the current `intrinsic` step: it holds no TokEval, its fidelity check covered each source's
-first 200 val documents (the code: the first row group), and its `seconds` keys are `compile`, `measures`, `all`.
+check. The record predates the current `intrinsic` step: it holds no TokEval measures (arXiv 2608.18062; the current
+step computes none either), its fidelity check covered each source's first 200 val documents (the code: the first row
+group), and its `seconds` keys are `compile`, `measures`, `all`.
 
 | Measure | sa-bpe | sa-bpe-fused | hybrid | bpe |
 |---|---|---|---|---|
@@ -450,37 +450,26 @@ the current segmentation, a pair of one unit scoring 0; ln as in pchizhov/sa-bpe
   every character in some chunk (tiktoken drops unmatched text); without lookahead fancy-regex does not backtrack on
   long whitespace runs.
 - **Constants.** `NUM_HIDDEN_LAYERS` = 16: the d16 run the set is sized for. `MARGIN` = 1.5 sits above whole-shard
-  rounding of the code shards and the arms' spread in compression. `PROGRAMS` feeds depth invariance and
-  `tokeval_group`. `INDENTED`: an indented line is its leading spaces and tabs, then its statement; `INDENTED_LINES`
-  are the first such lines of each program source's val split. `TOKEVAL_LANGUAGES`: tree-sitter's names.
+  rounding of the code shards and the arms' spread in compression. `PROGRAMS` feeds depth invariance. `INDENTED`: an
+  indented line is its leading spaces and tabs, then its statement; `INDENTED_LINES` are the first such lines of each
+  program source's val split.
 - **`vocabularies`**: all arms trained at once in threads on one draw of the sample (each merge an argmax with fixed
   tie-breaks, so arms are independent); writes `ABLATION/<arm>/{tokenizer.tiktoken, tokenizer.pattern, merges.json}`.
   Record: `sample` (documents, bytes, units, seconds, per source: target bytes, fraction of rows taken, documents,
   bytes and units taken), `arms` (pattern, score, merges, seconds, data_key), `seconds`, `provenance`.
 - **`provenance`**: commit, UTC time, host, machine, cpus, memory_gb, Python and the versions of tiktoken, tokenizers,
-  numpy, scipy, pyarrow, regex, tokenizer-intrinsic-evals and tree-sitter-language-pack.
+  numpy, scipy, pyarrow and regex.
 - **`val_split`/`describe`**: per-token counts and per-document bytes of an arm's tokenized val split; `describe`
   writes `sources` (bytes, tokens, bytes_per_token), `file_stage_bytes_per_token` (all and per group: the weighted
   harmonic mean over `byte_shares`), `train_tokens_over_draw` per group read in part (`mixture.PART`, `IN_PART`;
   `prepare.extent`, `mixture.SPREAD`), `line_break_entries` (line_break, punctuation_line_break,
   line_break_indentation: a line break then indentation ending the entry, the companion post's MinGram `cb`) and
   `merged_reads`. Validity (`train_tokenizer.fidelity`) runs on the first row group of each source's val split.
-- **TokEval sample** (`tokeval_documents`, `tokeval_group`, `tokeval`): each source's leading val documents (the
-  tokenized ones, `corpus/sources.py` `curated_documents`: a repository sample's files concatenated) until their UTF-8
-  bytes reach `TOKEVAL_BYTES` = 2,000,000, the crossing document included; grouped in `TOKEVAL_GROUPS` order (python,
-  cpp, text, math, mixed); `tokeval_group` tests in turn: a program source's language, math (`mixture.MATH_SOURCES`),
-  text (other web documents), mixed (Codeforces reasoning traces, Kaggle notebooks). Prose languages are the groups
-  suffixed `_val` (TokEval reports code and math under the domain keys python, cpp, math); the code corpus is the
-  python and cpp groups, the math corpus the math group. Record:
-  `sample` (per source group, documents, bytes, split_exhausted) and `metrics` (global values of compression_rate,
-  fertility, renyi_efficiency, bigram/trigram_entropy, utf8_token_integrity, ast_boundary_alignment,
-  identifier_fragmentation, indentation_consistency, vocabulary_utilization, reconstruction_fidelity;
-  `ast_boundary_alignment_per_category`; `utf8_char_split`).
-- **`intrinsic`**: one process pool runs depth invariance per program source, fidelity per arm and source and TokEval
-  per arm (none reads tokenized data) beside the tokenize jobs; every val split is tokenized at once (a val split is a
-  few row groups, so one at a time would leave the pool idle) and counted as it finishes. Record: `arms` (describe's
-  keys, `depth_invariance`, `fidelity`, `tokeval`), `tokeval_sample`, `seconds` (`tokenized`: wall time to the last
-  tokenize job's end, the checks overlapping; `all`), `provenance`.
+- **`intrinsic`**: one process pool runs depth invariance per program source and fidelity per arm and source (neither
+  reads tokenized data) beside the tokenize jobs; every val split is tokenized at once (a val split is a few row
+  groups, so one at a time would leave the pool idle) and counted as it finishes. Record: `arms` (describe's keys,
+  `depth_invariance`, `fidelity`), `seconds` (`tokenized`: wall time to the last tokenize job's end, the checks
+  overlapping; `all`), `provenance`.
 - **`document_set`**: shard tokens estimated from text bytes at sa-bpe's val bytes per token; each corpus's draw is its
   share of the base model's stage (`Stage.shares` of the sources' train tokens; the repositories corpora, unestimated,
   alike within their group) at the run's tokens in the stage. Code sources take the fewest leading train shards

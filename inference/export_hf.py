@@ -1,7 +1,8 @@
-"""A checkpoint as a Hugging Face model directory (weights, config, generation config, tokenizer), which transformers
-and vLLM load by trust_remote_code through inference/modeling_nanochat.py.
+"""A checkpoint of a model trained with the corpus tokenizer (corpus.tokenizer.TOKENIZER) as a Hugging Face model
+directory (weights, config, generation config, tokenizer), which transformers and vLLM load by trust_remote_code through
+inference/modeling_nanochat.py.
 
-    python -m inference.export_hf <checkpoint.pt> <out dir> [<tokenizer dir>]   (default corpus.tokenizer.TOKENIZER)
+    python -m inference.export_hf <checkpoint.pt> <out dir>
 """
 
 import json
@@ -22,7 +23,7 @@ from model.modeling import ModelConfig, has_ve, layer_windows
 from model.ops.linear import EPS
 
 
-def export(checkpoint: Path, out: Path, tokenizer_dir: Path = TOKENIZER) -> None:
+def export(checkpoint: Path, out: Path) -> None:
     out.mkdir(exist_ok=True)
     state = torch.load(checkpoint, map_location="cpu")
     config = ModelConfig(**state["config"])
@@ -32,7 +33,7 @@ def export(checkpoint: Path, out: Path, tokenizer_dir: Path = TOKENIZER) -> None
                v.to(torch.float32 if fp32 & set(k.split(".")) else torch.bfloat16).contiguous()
                for k, v in state["model"].items()}, out / "model.safetensors", metadata={"format": "pt"})
 
-    tokenizer = get_tokenizer(tokenizer_dir)
+    tokenizer = get_tokenizer(TOKENIZER)
     windows = layer_windows(config)
     (short,) = {w for w in windows if w < T}
     shutil.copy(Path(__file__).with_name("modeling_nanochat.py"), out / "modeling_nanochat.py")
@@ -55,7 +56,7 @@ def export(checkpoint: Path, out: Path, tokenizer_dir: Path = TOKENIZER) -> None
     (out / "generation_config.json").write_text(json.dumps(
         {"bos_token_id": tokenizer.bos_token_id, "eos_token_id": tokenizer.bos_token_id}, indent=2) + "\n")
 
-    fast = TikTokenConverter(vocab_file=str(tokenizer_dir / "tokenizer.tiktoken"), pattern=tokenizer.pattern,
+    fast = TikTokenConverter(vocab_file=str(TOKENIZER / "tokenizer.tiktoken"), pattern=tokenizer.pattern,
                              extra_special_tokens=list(SPECIAL_TOKENS)).converted()
     fast.post_processor = processors.TemplateProcessing(single=f"{BOS} $A",
                                                        special_tokens=[(BOS, tokenizer.bos_token_id)])
@@ -64,4 +65,4 @@ def export(checkpoint: Path, out: Path, tokenizer_dir: Path = TOKENIZER) -> None
 
 
 if __name__ == "__main__":
-    export(Path(sys.argv[1]), Path(sys.argv[2]), *map(Path, sys.argv[3:4]))
+    export(Path(sys.argv[1]), Path(sys.argv[2]))

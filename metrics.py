@@ -1,31 +1,25 @@
 """
 Metrics, torch-free: the run log, bits per byte (arXiv 2101.00027 §3.1), parse outcomes, completion similarity
 (arXiv 2310.11248 §4), pass@k (arXiv 2107.03374 §2.1), error bars (arXiv 2411.00640), model FLOPs utilization
-(arXiv 2204.02311 App. B), decoding latency and TokEval tokenizer metrics (arXiv 2608.18062).
+(arXiv 2204.02311 App. B) and decoding latency.
 """
 import difflib
 import json
 import keyword
 import re
 import statistics
-import tempfile
 import time
 import warnings
 from collections import Counter
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
-import regex
 import statsmodels.api as sm
 from human_eval_infilling.evaluation import estimate_pass_at_k
 from numpy.typing import ArrayLike
 
 from corpus.mixture import REPO_LEVEL_STAGE
-from corpus.tokenizer import Tokenizer, get_tokenizer
 from paths import RUNS
 
 PARSE_OUTCOMES = ("parses", "indentation", "syntax")
@@ -289,119 +283,3 @@ def latency(starts: ArrayLike, firsts: ArrayLike, ends: ArrayLike, new_tokens: A
             "tpot": describe((end - first)[many] / (n[many] - 1)) if many.any() else None,
             "e2el": describe(end - start), "output_throughput": float(n.sum() / duration),
             "requests": int(n.size)}
-
-
-# TokEval: cimeister/tokenizer-intrinsic-evals 7d03a61 tokenizer_analysis (arXiv 2608.18062). Its modules and
-# transformers are imported inside the functions: this module loads in forkserver workers.
-
-
-def token_offsets(text: str, lengths: np.ndarray) -> list[tuple[int, int]]:
-    """Each token's (start, end) character range in `text` from its byte length (HuggingFace ByteLevel offsets): a
-    token holding part of a multi-byte character overlaps the next one's range at that character."""
-    data = np.frombuffer(text.encode("utf-8"), dtype=np.uint8)
-    ends = np.cumsum(lengths)
-    # the character each byte belongs to: the lead and ASCII bytes up to it, less one
-    char_of_byte = np.cumsum((data & 0xC0) != 0x80) - 1
-    return list(zip(char_of_byte[ends - lengths].tolist(), (char_of_byte[ends - 1] + 1).tolist(), strict=True))
-
-
-def tokeval_wrapper(name: str, tokenizer: Tokenizer):
-    """A corpus/tokenizer.py Tokenizer as a TokEval TokenizerWrapper (core/tokenizer_wrapper.py).
-    Vocabulary keys: GPT-2 byte-to-unicode renderings of token bytes (openai/gpt-2 src/encoder.py), as TokEval reads."""
-    from tokenizer_analysis.core.tokenizer_wrapper import TokenizerWrapper
-    from transformers.convert_slow_tokenizer import bytes_to_unicode
-
-    byte_to_unicode = bytes_to_unicode()
-
-    class Wrapper(TokenizerWrapper):
-        def __init__(self) -> None:
-            self._enc, self._mergeable, self._lengths = tokenizer.enc, tokenizer.bos_token_id, tokenizer.token_lengths
-            self._strings = ["".join(byte_to_unicode[b] for b in token)
-                             for token in tokenizer.mergeable] + list(tokenizer.special_tokens)
-            self._vocab = {s: i for i, s in enumerate(self._strings)}
-            self._split = regex.compile(tokenizer.pattern)
-
-        def get_name(self) -> str:
-            return name
-
-        def get_vocab_size(self) -> int:
-            return tokenizer.vocab_size
-
-        def get_vocab(self) -> dict[str, int]:
-            return dict(self._vocab)
-
-        def can_encode(self) -> bool:
-            return True
-
-        def encode(self, text: str) -> list[int]:
-            return self._enc.encode_ordinary(text)
-
-        def can_pretokenize(self) -> bool:
-            return True
-
-        def pretokenize(self, text: str) -> list[str]:
-            return self._split.findall(text)
-
-        def pretokenize_with_spans(self, text: str) -> list[tuple[str, tuple[int, int]]]:
-            return [(m.group(), m.span()) for m in self._split.finditer(text)]
-
-        def get_special_token_strings(self) -> set[str]:
-            return set(tokenizer.special_tokens)
-
-        @classmethod
-        def from_config(cls, name: str, config: dict):
-            """{"path": a tokenizer directory (corpus/tokenizer.py get_tokenizer)}."""
-            return tokeval_wrapper(name, get_tokenizer(Path(config["path"])))
-
-        def can_decode(self) -> bool:
-            return True
-
-        def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
-            if skip_special_tokens:
-                token_ids = [i for i in token_ids if i < self._mergeable]
-            return self._enc.decode_bytes(token_ids).decode("utf-8", errors="replace")
-
-        def encode_with_offsets(self, text: str) -> tuple[list[int], list[tuple[int, int]]]:
-            ids = self._enc.encode_ordinary(text)
-            return ids, token_offsets(text, self._lengths[np.asarray(ids, dtype=np.int64)])
-
-        def encode_batch_with_offsets(self, texts: list[str]) -> list[tuple[list[int], list[tuple[int, int]]]]:
-            batch = self._enc.encode_ordinary_batch(texts)
-            return [(ids, token_offsets(text, self._lengths[np.asarray(ids, dtype=np.int64)]))
-                    for text, ids in zip(texts, batch, strict=True)]
-
-        def convert_ids_to_tokens(self, token_ids: list[int]) -> list[str]:
-            return [self._strings[i] for i in token_ids]
-
-        def get_special_token_ids(self) -> set[int]:
-            return set(tokenizer.special_tokens.values())
-
-        def get_unk_token_id(self) -> None:
-            return None  # byte-level: every byte has a token
-
-    return Wrapper()
-
-
-def tokeval(tokenizers: dict[str, Tokenizer], texts: dict[str, list[str]], code: dict[str, list[str]],
-            math: list[str]) -> dict:
-    """TokEval's full analysis (main.py UnifiedTokenizerAnalyzer.run_analysis), published form (normalize_results).
-    texts: {language: prose}, names distinct from the code languages and "math"; code: {language: code}."""
-    from tokenizer_analysis import UnifiedTokenizerAnalyzer
-    from tokenizer_analysis.cli.run_analysis import _convert_for_json_public, normalize_results
-    from tokenizer_analysis.core.input_providers import create_input_provider
-    from tokenizer_analysis.core.input_utils import create_simple_specifications
-
-    wrappers = {name: tokeval_wrapper(name, tokenizer) for name, tokenizer in tokenizers.items()}
-    with tempfile.TemporaryDirectory() as tmp:
-        directory = Path(tmp)
-        for language, documents in code.items():
-            pq.write_table(pa.table({"content": documents}), directory / f"code_{language}.parquet")
-        (directory / "math.json").write_text(json.dumps({"texts": math}), encoding="utf-8")
-        provider = create_input_provider(create_simple_specifications(
-            {name: (wrapper, texts) for name, wrapper in wrappers.items()}))
-        analyzer = UnifiedTokenizerAnalyzer(
-            provider, plot_save_dir=str(directory / "plots"),
-            code_ast_config={language: str(directory / f"code_{language}.parquet") for language in code},
-            math_data_path=str(directory / "math.json"))
-        results = analyzer.run_analysis(save_plots=False, include_morphscore=False, verbose=False, cer_time_budget_s=0)
-    return _convert_for_json_public(normalize_results(results))

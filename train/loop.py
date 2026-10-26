@@ -18,7 +18,7 @@ from model.modeling import CausalLM, accumulated_weights, non_embedding_flops_pe
 from model.ops.cross_entropy import step_shares
 from train.checkpoint import checkpoint_path, save_checkpoint
 from train.diagnostics import Diagnostics
-from train.optim import MAX_GRAD_NORM, optimizers, tau_weight_decay, update
+from train.optim import optimizers, tau_weight_decay, update
 from train.schedule import RunPlan, lr_lambda
 from train.stages import stage_batches
 
@@ -77,12 +77,11 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
         return metrics.model_flops_per_token(matmul_params=matmul_params, hidden_size=hidden_size,
                                              windows=model.window_sizes, context=model.config.max_position_embeddings)
 
-    metrics.append(run_name, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "config": config,
+    metrics.append(run_name, {"kind": "run", "step": start_step, "plan": asdict(run), "config": config,
                               "data_key": tokenizer.data_key, "model": asdict(model.config),
                               "num_parameters": sum(p.numel() for p in model.parameters()),
                               "flops_per_token": non_embedding_flops_per_token(model),
                               "model_flops_per_token": model_flops_per_token(),
-                              "max_grad_norm": MAX_GRAD_NORM,
                               "learning_rate": {name: [g["initial_lr"] for g in opt.param_groups]
                                                 for name, opt in zip(("adamw", "muon"), opts, strict=True)},
                               "weight_decay": {name: [g["weight_decay"] for g in opt.param_groups]
@@ -111,8 +110,8 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
                        | diagnostics.record(values, layout), attempt=attempt)
 
     while True:
-        if pending is not None and (step in checkpoints or step == run.max_steps):
-            # the last step's values checked finite before a checkpoint saves its weights or the run ends
+        if pending is not None and step in checkpoints:
+            # the last step's values checked finite before a checkpoint (run.max_steps among them) saves its weights
             log(*pending)
             pending = None
         # state after `step` steps at the stage they trained in

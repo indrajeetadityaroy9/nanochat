@@ -1,5 +1,5 @@
 """Tokenizer ablation: pre-tokenizer split pattern x BPE merge score (ARMS); trains, measures and packs each arm.
-Scores: SA-BPE's F·ln R (arXiv 2604.14053 §4.1) and frequency F (Table 3); measures include TokEval (arXiv 2608.18062).
+Scores: SA-BPE's F·ln R (arXiv 2604.14053 §4.1) and frequency F (Table 3).
 
 python -m ablations.tokenizer_split_merge vocabularies|intrinsic|data|repack
 """
@@ -20,13 +20,12 @@ import pyarrow.parquet as pq
 import regex
 from scipy.stats import hmean
 
-import metrics
 from corpus import mixture
 from corpus.layout import TOKEN_DTYPE, split_path, stage_rows
 from corpus.pack import packed_shards, shard_count, write
 from corpus.parallel import SPAWN, memory
-from corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE, TEXT
-from corpus.sources import SOURCES, curated_documents, curated_shards, texts
+from corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE
+from corpus.sources import SOURCES, curated_shards, texts
 from corpus.tokenize import tokenize_repo_level_stage, tokenize_repositories, tokenize_source, train_parts
 from corpus.tokenizer import ABLATION, SPLIT_PATTERN, get_tokenizer, save
 from corpus.train_tokenizer import Score, byte_shares, fidelity, sample, shard_bytes, train, vocabulary
@@ -54,9 +53,6 @@ PROGRAMS = (REPOSITORY_FILE, EXERCISE, SYNTHETIC_FILE, FUNCTION)
 # Rate standard error <= √(1/(4n)) ≈ 0.0022
 INDENTED_LINES = 50_000
 INDENTED = regex.compile(r"([ \t]+)(\S.*)")
-TOKEVAL_BYTES = 2_000_000
-TOKEVAL_GROUPS = ("python", "cpp", "text", "math", "mixed")
-TOKEVAL_LANGUAGES = {"Python": "python", "C++": "cpp"}
 
 
 def provenance() -> dict:
@@ -67,8 +63,7 @@ def provenance() -> dict:
             "host": platform.node(), "machine": platform.machine(), "cpus": os.cpu_count(),
             "memory_gb": memory() / 2**30, "python": platform.python_version(),
             "packages": {name: importlib.metadata.version(name)
-                         for name in ("tiktoken", "tokenizers", "numpy", "scipy", "pyarrow", "regex",
-                                      "tokenizer-intrinsic-evals", "tree-sitter-language-pack")}}
+                         for name in ("tiktoken", "tokenizers", "numpy", "scipy", "pyarrow", "regex")}}
 
 
 def vocabularies() -> None:
@@ -172,50 +167,6 @@ def depth_invariance(source: str) -> dict[str, dict[str, float]]:
     return result
 
 
-def tokeval_group(source: str) -> str:
-    """A source's TokEval language: its code language, math, text or mixed (prose with fenced code)."""
-    spec = SOURCES[source]
-    if spec.category in PROGRAMS:
-        return TOKEVAL_LANGUAGES[spec.language]
-    if source in mixture.MATH_SOURCES:
-        return "math"
-    return "text" if spec.category == TEXT else "mixed"
-
-
-def tokeval_documents(source: str) -> tuple[list[str], bool]:
-    """A source's leading val documents up to TOKEVAL_BYTES, and whether the split ran out first."""
-    taken, size = [], 0
-    for path in curated_shards(source, "val"):
-        f = pq.ParquetFile(path)
-        for g in range(f.num_row_groups):
-            for doc in curated_documents(source, f.read_row_group(g)):
-                taken.append(doc)
-                size += len(doc.encode("utf-8"))
-                if size >= TOKEVAL_BYTES:
-                    return taken, False
-    return taken, True
-
-
-def tokeval(arm: str) -> dict:
-    """An arm's TokEval record: "sample" per source and "metrics" (global values, AST per category, char splits)."""
-    sample = {source: tokeval_documents(source) for source in SOURCES}
-    grouped = {group: [d for s, (docs, _) in sample.items() if tokeval_group(s) == group for d in docs]
-               for group in TOKEVAL_GROUPS}
-    results = metrics.tokeval({arm: get_tokenizer(ABLATION / arm)}, {f"{g}_val": d for g, d in grouped.items()},
-                              {language: grouped[language] for language in TOKEVAL_LANGUAGES.values()},
-                              grouped["math"])
-    measures = {name: results[name]["per_tokenizer"][arm] for name in (
-        "compression_rate", "fertility", "renyi_efficiency", "bigram_entropy", "trigram_entropy",
-        "utf8_token_integrity", "ast_boundary_alignment", "identifier_fragmentation", "indentation_consistency",
-        "vocabulary_utilization", "reconstruction_fidelity")}
-    return {"sample": {s: {"group": tokeval_group(s), "documents": len(docs),
-                           "bytes": sum(len(d.encode("utf-8")) for d in docs), "split_exhausted": exhausted}
-                       for s, (docs, exhausted) in sample.items()},
-            "metrics": {name: m["global"] for name, m in measures.items()}
-            | {"ast_boundary_alignment_per_category": measures["ast_boundary_alignment"]["per_category"],
-               "utf8_char_split": measures["utf8_token_integrity"]["char_split"]["global"]}}
-
-
 def intrinsic() -> None:
     """Tokenize every arm's val splits, check equal bytes, run the measures in one pool; write the intrinsic record."""
     start, began = time.perf_counter(), provenance()
@@ -226,7 +177,6 @@ def intrinsic() -> None:
             split_path(corpus, "val", get_tokenizer(ABLATION / arm)).parent.mkdir(parents=True)
         invariance = [pool.submit(depth_invariance, source) for source in programs]
         fidelities = [pool.submit(fidelity, (ABLATION / arm, source)) for arm, source in checks]
-        tokevals = {arm: pool.submit(tokeval, arm) for arm in ARMS}
 
         def tokenized(check: tuple[str, str]) -> Future:
             tokenize_source(check[1], "val", ABLATION / check[0], pool)
@@ -247,10 +197,6 @@ def intrinsic() -> None:
                 record["arms"][arm]["depth_invariance"][source] = result
         for (arm, source), future in zip(checks, fidelities, strict=True):
             record["arms"][arm]["fidelity"][source] = future.result()
-        for arm, future in tokevals.items():
-            arm_tokeval = future.result()
-            record["tokeval_sample"] = arm_tokeval["sample"]
-            record["arms"][arm]["tokeval"] = arm_tokeval["metrics"]
     record |= {"seconds": {"tokenized": tokenized_seconds, "all": time.perf_counter() - start}, "provenance": began}
     (RESULTS / f"{EXPERIMENT}-intrinsic.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
 

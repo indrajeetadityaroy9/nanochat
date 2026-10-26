@@ -1,0 +1,13 @@
+# @package _global_
+# Peak-lr calibration (ablations/peak_lr.py), d24: the law's lr x1, 2, 4 at SHORT tokens per parameter
+num_hidden_layers: 24
+tokens_per_param: 5.0
+learning_rate_scale: 1.0
+
+hydra:
+  sweeper:
+    params:
+      learning_rate_scale: 1.0,2.0,4.0
+  callbacks:
+    records:
+      _target_: ablations.records.Records

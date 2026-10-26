@@ -14,11 +14,9 @@ def ve_forward(n: Tensor, v: Tensor, input_ids: Tensor, table: Tensor, w: Tensor
     """n (B, T, C) bf16, input_ids (B, T) int32, v (B, T, H, HEAD_DIM) bf16 evenly spaced rows, table (V, C) and w
     (H, C) fp32 -> (mixed v contiguous, gate (B*T, H) fp32)."""
     out, gate = v.new_empty(v.shape), v.new_empty((input_ids.numel(), w.size(0)), dtype=torch.float32)
-    if not cuda_library("ve_gate").ve_forward(pointer(n), pointer(v), ctypes.c_longlong(v.stride(1)),
-                                              pointer(input_ids), pointer(table), pointer(w), pointer(out),
-                                              pointer(gate), ctypes.c_longlong(input_ids.numel()), w.size(0),
-                                              stream()):
-        raise ValueError(f"model/kernels/ve_gate.cu has no kernel for {w.size(0)} heads")
+    cuda_library("ve_gate").ve_forward(pointer(n), pointer(v), ctypes.c_longlong(v.stride(1)), pointer(input_ids),
+                                       pointer(table), pointer(w), pointer(out), pointer(gate),
+                                       ctypes.c_longlong(input_ids.numel()), w.size(0), stream())
     return out, gate
 
 

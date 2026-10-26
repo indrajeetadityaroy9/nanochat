@@ -15,6 +15,3 @@ hydra:
   sweep:
     dir: ${runs:}
     subdir: ${run_name:}
-  sweeper:
-    # one job per batch: the first failed job stops the sweep
-    max_batch_size: 1
