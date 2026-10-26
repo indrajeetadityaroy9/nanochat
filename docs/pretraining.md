@@ -149,7 +149,7 @@ Ops in `model/ops/`, CUDA sources in `model/kernels/` (built on first use by `na
 |---|---|
 | Projection, MLP, LM-head GEMMs | forward and dX: QuACK SM90 GEMMs autotuned by QuACK (`quack.gemm_interface`, `tuned=True`); fp32 weight gradients: cuBLAS `torch.mm` |
 | Post-attention norm, ReLU² MLP, residuals | `model/ops/linear.py`: the gain-free norm folded into QuACK epilogues, the normed stream never stored: `o_proj` adds the residual and sums each row's squares (`sq_reduce_mod`, `rms_final_reduce`); the up projection scales rows by rstd before relu² (`gemm_norm_act`), its pre-activation and activation both saved for the backward; the down projection adds the residual (`gemm_add`); backward: relu²'s derivative with the rstd scale and the norm's row sum in one epilogue, the norm's backward in the up projection's dX epilogue |
-| Cross entropy | QuACK, bf16 logits read once, the logit gradient written over them; the softcap arm's capped loss fused in the same op (`model/ops/cross_entropy.py`) |
+| Cross entropy | QuACK's scaled-exp linear cross entropy per 8,192-row chunk: the logits GEMM's epilogue stores per-tile rescaled exponentials with each row's tile maxima, sums and label logit (the loss from the fp32 accumulators), the dX and dW GEMMs rescale them on the A-operand load; no softmax pass and no micro-batch logits; the softcap arm: bf16 logits, QuACK's cross entropy writing the logit gradient over them, the cap fused in the same op (`model/ops/cross_entropy.py`) |
 | Attention | FlashAttention-4 varlen over the micro-batch's real document segments only (`model/ops/flash_attn.py`), one `attention` op with the q/k prologue and the value-embedding mix, q/k/v read as strided views of the fused projection and every q/k/v gradient written into one buffer; window layers: a persistent forward (one CTA per SM, the output tile staged apart from Q) and dQ reduce-added in bf16 (no fp32 accumulator, zero fill or postprocess); full layers FA4's own kernels |
 | q/k norm + gain + RoPE | `model/kernels/qk_prologue.cu`: one pass per direction; gain gradient without atomics (row math shared with the decoder, `model/kernels/qk_row.cuh`) |
 | Value-embedding gate and mix | `model/kernels/ve_gate.cu` (`model/ops/ve_gate.py`): one launch forward, the gate's logits in fp32; backward in token order (one sort of `input_ids` per micro-batch, shared by the layers), one atomic per run of equal tokens, added straight into the table's `.grad` (no zeroed buffer, no autograd add); the gate weight's gradient a cuBLAS GEMM from bf16 dz |
@@ -184,8 +184,11 @@ Measured choices [unverified: `torch.profiler` and CUDA-graph timings, records n
   median tok/s): 8K 356,431 → 359,180 (+0.77%), 32K 283,357 → 285,776 (+0.85%); peak memory +1.7 GiB warm (75.1 →
   76.8 at 8K), 90.4 cold (QuACK's first autotune; master 88.7); 10-step losses at ×2.797 bitwise through step 3,
   then within master's run-to-run spread. The weight gradients stay three C × C `addmm` (one 3C × C GEMM: −0.26%).
-- **Ours over QuACK's chunked linear cross entropy** for the LM-head loss (29.2 against ≥ 31.4 ms at d8); per-position
-  evaluation losses by QuACK's `lse_target_epi` (no logits).
+- **QuACK's scaled-exp linear cross entropy** over GEMM + cross-entropy pass + two gradient GEMMs (d24, GH200 at
+  700 W, 25 steps, 8 warm-up, median tok/s): 8K 362,988 → 365,466 (+0.68%), 32K 286,619 → 287,476 (+0.30%), peak
+  memory 76.99 → 71.44 GiB; per call on a real micro-batch 26.6–27.1 → 24.2 ms; loss, logsumexp and dW closer to fp64
+  than the bf16-logit path (it reads the fp32 accumulators). Earlier, ours over QuACK's chunked linear cross entropy
+  (29.2 against ≥ 31.4 ms at d8); per-position evaluation losses by QuACK's `lse_target_epi` (no logits).
 - **The value-embedding gate kernel** is not bitwise to the PyTorch expressions it replaced (its fp32 reduction order
   moves about 15% of elements by one bf16 ulp). Its token-ordered backward against the per-row-atomics one (d24 8K,
   GH200 at 700 W): ve_gate 162 → 93 ms per step plus the table's memset and autograd add (−19 ms), the gate-weight
