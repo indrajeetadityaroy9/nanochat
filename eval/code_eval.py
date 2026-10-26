@@ -31,7 +31,7 @@ from huggingface_hub import hf_hub_download
 from human_eval_infilling.data import read_problems
 
 from corpus.tokenizer import Tokenizer
-from eval.verify import chosen, search, solution_diagnostics
+from eval.verify import chosen, search, solution_diagnostics, vetted_examples
 from inference.decoder import NativeDecoder, Request, fim_prompt, heal_tokens
 from inference.syntax_constraint import SyntaxConstraint
 from metrics import completion_scores, latency, parse_outcome, parse_shares, pass_at_k, summary
@@ -144,18 +144,19 @@ def pass_scores(passed: list[list[bool]]) -> dict[str, dict]:
 
 
 def filtered(generator: NativeDecoder, request: Callable[[int], Request], text: Callable[[int, list[int]], str],
-             check: Callable[[int, str], tuple[str, str, list[str]]], *, language: Literal["python", "cpp"],
-             count: int) -> tuple[list[str], dict]:
-    """The filtered mode of tasks 0..count-1 (verify.search): each task's chosen text and the search record.
-    check(i, text) returns verify.verdicts' (prompt, program, diagnostics)."""
-    tried, timing = search(generator, request, lambda i, ids: check(i, text(i, ids)), language=language, count=count)
+             check: Callable[[int, str], tuple[str, list[str]]], *, found: list[list[tuple[str, str]]],
+             language: Literal["python", "cpp"]) -> tuple[list[str], dict]:
+    """The filtered mode of tasks 0..len(found)-1 (verify.search): each task's chosen text and the search record.
+    check(i, text) returns the checked program and its known diagnostics; found[i]: task i's vetted examples."""
+    tried, timing = search(generator, request, lambda i, ids: (found[i], *check(i, text(i, ids))), language=language,
+                           count=len(found))
     return [text(i, chosen(c).ids) for i, c in enumerate(tried)], {
         "attempts": [len(c) for c in tried], "accepted": [c[-1].accepted for c in tried], "latency": timing}
 
 
 def filtered_completions(generator: NativeDecoder, tokenizer: Tokenizer, items: list[Task], prompts: list[list[int]],
                          budgets: list[int], *, special: Literal["skip", "stop"],
-                         check: Callable[[Task, str], tuple[str, str, list[str]]],
+                         check: Callable[[Task, str], tuple[str, list[str]]],
                          language: Literal["python", "cpp"]) -> tuple[list[str], dict]:
     """filtered of left-to-right prompts, healed (one more token of budget; Python under the syntax constraint)."""
     dropped = [heal_tokens(tokenizer, p)[2] for p in prompts]
@@ -168,22 +169,25 @@ def filtered_completions(generator: NativeDecoder, tokenizer: Tokenizer, items: 
         return Request(input_ids=input_ids, max_new_tokens=budgets[i] + 1, constraint=constraint,
                        stopping_criteria=KeywordsStoppingCriteria(tokenizer, items[i].stopwords, healed=dropped[i]))
 
+    found = (vetted_examples([(t.prompt, evalplus_source(t, t.canonical_solution)) for t in items])
+             if language == "python" else [[] for _ in items])
     return filtered(generator, request,
                     lambda i, ids: completion(tokenizer, items[i], ids, special=special, healed=dropped[i]),
-                    lambda i, text: check(items[i], text), language=language, count=len(items))
+                    lambda i, text: check(items[i], text), found=found, language=language)
 
 
 def filtered_middles(generator: NativeDecoder, tokenizer: Tokenizer, problems: list[dict], prompts: list[list[int]], *,
                      max_new_tokens: int) -> tuple[list[str], dict]:
-    """filtered of FIM prompts under the syntax constraint of prefix and suffix, checked on the prefix's examples."""
+    """filtered of FIM prompts under the syntax constraint of prefix and suffix, checked on the prefix's examples
+    that the reference program (prefix + reference middle + suffix) passes."""
+    found = vetted_examples([(p["prompt"], p["prompt"] + p["canonical_solution"] + p["suffix"]) for p in problems])
     return filtered(generator, lambda i: Request(
                         input_ids=prompts[i], max_new_tokens=max_new_tokens,
                         constraint=SyntaxConstraint(tokenizer, problems[i]["prompt"].encode(),
                                                     suffix=problems[i]["suffix"].encode())),
                     lambda i, ids: tokenizer.enc.decode(ids),
-                    lambda i, middle: (problems[i]["prompt"], problems[i]["prompt"] + middle + problems[i]["suffix"],
-                                       []),
-                    language="python", count=len(problems))
+                    lambda i, middle: (problems[i]["prompt"] + middle + problems[i]["suffix"], []),
+                    found=found, language="python")
 
 
 def sanitizer_init() -> None:
@@ -216,16 +220,15 @@ def evalplus_source(task: Task, text: str) -> str:
     return task.prompt + text.replace("\t", "    ")
 
 
-def evalplus_check(pool: ProcessPoolExecutor, task: Task, text: str) -> tuple[str, str, list[str]]:
-    """(prompt, solution, verify.solution_diagnostics) of a completion text (evalplus_source), sanitized by `pool`."""
-    source = evalplus_source(task, text)
-    solution = pool.submit(sanitize, source, task.entry_point).result()
-    return task.prompt, solution, solution_diagnostics(source, solution, task.entry_point)
+def evalplus_check(pool: ProcessPoolExecutor, task: Task, text: str) -> tuple[str, list[str]]:
+    """(solution, verify.solution_diagnostics) of a completion text (evalplus_source), sanitized by `pool`."""
+    solution = pool.submit(sanitize, evalplus_source(task, text), task.entry_point).result()
+    return solution, solution_diagnostics(solution, task.entry_point)
 
 
-def multipl_e_check(task: Task, text: str) -> tuple[str, str, list[str]]:
-    """(prompt, program, []) of a completion: prompt + completion + the closing "}" its stop token cut."""
-    return task.prompt, task.prompt + text + "\n}", []
+def multipl_e_check(task: Task, text: str) -> tuple[str, list[str]]:
+    """(program, []) of a completion: prompt + completion + the closing "}" its stop token cut."""
+    return task.prompt + text + "\n}", []
 
 
 # `python -m evalplus.evaluate` in a fresh isolated process on all CPUs, ended by os._exit: evaluate.py's
@@ -333,7 +336,7 @@ class CodegenRun(NamedTuple):
     prompts: list[list[int]]  # BOS and the prompt's tokens
     budgets: list[int]  # max_new_tokens per task
     special: Literal["skip", "stop"]
-    check: Callable[[Task, str], tuple[str, str, list[str]]]
+    check: Callable[[Task, str], tuple[str, list[str]]]
     language: Literal["python", "cpp"]
     score: Callable[[list[Task], list[list[str]]], dict]
 

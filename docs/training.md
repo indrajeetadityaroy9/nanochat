@@ -147,10 +147,12 @@ of linear decay to zero; at a fixed model it falls with tokens as D^−0.125 [ar
 on how the optimum moves with the horizon: Complete^(d)P's AdamW SDE rule η ∝ √(m_B/m_D) (arXiv 2512.22382 §2.1
 Table 1) lowers it, as arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law η = 1.79·N^−0.713·D^0.307, fit over AdamW
 models (arXiv 2503.04715 §1 Eq. 1), raises it. The multiplier is measured at d24 itself (the base model's shape,
-standard parameterization, not μP: no width or depth transfer) over `SHORT` = 5 tokens per parameter, and carried to
+standard parameterization, not μP: no width or depth transfer) over 5 tokens per parameter, and carried to
 the base plan by the law, whose η(C) and batch B(C) were fit jointly across compute (arXiv 2401.02954 §3.1): the
-base multiplier is d24 at 5's optimum. No smaller model stands in for d24's horizon trend; under the earlier recipe
-(below) d8's optimum moved by r = 0.9105 over 40× its tokens with the law's lr and batch at both ends.
+base multiplier is d24 at 5's optimum. That the multiplier carries is an assumption [inference]: the law was fit at
+compute-optimal allocations, while here the model is fixed and its tokens grow 105×. No smaller model stands in for
+d24's horizon trend; the one measurement of the assumption is the earlier recipe's d8 (below), whose optimal
+multiplier of the law changed ×0.9105 over 40× its tokens (the optimum itself ×0.574, the law's lr ×0.6306).
 
 **Arms.** × 1, 2, 4 at d24 at 5; seed 0; 3 runs, each the current recipe at its setting (corpus tokenizer and mixture,
 cap, `generate` "parse"): `conf/experiment/peak_lr_d24.yaml`, whose records are `results/peak_lr_d24.jsonl` and its
@@ -167,13 +169,14 @@ cap, `generate` "parse"): `conf/experiment/peak_lr_d24.yaml`, whose records are 
   or that run itself when its upper neighbour diverged;
 - the base multiplier is the vertex; the base lr is it times the law's lr on the base plan.
 
-**Earlier recipe** (`results/peak_lr.jsonl` at `81fb386`, removed since; code bits per byte; no run diverged). The same
-11 arms trained under an earlier recipe: the reference tokenizer's data (dataset revision `1e711aa7`), no output-logit
-cap, nanochat's per-window FLOP count for the law's lr (Eq. 2's M, §2, lowers it by 1/1.1186 at d8 and 1/1.0776 at
-d24, hence the re-based vertices), and an earlier mixture (each run's `run` and `stage` records): at 8K eleven corpora
-(Stack-Edu, UltraData code and Stack-v3 L2 Python and C++, Kaggle notebooks, Codeforces CoTs, ClimbMix 0.10, two math
-corpora), at 32K the six Stack-Edu and UltraData Python and C++ corpora (file-level code, not repositories) over the
-last 41 of 746, 815 of 14,937 and 180 of 3,307 steps. `check` rejects these records.
+**Earlier recipe** (`results/peak_lr.jsonl` at `81fb386`, removed since; code bits per byte; no run diverged). 11 arms
+(× 1–8 at d8 at 5 and at 200, × 1–4 at d24 at 5) trained under an earlier recipe: the reference tokenizer's data
+(dataset revision `1e711aa7`), no output-logit cap, nanochat's per-window FLOP count for the law's lr (Eq. 2's M, §2,
+lowers it by 1/1.1186 at d8 and 1/1.0776 at d24, hence the re-based vertices), and an earlier mixture (each run's
+`run` and `stage` records): at 8K eleven corpora (Stack-Edu, UltraData code and Stack-v3 L2 Python and C++, Kaggle
+notebooks, Codeforces CoTs, ClimbMix 0.10, two math corpora), at 32K the six Stack-Edu and UltraData Python and C++
+corpora (file-level code, not repositories) over the last 41 of 746, 815 of 14,937 and 180 of 3,307 steps. `check`
+rejects these records.
 
 | Setting | Plan | × 1 | × 2 | × 4 | × 8 | Vertex (recorded lr) | Curvature | Re-based |
 |---|---|---|---|---|---|---|---|---|
@@ -183,15 +186,15 @@ last 41 of 746, 815 of 14,937 and 180 of 3,307 steps. `check` rejects these reco
 
 The best arm beat the law by 0.1253, 0.0118 and 0.0044. r = 0.9105 (predicted: SDE rule 0.3544, Step-Law 4.9231; law
 fall 0.6306; horizon exponent −0.0254, −0.1193 net of the batch; m_B,d8 = 2, m_D,d8 = 40.05): the optimum barely
-moved with the horizon, against both rules. The base multiplier was 2.7970369 (m_B,base = 5, m_D,base = 105.25): peak
-lr 2.4136e-3 on the base plan of `81fb386`'s packs.
+moved with the horizon, against both rules. The removed d8-transfer estimator, vertex(d24 at 5)·m_D^h·√m_B (h the
+net horizon exponent −0.1193, m_D = 105.25 and m_B = 5 the base plan's token and batch ratios over d24 at 5), gave
+the base multiplier 2.7970369: peak lr 2.4136e-3 on the base plan of `81fb386`'s packs.
 
 **`lr_multiplier`.** `conf/run.yaml` sets every run's `learning_rate_scale` to `${lr_multiplier:}`, a cached resolver:
 `run.py` `lr_multiplier` evaluates `analysis` over the experiment's records at launch and returns `base_multiplier`.
-No copy is stored, since `check` depends on the current plans, hence on the corpus tokenizer's `max_tokens_per_param`,
-so every launch reads the corpus's packs. `RunConfig`'s own default 1.0 is the law's lr (the `peak_lr_d24`
-experiment sets it per arm), so every other run's name carries the resolved multiplier (§6). A launch other than
-`peak_lr_d24` fails until its records exist.
+No copy is stored: `check` recomputes each run's plan and stage mixtures from the current code and packs.
+`RunConfig`'s own default 1.0 is the law's lr (the `peak_lr_d24` experiment sets it per arm), so every other run's
+name carries the resolved multiplier (§6). A launch other than `peak_lr_d24` fails until its records exist.
 
 ## 6. Runs and records
 

@@ -1,6 +1,6 @@
 """
 Peak-lr calibration (d24): the base model's multiplier of DeepSeek LLM's law eta = 0.3118 C^-0.125 (arXiv 2401.02954
-§3.1 Eq. 1), the optimum of d24 at SHORT tokens per parameter; the law, with its batch, carries the compute dependence
+§3.1 Eq. 1), the optimum of d24 at 5 tokens per parameter; the law, with its batch, carries the compute dependence
 to the base plan. The runs: conf/experiment/peak_lr_d24.yaml.
 """
 import json
@@ -17,8 +17,6 @@ from run import RunConfig, plan_of, tokenizer_path
 from train.stages import stage_mixture
 
 EXPERIMENT = "peak_lr_d24"
-# short horizon in tokens per parameter: the longest d24 run a sweep affords
-SHORT = 5
 
 
 def records() -> list[dict]:

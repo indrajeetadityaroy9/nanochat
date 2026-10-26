@@ -16,7 +16,7 @@ setting; "d16 checkpoint" is a 20-tokens-per-parameter d16 run's final checkpoin
 | `eval/suite.py` (`evaluate`, `record`, `evaluation_path`) | §1 |
 | `eval/bpb.py` (`likelihood`, `val_bits`, `solution_bits`, `sums`, `sample_rows`) | §2 |
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `generation`, `fim_generation`, `filtered_generation`, `fim_filtered_generation`, evaluator wrappers) | §1, §3, §4 |
-| `eval/verify.py` (`search`, `python_diagnostics`, `solution_diagnostics`, `cpp_diagnostics`, `examples_pass`) | §7 |
+| `eval/verify.py` (`search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `examples_pass`, `vetted_examples`) | §7 |
 | `metrics.py` (every function) | §5 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `fim_prompt`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
 | `inference/syntax_constraint.py`; `inference/syntax/` (`lib.rs`, `lexer.rs`, `parser.rs`, `vocab.rs`, `python.lark`, `Cargo.toml`, `Cargo.lock`) | §7 |
@@ -236,7 +236,8 @@ the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint Flas
   depend on the batch, the store or timing (64 of 64 greedy and 64 of 64 sampled requests identical alone and
   batched, `4385748`). The FP8 cache makes them differ from the bf16 forward's where two logits nearly tie: agreement
   with the training forward's greedy choice 0.9916 at `4385748` (137 of 16,261 tokens; every mismatch a top-2 gap
-  < 0.57, median 0.0625) and 0.9920 at `ca18db5`.
+  < 0.57, median 0.0625) and 0.9920 at `ca18db5`; 216 of 542 greedy HumanEval+/MBPP+ continuations identical to the
+  training forward's (a bf16 cache instead: `docs/experiments.md` §6).
 - **Memory.** The decoder takes the device's free memory (slots, prefill rows, graphs, store).
 - **Speed** (`4385748`, GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens):
   94,778 tok/s at d24 and 189,307 at d16, against 21,809 and 66,559 for the per-slot-group GEMV decoder it replaced
@@ -296,33 +297,39 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
 
 **Post-generation checks** (`eval/verify.py`, the filtered mode's acceptance test):
 
-- Python (`python_diagnostics`): the program parses (`ast.parse`; parser overflow and the parser's ValueError of §10
-  failures), then basedpyright 1.40.2 (one process per batch) with every rule off but `reportUndefinedVariable`,
-  `reportAttributeAccessIssue`, `reportCallIssue`, `reportReturnType` (definite runtime failures or annotation
-  contradictions; style, unknown-type, possibly-unbound and optional-member rules are off because a correct program
-  may trigger them, argument types because pyright also judges them against its own inferred types and rejects
-  HumanEval/130's canonical solution). A program basedpyright cannot check (an exception inside its checker, e.g. a
-  d16 completion's chained assignments overflowing its stack) fails with that error.
-  EvalPlus solutions (`solution_diagnostics`): the generated text's syntax error, an entry function missing or without
-  a `return <value>` in its own body (sanitize keeps a parseable span and would hide both).
-- Examples (`examples_pass`): the prompt's doctest `>>>` examples and Python `assert` lines, run by value (equal to
-  the want, or None/True for a bare expression) in a fresh interpreter under EvalPlus's `reliability_guard`, 3 s
-  (HumanEval's timeout; Codex §3.5's 3 s is its APPS timeout); true without examples. By value rather than doctest's
-  output text because HumanEval writes some wants in an equal but differently printed form (HumanEval/65, /113) and
-  some examples as bare comparisons without output (/108, /145); MBPP+ asserts compare tuples as lists.
+- Python (`python_diagnostics`, on the program the scorer runs: EvalPlus's sanitized solution, or FIM prefix + middle
+  + suffix): the program compiles (`compile_error`: `ast.parse`, whose overflow and ValueError of §10 are failures,
+  then `compile()`, whose own SyntaxErrors such as `'return' outside function` or a duplicate argument `ast.parse` and
+  the syntax constraint's end accept: on a d16 checkpoint (`81fb386`) 5, 60 and 6 accepted single-line, multi-line and
+  random-span filtered middles did not compile), then basedpyright 1.40.2 with every rule off but
+  `reportUndefinedVariable`, `reportAttributeAccessIssue` and `reportCallIssue`: one process per round unless it
+  exceeds `PYRIGHT_TIMEOUT` = 60 s, then halves in sequence (the largest normal round, FIM multi-line's 5,815
+  programs, takes 27.6 s). A program basedpyright cannot check fails: an exception inside its checker (a d16
+  completion's chained assignments overflowing its stack), or a run past the timeout, halved until the stalling
+  program is alone (a d16 MBPP+ candidate with 22 repeated `if …: continue` statements in a nested loop held its
+  400-program batch over 47 min); the timed-out process group is killed. A stalling program costs ⌈log₂ N⌉ + 1
+  timeouts in a round of N [arithmetic]: 9 min at 164 programs, 10 at 378, 12 at 1,033 and 1,640, 14 at 5,815.
+  EvalPlus solutions (`solution_diagnostics`): the solution's syntax error, an entry function missing or without a
+  `return <value>` in its own body.
+- Examples (`examples_pass`): the prompt's doctest `>>>` examples and Python `assert` lines that the reference program
+  passes, each run alone and untimed once per evaluation (`vetted_examples`: EvalPlus prompt + canonical solution, FIM
+  prefix + reference middle + suffix), run by value (equal to the want, or None/True for a bare expression) in a fresh
+  interpreter under EvalPlus's `reliability_guard`, 3 s (HumanEval's timeout; Codex §3.5's 3 s is its APPS timeout);
+  true without examples. Of the 554 EvalPlus examples, the references fail 4 (HumanEval/47's median 15.0, all three of
+  /116's), which every correct program fails. By value rather than doctest's output text because HumanEval writes
+  some wants in an equal but differently printed form (HumanEval/65, /113) and some examples as bare comparisons
+  without output (/108, /145); MBPP+ asserts compare tuples as lists.
 - C++ (`cpp_diagnostics`): `g++ -std=c++17 -fsyntax-only`, the MultiPL-E judge's compiler and standard, 15 s; C++
   prompts carry no examples here.
 
 `search` decodes every task without an accepted candidate yet, one round per attempt, at most 10; `chosen` returns
-the accepted candidate, else the greedy one. FIM candidates are checked as prefix + middle + suffix against the
-prefix's examples.
+the accepted candidate, else the greedy one.
 
-On the reference solutions (CPU, `8be5e90`) the acceptance test rejects 5 of 164 HumanEval+ and 2 of 378 MBPP+:
-`reportReturnType` on HumanEval/10 and /17 (loops that return inside, then an implicit fall-through) and /20
-(`tuple | None` against the annotation), `reportCallIssue` on Mbpp/130 (`max(d, key=d.get)` on a `defaultdict`); the
-prompts' own wrong examples on HumanEval/47 (median 15.0) and /116; Mbpp/630, whose helper EvalPlus `sanitize` drops
-(EvalPlus's scoring fails it too). A correct candidate rejected there is resampled and may end as the greedy one, which
-biases these problems' filtered pass@1 down.
+Basis (both d16 checkpoints' full 10-candidate HumanEval+ and MBPP+ pools, `2d49bb1`): the three rules and the vetted
+examples rejected none of the 100 candidates that pass EvalPlus plus (95% upper bound 3.6%); without the examples
+check filtered plus pass@1 fell 1.1–1.8 points. The removed checks: `docs/experiments.md` §6.
+`reportCallIssue` rejects one reference, Mbpp/130 (`max(d, key=d.get)` on a `defaultdict`, an overload miss);
+Mbpp/630's reference fails as EvalPlus scores it (sanitize drops its helper).
 
 ## 8. Export, vLLM and the standard-protocol cross-check
 
@@ -533,9 +540,9 @@ Per module and symbol; what §1–§9 state is not repeated.
 ### `eval/verify.py`
 
 - `PYRIGHT_RULES` from basedpyright's configuration reference (`config-files`); everything else off, argument types
-  (`reportArgumentType`) included. `python_diagnostics`: "line:col: SyntaxError: message" for unparsed programs
-  ("MemoryError: …", "RecursionError: …" or "ValueError: …", as `syntax_error`); each parsed program written as
-  `program.py` in its own directory; one process (`--pythonpath sys.executable`, so the installed packages resolve)
+  (`reportArgumentType`) included. `python_diagnostics`: `compile_error`'s "line:col: SyntaxError: message" (or
+  "MemoryError: …", "RecursionError: …", "ValueError: …") for programs that do not compile; each other program written
+  as `program.py` in its own directory; one process (`--pythonpath sys.executable`, so the installed packages resolve)
   because its start dominates a check; exit status 1 on errors, the JSON report on stdout either way. An exception in
   one file's check aborts the whole run (pyright.js `sourceFile.check` rethrows after its internal-error diagnostic,
   `analyzeProgram` exits 2 without a report): the file named on stderr gets "1:1: basedpyright: internal error: …"

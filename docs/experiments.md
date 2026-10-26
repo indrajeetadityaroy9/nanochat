@@ -428,6 +428,29 @@ plugin image were removed as a second implementation of the model. The export an
 **Type-constrained decoding** (arXiv 2504.09246). Not used; Python syntax is constrained and types are checked after
 generation (basis: `docs/evaluation.md` §7).
 
+**Filtered-mode checks removed** (both d16 checkpoints at 5 tokens per parameter, step 1,707: every HumanEval+ and
+MBPP+ task's full 10 candidates as `verify.search` builds them, each scored by EvalPlus and by each check; `2d49bb1`;
+a candidate's tokens do not depend on earlier acceptances, so the pools give each rule set's filtered pass@1 exactly).
+As the only rejecting check, the kept rules rejected 280 of 3,223 incorrect HumanEval+ candidates and the examples 923
+(MBPP+: 3 and 2,379 of 7,517); no subset of the rules changed any task's outcome. Removed:
+- `reportReturnType`: rejects 3 HumanEval+ reference solutions (/10, /17 fall through after a loop, /20
+  `tuple | None`) and alone rejected no incorrect HumanEval+ candidate (6 of 7,517 on MBPP+).
+- the syntax check of the unsanitized prompt + completion: rejected 8 of the 100 candidates that pass EvalPlus plus,
+  all cut at the token budget, which `sanitize` recovers and EvalPlus scores correct; removing it gained 1 task in 2 of
+  4 benchmark × checkpoint cells, lost none, and decoded 0.7–5.4% fewer tokens.
+- the prompts' examples the reference program fails (HumanEval/47's median 15.0, all three of /116's): every correct
+  program fails them. The kept checks and their basis: `docs/evaluation.md` §7.
+
+**bf16 KV cache in `NativeDecoder`** (a measurement variant of `decode.cu`: K and V cached as bf16, scales 1, the
+scores by bf16 MMAs; the d16 checkpoint above, `81fb386`; greedy continuations of the 542 HumanEval+/MBPP+ prompts,
+512 new tokens, against the compiled training forward's). Identical continuations 363 against 216 with the FP8 cache
+(for scale: the uncompiled training forward 340, the export under vLLM 379, `docs/evaluation.md` §8); divergence
+before the EvalPlus stop 164 against 299; EvalPlus-scored completions differing from the training forward's 25 and
+138 (HumanEval+, MBPP+) against 52 and 249; pass@1 HumanEval+ 0.0488 for both, MBPP+ base/plus 0.0238/0.0212 (equal
+to the training forward's) against 0.0265/0.0238 with FP8. The cache's bytes per position grow 1.94× (73,728 against
+38,016 at d24 [arithmetic]); its decode speed and the full evaluation's pass@1 are not measured. The decoder keeps
+the FP8 cache (`docs/evaluation.md` §6).
+
 **Speculative decoding.** Lossless by construction; its gains target large-model serving [inference]. Not used.
 
 **Self-correction prompting.** Not used: the model is a base model without instruction tuning.
