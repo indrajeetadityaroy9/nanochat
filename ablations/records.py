@@ -26,7 +26,9 @@ def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
     evaluation."""
     name, run = run_name(config), plan_of(config)
     stopped = metrics.diverged(log)
-    started = [r for r in log if r["kind"] == "run"][-1]
+    # the first attempt's run record (step 0, the file-level stage): a resumed attempt's holds its own stage's context,
+    # so its flops_per_token would not be the scaling plan's compute
+    started = next(r for r in log if r["kind"] == "run")
     # the stages' peaks: the stage switch's (the file-level stage) and the end's (the last stage)
     peaks = [r for r in log if r["kind"] in ("stage", "end")]
     measured = errors = offset = efficiency = None

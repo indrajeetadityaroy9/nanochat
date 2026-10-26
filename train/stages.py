@@ -56,9 +56,13 @@ def max_tokens_per_param(tokenizer: Tokenizer, *, num_hidden_layers: int) -> flo
         return n * MICRO_BATCH_TOKENS / params
 
     def overdrawn(n: int) -> bool:
+        if n == 0:  # no tokens overdraw nothing (and plan needs a positive count)
+            return False
         run = plan(model=model, tokens_per_param=tokens_per_param(n))
         return any(weights(stage, held, drawn(stage, run))[2] for stage, held in rows if drawn(stage, run))
 
     n = bisect.bisect_left(range(sum(rows[0][1].values()) * FILE_LEVEL_STAGE.seq_len // MICRO_BATCH_TOKENS + 1), True,
                            key=overdrawn)
+    if n == 1:
+        raise ValueError(f"one micro-batch ({MICRO_BATCH_TOKENS} tokens) already overdraws the data")
     return tokens_per_param(n - 1)
