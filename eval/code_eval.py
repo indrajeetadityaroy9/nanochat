@@ -190,22 +190,38 @@ def decoder(model: CausalLM, tokenizer: Tokenizer, *, max_length: int, prompt_st
 
 
 def generate_groups(generator: NativeDecoder, groups: list[list[Request]],
-                    done: Callable[[int, list[list[int]], dict], None]) -> None:
+                    done: Callable[[int, list[list[int]], dict | None], None]) -> None:
     """One generator.generate call over every group's requests, in group order (the requests are independent: a
     request's tokens do not depend on the others, decoder.NativeDecoder), calling done(g, ids, timing) as soon as group
     g's requests are all generated: their generated ids in request order and metrics.latency of them
     (generator.timings; duration: from the group's first start to its last end, the call's other requests
-    interleaved)."""
+    interleaved; None if none ran). A request without budget (max_new_tokens < 1: a MultiPL-E prompt of at least its
+    1,024-token limit, codegen_runs) is not run and generates nothing."""
+    requests = [r for group in groups for r in group]
     bounds = [0, *itertools.accumulate(map(len, groups))]
     owner = [g for g, group in enumerate(groups) for _ in group]
-    out, left = [None] * bounds[-1], list(map(len, groups))
-    for i, ids in generator.generate([r for group in groups for r in group]):
-        out[i], g = ids, owner[i]
+    run = [j for j, r in enumerate(requests) if r.max_new_tokens >= 1]
+    out, left, timings = [[] for _ in requests], [0] * len(groups), {}
+    for j in run:
+        left[owner[j]] += 1
+
+    def finish(g: int) -> None:
+        timed = [j for j in range(bounds[g], bounds[g + 1]) if j in timings]
+        if not timed:
+            done(g, out[bounds[g]:bounds[g + 1]], None)
+            return
+        starts, firsts, ends, n = zip(*[(*timings[j], len(out[j])) for j in timed], strict=True)
+        done(g, out[bounds[g]:bounds[g + 1]], latency(starts, firsts, ends, n, duration=max(ends) - min(starts)))
+
+    for g in range(len(groups)):
+        if not left[g]:
+            finish(g)
+    for k, ids in generator.generate([requests[j] for j in run]):
+        j = run[k]
+        out[j], timings[j], g = ids, generator.timings[k], owner[j]
         left[g] -= 1
         if not left[g]:
-            starts, firsts, ends, n = zip(*[(*generator.timings[j], len(out[j]))
-                                            for j in range(bounds[g], bounds[g + 1])], strict=True)
-            done(g, out[bounds[g]:bounds[g + 1]], latency(starts, firsts, ends, n, duration=max(ends) - min(starts)))
+            finish(g)
 
 
 def pass_scores(passed: list[list[bool]]) -> dict[str, dict]:
@@ -235,8 +251,12 @@ def filtered_completions(generator: NativeDecoder, tokenizer: Tokenizer, items: 
     constraint of the healed prompt's bytes holding it for Python tasks); each candidate checked as check(task,
     completion): the program its evaluator scores."""
     dropped = [heal_tokens(tokenizer, p)[2] for p in prompts]
+    # a task without budget (budgets[i] < 1: a MultiPL-E prompt of at least its 1,024-token limit, codegen_runs) is not
+    # searched: its completion is empty
+    run = [i for i, b in enumerate(budgets) if b >= 1]
 
-    def request(i: int) -> Request:
+    def request(k: int) -> Request:
+        i = run[k]
         input_ids, constraint, _ = heal_tokens(tokenizer, prompts[i])  # a fresh constraint per candidate
         if language == "python":
             constraint = SyntaxConstraint(tokenizer, tokenizer.enc.decode_bytes(input_ids[1:]), suffix=b"",
@@ -244,9 +264,14 @@ def filtered_completions(generator: NativeDecoder, tokenizer: Tokenizer, items: 
         return Request(input_ids=input_ids, max_new_tokens=budgets[i] + 1, constraint=constraint,
                        stopping_criteria=KeywordsStoppingCriteria(tokenizer, items[i].stopwords, healed=dropped[i]))
 
-    return filtered(generator, request,
-                    lambda i, ids: completion(tokenizer, items[i], ids, special=special, healed=dropped[i]),
-                    lambda i, text: check(items[i], text), language=language, count=len(items))
+    texts, record = filtered(generator, request,
+                             lambda k, ids: completion(tokenizer, items[run[k]], ids, special=special,
+                                                       healed=dropped[run[k]]),
+                             lambda k, text: check(items[run[k]], text), language=language, count=len(run))
+    at = dict(zip(run, range(len(run)), strict=True))
+    return [texts[at[i]] if i in at else "" for i in range(len(items))], record | {
+        "attempts": [record["attempts"][at[i]] if i in at else 0 for i in range(len(items))],
+        "accepted": [record["accepted"][at[i]] if i in at else False for i in range(len(items))]}
 
 
 def filtered_middles(generator: NativeDecoder, tokenizer: Tokenizer, problems: list[dict], prompts: list[list[int]], *,
@@ -436,7 +461,10 @@ def codegen_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]],
         items = benchmarks[name]
         prompts = [[bos, *tokenizer.enc.encode_ordinary(t.prompt.strip())] for t in items]
         # MultiPL-E: at most 1024 tokens of prompt and completion (multipl_e/completions.py --max-tokens,
-        # automodel.py:67 generate(max_length=...)), the BOS among them
+        # automodel.py:67 generate(max_length=...)), the BOS among them. A prompt of 1024 tokens or more gets a budget
+        # below 1 and the empty completion (generate_groups, filtered_completions), as MultiPL-E's generator gives it:
+        # it truncates the prompt to max_length - 1 tokens (:56) and returns the decoded output past the full prompt's
+        # length (:114), empty but for a 1024-token prompt whose one generated token outspans the truncated one
         runs[name] = CodegenRun(items, prompts, [1024 - len(p) for p in prompts], "stop", multipl_e_check, "cpp",
                                 multipl_e)
     return runs

@@ -23,7 +23,7 @@
  * GEMMs compile without the choice (the GEMM kernels' CHOICE).
  *
  * Each step (modeling.py's forward at one position; C width, H heads of HEAD_DIM, x0 the normed embedding):
- *   k_norm    x0 = norm(wte[token])
+ *   k_norm    x0 = norm(wte[token]) (fp32, unrounded)
  *   per layer i:
  *     k_norm  xm = resid_lambdas[i] x + x0_lambdas[i] x0 (x = x0 before layer 0), h = norm(xm)
  *     k_wgmma [q k v] = h [Wq Wk Wv]^T
@@ -43,9 +43,10 @@
  *             softmax(s / T) (head only)
  *   k_commit  the choice (and its alternative) becomes each active slot's next input
  *
- * Numerics follow model/modeling.py's forward op by op: bf16 copies of the fp32 matrices and tables; fp32 rotary
- * table, q/k norm weights and value-embedding gate (no contraction), the gate's mix rounded once to bf16; resid/x0
- * lambdas as bf16 values on bf16 tensors (PyTorch's 0-dim fp32 x bf16 promotion), each product and sum rounded; ReLU^2
+ * Numerics follow model/modeling.py's compiled forward (torch.compile, as training and bpb run it) op by op: bf16
+ * copies of the fp32 matrices and tables; fp32 rotary table, q/k norm weights and value-embedding gate (no
+ * contraction), the gate's mix rounded once to bf16; the residual mix as Inductor fuses it (k_norm RESID_NORM: fp32
+ * lambdas and x0, one fma, one bf16 rounding, the norm of the unrounded mix); ReLU^2
  * from the fp32 accumulators as QuACK's gemm_act relu_sq (quack/activation.py), one bf16 rounding; F.rms_norm's fp32
  * epsilon; the choice over fp32 logits. The KV cache departs from it: keys and values are e4m3 (1 byte, a scale per
  * position and head: amax / 448), half the bytes a step reads; scores and the softmax stay fp32. A slot's arithmetic
@@ -503,30 +504,40 @@ __global__ void __launch_bounds__(NUCLEUS_THREADS) k_nucleus(Choice c, const uns
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
-/* RMS norm of each active slot's input row, a warp per slot, the sum of squares over K in lane-strided order then
- * warp_sum, r = rsqrt(mean + FLT_EPSILON): NORM out = bf16(in r) of the slot's row of in; EMBED the same of in's row
- * tokens[b] (x0 = rms_norm(wte[token])); RESID_NORM mixed = bf16(bf16(l1 in) + bf16(l2 in2)) (the resid and x0
- * lambdas, bf16 values), out = bf16(mixed r). */
-__global__ void k_norm(int kind, const bf16 *in, const bf16 *in2, const int32_t *tokens, float l1, float l2,
-                       bf16 *mixed, bf16 *out, const unsigned long long *active, int B, int K) {
+/* RMS norm of each active slot's row v, a warp per slot, the sum of squares over K in lane-strided order then warp_sum,
+ * r = rsqrt(mean + FLT_EPSILON). NORM: v the slot's row of in, out = bf16(v r). EMBED: v the row tokens[b] of the
+ * fp32 table wte, x0 = v r in fp32, unrounded (the compiled forward's x0: Inductor drops modeling.py's bf16 cast of the
+ * embedding and recomputes x0 in fp32 for every layer's mix, never rounding it). RESID_NORM: v = fma(l1, h, x0 l2) in
+ * fp32 with the fp32 resid and x0 lambdas l1, l2 (h the slot's row of in, x0 at layer 0: in NULL), as the compiled
+ * forward's fused mix-and-norm kernel computes it (Triton contracts l1 h + l2 x0 to this fma); mixed = bf16(v), out =
+ * bf16(v r) of the unrounded v. */
+__global__ void k_norm(int kind, const bf16 *in, const float *wte, float *x0, const int32_t *tokens, float l1,
+                       float l2, bf16 *mixed, bf16 *out, const unsigned long long *active, int B, int K) {
     pdl_start();
+    extern __shared__ float rows[];  /* each warp's v, computed once: [NORM_WARPS][K] */
     const int b = blockIdx.x * NORM_WARPS + threadIdx.x / WARP, lane = threadIdx.x % WARP;
     if (b >= B || !live(active, b)) return;
-    const size_t row = (size_t)b * K, src = kind == EMBED ? (size_t)tokens[b] * K : row;
-    auto value = [&](int i) {
-        const float v = __bfloat162float(in[src + i]);
-        return kind == RESID_NORM ? bfr(bfr(l1 * v) + bfr(l2 * __bfloat162float(in2[row + i]))) : v;
-    };
+    const size_t row = (size_t)b * K;
+    float *v = rows + (size_t)(threadIdx.x / WARP) * K;  /* a lane reads back only the elements it wrote */
     float s = 0.f;
     for (int i = lane; i < K; i += WARP) {
-        const float v = value(i);
-        s = __fmaf_rn(v, v, s);
+        if (kind == EMBED) {
+            v[i] = wte[(size_t)tokens[b] * K + i];
+        } else if (kind == NORM) {
+            v[i] = __bfloat162float(in[row + i]);
+        } else {
+            const float h = in ? __bfloat162float(in[row + i]) : x0[row + i];
+            v[i] = __fmaf_rn(l1, h, __fmul_rn(x0[row + i], l2));
+            mixed[row + i] = __float2bfloat16_rn(v[i]);
+        }
+        s = __fmaf_rn(v[i], v[i], s);
     }
     const float r = rsqrtf(warp_sum(s) / (float)K + FLT_EPSILON);
     for (int i = lane; i < K; i += WARP) {
-        const float v = value(i);
-        if (kind == RESID_NORM) mixed[row + i] = __float2bfloat16_rn(v);
-        out[row + i] = __float2bfloat16_rn(bfr(v * r));
+        if (kind == EMBED)
+            x0[row + i] = __fmul_rn(v[i], r);
+        else
+            out[row + i] = __float2bfloat16_rn(__fmul_rn(v[i], r));
     }
 }
 
@@ -830,7 +841,8 @@ typedef struct {
      * layout). max_len: a slot's cache positions (the caller's longest sequence). store: the prompt store's
      * positions. lazy: the row whose choice the host confirms (Choice) */
     int B, capacity, L, H, C, F, vocab, max_len, store, lazy;
-    const bf16 *wte, *lm_head;
+    const float *wte;         /* the fp32 embedding table (k_norm EMBED) */
+    const bf16 *lm_head;
     const float *cos, *sin;   /* the fp32 rotary table [context][HALF] */
     Layer *layer;
     int32_t *tokens, *pos;    /* [B]: each slot's input token and position */
@@ -846,7 +858,8 @@ typedef struct {
     unsigned long long *active;  /* device [2][MASK_WORDS]: the active slots' mask, then the masked slots' */
     int32_t *host_tokens;     /* pinned host [2][B]: the last step's tokens, then their alternatives */
     unsigned long long *argmax, *alt;  /* [B]: the choice's key, the alternative's (Choice::alt) */
-    bf16 *x, *x0, *xm, *h, *hn, *qkv_out, *att, *xo, *u;  /* [B][...]; hn: the normed input of fc and lm_head */
+    bf16 *x, *xm, *h, *hn, *qkv_out, *att, *xo, *u;  /* [B][...]; hn: the normed input of fc and lm_head */
+    float *x0;                /* [B][C]: the normed embedding, fp32 (k_norm EMBED) */
     float *qkvf;              /* [B][3][C]: k_prologue's q, k, v */
     uint8_t *kc, *vc;         /* [B][L][max_len][C] e4m3 */
     float *ksc, *vsc;         /* [B][L][H][max_len]: their scales */
@@ -882,7 +895,8 @@ template <class F> static void slot_buffers(Decoder *d, F f) {
     f((void **)&d->logits, d->vocab * sizeof(float));
     f((void **)&d->probs, d->vocab * sizeof(float));
     f((void **)&d->allow, d->vocab / WORD_BITS * sizeof(uint32_t));
-    for (bf16 **b : {&d->x, &d->x0, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
+    for (bf16 **b : {&d->x, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
+    f((void **)&d->x0, C * sizeof(float));
     f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
     f((void **)&d->qkvf, 3 * C * sizeof(float));
     f((void **)&d->u, d->F * sizeof(bf16));
@@ -897,7 +911,8 @@ template <class F> static void slot_buffers(Decoder *d, F f) {
 template <class F> static void row_buffers(Decoder *d, F f) {
     const size_t C = d->C;
     f((void **)&d->tokens, 3 * sizeof(int32_t));
-    for (bf16 **b : {&d->x, &d->x0, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
+    for (bf16 **b : {&d->x, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
+    f((void **)&d->x0, C * sizeof(float));
     f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
     f((void **)&d->qkvf, 3 * C * sizeof(float));
     f((void **)&d->u, d->F * sizeof(bf16));
@@ -910,10 +925,9 @@ static Gemm gemm(const Decoder *d, const bf16 *w, int rows, int cols, const bf16
     return g;
 }
 
-static void launch_norm(Decoder *d, int kind, const bf16 *in, const bf16 *in2, float l1, float l2, bf16 *mixed,
-                        bf16 *out) {
-    launch(k_norm, (d->B + NORM_WARPS - 1) / NORM_WARPS, NORM_WARPS * WARP, 0, d->stream,
-           kind, in, in2, d->tokens, l1, l2, mixed, out, d->active, d->B, d->C);
+static void launch_norm(Decoder *d, int kind, const bf16 *in, float l1, float l2, bf16 *mixed, bf16 *out) {
+    launch(k_norm, (d->B + NORM_WARPS - 1) / NORM_WARPS, NORM_WARPS * WARP, NORM_WARPS * d->C * sizeof(float),
+           d->stream, kind, in, d->wte, d->x0, d->tokens, l1, l2, mixed, out, d->active, d->B, d->C);
 }
 
 static Choice choice(const Decoder *d) {
@@ -958,11 +972,11 @@ template <bool CHOICE> static void launch_gemm(Decoder *d, const Gemm &g) {
 /* The step's body on d->stream: every layer of every active slot, up to x before the final norm. */
 static void enqueue_body(Decoder *d) {
     const int C = d->C, F = d->F, L = d->L, B = d->B;
-    launch_norm(d, EMBED, d->wte, NULL, 0.f, 0.f, NULL, d->x0);
+    launch_norm(d, EMBED, NULL, 0.f, 0.f, NULL, NULL);
     for (int l = 0; l < L; l++) {
         const Layer *ly = &d->layer[l];
-        /* input: x0 at layer 0, else the previous layer's output */
-        launch_norm(d, RESID_NORM, l == 0 ? d->x0 : d->x, d->x0, ly->resid_lambda, ly->x0_lambda, d->xm, d->h);
+        /* input: x0 at layer 0 (NULL), else the previous layer's output */
+        launch_norm(d, RESID_NORM, l == 0 ? NULL : d->x, ly->resid_lambda, ly->x0_lambda, d->xm, d->h);
         launch_gemm<false>(d, gemm(d, ly->qkv, 3 * C, C, d->h, EPI_STORE, d->qkv_out));
         const Attn a = {d->qkv_out, d->h, ly->ve, ly->ve_gate, ly->q_gain, ly->k_gain, d->cos, d->sin,
                         d->kc + (size_t)l * d->max_len * C, d->vc + (size_t)l * d->max_len * C,
@@ -977,7 +991,7 @@ static void enqueue_body(Decoder *d) {
         Gemm g = gemm(d, ly->o, C, C, d->att, EPI_RESID, d->xo);
         g.res = d->xm;
         launch_gemm<false>(d, g);
-        launch_norm(d, NORM, d->xo, NULL, 0.f, 0.f, NULL, d->hn);
+        launch_norm(d, NORM, d->xo, 0.f, 0.f, NULL, d->hn);
         launch_gemm<false>(d, gemm(d, ly->fc, F, C, d->hn, EPI_RELU2, d->u));
         g = gemm(d, ly->proj, C, F, d->u, EPI_RESID, d->x);
         g.res = d->xo;
@@ -988,7 +1002,7 @@ static void enqueue_body(Decoder *d) {
 /* The step's head on d->stream: the final norm, the token choice in lm_head's epilogue (k_wgmma's CHOICE) or, for a
  * nucleus-sampled slot, by k_nucleus, the commit and the tokens' copy to the host. */
 template <bool CHOICE> static void enqueue_head(Decoder *d) {
-    launch_norm(d, NORM, d->x, NULL, 0.f, 0.f, NULL, d->hn);
+    launch_norm(d, NORM, d->x, 0.f, 0.f, NULL, d->hn);
     Gemm g = gemm(d, d->lm_head, d->vocab, d->C, d->hn, EPI_ARGMAX, NULL);
     g.argmax = d->argmax;
     launch_gemm<CHOICE>(d, g);
@@ -1041,10 +1055,10 @@ extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
  *      requested: it takes at most the device memory left after the slots and graphs), lazy (the row whose choice
  *      the host confirms after a step, Choice::lazy; -1 none), budget (MiB the decoder takes at most: slots, prefill
  *      rows, graphs and prompt store; 0: all free memory).
- * ptrs: GLOBAL_PTRS pointers wte, cos, sin (the fp32 rotary table [context][HALF] of every layer), lm_head; then
+ * ptrs: GLOBAL_PTRS pointers wte (fp32), cos, sin (the fp32 rotary table [context][HALF] of every layer), lm_head; then
  *       LAYER_PTRS per layer: qkv, o, fc, proj, value-embedding table (0 if none), value-embedding gate (0 if none),
  *       q norm weight, k norm weight.
- * scal: per layer: resid lambda, x0 lambda (bf16 values); then the output-logit cap
+ * scal: per layer: resid lambda, x0 lambda (fp32); then the output-logit cap
  *       (ModelConfig.final_logit_softcapping, 0 none).
  * window: per layer, the keys before each query that it attends (FlashAttention's window_size left).
  * stream: the caller's stream (not the legacy default stream: it is captured), alive past dec_destroy.
@@ -1056,7 +1070,7 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->store = cfg[6];
     d->lazy = cfg[7];
     d->H = d->C / HEAD_DIM;
-    d->wte = (const bf16 *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
+    d->wte = (const float *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
     d->lm_head = (const bf16 *)ptrs[3]; d->stream = (cudaStream_t)stream;
     const int L = d->L;
     d->softcap = scal[2 * L];

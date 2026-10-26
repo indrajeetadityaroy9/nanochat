@@ -48,7 +48,7 @@ def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm
 
 @dataclass(frozen=True, kw_only=True)
 class Request:
-    """A continuation of input_ids (BOS and at least one more token) by at most max_new_tokens tokens.
+    """A continuation of input_ids (BOS and at least one more token) by at most max_new_tokens (at least 1) tokens.
     stopping_criteria: None or a predicate of the generated ids, true once the sequence is done. temperature 0: the
     greedy argmax (ties to the lowest id); > 0: a sample of softmax(logits / temperature), logits capped by
     ModelConfig.final_logit_softcapping if set, its draw at
@@ -212,9 +212,10 @@ class NativeDecoder:
         if not 1 < max_length <= T:
             raise ValueError(f"max_length {max_length} outside (1, max_position_embeddings {T}]")
         self.max_length = max_length
-        # bf16 copies of the matrices and tables (the forward's rounding at use); fp32 q/k norm weights, gate weights
-        # and rotary table, as modeling.py uses them
-        weights = [model.embed_tokens.weight.bfloat16(), model.cos, model.sin, model.lm_head.weight.bfloat16()]
+        # bf16 copies of the matrices and tables (the forward's rounding at use); the fp32 embedding table (the compiled
+        # forward's x0 is the fp32 row's norm, decode.cu k_norm); fp32 q/k norm weights, gate weights and rotary table,
+        # as modeling.py uses them
+        weights = [model.embed_tokens.weight.clone(), model.cos, model.sin, model.lm_head.weight.bfloat16()]
         for i, layer in enumerate(model.layers):
             attn, mlp = layer.self_attn, layer.mlp
             ve = str(i) in model.value_embeds
@@ -224,9 +225,9 @@ class NativeDecoder:
                         attn.ve_gate.weight.clone() if ve else None, attn.q_norm_weight.clone(),
                         attn.k_norm_weight.clone()]
         self.weights = weights  # referenced while the decoder reads them through pointers
-        # per layer (resid, x0), rounded to bf16: a 0-dim fp32 tensor times a bf16 tensor computes in bf16; then the
-        # output-logit cap (0: none)
-        lambdas = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).to(torch.bfloat16).float().flatten().cpu()
+        # per layer (resid, x0), fp32 as the compiled forward computes the mix (decode.cu k_norm); then the output-logit
+        # cap (0: none)
+        lambdas = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).flatten().cpu()
         scal = np.append(lambdas.numpy(), np.float32(cfg.final_logit_softcapping or 0.0))
         # F: up_proj is (F, C); the lazy row: BOS, a syntax constraint's end, confirmed once chosen (generate); the
         # memory budget in MiB (0: none)
@@ -358,6 +359,8 @@ class NativeDecoder:
         def fill(b):
             """Slot b takes the next request (NativeDecoder.start), or idles once none is left."""
             for i, request in queue:
+                if request.max_new_tokens < 1:  # its finish test would never fire: decoding past max_length
+                    raise ValueError(f"request {i}: max_new_tokens {request.max_new_tokens} < 1")
                 if (end := len(request.input_ids) + request.max_new_tokens - 1) > max_length:
                     raise ValueError(f"request {i}: len(input_ids) {len(request.input_ids)} + max_new_tokens "
                                      f"{request.max_new_tokens} - 1 = {end} > max_length {max_length}")
