@@ -57,6 +57,8 @@ class RunConfig:
     muon_tau_scale: float = 1.0     # Muon matrices' tau x scale (their weight decay / scale; train/optim.py)
     # AdamW groups' learning rate x scale, their weight decay / scale (decay timescale held)
     adamw_learning_rate_scale: float = 1.0
+    # x0_lambdas, resid_lambdas in AdamW groups at karpathy/nanochat 92d63d4's scalar lrs (train/optim.py)
+    scalar_learning_rates: bool = False
     # output logits cap * tanh(logits / cap); None: no cap (model/modeling.py)
     final_logit_softcapping: float | None = None
     num_checkpoints: int = 1        # evenly spaced checkpoints, the final among them; > 1 adds repo_level_start
@@ -121,6 +123,7 @@ def training(config: RunConfig, run: "RunPlan") -> None:
     model = meta_model(config.num_hidden_layers, config.final_logit_softcapping)
     train(model=model, run=run, tokenizer_path=tokenizer_path(config), seed=config.seed,
           muon_tau_scale=config.muon_tau_scale, adamw_learning_rate_scale=config.adamw_learning_rate_scale,
+          scalar_learning_rates=config.scalar_learning_rates,
           checkpoints=checkpoint_steps(config, run), run_name=run_name(config), config=asdict(config))
 
 

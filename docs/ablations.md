@@ -379,6 +379,10 @@ ablation's sa-bpe runs (same run names), so 4 runs train.
 
 **State.** Waits for the tokenizer runs.
 
+**Scalar lr arm.** `scalar_learning_rates` moves x0_lambdas and resid_lambdas out of the 1-D AdamW group into groups at
+karpathy/nanochat 92d63d4's lr (0.5 and 0.005 at 2^19 tokens, × √(B/2^19)), betas, eps and weight decay
+(`train/optim.py`).
+
 ## References
 
 | arXiv | Paper |

@@ -90,21 +90,39 @@ class Muon(torch.optim.Muon):
         return loss
 
 
+# Scalar-lr arm (karpathy/nanochat 92d63d4 nanochat/gpt.py setup_optimizer lines 442-443, scalar_lr 0.5 its
+# base_train.py --scalar-lr default; validated in its dev/LOG.md 2026-01-11 and 2026-01-19..22): (lr at B_REF, betas,
+# eps, weight decay) of x0_lambdas and resid_lambdas; lr x sqrt(B / B_REF) (base_train.py lines 287-293)
+SCALAR_B_REF = 2**19
+X0_GROUP = (0.5, (0.96, 0.95), 1e-10, 0.0)
+RESID_GROUP = (0.5 * 0.01, (0.8, 0.95), 1e-10, 0.05)
+
+
 def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float, muon_tau_scale: float,
-               adamw_learning_rate_scale: float) -> tuple[torch.optim.Optimizer, ...]:
+               adamw_learning_rate_scale: float, scalar_learning_rates: bool,
+               batch_size: int) -> tuple[torch.optim.Optimizer, ...]:
     """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, not 1-D parameters (karpathy/nanoGPT
     model.py configure_optimizers). Two scales, each the identity at 1: muon_tau_scale divides Muon's weight decay, so
     its EMA timescale 1 / (lr wd) grows by it (the tau law was fit with AdamW; Power Lines, arXiv 2505.13738 App. B);
     adamw_learning_rate_scale multiplies AdamW's lr and divides its weight decay, holding its timescale (Moonlight's
     one lr and weight decay for every group, arXiv 2502.16982 §2.2, matches Muon's update RMS, not the AdamW groups'
-    lr)."""
+    lr). scalar_learning_rates: x0_lambdas and resid_lambdas leave the 1-D group for two AdamW groups of their own at
+    92d63d4's absolute lr, betas, eps and weight decay (X0_GROUP, RESID_GROUP), lr x sqrt(batch_size / SCALAR_B_REF)
+    (batch_size: tokens per step); the schedule multiplies each group's own initial lr (train/loop.py LambdaLR). Off:
+    the groups are the ones without the option."""
     tables = [model.embed_tokens.weight, model.lm_head.weight, *model.value_embeds.parameters()]
     table_ids = {id(p) for p in tables}
-    vectors = [p for p in model.parameters() if p.ndim == 1]
+    scalars = [model.x0_lambdas, model.resid_lambdas] if scalar_learning_rates else []
+    scalar_ids = {id(p) for p in scalars}
+    vectors = [p for p in model.parameters() if p.ndim == 1 and id(p) not in scalar_ids]
     matrices = [p for p in model.parameters() if p.ndim == 2 and id(p) not in table_ids]
-    adamw = torch.optim.AdamW([{"params": tables, "weight_decay": weight_decay / adamw_learning_rate_scale},
-                               {"params": vectors, "weight_decay": 0.0}], lr=lr * adamw_learning_rate_scale,
-                              betas=BETAS, fused=True)
+    groups = [{"params": tables, "weight_decay": weight_decay / adamw_learning_rate_scale},
+              {"params": vectors, "weight_decay": 0.0}]
+    if scalar_learning_rates:
+        scale = (batch_size / SCALAR_B_REF) ** 0.5
+        groups += [{"params": [p], "lr": base * scale, "betas": betas, "eps": eps, "weight_decay": wd}
+                   for p, (base, betas, eps, wd) in zip(scalars, (X0_GROUP, RESID_GROUP), strict=True)]
+    adamw = torch.optim.AdamW(groups, lr=lr * adamw_learning_rate_scale, betas=BETAS, fused=True)
     return adamw, Muon(matrices, lr=lr, weight_decay=weight_decay / muon_tau_scale, adjust_lr_fn="match_rms_adamw")
 
 

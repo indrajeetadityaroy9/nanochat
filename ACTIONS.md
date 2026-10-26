@@ -92,6 +92,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | D5 softcap | `logit_softcap.yaml`: d16 at tokens_per_param 20.0 on the sa-bpe set at the run app's learning_rate_scale `${lr_multiplier:}` (the D1-rebased base multiplier, computed at launch from `results/peak_lr.jsonl`: 2.79704; `142eae3`, `269e671`), final_logit_softcapping 15 vs none, 4 seeds | user approval |
 | Tokenizer ablation | 8 d16 runs at each arm's max_tokens_per_param (4 arms × 2 seeds, ~7,151 steps each, `experiment=tokenizer_split_merge`), decision, `adopt`, tokenize, pack | D5 and D7 decided; user approval |
 | D6 AdamW-group lr | `adamw_group_lr.yaml`: d16 on the sa-bpe set at its max_tokens_per_param, adamw_learning_rate_scale ¼ and 4, 2 seeds; its ×1 arm is the tokenizer ablation's sa-bpe baseline (same run name), so 4 runs train | the tokenizer runs; user approval |
+| Scalar lr (user arm) | `RunConfig.scalar_learning_rates` (`train/optim.py`): x0_lambdas and resid_lambdas in AdamW groups of their own at karpathy/nanochat 92d63d4's lrs (0.5 and 0.005 × √(B/2^19); d16 at 20: 0.375 / 0.00375), betas, eps and weight decay (`gpt.py` 442-443; its LOG 2026-01-11, 01-19..22); off is the current path | the user's run design |
 | Base model pre-training | `experiment=pretrain` (d24, the decided recipe and tokenizer) | every ablation above; its own user approval |
 
 Order: the user's permission → D7 at 20, D5, D7 at 200, tokenizer runs (with D6's arms) → adopt, tokenize, pack → base
