@@ -95,12 +95,12 @@ read is not ablated.
   solve the problem of logit shift in the final softmax" (Chameleon, arXiv 2405.09818 §2.3). Output-logit divergence
   occurs "in models with no weight decay regardless of scale … Weight decay also mitigates this instability for the
   larger models we test" (arXiv 2309.14322 §3.1.2); `lm_head` is weight-decayed (`docs/training.md` §3) and no
-  `peak_lr` run diverged up to ×8 (`docs/training.md` §5), so no z-loss. Effect sizes: Gemma 2 caps the final layer
-  (arXiv 2408.00118 §2); modded-nanogpt record #9 added a cap at 30 (val loss 3.2844 → 3.2791, one run each) and
-  record #18 lowered it to 15 (steps to the 3.28 target 1,490 → 1,390; 80 runs, p = 0.0001); nanochat at d24 found
-  caps from 5 to 30 about equal except 5 (much worse), 20 best by ~1e-3 val loss (LOG 2026-03-02), while 92d63d4
-  `gpt.py:511-515` keeps 15. Its cost: 0.58% of the 8K step (§3). The designed ablation and its detection power:
-  `docs/experiments.md` §3.
+  earlier-recipe `peak_lr` run, uncapped, diverged up to ×8 (`docs/training.md` §5), so no z-loss. Effect sizes:
+  Gemma 2 caps the final layer (arXiv 2408.00118 §2); modded-nanogpt record #9 added a cap at 30 (val loss 3.2844 →
+  3.2791, one run each) and record #18 lowered it to 15 (steps to the 3.28 target 1,490 → 1,390; 80 runs, p = 0.0001);
+  nanochat at d24 found caps from 5 to 30 about equal except 5 (much worse), 20 best by ~1e-3 val loss (LOG
+  2026-03-02), while 92d63d4 `gpt.py:511-515` keeps 15. Its cost: 0.58% of the 8K step (§3). The designed ablation
+  and its detection power: `docs/experiments.md` §3.
 - **RoPE base 10^6 from the first step:** above the 32K context's lower bound of arXiv 2405.14591 (Table 2: 6.4e5
   [unverified: caption only in the extracted text]); large from the start as Llama 3 (500,000, arXiv 2407.21783 §3.2);
   base 10k against 500k at 8K changes Gemma 2B's perplexity 4.4627 → 4.4485 (Wiki) and 6.4429 → 6.4593 (FlanV2), under
@@ -142,7 +142,7 @@ DeepSeek-Coder the FIM rate (arXiv 2401.14196 Fig. 3); none ablates gains, resid
 
 ## 3. GPU implementation
 
-**Build** (`native.py`). `cuda_library(name)` builds `model/kernels/<name>.cu` with one nvcc command for the device's
+**Build** (`native.py`). `cuda_library(name)` builds `model/kernels/<name>.cu` with one nvcc command for the GH200's
 architecture-specific target (sm_90a: wgmma, setmaxnreg) and `-DHEAD_DIM=128`, into `NATIVE/<name>-sm_90a-<sha256 of
 the command, the file and every header>.so` (written to a temporary file and renamed, so concurrent first builds never
 share a file), loaded by ctypes once per process. `crate_module` does the same for the Rust crates through cargo

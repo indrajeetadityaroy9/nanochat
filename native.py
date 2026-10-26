@@ -51,20 +51,16 @@ def stream() -> ctypes.c_void_p:
 
 @functools.cache
 def cuda_library(name: str) -> ctypes.CDLL:
-    """model/kernels/<name>.cu built by nvcc for the device's arch-specific target (sm_90a: wgmma, setmaxnreg) with
+    """model/kernels/<name>.cu built by nvcc for the GH200's arch-specific target sm_90a (wgmma, setmaxnreg) with
     HEAD_DIM, keyed by the command, the file and every header; loaded once per process."""
-    import torch
-
-    major, minor = torch.cuda.get_device_capability()
-    arch = f"sm_{major}{minor}a"
     source = KERNELS / f"{name}.cu"
-    command = ["nvcc", f"-gencode=arch=compute_{major}{minor}a,code={arch}", f"-DHEAD_DIM={HEAD_DIM}", "-Xcompiler",
-               "-fPIC", "-shared", "-o"]
+    command = ["nvcc", "-gencode=arch=compute_90a,code=sm_90a", f"-DHEAD_DIM={HEAD_DIM}", "-Xcompiler", "-fPIC",
+               "-shared", "-o"]
 
     def build(path: Path) -> None:
         subprocess.run([*command, path, source], check=True)
 
-    return ctypes.CDLL(native_library(f"{name}-{arch}", command, [source, *sorted(KERNELS.glob("*.cuh"))], build))
+    return ctypes.CDLL(native_library(f"{name}-sm_90a", command, [source, *sorted(KERNELS.glob("*.cuh"))], build))
 
 
 @functools.cache

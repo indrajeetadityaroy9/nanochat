@@ -15,7 +15,7 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 |`train/stages.py` (`max_tokens_per_param`, `stage_batches`)|§1, §8|
 |`train/optim.py` (`optimizers`, `Muon`, `tau_weight_decay`, `update`, `MAX_GRAD_NORM`)|§3|
 |`train/loop.py` (`train`), `train/diagnostics.py` (`Diagnostics`), `train/checkpoint.py`|§6, §8|
-|`ablations/peak_lr.py` (`records`, `check`, `fit`, `analysis`); `conf/experiment/peak_lr_d8.yaml`, `peak_lr_d24.yaml`; `results/peak_lr_d8.jsonl`, `peak_lr_d24.jsonl` and their `-curves.jsonl`|§5|
+|`ablations/peak_lr.py` (`records`, `check`, `fit`, `analysis`); `conf/experiment/peak_lr_d24.yaml`; `results/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
 |`ablations/records.py` (`Records`, `record`)|§6|
 |`scripts/setup.sh`, `scripts/container.sh`, `scripts/release.sh`, `paths.py`|§7, §9|
 |`docker/Dockerfile`, `pyproject.toml`, `uv.lock`|§8|
@@ -61,7 +61,6 @@ the corpus's packs (peak lr at the earlier recipe's base multiplier 2.7970369, �
 | d16 at 20 | 19.998 | 3 | 4,552 | 4,304 | 1.342B | 1.6686e-3 | 4.6671e-3 | 0.2105 |
 | d8 at 20 | 19.997 | 1 | 2,987 | 2,824 | 0.294B | 2.4438e-3 | 6.8355e-3 | 0.2191 |
 | d8 at 200 | 199.993 | 2 | 14,937 | 14,122 | 2.937B | 1.8326e-3 | 5.1259e-3 | 0.1966 |
-| d8 at 5 (`peak_lr`) | 4.994 | 1 | 746 | 705 | 0.073B | 2.9062e-3 | | |
 | d24 at 5 (`peak_lr`) | 4.999 | 3 | 3,307 | 3,127 | 0.975B | 1.5443e-3 | | |
 
 N and M per depth: `docs/architecture.md` §1. `max_tokens_per_param` of the corpus's tokenizer is 6,990 at d8 and
@@ -147,35 +146,26 @@ under a multi-step schedule (§2.3) at compute below the base model's, applied h
 of linear decay to zero; at a fixed model it falls with tokens as D^−0.125 [arithmetic]. The transfer rules disagree
 on how the optimum moves with the horizon: Complete^(d)P's AdamW SDE rule η ∝ √(m_B/m_D) (arXiv 2512.22382 §2.1
 Table 1) lowers it, as arXiv 2409.19913 §3.2 Eq. 1 and the law do; Step-Law η = 1.79·N^−0.713·D^0.307, fit over AdamW
-models (arXiv 2503.04715 §1 Eq. 1), raises it. So it is measured at d24 (the base model's shape, standard
-parameterization, not μP: no width or depth transfer) over `SHORT` = 5 tokens per parameter, times the optimum's
-horizon trend measured at d8 between 5 and `LONG` = 200 (where d8's law batch is 2 micro-batches, so the trend
-includes batch growth, as the base run's does). The ×8 arm at d8 at 200 is where Step-Law points.
+models (arXiv 2503.04715 §1 Eq. 1), raises it. The multiplier is measured at d24 itself (the base model's shape,
+standard parameterization, not μP: no width or depth transfer) over `SHORT` = 5 tokens per parameter, and carried to
+the base plan by the law, whose η(C) and batch B(C) were fit jointly across compute (arXiv 2401.02954 §3.1): the
+base multiplier is d24 at 5's optimum. No smaller model stands in for d24's horizon trend; under the earlier recipe
+(below) d8's optimum moved by r = 0.9105 over 40× its tokens with the law's lr and batch at both ends.
 
-**Arms.** × 1, 2, 4, 8 at d8 at 5 and at 200; × 1, 2, 4 at d24 at 5; seed 0; 11 runs, each the current recipe at its
-setting (corpus tokenizer and mixture, cap, `generate` "parse"): `conf/experiment/peak_lr_d8.yaml` (8 runs, sweeping
-`tokens_per_param` and `learning_rate_scale`) and `peak_lr_d24.yaml` (3 runs), whose records are
-`results/peak_lr_d8.jsonl`, `results/peak_lr_d24.jsonl` and their `-curves.jsonl` (§6). A grid extension re-launches a
-sweep with the extra multiplier added to its `learning_rate_scale` list; completed runs are skipped and recorded again.
+**Arms.** × 1, 2, 4 at d24 at 5; seed 0; 3 runs, each the current recipe at its setting (corpus tokenizer and mixture,
+cap, `generate` "parse"): `conf/experiment/peak_lr_d24.yaml`, whose records are `results/peak_lr_d24.jsonl` and its
+`-curves.jsonl` (§6). A grid extension re-launches the sweep with the extra multiplier added to its
+`learning_rate_scale` list; completed runs are skipped and recorded again.
 
-**Rule** (`ablations/peak_lr.py` `analysis`, pre-registered):
+**Rule** (`ablations/peak_lr.py` `analysis`):
 - every record is checked against the current recipe (`check`): its `run` record's `plan` and `data_key`, and the
   mixture of its `run` and `stage` records, must equal what the current code computes for its `RunConfig`
   (`plan_of`, `train/stages.py` `stage_mixture`), else it raises;
-- per setting (`fit`), code bits per byte against u = ln(multiplier), a diverged run worse than any evaluated one:
-  extend the grid ×2 while the lowest-code run is at an end; else the vertex of the parabola through the lowest-code
-  run and its two neighbours (`metrics.parabola_vertex`, `docs/evaluation.md` §5; arXiv 2409.19913 §3.1 fits
-  quadratics in log lr), or that run itself when its upper neighbour diverged;
-- r = vertex(d8 at 200)/vertex(d8 at 5), against the SDE rule's √(m_B/m_D) and Step-Law's m_D^0.307, each divided by
-  the law's own fall between the two plans; m_B,d8 and m_D,d8 are the batch and token ratios of d8 at 200 over d8 at 5;
-- the net horizon exponent h = ln(r/√m_B,d8)/ln m_D,d8 (d8's trend net of its batch growth by the square-root rule,
-  arXiv 2205.10287 Def. 5.2), and the base multiplier vertex(d24 at 5)·m_D,base^h·√m_B,base, m_D,base and m_B,base
-  the token and batch ratios of the base plan over d24 at 5.
-
-The trend is assumed width-independent: arXiv 2409.19913 §4 fits its horizon exponent on models of 760M parameters
-and more and observes a larger one at 50M and 125M (d8 has 14.7M non-embedding parameters). The net exponent is
-carried to the base model's horizon as every rule in play is a power law in D; the square-root batch rule is also
-Complete^(d)P's (arXiv 2512.22382 Table 1).
+- `fit`: code bits per byte against u = ln(multiplier), a diverged run worse than any evaluated one: extend the grid
+  ×2 while the lowest-code run is at an end; else the vertex of the parabola through the lowest-code run and its two
+  neighbours (`metrics.parabola_vertex`, `docs/evaluation.md` §5; arXiv 2409.19913 §3.1 fits quadratics in log lr),
+  or that run itself when its upper neighbour diverged;
+- the base multiplier is the vertex; the base lr is it times the law's lr on the base plan.
 
 **Earlier recipe** (`results/peak_lr.jsonl` at `81fb386`, removed since; code bits per byte; no run diverged). The same
 11 arms trained under an earlier recipe: the reference tokenizer's data (dataset revision `1e711aa7`), no output-logit
@@ -197,11 +187,11 @@ moved with the horizon, against both rules. The base multiplier was 2.7970369 (m
 lr 2.4136e-3 on the base plan of `81fb386`'s packs.
 
 **`lr_multiplier`.** `conf/run.yaml` sets every run's `learning_rate_scale` to `${lr_multiplier:}`, a cached resolver:
-`run.py` `lr_multiplier` evaluates `analysis` over the two experiments' records at launch and returns
-`base_multiplier`. No copy is stored, since it depends on the base plan, hence on the corpus tokenizer's
-`max_tokens_per_param` (`plan_of(RunConfig())`), so every launch reads the corpus's packs. `RunConfig`'s own default
-1.0 is the law's lr (the `peak_lr` experiments set it per arm), so every other run's name carries the resolved
-multiplier (§6). A launch other than the `peak_lr` experiments fails until their records exist.
+`run.py` `lr_multiplier` evaluates `analysis` over the experiment's records at launch and returns `base_multiplier`.
+No copy is stored, since `check` depends on the current plans, hence on the corpus tokenizer's `max_tokens_per_param`,
+so every launch reads the corpus's packs. `RunConfig`'s own default 1.0 is the law's lr (the `peak_lr_d24`
+experiment sets it per arm), so every other run's name carries the resolved multiplier (§6). A launch other than
+`peak_lr_d24` fails until its records exist.
 
 ## 6. Runs and records
 
@@ -223,8 +213,8 @@ base model's recipe:
 or sweeps fields) and the command line's overrides. Every invocation is a Hydra multirun, so the run's directory is
 `RUNS/<run_name>` and an experiment's callback runs when the sweep ends: `python run.py experiment=<name>`, or one run,
 e.g. `python run.py num_hidden_layers=8 tokens_per_param=0.5 tokenizer=sa-bpe`. The experiments in `conf/` are
-`pretrain` (`num_checkpoints` 10, `generate` "benchmarks", the `Records` callback) and `peak_lr_d8`, `peak_lr_d24`
-(§5). The output-logit cap is the model's, not a run field (`docs/architecture.md` §1).
+`pretrain` (`num_checkpoints` 10, `generate` "benchmarks", the `Records` callback) and `peak_lr_d24` (§5). The
+output-logit cap is the model's, not a run field (`docs/architecture.md` §1).
 
 **Names.** `run_name`: the fields that differ from `RunConfig()`, sorted, `k=v` joined by `,` (`defaults` if none), so
 a run two experiments share is trained once. With m the resolved multiplier (§5), the base model's run
@@ -365,8 +355,8 @@ unlimited stack hard limit for evalplus's `reliability_guard`).
 
 1. **Corpus**: the tokenizer ablation's vocabularies, intrinsic measures and data, the corpus's tokenizer, tokenize,
    pack and the smoke check, in the order of `docs/corpus.md` §10.
-2. **Peak lr**: `scripts/container.sh python run.py experiment=peak_lr_d8`, then `experiment=peak_lr_d24` (§5; the
-   11 runs and their evaluations), writing the records `lr_multiplier` reads.
+2. **Peak lr**: `scripts/container.sh python run.py experiment=peak_lr_d24` (§5; the 3 runs and their evaluations),
+   writing the records `lr_multiplier` reads.
 3. **Train**: `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'` trains both stages with
    11 checkpoints (each tenth of the 69,611 steps and step 65,814, the repository stage's start), evaluates each with
    every benchmark and writes `results/pretrain.jsonl` and `results/pretrain-curves.jsonl`. Expected time: §7.
@@ -400,13 +390,12 @@ a training phase that fails without a `failure` record raises `ChildProcessError
 `conf/run.yaml` disables Hydra's job logging, whose default file `${hydra.job.name}.log` would be
 `RUNS/<run_name>/run.log`, the phases' log.
 
-**`ablations/peak_lr.py`.** `records` reads both experiments' records; `check` compares each run's recorded
-`plan` with `plan_of` of its `RunConfig`, so the recorded lr is the law's at the current FLOP count times the arm's
-multiplier. `fit` returns `{curvature, vertex}`; the parabola through the lowest-code run and its neighbours has
+**`ablations/peak_lr.py`.** `records` reads the experiment's records; `check` compares each run's recorded `plan`
+with `plan_of` of its `RunConfig`, so the recorded lr is the law's at the current FLOP count times the arm's
+multiplier. `fit` returns `{curvature, vertex, code}`; the parabola through the lowest-code run and its neighbours has
 positive curvature by construction; where the rule would extend the grid (the lowest-code run at an end) or its lower
-neighbour diverged, `fit` raises. `analysis` takes batches, steps and the law's lrs from `base_plan` (equal to the
-recorded plans by `check`) and also reports the unnetted horizon exponent ln r / ln m_D,d8. The base model's plan is
-`plan_of(RunConfig())`, whose `learning_rate_scale` 1.0 is the law's lr.
+neighbour diverged, `fit` raises. The base model's plan is `plan_of(RunConfig())`, whose `learning_rate_scale` 1.0 is
+the law's lr.
 
 **`train/loop.py`.** A step composes `optim.py` (optimizers, weight decay, clip), `schedule.py` (stage, lr),
 `stages.py` (micro-batches in data order) and `model/ops/cross_entropy.py` `step_shares` (micro-batch loss weights).
