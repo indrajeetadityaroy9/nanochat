@@ -57,8 +57,9 @@ class RunConfig:
     muon_tau_scale: float = 1.0     # Muon matrices' tau x scale (their weight decay / scale; train/optim.py)
     # AdamW groups' learning rate x scale, their weight decay / scale (decay timescale held)
     adamw_learning_rate_scale: float = 1.0
-    # output logits cap * tanh(logits / cap); None: no cap (model/modeling.py)
-    final_logit_softcapping: float | None = None
+    # output logits cap * tanh(logits / cap), cap 15 as karpathy/nanochat 92d63d4 gpt.py:511-515; None: no cap
+    # (model/modeling.py)
+    final_logit_softcapping: float | None = 15.0
     num_checkpoints: int = 1        # evenly spaced checkpoints, the final among them; > 1 adds repo_level_start
     generate: str = "parse"         # suite.evaluate's generate: "parse" (ablations) or "benchmarks" (base)
 

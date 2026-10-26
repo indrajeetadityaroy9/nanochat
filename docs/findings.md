@@ -18,7 +18,7 @@ karpathy/nanochat 92d63d4 `gpt.py` with the wins of its experiment log and learn
 | Value embeddings | alternating layers (the last included), added to V behind a per-head gate 2σ(·) of the normed stream, zero init | modded-nanogpt record #14; MoVE LaVE, arXiv 2601.22887 §4.1 Eq. 6 |
 | MLP | ReLU², hidden 4C (SwiGLU worse at d12/d24 in nanochat's log) | nanochat LOG 2026-02-05 |
 | Norms, linears | gain-free RMS norm (eps = FLT_EPSILON), bias-free linears, untied lm_head | modded-nanogpt record #8 |
-| Output | plain cross entropy; optional logit cap c·tanh(z/c) (ablation `logit_softcap`) | Gemma 2; modded-nanogpt |
+| Output | plain cross entropy on logits capped c·tanh(z/c), c = 15 (adopted on the literature, §5.22, §5.24) | Gemma 2; modded-nanogpt; nanochat 92d63d4 |
 | Attention kernel | FlashAttention-4 (CuTe DSL) with document masking (varlen) | — |
 | Vocabulary | 32,768 ids: 256 bytes, 32,508 merges, BOS, three DeepSeek-Coder FIM sentinels | `docs/corpus.md` §5 |
 
@@ -567,3 +567,19 @@ to 0.0007 at d20, with d12-tuned values hurting at d20. Decisions:
   x0_lambdas and resid_lambdas train at the shared AdamW lr, nanochat's at 0.5 and 0.005 × √(B/2^19) (0.375 and
   0.00375 at d16's 294,912 tokens per step), a gap too large to bound the effect from the literature. Adopt iff code
   bpb better than τ×1 seed 0 by > 0.0094 and MBPP+ parsing not worse; a smaller difference is inconclusive.
+
+### 5.24 The output-logit softcap adopted (user) — Oct 26
+LinearCE fused the cap into the scaled-exp linear cross entropy (`e24333d`): tanh on the fp32 accumulator in the
+logits GEMM's epilogue, the tile maximum capped the same way (tanh is increasing), 1 − tanh² folded into the stored
+exponentials, one Triton launch per chunk for the label entry; master's capped path (bf16 capped logits in place, a
+logits-sized derivative buffer, a cross-entropy pass, an autotuned dX GEMM) removed. Exclusive, real d24 micro-batch,
+forward + backward: uncapped 25.30 ms, capped 26.86 (+1.56 ms, 0.58% of the 8K step; op peak 0.80 GiB either way);
+master's path 28.04 → 37.44 ms, 6.14 → 12.14 GiB. FA4's software exp2 polynomial in place of the SFU was slower (+2.9
+to +3.3 ms). Against fp64 on real captures at step 200: mean loss 1.7e-4 (master capped) vs 2.3e-8, per-position
+loss 4.2e-3 vs 9.5e-6, logsumexp 7.8e-4 vs 2.5e-6, dx 5.5e-3 vs 3.1e-3, dW 2.2e-3 vs 8.7e-4; uncapped bitwise
+`067e60b`'s. 10 steps at ×2.797 capped: within max(spread, 1e-3), largest 8.0e-4 at step 9 against master-capped's
+run-to-run ≤ 7e-6 (the more accurate gradient diverging, as the uncapped path's 6.4e-4); the 10-step peak 82.67 →
+71.11 GiB, a cold start 71.11. The user adopted c = 15 at 0.58% (above the 0.3% bar, within the 0.5–0.7% expected;
+the base run trains a fixed token budget, so the cost is ~27 min of ~78 h): `RunConfig.final_logit_softcapping`
+15.0, the `logit_softcap` experiment removed. nanochat's code keeps 15 (`gpt.py:511`); its LOG 2026-03-02 found 20
+marginally best at d24 (val loss −1e-3, one run).

@@ -24,13 +24,13 @@ Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and loo
 | Attention | per-head RMS norm → learned per-dim gain → RoPE over the full head, base 10^6 (`model/config.py` `ROPE_THETA`); SSSL windows (S = 512), last layer full; FlashAttention-4 varlen with document masking |
 | MLP | ReLU², hidden 4C |
 | Residual | `x = resid_lambda·x + x0_lambda·x0` per layer; value embeddings on alternating layers (12 of 24) behind a per-head `2·sigmoid` gate of the normed stream, zero init (gate 1): modded-nanogpt record #14's per-layer tables, MoVE's LaVE (arXiv 2601.22887 §4.1 Eq. 6) |
-| Head | untied `lm_head`, zero init (modded-nanogpt record #8), plain cross entropy, no z-loss; an output-logit softcap only as the D5 ablation's arm (`ModelConfig.final_logit_softcapping`) |
+| Head | untied `lm_head`, zero init (modded-nanogpt record #8), plain cross entropy on the logits capped c·tanh(z/c), c = 15 (`final_logit_softcapping`; karpathy/nanochat 92d63d4 `gpt.py:511-515`; adopted on the literature, `docs/findings.md` §5.22, §5.24), no z-loss |
 | Vocabulary | 2^15 ids (`model/config.py` `VOCAB_SIZE`; BOS and 3 FIM sentinels; `docs/ablations.md`, tokenizer_split_merge) |
 | Parameters | 195,096,576 non-embedding parameters (`layers` + `lm_head`, `num_non_embedding_params`), what the token budget counts; 522,252,336 in all with the token table and 12 value-embedding tables (25,165,824 each) |
 | FLOPs per token | 2.831 GFLOP non-embedding: DeepSeek LLM's M (arXiv 2401.02954 §3.2 Eq. 2), 72·n_layer·d² + 12·n_layer·d·l_seq at the full 8K context (`non_embedding_flops_per_token`) |
 | Init | stream-reading matrices and tables uniform with std C^-½; `o_proj`, `down_proj` (modded-nanogpt record #5), `lm_head`, value-embedding gates zero; resid lambdas and gains 1, x0 lambdas 0 |
 | Precision | fp32 parameters, gradients and optimizer state; bf16 activations and GEMM inputs |
-| Lineage | From nanochat 92d63d4: the block layout, value-embedding layers, MLP and window pattern. Not taken: its smear, backout and logit softcap, QK order (RoPE → norm → ×1.2), short window (a quarter of the context), RoPE base (10^5) and init. The gate is nanochat e85db6b's (2·sigmoid, zero init) read over the full width rather than its first 32 channels; the full-width read is not ablated |
+| Lineage | From nanochat 92d63d4: the block layout, value-embedding layers, MLP, window pattern and logit softcap (c = 15). Not taken: its smear and backout, QK order (RoPE → norm → ×1.2), short window (a quarter of the context), RoPE base (10^5) and init. The gate is nanochat e85db6b's (2·sigmoid, zero init) read over the full width rather than its first 32 channels; the full-width read is not ablated |
 
 ### Basis
 
@@ -261,7 +261,7 @@ then, after logging in again (docker group), each through `scripts/container.sh`
    (`results/tokenizer_split_merge-intrinsic.json`) below 1 means a group
    read in part is too small for it: raise `mixture.SPREAD`, then prepare, curate and publish again on the GB10.
 2. **Recipe ablations and tokenizer decision** (the user's approval): `python run.py experiment=<name>` for
-   `muon_wd_timescale_20tpp`, `logit_softcap`, `muon_wd_timescale_200tpp`, `tokenizer_split_merge`, `adamw_group_lr` (records in `results/<name>.*`; runs in
+   `muon_wd_timescale_20tpp`, `muon_wd_timescale_200tpp`, `tokenizer_split_merge`, `adamw_group_lr` (records in `results/<name>.*`; runs in
    `artifacts/runs/<run_name>/`).
 3. **Adopt the tokenizer**: `python -m ablations.tokenizer_split_merge adopt` writes the decided vocabulary to `CORPUS/tokenizer`
    (over any provisional one); every later step reads it.
@@ -296,8 +296,8 @@ the base model's pre-training; the H100 SXM5 (80 GB) is the measured fallback. W
 - *Memory.* `corpus/mixture.py` `MICRO_BATCH_TOKENS` (98,304: 12 rows at 8K, 3 at 32K) is the most whole rows of both
   contexts whose d24 step fits 80 GB (peak 69.6 GiB [unverified]); on 96 GB it stays, as a larger micro-batch would
   change every run's batch rounding (`schedule.plan`).
-- *Kernels.* Both GPUs are sm_90; QuACK's autotuner picks GEMM tiles by timing, per host, so steps need not be bitwise
-  across hosts [inference].
+- *Kernels.* Both GPUs are sm_90 and run the same fixed QuACK tile configurations (`model/ops/linear.py` `CONFIGS`,
+  measured on the GH200); steps are not bitwise across processes either way (FA4's and the embedding backward's atomics).
 - *ARM64.* `docker/Dockerfile` pins multi-arch index digests; the data order does not depend on the CPU [inference].
   `char` is unsigned on ARM64 and signed on x86, so a MultiPL-E C++ program that depends on it can score differently
   [inference].
@@ -516,7 +516,7 @@ examples in `pack.py`'s format in the mix; the fine-tuned model reported beside 
   trainer); `crate/`, its Rust crate (`native.py`): the SA-BPE trainer (and frequency BPE), repository samples and
   the packer.
 - `ablations/`: one module per experiment, named as it, each with its pre-registered `analysis` (`peak_lr.py`,
-  `tokenizer_split_merge.py` (the tokenizer ablation), `logit_softcap.py`,
+  `tokenizer_split_merge.py` (the tokenizer ablation),
   `adamw_group_lr.py`, `muon_wd_timescale.py`); `contrast.py` (the pre-registered tests and adoption rules they decide
   by), `records.py` (an experiment's records in `results/`).
 - `docs/`: `pretraining.md` (this document), `corpus.md` (the corpus's specification), `ablations.md`.

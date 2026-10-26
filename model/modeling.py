@@ -11,10 +11,10 @@ parameters, arXiv 2309.14322 §3.2.5; a fixed scale costs 0.11% of loss in nGPT,
   embeddings, MoVE's LaVE, arXiv 2601.22887 §4.1 Eq. 6; nanochat e85db6b, whose gate read the stream's first 32
   channels); FlashAttention-4 with document masking.
 - MLP ReLU^2, hidden 4C (LOG 2026-02-05: SwiGLU worse at d12/d24).
-- Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy; an optional
-  output-logit cap c tanh(z / c) (ModelConfig.final_logit_softcapping).
+- Gain-free RMS norm, bias-free linears, untied lm_head (modded-nanogpt record #8), plain cross entropy; the
+  output-logit cap c tanh(z / c) (ModelConfig.final_logit_softcapping; run.py's c = 15 is 92d63d4's).
 Not taken from 92d63d4: its smear and backout, its QK order (RoPE, norm, x 1.2) and its init (init_weights states this
-model's); its logit softcap is optional here.
+model's).
 fp32 parameters, bf16 activations; the GEMM ops multiply by bf16 copies of the weights (GemmLinear), the other ops
 round theirs to bf16. Gradient reductions run in no fixed order (FA4's and the embedding backward's atomic
 accumulation), so gradients are not bitwise reproducible.

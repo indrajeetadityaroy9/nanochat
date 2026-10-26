@@ -89,7 +89,7 @@ approval; proof-of-concept runs for development and verification are allowed, on
 | Training-step throughput (d24 pre-training ≈ 81 h at master's measured 356,259 / 282,256 tok/s, 8K / 32K, before postact; ~85 h at the Oct 24 rates) | GPU-bound (busy 99%). Done: FA4 persistent window forward and bf16 dQ in the window layers (+0.94% d24 8K, +0.72% 32K); master as a whole +5.4% / +3.2% over the Oct 24 profile; the MLP postact saved in the forward with QuACK's dact epilogue (`6299e84`), +1.42% / +1.01% (MFU 0.473 → 0.480), peak 66.4 → 80.9 GB, 200-step loss at ×2.797 −0.0027 (the hand sm_90a relu² GEMMs are bitwise but slower and do not land); NorMuon (`646a986`, −0.08% tok/s, `docs/findings.md` §5.15); fused QKV (C3, +0.77% / +0.85%, warm peak +1.7 GiB, 10-step equivalence passed; one 3C×C dW GEMM rejected, −0.26%); the decoder (`4385748`, 4.35× main at d24, full d16 evaluation 862 s vs 1,064 s, §5.16); the linear cross entropy (`067e60b`, +0.68% / +0.30%, 365,466 / 287,476 tok/s, peak −5.5 GiB, §5.21); fixed QuACK tile configurations in linear.py (`fb86efc`, +0.36% / +0.32%, no run-time autotuning, cold first step 119 → 35 s, §4); FA4's dpsum from the o_proj dX epilogue, FA4's preprocess replaced by `fa4_rows.cu` (`db1e90e`, +0.36% / +0.18%, §5.21). Rejected: split-K dW (only C×C gains, inside the spread); every torch matmul on cuBLASLt with a 16 MiB workspace (−0.53% / −0.40%: it also re-selects Muon's and the other GEMMs) and cuBLASLt at the two 4C dW calls only (−0.09% / −0.03%); Inductor PDL (−0.17% / −0.05%); QK-norm + RoPE in the fused-QKV epilogue (2,065 vs 801 µs per call, §5.21). Open (§5.21): mix + norm beside the down projection (route b), the window-layer attention (WindowAttn); the code audit's last slice (§5.20) | MlpOutMix, WindowAttn |
 | Ablation queue | pruned (user, Oct 26; findings §5.23): D7 stopped after 3 of its 12 runs, the tokenizer ablation and D6's ×¼/×4 arms not run, D5 settled on literature; what remains is the scalar-lr candidate, one d16 run against D7's τ×1 seed 0 (pinned trees `.worktrees/Ablations` `acb1e5e`, `.worktrees/ScalarLr` `61e316a`: the scalar-lr change only). Every run trains at the base recipe's lr: `conf/run.yaml` sets `learning_rate_scale: ${lr_multiplier:}` (`269e671`) | Ablations-2 |
 | D7 Muon τ | stopped (user, Oct 26): τ×½ seeds 0, 1 and τ×1 seed 0 trained (a sanity check, no decision); the τ law stays for Muon on arXiv 2512.05620 §H.3, §H.5 and 2509.02046 Table 4 (findings §5.23); ~3.7 GPU-h saved | done |
-| D5 softcap | not run (user, Oct 26; findings §5.22): the design detects only > 0.0047 bpb, the literature-sized effect is ≈ 0.002. Cap 15 adopted on literature iff the training loss's softcap costs ≤ 0.3% of the 8K step and the cold peak stays ≤ 93 GiB (LinearCE's bench; master's path holds a second ≈ 6 GiB logits buffer) | LinearCE's bench |
+| D5 softcap | adopted (user, Oct 26; findings §5.22, §5.24): c = 15 on literature, `RunConfig.final_logit_softcapping` 15.0 by default; the cap fused into the linear cross entropy (`e24333d`: +1.56 ms per micro-batch, 0.58% of the 8K step, no extra memory; master's old path, 3.5% and +6 GiB, removed); `logit_softcap` experiment removed | done |
 | Tokenizer ablation | not run (user, Oct 26; findings §5.23): sa-bpe stays, its corpus already tokenized and packed (`CORPUS/tokenizer`, the provisional copy; the base plan fits); ~6.7 GPU-h and the adopt, tokenize, pack step saved | done |
 | D6 AdamW-group lr | ×¼/×4 arms not run (user: only the scalar-lr arm, one candidate run); the scalar-lr candidate: adopt iff code bpb better than D7's τ×1 seed 0 by > 0.0094 and MBPP+ parsing not worse | Ablations-2 |
 | Base model pre-training | `experiment=pretrain` (d24, sa-bpe, the decided recipe) | the scalar-lr result, the softcap bench; its own user approval |
@@ -113,8 +113,8 @@ Order: the scalar-lr candidate run → its decision, the softcap bench's → the
 | D10 | **Last step's lr is 1/(steps − 40) of peak, not 0** (`lr_multiplier`; 1.44e-5 at D1's plan) | doc fix / make the last step 0 | negligible |
 | D11 | **`plan` truncates `int(ratio * params)`**: 86,974 steps at the exact ratio, 86,975 at max_ratio's bisected ratio | keep (mixture.STEPS matches the bisected run) | none |
 
-**Status: §0.** Every row above is decided (D8: keep 0.30; D5: cap 15 on literature, pending its overhead bench; D7:
-the τ law on literature) except D6's scalar-lr arm, one run in the queue.
+**Status: §0.** Every row above is decided (D8: keep 0.30; D5: cap 15, adopted on literature; D7: the τ law on
+literature) except D6's scalar-lr arm, one run in the queue.
 
 ## 2. Refactor slices: integration
 
@@ -235,7 +235,7 @@ nGPT (arXiv 2410.01131 App. A.9 Table 5): fixing the normalized q/k scale costs 
 Gemma 3 and OLMo 2 learn it; per-head QK norm with learnable parameters in arXiv 2309.14322 §3.2.5. Resolving the
 ~0.0006 bpb effect would take ~247 seeds per arm: no ablation.
 
-### D5 output-logit softcap (ArchitectureAnswers): ablation, before the tokenizer runs
+### D5 output-logit softcap (ArchitectureAnswers): adopted on the literature (user, Oct 26; §0, findings §5.24)
 - The old reason was wrong: QK norm "does not solve the problem of logit shift in the final softmax" (Chameleon,
   arXiv 2405.09818 §2.3). z-loss not needed: weight decay mitigates output-logit divergence (arXiv 2309.14322 §3.1.2),
   `lm_head` is decayed, and no lr-sweep run diverged up to ×8. Softcap evidence is small and single-run
@@ -336,9 +336,9 @@ ResFormer (which reuses the first layer's values); LaVE gains 0.016/0.010/0.010 
   `679e7d9`), `config.run_tag`'s hashed tags, `suite.export`, the `variant` record field, peak_lr.py's driver and the tokenizer
   ablation's `runs` verb. `run.py`'s `RunConfig` defaults are the base model's recipe (num_hidden_layers 24,
   tokens_per_param null = `train/stages.py` max_tokens_per_param, seed 0, tokenizer corpus, scales 1.0,
-  final_logit_softcapping null); `conf/run.yaml` composes them (the
+  final_logit_softcapping 15.0); `conf/run.yaml` composes them (the
   `run_schema` ConfigStore node) with an experiment and Hydra's settings; `conf/experiment/<name>.yaml` sweeps fields
-  against them (pretrain, tokenizer_split_merge, logit_softcap, adamw_group_lr, muon_wd_timescale_20tpp/200tpp).
+  against them (pretrain, tokenizer_split_merge, adamw_group_lr, muon_wd_timescale_20tpp/200tpp).
 - A run's name (`run_name`) is the fields differing from the defaults, sorted, `k=v` joined by `,` (e.g.
   `num_hidden_layers=16,seed=1,tokenizer=sa-bpe`; `defaults` if none); a run shared by two experiments is one run.
   Everything of it is in `artifacts/runs/<run_name>/`: `.hydra/`, `metrics.jsonl` (its run record holds `config` and

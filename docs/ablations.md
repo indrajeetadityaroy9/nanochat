@@ -9,7 +9,6 @@ approval. The corpus and its dataset: `docs/corpus.md`.
 |---|---|---|---|---|
 | `peak_lr` | the base model's peak lr multiplier | d8 at 5 and 200, d24 at 5 | 11 | done |
 | `muon_wd_timescale_20tpp` | Muon's weight-decay timescale (at 20) | d16 at 20, sa-bpe data | 3 × 2 seeds | stopped after 3 runs (user: the τ law on literature; `docs/findings.md` §5.23) |
-| `logit_softcap` | output-logit softcap | d16 at 20, sa-bpe data | 2 × 4 seeds | not run (user: cap 15 on literature, pending its overhead bench; `docs/findings.md` §5.22) |
 | `muon_wd_timescale_200tpp` | Muon's timescale law (with the 20 result) | d8 at 200, corpus tokenizer's data | 3 × 2 seeds | not run (user; §5.23) |
 | `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | intrinsic and data done; runs not run (user: sa-bpe stays; §5.23) |
 | `adamw_group_lr` | the AdamW groups' lr | d16 at sa-bpe's `max_tokens_per_param` | 3 × 2 seeds (× 1 shared) | ×¼/×4 not run; the scalar-lr arm runs once (user) |
@@ -133,19 +132,6 @@ decoupled-decay optimizers), AdamW's untouched (`muon_tau_scale`).
 stays for Muon; else Muon's own law through both points, τ* = c·TPP^e with c = `TAU_C`·m_20·20^-D, e = `TAU_E` + D,
 D = ln(m_200/m_20)/ln 10. The two points' depths differ, so the law takes m as independent of depth between d8 and d16
 (Power Lines' τ is a function of TPP alone, arXiv 2505.13738 §2.3).
-
-**State.** Waits.
-
-## logit_softcap
-
-**Varies.** The output logits capped at c = 15 (`final_logit_softcapping`; karpathy/nanochat 92d63d4 `gpt.py:511-515`;
-modded-nanogpt record #18 "lowers that to 15") against none.
-
-**Arms.** {none, 15} × seeds 0–3, d16 at 20 tokens per parameter (Chinchilla, arXiv 2203.15556 Table 3) on the sa-bpe
-arm's data, at the default `learning_rate_scale`, the base model's multiplier (the cap's published effect is a
-high-lr one).
-
-**Rule.** Adopt c = 15 iff `adopted`; else no cap (equal keeps none: the cap costs the loss, eval and decoder paths).
 
 **State.** Waits.
 
