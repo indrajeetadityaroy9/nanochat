@@ -1,7 +1,7 @@
 # Pre-training a code base model on one GH200
 
-A Python and C++ code-generation base model pre-trained on one NVIDIA Hopper GPU (sm_90: the GH200's, or an H100 80 GB
-SXM5) at the most tokens its data holds without any stage reading a document twice. The code is the specification;
+A Python and C++ code-generation base model pre-trained on one NVIDIA GH200 (its Hopper GPU, sm_90) at the most
+tokens its data holds without any stage reading a document twice. The code is the specification;
 this document states each decision, its basis (a cited result, a measurement, or the law it is derived from) and the
 file that defines it. Two companion documents own their parts, and this one links to them:
 
@@ -10,10 +10,10 @@ file that defines it. Two companion documents own their parts, and this one link
 
 Numbers come from the code, from `results/`, or are derived from them [arithmetic]; measurements are cited to
 `docs/findings.md` (its section and commit), which also holds each design decision's evidence ("Design decisions",
-D1–D11). Measurements whose records were not kept (the pre-launch measurements of 2026-10-19 to 2026-10-22, mostly on
-an H100 80GB HBM3 SXM5 at its 700 W cap) are marked [unverified]. Terminology follows DeepSeek-Coder: the base model,
-its pre-training, an ablation's baseline; names in code follow Hugging Face's (`ModelConfig`, `num_hidden_layers`,
-`hidden_size`, `CausalLM`, `DecoderLayer`, `self_attn`, `q/k/v/o_proj`, `up/down_proj`, `checkpoint-<N>.pt`).
+D1–D11). Figures whose records were not kept are marked [unverified]. Terminology follows DeepSeek-Coder: the base
+model, its pre-training, an ablation's baseline; names in code follow Hugging Face's (`ModelConfig`,
+`num_hidden_layers`, `hidden_size`, `CausalLM`, `DecoderLayer`, `self_attn`, `q/k/v/o_proj`, `up/down_proj`,
+`checkpoint-<N>.pt`).
 
 ## Model
 
@@ -40,8 +40,7 @@ Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and loo
 - **Value embeddings, kept** (decided from the literature; `docs/findings.md` "Design decisions", Value embeddings):
   per-layer token-indexed tables are modded-nanogpt record #14's and MoVE's LaVE (arXiv 2601.22887 §4.1 Eq. 6), not
   ResFormer's first-layer value reuse; LaVE gains 0.016, 0.010 and 0.010 at D12, D20 and D32 (Table 1), ≈ −0.014
-  extrapolated to d24 in MoVE's coordinates [inference], against 4.7% of the d24 step [unverified]. No reference code
-  model has them.
+  extrapolated to d24 in MoVE's coordinates [inference]. No reference code model has them.
 - **Learnable QK gains, kept** (D4): fixing the normalized q/k scale costs 0.11% of loss (nGPT, arXiv 2410.01131
   App. A.9 Table 5); per-head QK norm with learnable parameters in arXiv 2309.14322 §3.2.5; an effect this small is
   below what an affordable seed count resolves, so it is not ablated (`docs/findings.md` "Design decisions", D4).
@@ -63,8 +62,8 @@ Qwen3's QK norm and learnable gains. Each layer mixes x0 into the stream and loo
     6.4e5), large from the start as Llama 3 (arXiv 2407.21783 §3.2); Barbero et al. (arXiv 2410.06205 Table 2) find
     10k against 500k at 8K within 0.3%, of mixed sign; Qwen2.5-Coder instead raises 10^4 to 10^6 at its repository
     stage (arXiv 2409.12186 §3.2.2).
-- **Not adopted:** Block Attention Residuals (a published 1.1% loss gain at 194M parameters, arXiv 2603.15031; +12% d24
-  step time [unverified]), the partial key offset (modded-nanogpt record #49), either of which would need a native
+- **Not adopted:** Block Attention Residuals (a published 1.1% loss gain at 194M parameters, arXiv 2603.15031), the
+  partial key offset (modded-nanogpt record #49), either of which would need a native
   decode path; multi-token prediction, reported to hurt models of this size on code benchmarks (arXiv 2404.19737).
 
 ### Against the reference code models
@@ -187,15 +186,13 @@ Ops in `model/ops/`, CUDA sources in `model/kernels/` (built on first use by `na
 | Decoding | `model/kernels/decode.cu` (`inference/decoder.py`): batched native decoder for the code benchmarks |
 
 Measured choices (d24 tok/s A/Bs: GH200 at 700 W, exclusive, 25 steps after 8 warm-up, median; cited to
-`docs/findings.md` by section and commit; figures not in `docs/findings.md` are [unverified]: `torch.profiler` and
-CUDA-graph timings whose records were not kept):
-- **cuBLAS for the fp32 weight gradients** [unverified]: dYᵀX has a small output (768 × 768 or 768 × 3,072) and K =
-  98,304; QuACK's split-K-1 tiles left most SMs idle (c_q/c_k/c_v/c_o dW 0.544 against 0.191 ms, relative error vs
-  fp64 2.3e-4 against 1.8e-5). Split-K dW, every torch matmul on cuBLASLt with a 16 MiB workspace (−0.53% / −0.40%)
-  and DeepGEMM's dW (2× slower than cuBLAS here) were rejected (`docs/findings.md` §5.19).
-- **`model/kernels/qk_prologue.cu`** rather than Inductor's fusion of the PyTorch ops: the d24 step 3,792 against
-  3,890 ms [unverified]; its per-position forward +0.3% (`62b50c2`, §5.10); micro-batches of 98,304 tokens rather
-  than 65,536 (1% faster per token) [unverified].
+`docs/findings.md` by section and commit):
+- **cuBLAS for the fp32 weight gradients**: dYᵀX has a small output (768 × 768 or 768 × 3,072) and K = 98,304;
+  QuACK's split-K dW is slower than cuBLAS (`docs/findings.md` §5.10), and on the C × C dW torch.mm reaches 662
+  TFLOP/s against DeepGEMM's 295–315; split-K dW, every torch matmul on cuBLASLt with a 16 MiB workspace (−0.53% /
+  −0.40%) and DeepGEMM's dW were rejected (§5.19).
+- **`model/kernels/qk_prologue.cu`** (q/k norm, gain and RoPE, one pass per direction): its per-position forward
+  250.3 → 183.6 µs per call, +0.3% end to end (`62b50c2`, §5.10).
 - **Fixed QuACK tile configurations** (`CONFIGS`, the lowest mean of three runs of QuACK's own benchmark per width)
   rather than its per-process autotuner: +0.36% / +0.32% at 8K / 32K, a cold first step 119 → 35 s, every op output
   bitwise (`fb86efc`, §4).
@@ -207,12 +204,10 @@ CUDA-graph timings whose records were not kept):
   memory 61.8 → 75.3 GiB at 8K, 61.7 → 75.2 at 32K; dW of the down projection now uses the forward's activation (relu²
   of the fp32 pre-activation, rounded once) rather than relu² of the bf16 pre-activation; 200-step loss at the base
   recipe's lr last-100 −0.0027 (same-seed noise 0.005 at ×1).
-- **FlashAttention-4** rather than cuDNN 9.26 [unverified]: forward + backward 1.47 against 4.96 ms at window 512,
-  1.83 against 5.85 ms at 8,192 (d8 shapes); its full-context layers use the causal kernel (`window = None`), 1–2%
-  faster than the local kernel at window T, outputs bitwise equal. FA4 on the real segments rather than the loader's
-  padded `cu_seqlens`
-  (`a81410c`, with Muon's batched Newton–Schulz: d24 8K −5.3% step time): losses bitwise, gradients within
-  run-to-run spread.
+- **FlashAttention-4** rather than cuDNN attention (slower than FA4 at every shape measured, §5.10); its full-context
+  layers use FA4's causal kernel (`fa4_window_left`: a window spanning T is plain causal attention). FA4 on the real
+  segments rather than the loader's padded `cu_seqlens` (`a81410c`, with Muon's batched Newton–Schulz: d24 8K −5.3%
+  step time): losses bitwise, gradients within run-to-run spread.
 - **FA4 window layers persistent, with bf16 dQ** (`0e627ff`, §4, §5.11): 8K
   344,967 → 348,218 (+0.94%; the persistent forward alone +0.32%), 32K 276,538 → 278,524 (+0.72%); a window dQ element
   sums at most 5 bf16 partials (norm rel 2.45e-3 vs fp32 accumulation), full layers (64–256 partials) keep fp32;
@@ -225,8 +220,7 @@ CUDA-graph timings whose records were not kept):
 - **QuACK's scaled-exp linear cross entropy** over GEMM + cross-entropy pass + two gradient GEMMs (`067e60b`, §5.21):
   8K 362,988 → 365,466 (+0.68%), 32K 286,619 → 287,476 (+0.30%), peak memory 76.99 → 71.44 GiB; per call on a real
   micro-batch 26.6–27.1 → 24.2 ms; loss, logsumexp and dW closer to fp64 than the bf16-logit path (it reads the fp32
-  accumulators). Earlier, ours over QuACK's chunked linear cross entropy (29.2 against ≥ 31.4 ms at d8)
-  [unverified]. The cap in the same pipeline (`e24333d`, §5.24): +1.56 ms per micro-batch over the uncapped op
+  accumulators). The cap in the same pipeline (`e24333d`, §5.24): +1.56 ms per micro-batch over the uncapped op
   (0.58% of the 8K step), op peak unchanged (0.80 GiB), against +9.4 ms and +6 GiB for the removed bf16-logit path's
   two logits-sized passes; FlashAttention-4's FMA-pipe exp2 polynomial in place of the MUFU ex2 +2.9–3.3 ms.
 - **FA4's dpsum from `o_proj`'s dX epilogue**, FA4's preprocess replaced by `fa4_rows.cu` (`db1e90e`, §5.21): +0.36%
@@ -244,8 +238,7 @@ CUDA-graph timings whose records were not kept):
   RMS norm in the next GEMM and dW accumulation in the GEMM as separate items (each ≤ 1% realizable); Liger and Cut
   Cross-Entropy losses, fused RMSNorm/RoPE libraries, DCP checkpointing.
 
-**The d24 step.** On the H100 SXM5, 12 micro-batches, 3,741 ms (GEMM 53%, FA4 25%, Inductor 14%; peak 69.6 GiB)
-[unverified]; on the GH200 the GEMMs run at the 700 W power cap's ceiling (703 of 989 dense bf16 TFLOP/s,
+**The d24 step.** On the GH200 the GEMMs run at the 700 W power cap's ceiling (703 of 989 dense bf16 TFLOP/s,
 `docs/findings.md` "Design decisions", E3). Master's latest measured rates: 365,466 / 287,476 tok/s at 8K / 32K
 (`067e60b`, §5.21), the cap +0.58% of the 8K step on top (§5.24); the 10-step peak 71.11 GiB, a cold start the same
 (§5.24).
@@ -299,7 +292,7 @@ On the GB10, once (the dataset is constant afterwards):
 3. **Publish**: `python -m corpus.publish push` writes the card, replaces the dataset's tree and squashes its
    history into one commit (the card turns the Hub's viewer off).
 
-On a fresh Lambda `gpu_1x_gh200` (Ubuntu with Docker and the NVIDIA driver; the H100 SXM5 runs the same image):
+On a fresh Lambda `gpu_1x_gh200` (Ubuntu with Docker and the NVIDIA driver):
 
 ```bash
 git clone https://github.com/indrajeetadityaroy9/nanochat nanochat && cd nanochat
@@ -343,43 +336,31 @@ and a resumed run read them.
 ### Hardware
 
 The GH200 (one H100 GPU with 96 GB HBM3, 64 Neoverse-V2 cores, 525 GB of memory) is the host of the ablations and
-the base model's pre-training; the H100 SXM5 (80 GB) is the measured fallback. What the code depends on:
+the base model's pre-training. What the code depends on:
 
 - *Power.* The GPU's enforced limit is 700 W, set outside the VM (`nvidia-smi -pl 900` is accepted but not enforced),
   and the GH200 module (Grace + Hopper + memory) shares a 1,000 W budget with the CPU (888–910 W drawn with the CPU
   busy), so no heavy CPU job runs beside a measured run (`docs/findings.md` §4, "Design decisions", E1).
   `scripts/setup.sh` locks the SM clock at the GPU's maximum (1,980 MHz on the GH200; reset by a reboot), speed only,
   not numerics (E2).
-- *Memory.* `corpus/mixture.py` `MICRO_BATCH_TOKENS` (98,304: 12 rows at 8K, 3 at 32K) is the most whole rows of both
-  contexts whose d24 step fits 80 GB (74.5 GiB) [inference]: master's 8K peak is 71.11 GiB, warm and cold
-  (`docs/findings.md` §5.24); on 96 GB it stays, as a larger micro-batch would change every run's batch rounding
-  (`schedule.plan`).
-- *Kernels.* Both GPUs are sm_90 and run the same fixed QuACK tile configurations (`model/ops/linear.py` `CONFIGS`,
-  measured on the GH200); steps are not bitwise across processes either way (FA4's and the embedding backwards'
-  atomics). Every kernel builds for sm_90a (`native.cuda_library`).
+- *Memory.* `corpus/mixture.py` `MICRO_BATCH_TOKENS` (98,304: whole rows of both contexts, 12 at 8K and 3 at 32K):
+  master's d24 peak is 71.11 GiB at 8K, warm and cold (`docs/findings.md` §5.24), of the GPU's 96 GB; a larger
+  micro-batch would change every run's batch rounding (`schedule.plan`).
+- *Kernels.* The GPU is sm_90 and QuACK runs fixed tile configurations (`model/ops/linear.py` `CONFIGS`, measured on
+  the GH200); steps are not bitwise across processes (FA4's and the embedding backwards' atomics). Every kernel builds
+  for sm_90a (`native.cuda_library`).
 - *ARM64.* `docker/Dockerfile` pins multi-arch index digests; the data order does not depend on the CPU [inference].
   `char` is unsigned on ARM64 and signed on x86, so a MultiPL-E C++ program that depends on it can score differently
   [inference].
 - *Evaluation is where the CPU counts:* its pools are sized by `os.cpu_count()`.
 
-## Pre-launch verification
+## Verification against fp64
 
-**The model against its specification** [unverified: 2026-10-20 at `7faf11f`, before D1 and the kernels above; records
-not kept]. Each op and the whole model against fp64 restatements written from the Model table, forward and backward,
-on the GB10 (sm_121) and an H100 (SM90); relative error:
-
-| Check | GB10 | H100 |
-|---|---|---|
-| GEMMs and ReLU² (fp32 weight gradients) | 3.7e-3 (4.4e-6) | 3.7e-3 (4.4e-6) |
-| q/k prologue (gain gradients) | 1.7e-3 (1.5e-7) | 1.7e-3 (2.0e-7, bitwise repeatable) |
-| FA4 output and gradients | 3.6e-3 | 3.6e-3 |
-| FA4 window boundary: worst row, against either off-by-one | 2.7e-3 against 1.0–2.3 | 2.7e-3 against 1.06–2.20 |
-| FA4 without the document mask | 4.1 | 4.2 |
-| Cross entropy | 1.7e-3 | 1.7e-3 |
-| Whole model (4 × 256, every component perturbed to matter): per-position loss | 5.0e-3 | 5.2e-3 mean, 2.5e-2 max |
-| Restatements each breaking one rule (no x0, σ gate, no value embeddings, RoPE +θ, no document mask) | 5.1e-2–1.5e-1 | 4.4e-2–1.5e-1 |
-| Gradients | 1.7e-2 | 2.1e-2 |
-| Native decoder: greedy tokens the forward's argmax, the rest within | 499 of 512, 0.014 of its maximum logit | 502 of 512, 0.015 |
+Kernel landings since the fused q/k/v projection carry an op check (against an fp64 reference, or bitwise against
+master's op for the fixed tiles `fb86efc`) and a 10-step run at ×2.797 against master's run-to-run spread
+(`docs/findings.md` §4, §5.21, §5.24). The model's gradients against an fp64
+restatement in plain PyTorch (4 layers, C 768, 2 × 2,048 tokens; its fp32 run 2e-6 from it): per-parameter relative
+error median 1.17e-2, max 1.96e-2 at `70025d8`, against 1.18e-2 / 1.95e-2 before it: bf16 rounding (§4).
 
 ## Evaluation
 

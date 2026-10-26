@@ -3,8 +3,8 @@
 One entry per agent execution: the question, the method, the measured outputs and the conclusion, with the commits
 that carry it. §1–§4 state the model, training, evaluation and hardware setup as built (master `c265fdd`); "Design
 decisions and their evidence" holds each design choice with its evidence; §5 is the execution log, newest last.
-Numbers are measurements on the GH200 (one H100 96 GB, 72 Grace cores) on the real corpus unless marked [estimate];
-derived numbers (parameter counts, FLOPs, plans) are computed from master's code on CPU.
+Numbers are measurements on the GH200 (one H100 96 GB, 64 Neoverse-V2 cores) on the real corpus unless marked
+[estimate]; derived numbers (parameter counts, FLOPs, plans) are computed from master's code on CPU.
 
 ## 1. Model architecture (as built, `model/modeling.py`)
 
