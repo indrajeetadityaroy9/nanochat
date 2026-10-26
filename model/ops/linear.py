@@ -33,10 +33,11 @@ tensor is never stored.
   dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h; the row sum is a reduce of the dact epilogue, the rest the
   dX GEMM's epilogue (C = dy, h a tile load).
 - nanochat::relu2_mlp_mix: relu2_mlp plus the next layer's mix x = resid_lambda h' + x0_lambda x0 in the down
-  projection's epilogue (residual_mix: TileKernels mhc/pre_big_fuse_cuda.py's mix beside the GEMM), so the stream is
-  read once more by the norm (quack.rmsnorm) instead of the GEMM's h' and the embedding being re-read by an Inductor
-  mix + norm pass. Its backward is the mix and norm backward as PyTorch ops (Inductor fuses them, x recomputed from h'
-  and x0 as before), then relu2_mlp's."""
+  projection's epilogue (residual_mix; TileKernels mhc/pre_big_fuse_cuda.py: the mix beside the GEMM), which stores
+  x instead of h'; the next layer's norm then reads x once (quack.rmsnorm). Before, the GEMM stored h' and an Inductor
+  pass read h' and the embedding to write x and the norm: 1 E (one (M, C) bf16 tensor) less per layer. Its backward is
+  the mix and norm backward as PyTorch ops (Inductor fuses them; resid_lambda's gradient takes h' from x), then
+  relu2_mlp's."""
 import torch
 from cutlass import Float32
 from cutlass._mlir.dialects import llvm
@@ -79,6 +80,10 @@ CONFIGS: dict[str, dict[int, GemmConfig]] = {
     "up": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(128, 192, 2, 1, swap_ab=True),
            768: sm90(128, 192, 1, 2)},
     "down": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 1, 2)},
+    # relu2_mlp_mix's down projection (residual_mix: x0 loaded, x stored). 768: the lowest of 50 interleaved single
+    # calls among 5 tiles (MlpOutMix bench8, Oct 26: 574 us; the down pin 607 us); 256, 512: the down pins.
+    "down_mix": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(192, 128, 1, 2),
+                 768: sm90(128, 208, 2, 1, swap_ab=True)},
     "down_dx": {256: sm90(128, 256, 2, 1, pingpong=False), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 2, 1)},
     "up_dx": {256: sm90(128, 128, 1, 2), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 1, 2)},
 }
@@ -282,7 +287,7 @@ def relu2_mlp_mix(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: T
     h2, C = h.reshape(-1, h.shape[-1]), h.shape[-1]
     preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True,
                                     config=config("up", C, h), tuned=False)
-    x = residual_mix(postact, w_down.t(), h2, x0=x0.reshape(h2.shape), lr=lr, lx=lx, config=config("down", C, h),
+    x = residual_mix(postact, w_down.t(), h2, x0=x0.reshape(h2.shape), lr=lr, lx=lx, config=config("down_mix", C, h),
                      tuned=False)["D"]
     n, _, rstd_x = rmsnorm_fwd(x, eps=EPS, store_rstd=True)
     return x.view(h.shape), n.view(h.shape), rstd_x, preact, postact
