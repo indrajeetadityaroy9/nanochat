@@ -444,10 +444,12 @@ step 0's diagnostics bitwise equal to master's; −38 lines), `646a986` train/op
 path, the rehead path, `NORM_WARPS` 4 → 2 derived from residency, every remaining launch constant measured or ISA).
 Per-file tables filed: RunAudit, EarlierAudit, CorpusAudit, VeCeKernel, OptAdopt (all of train/), DecoderOwner;
 GemmOwner's linear.py change with `6299e84` (its hand GEMM kernels did not land, so there is nothing to audit); the
-attention files (C3Lander, AttnOwner's tables) with C3's commit. Integration check: a d8 run end to end through `run.py` at
-`300eca3` at ×1, exit 0 in every phase, code bpb 2.6977 against 2.7011–2.7013 at the pre-kernel commits; the four
-numerics-changing kernel commits since (B1, the gate, C1, bf16 dQ) were each verified at d24 [inference: the
-−0.0035 not attributed among them]. Noted, unchanged: `stack_edu_python`'s published row groups
+attention files (C3Lander, AttnOwner's tables) with C3's commit. Integration check: a d8 run end to end through
+`run.py` at `300eca3` at ×1 (46 steps, tokens_per_param 0.31, sa-bpe), exit 0 in every phase, code bpb 2.69765 and
+last loss 6.1464, reproducing the two earlier runs of the same plan (E2EMetrics 2.69771 / 6.1463, RenameGPU 2.69771
+/ 6.1462) to 6e-5: the kernel and audit commits changed nothing measurable here. The 2.7011–2.7013 cited in ACTIONS
+for `d0a2ec0`, `9ea5037` and `860ac7b` came from a configuration not recorded with them (an earlier "−0.0035"
+attribution to kernel numerics was wrong). Noted, unchanged: `stack_edu_python`'s published row groups
 (~64,920 rows) are below the 65,536 the current curate writes, so an older version wrote them — tokens do not depend
 on row grouping (three shards re-cut at 122,880 rows tokenize identically).
 
@@ -460,3 +462,10 @@ and norm beside the down projection (MlpOutMix; ≤ 58, floor 15); the linear cr
 measured on an older base); Inductor's PDL setting and FA4's dpsum from the o_proj dX epilogue (PdlDpsum; ≤ 13 and
 ~15 ms/step). Ablations as GPU backfill (user): the queue runs from `646a986` one run at a time (Ablations-2), so an
 exclusive A/B waits at most one d16 run; the tokenizer ablation's pre-run data are already complete (`df62b22`).
+Deterministic GEMM selection (QuackPin): every training GEMM runs QuACK with tuned=True, whose autotuner times the
+candidate configs per shape on first use and caches the winner (QUACK_CACHE_DIR/…/gemm_tuned.autotune.json), so the
+kernel, and with it the bf16 rounding, is chosen by timing noise among near-ties, the same reason the repository keeps
+Inductor's coordinate-descent tuning off; a cold cache also sets d24 8K's memory peak (88.7 GiB vs 75.1 warm, of 95.6)
+and a 128–180 s first step. Planned: prove it with two cold-cache runs, then QuACK's default config or a pinned
+measured config per call and shape, landed if throughput is within 0.1%; an fp64-referenced gradient check settles
+whether C3's 4e-3–2e-2 single-step gradient difference from the pre-C3 tree is rounding.
