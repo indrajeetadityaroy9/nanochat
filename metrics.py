@@ -59,8 +59,9 @@ lines and spans of one HumanEval problem); 95% intervals by the normal quantile 
 
 Hardware (model_flops_per_token, executed_model_flops, mfu, latency): model FLOPs utilization (PaLM, arXiv 2204.02311
 App. B: 6N + 12 L H Q T per token, 2 FLOPs per multiply-add, rematerialization not counted) at the GPU's dense BF16
-peak, N the matmul parameters. Nominal (model_flops_per_token): each layer's T the keys a query can attend,
-min(window, context), without the causal halving (torchtitan quadratic_attention_flops_per_token). Executed
+peak, N the matmul parameters. Nominal (model_flops_per_token): each layer's T the most keys a query attends, itself
+and up to its window before it, min(window + 1, context), without the causal halving (torchtitan
+quadratic_attention_flops_per_token). Executed
 (executed_model_flops): the keys each query attends within its segment (cu_seqlens: a document, a FIM example, a row's
 padding) and window, causally, the work FlashAttention does (Megatron-LM num_floating_point_operations' causal and
 per-document counting); torch.utils.flop_counter counts the same once each custom op registers its formula, but per
@@ -341,11 +342,12 @@ def summary(scores: ArrayLike, clusters: ArrayLike | None = None) -> dict:
 PEAK_FLOPS = 989.4e12
 
 
-def model_flops_per_token(*, matmul_params: int, hidden_size: int, attended: Sequence[int]) -> int:
+def model_flops_per_token(*, matmul_params: int, hidden_size: int, windows: Sequence[int], context: int) -> int:
     """Nominal training FLOPs per token (forward and backward) of PaLM's MFU: 6 x the matmul parameters (decoder
-    layers' and lm_head's weights; embedding tables are lookups, norm gains elementwise) + 12 hidden_size per attended
-    key per layer, `attended` each layer's keys a query can attend (min(window, context))."""
-    return 6 * matmul_params + 12 * hidden_size * sum(attended)
+    layers' and lm_head's weights; embedding tables are lookups, norm gains elementwise) + 12 hidden_size per key per
+    layer, each layer's most keys a query attends: itself and up to `window` keys before it (model/modeling.py
+    layer_windows, as attended_keys counts them) within the context, min(window + 1, context)."""
+    return 6 * matmul_params + 12 * hidden_size * sum(min(window + 1, context) for window in windows)
 
 
 def attended_keys(lengths: np.ndarray, window: int) -> int:

@@ -57,14 +57,15 @@ QK-norm weights. Each random tensor draws from a generator seeded by seed·2^32 
 **Counts** (`num_non_embedding_params`: decoder layers + `lm_head`, what the token budget scales with,
 `docs/training.md` §2; `num_matmul_params`: every 2-D weight but the tables, PaLM's N; M:
 `non_embedding_flops_per_token`, DeepSeek LLM's 72·n_layer·C² + 12·n_layer·C·l_seq, arXiv 2401.02954 §3.2 Eq. 2,
-windowed layers counted as full; nominal: `metrics.model_flops_per_token`, 6N + 12·C·Σ_layers min(window, context),
-defined in `docs/evaluation.md` §5). Recomputed on CPU from `model/modeling.py` on the meta device [arithmetic]:
+windowed layers counted as full; nominal: `metrics.model_flops_per_token`, 6N + 12·C·Σ_layers min(window + 1,
+context), each layer's most keys a query attends, itself included; defined in `docs/evaluation.md` §5). Recomputed
+on CPU from `model/modeling.py` on the meta device [arithmetic]:
 
 | Model | Layers | C | Heads | VE tables | Non-embedding | Matmul N | All | M at 8K (32K) | Nominal at 8K (32K) |
 |---|---|---|---|---|---|---|---|---|---|
-| d8 | 8 | 256 | 2 | 4 | 14,684,160 | 14,682,112 | 56,627,216 | 239,075,328 (843,055,104) | 147,861,504 (298,856,448) |
-| d16 | 16 | 512 | 4 | 8 | 67,129,344 | 67,125,248 | 218,124,320 | 1,107,296,256 (3,523,215,360) | 641,826,816 (1,245,806,592) |
-| d24 (base) | 24 | 768 | 6 | 12 | 195,096,576 | 195,090,432 | 522,252,336 | 2,831,155,200 (8,266,973,184) | 1,708,462,080 (3,067,416,576) |
+| d8 | 8 | 256 | 2 | 4 | 14,684,160 | 14,682,112 | 56,627,216 | 239,075,328 (843,055,104) | 147,879,936 (298,874,880) |
+| d16 | 16 | 512 | 4 | 8 | 67,129,344 | 67,125,248 | 218,124,320 | 1,107,296,256 (3,523,215,360) | 641,900,544 (1,245,880,320) |
+| d24 (base) | 24 | 768 | 6 | 12 | 195,096,576 | 195,090,432 | 522,252,336 | 2,831,155,200 (8,266,973,184) | 1,708,627,968 (3,067,582,464) |
 
 At d24 the 6,144 non-embedding parameters outside N are the QK-norm gains; "all" adds the token table and 12
 value-embedding tables (25,165,824 each) and the 48 lambdas [arithmetic].

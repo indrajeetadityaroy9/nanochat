@@ -85,8 +85,7 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
     def model_flops_per_token() -> int:
         """PaLM's nominal model FLOPs per token at the model's stage (metrics.model_flops_per_token)."""
         return metrics.model_flops_per_token(matmul_params=matmul_params, hidden_size=hidden_size,
-                                             attended=[min(w, model.config.max_position_embeddings)
-                                                       for w in model.window_sizes])
+                                             windows=model.window_sizes, context=model.config.max_position_embeddings)
 
     metrics.append(run_name, {"kind": "run", "step": start_step, "plan": asdict(run), "seed": seed, "config": config,
                               "data_key": tokenizer.data_key, "model": asdict(model.config),
