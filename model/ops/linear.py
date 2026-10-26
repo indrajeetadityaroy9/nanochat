@@ -31,16 +31,25 @@ tensor is never stored.
   gets no gradient of its own): with P = h W_up^T, preact = rstd P and dpreact from relu^2's derivative,
   dP = rstd dpreact, d rstd = sum(dpreact preact) / rstd and d rstd/dh = -rstd^3 h / C, so
   dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h; the row sum is a reduce of the dact epilogue, the rest the
-  dX GEMM's epilogue (C = dy, h a tile load)."""
+  dX GEMM's epilogue (C = dy, h a tile load).
+- nanochat::relu2_mlp_mix: relu2_mlp plus the next layer's mix x = resid_lambda h' + x0_lambda x0 in the down
+  projection's epilogue (residual_mix: TileKernels mhc/pre_big_fuse_cuda.py's mix beside the GEMM), so the stream is
+  read once more by the norm (quack.rmsnorm) instead of the GEMM's h' and the embedding being re-read by an Inductor
+  mix + norm pass. Its backward is the mix and norm backward as PyTorch ops (Inductor fuses them, x recomputed from h'
+  and x0 as before), then relu2_mlp's."""
 import torch
+from cutlass import Float32
+from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.activation import drelu_sq
 from quack.cute_dsl_utils import get_device_capacity
 from quack.epilogue.frontend import gemm_epilogue
 from quack.epilogue.library import sq_reduce_mod
-from quack.epilogue.ops import ColVecLoad, ColVecReduce
+from quack.epilogue.ops import ColVecLoad, ColVecReduce, Scalar, TileLoad
 from quack.gemm_config import GemmConfig
 from quack.gemm_interface import gemm_norm_act, gemm_tuned
 from quack.rms_final_reduce import rms_final_reduce
+from quack.rmsnorm import rmsnorm_fwd
 from torch import Tensor
 from torch.autograd.function import FunctionCtx
 
@@ -244,3 +253,66 @@ def relu2_mlp_grad(ctx: FunctionCtx, dy: Tensor, dpreact: Tensor,
 
 
 relu2_mlp.register_autograd(relu2_mlp_grad, setup_context=relu2_mlp_save)
+
+
+@dsl_user_op
+def round_bf16(x: Float32, *, loc=None, ip=None) -> Float32:
+    """x rounded to the nearest bf16 (ties to even), as an fp32 value: the value a bf16 store of x writes. Pure
+    (has_side_effects=False), so the compiler may schedule and CSE it like arithmetic."""
+    return Float32(llvm.inline_asm(
+        T.f32(), [Float32(x).ir_value(loc=loc, ip=ip)],
+        "{ .reg .b16 lo, b; cvt.rn.bf16.f32 b, $1; mov.b16 lo, 0; mov.b32 $0, {lo, b}; }", "=f,f",
+        has_side_effects=False, is_align_stack=False))
+
+
+@gemm_epilogue(ops={"x0": TileLoad("x0"), "lr": Scalar("lr"), "lx": Scalar("lx")})
+def residual_mix(acc, c, x0, lr, lx):
+    """The down projection's epilogue with the next layer's mix: acc = postact W_down^T, c = h -> D = x = lr h' + lx x0
+    with h' = h + acc rounded to bf16 first (the stream model/modeling.py stored and then mixed)."""
+    return {"D": lr * round_bf16(acc + c) + lx * x0}
+
+
+@torch.library.custom_op("nanochat::relu2_mlp_mix", mutates_args=(), device_types="cuda")
+def relu2_mlp_mix(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tensor | None, g_down: Tensor | None,
+                  x0: Tensor, lr: Tensor, lx: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """relu2_mlp followed by the next layer's mix and norm: x = lr h' + lx x0 with h' = h + MLP(norm(h)) (x0 like h,
+    lr, lx 0-dim fp32), n = norm(x) -> (x, n, rstd (M,) fp32 of x's rows, preact, postact); x, rstd, preact and postact
+    are saved for the backward. The mix rides the down projection's epilogue (residual_mix), h' is never stored; the
+    norm is QuACK's RMSNorm over the stored x (statistics in fp32 of the bf16 x, as Inductor's norm of the mix)."""
+    h2, C = h.reshape(-1, h.shape[-1]), h.shape[-1]
+    preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True,
+                                    config=config("up", C, h), tuned=False)
+    x = residual_mix(postact, w_down.t(), h2, x0=x0.reshape(h2.shape), lr=lr, lx=lx, config=config("down", C, h),
+                     tuned=False)["D"]
+    n, _, rstd_x = rmsnorm_fwd(x, eps=EPS, store_rstd=True)
+    return x.view(h.shape), n.view(h.shape), rstd_x, preact, postact
+
+
+@relu2_mlp_mix.register_fake
+def relu2_mlp_mix_fake(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tensor | None,
+                       g_down: Tensor | None, x0: Tensor, lr: Tensor,
+                       lx: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    act = h.new_empty(h.numel() // h.shape[-1], w_up.shape[0])
+    return h.new_empty(h.shape), h.new_empty(h.shape), rstd.new_empty(rstd.shape), act, torch.empty_like(act)
+
+
+def relu2_mlp_mix_save(ctx: FunctionCtx, inputs: tuple[Tensor, ...], output: tuple[Tensor, ...]) -> None:
+    ctx.mark_non_differentiable(*output[2:])
+    ctx.save_for_backward(*inputs, output[0], *output[2:])
+
+
+def relu2_mlp_mix_grad(ctx: FunctionCtx, dx: Tensor, dn: Tensor, *_: None) -> tuple[Tensor | None, ...]:
+    """The mix and norm backward as PyTorch ops (fused by Inductor), then relu2_mlp's backward. The mix's resid_lambda
+    gradient sum(dx h') takes h' from the stored x: lr h' = x - lx x0 (exact up to x's bf16 rounding); both lambda
+    gradients are rounded to bf16 as autograd's bf16 sums of the mix were."""
+    h, rstd, w_up, w_down, g_up, g_down, x0, lr, lx, x, rstd_x, preact, postact = ctx.saved_tensors
+    xf = x.float()
+    r = rstd_x.view(*xf.shape[:-1], 1)
+    dnf = dn.float()
+    dxt = dx + (r * (dnf - xf * (r * r) * (dnf * xf).mean(-1, keepdim=True))).to(dx.dtype)
+    dh = relu2_mlp_bwd(lr * dxt, h, rstd, preact, postact, w_up, w_down, g_up, g_down)
+    dlr = ((dxt.float() * (xf - lx * x0.float())).sum() / lr).to(dx.dtype).to(lr.dtype)
+    return dh, None, None, None, None, None, lx * dxt, dlr, (dxt * x0).sum().to(lx.dtype)
+
+
+relu2_mlp_mix.register_autograd(relu2_mlp_mix_grad, setup_context=relu2_mlp_mix_save)

@@ -4,7 +4,8 @@ back; CausalLM's layer loop mixes in x0 and looks up value embeddings) with the 
 "LOG") and learnable per-dimension QK-norm weights (transformers modeling_qwen3.py; per-head QK norm with learnable
 parameters, arXiv 2309.14322 §3.2.5; a fixed scale costs 0.11% of loss in nGPT, arXiv 2410.01131 App. A.9 Table 5).
 - Normed token embedding, no positional embedding; RoPE over the full head (92d63d4 gpt.py:57-65).
-- Per layer x = resid_lambda x + x0_lambda x0, x0 the normed embedding (LOG 2026-01-11).
+- Per layer x = resid_lambda x + x0_lambda x0, x0 the normed embedding (LOG 2026-01-11); after layer 0 the mix and the
+  next layer's norm run with the previous layer's MLP (model/ops/linear.py relu2_mlp_mix).
 - Attention: MHA, head_dim HEAD_DIM (model/config.py); per-head RMS norm, a per-dim weight shared across heads, then
   RoPE (transformers modeling_qwen3.py Qwen3Attention.forward); SSSL windows; value embeddings on alternating layers
   behind a per-head gate 2 sigmoid(.) of the normed stream, zero init (modded-nanogpt record #14's per-layer value
@@ -31,7 +32,7 @@ from corpus.mixture import Stage
 from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.ops.cross_entropy import lm_loss, lm_losses
 from model.ops.flash_attn import attention
-from model.ops.linear import qkv_proj, relu2_mlp, residual_rms
+from model.ops.linear import qkv_proj, relu2_mlp, relu2_mlp_mix, residual_rms
 
 # Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 Table 9)
 ASPECT_RATIO = 960 // 32
@@ -120,7 +121,8 @@ class Attention(nn.Module):
 
 class MLP(nn.Module):
     """h + down_proj(relu(up_proj(norm(h)))^2) from the stream h and its rows' rstd; norm, activation, residual and
-    their derivatives run in QuACK GEMM epilogues (model/ops/linear.py relu2_mlp)."""
+    their derivatives run in QuACK GEMM epilogues (model/ops/linear.py relu2_mlp), and so do the next layer's mix and
+    norm when there is one (relu2_mlp_mix)."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -128,9 +130,15 @@ class MLP(nn.Module):
         self.up_proj = GemmLinear(C, 4 * C)
         self.down_proj = GemmLinear(4 * C, C)
 
-    def forward(self, h: Tensor, rstd: Tensor) -> Tensor:
-        return relu2_mlp(h, rstd, self.up_proj.weight_bf16, self.down_proj.weight_bf16, self.up_proj.weight.grad,
-                         self.down_proj.weight.grad)[0]
+    def forward(self, h: Tensor, rstd: Tensor, mix: tuple[Tensor, Tensor, Tensor] | None) -> tuple[Tensor, Tensor]:
+        """mix: the next layer's (x0, resid_lambda, x0_lambda), None after the last layer -> (the stream, normed)."""
+        weights = (self.up_proj.weight_bf16, self.down_proj.weight_bf16, self.up_proj.weight.grad,
+                   self.down_proj.weight.grad)
+        if mix is None:
+            y = relu2_mlp(h, rstd, *weights)[0]
+            return y, norm(y)
+        x, n = relu2_mlp_mix(h, rstd, *weights, *mix)[:2]
+        return x, n
 
 
 class DecoderLayer(nn.Module):
@@ -139,11 +147,13 @@ class DecoderLayer(nn.Module):
         self.self_attn = Attention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, hidden_states: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
-                cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor, segments: Tensor) -> Tensor:
-        h, rstd = self.self_attn(norm(hidden_states), hidden_states, input_ids, ve_table, cos_sin=cos_sin,
+    def forward(self, hidden_states: Tensor, normed: Tensor, input_ids: Tensor, ve_table: Tensor | None, *,
+                cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor, segments: Tensor,
+                mix: tuple[Tensor, Tensor, Tensor] | None) -> tuple[Tensor, Tensor]:
+        """hidden_states: the stream, normed: norm(hidden_states); mix: MLP.forward's -> (the stream, normed)."""
+        h, rstd = self.self_attn(normed, hidden_states, input_ids, ve_table, cos_sin=cos_sin,
                                  window_size=window_size, cu_seqlens=cu_seqlens, segments=segments)
-        return self.mlp(h, rstd)
+        return self.mlp(h, rstd, mix)
 
 
 class CausalLM(nn.Module):
@@ -222,14 +232,19 @@ class CausalLM(nn.Module):
         """Final normed hidden states (B*T, C) of input_ids (B, T) int32; cu_seqlens: int32 document bounds in
         flattened input_ids, the first segments + 1 of them in use (segments: 0-dim int32 on the host;
         corpus/loader.py PretrainingBatches)."""
-        hidden_states = x0 = norm(F.embedding(input_ids, self.embed_tokens.weight).to(torch.bfloat16))
+        x0 = norm(F.embedding(input_ids, self.embed_tokens.weight).to(torch.bfloat16))
+        # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 without fp32 copies of the mix; every
+        # later layer's mix and norm run in the previous layer's down-projection epilogue (MLP.forward)
+        hidden_states = self.resid_lambdas[0] * x0 + self.x0_lambdas[0] * x0
+        normed = norm(hidden_states)
+        n = len(self.layers)
         for i, layer in enumerate(self.layers):
-            # 0-dim fp32 lambdas x bf16: Inductor reduces their gradients in fp32 without fp32 copies of the mix
-            hidden_states = self.resid_lambdas[i] * hidden_states + self.x0_lambdas[i] * x0
             ve_table = self.value_embeds[str(i)].weight if str(i) in self.value_embeds else None
-            hidden_states = layer(hidden_states, input_ids, ve_table, cos_sin=(self.cos, self.sin),
-                                  window_size=self.window_sizes[i], cu_seqlens=cu_seqlens, segments=segments)
-        return norm(hidden_states).flatten(0, 1)
+            mix = (x0, self.resid_lambdas[i + 1], self.x0_lambdas[i + 1]) if i + 1 < n else None
+            hidden_states, normed = layer(hidden_states, normed, input_ids, ve_table, cos_sin=(self.cos, self.sin),
+                                          window_size=self.window_sizes[i], cu_seqlens=cu_seqlens, segments=segments,
+                                          mix=mix)
+        return normed.flatten(0, 1)
 
     def forward(self, input_ids: Tensor, labels: Tensor, cu_seqlens: Tensor,
                 segments: Tensor) -> tuple[Tensor, Tensor, Tensor]:
