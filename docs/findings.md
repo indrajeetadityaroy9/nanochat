@@ -470,7 +470,7 @@ attribution to kernel numerics was wrong). Noted, unchanged: `stack_edu_python`'
 (~64,920 rows) are below the 65,536 the current curate writes, so an older version wrote them — tokens do not depend
 on row grouping (three shards re-cut at 122,880 rows tokenize identically).
 
-### 5.21 TileKernels fusions and the remaining step-time cuts (QkvEpi, MlpOutMix, LinearCE, PdlDpsum) — in progress
+### 5.21 TileKernels fusions and the remaining step-time cuts (QkvEpi, MlpOutMix, LinearCE, PdlDpsum, WindowAttn) — done
 User: aggressive execution of the designs TileKernelsStudy left as follow-ups (methodology §2; ceilings are byte
 arithmetic, not measurements), each on a GEMM as fast as QuACK's (the hand sm90 skeleton they were prototyped on
 measured slower) and landed at ≥ 0.3% with an op check and the 10-step equivalence: QK-norm + RoPE in the fused-QKV
@@ -516,8 +516,35 @@ bitwise-identical outputs (split_k 1), so selection sets throughput and the cold
 (`fb86efc`, §4): each linear.py call at a fixed per-width configuration, +0.36% / +0.32%, a cold first step 119 → 35
 s. With LinearCE's explicit configurations no training GEMM autotunes, so a cold start's peak should now be the warm
 one [inference; unmeasured]. The fp64 check settles C3: both trees' gradient error vs an fp64 reference median
-1.18e-2 / 1.17e-2 (max 1.95e-2 / 1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no defect. MlpOutMix (b)'s equivalence
-and A/B are running.
+1.18e-2 / 1.17e-2 (max 1.95e-2 / 1.96e-2), C3 vs pre-C3 3.75e-3: rounding, no defect.
+
+MlpOutMix closed (user: master's Inductor mix and norm stay; branches `mlp-out-mix-land` `76e32e8`, `mlp-out-mix-v2`
+`ce30108` as records). The down projection's epilogue (`residual_mix`) stores x = fma(λr, bf16(h + acc), x0·λx), with
+fp32 x0 bitwise master's compiled mix (0 of 75.5M elements differ at layers 1, 12, 22), 4 E per layer outside the GEMM
+instead of 5, peak 71.1 → 68.0 GiB. Inductor first wrote x0 once per custom-op call (23 copies per micro-batch, 1,252
+vs 161 µs), the whole gap between the bench's −65 µs per call and the first A/B (+0.13%). The 10-step check then
+separated the x0 paths: an RMSNorm op with a bf16 backward, a bf16 sum of the 23 gradient terms and any bf16 x0 in the
+forward all fail, with step-8 losses clustered at 9.40437–9.40449 against master's 9.40705 — systematic: with o_proj
+and down_proj zero-initialised the first steps run through the x0 → lm_head path — while fp32 x0 passes (≤ 1.6e-5).
+Against fp64 (QuackPin's 4-layer harness) master, the fp32-x0 tree and the bf16-x0 tree are equally accurate (median
+1.20e-2). Exclusive A/Bs: fp32 x0 +0.25% / +0.49%, bf16 x0 +0.41% / +0.47%: the passing tree misses the 8K bar and the
+faster one fails the 10-step, a ceiling of ~55 µs per call bought with custom autograd for the residual stream, against
+master's bandwidth-bound Inductor backward (198 ms/step at 3.5–3.6 TB/s; each layer's x0-gradient term stored once in
+bf16, sums batched over 3–4 layers, so no restructure win). Route (a), n written by the GEMM through a last-arriver
+CTA, is deterministic but 969 vs 725 µs (the L2 re-read is latency-bound). The pre-attention norm fold was not built:
+n is also dW_qkv's and the value-embedding gate's saved operand, so removing its 2 E pass needs dW_qkv on QuACK with
+rstd as a K-dim A-operand scale (`transform_a_operand`, as `cross_entropy.py`'s dW) and the gate rewritten.
+
+WindowAttn closed (branch `window-attn` `2bf0e12` as a record). Real 8K micro-batches: the window forward runs at 332
+TFLOP/s true (446 computed), the backward main kernel at 363 (473), full layers 524–551. A sweep fit puts ~32% of the
+window forward and ~27% of its backward in per-tile fixed cost (per CTA 3,160 cycles of load and 6,600 of epilogue,
+exit and relaunch: 25.5% at 8K) and ~15% in masked waste. A warpgroup whose 64 keys are fully masked skipping its S,
+dP, dV and dK GEMMs (dK/dV zeroed through the MMA flag: zero-fill stores made ptxas serialize the wgmma, C7515, +25%)
+is bitwise in out/dk/dv and +0.27% / +0.18%: below the bar. Persistent backwards lost three times (+44%; +18% / +13%
+with refill overlap; +18% / +12% without): one CTA per SM (registers) keeps the epilogue and the next tile's K/V load
+serial, which costs more than FA4's exit and relaunch; the forward has no room for a second K/V stage; 64-key edge
+trimming is worth ≤ 0.2%, inside the kernel's run-to-run variation (up to 5%). Published full-efficiency short windows
+align the window to tiles (`local://WindowLit.md`), an architecture change.
 
 ### 5.22 Review of every queued execution (user: required, or inferable?) — Oct 26
 Each queued GPU job was checked against the decision it feeds and the agents' own measurements. Cut: QkvEpi's remaining
