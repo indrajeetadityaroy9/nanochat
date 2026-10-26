@@ -204,6 +204,8 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
         # The staging and store below are written for FA4's hdim-128 causal/local config (_tile_size_bwd_sm90)
         assert self.tile_m == 64 and self.tile_hdim == 128 and not self.dQ_swapAB and self.num_wg_dQ == 2
         assert self.AtomLayoutMdQ == 1 and self.mma_dkv_is_rs
+        # Warpgroup skipping (_wg_masked): S^T = K Q^T with the two MMA warpgroups each owning half the n-block's keys
+        assert self.SdP_swapAB and self.AtomLayoutMSdP == 1 and self.num_wg_mma == 2
         # Staged dQ rows tile_hdim + one 16-byte vector apart: 16-byte aligned, and the MMA C layout's rows fall in
         # different banks
         self.pitch = self.tile_hdim + 128 // self.dtype.width
@@ -220,6 +222,32 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
         if const_expr(self.is_local and mask.window_size_left is not None):
             need = need or (n0 < m0 + self.tile_m - 1 + mask.seqlen_k - mask.seqlen_q - mask.window_size_left)
         return need
+
+    @cute.jit
+    def _wg_masked(self, mask_fn, m_block, wg):
+        """Whether the m-block's queries attend none of warpgroup wg's keys, [wg, wg + 1) * tile_n / 2 of the n-block
+        (all after the causal diagonal, before the window's left edge or past the segment end)."""
+        mask, n_block = mask_fn.func.__self__, mask_fn.keywords["n_block"]
+        keys = self.tile_n // self.num_wg_mma
+        k0, m0 = n_block * self.tile_n + wg * keys, m_block * self.tile_m
+        off = mask.seqlen_k - mask.seqlen_q
+        masked = (k0 >= mask.seqlen_k) or (k0 > m0 + self.tile_m - 1 + off)
+        if const_expr(self.is_local and mask.window_size_left is not None):
+            masked = masked or (k0 + keys - 1 < m0 + off - mask.window_size_left)
+        return masked
+
+    @cute.jit
+    def _dq_gemm(self, mma_dsk_fn, acc, smem_idx, k_lo: cutlass.Constexpr[int], k_hi: cutlass.Constexpr[int]):
+        """acc = dS @ K over the key k-blocks [k_lo, k_hi) (mma_dsk_fn's gemm_zero_init restricted to those keys)."""
+        tiled_mma, _, tCrA, tCrB = mma_dsk_fn.args
+        rA = tCrA[None, None, None, smem_idx]
+        warpgroup.fence()
+        atom = cute.make_mma_atom(tiled_mma.op)
+        atom.set(warpgroup.Field.ACCUMULATE, False)
+        for k in cutlass.range_constexpr(k_lo, k_hi):
+            cute.gemm(atom, acc, rA[None, None, k], tCrB[None, None, k], acc)
+            atom.set(warpgroup.Field.ACCUMULATE, True)
+        warpgroup.commit_group()
 
     def _check_type(self, *types):
         pass  # mdQaccum is dq (bf16) viewed as fp32
@@ -247,37 +275,66 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
                         score_mod_bwd_fn=None, dKV_accumulate=True):
         # FlashAttentionBackwardSm90.mma_one_m_block (mma_dkv_is_rs, Q_stage == dO_stage == PdS_stage, so one
         # pipeline state and stage index serve Q, dO, P and dS; no score_mod) with dQ staged as scaled bf16 rows
-        # instead of fp32 accumulator fragments, and the mask applied only to tiles that cross a boundary
+        # instead of fp32 accumulator fragments, the mask applied only to tiles that cross a boundary, and a warpgroup
+        # whose keys the m-block's queries do not attend (_wg_masked: the window's first and last m-blocks of each
+        # n-block, segment ends) skipping S, dP, dV and dK, the dQ GEMM then running over the other half's keys only
         smem_idx = consumer_state_Q.index
+        kb = cute.size(mma_dsk_fn.args[2].shape[2]) // self.num_wg_mma  # dQ k-blocks over one warpgroup's keys
+        active = not self._wg_masked(mask_fn, m_block, warp_group_idx)
+        other_active = not self._wg_masked(mask_fn, m_block, 1 - warp_group_idx)
+        # dK and dV start at the warpgroup's first attended m-block: a warpgroup's masked m-blocks are a causal prefix
+        # and a window suffix of the n-block's range (or all of it past the segment end, whose rows the dK/dV TMA
+        # store clips), so that is the n-block's first m-block or one whose predecessor is masked. Zeroing the
+        # accumulators with ordinary stores instead would make ptxas serialize the wgmma pipeline.
+        zero_init = not dKV_accumulate or self._wg_masked(mask_fn, m_block - 1, warp_group_idx)
+        acc_dQ = cute.make_rmem_tensor(mma_dsk_fn.args[0].partition_shape_C(mma_dsk_fn.args[1]), cutlass.Float32)
         pipeline_Q.consumer_wait(consumer_state_Q, pipeline_Q.consumer_try_wait(consumer_state_Q))
-        acc_S = mma_qk_fn(A_idx=smem_idx, wg_wait=-1)
-        tLSErLSE = copy_utils.load_s2r(tLSEsLSE[None, smem_idx])
-        pipeline_dO.consumer_wait(consumer_state_Q, pipeline_dO.consumer_try_wait(consumer_state_Q))
-        acc_dP = mma_dov_fn(A_idx=smem_idx, wg_wait=1)
-        if self._needs_mask(mask_fn, m_block):
-            mask_fn(acc_S, m_block=m_block)
-        acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S, transpose=self.SdP_swapAB)
-        lane_idx = cute.arch.lane_idx()
-        for r in cutlass.range_constexpr(cute.size(acc_S_mn, mode=[0])):
-            lse_val = self._get_stat(tLSErLSE, r, lane_idx, shuffle=self.shuffle_LSE)
-            for c in cutlass.range(cute.size(acc_S_mn, mode=[1]), unroll_full=True):
-                acc_S_mn[r, c] = cute.math.exp2(acc_S_mn[r, c] * softmax_scale_log2 - lse_val, fastmath=True)
-        tLSErdPsum = copy_utils.load_s2r(tLSEsdPsum[None, smem_idx])
-        tdVrP = utils.cvt_f16(layout_utils.reshape_acc_to_frgA(acc_S), self.dtype)
-        warpgroup.wait_group(0)
-        acc_dP_mn = layout_utils.reshape_acc_to_mn(acc_dP, transpose=self.SdP_swapAB)
-        for r in cutlass.range_constexpr(cute.size(acc_dP_mn, mode=[0])):
-            dpsum_val = self._get_stat(tLSErdPsum, r, lane_idx, shuffle=self.shuffle_dPsum)
-            for c in cutlass.range(cute.size(acc_dP_mn, mode=[1]), unroll_full=True):
-                acc_dP_mn[r, c] = acc_S_mn[r, c] * (acc_dP_mn[r, c] - dpsum_val)
-        tdKrdS = utils.cvt_f16(layout_utils.reshape_acc_to_frgA(acc_dP), self.dtype)
-        copy_dS_r2s(tdKrdS, dst_idx=smem_idx)
-        mma_pdo_fn(tCrA=tdVrP, B_idx=smem_idx, zero_init=not dKV_accumulate, wg_wait=-1)
-        cute.arch.fence_view_async_shared()
-        PdS_barrier.arrive_and_wait()
-        acc_dQ = mma_dsk_fn(A_idx=smem_idx, wg_wait=1)
-        pipeline_dO.consumer_release(consumer_state_Q)
-        mma_dsq_fn(tCrA=tdKrdS, B_idx=smem_idx, zero_init=not dKV_accumulate, wg_wait=1)
+        if active:
+            acc_S = mma_qk_fn(A_idx=smem_idx, wg_wait=-1)
+            tLSErLSE = copy_utils.load_s2r(tLSEsLSE[None, smem_idx])
+            pipeline_dO.consumer_wait(consumer_state_Q, pipeline_dO.consumer_try_wait(consumer_state_Q))
+            acc_dP = mma_dov_fn(A_idx=smem_idx, wg_wait=1)
+            if self._needs_mask(mask_fn, m_block):
+                mask_fn(acc_S, m_block=m_block)
+            acc_S_mn = layout_utils.reshape_acc_to_mn(acc_S, transpose=self.SdP_swapAB)
+            lane_idx = cute.arch.lane_idx()
+            for r in cutlass.range_constexpr(cute.size(acc_S_mn, mode=[0])):
+                lse_val = self._get_stat(tLSErLSE, r, lane_idx, shuffle=self.shuffle_LSE)
+                for c in cutlass.range(cute.size(acc_S_mn, mode=[1]), unroll_full=True):
+                    acc_S_mn[r, c] = cute.math.exp2(acc_S_mn[r, c] * softmax_scale_log2 - lse_val, fastmath=True)
+            tLSErdPsum = copy_utils.load_s2r(tLSEsdPsum[None, smem_idx])
+            tdVrP = utils.cvt_f16(layout_utils.reshape_acc_to_frgA(acc_S), self.dtype)
+            warpgroup.wait_group(0)
+            acc_dP_mn = layout_utils.reshape_acc_to_mn(acc_dP, transpose=self.SdP_swapAB)
+            for r in cutlass.range_constexpr(cute.size(acc_dP_mn, mode=[0])):
+                dpsum_val = self._get_stat(tLSErdPsum, r, lane_idx, shuffle=self.shuffle_dPsum)
+                for c in cutlass.range(cute.size(acc_dP_mn, mode=[1]), unroll_full=True):
+                    acc_dP_mn[r, c] = acc_S_mn[r, c] * (acc_dP_mn[r, c] - dpsum_val)
+            tdKrdS = utils.cvt_f16(layout_utils.reshape_acc_to_frgA(acc_dP), self.dtype)
+            copy_dS_r2s(tdKrdS, dst_idx=smem_idx)
+            mma_pdo_fn(tCrA=tdVrP, B_idx=smem_idx, zero_init=zero_init, wg_wait=-1)
+            cute.arch.fence_view_async_shared()
+            PdS_barrier.arrive_and_wait()
+            if other_active:
+                self._dq_gemm(mma_dsk_fn, acc_dQ, smem_idx, 0, 2 * kb)
+            elif warp_group_idx == 0:
+                self._dq_gemm(mma_dsk_fn, acc_dQ, smem_idx, 0, kb)
+            else:
+                self._dq_gemm(mma_dsk_fn, acc_dQ, smem_idx, kb, 2 * kb)
+            warpgroup.wait_group(1)
+            pipeline_dO.consumer_release(consumer_state_Q)
+            mma_dsq_fn(tCrA=tdKrdS, B_idx=smem_idx, zero_init=zero_init, wg_wait=1)
+        else:
+            pipeline_dO.consumer_wait(consumer_state_Q, pipeline_dO.consumer_try_wait(consumer_state_Q))
+            PdS_barrier.arrive_and_wait()
+            # The other warpgroup's keys are attended: the n-block's m-block range holds only m-blocks with an
+            # attended (query, key) pair (BlockInfo.get_m_block_min_max)
+            if warp_group_idx == 0:
+                self._dq_gemm(mma_dsk_fn, acc_dQ, smem_idx, kb, 2 * kb)
+            else:
+                self._dq_gemm(mma_dsk_fn, acc_dQ, smem_idx, 0, kb)
+            warpgroup.wait_group(0)
+            pipeline_dO.consumer_release(consumer_state_Q)
         rdQ = cute.make_fragment_like(acc_dQ, self.dtype)
         rdQ.store((acc_dQ.load() * self._softmax_scale).to(self.dtype))
         cute.arch.barrier(barrier_id=int(NamedBarrierBwd.dQEmptyWG0) + warp_group_idx,
