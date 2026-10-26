@@ -1,10 +1,12 @@
 """
 Attention of model/modeling.py as one torch.library op over the fused q/k/v projection (model/ops/linear.py
-qkv_proj): the q/k prologue (model/ops/qk_prologue.py), the value embeddings' gate and mix (model/ops/ve_gate.py) and
-FlashAttention-4 (Dao-AILab flash_attn.cute), causal with `window_left` keys before each query; FA4's own
-autograd.Function cannot be traced by torch.compile. One op, so the backward writes every gradient of the projection
-into one (B, T, 3C) buffer: FA4's dv into the v block (the value embeddings' backward reads it there; the mix passes
-dv through to v), the prologue's dq, dk into the q and k blocks, with no concatenation and no autograd add.
+qkv_proj) and its epilogue's normed and rotated q | k (model/ops/qk_prologue.py): the value embeddings' gate and mix
+(model/ops/ve_gate.py) and FlashAttention-4 (Dao-AILab flash_attn.cute), causal with `window_left` keys before each
+query; FA4's own autograd.Function cannot be traced by torch.compile. The prologue output is a function of the
+projection and the norm weights, so this op's backward differentiates through the prologue (qk_backward) into the
+projection and the norm weights, and qk gets no gradient. One op, so the backward writes every gradient of the
+projection into one (B, T, 3C) buffer: FA4's dv into the v block (the value embeddings' backward reads it there; the
+mix passes dv through to v), the prologue's dq, dk into the q and k blocks, with no concatenation and no autograd add.
 
 Document masking (ProLong, arXiv 2410.02660): FA4's varlen kernels restrict attention to the segments in
 cu_seqlens, the int32 offsets of the flattened (B*T) tokens (corpus/loader.py PretrainingBatches). cu_seqlens has a
@@ -60,7 +62,7 @@ from torch import Tensor
 from torch.autograd.function import FunctionCtx
 
 from model.config import HEAD_DIM
-from model.ops.qk_prologue import qk_backward, qk_forward
+from model.ops.qk_prologue import qk_backward
 from model.ops.ve_gate import ve_backward, ve_forward
 
 
@@ -342,18 +344,25 @@ def heads(qkv: Tensor, i: int) -> Tensor:
     return qkv[..., i * C:(i + 1) * C].unflatten(-1, (-1, HEAD_DIM))
 
 
+def qk_heads(qk: Tensor) -> tuple[Tensor, Tensor]:
+    """The normed and rotated q, k of the (B, T, 2C) prologue output as (B, T, H, HEAD_DIM) views, token stride 2C."""
+    q, k = qk.unflatten(-1, (2, -1, HEAD_DIM)).unbind(2)
+    return q, k
+
+
 @torch.library.custom_op("nanochat::attention", mutates_args=(), device_types="cuda")
-def attention(qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor, window_left: int,
-              cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, input_ids: Tensor | None, table: Tensor | None,
-              w_gate: Tensor | None, ids: Tensor | None,
-              order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """qkv (B, T, 3C) bf16; norm weights (HEAD_DIM,) fp32; cos/sin (T_table >= T, HEAD_DIM / 2) fp32; value
-    embeddings when table is given (model/ops/ve_gate.py: n the normed stream, input_ids, table, w_gate; ids, order
-    torch.sort of input_ids, for the backward) -> (out (B, T, H, HEAD_DIM), lse fp32 (H, B*T), normed q, k, mixed v,
-    gate), the last five for the backward (mixed v and gate empty without value embeddings)."""
+def attention(qkv: Tensor, qk: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor,
+              window_left: int, cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, input_ids: Tensor | None,
+              table: Tensor | None, w_gate: Tensor | None, ids: Tensor | None,
+              order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """qkv (B, T, 3C) bf16; qk (B, T, 2C) bf16 its normed and rotated q | k; norm weights (HEAD_DIM,) fp32; cos/sin
+    (T_table >= T, HEAD_DIM / 2) fp32 (the prologue's, for the backward); value embeddings when table is given
+    (model/ops/ve_gate.py: n the normed stream, input_ids, table, w_gate; ids, order torch.sort of input_ids, for the
+    backward) -> (out (B, T, H, HEAD_DIM), lse fp32 (H, B*T), mixed v, gate), the last three for the backward (mixed v
+    and gate empty without value embeddings)."""
     T, cu = qkv.size(1), segmented(cu_seqlens, segments)
     window = fa4_window_left(window_left, T)
-    qn, kn = qk_forward(heads(qkv, 0), heads(qkv, 1), q_norm_weight, k_norm_weight, cos, sin)
+    qn, kn = qk_heads(qk)
     if table is None:
         v, vmix, gate = heads(qkv, 2), qkv.new_empty(0), qkv.new_empty(0, dtype=torch.float32)
     else:
@@ -363,25 +372,24 @@ def attention(qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Te
         out, lse = _flash_attn_fwd(qn.flatten(0, 1), kn.flatten(0, 1), v.flatten(0, 1), cu_seqlens_q=cu,
                                    cu_seqlens_k=cu, max_seqlen_q=T, max_seqlen_k=T, causal=True,
                                    window_size_left=window, return_lse=True)[:2]
-    return out.view(qn.shape), lse, qn, kn, vmix, gate
+    return out.view(qn.shape), lse, vmix, gate
 
 
 @attention.register_fake
-def attention_fake(qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor,
+def attention_fake(qkv: Tensor, qk: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor,
                    window_left: int, cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, input_ids: Tensor | None,
                    table: Tensor | None, w_gate: Tensor | None, ids: Tensor | None,
-                   order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+                   order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     q = heads(qkv, 0)
     B, T, H = q.shape[:3]
     vmix = qkv.new_empty(0) if table is None else q.new_empty(q.shape)
     gate = qkv.new_empty(0 if table is None else (B * T, H), dtype=torch.float32)
-    return (q.new_empty(q.shape), q.new_empty((H, B * T), dtype=torch.float32), q.new_empty(q.shape),
-            q.new_empty(q.shape), vmix, gate)
+    return q.new_empty(q.shape), q.new_empty((H, B * T), dtype=torch.float32), vmix, gate
 
 
 @torch.library.custom_op("nanochat::attention_bwd", mutates_args=(), device_types="cuda")
-def attention_bwd(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor,
-                  out: Tensor, lse: Tensor, qn: Tensor, kn: Tensor, vmix: Tensor, gate: Tensor, window_left: int,
+def attention_bwd(dout: Tensor, qkv: Tensor, qk: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor,
+                  sin: Tensor, out: Tensor, lse: Tensor, vmix: Tensor, gate: Tensor, window_left: int,
                   cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, table: Tensor | None, w_gate: Tensor | None,
                   ids: Tensor | None, order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """(d qkv (B, T, 3C), d q_norm_weight, d k_norm_weight, dn, dw_gate; the last two empty without value
@@ -392,6 +400,7 @@ def attention_bwd(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weigh
     dqkv = torch.empty_like(qkv)
     dv = heads(dqkv, 2)
     v = heads(qkv, 2) if table is None else vmix
+    qn, kn = qk_heads(qk)
     args = qn.flatten(0, 1), kn.flatten(0, 1), v.flatten(0, 1), out.flatten(0, 1), dout.flatten(0, 1), lse
     dqn, dkn = (_flash_attn_bwd(*args, causal=True, cu_seqlens_q=cu, cu_seqlens_k=cu, max_seqlen_q=T, max_seqlen_k=T,
                                 dv=dv.flatten(0, 1))[:2]
@@ -405,8 +414,8 @@ def attention_bwd(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weigh
 
 
 @attention_bwd.register_fake
-def attention_bwd_fake(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor,
-                       sin: Tensor, out: Tensor, lse: Tensor, qn: Tensor, kn: Tensor, vmix: Tensor, gate: Tensor,
+def attention_bwd_fake(dout: Tensor, qkv: Tensor, qk: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor,
+                       cos: Tensor, sin: Tensor, out: Tensor, lse: Tensor, vmix: Tensor, gate: Tensor,
                        window_left: int, cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, table: Tensor | None,
                        w_gate: Tensor | None, ids: Tensor | None,
                        order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -416,22 +425,22 @@ def attention_bwd_fake(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_
 
 
 def attention_save(ctx: FunctionCtx, inputs: tuple, output: tuple[Tensor, ...]) -> None:
-    qkv, q_norm_weight, k_norm_weight, cos, sin, ctx.window_left, cu_seqlens, segments, n, _, table, w, ids, order = (
-        inputs)
-    ctx.save_for_backward(qkv, q_norm_weight, k_norm_weight, cos, sin, *output, cu_seqlens, segments, n, table, w, ids,
-                          order)
+    qkv, qk, q_norm_weight, k_norm_weight, cos, sin, ctx.window_left, cu_seqlens, segments, n, _, table, w, ids, \
+        order = inputs
+    ctx.save_for_backward(qkv, qk, q_norm_weight, k_norm_weight, cos, sin, *output, cu_seqlens, segments, n, table, w,
+                          ids, order)
 
 
 def attention_grad(ctx: FunctionCtx, dout: Tensor, *_: Tensor) -> tuple:
-    """Gradients of qkv, the norm weights, the normed stream and the gate weight (the table's goes to table.grad);
-    the outputs other than out are for the backward only."""
-    qkv, qnw, knw, cos, sin, out, lse, qn, kn, vmix, gate, cu_seqlens, segments, n, table, w, ids, order = (
+    """Gradients of qkv (through the prologue too), the norm weights, the normed stream and the gate weight (the
+    table's goes to table.grad); qk gets none, and the outputs other than out are for the backward only."""
+    qkv, qk, qnw, knw, cos, sin, out, lse, vmix, gate, cu_seqlens, segments, n, table, w, ids, order = (
         ctx.saved_tensors)
-    dqkv, dqnw, dknw, dn, dw = attention_bwd(dout, qkv, qnw, knw, cos, sin, out, lse, qn, kn, vmix, gate,
-                                             ctx.window_left, cu_seqlens, segments, n, table, w, ids, order)
+    dqkv, dqnw, dknw, dn, dw = attention_bwd(dout, qkv, qk, qnw, knw, cos, sin, out, lse, vmix, gate, ctx.window_left,
+                                             cu_seqlens, segments, n, table, w, ids, order)
     ve = table is not None
-    return (dqkv, dqnw, dknw, None, None, None, None, None, dn if ve else None, None, None, dw if ve else None, None,
-            None)
+    return (dqkv, None, dqnw, dknw, None, None, None, None, None, dn if ve else None, None, None, dw if ve else None,
+            None, None)
 
 
 attention.register_autograd(attention_grad, setup_context=attention_save)

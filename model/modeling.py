@@ -32,6 +32,7 @@ from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.ops.cross_entropy import lm_loss, lm_losses
 from model.ops.flash_attn import attention
 from model.ops.linear import qkv_proj, relu2_mlp, residual_rms
+from model.ops.qk_prologue import qk_gains
 
 # Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 Table 9)
 ASPECT_RATIO = 960 // 32
@@ -96,6 +97,9 @@ class Attention(nn.Module):
         self.o_proj = GemmLinear(C, C)
         self.q_norm_weight = nn.Parameter(torch.empty(HEAD_DIM))
         self.k_norm_weight = nn.Parameter(torch.empty(HEAD_DIM))
+        # The norm weights per projection column, as the GEMM epilogue's q/k prologue reads them
+        # (model/ops/qk_prologue.py qk_gains), refreshed with the bf16 copies
+        self.register_buffer("qk_gains", self.q_norm_weight.new_empty((2, 3 * C)), persistent=False)
         self.ve_gate = (nn.Linear(C, C // HEAD_DIM, bias=False)
                         if has_ve(layer_idx, num_hidden_layers=config.num_hidden_layers) else None)
 
@@ -108,12 +112,13 @@ class Attention(nn.Module):
         """hidden_states: normed stream; residual: the stream; input_ids: the token ids; ve_table: this layer's value
         embeddings or None -> (residual + attention output, its rows' rstd; model/ops/linear.py residual_rms)."""
         B, T, C = hidden_states.size()
-        qkv = qkv_proj(hidden_states, self.qkv_bf16, *(w.grad for w in self.qkv_weights()))
+        qkv, qk = qkv_proj(hidden_states, self.qkv_bf16, self.qk_gains, *cos_sin,
+                           *(w.grad for w in self.qkv_weights()))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once
         # (model/ops/ve_gate.py, inside the attention op; its backward visits the tokens in sorted order)
         ve = ((hidden_states, input_ids, ve_table, self.ve_gate.weight, *torch.sort(input_ids.flatten()))
               if ve_table is not None else (None,) * 6)
-        out = attention(qkv, self.q_norm_weight, self.k_norm_weight, *cos_sin, window_size, cu_seqlens, segments,
+        out = attention(qkv, qk, self.q_norm_weight, self.k_norm_weight, *cos_sin, window_size, cu_seqlens, segments,
                         *ve)[0]
         return residual_rms(out.view(B, T, C), self.o_proj.weight_bf16, self.o_proj.weight.grad, residual)
 
@@ -189,8 +194,9 @@ class CausalLM(nn.Module):
     @torch.no_grad()
     def refresh_gemm_weights(self) -> None:
         """The bf16 copies the GEMM ops multiply by (GemmLinear.weight_bf16, Attention.qkv_bf16) from their fp32
-        weights: after init, load and every optimizer step; in place (a compiled graph holds the copies), reallocated
-        only where a load assigned weights on another device (train/checkpoint.py load_model's meta model)."""
+        weights, and the q/k norm weights' per-column rows (Attention.qk_gains): after init, load and every optimizer
+        step; in place (a compiled graph holds the copies), reallocated only where a load assigned weights on another
+        device (train/checkpoint.py load_model's meta model)."""
         linears = [m for m in self.modules() if isinstance(m, GemmLinear)]
         attentions = [m for m in self.modules() if isinstance(m, Attention)]
         for m in linears:
@@ -199,8 +205,13 @@ class CausalLM(nn.Module):
         for m in attentions:
             if m.qkv_bf16.device != m.q_proj.weight.device:
                 m.qkv_bf16 = torch.empty_like(m.qkv_bf16, device=m.q_proj.weight.device)
-        torch._foreach_copy_([m.weight_bf16 for m in linears] + [b for m in attentions for b in m.qkv_bf16.chunk(3)],
-                             [m.weight for m in linears] + [w for m in attentions for w in m.qkv_weights()])
+            if m.qk_gains.device != m.q_norm_weight.device:
+                m.qk_gains = torch.empty_like(m.qk_gains, device=m.q_norm_weight.device)
+        heads = self.config.hidden_size // HEAD_DIM
+        torch._foreach_copy_([m.weight_bf16 for m in linears] + [b for m in attentions for b in m.qkv_bf16.chunk(3)]
+                             + [m.qk_gains for m in attentions],
+                             [m.weight for m in linears] + [w for m in attentions for w in m.qkv_weights()]
+                             + [qk_gains(m.q_norm_weight, m.k_norm_weight, heads) for m in attentions])
 
     def init_buffers(self) -> None:
         """Non-checkpointed buffers: the fp32 rotary tables cos/sin (max_position_embeddings, HEAD_DIM/2) of

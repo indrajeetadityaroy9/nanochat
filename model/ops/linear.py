@@ -8,9 +8,11 @@ backward adds dW into them in place, so the gradient-accumulation micro-batches 
 micro-batch plus autograd's AccumulateGrad add; autograd sees no gradient for those weights. Forward-only callers pass
 None.
 
-nanochat::qkv_proj (q_proj, k_proj, v_proj): one GEMM y = x [Wq; Wk; Wv]^T (..., 3C) against the stacked bf16 copy
-(model/modeling.py Attention.qkv_bf16), q, k, v its column blocks; backward dX = dY [Wq; Wk; Wv] (one GEMM, K = 3C),
-each dW = dY_block^T X on the block's strided view of dY.
+nanochat::qkv_proj (q_proj, k_proj, v_proj): one GEMM y = x [Wq; Wk; Wv]^T (B, T, 3C) against the stacked bf16 copy
+(model/modeling.py Attention.qkv_bf16), q, k, v its column blocks, whose epilogue also writes the attention's q/k
+prologue, the normed and rotated q | k (B, T, 2C) (model/ops/qk_prologue.py; non-differentiable here: the attention op
+differentiates through the prologue into q, k); backward dX = dY [Wq; Wk; Wv] (one GEMM, K = 3C), each
+dW = dY_block^T X on the block's strided view of dY.
 
 The post-attention half of a layer runs on the un-normed stream: the norm is gain-free, so
 norm(h) W^T = diag(rstd) (h W^T) exactly, and rstd rides the GEMM epilogues as a per-row (colvec) scale; the normed
@@ -31,26 +33,34 @@ from quack.activation import drelu_sq
 from quack.epilogue.frontend import gemm_epilogue
 from quack.epilogue.library import sq_reduce_mod
 from quack.epilogue.ops import ColVecLoad, ColVecReduce
+from quack.gemm_config import GemmConfig
 from quack.gemm_interface import gemm, gemm_add, gemm_norm_act
 from quack.rms_final_reduce import rms_final_reduce
 from torch import Tensor
 from torch.autograd.function import FunctionCtx
 
+from model.ops.qk_prologue import qk_forward
+
 # model/modeling.py norm's epsilon
 EPS = torch.finfo(torch.float32).eps
 
+QKV_CONFIG = GemmConfig(tile_m=128, tile_n=256, pingpong=False, cluster_m=1, cluster_n=2, is_dynamic_persistent=False)
+
 
 @torch.library.custom_op("nanochat::qkv_proj", mutates_args=(), device_types="cuda")
-def qkv_proj(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | None, gv: Tensor | None) -> Tensor:
-    """x (..., C) bf16, weight (3C, C) the stacked bf16 [Wq; Wk; Wv], gq, gk, gv their fp32 .grad or None (forward
-    only) -> (..., 3C) bf16: q, k, v the column blocks [0, C), [C, 2C), [2C, 3C)."""
-    y = gemm(x.reshape(-1, x.shape[-1]), weight.t(), out_dtype=x.dtype)
-    return y.view(*x.shape[:-1], weight.shape[0])
+def qkv_proj(x: Tensor, weight: Tensor, gains: Tensor, cos: Tensor, sin: Tensor, gq: Tensor | None, gk: Tensor | None,
+             gv: Tensor | None) -> tuple[Tensor, Tensor]:
+    """x (B, T, C) bf16, weight (3C, C) the stacked bf16 [Wq; Wk; Wv], gains the norm weights' per-column rows
+    (model/ops/qk_prologue.py qk_gains), cos/sin (T_table >= T, HEAD_DIM / 2) fp32, gq, gk, gv the projections' fp32
+    .grad or None (forward only) -> ((B, T, 3C) bf16: q, k, v the column blocks [0, C), [C, 2C), [2C, 3C); (B, T, 2C)
+    bf16: the normed and rotated q | k)."""
+    return qk_forward(x, weight, gains, cos, sin, QKV_CONFIG)
 
 
 @qkv_proj.register_fake
-def qkv_proj_fake(x: Tensor, weight: Tensor, gq: Tensor | None, gk: Tensor | None, gv: Tensor | None) -> Tensor:
-    return x.new_empty(*x.shape[:-1], weight.shape[0])
+def qkv_proj_fake(x: Tensor, weight: Tensor, gains: Tensor, cos: Tensor, sin: Tensor, gq: Tensor | None,
+                  gk: Tensor | None, gv: Tensor | None) -> tuple[Tensor, Tensor]:
+    return x.new_empty(*x.shape[:-1], weight.shape[0]), x.new_empty(*x.shape[:-1], weight.shape[0] // 3 * 2)
 
 
 @torch.library.custom_op("nanochat::qkv_proj_bwd", mutates_args=("gq", "gk", "gv"), device_types="cuda")
@@ -69,13 +79,15 @@ def qkv_proj_bwd_fake(dy: Tensor, x: Tensor, weight: Tensor, gq: Tensor, gk: Ten
     return x.new_empty(x.shape)
 
 
-def qkv_proj_save(ctx: FunctionCtx, inputs: tuple[Tensor, ...], output: Tensor) -> None:
-    ctx.save_for_backward(*inputs)
+def qkv_proj_save(ctx: FunctionCtx, inputs: tuple[Tensor, ...], output: tuple[Tensor, Tensor]) -> None:
+    ctx.mark_non_differentiable(output[1])
+    x, weight, _, _, _, gq, gk, gv = inputs
+    ctx.save_for_backward(x, weight, gq, gk, gv)
 
 
-def qkv_proj_grad(ctx: FunctionCtx, dy: Tensor) -> tuple[Tensor, None, None, None, None]:
+def qkv_proj_grad(ctx: FunctionCtx, dy: Tensor, dqk: None) -> tuple[Tensor, None, None, None, None, None, None, None]:
     x, weight, gq, gk, gv = ctx.saved_tensors
-    return qkv_proj_bwd(dy, x, weight, gq, gk, gv), None, None, None, None
+    return qkv_proj_bwd(dy, x, weight, gq, gk, gv), None, None, None, None, None, None, None
 
 
 qkv_proj.register_autograd(qkv_proj_grad, setup_context=qkv_proj_save)
