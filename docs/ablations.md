@@ -8,16 +8,14 @@ approval. The corpus and its dataset: `docs/corpus.md`.
 | Experiment | Decides | Setting | Runs | State |
 |---|---|---|---|---|
 | `peak_lr` | the base model's peak lr multiplier | d8 at 5 and 200, d24 at 5 | 11 | done |
-| `muon_wd_timescale_20tpp` | Muon's weight-decay timescale (at 20) | d16 at 20, sa-bpe data | 3 × 2 seeds | running |
+| `muon_wd_timescale_20tpp` | Muon's weight-decay timescale (at 20) | d16 at 20, sa-bpe data | 3 × 2 seeds | stopped after 3 runs (user: the τ law on literature; `docs/findings.md` §5.23) |
 | `logit_softcap` | output-logit softcap | d16 at 20, sa-bpe data | 2 × 4 seeds | not run (user: cap 15 on literature, pending its overhead bench; `docs/findings.md` §5.22) |
-| `muon_wd_timescale_200tpp` | Muon's timescale law (with the 20 result) | d8 at 200, corpus tokenizer's data | 3 × 2 seeds | waits |
-| `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | intrinsic and data done; runs wait |
-| `adamw_group_lr` | the AdamW groups' lr | d16 at sa-bpe's `max_tokens_per_param` | 3 × 2 seeds (× 1 shared) | waits |
+| `muon_wd_timescale_200tpp` | Muon's timescale law (with the 20 result) | d8 at 200, corpus tokenizer's data | 3 × 2 seeds | not run (user; §5.23) |
+| `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | intrinsic and data done; runs not run (user: sa-bpe stays; §5.23) |
+| `adamw_group_lr` | the AdamW groups' lr | d16 at sa-bpe's `max_tokens_per_param` | 3 × 2 seeds (× 1 shared) | ×¼/×4 not run; the scalar-lr arm runs once (user) |
 
-Run order (`ACTIONS.md` §0 Open): the user's approval → `muon_wd_timescale_20tpp` → `muon_wd_timescale_200tpp` →
-`tokenizer_split_merge` runs (with `adamw_group_lr`, whose × 1 arm they train) → `adopt`,
-tokenize, pack → `pretrain` (its own approval). `muon_wd_timescale_200tpp` reads its 20 tpp half's result;
-`adamw_group_lr`'s baseline is the tokenizer ablation's sa-bpe runs; `pretrain` waits for every decision.
+Run order (`ACTIONS.md` §0 Open): the scalar-lr candidate (one d16 run against `muon_wd_timescale_20tpp`'s τ×1 seed
+0) → `pretrain` (its own approval). The others were stopped or not run (`docs/findings.md` §5.23).
 
 ## Method
 

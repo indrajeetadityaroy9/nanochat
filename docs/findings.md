@@ -542,3 +542,28 @@ literature-backed engineering decision, not a measured improvement on this data,
 and backward cost ≤ 0.3% of the 8K step and the cold peak stays ≤ 93 GiB. Master's softcap path keeps a second
 logits-sized buffer (≈ 6 GiB at d24 8K, over the cold limit), so the adoption rides on LinearCE's chunked path (bench
 queued with its A/B). D7 at 200 stays on D7's pinned tree (no softcap), so the law fit's two horizons share a recipe.
+
+### 5.23 Ablation pruning (user: are the ablations required, or settled by the literature?) — Oct 26
+A 2-seed d16 arm detects a code-bpb difference above 0.0067 (one seed: 0.0094, `docs/ablations.md` Method), and
+karpathy/nanochat's ~320-run optimizer sweep (dev/LOG.md 2026-01-19..22) found gains shrinking from ~0.002 bpb at d12
+to 0.0007 at d20, with d12-tuned values hurting at d20. Decisions:
+- D7 (Muon's weight-decay timescale) stopped after 3 of 12 runs (τ×½ seeds 0, 1; τ×1 seed 0, kept as a sanity
+  check and as the scalar-lr baseline): the τ law stays for Muon. arXiv 2512.05620 §H.5: as TPP varies at fixed FLOPs,
+  Muon's optimal independent weight decay stays constant, "consistent with Bergsma et al." (Power Lines); §H.3: ×2
+  perturbations of lr or weight decay do equal or worse. arXiv 2509.02046 Table 4: Muon's only scaling-sensitive
+  hyperparameter is its lr (130M–500M at 1×, 130M at 1–8× Chinchilla). Power Lines fit TPP 20–1280, the base run's 526
+  inside. Doubling Muon's decay cost 0.010–0.019 loss there, ≈ 0.004–0.008 bpb [estimate, 3.62 bytes/token], at or
+  below the margin; and a d8 point at 200 TPP is the small-proxy transfer nanochat's sweep warns against. nanochat
+  itself scales Muon's decay by arXiv 2405.13698's constant τ_epoch (base_train.py:296-304), "blindly following AdamW
+  theory". ~3.7 GPU-h saved. (§5.22's D7-at-200 recipe note is moot.)
+- The tokenizer ablation is not run: sa-bpe stays, its corpus already packed (the base plan fits). Its arms: bpe ties
+  in compression (3.623 vs 3.624 bytes per token; the design expected a tie), the fused control's harm is documented
+  (TokEval's post: MBPP 0.22 vs 0.02–0.17), the hybrid compresses 0.2% worse and is untested as a whole. Merge scores
+  barely move the token count while pre-tokenization drives accuracy (arXiv 2402.18376 §5, §6.1); GPT-4-style and
+  Punct regexes score alike on code (2402.01035 App. E); sa-bpe already avoids the one documented large effect (no
+  punctuation fused with a line break). ~6.7 GPU-h and the adopt, tokenize, pack step saved; the hybrid stays an
+  untested idea, not a worse one.
+- D6's ×¼/×4 arms are not run (user: the scalar-lr arm only). The scalar-lr candidate runs once: this tree's
+  x0_lambdas and resid_lambdas train at the shared AdamW lr, nanochat's at 0.5 and 0.005 × √(B/2^19) (0.375 and
+  0.00375 at d16's 294,912 tokens per step), a gap too large to bound the effect from the literature. Adopt iff code
+  bpb better than τ×1 seed 0 by > 0.0094 and MBPP+ parsing not worse; a smaller difference is inconclusive.
