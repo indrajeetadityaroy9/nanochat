@@ -15,8 +15,12 @@ each dW = dY_block^T X on the block's strided view of dY.
 The post-attention half of a layer runs on the un-normed stream: the norm is gain-free, so
 norm(h) W^T = diag(rstd) (h W^T) exactly, and rstd rides the GEMM epilogues as a per-row (colvec) scale; the normed
 tensor is never stored.
-- nanochat::residual_rms (o_proj): h = residual + x W^T and rstd = (mean(h^2) + eps)^-1/2 from the same epilogue
-  (quack.gemm_interface.gemm_rms: per-tile squared sums, finalized by quack.rms_final_reduce).
+- residual_rms (o_proj; inside model/ops/flash_attn.py's attention op, whose backward needs its dX epilogue's row
+  sums): h = residual + x W^T and rstd = (mean(h^2) + eps)^-1/2 from the same epilogue
+  (quack.gemm_interface.gemm_rms: per-tile squared sums, finalized by quack.rms_final_reduce). Backward
+  (residual_rms_bwd): dO = dh W with FA4's dpsum = rowsum(dO O) per head in the epilogue (dx_dpsum, x = O): the
+  column tile is one head (DPSUM_CONFIG), so the per-tile reduce partials are dpsum per (row, head), and FA4's
+  backward no longer reads O and dO again for it (flash_bwd_preprocess.py).
 - nanochat::relu2_mlp: h + down_proj(relu(rstd up_proj h)^2), the MLP of karpathy/nanochat 92d63d4 gpt.py:131-141 on
   the normed stream plus its residual: rstd and relu^2 in the up-projection's epilogue
   (quack.gemm_interface.gemm_norm_act, which stores the scaled pre-activation and the activation, both saved for the
@@ -27,14 +31,18 @@ tensor is never stored.
   dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h; the row sum is a reduce of the dact epilogue, the rest the
   dX GEMM's epilogue (C = dy, h a tile load)."""
 import torch
+from cutlass import BFloat16, Float32
 from quack.activation import drelu_sq
 from quack.epilogue.frontend import gemm_epilogue
 from quack.epilogue.library import sq_reduce_mod
 from quack.epilogue.ops import ColVecLoad, ColVecReduce
+from quack.gemm_config import GemmConfig
 from quack.gemm_interface import gemm, gemm_add, gemm_norm_act
 from quack.rms_final_reduce import rms_final_reduce
 from torch import Tensor
 from torch.autograd.function import FunctionCtx
+
+from model.config import HEAD_DIM
 
 # model/modeling.py norm's epsilon
 EPS = torch.finfo(torch.float32).eps
@@ -81,51 +89,41 @@ def qkv_proj_grad(ctx: FunctionCtx, dy: Tensor) -> tuple[Tensor, None, None, Non
 qkv_proj.register_autograd(qkv_proj_grad, setup_context=qkv_proj_save)
 
 
-@torch.library.custom_op("nanochat::linear_bwd", mutates_args=("grad",), device_types="cuda")
-def linear_bwd(dy: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> Tensor:
-    """dX like x; dW accumulated into grad."""
-    dy2, x2 = dy.reshape(-1, dy.shape[-1]), x.reshape(-1, x.shape[-1])
-    dx = gemm(dy2, weight, out_dtype=x.dtype).view(x.shape)
-    torch.addmm(grad, dy2.t(), x2, out_dtype=grad.dtype, out=grad)
-    return dx
-
-
-@linear_bwd.register_fake
-def linear_bwd_fake(dy: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> Tensor:
-    return x.new_empty(x.shape)
-
-
-@torch.library.custom_op("nanochat::residual_rms", mutates_args=(), device_types="cuda")
-def residual_rms(x: Tensor, weight: Tensor, grad: Tensor | None, residual: Tensor) -> tuple[Tensor, Tensor]:
-    """x (..., K), weight (N, K), grad its fp32 .grad or None, residual (..., N) -> (h = residual + x W^T in x's dtype,
-    rstd (M,) fp32 of h's rows before rounding). rstd is non-differentiable: relu2_mlp, its one consumer,
-    differentiates through it."""
+def residual_rms(x: Tensor, weight: Tensor, residual: Tensor) -> tuple[Tensor, Tensor]:
+    """x (M, K), weight (N, K), residual (M, N) -> (h = residual + x W^T in x's dtype, rstd (M,) fp32 of h's rows
+    before rounding)."""
     N = weight.shape[0]
-    r = sq_reduce_mod(has_c=True, has_rowvec=False, has_aux=False)(
-        x.reshape(-1, x.shape[-1]), weight.t(), residual.reshape(-1, N))
+    r = sq_reduce_mod(has_c=True, has_rowvec=False, has_aux=False)(x, weight.t(), residual)
     # gemm_rms's epilogue and finalize (quack/gemm_interface.py _gemm_rms_call, _rms_finalize); the per-tile partials
     # of a cold autotuned call are a strided slice, which rms_final_reduce rejects, hence contiguous()
     rstd = rms_final_reduce(r["mColVecReduce"].contiguous(), scale=1 / N, eps=EPS)
-    return r["D"].view(residual.shape), rstd
+    return r["D"], rstd
 
 
-@residual_rms.register_fake
-def residual_rms_fake(x: Tensor, weight: Tensor, grad: Tensor | None, residual: Tensor) -> tuple[Tensor, Tensor]:
-    return residual.new_empty(residual.shape), x.new_empty(residual.numel() // weight.shape[0], dtype=torch.float32)
+# o_proj's dX tiling: tile_n = HEAD_DIM, so each column tile is one head and dx_dpsum's per-tile row sums are FA4's
+# dpsum; QuACK's tuner cannot pin tile_n (its sweep keeps any tile_n the partials buffer fits), so the config is
+# fixed: the fastest of QuACK's SM90 tile_n = 128 configs on the d24 shape (98,304 x 768 x 768, exclusive GPU),
+# 172.2 us; cluster (2, 1) 172.8, tile_m 192 212.4 / 218.3, 256 (cooperative) 268.5 / 270.4
+DPSUM_CONFIG = GemmConfig(tile_m=128, tile_n=HEAD_DIM, pingpong=True, is_dynamic_persistent=False, cluster_m=1,
+                          cluster_n=2)
 
 
-def residual_rms_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor | None, Tensor],
-                      output: tuple[Tensor, Tensor]) -> None:
-    ctx.mark_non_differentiable(output[1])
-    ctx.save_for_backward(*inputs[:3])
+@gemm_epilogue(reduces={"dpsum": ColVecReduce("dpsum", scaled=True)})
+def dx_dpsum(acc, c):
+    """acc = dh W (dO), c = O, FA4's output: D = dO, dpsum = the row sums per column tile of bf16(dO) O (bf16(dO):
+    the dO FA4's backward reads)."""
+    d = acc.to(BFloat16).to(Float32)
+    return {"D": d, "dpsum": (d, c)}
 
 
-def residual_rms_grad(ctx: FunctionCtx, dh: Tensor, drstd: None) -> tuple[Tensor, None, None, Tensor]:
-    x, weight, grad = ctx.saved_tensors
-    return linear_bwd(dh, x, weight, grad), None, None, dh
-
-
-residual_rms.register_autograd(residual_rms_grad, setup_context=residual_rms_save)
+def residual_rms_bwd(dh: Tensor, x: Tensor, weight: Tensor, grad: Tensor) -> tuple[Tensor, Tensor]:
+    """dh (M, N); x (M, K) FA4's output (heads of HEAD_DIM); weight (N, K); grad its fp32 .grad -> (dx = dh W bf16,
+    dpsum (M, K / HEAD_DIM) fp32: the sum over each head's dims of dx x, FA4's backward dpsum); dW accumulated into
+    grad."""
+    dpsum = dh.new_empty((dh.shape[0], x.shape[1] // HEAD_DIM), dtype=torch.float32)
+    dx = dx_dpsum(dh, weight, x, dpsum=dpsum, config=DPSUM_CONFIG)["D"]
+    torch.addmm(grad, dh.t(), x, out_dtype=grad.dtype, out=grad)
+    return dx, dpsum
 
 
 @gemm_epilogue(ops={"rstd": ColVecLoad("rstd")}, reduces={"dsum": ColVecReduce("dsum", scaled=True)})

@@ -31,7 +31,7 @@ from corpus.mixture import Stage
 from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.ops.cross_entropy import lm_loss, lm_losses
 from model.ops.flash_attn import attention
-from model.ops.linear import qkv_proj, relu2_mlp, residual_rms
+from model.ops.linear import qkv_proj, relu2_mlp
 
 # Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 Table 9)
 ASPECT_RATIO = 960 // 32
@@ -106,16 +106,15 @@ class Attention(nn.Module):
                 cos_sin: tuple[Tensor, Tensor], window_size: int, cu_seqlens: Tensor,
                 segments: Tensor) -> tuple[Tensor, Tensor]:
         """hidden_states: normed stream; residual: the stream; input_ids: the token ids; ve_table: this layer's value
-        embeddings or None -> (residual + attention output, its rows' rstd; model/ops/linear.py residual_rms)."""
-        B, T, C = hidden_states.size()
+        embeddings or None -> (residual + o_proj(attention output), its rows' rstd; model/ops/flash_attn.py
+        attention, o_proj inside it: its backward takes FA4's dpsum from o_proj's dX epilogue)."""
         qkv = qkv_proj(hidden_states, self.qkv_bf16, *(w.grad for w in self.qkv_weights()))
         # Value residual, per-head gate 2 sigmoid(.) in (0, 2), 1 at zero init; fp32, rounded once
         # (model/ops/ve_gate.py, inside the attention op; its backward visits the tokens in sorted order)
         ve = ((hidden_states, input_ids, ve_table, self.ve_gate.weight, *torch.sort(input_ids.flatten()))
               if ve_table is not None else (None,) * 6)
-        out = attention(qkv, self.q_norm_weight, self.k_norm_weight, *cos_sin, window_size, cu_seqlens, segments,
-                        *ve)[0]
-        return residual_rms(out.view(B, T, C), self.o_proj.weight_bf16, self.o_proj.weight.grad, residual)
+        return attention(qkv, self.q_norm_weight, self.k_norm_weight, *cos_sin, window_size, cu_seqlens, segments,
+                         self.o_proj.weight_bf16, self.o_proj.weight.grad, residual, *ve)[:2]
 
 
 class MLP(nn.Module):

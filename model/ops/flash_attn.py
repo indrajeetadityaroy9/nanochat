@@ -31,9 +31,16 @@ bf16-rounded partials (one per 128-key block of the 512-key window; norm rel 2.4
 full layers would sum up to T / 128 (64 at 8K, 256 at 32K), so they keep FA4's fp32 accumulator. Tile shapes and
 stages are FA4's own (_tile_size_fwd_sm90, _tile_size_bwd_sm90): every other forward and backward configuration
 measured on the d24 shapes was slower (§5.11).
+
+The op ends with o_proj (model/ops/linear.py residual_rms: h = residual + out W_o^T and its rows' rstd), so its
+backward takes dO from o_proj's dX GEMM together with FA4's dpsum = rowsum(dO O) per (row, head), summed in that
+GEMM's epilogue (linear.py residual_rms_bwd), where dO is in registers and O one more tile load: FA4's backward
+preprocess (flash_bwd_preprocess.py), which reads O and dO again for dpsum, gives way to fa4_rows
+(model/kernels/fa4_rows.cu), which places dpsum and lse log2(e) at FA4's padded rows from (rows, H) and lse alone.
 """
 
 import contextlib
+import ctypes
 import hashlib
 import math
 from pathlib import Path
@@ -60,8 +67,10 @@ from torch import Tensor
 from torch.autograd.function import FunctionCtx
 
 from model.config import HEAD_DIM
+from model.ops.linear import residual_rms, residual_rms_bwd
 from model.ops.qk_prologue import qk_backward, qk_forward
 from model.ops.ve_gate import ve_backward, ve_forward
+from native import cuda_library, pointer, stream
 
 
 class PersistentVarlenScheduler(SingleTileVarlenScheduler):
@@ -145,6 +154,34 @@ def persistent_forward():
         yield
     finally:
         fa4.FlashAttentionForwardSm90, flash_fwd_sm90.SingleTileVarlenScheduler, _flash_attn_fwd.compile_cache = saved
+
+
+def fa4_rows(rows: Tensor, lse: Tensor, cu: Tensor, m: int, dpsum: Tensor, lse_log2: Tensor) -> None:
+    """FA4's backward row statistics (H, padded) fp32 at its padded rows (m: its backward m-block) into dpsum and
+    lse_log2, from rows (total, H) fp32, the o_proj epilogue's dpsum, and lse (H, total) fp32
+    (model/kernels/fa4_rows.cu); cu int32 (segments + 1)."""
+    H, padded = dpsum.shape
+    cuda_library("fa4_rows").fa4_rows(pointer(rows), pointer(lse), ctypes.c_longlong(lse.stride(0)), pointer(cu),
+                                      cu.shape[0] - 1, H, m,
+                                      ctypes.c_longlong(padded), pointer(dpsum), pointer(lse_log2), stream())
+
+
+@contextlib.contextmanager
+def precomputed_dpsum(rows: Tensor):
+    """_flash_attn_bwd with its preprocess (interface.py _bwd_preprocess, looked up by module name), which reads O and
+    dO for dpsum, replaced by fa4_rows from rows (total, H), and the preprocess's zero fill of dq_accum."""
+    saved = fa4._bwd_preprocess
+
+    def preprocess(out, dout, dpsum, lse, lse_log2, dq_accum, cu_seqlens_q, seqused_q, dlse, dtype, head_dim,
+                   head_dim_v, m_block_size, *, cu_total_m_blocks, fake_mode, hdim_multiple_of):
+        fa4_rows(rows, lse, cu_seqlens_q, m_block_size, dpsum, lse_log2)
+        dq_accum.zero_()
+
+    fa4._bwd_preprocess = preprocess
+    try:
+        yield
+    finally:
+        fa4._bwd_preprocess = saved
 
 
 def reduce_add_bf16(smem_ptr: cute.Pointer, gmem_ptr: cute.Pointer, nbytes: int):
@@ -290,10 +327,11 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
         cute.arch.cp_async_bulk_wait_group(0, read=True)
 
 
-def bwd_bf16dq(q: Tensor, k: Tensor, v: Tensor, out: Tensor, dout: Tensor, lse: Tensor, cu: Tensor, window: int,
+def bwd_bf16dq(q: Tensor, k: Tensor, v: Tensor, dout: Tensor, lse: Tensor, rows: Tensor, cu: Tensor, window: int,
                dv: Tensor) -> tuple[Tensor, Tensor]:
-    """q, k, out, dout (total, H, D) bf16, contiguous; v and dv (total, H, D) with heads contiguous, any token stride;
-    lse (H, total) fp32; cu int32 (segments + 1); window: the left window -> (dq, dk); dv written in place."""
+    """q, k, dout (total, H, D) bf16, contiguous; v and dv (total, H, D) with heads contiguous, any token stride;
+    lse (H, total) fp32; rows (total, H) fp32 the dpsum of o_proj's epilogue; cu int32 (segments + 1); window: the
+    left window -> (dq, dk); dv written in place."""
     total, H, D = q.shape
     causal, local, wl, wr = fa4._resolve_causal_local_window(True, window, None)
     cfg = fa4._tile_size_bwd_sm90(D, D, causal, local)
@@ -303,7 +341,7 @@ def bwd_bf16dq(q: Tensor, k: Tensor, v: Tensor, out: Tensor, dout: Tensor, lse: 
     lse_log2 = torch.empty(H, padded, dtype=torch.float32, device=q.device)
     dq, dk = torch.zeros_like(q), torch.empty_like(k)
     dtype = fa4.torch2cute_dtype_map[q.dtype]
-    fa4._bwd_preprocess(out, dout, dpsum, lse, lse_log2, None, cu, None, None, dtype, D, D, m, fake_mode=False)
+    fa4_rows(rows, lse, cu, m, dpsum, lse_log2)
     dq_as_f32 = dq.view(torch.float32).view(total, H * D // 2)
     key = H
     softmax_scale = 1.0 / math.sqrt(D)
@@ -344,13 +382,17 @@ def heads(qkv: Tensor, i: int) -> Tensor:
 
 @torch.library.custom_op("nanochat::attention", mutates_args=(), device_types="cuda")
 def attention(qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor, window_left: int,
-              cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, input_ids: Tensor | None, table: Tensor | None,
-              w_gate: Tensor | None, ids: Tensor | None,
-              order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """qkv (B, T, 3C) bf16; norm weights (HEAD_DIM,) fp32; cos/sin (T_table >= T, HEAD_DIM / 2) fp32; value
-    embeddings when table is given (model/ops/ve_gate.py: n the normed stream, input_ids, table, w_gate; ids, order
-    torch.sort of input_ids, for the backward) -> (out (B, T, H, HEAD_DIM), lse fp32 (H, B*T), normed q, k, mixed v,
-    gate), the last five for the backward (mixed v and gate empty without value embeddings)."""
+              cu_seqlens: Tensor, segments: Tensor, o_weight: Tensor, o_grad: Tensor | None, residual: Tensor,
+              n: Tensor | None, input_ids: Tensor | None, table: Tensor | None, w_gate: Tensor | None,
+              ids: Tensor | None,
+              order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """qkv (B, T, 3C) bf16; norm weights (HEAD_DIM,) fp32; cos/sin (T_table >= T, HEAD_DIM / 2) fp32; o_weight (C, C)
+    o_proj's bf16 copy, o_grad its fp32 .grad or None (forward only), residual (B, T, C) the stream; value embeddings
+    when table is given (model/ops/ve_gate.py: n the normed stream, input_ids, table, w_gate; ids, order torch.sort
+    of input_ids, for the backward) -> (h = residual + o_proj(out) (B, T, C), its rows' rstd (B*T,) fp32
+    (non-differentiable: relu2_mlp, its one consumer, differentiates through it), out (B, T, H, HEAD_DIM), lse fp32
+    (H, B*T), normed q, k, mixed v, gate), the last six for the backward (mixed v and gate empty without value
+    embeddings)."""
     T, cu = qkv.size(1), segmented(cu_seqlens, segments)
     window = fa4_window_left(window_left, T)
     qn, kn = qk_forward(heads(qkv, 0), heads(qkv, 1), q_norm_weight, k_norm_weight, cos, sin)
@@ -363,39 +405,48 @@ def attention(qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Te
         out, lse = _flash_attn_fwd(qn.flatten(0, 1), kn.flatten(0, 1), v.flatten(0, 1), cu_seqlens_q=cu,
                                    cu_seqlens_k=cu, max_seqlen_q=T, max_seqlen_k=T, causal=True,
                                    window_size_left=window, return_lse=True)[:2]
-    return out.view(qn.shape), lse, qn, kn, vmix, gate
+    h, rstd = residual_rms(out.flatten(1), o_weight, residual.flatten(0, 1))
+    return h.view(residual.shape), rstd, out.view(qn.shape), lse, qn, kn, vmix, gate
 
 
 @attention.register_fake
 def attention_fake(qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor,
-                   window_left: int, cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, input_ids: Tensor | None,
-                   table: Tensor | None, w_gate: Tensor | None, ids: Tensor | None,
-                   order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+                   window_left: int, cu_seqlens: Tensor, segments: Tensor, o_weight: Tensor, o_grad: Tensor | None,
+                   residual: Tensor, n: Tensor | None, input_ids: Tensor | None, table: Tensor | None,
+                   w_gate: Tensor | None, ids: Tensor | None,
+                   order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     q = heads(qkv, 0)
     B, T, H = q.shape[:3]
     vmix = qkv.new_empty(0) if table is None else q.new_empty(q.shape)
     gate = qkv.new_empty(0 if table is None else (B * T, H), dtype=torch.float32)
-    return (q.new_empty(q.shape), q.new_empty((H, B * T), dtype=torch.float32), q.new_empty(q.shape),
-            q.new_empty(q.shape), vmix, gate)
+    return (residual.new_empty(residual.shape), q.new_empty(B * T, dtype=torch.float32), q.new_empty(q.shape),
+            q.new_empty((H, B * T), dtype=torch.float32), q.new_empty(q.shape), q.new_empty(q.shape), vmix, gate)
 
 
-@torch.library.custom_op("nanochat::attention_bwd", mutates_args=(), device_types="cuda")
-def attention_bwd(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor,
+@torch.library.custom_op("nanochat::attention_bwd", mutates_args=("o_grad",), device_types="cuda")
+def attention_bwd(dh: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor, sin: Tensor,
                   out: Tensor, lse: Tensor, qn: Tensor, kn: Tensor, vmix: Tensor, gate: Tensor, window_left: int,
-                  cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, table: Tensor | None, w_gate: Tensor | None,
-                  ids: Tensor | None, order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+                  cu_seqlens: Tensor, segments: Tensor, o_weight: Tensor, o_grad: Tensor, n: Tensor | None,
+                  table: Tensor | None, w_gate: Tensor | None, ids: Tensor | None,
+                  order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """(d qkv (B, T, 3C), d q_norm_weight, d k_norm_weight, dn, dw_gate; the last two empty without value
-    embeddings, whose table's gradient is added into table.grad); FA4's backward, local layers' dq accumulated in
-    bf16 (bwd_bf16dq), atomically (not bitwise reproducible)."""
+    embeddings, whose table's gradient is added into table.grad; o_proj's dW accumulated into o_grad); FA4's
+    backward on dO and dpsum from o_proj's dX GEMM, local layers' dq accumulated in bf16 (bwd_bf16dq), atomically
+    (not bitwise reproducible)."""
     T, cu = qkv.size(1), segmented(cu_seqlens, segments)
     window = fa4_window_left(window_left, T)
+    dout, rows = residual_rms_bwd(dh.flatten(0, 1), out.flatten(2).flatten(0, 1), o_weight, o_grad)
     dqkv = torch.empty_like(qkv)
     dv = heads(dqkv, 2)
     v = heads(qkv, 2) if table is None else vmix
-    args = qn.flatten(0, 1), kn.flatten(0, 1), v.flatten(0, 1), out.flatten(0, 1), dout.flatten(0, 1), lse
-    dqn, dkn = (_flash_attn_bwd(*args, causal=True, cu_seqlens_q=cu, cu_seqlens_k=cu, max_seqlen_q=T, max_seqlen_k=T,
-                                dv=dv.flatten(0, 1))[:2]
-                if window is None else bwd_bf16dq(*args, cu, window, dv.flatten(0, 1)))
+    q, k, dout = qn.flatten(0, 1), kn.flatten(0, 1), dout.view(out.shape).flatten(0, 1)
+    if window is None:
+        with precomputed_dpsum(rows):
+            dqn, dkn = _flash_attn_bwd(q, k, v.flatten(0, 1), out.flatten(0, 1), dout, lse, causal=True,
+                                       cu_seqlens_q=cu, cu_seqlens_k=cu, max_seqlen_q=T, max_seqlen_k=T,
+                                       dv=dv.flatten(0, 1))[:2]
+    else:
+        dqn, dkn = bwd_bf16dq(q, k, v.flatten(0, 1), dout, lse, rows, cu, window, dv.flatten(0, 1))
     dq_norm_weight, dk_norm_weight = qk_backward(heads(qkv, 0), heads(qkv, 1), q_norm_weight, k_norm_weight,
                                                  dqn.view(qn.shape), dkn.view(kn.shape), cos, sin, heads(dqkv, 0),
                                                  heads(dqkv, 1))
@@ -405,10 +456,10 @@ def attention_bwd(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weigh
 
 
 @attention_bwd.register_fake
-def attention_bwd_fake(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor,
+def attention_bwd_fake(dh: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_weight: Tensor, cos: Tensor,
                        sin: Tensor, out: Tensor, lse: Tensor, qn: Tensor, kn: Tensor, vmix: Tensor, gate: Tensor,
-                       window_left: int, cu_seqlens: Tensor, segments: Tensor, n: Tensor | None, table: Tensor | None,
-                       w_gate: Tensor | None, ids: Tensor | None,
+                       window_left: int, cu_seqlens: Tensor, segments: Tensor, o_weight: Tensor, o_grad: Tensor,
+                       n: Tensor | None, table: Tensor | None, w_gate: Tensor | None, ids: Tensor | None,
                        order: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     ve = table is not None
     return (torch.empty_like(qkv), torch.empty_like(q_norm_weight), torch.empty_like(k_norm_weight),
@@ -416,22 +467,24 @@ def attention_bwd_fake(dout: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_
 
 
 def attention_save(ctx: FunctionCtx, inputs: tuple, output: tuple[Tensor, ...]) -> None:
-    qkv, q_norm_weight, k_norm_weight, cos, sin, ctx.window_left, cu_seqlens, segments, n, _, table, w, ids, order = (
-        inputs)
-    ctx.save_for_backward(qkv, q_norm_weight, k_norm_weight, cos, sin, *output, cu_seqlens, segments, n, table, w, ids,
-                          order)
+    (qkv, q_norm_weight, k_norm_weight, cos, sin, ctx.window_left, cu_seqlens, segments, o_weight, o_grad, _, n, _,
+     table, w, ids, order) = inputs
+    ctx.mark_non_differentiable(output[1])
+    ctx.save_for_backward(qkv, q_norm_weight, k_norm_weight, cos, sin, *output[2:], cu_seqlens, segments, o_weight,
+                          o_grad, n, table, w, ids, order)
 
 
-def attention_grad(ctx: FunctionCtx, dout: Tensor, *_: Tensor) -> tuple:
-    """Gradients of qkv, the norm weights, the normed stream and the gate weight (the table's goes to table.grad);
-    the outputs other than out are for the backward only."""
-    qkv, qnw, knw, cos, sin, out, lse, qn, kn, vmix, gate, cu_seqlens, segments, n, table, w, ids, order = (
-        ctx.saved_tensors)
-    dqkv, dqnw, dknw, dn, dw = attention_bwd(dout, qkv, qnw, knw, cos, sin, out, lse, qn, kn, vmix, gate,
-                                             ctx.window_left, cu_seqlens, segments, n, table, w, ids, order)
+def attention_grad(ctx: FunctionCtx, dh: Tensor, *_: Tensor) -> tuple:
+    """Gradients of qkv, the norm weights, the residual (dh), the normed stream and the gate weight (the table's goes
+    to table.grad, o_proj's to its .grad); the outputs other than h and rstd are for the backward only."""
+    (qkv, qnw, knw, cos, sin, out, lse, qn, kn, vmix, gate, cu_seqlens, segments, o_weight, o_grad, n, table, w, ids,
+     order) = ctx.saved_tensors
+    dqkv, dqnw, dknw, dn, dw = attention_bwd(dh, qkv, qnw, knw, cos, sin, out, lse, qn, kn, vmix, gate,
+                                             ctx.window_left, cu_seqlens, segments, o_weight, o_grad, n, table, w,
+                                             ids, order)
     ve = table is not None
-    return (dqkv, dqnw, dknw, None, None, None, None, None, dn if ve else None, None, None, dw if ve else None, None,
-            None)
+    return (dqkv, dqnw, dknw, None, None, None, None, None, None, None, dh, dn if ve else None, None, None,
+            dw if ve else None, None, None)
 
 
 attention.register_autograd(attention_grad, setup_context=attention_save)
