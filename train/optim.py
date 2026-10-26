@@ -3,8 +3,6 @@ AdamW (fused) on token tables, lm_head and 1-D parameters; NorMuon (arXiv 2510.0
 update scaled to AdamW's RMS (0.2 sqrt(max(fan_out, fan_in)), Moonlight, arXiv 2502.16982 §2.2) so all groups share
 one lr and weight decay. Each update clips the accumulated gradient's global norm first.
 """
-from collections.abc import Callable
-
 import torch
 from torch.optim._muon import _adjust_lr
 
@@ -30,19 +28,14 @@ class Muon(torch.optim.Muon):
     rescaled to O's Frobenius norm. Sets update_square: sum of squared (adjusted lr x update) norms, on the device."""
 
     @torch.no_grad()
-    def step(self, closure: Callable[[], torch.Tensor] | None = None) -> torch.Tensor | None:
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
+    def step(self) -> None:
         squares = []
         for group in self.param_groups:
             lr, momentum = group["lr"], group["momentum"]
             a, b, c = group["ns_coefficients"]
             shapes: dict[torch.Size, list[torch.Tensor]] = {}
             for p in group["params"]:
-                if p.grad is not None:
-                    shapes.setdefault(p.shape, []).append(p)
+                shapes.setdefault(p.shape, []).append(p)
             for shape, params in shapes.items():
                 grads = [p.grad for p in params]
                 for p in params:
@@ -51,7 +44,7 @@ class Muon(torch.optim.Muon):
                         self.state[p]["second_momentum_buffer"] = torch.zeros_like(p[:, :1])
                 bufs = [self.state[p]["momentum_buffer"] for p in params]
                 torch._foreach_lerp_(bufs, grads, 1 - momentum)
-                x = torch.stack(torch._foreach_lerp(grads, bufs, momentum) if group["nesterov"] else bufs).bfloat16()
+                x = torch.stack(torch._foreach_lerp(grads, bufs, momentum)).bfloat16()
                 tall = shape[0] > shape[1]
                 if tall:
                     x = x.mT
@@ -72,7 +65,6 @@ class Muon(torch.optim.Muon):
                 torch._foreach_add_(params, x.unbind(0), alpha=-adjusted)
                 squares.append(torch.linalg.vector_norm(x, dtype=torch.float32).square() * adjusted**2)
         self.update_square = torch.stack(squares).sum()
-        return loss
 
 
 def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tuple[torch.optim.Optimizer, ...]:

@@ -38,7 +38,7 @@ class Tokenizer:
     """A vocabulary: its mergeable tokens' bytes in rank order, then SPECIAL_TOKENS, encoded by tiktoken."""
 
     def __init__(self, mergeable: list[bytes], pattern: str, *, tokenized: Path) -> None:
-        self.tokenized, self.pattern = tokenized, pattern
+        self.tokenized, self.pattern, self.mergeable = tokenized, pattern, mergeable
         self.bos_token_id = len(mergeable)
         self.special_tokens = {token: len(mergeable) + i for i, token in enumerate(SPECIAL_TOKENS)}
         # a special token's bytes are its text; its document length 0

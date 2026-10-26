@@ -465,8 +465,8 @@ the current segmentation, a pair of one unit scoring 0; ln as in pchizhov/sa-bpe
   `prepare.extent`, `mixture.SPREAD`), `line_break_entries` (line_break, punctuation_line_break,
   line_break_indentation: a line break then indentation ending the entry, the companion post's MinGram `cb`) and
   `merged_reads`. Validity (`train_tokenizer.fidelity`) runs on the first row group of each source's val split.
-- **TokEval sample** (`tokeval_documents`, `tokeval_group`, `tokeval`): each source's leading val documents (as
-  `corpus/tokenize.py` `row_group_documents` forms them: a repository sample's files concatenated) until their UTF-8
+- **TokEval sample** (`tokeval_documents`, `tokeval_group`, `tokeval`): each source's leading val documents (the
+  tokenized ones, `corpus/sources.py` `curated_documents`: a repository sample's files concatenated) until their UTF-8
   bytes reach `TOKEVAL_BYTES` = 2,000,000, the crossing document included; grouped in `TOKEVAL_GROUPS` order (python,
   cpp, text, math, mixed); `tokeval_group` tests in turn: a program source's language, math (`mixture.MATH_SOURCES`),
   text (other web documents), mixed (Codeforces reasoning traces, Kaggle notebooks). Prose languages are the groups

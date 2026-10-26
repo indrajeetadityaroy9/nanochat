@@ -20,13 +20,12 @@ import pyarrow.parquet as pq
 from corpus import mixture
 from corpus.layout import TOKEN_DTYPE, shard_bounds, split_path
 from corpus.parallel import MEMORY, SPAWN, ordered
-from corpus.schema import REPOSITORY_FILE
 from corpus.sources import (
     SOURCES,
     curated_dir,
+    curated_documents,
     curated_shards,
     repository_samples,
-    sample_starts,
     text_bytes,
     texts,
 )
@@ -52,14 +51,9 @@ def encode(documents: list[str], tokenizer_path: Path, threads: ThreadPoolExecut
 
 
 def row_group_documents(task: tuple[str, Path, int, Path]) -> Documents:
-    """The documents of one curated row group (a repository sample's files concatenated)."""
+    """The documents of one curated row group (curated_documents)."""
     source, path, g, tokenizer_path = task
-    table = pq.ParquetFile(path).read_row_group(g)
-    documents = texts(source, table)
-    if SOURCES[source].category == REPOSITORY_FILE:
-        starts = sample_starts(table["sample"].to_numpy())
-        documents = ["".join(documents[a:b]) for a, b in itertools.pairwise([*starts, len(documents)])]
-    return encode(documents, tokenizer_path)
+    return encode(curated_documents(source, pq.ParquetFile(path).read_row_group(g)), tokenizer_path)
 
 
 def language_sources(language: str) -> list[str]:
@@ -105,7 +99,8 @@ def tokenize_split(corpus: str, split: str, tokenizer_path: Path, shards: list[i
     path.with_suffix(".json").write_text(json.dumps({"files": per_shard}))
 
 
-def tokenize_source(source: str, split: str, tokenizer_path: Path, pool: Executor, leading: int | None = None) -> None:
+def tokenize_source(source: str, split: str, tokenizer_path: Path, pool: Executor, *, leading: int | None = None
+                    ) -> None:
     """A source's curated split, or its `leading` curated shards, a row group per task."""
     tasks = [[(source, path, g, tokenizer_path) for g in range(pq.read_metadata(path).num_row_groups)]
              for path in curated_shards(source, split)[:leading]]

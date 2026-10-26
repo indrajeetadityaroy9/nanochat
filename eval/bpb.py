@@ -6,7 +6,6 @@ excluded from both sums (karpathy/nanochat 92d63d4 nanochat/loss_eval.py evaluat
 import math
 import re
 from collections.abc import Callable, Iterable
-from itertools import islice
 
 import numpy as np
 import torch
@@ -30,9 +29,9 @@ SOLUTION_BENCHMARKS = ("humaneval_plus", "mbpp_plus", "humaneval_x_cpp")
 
 
 @torch.no_grad()
-def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, steps: int,
+def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *,
          num_segments: int) -> dict[str, list[float]]:
-    """Bits and bytes sums of the first `steps` batches per context bucket, byte-offset bucket and row.
+    """Bits and bytes sums of batches per context bucket, byte-offset bucket and row.
     token_bytes: bytes per token, 0 for special tokens; cu_seqlens is padded to num_segments by repeating its last
     offset (one compiled shape)."""
     device = token_bytes.device
@@ -41,7 +40,7 @@ def sums(losses: Callable, batches: Iterable, token_bytes: torch.Tensor, *, step
     total = torch.zeros(2, len(CONTEXTS) + 1, dtype=torch.float64, device=device)
     offset_total = torch.zeros(2, len(OFFSETS) + 1, dtype=torch.float64, device=device)
     rows = []
-    for x, y, cu_seqlens, segments, _ in islice(batches, steps):
+    for x, y, cu_seqlens, segments, _ in batches:
         cu_seqlens = torch.cat([cu_seqlens, cu_seqlens[-1:].expand(num_segments + 1 - cu_seqlens.numel())])
         y = y.flatten()
         nbytes = torch.where(y == IGNORE_INDEX, 0, token_bytes[y.clamp_min(0)])
@@ -86,8 +85,7 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     num_segments = max(loader.num_segments for loader in loaders.values())
     corpora = {}
     for name, loader in loaders.items():
-        scored = sums(losses, loader, token_bytes, steps=len(samples[name]) // stage.micro_batch_size,
-                      num_segments=num_segments)
+        scored = sums(losses, loader, token_bytes, num_segments=num_segments)
         n = sampled[name]
         corpora[name] = scored | {"row_bits": scored["row_bits"][:n], "row_bytes": scored["row_bytes"][:n], "rows": n}
     rows = stage_rows(tokenizer, stage)
@@ -124,7 +122,7 @@ def solution_bits(losses: Callable, tokenizer: Tokenizer, benchmarks: dict, *, d
                 x[r, :len(ids) - 1] = torch.tensor(ids[:-1])
                 y[r, first - 1:len(ids) - 1] = torch.tensor(ids[first:])
             batches.append((x.to(device), y.to(device), cu_seqlens, segments, None))  # sums reads no lengths
-        scored = sums(losses, batches, token_bytes, steps=len(batches), num_segments=micro_batch_size)
+        scored = sums(losses, batches, token_bytes, num_segments=micro_batch_size)
         results[name] = scored | {k: scored[k][:len(seqs)] for k in ("row_bits", "row_bytes")}
     return results
 

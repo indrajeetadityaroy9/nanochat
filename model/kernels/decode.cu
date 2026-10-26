@@ -903,16 +903,16 @@ extern "C" void dec_destroy(void *handle) {
 
 extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
 
-/* cfg: L, C, F, vocab, max_len (<= context), context, store (positions requested), lazy (-1: none), budget (MiB, 0:
- * none). ptrs: wte (fp32), cos, sin ([context][HALF] fp32), lm_head; per layer qkv, o, fc, proj, ve table, ve gate (0
- * if none), q norm, k norm. scal: per layer resid, x0 lambda; then the logit cap. window: per layer, keys before a
- * query. stream: the caller's (not the legacy default stream: it is captured), alive past dec_destroy. */
+/* cfg: L, C, F, vocab, max_len (<= context), store (positions requested), lazy, budget (MiB, 0: none). ptrs: wte
+ * (fp32), cos, sin ([context][HALF] fp32), lm_head; per layer qkv, o, fc, proj, ve table, ve gate (0 if none),
+ * q norm, k norm. scal: per layer resid, x0 lambda; then the logit cap. window: per layer, keys before a query.
+ * stream: the caller's (not the legacy default stream: it is captured), alive past dec_destroy. */
 constexpr int GLOBAL_PTRS = 4, LAYER_PTRS = 8;
 
 extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *scal, const int *window, void *stream) {
     Decoder *d = (Decoder *)calloc(1, sizeof(Decoder));
-    d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->store = cfg[6];
-    d->lazy = cfg[7];
+    d->L = cfg[0]; d->C = cfg[1]; d->F = cfg[2]; d->vocab = cfg[3]; d->max_len = cfg[4]; d->store = cfg[5];
+    d->lazy = cfg[6];
     d->H = d->C / HEAD_DIM;
     d->wte = (const float *)ptrs[0]; d->cos = (const float *)ptrs[1]; d->sin = (const float *)ptrs[2];
     d->lm_head = (const bf16 *)ptrs[3]; d->stream = (cudaStream_t)stream;
@@ -933,7 +933,7 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     slot_buffers(d, [&](void **, size_t bytes) { slot += bytes; });
     row_buffers(d, [&](void **, size_t bytes) { row += bytes; });
     cudaMemGetInfo(&free_bytes, &total_bytes);
-    const size_t free_start = free_bytes, budget = (size_t)cfg[8] << 20;
+    const size_t free_start = free_bytes, budget = (size_t)cfg[7] << 20;
     if (budget > 0 && budget < free_bytes) free_bytes = budget;
     const size_t limit = free_bytes;  /* the bytes this decoder may take */
     free_bytes -= MAX_BATCH * row < free_bytes ? MAX_BATCH * row : free_bytes;

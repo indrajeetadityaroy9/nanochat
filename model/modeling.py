@@ -9,11 +9,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from corpus.mixture import Stage
+from corpus.mixture import FILE_LEVEL_STAGE, Stage
 from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.ops.cross_entropy import lm_loss, lm_losses
 from model.ops.flash_attn import attention
-from model.ops.linear import qkv_proj, relu2_mlp
+from model.ops.linear import EPS, qkv_proj, relu2_mlp
 
 # Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 Table 9)
 ASPECT_RATIO = 960 // 32
@@ -25,14 +25,7 @@ class ModelConfig:
     num_hidden_layers: int
     hidden_size: int
     # Logit cap c in every loss and sample (cross_entropy.py, decode.cu); None: uncapped
-    final_logit_softcapping: float | None = None
-
-
-def model_config(*, num_hidden_layers: int, stage: Stage) -> ModelConfig:
-    """nanochat's shape rule (92d63d4 scripts/base_train.py:51-52, 131-134): width ASPECT_RATIO x num_hidden_layers,
-    rounded up to whole heads."""
-    return ModelConfig(max_position_embeddings=stage.seq_len, num_hidden_layers=num_hidden_layers,
-                       hidden_size=-(-num_hidden_layers * ASPECT_RATIO // HEAD_DIM) * HEAD_DIM)
+    final_logit_softcapping: float | None
 
 
 def has_ve(layer_idx: int, *, num_hidden_layers: int) -> bool:
@@ -48,8 +41,8 @@ def layer_windows(config: ModelConfig) -> list[int]:
 
 
 def norm(x: Tensor) -> Tensor:
-    """RMS norm, statistics in fp32, eps FLT_EPSILON (as model/kernels/qk_prologue.cu and decode.cu)."""
-    return F.rms_norm(x, (x.size(-1),), eps=torch.finfo(torch.float32).eps)
+    """RMS norm, statistics in fp32, eps EPS (FLT_EPSILON, as model/kernels/qk_row.cuh and decode.cu)."""
+    return F.rms_norm(x, (x.size(-1),), eps=EPS)
 
 
 class GemmLinear(nn.Linear):
@@ -210,6 +203,16 @@ class CausalLM(nn.Module):
                          self.config.final_logit_softcapping)
 
 
+def meta_model(*, num_hidden_layers: int, final_logit_softcapping: float | None) -> CausalLM:
+    """The model on the meta device at the file-level stage's context, by nanochat's shape rule (92d63d4
+    scripts/base_train.py:51-52, 131-134): width ASPECT_RATIO x num_hidden_layers, rounded up to whole heads."""
+    config = ModelConfig(max_position_embeddings=FILE_LEVEL_STAGE.seq_len, num_hidden_layers=num_hidden_layers,
+                         hidden_size=-(-num_hidden_layers * ASPECT_RATIO // HEAD_DIM) * HEAD_DIM,
+                         final_logit_softcapping=final_logit_softcapping)
+    with torch.device("meta"):
+        return CausalLM(config)
+
+
 def num_non_embedding_params(model: CausalLM) -> int:
     """Decoder-layer parameters + lm_head: what the token budget scales with (92d63d4 scripts/base_train.py:263-267)."""
     return sum(p.numel() for p in model.layers.parameters()) + model.lm_head.weight.numel()
@@ -218,7 +221,8 @@ def num_non_embedding_params(model: CausalLM) -> int:
 def accumulated_weights(model: CausalLM) -> list[nn.Parameter]:
     """Weights whose fp32 .grad the GEMM ops accumulate into in place; a training backward needs it allocated."""
     return [w for m in model.modules()
-            for w in (m.qkv_weights() if isinstance(m, Attention) else (m.weight,) if isinstance(m, GemmLinear) else ())]
+            for w in (m.qkv_weights() if isinstance(m, Attention)
+                      else (m.weight,) if isinstance(m, GemmLinear) else ())]
 
 
 def num_matmul_params(model: CausalLM) -> int:

@@ -9,6 +9,7 @@ import functools
 import keyword
 import sys
 import token as pytoken
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,7 +30,7 @@ SPECIAL = ("$END", "NEWLINE", "INDENT", "DEDENT")
 NO_ACTION = np.iinfo(np.int32).min  # parser.rs NO_ACTION
 
 
-def identifier_ranges(test) -> list[tuple[int, int]]:
+def identifier_ranges(test: Callable[[str], bool]) -> list[tuple[int, int]]:
     """The inclusive ranges of the non-ASCII code points c where test(chr(c)) holds."""
     chars = range(0x80, sys.maxunicode + 1)
     hits = np.flatnonzero(np.fromiter(map(test, map(chr, chars)), dtype=bool, count=len(chars))) + 0x80
@@ -70,17 +71,18 @@ def python_syntax(tokenizer: Tokenizer):
         start=conf.start_state, end=conf.end_state,
         xid_start=identifier_ranges(str.isidentifier),
         xid_continue=identifier_ranges(lambda c: ("a" + c).isidentifier()),
-        token_bytes=tokenizer.token_bytes[:tokenizer.bos_token_id])
+        token_bytes=tokenizer.mergeable)
 
 
 def syntax_error(source: str) -> list[str]:
-    """source's syntax error as "line:col: SyntaxError: message", [] if it parses.
-    Parser overflow (MemoryError, RecursionError) counts as a failure to parse."""
+    """source's syntax error as "line:col: SyntaxError: message", [] if it parses. Parser overflow (MemoryError,
+    RecursionError) and CPython 3.12.3's ValueError for f"{x:{y=}}" (python/cpython#121130, fixed in 3.12.5) count as
+    failures to parse."""
     try:
         ast.parse(source)
     except SyntaxError as e:
         return [f"{e.lineno}:{e.offset}: SyntaxError: {e.msg}"]
-    except (MemoryError, RecursionError) as e:
+    except (MemoryError, RecursionError, ValueError) as e:
         return [f"{type(e).__name__}: {e}"]
     return []
 

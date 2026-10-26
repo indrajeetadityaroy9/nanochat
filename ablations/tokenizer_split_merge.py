@@ -23,11 +23,10 @@ from scipy.stats import hmean
 import metrics
 from corpus import mixture
 from corpus.layout import TOKEN_DTYPE, split_path, stage_rows
-from corpus.mixture import weights
 from corpus.pack import packed_shards, shard_count, write
 from corpus.parallel import SPAWN, memory
 from corpus.schema import EXERCISE, FUNCTION, REPOSITORY_FILE, SYNTHETIC_FILE, TEXT
-from corpus.sources import SOURCES, curated_shards, sample_starts, texts
+from corpus.sources import SOURCES, curated_documents, curated_shards, texts
 from corpus.tokenize import tokenize_repo_level_stage, tokenize_repositories, tokenize_source, train_parts
 from corpus.tokenizer import ABLATION, SPLIT_PATTERN, get_tokenizer, save
 from corpus.train_tokenizer import Score, byte_shares, fidelity, sample, shard_bytes, train, vocabulary
@@ -45,7 +44,6 @@ FUSED_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}|
 HYBRID_PATTERN = r"""(?:[^\s\p{L}\p{N}]| )?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\n+|\r+|\t+| +|[^\S\r\n\t ]+"""
 ARMS: dict[str, tuple[str, Score]] = {"sa-bpe": (SPLIT_PATTERN, "sa-bpe"), "sa-bpe-fused": (FUSED_PATTERN, "sa-bpe"),
                                       "hybrid": (HYBRID_PATTERN, "sa-bpe"), "bpe": (SPLIT_PATTERN, "frequency")}
-CHALLENGERS = ("sa-bpe-fused", "hybrid", "bpe")
 NUM_HIDDEN_LAYERS = 16
 # Chinchilla tokens per non-embedding parameter (arXiv 2203.15556 Table 3), d16 under sa-bpe
 TOKENS_PER_PARAM = 20
@@ -130,7 +128,7 @@ def describe(arm: str, counts: dict[str, np.ndarray]) -> dict:
         """Weighted harmonic mean of the members' bytes per token over their file-stage byte shares."""
         return float(hmean([sources[s]["bytes_per_token"] for s in members], weights=[shares[s] for s in members]))
 
-    entries = [b.decode("utf-8", "ignore") for b in tokenizer.token_bytes[:tokenizer.bos_token_id]]
+    entries = [b.decode("utf-8", "ignore") for b in tokenizer.mergeable]
     # \Z: $ also matches before a final line break
     fused, indented = regex.compile(r"[^\s\p{L}\p{N}][\r\n]"), regex.compile(r"[\r\n][ \t]+\Z")
     merged = held[256:]
@@ -190,12 +188,7 @@ def tokeval_documents(source: str) -> tuple[list[str], bool]:
     for path in curated_shards(source, "val"):
         f = pq.ParquetFile(path)
         for g in range(f.num_row_groups):
-            table = f.read_row_group(g)
-            documents = texts(source, table)
-            if SOURCES[source].category == REPOSITORY_FILE:
-                starts = sample_starts(table["sample"].to_numpy())
-                documents = ["".join(documents[a:b]) for a, b in itertools.pairwise([*starts, len(documents)])]
-            for doc in documents:
+            for doc in curated_documents(source, f.read_row_group(g)):
                 taken.append(doc)
                 size += len(doc.encode("utf-8"))
                 if size >= TOKEVAL_BYTES:
@@ -245,7 +238,7 @@ def intrinsic() -> None:
         for check, future in splits.items():
             counts[check], sizes[check] = future.result()
         for corpus in SOURCES:
-            if not all(np.array_equal(sizes["sa-bpe", corpus], sizes[arm, corpus]) for arm in CHALLENGERS):
+            if not all(np.array_equal(sizes["sa-bpe", corpus], sizes[arm, corpus]) for arm in ARMS):
                 raise RuntimeError(f"{corpus}: the arms' tokenized val documents differ in bytes")
         record = {"arms": {arm: describe(arm, {corpus: counts[arm, corpus] for corpus in SOURCES})
                            | {"depth_invariance": {}, "fidelity": {}} for arm in ARMS}}
@@ -319,7 +312,7 @@ def arm_record() -> dict:
         read = {}
         for stage in (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE):
             rows, count = stage_rows(tokenizer, stage), drawn(stage, arm_run)
-            shares, draws, _ = weights(stage, rows, count)
+            shares, draws, _ = mixture.weights(stage, rows, count)
             read[str(stage.seq_len)] = {n: {"rows": rows[n], "weight": shares[n], "read": d / rows[n]}
                                         for n, d in draws.items()}
         arms[arm] = {"data_key": tokenizer.data_key, "tokens_per_param": arm_run.tokens_per_param,

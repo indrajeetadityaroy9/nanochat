@@ -32,7 +32,6 @@ def native_library(name: str, command: list[str], sources: list[Path], build: Ca
         digest.update(source.read_bytes())
     path = NATIVE / f"{name}-{digest.hexdigest()}.so"
     if not path.exists():
-        NATIVE.mkdir(parents=True, exist_ok=True)  # absent in a fresh checkout
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         build(tmp)
         tmp.replace(path)

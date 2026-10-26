@@ -12,7 +12,7 @@ tokenized and packed data under the corpus's tokenizer.
 | File | § |
 |---|---|
 | `corpus/__init__.py` (run order; `CORPUS` = `paths.CORPUS` = `artifacts/corpus`, its layout in §11) | 10, 11 |
-| `corpus/sources.py` (`SOURCES`, paths, `texts`, `repository_samples`) | 1, 3, 6 |
+| `corpus/sources.py` (`SOURCES`, paths, `texts`, `curated_documents`, `repository_samples`) | 1, 3, 6 |
 | `corpus/prepare.py` (fetch, extent, standardize) | 1, 2 |
 | `corpus/schema.py` (categories, `SPLIT`, `SAMPLE_FILE`) | 2, 3 |
 | `corpus/curate.py` (check, dedup, split, shards) | 3 |
@@ -141,7 +141,9 @@ scored benchmarks (`docs/evaluation.md` §4).
 
 **Split.** A row is validation when `md5_number(group) % 100 = 0` (DuckDB; `schema.SPLIT` = 100), the group being its
 category's (§2): a repository (lowercased, as GitHub's names are case-insensitive), a Codeforces problem, or the
-document itself.
+document itself. The split is per source: a validation repository's file can occur in train rewritten (Nemotron
+rewriting, transpilation) or as an exercise written from it (UltraData-Code L3), sources split by document; no
+published column links the two [inference].
 
 **Shards**, `curated/<source>/<split>/<k>.parquet`, zstd:
 - **Repository sources** (REPOSITORY_FILE): one shard per residue partition, `val/0.parquet` and `train/1..99.parquet`.
@@ -234,7 +236,7 @@ and packed (§6, §8).
   `BYTES_PER_TOKEN`), drawn systematically in shard order (row i taken when ⌊(i+1)·f⌋ > ⌊i·f⌋, f the source's target
   bytes over its train split's footer text bytes; a repository file is one document, after its path comment). The
   size is the reference tokenizer's sample's, so every vocabulary trains on as much text as the reference did
-  (`train_tokenizer.py:36–38`).
+  (`train_tokenizer.SAMPLE_BYTES`).
   Codeforces-CoTs (32K stage only) is not sampled. Tokenizer training data should be "representative of
   model training data" (arXiv 2405.05417 §5); across tokenizer training mixes a subset's compression "only varies by 5
   to 6 percentage points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); proportional weights gave lower
@@ -286,12 +288,12 @@ ordinary text), per corpus and split:
 | `<split>.idx` | int64: each document's first offset, then the total |
 | `<split>.json` | each curated shard's (or partition's) document count; `pack` packs each one's documents together |
 
-**Documents.** A curated row, except in a repository source, where a document is one sample (§3): its files
-concatenated in the sample's order. Each repository file is preceded by a line comment with its path (`# path`,
-`// path`; DeepSeek-Coder: "a comment indicating the file's path is added at the beginning of each file", arXiv
-2401.14196 §2.2) and ends with a line end, added when missing (`sources.texts`; Python Language Reference §2.1.2, C++23
-[lex.phases] phase 2); a line break in a path is written `\r` or `\n`, and a C++ file ending in a backslash gets an
-empty line, so phase 2 splices no comment onto it (C++23 [lex.phases]).
+**Documents** (`sources.curated_documents`). A curated row, except in a repository source, where a document is one
+sample (§3): its files concatenated in the sample's order. Each repository file is preceded by a line comment with its
+path (`# path`, `// path`; DeepSeek-Coder: "a comment indicating the file's path is added at the beginning of each
+file", arXiv 2401.14196 §2.2) and ends with a line end, added when missing (`sources.texts`; Python Language Reference
+§2.1.2, C++23 [lex.phases] phase 2); a line break in a path is written `\r` or `\n`, and a C++ file ending in a
+backslash gets an empty line, so phase 2 splices no comment onto it (C++23 [lex.phases]).
 
 **The corpus crate** (`corpus/crate/`, pyo3 module `nanochat_crate`): `train` (§5), `topological_sort` (below) and
 `pack` (§8), built by cargo and imported through `native.corpus_crate` (`native.crate_module`).
@@ -491,7 +493,7 @@ start position consumed.
 
 Every command runs in the `nanochat` image from the repository's root (`docs/training.md` §9 builds it and runs
 `scripts/setup.sh`, which pulls the dataset), through `scripts/container.sh` on the GH200 or, for the text stages
-on any host, as
+on any host with cgroup v2 (`parallel.memory` reads `/sys/fs/cgroup/memory.max`), as
 
 ```
 docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/workspace/nanochat -w /workspace/nanochat \
@@ -529,7 +531,7 @@ Detail of the code not stated in §1–§10, by module and symbol.
 | `raw/<source>/<Hub path>` | fetched Hub columns (`prepare.fetch`) |
 | `standardized/<source>/<k>.parquet` | fetched file k in its category's schema |
 | `checked/<source>/<k>.parquet` | a Python source's standardized file after the check |
-| `curated/<source>/<split>/<k>.parquet` | curated shard k (the published dataset) |
+| `curated/<source>/<split>/<k>.parquet` | curated shard k (the published dataset; `sources.CURATED`) |
 | `tokenizer/tokenizer.{tiktoken,pattern}` | the corpus's tokenizer |
 | `tokenizer-ablation/<arm>/`, `tokenizer-ablation/tokenized/` | the ablation's arms and their data |
 | `tokenized/<corpus>-<data key>/<split>.*` | tokenized split (`.bin`, `.idx`, `.json`), packs `-T<seq_len>.*` |
@@ -677,8 +679,9 @@ packed rows (after); a Stage's `tokens` are the `MAX_STEPS` plan's, and any othe
 `IN_PART` groups read the same fraction of each source (`prepare.extent`). `REPOSITORIES` is one corpus per language,
 as a pack call parses one grammar. `SPREAD` is checked per arm by the intrinsic step (`train_tokens_over_draw`).
 
-**`corpus/parallel.py`.** Workers are spawned (no inherited threads or state). `memory`: no `memory.max` (a cgroup v1
-host, the hierarchy's root) or `max` means no limit. The other half of memory is left to other processes.
+**`corpus/parallel.py`.** Workers are spawned (no inherited threads or state). `memory` reads the container's cgroup v2
+`memory.max` (the GH200 host mounts cgroup v2); `max` means no limit. The other half of memory is left to other
+processes.
 
 ## References
 

@@ -18,7 +18,7 @@ what it does, the basis for each choice and its measured effect. Markers: [arith
 | `model/ops/ve_gate.py`, `model/kernels/ve_gate.cu` | §3, §4 |
 | `model/kernels/fa4_rows.cu` | §3 |
 | `model/kernels/common.cuh` | §3 (shared vector access, fixed-order warp sum, occupancy) |
-| `model/ops/__init__.py` | (empty package marker) |
+| `model/__init__.py`, `model/ops/__init__.py` | (empty package markers) |
 | `native.py` | §3 (build and loading of the kernels and of the Rust crates) |
 
 Names follow Hugging Face's (`ModelConfig`, `num_hidden_layers`, `hidden_size`, `CausalLM`, `DecoderLayer`,
@@ -28,9 +28,9 @@ Names follow Hugging Face's (`ModelConfig`, `num_hidden_layers`, `hidden_size`, 
 
 `CausalLM` is karpathy/nanochat 92d63d4 `nanochat/gpt.py` with the wins of its experiment log (`dev/LOG.md`, "LOG")
 and Qwen3's QK-Norm (arXiv 2505.09388 §2) with learnable per-dimension weights (transformers `modeling_qwen3.py`).
-`CausalLM.hidden`: x0 = norm(bf16(E[ids])); before layer i, x ← λr_i·x + λ0_i·x0; `DecoderLayer`:
-h = x + o_proj(Attn(norm(x))), x = h + down(relu(up(norm(h)))²); then the final norm, `lm_head` and the capped cross
-entropy (`CausalLM.forward`).
+`CausalLM.hidden`: x0 = norm(E[ids]) (the code's bf16 cast before the norm is elided when compiled, §3 Embedding);
+before layer i, x ← λr_i·x + λ0_i·x0; `DecoderLayer`: h = x + o_proj(Attn(norm(x))), x = h + down(relu(up(norm(h)))²);
+then the final norm, `lm_head` and the capped cross entropy (`CausalLM.forward`).
 
 | Component | Definition (code) |
 |---|---|
@@ -44,7 +44,7 @@ entropy (`CausalLM.forward`).
 | Output | z = x W^T capped c·tanh(z/c), c = `ModelConfig.final_logit_softcapping` (`run.py` `RunConfig`: 15.0; `None` uncapped), in the training loss, the evaluation losses and the decoder's sampling; no z-loss |
 | Precision | fp32 parameters and gradients; bf16 activations and GEMM operands (bf16 weight copies `weight_bf16`, `qkv_bf16`, refreshed after every update by `refresh_gemm_weights`); fp32 accumulation (§4) |
 
-**Shape rule** (`model_config`, 92d63d4 `scripts/base_train.py:51-52, 131-134`): C = 30 × `num_hidden_layers` rounded
+**Shape rule** (`meta_model`, 92d63d4 `scripts/base_train.py:51-52, 131-134`): C = 30 × `num_hidden_layers` rounded
 up to whole 128-wide heads; 30 = MobileLLM-350M's 960 / 32 (arXiv 2402.14905 Table 9). d24: 720 → 768.
 `max_position_embeddings` is the stage's context; `set_stage` recomputes the windows and the rotary tables (computed in
 fp64, rounded once to fp32: `init_buffers`), the weights unchanged.
@@ -165,7 +165,7 @@ the decoder's `decode.cu`) and one self-contained file per kernel with its C ent
 | Value-embedding gate and mix | `ve_gate.cu` (`ve_gate.py`): one warp per row, the gate logits in fp32, the mix rounded once; backward in token order (one `torch.sort` of `input_ids` per micro-batch, shared by the layers through CSE), 16 positions per warp, a run of equal tokens summed in registers and added into the table's `.grad` with one 16-byte atomic per 4 fp32 (two per lane and 8-wide chunk; the zeroed table gradient allocated once per step, when `.grad` is None, then accumulated into; no autograd add); the gate weight's gradient one cuBLAS GEMM from bf16 dz; compiled for H = 2, 4, 6 |
 | Cross entropy, training | `cross_entropy.py` `lm_loss`: QuACK's scaled-exp linear cross entropy per `LCE_CHUNK` = 8,192 rows: the logits GEMM's epilogue (N tile 128, pingpong) stores bf16 rescaled exponentials with each row's tile maxima, sums and the label's fp32 logit; `lce_glue` forms the loss from the fp32 accumulators; dX (bf16) and dW (fp32, accumulated across chunks) GEMMs rescale on the A-operand load, their N tile over C by QuACK's rule (`strip_tile_n`: 192 when it divides C, else 256). No logits tensor and no softmax pass. The cap in the same pipeline: tanh on the fp32 accumulator, the tile maximum capped likewise (tanh is increasing), 1 − tanh² folded into the stored exponentials, the label's entry fixed by one Triton kernel (`cap_label_fix`) |
 | Cross entropy, evaluation | `lm_losses`: uncapped, QuACK's `lse_target_epi` (logsumexp and label logit from the fp32 accumulators, no logits stored); capped, per 8,192 rows (`CHUNK`) an fp32-output GEMM and the capped logsumexp in one Inductor-fused kernel (`capped_losses`) |
-| Embedding | `F.embedding` of the token table, the bf16 cast fused by Inductor; PyTorch's backward accumulates rows with atomics |
+| Embedding | `F.embedding` of the token table; Inductor fuses the gather, the bf16 cast and the norm without rounding in between (`torch._inductor.config.emulate_precision_casts` off), so the compiled x0 is the norm of the fp32 rows, as `decode.cu` `k_norm` computes it (d8, 98,304 random ids at `8be5e90`: 114 of 25,165,824 elements differ from eager bf16(norm(E[ids])), 6,312,306 from eager norm(bf16(E[ids]))); PyTorch's backward accumulates rows with atomics |
 | Optimizer | Muon's Newton–Schulz batched over same-shape matrices and NorMuon: `docs/training.md` §3 |
 
 **Landed changes** (d24 tok/s, each against its parent commit in one exclusive A/B: GH200 at 700 W, SM clock locked,
@@ -312,8 +312,8 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   K = 3C), each dW = dY_blockᵀ X on the block's strided view of dY.
 - `residual_rms`: QuACK's `gemm_rms` epilogue and finalize (`quack/gemm_interface.py` `_gemm_rms_call`,
   `_rms_finalize`) via `sq_reduce_mod` and `rms_final_reduce`: per-tile squared sums, finalized to
-  rstd = (mean(h²) + eps)^−½; called inside the attention op. `residual_rms_bwd`: x = O (FA4's output, heads of
-  `HEAD_DIM`); dpsum is the sum over each head's dims of dx·x.
+  rstd = (mean(h²) + `EPS`)^−½ (`EPS`: the one RMS-norm epsilon, also `modeling.norm`'s); called inside the attention
+  op. `residual_rms_bwd`: x = O (FA4's output, heads of `HEAD_DIM`); dpsum is the sum over each head's dims of dx·x.
 - `relu2_mlp`: `gemm_norm_act` stores the scaled pre-activation and the activation (dW_down's operand is the saved
   activation); the residual is the down projection's C (`gemm_add`'s body). Its backward owns the norm's backward
   (rstd gets no gradient of its own): with P = h W_upᵀ, preact = rstd·P, dP = rstd·dpreact,
@@ -321,7 +321,7 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   of the dact epilogue (`relu2_dact_rstd`), the rest the dX GEMM's epilogue (`norm_bwd_apply`, C = dy, h a tile load).
 - `sm90`: a point of QuACK's SM90 space (`quack/gemm_config.py` `_get_sm90_configs`) with QuACK's static persistent
   scheduler (`is_dynamic_persistent=False`; the `down_dx` GEMM of `relu2_mlp_bwd` passes `dynamic_scheduler=True`).
-  `CONFIGS` covers the d8, d16 and d24 widths (`model_config`) at M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`; the
+  `CONFIGS` covers the d8, d16 and d24 widths (`meta_model`) at M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`; the
   benchmark is `quack/autotuner.py` (L2-cold CUDA-graph medians of every candidate, exclusive GPU). `gemm` calls
   `gemm_tuned.fn` because QuACK's `gemm`/`gemm_add` run `config=None` for `tuned=False`. `DPSUM_CONFIG` is the fastest
   tile_n = 128 configuration on 98,304 × 768 × 768.

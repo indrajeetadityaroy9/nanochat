@@ -12,6 +12,7 @@ import itertools
 import json
 import multiprocessing
 import os
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -28,7 +29,6 @@ from evalplus.provider.utility import EOS, extra_eos_for_direct_completion
 from evalplus.sanitize import sanitize
 from huggingface_hub import hf_hub_download
 from human_eval_infilling.data import read_problems
-from human_eval_infilling.evaluation import estimate_pass_at_k
 
 from corpus.tokenizer import Tokenizer
 from eval.verify import chosen, search, solution_diagnostics
@@ -210,11 +210,28 @@ def filtered_middles(generator: NativeDecoder, tokenizer: Tokenizer, problems: l
                     language="python", count=len(problems))
 
 
+def sanitizer_init() -> None:
+    """A sanitize worker: SyntaxWarnings ignored, and EvalPlus's syntax_check counting a ValueError of the parser as
+    a syntax error: CPython 3.12.3's compile() raises it for an f-string debug expression in a format spec, f"{x:{y=}}"
+    (python/cpython#121130, fixed in 3.12.5), which this interpreter therefore cannot run."""
+    warnings.filterwarnings("ignore", "", SyntaxWarning)
+    module = sys.modules[sanitize.__module__]  # evalplus/sanitize.py (the package's `sanitize` is the function)
+    check = module.syntax_check
+
+    def syntax_check(code: str, verbose: bool = False) -> bool:
+        try:
+            return check(code, verbose)
+        except ValueError:
+            return False
+
+    module.syntax_check = syntax_check
+
+
 def sanitizers() -> ProcessPoolExecutor:
-    """EvalPlus sanitize workers, one per CPU, from a forkserver; SyntaxWarnings ignored. The caller must shut the
-    pool down: an open pool blocks a spawned process's exit."""
+    """EvalPlus sanitize workers (sanitizer_init), one per CPU, from a forkserver. The caller must shut the pool down:
+    an open pool blocks a spawned process's exit."""
     return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("forkserver"),
-                               initializer=warnings.filterwarnings, initargs=("ignore", "", SyntaxWarning))
+                               initializer=sanitizer_init)
 
 
 def evalplus_source(task: Task, text: str) -> str:
@@ -328,7 +345,7 @@ def infilling(name: str, problems: list[dict], middles: list[str]) -> dict:
     passed = [r == "passed" for r in result]
     clusters = ["/".join(p["task_id"].split("/")[1:3]) for p in problems]
     scores = completion_scores(middles, [p["canonical_solution"] for p in problems]) | {"pass@1": passed}
-    return {"pass@1": float(estimate_pass_at_k(1, passed, 1).mean()),
+    return {"pass@1": statistics.fmean(passed),
             "scores": {k: summary(v, clusters) for k, v in scores.items()},
             "ids": [s["task_id"] for s in samples], "completions": middles, "result": result}
 

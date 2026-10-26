@@ -19,11 +19,12 @@ from corpus.tokenizer import BOS, SPECIAL_TOKENS, TOKENIZER, get_tokenizer
 from inference.modeling_nanochat import NanochatPreTrainedModel
 from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.modeling import ModelConfig, has_ve, layer_windows
+from model.ops.linear import EPS
 
 
 def export(checkpoint: Path, out: Path, tokenizer_dir: Path = TOKENIZER) -> None:
     out.mkdir(exist_ok=True)
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state = torch.load(checkpoint, map_location="cpu")
     config = ModelConfig(**state["config"])
     n, C, T = config.num_hidden_layers, config.hidden_size, config.max_position_embeddings
     fp32 = set(NanochatPreTrainedModel._keep_in_fp32_modules_strict)
@@ -39,13 +40,14 @@ def export(checkpoint: Path, out: Path, tokenizer_dir: Path = TOKENIZER) -> None
         "architectures": ["NanochatForCausalLM"], "model_type": "nanochat",
         "auto_map": {"AutoConfig": "modeling_nanochat.NanochatConfig", "AutoModel": "modeling_nanochat.NanochatModel",
                      "AutoModelForCausalLM": "modeling_nanochat.NanochatForCausalLM"},
-        "vocab_size": VOCAB_SIZE, "hidden_size": C, "intermediate_size": 4 * C, "num_hidden_layers": n,
+        "vocab_size": VOCAB_SIZE, "hidden_size": C,
+        "intermediate_size": state["model"]["layers.0.mlp.up_proj.weight"].size(0), "num_hidden_layers": n,
         "num_attention_heads": C // HEAD_DIM, "num_key_value_heads": C // HEAD_DIM, "head_dim": HEAD_DIM,
         "max_position_embeddings": T, "rope_parameters": {"rope_type": "default", "rope_theta": float(ROPE_THETA)},
         "sliding_window": short + 1,
         "layer_types": ["sliding_attention" if w < T else "full_attention" for w in windows],
         "value_embedding_layers": [i for i in range(n) if has_ve(i, num_hidden_layers=n)],
-        "final_logit_softcapping": config.final_logit_softcapping, "rms_norm_eps": torch.finfo(torch.float32).eps,
+        "final_logit_softcapping": config.final_logit_softcapping, "rms_norm_eps": EPS,
         "tie_word_embeddings": False, "torch_dtype": "bfloat16",
         "bos_token_id": tokenizer.bos_token_id, "eos_token_id": tokenizer.bos_token_id,
     }, indent=2) + "\n")

@@ -47,7 +47,7 @@ def fit(lines: list[dict]) -> dict:
 def analysis(lines: list[dict]) -> dict:
     """The estimator over results/peak_lr.jsonl's records; derived values None while a grid needs extending. Vertices
     are re-based onto the current law's lr; raises unless the recorded batch and steps are the current plan's."""
-    def recorded_plan(num_hidden_layers, tokens_per_param):
+    def recorded_plan(num_hidden_layers: int, tokens_per_param: float) -> dict:
         """The setting's recorded plan (old record keys) with the current and the recorded law's lr."""
         line = setting(lines, num_hidden_layers, tokens_per_param)[0]
         recorded = next(r for r in line["records"] if r["kind"] == "run")["plan"]
@@ -57,7 +57,7 @@ def analysis(lines: list[dict]) -> dict:
                                "not the current plan's")
         return recorded | {"lr": current.learning_rate, "recorded_lr": recorded["lr"] / line["fields"]["lr_scale"]}
 
-    def tokens(p):
+    def tokens(p: dict) -> int:
         return p["num_iterations"] * p["total_batch_size"]
 
     fits = {f"d{num_hidden_layers} at {tokens_per_param:g}": fit(setting(lines, num_hidden_layers, tokens_per_param))

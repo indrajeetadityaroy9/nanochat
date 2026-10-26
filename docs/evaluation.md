@@ -153,8 +153,8 @@ alike. Every public function:
 | `offset_bpb` | `mixture_bpb` per byte-offset bucket (None where no target is); a bucket pools the documents long enough to reach it, so the curve mixes context use with document composition | arXiv 2308.12950 Fig. 4a; 2503.13423 App. B.1 |
 | `bpb_summary(bits, nbytes, row_weights=)` | the ratio Σw·bits / Σw·bytes over rows (0-byte rows dropped) as the WLS fit of row bpb on a constant with weights w × bytes; standard error HC1 (the delta-method ratio standard error × √(n/(n−1))); 95% normal interval | Miller, arXiv 2411.00640 Eq. 1, 5–6; statsmodels `WLS` |
 | `mixture_bpb_summary` | `bpb_summary` of every sampled row of a group, a row of corpus c weighted w_c / rows_c (the `mixture_bpb` weights) | as above |
-| `parse_outcome(source)` | `compile()` → "parses", "indentation" (IndentationError, TabError; checked first) or "syntax" (other SyntaxError; MemoryError and RecursionError of the parser count here) | TokEval's companion post ("How the failing generations fail"; arXiv 2608.18062 App. F.3, fn. 15) |
-| `parse_shares`, `parsed` | each outcome's share; per completion whether it parses | — |
+| `parse_outcome(source)` | `compile()` → "parses", "indentation" (IndentationError, TabError; checked first) or "syntax" (other SyntaxError; MemoryError and RecursionError of the parser, and its ValueError of §10, count here) | TokEval's companion post ("How the failing generations fail"; arXiv 2608.18062 App. F.3, fn. 15) |
+| `parse_shares` | each outcome's share of a benchmark's completions | — |
 | `measures(evaluation, steps, repo_level_start=)` | a run's compared measures (table below) | — |
 | `measure_errors(evaluation)` | their error bars: `code`, `text`, `math`, `repo_32k` by `mixture_bpb_summary`; `solutions` by `bpb_summary`; the parse shares and `pass@1` by `summary` over problems; none for `repo_beyond_8k`, `tokens_per_second`, `mfu` | Miller Eq. 1 |
 | `line_exact_match` | `prediction.strip() == reference.strip()` | SantaCoder (arXiv 2301.03988 §6.1.2; bigcode-evaluation-harness `santacoder_fim.py`), DeepSeek-Coder §4.2 |
@@ -308,11 +308,12 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
 
 **Post-generation checks** (`eval/verify.py`, the filtered mode's acceptance test):
 
-- Python (`python_diagnostics`): the program parses (`ast.parse`, parser overflow a failure), then basedpyright 1.40.2
-  (one process per batch) with every rule off but `reportUndefinedVariable`, `reportAttributeAccessIssue`,
-  `reportCallIssue`, `reportReturnType` (definite runtime failures or annotation contradictions; style, unknown-type,
-  possibly-unbound and optional-member rules are off because a correct program may trigger them, argument types
-  because pyright also judges them against its own inferred types and rejects HumanEval/130's canonical solution).
+- Python (`python_diagnostics`): the program parses (`ast.parse`; parser overflow and the parser's ValueError of §10
+  failures), then basedpyright 1.40.2 (one process per batch) with every rule off but `reportUndefinedVariable`,
+  `reportAttributeAccessIssue`, `reportCallIssue`, `reportReturnType` (definite runtime failures or annotation
+  contradictions; style, unknown-type, possibly-unbound and optional-member rules are off because a correct program
+  may trigger them, argument types because pyright also judges them against its own inferred types and rejects
+  HumanEval/130's canonical solution).
   EvalPlus solutions (`solution_diagnostics`): the generated text's syntax error, an entry function missing or without
   a `return <value>` in its own body (sanitize keeps a parseable span and would hide both).
 - Examples (`examples_pass`): the prompt's doctest `>>>` examples and Python `assert` lines, run by value (equal to
@@ -326,6 +327,13 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
 `search` decodes every task without an accepted candidate yet, one round per attempt, at most 10; `chosen` returns
 the accepted candidate, else the greedy one. FIM candidates are checked as prefix + middle + suffix against the
 prefix's examples.
+
+On the reference solutions (CPU, `8be5e90`) the acceptance test rejects 5 of 164 HumanEval+ and 2 of 378 MBPP+:
+`reportReturnType` on HumanEval/10 and /17 (loops that return inside, then an implicit fall-through) and /20
+(`tuple | None` against the annotation), `reportCallIssue` on Mbpp/130 (`max(d, key=d.get)` on a `defaultdict`); the
+prompts' own wrong examples on HumanEval/47 (median 15.0) and /116; Mbpp/630, whose helper EvalPlus `sanitize` drops
+(EvalPlus's scoring fails it too). A correct candidate rejected there is resampled and may end as the greedy one, which
+biases these problems' filtered pass@1 down.
 
 ## 8. Export, vLLM and the standard-protocol cross-check
 
@@ -418,7 +426,9 @@ Per module and symbol; what §1–§9 state is not repeated.
   √(n/(n−1)) plays Eq. 1's n − 1. `summary`: `OLS` with `use_t=False`; clustered fit `cov_type="cluster"`,
   `use_correction=False`; returns `n` and the number of clusters.
 - `parse_outcome`: warnings suppressed during `compile`; MemoryError and RecursionError count as "syntax", as
-  `syntax_constraint.syntax_error` counts them; the classification source is the post's section "How the failing
+  `syntax_constraint.syntax_error` counts them, and so does the ValueError CPython 3.12.3's compiler raises in place of
+  parsing an f-string debug expression in a format spec, `f"{x:{y=}}"` (python/cpython#121130, fixed in 3.12.5): the
+  image's interpreter cannot run such a program. The classification source is the post's section "How the failing
   generations fail".
 - CrossCodeEval patterns: `COMMENT` (cceval `eval_utils.py` `remove_comments`: `#` and `//` to the line end, strings
   included), `STRING` (`string_pattern`, removed before identifiers are read), `IDENTIFIER` (`IDENTIFIER_REGEX`, matched
@@ -462,12 +472,12 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 ### `eval/bpb.py`
 
-- `sums(losses, batches, token_bytes, steps=, num_segments=)` → `{"bits", "bytes"}` per context bucket (bucket i:
+- `sums(losses, batches, token_bytes, num_segments=)` → `{"bits", "bytes"}` per context bucket (bucket i:
   contexts in (CONTEXTS[i−1], CONTEXTS[i]]; a target's context is its input's position in its segment + 1),
-  `{"offset_bits", "offset_bytes"}` per offset bucket and `{"row_bits", "row_bytes"}` per row; batches are
-  `corpus/loader.py` `PretrainingBatches` tuples. Padding `cu_seqlens` by its last offset leaves empty segments the
-  attention never reads; `searchsorted(right=True)` maps a position to its segment. OFFSETS reach 128 KiB, beyond a 32K
-  row's span in bytes.
+  `{"offset_bits", "offset_bytes"}` per offset bucket and `{"row_bits", "row_bytes"}` per row, over every batch;
+  batches are `corpus/loader.py` `PretrainingBatches` tuples (a loader ends with its sample's last micro-batch).
+  Padding `cu_seqlens` by its last offset leaves empty segments the attention never reads; `searchsorted(right=True)`
+  maps a position to its segment. OFFSETS reach 128 KiB, beyond a 32K row's span in bytes.
 - `val_bits` → `{"corpora": {corpus: {"bits", "bytes", "offset_bits", "offset_bytes", "row_bits", "row_bytes",
   "rows"}}, "bpb": {group | "all"}, "errors": {group}, "offset_bpb": {group}, "weights": {corpus}}`; weights are
   `Stage.shares` at the total train packed rows; the last micro-batch is filled with empty rows (index −1), dropped
@@ -509,7 +519,9 @@ Per module and symbol; what §1–§9 state is not repeated.
   `Reemit`, or for Python by the `SyntaxConstraint` built with `healing=`; a fresh constraint per candidate.
 - `sanitizers`: workers import the main module (`run.py`, whose top level must stay light); in a spawned process,
   multiprocessing's exit handler joins the workers before concurrent.futures' would stop them, hence the caller's
-  `with`.
+  `with`. `sanitizer_init` makes EvalPlus's `syntax_check` (which catches SyntaxError and MemoryError) count that
+  ValueError as a syntax error, so `code_extract` skips such spans: uncaught, one d16 completion ended a benchmark
+  evaluation (`8be5e90`).
 - `EVALPLUS_EVALUATE`: `evaluate(..., parallel=os.cpu_count())` (default half), `os._exit(0)` after the output file:
   `stucking_checker`, a non-daemon thread sleeping 20 s per check. `evalplus` → `{"base pass@1", "plus pass@1"
   (evaluator's `estimate_pass_at_k`), "scores": {"base", "plus"}, "ids", "base_status", "plus_status"}`; plus passes
@@ -533,9 +545,9 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 - `PYRIGHT_RULES` from basedpyright's configuration reference (`config-files`); everything else off, argument types
   (`reportArgumentType`) included. `python_diagnostics`: "line:col: SyntaxError: message" for unparsed programs
-  ("MemoryError: …" or "RecursionError: …" on parser overflow); each parsed program written as `program.py` in its own
-  directory; one process (`--pythonpath sys.executable`, so the installed packages resolve) because its start dominates
-  a check; exit status 1 on errors, the JSON report on stdout either way.
+  ("MemoryError: …", "RecursionError: …" or "ValueError: …", as `syntax_error`); each parsed program written as
+  `program.py` in its own directory; one process (`--pythonpath sys.executable`, so the installed packages resolve)
+  because its start dominates a check; exit status 1 on errors, the JSON report on stdout either way.
 - `solution_diagnostics`: sanitize reduces source (prompt + completion) to the entry function and its dependencies and
   keeps a parseable span; the entry function is its last top-level definition, nested functions, lambdas and classes
   excluded from the `return` search; a solution that does not parse returns its syntax error.
@@ -594,14 +606,16 @@ Per module and symbol; what §1–§9 state is not repeated.
   `NO_ACTION` = int32 min as in `parser.rs`), lexemes' terminals (keywords, soft keywords as NAME + keyword,
   operators), Python's non-ASCII identifier classes (`str.isidentifier` of c, of `"a" + c`, as inclusive ranges), the
   vocabulary's byte trie (tokens below BOS), and per-lexer-state token groupings filled on first use.
-- `syntax_error`: CPython's "Parser stack overflowed" `MemoryError` and `RecursionError` are failures to parse.
+- `syntax_error`: CPython's "Parser stack overflowed" `MemoryError`, `RecursionError` and the ValueError of
+  `metrics.parse_outcome` (python/cpython#121130) are failures to parse.
 
 ### `inference/decoder.py`
 
 - Flow: a request's prompt but its last token is prefilled (its positions run as rows of one batched pass, with any
   other new requests' prompts); captured CUDA graphs then advance every active slot a token per step (argmax or a
   seeded sample, optionally from its nucleus, within its constraint's allowed tokens) until BOS, the budget or the
-  stopping criteria; a freed slot takes the next request. A stage change (context, windows, rotary) needs a new decoder.
+  stopping criteria; a freed slot takes the next request. A stage change (context, windows, rotary) needs a new decoder;
+  the model's weights must not change while one lives (it reads them in place).
 - `fim_prompt`: the layout the packer trains (`corpus/pack.py`, `corpus/loader.py`); `NativeDecoder.generate` stops at
   the BOS ending the middle.
 - `Request`: `stopping_criteria` is None or a predicate of the generated ids, true once done; sampled logits are capped
@@ -628,9 +642,11 @@ Per module and symbol; what §1–§9 state is not repeated.
     later request with the same prompt copies them (K and V depend on the prompt alone, so tokens are unchanged).
   - `memory_fraction`: covers slots, prefill rows, graphs and the prompt store, capped by free memory (as vLLM's
     `gpu_memory_utilization`, counting this decoder alone).
-  - Weights: the embedding table stays fp32 because the compiled forward's x0 is the fp32 row's norm (`decode.cu`
-    `k_norm`); q/k/v concatenated per layer; value-embedding table and gate only on VE layers.
-  - `dec_create` config: L, C, F (`up_proj` is (F, C)), vocabulary, max_length, T, prompt store, BOS (the lazy row: a
+  - Weights: the matrices are the model's bf16 GEMM copies (`CausalLM.refresh_gemm_weights`: q/k/v concatenated per
+    layer, o, up, down), read in place, with bf16 copies of `lm_head` and the value-embedding tables; the embedding
+    table stays fp32 because the compiled forward's x0 is the fp32 row's norm (`decode.cu` `k_norm`); value-embedding
+    table and gate only on VE layers.
+  - `dec_create` config: L, C, F (`up_proj` is (F, C)), vocabulary, max_length, prompt store, BOS (the lazy row: a
     syntax constraint's end, confirmed once chosen in `generate`), memory budget in MiB (0: none).
 - `NativeDecoder.prefill`: `dec_prefill` takes every position as a row, `prefill_rows` rows a launch, a prompt's
   positions in order; `save` reads the K and V the launched prefill wrote.
@@ -651,8 +667,8 @@ Per module and symbol; what §1–§9 state is not repeated.
 - `model.safetensors`: the training state dict's names under `model.` (`lm_head.weight` as is); bf16 as the training
   ops round them; the fp32 set is `modeling_nanochat`'s `_keep_in_fp32_modules_strict`, as it reads them.
 - `config.json`: `architectures` NanochatForCausalLM; `model.modeling.layer_windows` as Gemma 3's `layer_types` +
-  `sliding_window` (keys attended including the query's own); `model.modeling.has_ve`'s layers; MLP width 4C
-  (`model.modeling`); eps FLT_EPSILON (`model.modeling.norm`).
+  `sliding_window` (keys attended including the query's own); `model.modeling.has_ve`'s layers; MLP width the
+  `up_proj` rows; eps FLT_EPSILON (`model.ops.linear` `EPS`, the norms' epsilon).
 - tokenizer: ByteLevel BPE, the split pattern as an Oniguruma Split (its possessive quantifiers are Oniguruma syntax);
   special tokens after the mergeable ones in `corpus.tokenizer.SPECIAL_TOKENS` order (the converter's order, so the
   same ids); BOS prepended by `TemplateProcessing`; `tokenizer_config.json` beside `tokenizer.json`.
@@ -777,14 +793,14 @@ Per module and symbol; what §1–§9 state is not repeated.
   sequence; the narrow graphs run while no slot at index ≥ `SMALL_BATCH` is active (`dec_set_active`). The prompt store
   keeps prompts' K and V for reuse (`dec_save_prompt`, `dec_load_prompt`).
 - `dec_create` ABI (`decoder.py` `NativeDecoder.__init__`): `cfg` = L, C, MLP width F (fc [F][C], proj [C][F]), vocab
-  (lm_head's rows), max_len (a slot's cache positions, at most context), context (`max_position_embeddings`), store
-  (the prompt store's positions requested: at most the device memory left after the slots and graphs), lazy (the row
-  whose choice the host confirms after a step, `Choice::lazy`; −1 none), budget (MiB the decoder takes at most: slots,
-  prefill rows, graphs and prompt store; 0 all free memory). `ptrs`: `GLOBAL_PTRS` = 4 (wte fp32, cos, sin: the fp32
-  rotary table [context][HALF] of every layer, lm_head), then `LAYER_PTRS` = 8 per layer (qkv, o, fc, proj,
-  value-embedding table, gate (0 if none), q norm weight, k norm weight). `scal`: per layer resid lambda, x0 lambda
-  (fp32), then the output-logit cap (`ModelConfig.final_logit_softcapping`, 0 none). `window`: per layer, the keys
-  before each query that it attends (FlashAttention's `window_size` left).
+  (lm_head's rows), max_len (a slot's cache positions, at most the context), store (the prompt store's positions
+  requested: at most the device memory left after the slots and graphs), lazy (the row whose choice the host confirms
+  after a step, `Choice::lazy`), budget (MiB the decoder takes at most: slots, prefill rows, graphs and prompt store;
+  0 all free memory). `ptrs`: `GLOBAL_PTRS` = 4 (wte fp32, cos, sin: the fp32 rotary table [context][HALF] of every
+  layer, lm_head), then `LAYER_PTRS` = 8 per layer (qkv, o, fc, proj, value-embedding table, gate (0 if none), q norm
+  weight, k norm weight). `scal`: per layer resid lambda, x0 lambda (fp32), then the output-logit cap
+  (`ModelConfig.final_logit_softcapping`, 0 none). `window`: per layer, the keys before each query that it attends
+  (FlashAttention's `window_size` left).
 - Graph pairs (`dec_create`): the narrow set exists because the blocks of inactive slots exit at once, but a mostly
   idle batch of MAX_BATCH slots still pays their launch. The prompt store's 2 MiB step is the device allocation
   granularity (`cuMemGetAllocationGranularity` on Hopper).

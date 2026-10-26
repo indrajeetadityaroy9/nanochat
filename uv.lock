@@ -747,14 +747,17 @@ dependencies = [
     { name = "lark", extra = ["interegular"] },
     { name = "nvidia-cutlass-dsl", extra = ["cu13"] },
     { name = "obstore" },
+    { name = "omegaconf" },
     { name = "pyarrow" },
     { name = "quack-kernels" },
     { name = "regex" },
+    { name = "safetensors" },
     { name = "scipy" },
     { name = "statsmodels" },
     { name = "tiktoken" },
     { name = "tokenizer-intrinsic-evals" },
     { name = "tokenizers" },
+    { name = "transformers" },
 ]
 
 [package.metadata]
@@ -769,14 +772,17 @@ requires-dist = [
     { name = "lark", extras = ["interegular"], specifier = "==1.3.1" },
     { name = "nvidia-cutlass-dsl", extras = ["cu13"], specifier = "==4.8.1" },
     { name = "obstore", specifier = "==0.12.0" },
+    { name = "omegaconf", specifier = "==2.3.1" },
     { name = "pyarrow", specifier = "==26.0.0" },
     { name = "quack-kernels", specifier = "==0.6.5" },
     { name = "regex", specifier = "==2026.9.29" },
+    { name = "safetensors", specifier = "==0.8.0" },
     { name = "scipy", specifier = "==1.18.1" },
     { name = "statsmodels", specifier = "==0.15.0" },
     { name = "tiktoken", specifier = "==0.14.0" },
     { name = "tokenizer-intrinsic-evals", git = "https://github.com/cimeister/tokenizer-intrinsic-evals?rev=7d03a61c2e2b4b557b796519141ccb52d144e10f" },
     { name = "tokenizers", specifier = "==0.23.3" },
+    { name = "transformers", specifier = "==5.20.2" },
 ]
 
 [[package]]

@@ -1,6 +1,5 @@
 """
-An experiment's records once its sweep has ended (Hydra callback): results/<experiment>.jsonl, -curves.jsonl and, with
-an analysis, <experiment>.json.
+An experiment's records once its sweep has ended (Hydra callback): results/<experiment>.jsonl and -curves.jsonl.
 """
 import dataclasses
 import json
@@ -8,7 +7,6 @@ from typing import Any
 
 from hydra.core.utils import JobReturn
 from hydra.experimental.callback import Callback
-from hydra.utils import get_method
 from omegaconf import DictConfig, OmegaConf
 
 import metrics
@@ -39,10 +37,9 @@ def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
 
 
 class Records(Callback):
-    """The sweep's records (module docstring); `analysis`: the dotted path of the experiment's analysis, or None."""
+    """The sweep's records (module docstring)."""
 
-    def __init__(self, analysis: str | None) -> None:
-        self.analysis = analysis
+    def __init__(self) -> None:
         self.configs: list[RunConfig] = []
 
     def on_job_end(self, config: DictConfig, job_return: JobReturn, **kwargs: Any) -> None:
@@ -60,6 +57,3 @@ class Records(Callback):
             "".join(json.dumps({"experiment": experiment, "run_name": run_name(c)} | metrics.curves(log),
                                allow_nan=False) + "\n" for c, log in zip(self.configs, logs, strict=True)),
             encoding="utf-8")
-        if self.analysis is not None:
-            (RESULTS / f"{experiment}.json").write_text(
-                json.dumps({"analysis": get_method(self.analysis)(lines)}, allow_nan=False), encoding="utf-8")

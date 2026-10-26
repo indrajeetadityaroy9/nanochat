@@ -2,6 +2,7 @@
 The corpus's sources (SOURCES, in deduplication's keep-first order) and its file paths under paths.CORPUS.
 """
 
+import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,8 @@ from paths import CORPUS
 
 # Python Language Reference §2.1.3, C++23 [lex.comment]
 COMMENTS = {"Python": "#", "C++": "//"}
+# The published dataset's tree (publish.DATASET), <source>/<split>/<k>.parquet
+CURATED = CORPUS / "curated"
 
 
 @dataclass(frozen=True)
@@ -99,7 +102,7 @@ def checked_path(source: str, k: int) -> Path:
 
 def curated_dir(source: str, split: str) -> Path:
     """The source's curated shards of a split, <k>.parquet."""
-    return CORPUS / "curated" / source / split
+    return CURATED / source / split
 
 
 def curated_shards(source: str, split: str) -> list[Path]:
@@ -131,6 +134,15 @@ def texts(source: str, table: pa.Table) -> list[str]:
     return [f"{comment} {path.replace('\r', '\\r').replace('\n', '\\n')}\n{body}\n"
             + ("\n" if spec.language == "C++" and body.endswith("\\") else "")
             for path, body in zip(table["relative_path"].to_pylist(), bodies, strict=True)]
+
+
+def curated_documents(source: str, table: pa.Table) -> list[str]:
+    """The documents of curated rows (texts): a repository source's sample is one, its files concatenated."""
+    documents = texts(source, table)
+    if SOURCES[source].category != REPOSITORY_FILE:
+        return documents
+    starts = sample_starts(table["sample"].to_numpy())
+    return ["".join(documents[a:b]) for a, b in itertools.pairwise([*starts, len(documents)])]
 
 
 def repository_samples(table: pa.Table, keys: tuple[str, ...], language: str, *, one_per_path: bool

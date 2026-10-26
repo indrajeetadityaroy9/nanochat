@@ -94,15 +94,14 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
     pending, previous_end = None, torch.cuda.Event(enable_timing=True)
     previous_end.record()
 
-    def log(step: int, learning_rate: float, model_flops: int, values: torch.Tensor, layout: dict,
+    def log(step: int, learning_rate: float, model_flops: int, values: torch.Tensor, layout: tuple,
             start: torch.cuda.Event, end: torch.cuda.Event) -> None:
         """A step's train record once its values reach the host, or its failure record (raising)."""
         end.synchronize()
         values = values.tolist()
         loss_value, grad_norm_value = values[:2]
         if not (math.isfinite(loss_value) and math.isfinite(grad_norm_value)):
-            metrics.append(run_name, {"kind": "failure", "step": step, "loss": None, "grad_norm": None},
-                           attempt=attempt)
+            metrics.append(run_name, {"kind": "failure", "step": step}, attempt=attempt)
             raise FloatingPointError(f"{run_name} step {step}: loss {loss_value}, grad_norm {grad_norm_value}")
         dt = start.elapsed_time(end) / 1000
         metrics.append(run_name, {"kind": "train", "step": step, "num_input_tokens_seen": (step + 1) * run.batch_size,

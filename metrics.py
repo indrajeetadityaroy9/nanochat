@@ -8,18 +8,24 @@ import json
 import keyword
 import re
 import statistics
+import tempfile
 import time
 import warnings
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+import regex
 import statsmodels.api as sm
 from human_eval_infilling.evaluation import estimate_pass_at_k
 from numpy.typing import ArrayLike
 
 from corpus.mixture import REPO_LEVEL_STAGE
+from corpus.tokenizer import Tokenizer, get_tokenizer
 from paths import RUNS
 
 PARSE_OUTCOMES = ("parses", "indentation", "syntax")
@@ -101,13 +107,14 @@ def mixture_bpb_summary(corpora: dict, weights: dict[str, float]) -> dict:
 
 def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
     """How a program compiles: "indentation" (IndentationError, checked first), "syntax" or "parses".
-    TokEval companion post's classification (arXiv 2608.18062 App. F.3, fn. 15); parser overflow counts as syntax."""
+    TokEval companion post's classification (arXiv 2608.18062 App. F.3, fn. 15); parser overflow counts as syntax, and
+    so does CPython 3.12.3's ValueError for f"{x:{y=}}" (python/cpython#121130, fixed in 3.12.5)."""
     with warnings.catch_warnings(action="ignore"):
         try:
             compile(source, "<completion>", "exec")
         except IndentationError:
             return "indentation"
-        except (SyntaxError, MemoryError, RecursionError):
+        except (SyntaxError, MemoryError, RecursionError, ValueError):
             return "syntax"
     return "parses"
 
@@ -115,11 +122,6 @@ def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
 def parse_shares(outcomes: list[str]) -> dict[str, float]:
     """Each parse outcome's share of a benchmark's completions."""
     return {kind: outcomes.count(kind) / len(outcomes) for kind in PARSE_OUTCOMES}
-
-
-def parsed(outcomes: list[str]) -> list[bool]:
-    """Per completion, whether it parses: the question scores of the parse shares."""
-    return [o == "parses" for o in outcomes]
 
 
 def measures(evaluation: dict, steps: dict[int, dict], *, repo_level_start: int) -> dict[str, float]:
@@ -151,7 +153,7 @@ def measure_errors(evaluation: dict) -> dict[str, dict]:
             "math": evaluation["8k"]["errors"]["math"], "repo_32k": evaluation["32k"]["errors"]["code"],
             "solutions": bpb_summary(np.concatenate([s["row_bits"] for s in solutions]),
                                      np.concatenate([s["row_bytes"] for s in solutions])),
-            "unparsed": summary([not p for p in parsed(outcomes)]),
+            "unparsed": summary([o != "parses" for o in outcomes]),
             "indentation": summary([o == "indentation" for o in outcomes]),
             "syntax": summary([o == "syntax" for o in outcomes]),
             "pass@1": summary([s[0] == "pass" for p in parse for s in p["base_status"]])}
@@ -289,8 +291,8 @@ def latency(starts: ArrayLike, firsts: ArrayLike, ends: ArrayLike, new_tokens: A
             "requests": int(n.size)}
 
 
-# TokEval: cimeister/tokenizer-intrinsic-evals 7d03a61 tokenizer_analysis (arXiv 2608.18062). Imported inside the
-# functions: its package imports transformers, and this module loads in forkserver workers.
+# TokEval: cimeister/tokenizer-intrinsic-evals 7d03a61 tokenizer_analysis (arXiv 2608.18062). Its modules and
+# transformers are imported inside the functions: this module loads in forkserver workers.
 
 
 def token_offsets(text: str, lengths: np.ndarray) -> list[tuple[int, int]]:
@@ -303,10 +305,9 @@ def token_offsets(text: str, lengths: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(char_of_byte[ends - lengths].tolist(), (char_of_byte[ends - 1] + 1).tolist(), strict=True))
 
 
-def tokeval_wrapper(name: str, tokenizer):
+def tokeval_wrapper(name: str, tokenizer: Tokenizer):
     """A corpus/tokenizer.py Tokenizer as a TokEval TokenizerWrapper (core/tokenizer_wrapper.py).
     Vocabulary keys: GPT-2 byte-to-unicode renderings of token bytes (openai/gpt-2 src/encoder.py), as TokEval reads."""
-    import regex
     from tokenizer_analysis.core.tokenizer_wrapper import TokenizerWrapper
     from transformers.convert_slow_tokenizer import bytes_to_unicode
 
@@ -316,7 +317,7 @@ def tokeval_wrapper(name: str, tokenizer):
         def __init__(self) -> None:
             self._enc, self._mergeable, self._lengths = tokenizer.enc, tokenizer.bos_token_id, tokenizer.token_lengths
             self._strings = ["".join(byte_to_unicode[b] for b in token)
-                             for token in tokenizer.token_bytes[:self._mergeable]] + list(tokenizer.special_tokens)
+                             for token in tokenizer.mergeable] + list(tokenizer.special_tokens)
             self._vocab = {s: i for i, s in enumerate(self._strings)}
             self._split = regex.compile(tokenizer.pattern)
 
@@ -350,9 +351,6 @@ def tokeval_wrapper(name: str, tokenizer):
         @classmethod
         def from_config(cls, name: str, config: dict):
             """{"path": a tokenizer directory (corpus/tokenizer.py get_tokenizer)}."""
-            from pathlib import Path
-
-            from corpus.tokenizer import get_tokenizer
             return tokeval_wrapper(name, get_tokenizer(Path(config["path"])))
 
         def can_decode(self) -> bool:
@@ -384,14 +382,10 @@ def tokeval_wrapper(name: str, tokenizer):
     return Wrapper()
 
 
-def tokeval(tokenizers: dict, texts: dict[str, list[str]], code: dict[str, list[str]], math: list[str]) -> dict:
+def tokeval(tokenizers: dict[str, Tokenizer], texts: dict[str, list[str]], code: dict[str, list[str]],
+            math: list[str]) -> dict:
     """TokEval's full analysis (main.py UnifiedTokenizerAnalyzer.run_analysis), published form (normalize_results).
     texts: {language: prose}, names distinct from the code languages and "math"; code: {language: code}."""
-    import tempfile
-    from pathlib import Path
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
     from tokenizer_analysis import UnifiedTokenizerAnalyzer
     from tokenizer_analysis.cli.run_analysis import _convert_for_json_public, normalize_results
     from tokenizer_analysis.core.input_providers import create_input_provider

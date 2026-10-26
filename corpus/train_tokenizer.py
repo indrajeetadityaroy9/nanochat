@@ -101,7 +101,7 @@ def fidelity(task: tuple[Path, str]) -> dict[str, int]:
     Raises RuntimeError on a mismatch."""
     directory, source = task
     tokenizer = get_tokenizer(directory)
-    spelled = [entry.decode("latin-1") for entry in tokenizer.token_bytes[:tokenizer.bos_token_id]]
+    spelled = [entry.decode("latin-1") for entry in tokenizer.mergeable]
     merges = json.loads((directory / "merges.json").read_text())
     bpe = models.BPE(vocab={s: i for i, s in enumerate(spelled)}, merges=[(spelled[a], spelled[b]) for a, b in merges])
     pattern = regex.compile(tokenizer.pattern)

@@ -13,7 +13,7 @@ from corpus.layout import stage_rows
 from corpus.loader import PretrainingBatches
 from corpus.mixture import FILE_LEVEL_STAGE, MICRO_BATCH_TOKENS, REPO_LEVEL_STAGE, Stage, weights
 from corpus.tokenizer import Tokenizer
-from model.modeling import CausalLM, model_config, num_non_embedding_params
+from model.modeling import meta_model, num_non_embedding_params
 from train.schedule import RunPlan, plan
 
 
@@ -42,8 +42,7 @@ def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int
 def max_tokens_per_param(tokenizer: Tokenizer, *, num_hidden_layers: int) -> float:
     """Bisection over whole micro-batches of tokens on "overdraws". Not monotone (gradient_accumulation_steps steps
     up with the count, so trained tokens dip): the result fits, but a larger fitting count may exist."""
-    with torch.device("meta"):
-        model = CausalLM(model_config(num_hidden_layers=num_hidden_layers, stage=FILE_LEVEL_STAGE))
+    model = meta_model(num_hidden_layers=num_hidden_layers, final_logit_softcapping=None)
     params = num_non_embedding_params(model)
     rows = [(stage, stage_rows(tokenizer, stage)) for stage in (FILE_LEVEL_STAGE, REPO_LEVEL_STAGE)]
 

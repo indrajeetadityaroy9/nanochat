@@ -21,7 +21,6 @@ from corpus.tokenizer import ABLATION, TOKENIZER, get_tokenizer
 from paths import RESULTS, ROOT, RUNS
 
 if TYPE_CHECKING:
-    from model.modeling import CausalLM
     from train.schedule import RunPlan
 
 
@@ -57,23 +56,13 @@ def tokenizer_path(config: RunConfig) -> Path:
     return TOKENIZER if config.tokenizer == "corpus" else ABLATION / config.tokenizer
 
 
-def meta_model(num_hidden_layers: int, final_logit_softcapping: float | None) -> "CausalLM":
-    """The model on the meta device at the file-level stage's context."""
-    import torch
-
-    from corpus.mixture import FILE_LEVEL_STAGE
-    from model.modeling import CausalLM, model_config
-
-    config = model_config(num_hidden_layers=num_hidden_layers, stage=FILE_LEVEL_STAGE)
-    with torch.device("meta"):
-        return CausalLM(replace(config, final_logit_softcapping=final_logit_softcapping))
-
-
 def base_plan(*, num_hidden_layers: int, tokens_per_param: float) -> "RunPlan":
     """The base model's plan at num_hidden_layers and tokens per non-embedding parameter (schedule.plan)."""
+    from model.modeling import meta_model
     from train.schedule import plan
 
-    return plan(model=meta_model(num_hidden_layers, None), tokens_per_param=tokens_per_param)
+    return plan(model=meta_model(num_hidden_layers=num_hidden_layers, final_logit_softcapping=None),
+                tokens_per_param=tokens_per_param)
 
 
 def plan_of(config: RunConfig) -> "RunPlan":
@@ -95,9 +84,11 @@ def checkpoint_steps(config: RunConfig, run: "RunPlan") -> frozenset[int]:
 
 
 def training(config: RunConfig, run: "RunPlan") -> None:
+    from model.modeling import meta_model
     from train.loop import train
 
-    model = meta_model(config.num_hidden_layers, config.final_logit_softcapping)
+    model = meta_model(num_hidden_layers=config.num_hidden_layers,
+                       final_logit_softcapping=config.final_logit_softcapping)
     train(model=model, run=run, tokenizer_path=tokenizer_path(config), seed=config.seed,
           checkpoints=checkpoint_steps(config, run), run_name=run_name(config), config=asdict(config))
 

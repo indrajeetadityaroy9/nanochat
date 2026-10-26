@@ -220,7 +220,7 @@ base model's recipe:
 or sweeps fields) and the command line's overrides. Every invocation is a multirun sweep run one job at a time
 (`max_batch_size` 1): `python run.py experiment=<name>`, or one run, e.g. `python run.py num_hidden_layers=8
 tokens_per_param=0.5 tokenizer=sa-bpe`. The one experiment in `conf/` is `pretrain` (`num_checkpoints` 10,
-`generate` "benchmarks", the `Records` callback without an analysis).
+`generate` "benchmarks", the `Records` callback).
 
 **Names.** `run_name`: the fields that differ from `RunConfig()`, sorted, `k=v` joined by `,` (`defaults` if none), so
 a run two experiments share is trained once. The base model's run (`experiment=pretrain`) is
@@ -275,11 +275,12 @@ failure stops the sweep.
 |---|---|
 | `results/<experiment>.jsonl` | per run: `experiment`, `eval/suite.py` `record` (name, run-log records, evaluations), `config`, `measures` and `errors` (`docs/evaluation.md` §5), `offset_bpb` (32K code bits per byte by byte offset), `efficiency` (parameters, FLOPs per token, peak memory), `diverged_at` |
 | `results/<experiment>-curves.jsonl` | per run: its train records as columns (`metrics.curves`) |
-| `results/<experiment>.json` | `{"analysis": ...}`, the pre-registered decision, when the yaml names one |
 
-The ablation records and their status: `docs/experiments.md` §1. `muon_wd_timescale_20tpp.jsonl` and
-`scalar_learning_rates.json[l]` were trained without the output-logit cap (`config.final_logit_softcapping` null); a
-run of the same name today carries cap 15, so the stale guard raises "recipe changed" on their directories.
+The ablation records and their status: `docs/experiments.md` §1; `results/peak_lr.json` and
+`scalar_learning_rates.json` hold analyses written by earlier code (§5, `docs/experiments.md` §4).
+`muon_wd_timescale_20tpp.jsonl` and `scalar_learning_rates.json[l]` were trained without the output-logit cap
+(`config.final_logit_softcapping` null); a run of the same name today carries cap 15, so the stale guard raises
+"recipe changed" on their directories.
 
 ## 7. Hardware and throughput
 
@@ -382,15 +383,16 @@ point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/p
 
 ## 11. Implementation reference
 
-**`run.py`.** The app process plans on the meta device (`meta_model`) and never initializes CUDA. Its top level
-imports no torch, model, training or evaluation code because the workers of `eval/code_eval.py`'s sanitize pool (a
-forkserver) import it as the phases' main module. `register` runs only in the app's process: `ablations/peak_lr.py`
-and `ablations/records.py` import the file again as `run`, whose registrations would fail. `run_name` omits default
-fields, so a field added with a default renames no run, and a changed default would keep a run's name under a new
-meaning; `same_config` closes that gap. `final_logit_softcapping` None disables the cap. `job`: a training phase that
-fails without a `failure` record raises `ChildProcessError`; one that diverged ends the job. `evaluation` silences
-`ast.parse`'s `SyntaxWarning`s on generated code (`eval/verify.py`, `inference/`). `conf/run.yaml` disables Hydra's
-job logging, whose default file `${hydra.job.name}.log` would be `RUNS/<run_name>/run.log`, the phases' log.
+**`run.py`.** The app process plans on the meta device (`model/modeling.py` `meta_model`) and never initializes CUDA.
+Its top level imports no torch, model, training or evaluation code because the workers of `eval/code_eval.py`'s
+sanitize pool (a forkserver) import it as the phases' main module. `register` runs only in the app's process:
+`ablations/peak_lr.py` and `ablations/records.py` import the file again as `run`, whose registrations would fail.
+`run_name` omits default fields, so a field added with a default renames no run, and a changed default would keep a
+run's name under a new meaning; `same_config` closes that gap. `final_logit_softcapping` None disables the cap. `job`:
+a training phase that fails without a `failure` record raises `ChildProcessError`; one that diverged ends the job.
+`evaluation` silences `ast.parse`'s `SyntaxWarning`s on generated code (`eval/verify.py`, `inference/`).
+`conf/run.yaml` disables Hydra's job logging, whose default file `${hydra.job.name}.log` would be
+`RUNS/<run_name>/run.log`, the phases' log.
 
 **`ablations/peak_lr.py`.** `fit` returns `{runs, curvature, vertex, extend}`; the parabola through the lowest-code run
 and its neighbours has positive curvature by construction; a diverged lower neighbour raises (extend the grid down by
@@ -410,9 +412,10 @@ the optimizers stepped but before the schedulers, so each group's lr is still th
 fp64 buffers, alternating by step): 5 scalars, then each group's update and parameter squared norms (measured steps
 only), then each row's loss sum and valid count.
 
-**`train/optim.py`.** `Muon` follows `torch/optim/_muon.py` `_single_tensor_muon` (momentum lerp, Nesterov, bf16
-Newton–Schulz, decoupled weight decay, `_adjust_lr`, imported privately); the batched `bmm`/`baddbmm` chain may round
-differently from per-matrix `mm`/`addmm`. State `second_momentum_buffer` is one fp32 per row (output neuron in
+**`train/optim.py`.** `Muon` follows `torch/optim/_muon.py` `_single_tensor_muon` (momentum lerp, Nesterov, which is
+`torch.optim.Muon`'s default and the only mode `Muon.step` implements, bf16 Newton–Schulz, decoupled weight decay,
+`_adjust_lr`, imported privately); the batched `bmm`/`baddbmm` chain may round differently from per-matrix
+`mm`/`addmm`. State `second_momentum_buffer` is one fp32 per row (output neuron in
 `nn.Linear`'s (out, in) layout). The rescale to O's Frobenius norm (zichongli5/NorMuon `normuon.py` `normuon_update`)
 lets `match_rms_adamw` scale the update as Muon's, the target of Alg. 1 line 10's rescale to RMS 0.2·lr.
 `update_square` excludes weight decay. `update`'s in-place gradients are those the ops accumulate into

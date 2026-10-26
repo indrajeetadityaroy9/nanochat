@@ -1,6 +1,7 @@
 """Batched decoding of a CausalLM by model/kernels/decode.cu: batched prefill, then CUDA-graph steps over slots.
 
-Continuous batching; weights, context, windows and rotary tables are snapshotted at construction.
+Continuous batching; context, windows and rotary tables are fixed at construction, and the model's weights, read in
+place, must not change while the decoder lives.
 """
 
 import bisect
@@ -15,7 +16,7 @@ from typing import Literal
 import numpy as np
 import torch
 
-from corpus.tokenizer import FIM_BEGIN, FIM_END, FIM_HOLE
+from corpus.tokenizer import FIM_BEGIN, FIM_END, FIM_HOLE, Tokenizer
 from inference import syntax_constraint
 from inference.syntax_constraint import SyntaxConstraint
 from model.config import VOCAB_SIZE
@@ -25,7 +26,7 @@ from native import cuda_library
 type Constraint = Reemit | SyntaxConstraint
 
 
-def fim_prompt(tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm"]) -> list[int]:
+def fim_prompt(tokenizer: Tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm"]) -> list[int]:
     """The token ids of a fill-in-the-middle prompt (arXiv 2207.14255 §3, App. D), prefix and suffix encoded apart:
     psm: BOS <fim_begin> prefix <fim_hole> suffix <fim_end>; spm: BOS <fim_begin> <fim_hole> suffix <fim_end> prefix.
     The model continues with the middle and ends it with BOS."""
@@ -54,7 +55,7 @@ class Request:
 
 
 @functools.cache
-def prefix_index(tokenizer) -> tuple[list[bytes], np.ndarray]:
+def prefix_index(tokenizer: Tokenizer) -> tuple[list[bytes], np.ndarray]:
     """The mergeable tokens' bytes sorted, and their ids: the tokens starting with a string are one contiguous run."""
     ids = np.array(sorted(range(tokenizer.bos_token_id), key=tokenizer.token_bytes.__getitem__))
     return [tokenizer.token_bytes[i] for i in ids], ids
@@ -64,7 +65,7 @@ class Reemit:
     """heal_tokens's constraint: while bytes are owed, each token's bytes are a non-empty proper prefix of them or
     start with them (BOS excluded); once they are re-emitted, no restriction."""
 
-    def __init__(self, tokenizer, owed: bytes):
+    def __init__(self, tokenizer: Tokenizer, owed: bytes):
         self.tokenizer, self.owed = tokenizer, owed
 
     def mask(self) -> np.ndarray | None:
@@ -87,7 +88,7 @@ class Reemit:
         self.owed = b"" if b.startswith(self.owed) else self.owed[len(b):]
 
 
-def heal_tokens(tokenizer, input_ids: list[int]) -> tuple[list[int], Reemit, bytes]:
+def heal_tokens(tokenizer: Tokenizer, input_ids: list[int]) -> tuple[list[int], Reemit, bytes]:
     """Token healing (Guidance 2023) over several tokens (arXiv 2608.18062 App. C.1): the prompt without its last token,
     its Reemit constraint, and the dropped bytes. input_ids: BOS and at least two more tokens."""
     dropped = tokenizer.token_bytes[input_ids[-1]]
@@ -141,7 +142,7 @@ class Slot:
     request: Request
     start: float
     first: float | None = None
-    out: list = field(default_factory=list)
+    out: list[int] = field(default_factory=list)
 
 
 class NativeDecoder:
@@ -150,7 +151,7 @@ class NativeDecoder:
     prompt store; memory_fraction: the decoder's device-memory cap as a fraction of the total (None: all free)."""
     @torch.no_grad()
     def __init__(self, model: CausalLM, *, bos_token_id: int, max_length: int, prompt_store: int,
-                 memory_fraction: float | None = None):
+                 memory_fraction: float | None):
         lib = cuda_library("decode")
         lib.dec_create.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dec_create.restype = ctypes.c_void_p
@@ -177,25 +178,24 @@ class NativeDecoder:
         if not 1 < max_length <= T:
             raise ValueError(f"max_length {max_length} outside (1, max_position_embeddings {T}]")
         self.max_length = max_length
-        # bf16 matrices (the forward's rounding at use); fp32 embedding, q/k norms, gate, rotary as modeling.py has them
-        weights = [model.embed_tokens.weight.clone(), model.cos, model.sin, model.lm_head.weight.bfloat16()]
+        # the forward's bf16 GEMM copies (CausalLM.refresh_gemm_weights), bf16 lm_head and value-embedding tables (the
+        # forward's rounding at use); fp32 embedding, q/k norms, gate, rotary as modeling.py has them
+        weights = [model.embed_tokens.weight, model.cos, model.sin, model.lm_head.weight.bfloat16()]
         for i, layer in enumerate(model.layers):
             attn, mlp = layer.self_attn, layer.mlp
             ve = str(i) in model.value_embeds
-            weights += [torch.cat([attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight]).bfloat16(),
-                        attn.o_proj.weight.bfloat16(), mlp.up_proj.weight.bfloat16(), mlp.down_proj.weight.bfloat16(),
+            weights += [attn.qkv_bf16, attn.o_proj.weight_bf16, mlp.up_proj.weight_bf16, mlp.down_proj.weight_bf16,
                         model.value_embeds[str(i)].weight.bfloat16() if ve else None,
-                        attn.ve_gate.weight.clone() if ve else None, attn.q_norm_weight.clone(),
-                        attn.k_norm_weight.clone()]
+                        attn.ve_gate.weight if ve else None, attn.q_norm_weight, attn.k_norm_weight]
         self.weights = weights  # referenced while the decoder reads them through pointers
         # per layer (resid, x0) in fp32 (decode.cu k_norm), then the output-logit cap (0: none)
         lambdas = torch.stack([model.resid_lambdas, model.x0_lambdas], 1).flatten().cpu()
         scal = np.append(lambdas.numpy(), np.float32(cfg.final_logit_softcapping or 0.0))
-        # config, dec_create's layout: L, C, F, vocabulary, max_length, T, prompt store, BOS, budget in MiB (0: none)
+        # config, dec_create's layout: L, C, F, vocabulary, max_length, prompt store, BOS, budget in MiB (0: none)
         device = model.embed_tokens.weight.device
         budget = 0 if memory_fraction is None else max(1, int(
             memory_fraction * torch.cuda.get_device_properties(device).total_memory) >> 20)
-        config = np.array([L, C, model.layers[0].mlp.up_proj.weight.size(0), VOCAB_SIZE, max_length, T, prompt_store,
+        config = np.array([L, C, model.layers[0].mlp.up_proj.weight.size(0), VOCAB_SIZE, max_length, prompt_store,
                            bos_token_id, budget], dtype=np.int32)
         # the prompt store: {prompt: its pages}, the free pages, the runs started
         self.stored: dict[tuple[int, ...], Stored] = {}
@@ -203,7 +203,7 @@ class NativeDecoder:
         self.timings: dict[int, tuple[float, float, float]] = {}  # generate's request timestamps
         self.bos = bos_token_id
         # dec_destroy (the finalizer) releases every native resource; the buffers it reads are this object's tensors
-        self.stream = torch.cuda.Stream(model.embed_tokens.weight.device)
+        self.stream = torch.cuda.Stream(device)
         ptrs = np.array([0 if t is None else t.data_ptr() for t in weights], dtype=np.uint64)
         window = np.array(model.window_sizes, dtype=np.int32)
         torch.cuda.synchronize()  # the weight copies above are on the current stream; the decoder uses its own

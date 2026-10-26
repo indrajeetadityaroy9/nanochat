@@ -7,4 +7,3 @@ hydra:
   callbacks:
     records:
       _target_: ablations.records.Records
-      analysis: null

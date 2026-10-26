@@ -9,7 +9,7 @@ import argparse
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, snapshot_download
 
 from corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
-from corpus.sources import SOURCES, curated_dir, footer_rows
+from corpus.sources import CURATED, SOURCES, curated_dir, footer_rows
 from paths import CORPUS
 
 DATASET = "iaroy/nanochat-data"
@@ -91,8 +91,8 @@ def push() -> None:
     if old:
         api.create_commit(DATASET, repo_type="dataset", operations=[CommitOperationDelete(f) for f in old],
                           commit_message="Delete the previous corpus")
-    additions = [CommitOperationAdd(path_in_repo=f.relative_to(CORPUS / "curated").as_posix(), path_or_fileobj=f)
-                 for f in sorted((CORPUS / "curated").glob("*/*/*.parquet"))]
+    additions = [CommitOperationAdd(path_in_repo=f.relative_to(CURATED).as_posix(), path_or_fileobj=f)
+                 for f in sorted(CURATED.glob("*/*/*.parquet"))]
     additions.append(CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=CORPUS / "README.md"))
     group, size = [], 0
     for addition in additions:
@@ -106,7 +106,7 @@ def push() -> None:
 
 
 def pull() -> None:
-    snapshot_download(DATASET, repo_type="dataset", local_dir=CORPUS / "curated",
+    snapshot_download(DATASET, repo_type="dataset", local_dir=CURATED,
                       allow_patterns=[f"{source}/**" for source in SOURCES])
 
 
