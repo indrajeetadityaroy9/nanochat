@@ -1,13 +1,13 @@
 """The decoder layer's GEMMs as torch.library ops (traceable by fullgraph torch.compile): forward and dX on QuACK's
-GEMMs (quack.gemm_interface and quack.epilogue fused epilogues) at fixed tile configurations (CONFIGS) with W the bf16
-copy of the fp32 master (model/modeling.py GemmLinear); dW accumulated in fp32 by cuBLAS straight into the fp32
-master's .grad (aten addmm.dtype_out, beta = 1).
+(Dao-AILab/quack) GEMMs (quack.gemm_interface and quack.epilogue fused epilogues) at fixed tile configurations
+(CONFIGS) with W the bf16 copy of the fp32 master (model/modeling.py GemmLinear); dW accumulated in fp32 by cuBLAS
+straight into the fp32 master's .grad (aten addmm.dtype_out, beta = 1; NVIDIA/Megatron-LM's gradient-accumulation
+fusion, deepseek-ai/DeepGEMM's D = C + A B).
 
 Tile configurations: fixed per call and width, never chosen by timing at run time. QuACK's autotuner (tuned=True, its
-default) benchmarks every candidate at a shape's first call and keeps the fastest, so processes pick different tiles
-(two cold d24 runs chose differently for 2 of 9 GEMM keys; the shared cache's q/k/v forward pick is 6.6% slower than
-the best), and a cold first d24 step spends ~80 s in it. QuACK's default_config (tuned=False) is 1.1% / 5.4% / 26%
-slower over these GEMMs at d24 / d16 / d8, so each call takes the best of QuACK's own benchmark instead.
+default) benchmarks every candidate at a shape's first call and keeps the fastest, so processes may pick different
+tiles and a cold first step spends time tuning; QuACK's default_config (tuned=False) is slower over these GEMMs,
+so each call takes the best of QuACK's own benchmark instead (CONFIGS).
 
 Weight gradients: each op takes its weights' .grad buffers (fp32, allocated and zeroed by train/loop.py) and its
 backward adds dW into them in place, so the gradient-accumulation micro-batches sum in the GEMM instead of a new dW per
@@ -26,7 +26,7 @@ tensor is never stored.
   (quack.gemm_interface.gemm_rms: per-tile squared sums, finalized by quack.rms_final_reduce). Backward
   (residual_rms_bwd): dO = dh W with FA4's dpsum = rowsum(dO O) per head in the epilogue (dx_dpsum, x = O): the
   column tile is one head (DPSUM_CONFIG), so the per-tile reduce partials are dpsum per (row, head), and FA4's
-  backward no longer reads O and dO again for it (flash_bwd_preprocess.py).
+  backward does not read O and dO again for it (flash_bwd_preprocess.py).
 - nanochat::relu2_mlp: h + down_proj(relu(rstd up_proj h)^2), the MLP of karpathy/nanochat 92d63d4 gpt.py:131-141 on
   the normed stream plus its residual: rstd and relu^2 in the up-projection's epilogue
   (quack.gemm_interface.gemm_norm_act, which stores the scaled pre-activation and the activation, both saved for the
@@ -64,8 +64,8 @@ def sm90(tile_m: int, tile_n: int, cluster_m: int, cluster_n: int, *, swap_ab: b
 
 # Per call, the hidden width C -> config: the d8, d16 and d24 widths (model/modeling.py model_config), M = 98,304
 # tokens (corpus/mixture.py MICRO_BATCH_TOKENS). Each is the lowest mean over three runs of QuACK's autotuning
-# benchmark (quack/autotuner.py: L2-cold CUDA-graph medians of every candidate, GH200 at 700 W, exclusive; fb86efc);
-# a single run's own winner is up to 2.1% slower than it. Other widths and GPUs: QuACK's default_config.
+# benchmark (quack/autotuner.py: L2-cold CUDA-graph medians of every candidate, GH200 at 700 W, exclusive). Other
+# widths and GPUs: QuACK's default_config.
 CONFIGS: dict[str, dict[int, GemmConfig]] = {
     "qkv": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(128, 192, 2, 1, swap_ab=True),
             768: sm90(128, 192, 1, 2)},
@@ -149,8 +149,7 @@ def residual_rms(x: Tensor, weight: Tensor, residual: Tensor) -> tuple[Tensor, T
 
 # o_proj's dX tiling: tile_n = HEAD_DIM, so each column tile is one head and dx_dpsum's per-tile row sums are FA4's
 # dpsum; QuACK's tuner cannot pin tile_n (its sweep keeps any tile_n the partials buffer fits), so the config is
-# fixed: the fastest of QuACK's SM90 tile_n = 128 configs on the d24 shape (98,304 x 768 x 768, exclusive GPU),
-# 172.2 us; cluster (2, 1) 172.8, tile_m 192 212.4 / 218.3, 256 (cooperative) 268.5 / 270.4
+# fixed: the fastest of QuACK's SM90 tile_n = 128 configs on the d24 shape (98,304 x 768 x 768, exclusive GPU)
 DPSUM_CONFIG = sm90(128, HEAD_DIM, 1, 2)
 
 

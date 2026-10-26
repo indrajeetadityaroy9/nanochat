@@ -61,15 +61,15 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lang {
 }
 
 /// The workers' stack when RLIMIT_STACK is unlimited: scripts/container.sh's soft limit (--ulimit stack=67108864), the
-/// one pack runs and was measured under.
+/// one pack runs under.
 const UNLIMITED_STACK: usize = 64 << 20;
 
 /// The module, with rayon's global pool built here first: its workers get the process's stack limit (RLIMIT_STACK's
 /// soft limit: the stack of the main thread and glibc's default for every thread it creates, Python's included;
 /// scripts/container.sh sets it), not std's 2 MiB (std::thread::Builder, which ignores the limit). At 2 MiB, pack
-/// overflowed a worker's stack: a worker waiting in a join runs stolen jobs on its own stack, so the nesting deepens
+/// overflows a worker's stack: a worker waiting in a join runs stolen jobs on its own stack, so the nesting deepens
 /// with the pack calls in flight from Python threads (corpus/pack.py). An unlimited limit gives no size (and glibc's
-/// default thread stack under it is 2 MiB, measured in the image), so the pool then takes UNLIMITED_STACK.
+/// default thread stack under it is 2 MiB in the image), so the pool then takes UNLIMITED_STACK.
 #[pymodule]
 fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut stack = libc::rlimit { rlim_cur: 0, rlim_max: 0 };

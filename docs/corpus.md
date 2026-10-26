@@ -55,7 +55,10 @@ Codeforces-CoTs (DeepSeek-R1 traces, per the dataset card [unverified]).
 group, written to `<file>.partial` and renamed when whole; an existing raw file is kept. Stack-Edu's Hub files are
 metadata, downloaded whole; each row group's blobs are read from Software Heritage's public S3 bucket by `blob_id`,
 gunzipped and decoded with their `src_encoding` (`prepare.blob_texts`); a blob the bucket lacks or that does not decode
-has no text. `FETCHES` = 4 files at once (Stack-Edu one at a time, `prepare.prepare`).
+has no text. `FETCHES` = 4 files at once (Stack-Edu one at a time, `prepare.prepare`): the throughput peak reading one
+column of 8 UltraData-Code L3 files, 8.5, 11.5, 12.4 and 10.5 MB/s at 1, 2, 4 and 8 files in flight (`c1a7d7b`).
+Software Heritage requests retry from 1 s to 1 min for up to 15 min (`prepare.swh_store`): under obstore's default
+(10 retries from 100 ms) the Stack-Edu fetch failed when the bucket reset one request 10 times within 8.2 s.
 
 **Extent** (`prepare.extent`): a source of a group read in part (`mixture.IN_PART`: synthetic code, ClimbMix,
 UltraData-Math L3) fetches the fewest Hub files, in the SHA-1 order of their paths, whose text bytes (Parquet footers,
@@ -125,8 +128,8 @@ repaired text is kept with its `id` recomputed, and a file no subset repairs is 
 1. Stack v3's placeholders `<EMAIL>`, `<KEY>`, `<NAME>`, `<PASSWORD>` become the bare word.
 2. Leading-indentation tabs expand to tab stops of 8 (Python 2 Language Reference §2.1.8).
 3. Every fixer of `fissix.fixes` (2to3), under the recursion limit `RECURSION` = 6,000 (2to3 recurses over the parse
-   tree; at Python's default 1,000 it fails on 800 nested blocks; `ast.parse`'s depth limits are CPython's own); 2to3
-   adds a missing final line end.
+   tree; at Python's default 1,000 it fails on 800 nested blocks, at 6,000 not on 1,600; `ast.parse`'s depth limits
+   are CPython's own, its result unchanged from limit 1,000 to 100,000); 2to3 adds a missing final line end.
 
 **Exact deduplication.** One row per `id` over every source (before the split), the first in `SOURCES` order, then
 file and row (`curate.duplicates`); every empty text is dropped with the copies. No step decontaminates against the
@@ -142,7 +145,9 @@ document itself.
   (`sources.repository_samples`, the crate's `topological_sort`, §6), written in sample order, a sample's files in
   dependency order. Columns
   `schema.SAMPLE_FILE`: `repo_name`, `relative_path`, `content`, `sample`. A row group holds whole samples, at least
-  `SAMPLE_ROWS` = 65,536 files (the last excepted), so a reader of row groups never splits a sample.
+  `SAMPLE_ROWS` = 65,536 files (the last excepted), so a reader of row groups never splits a sample. A row group is
+  a tokenize task; its peak is 1.71 GiB (a 235 MiB group of `ultradata_code_l2_python`), 3.14 GiB at 122,880 files,
+  and three published shards re-cut at 122,880 files tokenize identically (`c1a7d7b`).
 - **Every other source**: its category's columns; validation rows in `val/0.parquet` and train rows over
   `train/0..99.parquet` (`ntile(100)`), each in `id` order (a uniform order, `id` being a hash), so any leading shards
   are a uniform sample.
@@ -260,7 +265,7 @@ and packed (§6, §8).
   6.21 GB): sa-bpe holds 3.624 bytes per token over the file stage and 3.442 on Stack-Edu Python, and passed the
   validity checks the record holds (at `ebd8058`, on 200 val documents per source: chunks cover the text, tiktoken
   equals the merges replayed, every text decodes; master's `train_tokenizer.fidelity` checks each source's first val
-  row group).
+  row group, up to 155 s for climbmix's 122,880 documents and 72.5M chunks, `2b32aef`).
 - **Data key** (`Tokenizer.data_key`): SHA-256 of the JSON list [pattern, {BOS: id}, tiktoken file] (the FIM sentinels
   after BOS do not enter it); a vocabulary's tokenized and packed data live in
   `<its directory's parent>/tokenized/<corpus>-<data key>/` (`layout.split_path`).
@@ -310,9 +315,13 @@ master).
 task order (`pool.map` for row groups, `parallel.ordered` for repository tasks), so the output does not depend on the
 worker count; repository tasks in flight are
 bounded by `MEMORY` / (`PEAK` = 8.18 × the largest partition's text), each encoding on a thread per core;
+`PEAK` is the larger measured peak per text byte (`ru_maxrss` of a spawned worker, corpus tokenizer, `c1a7d7b`):
+6.52 for Python (partition 41: 3.02 GiB of text, 19.7 GiB at peak), 8.18 for C++ (partition 71: 2.40 GiB, 19.6 GiB).
 `topological_sort` parses a partition's files in parallel (rayon). Measured on the GH200 at commits `b9769a8`,
 `9e40df4`, `4ce8004`, `a20d12a`, `737f2e1` (before → after): tokenizing the C++ val partition 386.7 → 16.3 s, the
-Python one 712 → 61 s; pack 189 → 93 CPU-s per shard.
+Python one 712 → 61 s; pack 189 → 93 CPU-s per shard. The crate's release profile (`lto`, one codegen unit,
+`03d131e`) against cargo's defaults: pack of six shards 36.4 vs 42.9 s, 8,000 training merges on 252,906
+documents 20.6 vs 22.1 s, outputs identical.
 
 ## 7. Mixture and stages
 
@@ -402,6 +411,7 @@ masking: IntraDoc lowers perplexity over UniChunk, arXiv 2402.13991 §3.2). A sh
 (64 MiB under `scripts/container.sh`'s `--ulimit stack=67108864:-1`; 64 MiB when unlimited), not std's 2 MiB: a worker
 waiting in a join runs stolen jobs on its own stack, so nesting deepens with the pack calls in flight, and at 2 MiB
 `pack` overflowed a worker's stack (core dump; fixed in `0de5dfb`, the limit taken from the process since `03d131e`).
+glibc's default thread stack under an unlimited limit is 2 MiB in the image (`4720b9b`).
 
 **Rows** (`best_fit_decreasing`): pieces longest first, each into the row with the fewest free slots that holds it,
 else a new row (Best-Fit-Decreasing, arXiv 2404.10830 §3.1), so no piece is truncated. Within a row the pieces whose

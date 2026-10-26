@@ -1,8 +1,8 @@
 """
 Fused q/k prologue of model/modeling.py's attention (model/kernels/qk_prologue.cu), one launch per direction covering
 q and k: per-head RMS norm with F.rms_norm's fp32 epsilon, fp32 per-dim norm weight (Qwen3, arXiv 2505.09388 §2),
-rotary by -theta over the full head (karpathy/nanochat 92d63d4 gpt.py:57-65); fp32 math, one bf16 rounding per
-output. Called inside model/ops/flash_attn.py's attention op.
+rotary by -theta over the full head (karpathy/nanochat 92d63d4 nanochat/gpt.py:57-65); fp32 math, one bf16 rounding
+per output. Called inside model/ops/flash_attn.py's attention op.
 
 q, k are the (B, T, H, HEAD_DIM) bf16 q and k blocks of the fused (B, T, 3C) projection (heads contiguous, token
 stride 3C), dq, dk the same blocks of its gradient; norm weights (HEAD_DIM,) fp32; cos/sin (T_table >= T,

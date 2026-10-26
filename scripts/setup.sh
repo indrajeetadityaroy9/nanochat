@@ -2,15 +2,15 @@
 # Prepare a fresh GH200 or H100 host with Docker and the NVIDIA driver (Lambda's Ubuntu image): the CDI spec
 # for scripts/container.sh's `--device nvidia.com/gpu=all`, docker group membership, the nanochat image, the
 # artifacts layout (paths.py) and the curated corpus (corpus/publish.py pull), from which the tokenizer ablation,
-# tokenize and pack build the training rows (docs/corpus.md §10, docs/training.md §9). Idempotent: docker build
+# corpus.tokenize and corpus.pack build the training rows, before training with run.py. Idempotent: docker build
 # cache, mkdir exist_ok.
 #
 #   HF_TOKEN=<read token> scripts/setup.sh
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-# the GPUs at their maximum SM clock (1980 MHz on the GH200): under a power cap the driver otherwise lowers the clock
-# (docs/training.md §7); speed only, not numerics; reset by a reboot
+# the GPUs at their maximum SM clock (1980 MHz on the GH200): under a power cap the driver otherwise lowers the clock;
+# speed only, not numerics; reset by a reboot
 MAX_SM_CLOCK=$(nvidia-smi --id=0 --query-gpu=clocks.max.sm --format=csv,noheader,nounits)
 sudo nvidia-smi -lgc "$MAX_SM_CLOCK,$MAX_SM_CLOCK"
 # the docker group applies at the next login; sg runs this script's docker commands in it

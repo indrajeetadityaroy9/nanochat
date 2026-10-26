@@ -22,7 +22,7 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 use crate::Lang;
 
 /// The import nodes of tree-sitter-python: pattern 0 an import statement, pattern 1 a from-import statement (Python
-/// Reference §7.11; `from __future__` is a future statement, §7.11.1, its own node kind).
+/// Language Reference §7.11; `from __future__` is a future statement, §7.11.1, its own node kind).
 const PYTHON: &str = "(import_statement) @import (import_from_statement) @import";
 
 /// The include paths of tree-sitter-cpp: pattern 0 a quoted header name ("q-char-sequence"), pattern 1 an angled one
@@ -69,8 +69,9 @@ fn components<'t>(node: Node, text: &'t str) -> Vec<&'t str> {
     name.named_children(&mut cursor).filter(|c| c.kind() == "identifier").map(|c| &text[c.byte_range()]).collect()
 }
 
-/// A Python import's files (Python Reference §5.2: module a.b.c is the file a/b/c.py or the package a/b/c/__init__.py;
-/// §7.11: a from-import's name is an attribute of the module or else its submodule, `*` the module's public names).
+/// A Python import's files (Python Language Reference §5.2: module a.b.c is the file a/b/c.py or the package
+/// a/b/c/__init__.py; §7.11: a from-import's name is an attribute of the module or else its submodule, `*` the module's
+/// public names).
 /// `import a.b.c [as x]`: by suffix a/b/c.py, a/b/c/__init__.py (not the parent packages' __init__.py, which the
 /// import also runs, §5.2.1). `from a.b import n, m as k`: by suffix a/b.py, a/b/__init__.py and per name a/b/n.py,
 /// a/b/n/__init__.py. A relative import of level l (the number of dots, §5.7 and importlib.util.resolve_name): base =
@@ -78,7 +79,7 @@ fn components<'t>(node: Node, text: &'t str) -> Vec<&'t str> {
 /// last, above it the import names no file), target = base/m; the exact paths target.py (with a module m),
 /// target/__init__.py, and per name target/n.py, target/n/__init__.py.
 fn python(node: Node, pattern: usize, path: &str, text: &str, index: &Index, targets: &mut Vec<usize>) {
-    // module m by suffix: the file m.py or the package m/__init__.py (Python Reference §5.2)
+    // module m by suffix: the file m.py or the package m/__init__.py (Python Language Reference §5.2)
     let mut by_suffix = |module: &str| {
         targets.extend(index.suffix(&format!("{module}.py")));
         targets.extend(index.suffix(&format!("{module}/__init__.py")));
@@ -149,12 +150,12 @@ fn cpp(node: Node, pattern: usize, path: &str, text: &str, index: &Index, target
     }
 }
 
-/// The samples of one repository (DeepSeek-Coder §2.2) from the dependencies of its files: `dependencies[f]` the files
-/// f depends on (g != f, ascending). A sample is a weakly connected component of the dependency graph, samples in the
-/// order of their smallest index; within a sample the files in a topological order of the condensation of its strongly
-/// connected components, each file after the files it depends on (petgraph's kosaraju_scc, iterative, returns the
-/// components in reverse topological order), the files of one component in index order (DeepSeek-Coder's Algorithm 1
-/// orders a cycle by least remaining in-degree instead). Each sample as its file indices.
+/// The samples of one repository (arXiv 2401.14196 §2.2) from the dependencies of its files: `dependencies[f]` the
+/// files f depends on (g != f, ascending). A sample is a weakly connected component of the dependency graph, samples in
+/// the order of their smallest index; within a sample the files in a topological order of the condensation of its
+/// strongly connected components, each file after the files it depends on (petgraph's kosaraju_scc, iterative, returns
+/// the components in reverse topological order), the files of one component in index order (DeepSeek-Coder's Algorithm
+/// 1 orders a cycle by least remaining in-degree instead). Each sample as its file indices.
 fn samples(dependencies: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let n = dependencies.len();
     let mut graph = DiGraph::<(), ()>::with_capacity(n, 0);

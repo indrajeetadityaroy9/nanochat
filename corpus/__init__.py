@@ -1,6 +1,7 @@
 """
 The pre-training corpus, one module per stage, under paths.CORPUS. Run order: prepare, curate, publish, the tokenizer
-(train_tokenizer.py trains the candidates, ablations/tokenizer_split_merge.py the arms; sa-bpe's copied), tokenize, pack.
+(train_tokenizer.py trains the candidates, ablations/tokenizer_split_merge.py the arms; sa-bpe's copied), tokenize,
+pack.
 
   schema.py     document categories: schema, split group, whether the content is code
   sources.py    the 18 sources, the corpus's file paths, curated texts and repository samples

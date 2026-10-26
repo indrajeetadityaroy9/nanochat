@@ -18,7 +18,8 @@
  * The backward visits rows in token order (order: a permutation sorting idx, ids = idx[order]), RUN consecutive
  * positions per warp: a run of equal tokens reads its table row once and sums its rows' dve in registers, then adds
  * the sum into dtable with one 16-byte atomic per lane and chunk (red.global.add.v4.f32), so a frequent token costs one
- * atomic per RUN rows instead of one per row. dtable is accumulated into, not overwritten.
+ * atomic per RUN rows instead of one per row. dtable is accumulated into, not overwritten. Design source: the Engram
+ * gate and weight-gradient reduce of deepseek-ai/TileKernels.
  */
 #include "common.cuh"
 
@@ -41,8 +42,8 @@ static __device__ __forceinline__ void unpack(const uint4 &u, float *v) {
     }
 }
 
-/* The launch configuration measured at d24 (eaf14d0: 8K +1.57% tok/s): THREADS per block, the backward at 2 blocks per
- * SM (128 registers per thread), RUN positions per warp (isolated backward 222 / 203 / 251 us at RUN 8 / 16 / 32). */
+/* The launch configuration, the fastest measured at d24 (GH200): THREADS per block, the backward at 2 blocks per SM
+ * (128 registers per thread), RUN positions per warp. */
 constexpr int THREADS = 256;  /* warps per block: THREADS / WARP */
 constexpr int RUN = 16;       /* backward: consecutive token-order positions per warp */
 static_assert(RUN <= WARP, "a warp's positions are held one per lane");

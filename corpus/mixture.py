@@ -80,7 +80,7 @@ REPO_LEVEL_STEPS = round(REPO_LEVEL_SHARE * MAX_STEPS)
 
 # Code, text and math shares: DeepSeek-Coder's 87% code, 10% code-related English and 3% code-unrelated Chinese (arXiv
 # 2401.14196 §2: "87% source code, 10% English code-related natural language corpus, and 3% code-unrelated Chinese
-# natural language corpus"); we take its natural language to cover web text and mathematics
+# natural language corpus"); its natural language is taken to cover web text and mathematics
 CODE_SHARE = 0.87
 NON_CODE = ("text", "math")
 REPOSITORY_SOURCES = ("stack_edu_python", "ultradata_stack_v3_l2_python", "ultradata_code_l2_python",

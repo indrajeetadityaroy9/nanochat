@@ -1,8 +1,8 @@
 """Native libraries (CUDA kernels, the Rust crates' Python modules), built on first use, cached under NATIVE; pointer
-and stream, the ctypes arguments of model/kernels' entry points. model/kernels follows ThunderKittens' layout
-(header-only shared code, common.cuh and qk_row.cuh; one self-contained file per kernel, its C entry points beside its
-kernels); this module is its one build, with one nvcc command for every kernel. torch is imported by the CUDA paths
-alone, so the corpus's spawned workers, which load only the crates, import none."""
+and stream, the ctypes arguments of model/kernels' entry points. model/kernels follows ThunderKittens'
+(HazyResearch/ThunderKittens) layout (header-only shared code, common.cuh and qk_row.cuh; one self-contained file per
+kernel, its C entry points beside its kernels); this module is its one build, with one nvcc command for every kernel.
+torch is imported by the CUDA paths alone, so the corpus's spawned workers, which load only the crates, import none."""
 
 import ctypes
 import functools

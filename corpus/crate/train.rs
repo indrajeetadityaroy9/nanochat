@@ -1,13 +1,13 @@
 //! nanochat's tokenizer trainer: byte-level BPE merges by source-attributed BPE (SA-BPE; arXiv 2604.14053). Each
-//! merge takes the pair of highest F·ln(R) (the paper's §4.1 criterion F·log R, without its default's language count;
-//! the paper leaves the log base unstated: ln as in its repository's scoring.py; the base changes no argmax), F = the
+//! merge takes the pair of highest F·ln(R) (arXiv 2604.14053 §4.1's criterion F·log R, without its default's language
+//! count; the log base is unstated there: ln as in pchizhov/sa-bpe scoring.py; the base changes no argmax), F = the
 //! pair's frequency, R = the number of distinct sources (authorship units: a repository or a document) whose
 //! documents hold the pair in the current segmentation. A pair seen in one source scores 0: it merges only after every
 //! pair seen in several. Ties (equal f64 scores) go to the higher F, then the smaller pair (rustbpe's order). Text is
-//! split by fancy-regex, the regex engine of OpenAI's tiktoken, which encodes with the trained vocabulary
+//! split by fancy-regex, the regex engine of tiktoken (openai/tiktoken), which encodes with the trained vocabulary
 //! (corpus/tokenizer.py), so training splits text as encoding does.
 //!
-//! The trainer is rustbpe's (github.com/karpathy/rustbpe): the documents are split into chunks by the pattern, each
+//! The trainer is rustbpe's (karpathy/rustbpe): the documents are split into chunks by the pattern, each
 //! distinct chunk is a word of byte ids with its count, and the merge loop keeps pair frequencies up to date
 //! incrementally, with a lazy max-heap (a popped entry whose frequency changed is requeued) whose entries hold the
 //! words a pair may occur in.

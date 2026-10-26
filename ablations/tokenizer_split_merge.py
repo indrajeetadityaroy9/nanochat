@@ -1,27 +1,28 @@
 """
 The tokenizer ablation (experiment EXPERIMENT: pre-tokenizer split pattern x BPE merge score): it trains every
 candidate vocabulary of the corpus's tokenizer (corpus/train_tokenizer.py: one sample, one trainer, VOCAB_SIZE ids),
-measures them on the corpus, and builds each arm's training set. Its runs were not run (docs/experiments.md §2): the
-corpus's tokenizer stays sa-bpe (corpus/tokenizer.py TOKENIZER). The val splits and the packs come from the curated
-shards through corpus (mixture.py, tokenize.py, pack.py).
+measures them on the corpus, and builds each arm's training set. The corpus's tokenizer is sa-bpe (corpus/tokenizer.py
+TOKENIZER). The val splits and the packs come from the curated shards through corpus (mixture.py, tokenize.py,
+pack.py).
 
 Arms (ARMS):
 - sa-bpe: the reference tokenizer's pattern (SPLIT_PATTERN) and SA-BPE's score F·ln R (arXiv 2604.14053 §4.1: F the
   pair's frequency, R the authorship units holding it in the current segmentation, a pair of one unit scoring 0; the
-  natural log as in pchizhov/sa-bpe scoring.py). The baseline: of Table 3's rows, F·log R has the highest compression
-  and far fewer verified under-trained tokens than BPE. The repository as the unit is the paper's; the document as the
-  unit of other text follows §6 ("documents, books, or document collections"), untested there. Not the paper's best
-  F·log R·L (Table 4): for natural language "the language aspect must be avoided" (§6);
+  natural log as in pchizhov/sa-bpe 9fff32d sabpe/scoring.py). The baseline: of Table 3's rows, F·log R has the
+  highest compression and far fewer verified under-trained tokens than BPE. The repository as the unit follows arXiv
+  2604.14053; the document as the unit of other text follows its §6 ("documents, books, or document collections"),
+  untested there. Not F·log R·L (Table 4, the best row): for natural language "the language aspect must be avoided"
+  (§6);
 - sa-bpe-fused: FUSED_PATTERN, whose punctuation clause takes the line breaks after it, as cl100k's does. The positive
   control: in arXiv 2608.18062's companion post, deleting those trailing line breaks from GPT-4o's clause, the
   tokenizer corpus held fixed, raises MBPP pass@1 with non-overlapping seed ranges (three seeds each; healed prompts,
-  the paper's §4.3 and App. C.1). If the parse test misses it at d16, it cannot decide the other arms;
+  arXiv 2608.18062 §4.3 and App. C.1). If the parse test misses it at d16, it cannot decide the other arms;
 - hybrid: HYBRID_PATTERN, whose statement chunks are the same at every indentation depth (its comment);
 - bpe: frequency alone (Table 3's F row, SA-BPE's baseline) within SPLIT_PATTERN, close to F·log R in compression,
   so a tie in the runs is likely (assumed), which the val coverage breaks.
-Not run: tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (arXiv 2409.04599
-Alg. 1) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.2); SuperBPE moved HumanEval and MBPP pass@10 in opposite
-directions, neither significantly (arXiv 2503.13423 Table 1).
+Not arms: tiktoken encodes by merge rank alone, which has no form for PickyBPE's token removals (arXiv 2409.04599
+Alg. 1, 2) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.1, §3.2); SuperBPE moved HumanEval and MBPP pass@10 in
+opposite directions, neither significantly (arXiv 2503.13423 Table 1).
 
 vocabularies: every arm trained at once on one draw of the sample (every merge is an argmax with fixed tie-breaks, so
 an arm does not depend on the others); ABLATION/<arm>: its vocabulary, pattern and merges;
@@ -33,9 +34,10 @@ measures that plan the runs, gate their validity, test an arm's mechanism or bre
 - planning: each source's bytes per token and the file stage's over its byte shares (an arm's tokens at equal bytes;
   the tokenize and pack budgets), and each group read in part's train tokens over its draw (below 1, the corpus's extent
   is too small for that arm: prepare.extent, mixture.SPREAD);
-- validity, asserted: every arm holds the same bytes per document, and on each source's first val texts its encoding
-  matches its merges (corpus/train_tokenizer.py fidelity);
-- mechanism: the vocabulary entries holding a line break (the companion post's strongest MBPP correlate), fusing
+- validity, asserted: every arm holds the same bytes per document, and on the first row group of each source's val
+  split its pattern's chunks cover every text, its encoding matches its merges replayed and every text decodes
+  (corpus/train_tokenizer.py fidelity);
+- mechanism: the vocabulary entries holding a line break (the companion post's most stable MBPP correlate), fusing
   punctuation with one, and ending in a line break and indentation (the post's MinGram cb, whose MBPP completions
   mostly fail with IndentationError or TabError); depth invariance, the hybrid's clause (2): of each program source's
   first INDENTED_LINES indented val lines, those whose tokens are the indentation's, then the statement's as at depth 0;
@@ -45,7 +47,7 @@ measures that plan the runs, gate their validity, test an arm's mechanism or bre
   Rényi efficiency, bigram and trigram entropy, UTF-8 integrity and character splits, AST boundary alignment and its
   per-category rates, identifier fragmentation, indentation consistency, vocabulary utilization and reconstruction, on
   each source's leading val documents up to TOKEVAL_BYTES, grouped as TokEval languages (tokeval_group). Of its 14
-  metrics only AST alignment predicts MBPP, which the paper attributes "to the vocabulary's line-break handling" (§5),
+  metrics only AST alignment predicts MBPP, attributed "to the vocabulary's line-break handling" (arXiv 2608.18062 §5),
   measured above directly, and Rényi efficiency predicts neither code bits per byte nor MBPP (Table 2).
 
 data: every arm's training set, the same documents (the set) tokenized and packed under each arm (corpus tokenize.py

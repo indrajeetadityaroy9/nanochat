@@ -78,9 +78,8 @@ constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thre
 constexpr int MAX_BATCH = 1024;
 constexpr int MASK_BITS = CHAR_BIT * sizeof(unsigned long long);  /* slots per word of a slot mask */
 constexpr int MASK_WORDS = MAX_BATCH / MASK_BITS;                 /* words of a slot mask */
-/* the narrow graphs' slots (Decoder::narrow); measured at d24 (prof steps, 256-token prompts) the fastest or within
- * 0.04 ms of it at 1, 64, 128 and 256 active slots against 64, 128, 512 and no narrow graphs (1 slot: 1.29 ms, none
- * 1.46 ms; 256 slots: 2.81 ms, none 2.97 ms) */
+/* the narrow graphs' slots (Decoder::narrow): at d24 (256-token prompts) the fastest step time, or within 0.04 ms of
+ * it, at 1, 64, 128 and 256 active slots, against 64, 128, 512 and no narrow graphs */
 constexpr int SMALL_BATCH = 256;
 static_assert(MAX_BATCH % MASK_BITS == 0, "slot masks are whole words");
 /* mma.sync m16n8k16 (PTX ISA "Matrix Fragments for mma.m16n8k16"): lanes form MMA_N groups (groupID = lane / GROUP) of
@@ -314,9 +313,9 @@ template <bool CHOICE> static __device__ __forceinline__ void argmax_fold(const 
  * accumulators' layout is mma m16n8's per warp (16 rows) and n8 chunk (PTX ISA "Register Fragments: wgmma
  * .m64nNk16"), whose lanes epilogue and argmax_fold address. Slot tiles without an active slot exit. CHOICE: ARGMAX
  * honours each slot's allowed tokens and temperature (c; the head graph); without it, the logits' argmax (the
- * whole-step graph), so greedy steps run the GEMM compiled without the choice. Measured at d24 (1,024 slots,
- * 256-token prompts, 512 steps): 8.27 ms per step, against 8.33 ms dispatching 128-row x 128-slot tiles where they
- * cover every SM; WG_STAGES 4 against 8.82, 8.44, 8.33 and 9.22 ms at 2, 3, 6 and 8 stages. */
+ * whole-step graph), so greedy steps run the GEMM compiled without the choice. Tile shape (WG_M x WG_N = 64 x 64,
+ * against 128-row x 128-slot tiles where they cover every SM) and WG_STAGES (4, against 2, 3, 6 and 8): the fastest
+ * step time at d24 (1,024 slots, 256-token prompts). */
 constexpr int WG_THREADS = 128, WG_M = 64, WG_N = MASK_BITS, WG_BK = 64, WG_STAGES = 4;
 static_assert(WG_BK * sizeof(bf16) == 128, "a K slice row is one 128-byte swizzle span");
 constexpr uint32_t WG_A_BYTES = WG_M * WG_BK * sizeof(bf16), WG_B_BYTES = WG_N * WG_BK * sizeof(bf16);
@@ -448,7 +447,7 @@ __global__ void __launch_bounds__(2 * WG_THREADS) k_wgmma(const __grid_constant_
  * §3.1): Gumbel-max at temperature T, as the GEMM's epilogue, over the fewest most likely allowed tokens whose
  * probability under softmax(s / T) reaches top_p; its key to argmax for k_commit. The nucleus is Hugging Face
  * transformers' TopPLogitsWarper's (the generator of MultiPL-E automodel.py and bigcode-evaluation-harness), which
- * sorts the probabilities ascending and drops every token whose cumulative probability is at most 1 - top_p; here,
+ * sorts the probabilities ascending and drops every token whose cumulative probability is at most 1 - top_p; k_nucleus,
  * with e = exp(s / T - max s / T) (0 outside the allowed tokens) and C(x) the sum of e over the tokens with e <= x,
  * the tokens kept are those with e >= e*, the least e with C(e) > (1 - top_p) sum(e), found by bisection on the IEEE
  * bits of x in [0, 1] (C is a step function rising at each e, so the least such bits are an e's). Tokens of exactly
@@ -550,7 +549,7 @@ __global__ void k_norm(int kind, const bf16 *in, const float *wte, float *x0, co
  * accumulators), updates its online softmax (m, l) once per run and adds the scaled values on the
  * CUDA cores, a lane's LANE_DIMS dims; the warps merge, add the current key and value, and write acc / l rounded to
  * bf16 (FlashAttention's output). One block per window: at d24 a 1,024-slot step's 6,144 (head, slot) blocks fill the
- * SMs, and a 1-slot step took 1.29 ms against 3.16 ms for the per-slot-group GEMV decoder it replaced. */
+ * SMs. */
 
 typedef struct {
     const bf16 *qkv, *h, *ve;  /* [B][3C], [B][C] (the normed input), the layer's value-embedding table or NULL */
@@ -633,8 +632,7 @@ static __device__ __forceinline__ float key_score(const float *q, const float *k
 }
 
 /* k_attn's keys per cp.async run (a commit group, double-buffered): one MMA_M tile per warp, the least a warp's MMA
- * scores; measured at d24 (1,024 slots, 256-token prompts, 512 steps) 8.31 ms per step against 8.80 ms for two tiles
- * per warp and 15.45 ms for four (under the earlier tile dispatch) */
+ * scores; the fastest step time at d24 (1,024 slots, 256-token prompts) among one, two and four tiles per warp */
 constexpr int ATTN_RUN = ATTN_WARPS * MMA_M;
 constexpr int ROW_VECS = HEAD_DIM / (int)sizeof(uint4);  /* 16-byte vectors per e4m3 key row */
 constexpr float FP8_MAX = 448.f;  /* the largest finite e4m3 */

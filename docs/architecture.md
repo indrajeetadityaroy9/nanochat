@@ -192,8 +192,9 @@ Notes on the rows:
 - **Fixed tiles.** QuACK's autotuner (`tuned=True`) timed every candidate at a shape's first call, so the choice was a
   per-process timing result: two cold d24 runs picked different configurations for 2 of 9 GEMM keys, and the shared
   cache's q/k/v forward pick was 6.6% slower than the best. QuACK's `default_config` would cost 1.1% / 5.4% / 26% of
-  these GEMMs' time at d24 / d16 / d8; a single benchmark run's winner is up to 2.1% slower than the three-run best
-  (`linear.py` `CONFIGS`). With `e24333d` no training GEMM autotunes, and a cold start peaks at the warm 71.11 GiB.
+  these GEMMs' time at d24 / d16 / d8; a single benchmark run's winner is up to 2.1% slower than the three-run best,
+  and a cold first d24 step spent ~80 s autotuning (`linear.py` `CONFIGS`, `fb86efc`). With `e24333d` no training
+  GEMM autotunes, and a cold start peaks at the warm 71.11 GiB.
 - **Norm in epilogues.** The rstd-scaled relu² derivative epilogue costs ~200 µs per layer and micro-batch over QuACK's
   plain `gemm_dact` (~72 ms per step); the Inductor norm and mix kernels that remain (norm before attention, the
   residual mix) run at ~3.6 TB/s.
@@ -204,9 +205,11 @@ Notes on the rows:
   autotuned dX GEMM) cost +9.4 ms and +6 GiB over uncapped (28.04 → 37.44 ms, 6.14 → 12.14 GiB). Over the run, 0.58%
   of the 8K stage's 73.8 h is ~26 min [arithmetic, `docs/training.md` §7]; the cap's 32K cost is not measured.
 - **dpsum.** `DPSUM_CONFIG` is the fastest QuACK SM90 configuration with tile_n = 128 on the d24 shape (172.2 µs;
-  cluster (2, 1) 172.8, tile_m 192 212.4, cooperative 256 268.5); `fa4_rows` takes 7.5 µs.
+  cluster (2, 1) 172.8, tile_m 192 212.4 / 218.3, cooperative 256 268.5 / 270.4); `fa4_rows` takes 7.5 µs.
 - **Value-embedding backward.** RUN = 16 positions per warp (isolated backward 222 / 203 / 251 µs at RUN 8 / 16 / 32),
   2 blocks of 256 threads per SM (`ve_gate.cu`).
+- **q/k prologue forward.** Two heads' loads in flight per thread group: `k_forward` 250.3 → 183.6 µs per call at d24
+  8K against one head per group (`qk_prologue.cu`, `62b50c2`).
 - **Window dQ in bf16.** A window dQ element sums at most 5 bf16 partials (one per 128-key block of the 512-key
   window); full layers would sum T/128 (64 at 8K, 256 at 32K) and keep FA4's fp32 accumulator and FA4's own launch
   and tile shapes (the persistent and tile variants measured for them: `docs/experiments.md` §5).

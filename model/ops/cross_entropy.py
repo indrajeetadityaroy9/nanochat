@@ -1,12 +1,12 @@
 """
 LM-head next-token loss from hidden states x (M, C) and head weight W (V, C), z = x W^T (or, with an output-logit cap
-c, z = c tanh(x W^T / c): model/modeling.py ModelConfig.final_logit_softcapping; 92d63d4 gpt.py:511-515, Gemma 2's
-final-logit softcapping, arXiv 2408.00118 §2):
+c, z = c tanh(x W^T / c): model/modeling.py ModelConfig.final_logit_softcapping; karpathy/nanochat 92d63d4
+nanochat/gpt.py:511-515, Gemma 2's final-logit softcapping, arXiv 2408.00118 §2):
 
     loss = sum over rows with label t != IGNORE_INDEX of (logsumexp(z) - z[t]), divided by the valid count n.
 
-nanochat::lm_loss (training): QuACK's scaled-exp linear cross entropy (quack/linear_cross_entropy.py,
-scaled_exp_linear_cross_entropy_fwd's calls and tiles, run here per LCE_CHUNK rows so that each row's label logit is kept
+nanochat::lm_loss (training): QuACK's (Dao-AILab/quack) scaled-exp linear cross entropy (quack/linear_cross_entropy.py,
+scaled_exp_linear_cross_entropy_fwd's calls and tiles, run per LCE_CHUNK rows so that each row's label logit is kept
 for its logsumexp): the logits GEMM's epilogue stores E = bf16(2^(z log2 e - k)), k the rounded maximum of the row's
 TILE_N1-wide N tile, beside each tile's sum of exponentials and the label's fp32 logit, never z itself; QuACK's row
 kernel (lce_glue) turns those into the loss (logsumexp - z[t], from the fp32 accumulators), fixes E at the label and
@@ -48,15 +48,13 @@ from corpus.loader import IGNORE_INDEX
 # Rows of lm_losses' capped fp32 logits per GEMM, a memory bound only (each row's loss is computed whole within its
 # chunk, so the losses do not depend on it): 8,192 x 2^15 x 4 bytes = 1 GiB
 CHUNK = 8192
-# Rows of lm_loss's scaled-exp chunks, a multiple of 128 (the gradient GEMMs' tile_M). On a real d24 micro-batch
-# (98,304 rows, GH200): 8,192 to 65,536 rows equally fast (24.1-24.4 ms per call), E (LCE_CHUNK x 2^15 bf16) and the
-# op's peak growing with it (0.82 GiB at 8,192, 4.59 at 65,536); a 98,304-row chunk (E past 2^31 elements) faults in
-# QuACK 0.6.5. The least memory of the equally fast.
+# Rows of lm_loss's scaled-exp chunks, a multiple of 128 (the gradient GEMMs' tile_M): of the chunk sizes equally fast
+# on a d24 micro-batch (98,304 rows, GH200), the one of least memory (E, LCE_CHUNK x 2^15 bf16, and the op's peak grow
+# with it); a 98,304-row chunk (E past 2^31 elements) faults in QuACK 0.6.5.
 LCE_CHUNK = 8192
 # The logits GEMM's N tile, each row's k and sum-of-exponentials granularity: a multiple of 64 (lce_glue's strip is
 # 64-column resolved) dividing the vocabulary 2^15, with QuACK's pingpong schedule (two consumer warp groups alternating
-# tiles, hiding the epilogue; tile_N <= 208). Same micro-batch: 128 with pingpong 24.2 ms per call, 256 (no pingpong)
-# 25.5, master's GEMM + cross entropy + gradient GEMMs 26.6-27.1.
+# tiles, hiding the epilogue; tile_N <= 208): the fastest such tile on a d24 micro-batch (GH200).
 TILE_N1 = 128
 # The gradient GEMMs' N tile over C, QuACK's rule (scaled_exp_linear_cross_entropy_fwd): 192 when it divides C (768)
 TILE_N2 = 192

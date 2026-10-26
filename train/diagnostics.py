@@ -20,9 +20,8 @@ from corpus.loader import IGNORE_INDEX
 from corpus.mixture import Stage, mixture_rows
 from model.modeling import CausalLM
 
-# Steps between update-RMS and parameter-norm measurements, by their cost: every step costs 0.50% of d24 throughput
-# (GH200, 25-step windows, 8 warm-up, alternated: 351.4K / 351.8K tok/s without, 349.9K / 349.8K with), every 10th
-# step is within the windows' spread (7e77833: 341,290-341,471 tok/s with or without)
+# Steps between update-RMS and parameter-norm measurements: every step costs measurable d24 throughput, every 10th is
+# within the spread of alternated 25-step windows (GH200)
 UPDATE_STATS_EVERY = 10
 
 
@@ -55,7 +54,7 @@ class Diagnostics:
     def micro_batch(self, labels: Tensor, losses: Tensor, lse: Tensor) -> None:
         """One micro-batch's per-row loss sums and valid counts, and its logsumexp statistics (lm_loss outputs). No
         autograd: lm_loss's per-position outputs require grad, and a graph from them copied into the pinned buffers
-        would chain every step's onto the last (~12.7 MiB per step at d24, never freed)."""
+        would chain every step's onto the last, never freed."""
         valid = labels != IGNORE_INDEX
         self.row_stats.append(torch.stack([losses.view(labels.shape).sum(1), valid.sum(1).float()]))
         valid = valid.flatten()

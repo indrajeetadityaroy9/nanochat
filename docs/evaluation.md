@@ -232,9 +232,15 @@ offsets from each token's byte length (`token_offsets`). Tree-sitter grammars: `
   the device's total (`NANOCHAT_DECODER_MEMORY_FRACTION`; unset: all free memory), so a job can share the GPU.
 - **Speed** (`4385748`, GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens):
   94,778 tok/s at d24 and 189,307 at d16, against 21,809 and 66,559 for the per-slot-group GEMV decoder it replaced
-  (4.35×, 2.84×); d24 step 8.27 ms at 1,024 slots, one slot 1.29 ms. A d16 checkpoint's per-problem results changed
-  little and in both directions (MBPP+ greedy +4/−5 base, +2/−7 plus; HumanEval+ greedy unchanged; FIM line exact
-  match within 0.002).
+  (4.35×, 2.84×); d24 step 8.27 ms at 1,024 slots, one slot 1.29 ms (GEMV decoder 3.16 ms). A d16 checkpoint's
+  per-problem results changed little and in both directions (MBPP+ greedy +4/−5 base, +2/−7 plus; HumanEval+ greedy
+  unchanged; FIM line exact match within 0.002).
+- **Tuned constants** (d24, GH200, 256-token prompts; 1,024 slots and 512 steps unless stated). GEMM tiles and
+  `WG_STAGES` (`4385748`): 64-row × 64-slot tiles 8.27 ms per step against 8.33 ms for 128 × 128 where they cover
+  every SM; 4 stages against 8.82, 8.44, 8.33, 9.22 ms at 2, 3, 6, 8. `ATTN_RUN` (`4385748`, under the earlier tile
+  dispatch): one MMA tile per warp 8.31 ms against 8.80 (two) and 15.45 (four). `SMALL_BATCH` = 256 (`55e64de`):
+  fastest or within 0.04 ms at 1, 64, 128, 256 active slots against 64, 128, 512 and no narrow graphs (1 slot
+  1.29 ms, none 1.46; 256 slots 2.81, none 2.97).
 
 ## 7. Syntax-constrained decoding and post-generation checks
 

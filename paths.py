@@ -2,8 +2,7 @@
 Every location the code reads or writes: ROOT, the repository (located from this file), and ARTIFACTS = ROOT/artifacts
 (gitignored), whose directories `python -m paths` (scripts/setup.sh) creates once; code never creates them, so a
 missing one fails at first use (Hydra creates RUNS/<run_name>, a run's directory, before its job starts). The corpus
-comes from the published dataset (`python -m corpus.publish pull`). RESULTS, the data the paper's tables and figures
-are drawn from, is tracked.
+comes from the published dataset (`python -m corpus.publish pull`). RESULTS, the experiments' records, is tracked.
 """
 from pathlib import Path
 

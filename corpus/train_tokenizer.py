@@ -8,8 +8,8 @@ share of the stage's tokens, Stage.shares, at the reference tokenizer's bytes pe
 a systematic sample in shard order: tokenizer training data "representative of model training data"
 (arXiv 2405.05417 §5); across tokenizer training mixes a subset's compression "only varies by 5 to 6 percentage
 points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); over languages, proportional tokenizer-training
-weights give lower bits per byte than equal ones (arXiv 2610.12144 Table 6, §7). An authorship unit (SA-BPE's R) is
-the repository, its name lowercased, for repository files and functions; any other document is its own.
+weights give lower bits per byte than equal ones (arXiv 2610.12144 App. D Table 6, §5.2). An authorship unit (SA-BPE's
+R) is the repository, its name lowercased, for repository files and functions; any other document is its own.
 
 fidelity: a trained vocabulary's encoding checked against its merges (tiktoken encodes by merge rank).
 """
@@ -33,8 +33,8 @@ from native import corpus_crate
 
 Score = Literal["sa-bpe", "frequency"]
 
-# The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers; that data is no longer on
-# the Hub), so a vocabulary trains on as much text as the reference tokenizer did
+# The sample's bytes: the reference tokenizer's sample's (its curated splits' Parquet footers; that data is not on the
+# Hub), so a vocabulary trains on as much text as the reference tokenizer did
 SAMPLE_BYTES = 13.38e9
 
 
@@ -121,7 +121,7 @@ def fidelity(task: tuple[Path, str]) -> dict[str, int]:
     equals the training segmentation chunk by chunk, and every text decodes back. The training segmentation is Hugging
     Face tokenizers' BPE model over the merges, each byte spelled as the Latin-1 character of its value: listed pairs
     merged by rank, each over every occurrence from the left (corpus/crate train.rs merge_pair), never a pair whose
-    bytes another made. A first row group checks in up to 155 s (climbmix's 122,880 documents, 72.5M chunks)."""
+    bytes another made."""
     directory, source = task
     tokenizer = get_tokenizer(directory)
     spelled = [entry.decode("latin-1") for entry in tokenizer.token_bytes[:tokenizer.bos_token_id]]

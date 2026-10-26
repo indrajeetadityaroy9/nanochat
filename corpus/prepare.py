@@ -44,8 +44,8 @@ from corpus.sources import (
     text_bytes,
 )
 
-# Hub files fetched at once: the measured throughput peak, reading one column of 8 UltraData-Code L3 files per setting
-# (8.5 MB/s with 1 file in flight, 11.5 with 2, 12.4 with 4, 10.5 with 8)
+# Hub files fetched at once: the throughput peak over 1, 2, 4 and 8 files in flight, reading one column of 8
+# UltraData-Code L3 files per setting
 FETCHES = 4
 
 
@@ -91,8 +91,8 @@ def extent(source: str) -> list[str]:
 def swh_store() -> S3Store:
     """This process's client of Software Heritage's bucket, created once so connections are reused; the file-descriptor
     limit raised to its hard limit (a row group's requests are in flight at once). Retries back off from a second to a
-    minute, for up to 15 minutes: under obstore's default (10 retries from 100 ms) the Stack-Edu fetch failed when the
-    bucket reset one request 10 times within 8.2 seconds."""
+    minute, for up to 15 minutes, outlasting the bucket's repeated resets of one request, which exhaust obstore's
+    default (10 retries from 100 ms)."""
     resource.setrlimit(resource.RLIMIT_NOFILE, (resource.getrlimit(resource.RLIMIT_NOFILE)[1],) * 2)
     return S3Store("softwareheritage", region="us-east-1", skip_signature=True,
                    retry_config={"max_retries": 15, "retry_timeout": timedelta(minutes=15),

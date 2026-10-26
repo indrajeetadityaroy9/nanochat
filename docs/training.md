@@ -237,7 +237,10 @@ the device never drains; its time runs between CUDA events at the previous step'
 `mixture.mixture_rows`); the output logits' logsumexp maximum and mean square over valid positions (PaLM's z-loss
 quantity, arXiv 2204.02311 §5); the largest QK-norm gain; every `UPDATE_STATS_EVERY` = 10th step each optimizer
 group's update RMS (without weight decay) and parameter norm, which cost 0.50% of d24 throughput when taken every step
-(351.4K / 351.8K against 349.9K / 349.8K tok/s, alternated 25-step windows; `train/diagnostics.py` comment).
+(351.4K / 351.8K against 349.9K / 349.8K tok/s, GH200, alternated 25-step windows after 8 warm-up steps; every 10th
+step within the windows' spread, 341,290–341,471 tok/s with or without, `7e77833`). The per-micro-batch statistics
+are taken without autograd: a graph through the pinned-buffer copies would chain every step's onto the last, a leak
+of ~12.7 MiB per step at d24 (`1f23203`).
 
 **Job** (`run.job`): the stale guard (a recorded `run` record whose `plan`, `data_key` or `config` differs raises
 "recipe changed", stopping the sweep until the run's directory is deleted; `same_config` matches a field the record

@@ -1,8 +1,8 @@
 """
 Attention of model/modeling.py as one torch.library op over the fused q/k/v projection (model/ops/linear.py
 qkv_proj): the q/k prologue (model/ops/qk_prologue.py), the value embeddings' gate and mix (model/ops/ve_gate.py) and
-FlashAttention-4 (Dao-AILab flash_attn.cute), causal with `window_left` keys before each query; FA4's own
-autograd.Function cannot be traced by torch.compile. One op, so the backward writes every gradient of the projection
+FlashAttention-4 (Dao-AILab/flash-attention flash_attn/cute), causal with `window_left` keys before each query; FA4's
+own autograd.Function cannot be traced by torch.compile. One op, so the backward writes every gradient of the projection
 into one (B, T, 3C) buffer: FA4's dv into the v block (the value embeddings' backward reads it there; the mix passes
 dv through to v), the prologue's dq, dk into the q and k blocks, with no concatenation and no autograd add.
 
@@ -18,19 +18,18 @@ Local layers' forward runs persistent. FA4's SM90 forward launches one CTA per (
 DynamicPersistentVarlenScheduler"), and a window-512 m-block of 128 queries covers ~5 key blocks, so each CTA's launch,
 Q load and output store are exposed. PersistentVarlenScheduler runs one CTA per SM over those tiles, and
 PersistentForwardSm90 stages the output tile in its own shared buffer (FlashAttentionForwardSm90.kernel puts it in sQ,
-which the producer refills with the next tile's Q once released, FlashAttentionForwardSm90.mma): d24 8K +0.32%
-(docs/architecture.md §3). Full causal layers keep FA4's launch: their m-blocks' work differs up to T / 128-fold, which
-a static stride balances worse than the hardware's CTA scheduling (measured slower, the same section).
+which the producer refills with the next tile's Q once released, FlashAttentionForwardSm90.mma). Full causal layers
+keep FA4's launch: their m-blocks' work differs up to T / 128-fold, which a static stride balances worse than the
+hardware's CTA scheduling (measured on the d24 shapes).
 
 Local layers' backward accumulates dQ in bf16 (BackwardSm90Bf16dQ): FA4's SM90 backward reduce-adds fp32 dQ partial
-tiles into a zeroed fp32 dq_accum and converts it in a postprocess kernel (flash_bwd_postprocess.py); here the
-consumers scale dQ by the softmax scale and stage it as bf16 rows, and the dQ warp reduce-adds each row straight into
-dq with cp.reduce.async.bulk .add.noftz.bf16 (PTX ISA, cp.reduce.async.bulk): no fp32 zero fill, no postprocess,
-interior tiles skip the mask; with the persistent forward d24 8K +0.94%, 32K +0.72%. A dq element there sums <= 5
-bf16-rounded partials (one per 128-key block of the 512-key window; norm rel 2.45e-3 against fp32 accumulation);
-full layers would sum up to T / 128 (64 at 8K, 256 at 32K), so they keep FA4's fp32 accumulator. Tile shapes and
-stages are FA4's own (_tile_size_fwd_sm90, _tile_size_bwd_sm90): every other forward and backward configuration
-measured on the d24 shapes was slower (docs/experiments.md §5).
+tiles into a zeroed fp32 dq_accum and converts it in a postprocess kernel (flash_bwd_postprocess.py); in
+BackwardSm90Bf16dQ the consumers scale dQ by the softmax scale and stage it as bf16 rows, and the dQ warp reduce-adds
+each row straight into dq with cp.reduce.async.bulk .add.noftz.bf16 (PTX ISA, cp.reduce.async.bulk): no fp32 zero
+fill, no postprocess, interior tiles skip the mask. A dq element there sums <= 5 bf16-rounded partials (one per
+128-key block of the 512-key window); full layers would sum up to T / 128 (64 at 8K, 256 at 32K), so they keep FA4's
+fp32 accumulator. Tile shapes and stages are FA4's own (_tile_size_fwd_sm90, _tile_size_bwd_sm90), the fastest of the
+forward and backward configurations timed on the d24 shapes (GH200 at 700 W).
 
 The op ends with o_proj (model/ops/linear.py residual_rms: h = residual + out W_o^T and its rows' rstd), so its
 backward takes dO from o_proj's dX GEMM together with FA4's dpsum = rowsum(dO O) per (row, head), summed in that

@@ -46,9 +46,8 @@ from corpus.sources import (
 from corpus.tokenizer import TOKENIZER, get_tokenizer
 
 Documents = tuple[np.ndarray, np.ndarray]  # tokens, document lengths
-# A repository task's peak memory in its partition's text bytes, measured (ru_maxrss of a spawned worker, the corpus
-# tokenizer, each language's largest train partition): 6.52 for Python (partition 41: 3.02 GiB of text, 19.7 GiB at
-# peak), 8.18 for C++ (partition 71: 2.40 GiB, 19.6 GiB); the larger
+# A repository task's peak memory in multiples of its partition's text bytes: the larger of the two languages' peaks
+# (ru_maxrss of a spawned worker under the corpus tokenizer, on each language's largest train partition), C++'s
 PEAK = 8.18
 
 

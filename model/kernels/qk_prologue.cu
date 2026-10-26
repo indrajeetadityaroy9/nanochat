@@ -9,9 +9,8 @@
  * contiguous, token stride 3C = 3 H HEAD_DIM), and the backward's dq, dk the same blocks of its gradient; the forward's
  * outputs and the backward's incoming gradients contiguous. Position of token t = t % T. The first half of the blocks
  * takes q, the second k. Forward: a QK_LANES-thread group per position, its gains and cos/sin entries loaded once for
- * the position's H heads, two heads' loads in flight (k_forward 250.3 -> 183.6 us per call at d24 8K against one head
- * per group, 62b50c2); the odd head of an odd H alone. Block size: the occupancy calculator's (a multiple of WARP, so
- * rows never straddle warps).
+ * the position's H heads, two heads' loads in flight; the odd head of an odd H alone. Block size: the occupancy
+ * calculator's (a multiple of WARP, so rows never straddle warps).
  *
  * Deterministic gain gradient without atomics: persistent blocks (half the device's resident blocks per tensor) stride
  * over rows accumulating dm * n in registers, reduce their warps in order into a per-block partial, and k_gain_sum adds
