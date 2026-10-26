@@ -187,21 +187,25 @@ weight decay 0.15342 on the base plan (§2).
 rows, the × 2 arm): 8K code 0.0008 (49,765 rows), 32K code 0.0035 (2,667 rows), 8K all 0.0013. × 1's deficit, 0.0078,
 is ≈ 10 of them; × 2 and × 4 differ by 0.00047, under one: the measure brackets a flat optimum over × 2–× 4, and
 × 2.7193 is the parabola's point estimate without an interval (the arms share val rows, so a paired difference would
-be tighter; not computed). The same fit on every other held-out measure of the three evaluations:
+be tighter; not computed). The same fit on the other likelihood measures of the three evaluations (`metrics.measures`):
 
 | Measure | × 1 | × 2 | × 4 | Lowest | Vertex |
 |---|---|---|---|---|---|
 | code, 8K (the rule) | 0.41322 | 0.40544 | 0.40591 | × 2 | × 2.719 |
 | code, 32K | 0.40859 | 0.40131 | 0.40227 | × 2 | × 2.610 |
 | code, 8K and 32K by the base run's stage tokens (97.05B, 5.60B) | | | | | × 2.713 |
+| repositories beyond 8K (`repo_beyond_8k`) | 0.36366 | 0.35736 | 0.35858 | × 2 | × 2.527 |
+| benchmark solutions (`solutions`; 706 rows, standard error 0.0089) | 0.49200 | 0.48710 | 0.48498 | × 4 | × 4.782 |
 | all, 8K / 32K | 0.49386 / 0.49250 | 0.48499 / 0.48403 | 0.48533 / 0.48479 | × 2 | × 2.756 / × 2.672 |
 | math, 8K / 32K | 0.53770 / 0.53733 | 0.52497 / 0.52459 | 0.52556 / 0.52518 | × 2 | × 2.743 / × 2.744 |
 | text, 8K / 32K | 1.07390 / 1.07466 | 1.05797 / 1.05881 | 1.05734 / 1.05821 | × 4 | × 2.910 / × 2.906 |
 
-The vertices span × 2.61–2.91: −4% to +7% of the base lr, ≤ 0.00004 bpb at the fitted curvature [arithmetic]. The
-parse measure's generations (single seed, greedy): HumanEval+ base pass@1 0.067 / 0.104 / 0.110 (standard error
-0.020–0.025), MBPP+ 0.114 / 0.132 / 0.127 (0.016–0.017), MBPP+ parse rate 0.825 / 0.894 / 0.775; none resolves × 2
-from × 4, and the rule reads none of them.
+The mixture measures' vertices span × 2.53–2.91: −7% to +7% of the base lr, ≤ 0.00005 bpb at the fitted curvature
+[arithmetic]. The solutions measure alone falls through × 4 and puts its vertex beyond the grid, but over 706 rows its
+× 2–× 4 gap (0.0021) is under one standard error; at the code fit's curvature its × 4.78 would cost 0.0027 code bpb
+[arithmetic]. The parse measure's generations (single seed, greedy): HumanEval+ base pass@1 0.067 / 0.104 / 0.110
+(standard error 0.020–0.025), MBPP+ 0.114 / 0.132 / 0.127 (0.016–0.017), MBPP+ parse rate 0.825 / 0.894 / 0.775;
+none resolves × 2 from × 4, and the rule reads none of them.
 
 **Dynamics** (the arms' `metrics.jsonl`, `train` records; × 1 / × 2 / × 4):
 - training loss (50-step means): × 4 leads until step 445, then trails × 2 (+0.011 at step 1,000, +0.002 at the
@@ -443,6 +447,9 @@ sanitize pool (a forkserver) import it as the phases' main module. `register` ru
 `run_name` omits default fields, so a field added with a default renames no run, and a changed default would keep a
 run's name under a new meaning; the stale guard's `config` comparison closes that gap. `job`:
 a training phase that fails without a `failure` record raises `ChildProcessError`; one that diverged ends the job.
+`evaluations` runs the checkpoints' evaluations in fresh processes, checkpoint k + 1's started once k's has released
+the GPU (`eval/suite.py` `released_path`, `docs/evaluation.md` §1) or ended; a failure starts no further evaluation,
+and `ChildProcessError` is raised once every started one has ended.
 `evaluation` silences `ast.parse`'s `SyntaxWarning`s on generated code (`eval/verify.py`, `inference/`).
 `conf/run.yaml` disables Hydra's job logging, whose default file `${hydra.job.name}.log` would be
 `RUNS/<run_name>/run.log`, the phases' log.
