@@ -106,13 +106,13 @@ def training(config: RunConfig, run: "RunPlan") -> None:
           config=asdict(config))
 
 
-def evaluation(config: RunConfig, step: int, previous: "Event | None") -> None:
+def evaluation(config: RunConfig, step: int, previous: "Event | None", released: "Event") -> None:
     from eval import suite
 
     # ast.parse's SyntaxWarnings on generated code
     warnings.filterwarnings("ignore", category=SyntaxWarning)
     suite.evaluate(get_tokenizer(tokenizer_path(config)), run_name=run_name(config), step=step,
-                   generate=config.generate, previous=previous)
+                   generate=config.generate, previous=previous, released=released)
 
 
 def logged(log: Path, target: Callable[..., None], kwargs: dict) -> None:
@@ -133,31 +133,25 @@ def phase(log: Path, target: Callable[..., None], **kwargs: object) -> int:
 
 def evaluations(log: Path, checkpoints: list[tuple[RunConfig, int]]) -> None:
     """Each (config, step)'s evaluation in a fresh process, output appended to `log`. Checkpoint k + 1's starts once
-    k's has released the GPU (suite.released_path) or ended, with previous = k's end (suite.evaluate); none starts
-    after a failure. Raises ChildProcessError, once every started evaluation has ended, if any failed."""
-    from eval.suite import released_path
-
+    k's has released the GPU (suite.evaluate's `released`) or ended, with previous = k's end; none starts after a
+    failure. Raises ChildProcessError, once every started evaluation has ended, if any failed."""
     spawn = multiprocessing.get_context("spawn")
     started, previous = [], None
     for config, step in checkpoints:
-        released = released_path(run_name(config), step)
-        released.unlink(missing_ok=True)
-        ended = spawn.Event()
+        released, ended = spawn.Event(), spawn.Event()
         process = spawn.Process(target=logged, args=(log, evaluation, {"config": config, "step": step,
-                                                                         "previous": previous}))
+                                                                         "previous": previous, "released": released}))
         process.start()
-        watcher = threading.Thread(target=lambda p=process, e=ended: (p.join(), e.set()))
+        watcher = threading.Thread(target=lambda p=process, e=ended, r=released: (p.join(), e.set(), r.set()))
         watcher.start()
         started.append((config, step, process, watcher))
-        while not ended.wait(1) and not released.exists():
-            pass
+        released.wait()  # set by the evaluation, or by its watcher once it has ended
         previous = ended
-        if any(not w.is_alive() and p.exitcode for _, _, p, w in started):
+        if any(p.exitcode for _, _, p, _ in started):  # a failed evaluation's exit code is set before its `released`
             break
     failed = []
     for config, step, process, watcher in started:
         watcher.join()
-        released_path(run_name(config), step).unlink(missing_ok=True)
         if process.exitcode:
             failed.append(f"{run_name(config)} step {step}")
     if failed:

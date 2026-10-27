@@ -2,15 +2,15 @@
 CPU replay of the scorers and checkers of a checkpoint's evaluation (eval/suite.py evaluate's record and its
 sampled-completions sidecar) on its stored completions, without a model: every scorer reruns (EvalPlus base and plus,
 MultiPL-E's judge, the infilling checks, parse outcomes, the filtered mode's verdicts) on the evaluation's code paths
-and every aggregate is recomputed by the functions the evaluation uses. Copied from the record, as they need the model,
-and so not validated by an equal replay: the likelihood sums (each context's "corpora" and "weights", "solution"), the
-filtered searches' "attempts", and every "latency". Checks run against an empty VerdictCache of their own (a temporary
-database), so every verdict is recomputed, none read from paths.VERDICTS.
+and every aggregate is recomputed by the functions the evaluation uses. Copied from the record, as they need the model
+or the packed corpus, and so not validated by an equal replay: the likelihood sums and sample weights (each context's
+"corpora" and "weights", "solution"), the filtered searches' "attempts", and every "latency". Checks run against an
+empty VerdictCache of their own (a temporary database), so every verdict is recomputed, none read from paths.VERDICTS.
 
     python -m eval.rescore <eval-json> [--out <path>]
 
 writes the replay (suite.write_evaluation: a record and its sidecar) to --out, prints each field whose replay differs
-from the evaluation, and exits 1 if any does. Records written before the sidecar lack "samples" and are not replayed.
+from the evaluation, and exits 1 if any does. Records written before the sidecar lack "samples" and raise KeyError.
 """
 import argparse
 import json
@@ -31,8 +31,9 @@ from eval.code_eval import (
     Task,
     codegen_scores,
     codegen_scoring,
+    filtered_record,
     fim_lines,
-    infilling_record,
+    infilling,
     parse_scores,
     reference_lines,
     sanitizers,
@@ -55,7 +56,7 @@ def search_record(stored: dict, accepted: list[bool]) -> dict:
 def codegen(pool: ProcessPoolExecutor, runs: ThreadPoolExecutor, name: str, items: list[Task],
             found: list[list[tuple[str, str]]], stored: dict) -> dict:
     """An EvalPlus or MultiPL-E benchmark's {"greedy", "sampled", "filtered"} records rescored; found: its tasks'
-    vetted examples (none for MultiPL-E)."""
+    vetted examples."""
     check, language, score = codegen_scoring(pool, name)
     greedy, sampled, filtered = stored["greedy"], stored["sampled"], stored["filtered"]
     chosen = filtered["completions"]
@@ -63,8 +64,7 @@ def codegen(pool: ProcessPoolExecutor, runs: ThreadPoolExecutor, name: str, item
                         pool=runs)
     return {"greedy": codegen_scores(score, items, "greedy", [[c] for c in greedy["completions"]], greedy["latency"]),
             "sampled": codegen_scores(score, items, "sampled", sampled["completions"], sampled["latency"]),
-            "filtered": (score(items, [[c] for c in chosen]) | {"completions": chosen}
-                         | search_record(filtered, accepted))}
+            "filtered": filtered_record(score, items, chosen, search_record(filtered, accepted))}
 
 
 def fim(runs: ThreadPoolExecutor, key: str, found: dict[str, list[list[tuple[str, str]]]], stored: dict) -> dict:
@@ -73,17 +73,17 @@ def fim(runs: ThreadPoolExecutor, key: str, found: dict[str, list[list[tuple[str
     name, mode = key.split("/")
     problems = list(read_problems(name).values())
     middles = stored["greedy"]["completions"]
-    out = {"greedy": infilling_record(name, problems, middles, {"latency": stored["greedy"]["latency"]})}
+    out = {"greedy": infilling(name, problems, middles, {"latency": stored["greedy"]["latency"]})}
     lines = reference_lines(name, problems)
     if lines is not None:
-        out["greedy_reference_lines"] = infilling_record(
+        out["greedy_reference_lines"] = infilling(
             name, problems, [fim_lines(m, k) for m, k in zip(middles, lines, strict=True)], {})
     if mode == FILTERED_MODE:
         filtered = stored["filtered"]
         accepted = verdicts([(f, p["prompt"] + m + p["suffix"], [])
                              for f, p, m in zip(found[name], problems, filtered["completions"], strict=True)],
                             language="python", pool=runs)
-        out["filtered"] = infilling_record(name, problems, filtered["completions"], search_record(filtered, accepted))
+        out["filtered"] = infilling(name, problems, filtered["completions"], search_record(filtered, accepted))
     return out
 
 
@@ -92,12 +92,12 @@ def rescore(stored: dict) -> dict:
     likelihood = {key: None if stored[key] is None else pooled(stored[key]["corpora"], stored[key]["weights"], stage)
                   for key, stage in STAGES.items()}
     benchmarks = tasks()
-    found = vetted(benchmarks)
+    found = None if stored["codegen"] is None else vetted(benchmarks)  # the filtered records' examples
     with sanitizers() as pool, ThreadPoolExecutor(timed_workers()) as runs:
         parse = {name: parse_scores(pool, name, benchmarks[name], r["completions"], r["latency"])
                  for name, r in stored["parse"].items()}
         codes = None if stored["codegen"] is None else {
-            name: codegen(pool, runs, name, benchmarks[name], found.get(name, [[] for _ in benchmarks[name]]), records)
+            name: codegen(pool, runs, name, benchmarks[name], found[name], records)
             for name, records in stored["codegen"].items()}
         fims = None if stored["fim"] is None else {key: fim(runs, key, found, records)
                                                    for key, records in stored["fim"].items()}

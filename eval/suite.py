@@ -8,7 +8,6 @@ import gzip
 import hashlib
 import json
 import os
-import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -28,21 +27,17 @@ if TYPE_CHECKING:
 
 
 def pin(cpus: frozenset[int]) -> None:
-    """Every thread of this process and of its descendants (and what they start later) to cpus."""
+    """Every thread of this process and of its descendants (and what they start later) to cpus. A process or thread
+    can end meanwhile (psutil raises FileNotFoundError while /proc/<pid>/stat exists, psutil#2418)."""
     for process in [psutil.Process(), *psutil.Process().children(recursive=True)]:
-        with contextlib.suppress(psutil.Error, ProcessLookupError, FileNotFoundError):
+        with contextlib.suppress(psutil.NoSuchProcess, FileNotFoundError):
             for thread in process.threads():
-                with contextlib.suppress(ProcessLookupError, PermissionError):
+                with contextlib.suppress(ProcessLookupError):
                     os.sched_setaffinity(thread.id, cpus)
 
 
 def evaluation_path(run_name: str, step: int) -> Path:
     return RUNS / run_name / f"eval-{step}.json"
-
-
-def released_path(run_name: str, step: int) -> Path:
-    """The marker an evaluation creates once it holds no GPU memory (evaluate)."""
-    return RUNS / run_name / f"eval-{step}.released"
 
 
 def samples_path(path: Path) -> Path:
@@ -87,20 +82,17 @@ def resolved(records: dict) -> dict:
 
 
 def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Literal["benchmarks", "parse"],
-             previous: "Event | None" = None) -> None:
+             previous: "Event | None", released: "Event") -> None:
     """Write evaluation_path(run_name, step) of the checkpoint, loaded onto the GPU; with generate "parse", codegen and
-    fim are null. After the last GPU phase the model, decoders and compiled graphs are dropped, the allocator's cache
-    emptied, the process tree kept to verify.cores()'s timed-check cores and released_path created (holding the
-    device memory left), while scoring finishes. previous: set once the previous checkpoint's evaluation has ended;
-    until then the process keeps to verify.cores()'s decode cores, and the official scoring and the filtered searches'
-    timed checks wait for it, so they never share the CPU with another checkpoint's. Results do not depend on the GPU
-    order except timed checks, which heavy CPU load can fail."""
-    decode, timed = cores()  # the starting affinity's split, taken before any pin
-    if previous is not None and not previous.is_set():
-        # rayon sizes its pool once, from the affinity at first use
-        os.environ.setdefault("RAYON_NUM_THREADS", str(len(decode | timed)))
-        pin(decode)
-        threading.Thread(target=lambda: (previous.wait(), pin(decode | timed)), daemon=True).start()
+    fim are null. The process tree keeps to verify.cores()'s decode cores (rayon's pool sized to them), its timed
+    checks to the timed-check cores (verify.timed). After the last GPU phase the model, decoders and compiled graphs are
+    dropped, the allocator's cache emptied, the process tree moved to the timed-check cores and `released` set, while
+    scoring finishes. previous: set once the previous checkpoint's evaluation has ended; the official scoring and the
+    filtered searches' timed checks wait for it, so they never share the CPU with another checkpoint's. Results do not
+    depend on the GPU order except timed checks, which heavy CPU load can fail."""
+    decode, timed = cores()  # the starting affinity's split, taken before the pin
+    os.environ["RAYON_NUM_THREADS"] = str(len(decode))  # rayon sizes its pool once, at first use
+    pin(decode)
     benchmarks = tasks()
     model = load_model(run_name, step, device=torch.device("cuda"))
     codegen = fim = None
@@ -129,11 +121,10 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         free, total = torch.cuda.mem_get_info()
-        released = {"allocated": torch.cuda.memory_allocated(), "reserved": torch.cuda.memory_reserved(),
-                    "free": free, "total": total}
-        print(f"GPU released: {released}", flush=True)
+        print(f"GPU released: allocated {torch.cuda.memory_allocated()}, reserved {torch.cuda.memory_reserved()}, "
+              f"free {free} of {total} bytes", flush=True)
         pin(timed)
-        released_path(run_name, step).write_text(json.dumps(released), encoding="utf-8")
+        released.set()
         results |= {"parse": resolved(parse), "codegen": None if codegen is None else resolved(codegen),
                     "fim": None if fim is None else resolved(fim)}
     write_evaluation(evaluation_path(run_name, step), {"run_name": run_name, "step": step} | results)

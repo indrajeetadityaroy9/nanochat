@@ -13,7 +13,7 @@ setting; "d16 checkpoint" is a 20-tokens-per-parameter d16 run's final checkpoin
 
 | File | Section |
 |---|---|
-| `eval/suite.py` (`evaluate`, `released_path`, `write_evaluation`, `read_evaluation`, `samples_path`, `record`, `evaluation_path`), `eval/rescore.py` (`rescore`, `differences`) | §1 |
+| `eval/suite.py` (`evaluate`, `write_evaluation`, `read_evaluation`, `samples_path`, `record`, `evaluation_path`), `eval/rescore.py` (`rescore`, `differences`) | §1 |
 | `eval/bpb.py` (`likelihood`, `val_bits`, `pooled`, `solution_bits`, `sums`, `sample_rows`) | §2 |
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `generation`, `fim_generation`, `filtered_generation`, `vetted`, `codegen_scoring`, `codegen_scores`, `parse_scores`, `reference_lines`, evaluator wrappers) | §1, §3, §4 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
@@ -46,19 +46,25 @@ for the call; the filtered searches' vetted examples (§7) are computed on a bac
 Results do not depend on this order (a request's tokens depend on the model and the request alone, §6) except timed
 checks, which heavy CPU load can fail.
 
-Cores (`verify.cores`): of the affinity a process starts with, the last `DECODE_CORES` = 16 are kept free of timed
-checks (the decoder's host thread and syntax masks, and the next checkpoint's start); every timed check (basedpyright,
-g++, timed example runs, EvalPlus, MultiPL-E and infilling evaluators) runs on the other cores (`verify.timed`:
-`taskset`), at most one child per such core (`timed_workers`), as EvalPlus asks of a test bed (no oversubscription).
+Cores (`verify.cores`): of the affinity a process starts with, the last `DECODE_CORES` = 16 hold the evaluation's
+process tree (`suite.evaluate` pins it there, rayon's pool sized to them): the decoder's host thread, the syntax masks,
+the in-process checks, the sanitize workers and the untimed reference runs. Every timed check (basedpyright, g++,
+timed example runs, EvalPlus, MultiPL-E and infilling evaluators) runs on the other cores (`verify.timed`:
+`taskset`); each pool of timed children is sized to those cores (`timed_workers`), as EvalPlus asks of a test bed
+(no oversubscription); the scorer thread's evaluators (all slots) and the filtered searches' checks (one each) share
+one budget of `timed_workers()` slots (`verify.timed_slots`), so at most one timed child runs per such core.
+Basis: on a d24 benchmarks evaluation (GH200, 64 cores, unpinned; ab4 overlap run, the host shared with other jobs
+for part of it, so timing is indicative), the evaluation process used 1.0 core in its unconstrained decodes and
+13.0–15.5 cores (30-s means, at most 18.6) in the filtered searches. Timed verdicts depend on load: an infilling
+check that takes 2.22–2.24 s on an idle core (3 s limit) timed out in one of two runs of the same checkpoint.
 
 Checkpoints overlap (`run.py` `evaluations`, one process per checkpoint): once checkpoint k's last GPU phase ends,
 `evaluate` drops the model, the decoders (their native memory goes with them) and the compiled graphs, empties the
-allocator's cache, keeps its process tree to the timed-check cores (`pin`) and creates `released_path`
-(`eval-<step>.released`, holding the device memory left); checkpoint k + 1's evaluation then starts on the 16 decode
-cores (its rayon pool sized for all) and widens to every core once k's process has ended (`previous`). k + 1's
-official scoring and filtered searches wait for that end, so no timed check of one checkpoint shares a core with
-another checkpoint's work; k + 1's decoders take the free memory as always (a slot count changes timing, not tokens,
-§6).
+allocator's cache, moves its process tree to the timed-check cores (`pin`) and sets `released` (a
+`multiprocessing` Event `run.evaluations` waits on); checkpoint k + 1's evaluation then starts on the decode
+cores. k + 1's official scoring and filtered searches wait for k's process to end (`previous`), so no timed check of
+one checkpoint shares a core with another checkpoint's work; k + 1's decoders take the free memory as always (a slot
+count changes timing, not tokens, §6).
 
 Measured on a d16 checkpoint (GH200): before the pipeline, the codegen half's 969 s were 36% CPU scoring with the GPU
 idle, 28% likelihood, 15% generation (85–96% SM busy), 22% filtered search [unverified: no record or commit];
@@ -70,14 +76,15 @@ scoring with no GPU work 483 → 8.4 s, 0 per-sample changes where the protocol 
 scorers and checkers on a record's stored completions, sampled ones included; it does not replay the evaluation.
 Every scorer reruns (EvalPlus base and plus, MultiPL-E's judge, the infilling checks, parse outcomes, the filtered
 mode's verdicts) through the code `evaluate` uses (`code_eval.codegen_scoring`, `codegen_scores`, `parse_scores`,
-`infilling_record`, `vetted`, `verify.verdicts` on the timed-check cores, `bpb.pooled`), against an empty
+`infilling`, `filtered_record`, `vetted`, `verify.verdicts` on the timed-check cores, `bpb.pooled`), against an empty
 `VerdictCache` of its own (a temporary database), so no verdict is read from `paths.VERDICTS`; the replay is compared
 with the record field by field, written with `write_evaluation` to `--out`, and the command exits 1 if any field
 differs. A filtered record's chosen completion is the accepted candidate, else the greedy one, which the search tried
-first and rejected, so its verdict replays the stored `"accepted"`. Copied from the record, as they need the model, and
-so not validated by an equal replay: the likelihood sums (`"corpora"`, `"weights"`, `"solution"`; `"bpb"`, `"errors"`
-and `"offset_bpb"` are recomputed), the searches' `"attempts"` and every `"latency"`. Timed checks can differ under
-heavy CPU load (above). A change to the evaluation is therefore validated in two parts, both required: the canonical
+first and rejected, so its verdict replays the stored `"accepted"`. Copied from the record, as they need the model or
+the packed corpus, and so not validated by an equal replay: the likelihood sums and sample weights (`"corpora"`,
+`"weights"`, `"solution"`; `"bpb"`, `"errors"` and `"offset_bpb"` are recomputed), the searches' `"attempts"` and
+every `"latency"`. Timed checks can differ under heavy CPU load (above). A change to the evaluation is therefore
+validated in two parts, both required: the canonical
 comparison of a new record with a reference record of the same checkpoint covers every model-derived field
 (generations, attempts, likelihoods, solution bits; latency excluded), and `eval.rescore` on the new record and its
 sidecar (exit 0) covers the scorers and checkers on its stored completions. On a d24 `eval-3307.json` of base
@@ -151,7 +158,7 @@ Generation modes (`generation`, `fim_generation`, `filtered_generation`):
 |---|---|---|
 | `greedy` | left-to-right argmax, one completion per problem; FIM in both orders | pass@1 as DeepSeek-Coder (arXiv 2401.14196 §4.1), StarCoder2 (arXiv 2402.19173 §7.1.1) and EvalPlus's leaderboard report it |
 | `sampled` (EvalPlus, MultiPL-E) | `N_SAMPLE` 20 per problem at `TEMPERATURE` 0.2 from the nucleus `TOP_P` 0.95 (arXiv 1904.09751); sample k of problem i seeded N_SAMPLE · i + k | pass@1 (and pass@10) by Codex's unbiased estimator (arXiv 2107.03374 §2.1; T and p from §3.2–3.3), as MultiPL-E and StarCoder2 (§7.1.2) sample |
-| `filtered` | the greedy candidate, then samples at T = 0.8 (`verify.TEMPERATURE`, seed = attempt) until one has no post-generation diagnostic and passes its prompt's own examples, at most `verify.ATTEMPTS` = 10; left-to-right prompts healed; Python and FIM middles under the syntax constraint (§7); FIM in SPM only (`FILTERED_MODE`) | filtered pass@1 of the accepted candidate, else the greedy one (Codex §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
+| `filtered` | the greedy candidate, then samples at T = 0.8 (`verify.TEMPERATURE`) from the nucleus `verify.TOP_P` 0.95 (Codex's setting for all its sampling, §3.2), attempt a of task i seeded `ATTEMPTS` · i + a, until one has no post-generation diagnostic and passes its prompt's own examples, at most `verify.ATTEMPTS` = 10; left-to-right prompts healed; Python and FIM middles under the syntax constraint (§7); FIM in SPM only (`FILTERED_MODE`) | filtered pass@1 of the accepted candidate, else the greedy one (Codex §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
 
 Each record also holds `"scores"` (`metrics.summary` of the per-problem scores, §5), the completions as scored (the
 sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the decoding's `"latency"`
@@ -257,11 +264,10 @@ the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint Flas
   softmax stay fp32.
 - **Prefill and prompt store.** A new request's prompt but its last token runs as rows of one batched pass through
   the step's body (up to 1,024 rows of any prompts per launch, each row computed as a step would), so its slot starts
-  at the prompt's last token. Its K and V are kept in a paged store (`PAGE` = 64 positions; vLLM's PagedAttention,
-  arXiv 2309.06180, pages likewise; prefix reuse as SGLang's RadixAttention, arXiv 2312.07104), and a later request
-  with the same prompt copies them; only prompts unused in the current and previous `generate` call can be evicted,
-  least recently used first, and if that frees too few pages the new prompt is not stored (so a search's rounds keep
-  the prompts they reuse, and a too-small store keeps a fixed part rather than cycling) [inference].
+  at the prompt's last token. Its K and V are copied to the prompt store's next free positions (prefix reuse as
+  SGLang's RadixAttention, arXiv 2312.07104), and a later request with the same prompt copies them back; a prompt is
+  stored once per decoder and never evicted (every decoder serves one `generate` call), and once the store is full
+  later prompts are prefilled each time.
 - **Request** (`Request`): `input_ids`, `max_new_tokens`, `stopping_criteria`, `temperature` (0: argmax, ties to the
   lowest id; > 0: Gumbel-max sampling of softmax(z / T), the noise a Philox function of (seed, generated position,
   token) alone, arXiv 1411.0030 §2), `top_p` (< 1: the fewest most likely allowed tokens holding top_p of the
@@ -342,20 +348,21 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
 **Post-generation checks** (`eval/verify.py`, the filtered mode's acceptance test):
 
 - Python (`python_diagnostics`, on the program the scorer runs: EvalPlus's sanitized solution, or FIM prefix + middle
-  + suffix): the program compiles (`compile_error`: `ast.parse`, whose overflow and ValueError of §10 are failures,
-  then `compile()`, whose own SyntaxErrors such as `'return' outside function` or a duplicate argument `ast.parse` and
+  + suffix): the program compiles (`compile_error`: one `compile()`, whose parser overflow and ValueError of §10 are
+  failures and whose own SyntaxErrors, such as `'return' outside function` or a duplicate argument, `ast.parse` and
   the syntax constraint's end accept: on a d16 checkpoint (`81fb386`) 5, 60 and 6 accepted single-line, multi-line and
   random-span filtered middles did not compile), then basedpyright 1.40.2 with every rule off but
-  `reportUndefinedVariable`, `reportAttributeAccessIssue` and `reportCallIssue`: per call min(16, ⌈N / 100⌉)
-  concurrent processes (`PYRIGHT_PROCESSES` = 16, `PYRIGHT_GROUP` = 100) over disjoint contiguous groups of a call's
-  N programs (a program's diagnostics do not depend on its group), each halved in sequence if it exceeds
-  `PYRIGHT_TIMEOUT` = 60 s (one process over the largest round, FIM multi-line's 5,815 programs, takes 27.6 s; 16
-  processes over 5,450 programs ran 4.5× faster than one on a 20-core aarch64 host [unverified: no record]). A
+  `reportUndefinedVariable`, `reportAttributeAccessIssue` and `reportCallIssue`: concurrent processes over disjoint
+  contiguous groups of a call's N programs, max(`PYRIGHT_GROUP` = 100, ⌈N / `timed_workers()`⌉) each, so at most one
+  per timed-check core (a program's diagnostics do not depend on its group; a process starts in ≈ 0.4 s and checks
+  ≈ 2.7 ms per program, so a group of 100 spends about as long starting as checking), each halved in sequence if it
+  exceeds `PYRIGHT_TIMEOUT` = 60 s (one process over the largest round, FIM multi-line's 5,815 programs, takes 27.6 s;
+  16 processes over 5,450 programs ran 4.5× faster than one on a 20-core aarch64 host [unverified: no record]). A
   program basedpyright cannot check fails: an exception inside its checker (a d16 completion's chained assignments
   overflowing its stack), or a run past the timeout, halved until the stalling program is alone (a d16 MBPP+ candidate
   with 22 repeated `if …: continue` statements in a nested loop held its 400-program batch over 47 min); the
   timed-out process group is killed. A stalling program costs ⌈log₂ G⌉ + 1 timeouts in a group of G [arithmetic]:
-  8 min at 100 programs, 10 at 364 (a 5,815-program round's groups).
+  8 min at 100–128 programs (a 5,815-program round's groups: 122 on 48 timed-check cores).
   EvalPlus solutions (`solution_diagnostics`): the solution's syntax error, an entry function missing or without a
   `return <value>` in its own body.
 - Examples (`examples_pass`): the prompt's doctest `>>>` examples and Python `assert` lines that the reference program
@@ -375,10 +382,15 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
   anyway (assert.h is re-read; the headers bits/stdc++.h includes are guarded); a compile is 4.0× and
   `-fsyntax-only` 5.3× faster [unverified: 30 programs on a 20-core aarch64 host, no record].
 - Verdict cache (`eval/cache.py` `VerdictCache`, SQLite at `paths.VERDICTS`, shared by concurrent evaluations): a
-  check's result keyed by its kind, its identity (rules, harness source and timeout; g++'s version; the interpreter's
-  version and every installed package's) and the exact program text, so an evaluation skips programs an earlier one
-  checked. Kept: basedpyright diagnostics except its timeouts and internal errors, g++ diagnostics except timeouts
-  and exit statuses other than 0 and 1, example runs not ended by the timeout or a signal; the official judges'
+  check's result keyed by its kind, its identity (the basedpyright configuration written; the example runner, memory
+  limit and timeout; for g++ and MultiPL-E's judge the precompiled-header digest of `verify.compiler` (g++ path,
+  `g++ -v`, flags, header bytes), the judge's sources; human-eval-infilling's modules and problem files by SHA-256, as
+  a checkout on `sys.path` it is no installed distribution; the interpreter's version and every installed package's)
+  and the exact program text, so an evaluation skips programs an earlier one checked. A result within a time limit is
+  kept as first observed (at that check's load); the g++ and basedpyright limits are not keyed (a lower limit would
+  reuse results found under a higher one). Kept: basedpyright diagnostics except its timeouts and internal errors, g++
+  diagnostics except timeouts and exit statuses other than 0 and 1, example runs not ended by the timeout or a signal;
+  the official judges'
   results likewise (§10 `multipl_e`, `infilling`). EvalPlus's verdicts are not kept: a test past its time limit
   fails like a wrong answer (`untrusted_check`), so a timing failure cannot be told from the program's own.
 
@@ -531,7 +543,7 @@ Per module and symbol; what §1–§9 state is not repeated.
   raise (`allow_nan=False`). Timed checks: EvalPlus's time limits, `verify.py`'s and the evaluators' timeouts.
   `resolved` replaces each scoring future by its result in key order.
 - GPU release: `torch._dynamo.reset()`, `gc.collect()` (a `NativeDecoder`'s finalizer frees its native memory),
-  `torch.cuda.empty_cache()`; `released_path` holds `{"allocated", "reserved", "free", "total"}` bytes after it (the
+  `torch.cuda.empty_cache()`; the log line "GPU released" gives the allocated, reserved and free bytes after it (the
   CUDA context stays until the process ends). `previous` gates the scorer thread (its first job waits) and the
   filtered searches.
 - `write_evaluation`: the sidecar is `gzip.compress(..., mtime=0)`, so equal completions give an equal sha256.
@@ -579,7 +591,7 @@ Per module and symbol; what §1–§9 state is not repeated.
   and prompt store are sized by free memory (for the filtered searches, which run after the likelihood pass, this
   returns that pass's blocks). Prompt stores: codegen, each prompt shared by its greedy request and samples; filtered,
   the prompts the rounds repeat (left-to-right ones healed: a token shorter, the budget a token longer), one decoder
-  for all seven searches whose `max_length` is the longest of either kind; FIM greedy none (no repeats).
+  for all seven searches whose `max_length` is the longest of either kind; parse and FIM greedy none (no repeats).
 - `generate_groups`: `done(g, ids in request order, latency)`, latency's duration from the group's first start to its
   last end with other groups interleaved; groups finish as soon as their last request ends.
 - `Filtered.record`: `{"attempts", "accepted", "latency"}` per task; unaccepted tasks score the greedy candidate.
@@ -594,29 +606,29 @@ Per module and symbol; what §1–§9 state is not repeated.
   ValueError as a syntax error, so `code_extract` skips such spans: uncaught, one d16 completion ended a benchmark
   evaluation (`8be5e90`).
 - `EVALPLUS_EVALUATE`: `evaluate(..., parallel=timed_workers())` (default half), `os._exit(0)` after the output file:
-  `stucking_checker`, a non-daemon thread sleeping 20 s per check. `evalplus` → `{"base pass@1", "plus pass@1",
-  "scores": {"base", "plus"}, "ids", "base_status", "plus_status"}`; plus passes when base_status == plus_status ==
-  "pass". The two pass@1 values are `evalplus_pass_at_1` of the statuses: the evaluator's `estimate_pass_at_k` per
-  problem, averaged in task order (`evaluate.py` averages in the order problems finish, which changed the last bit of
-  a sampled MBPP+ base pass@1 between two runs of the same samples).
-- `multipl_e` → `{"pass@1", "scores", "ids", "status"}`: a completions file per problem as `completions.py` writes it,
+  `stucking_checker`, a non-daemon thread sleeping 20 s per check. `evalplus` → `{"scores": {"base", "plus"}, "ids",
+  "base_status", "plus_status"}` (`evalplus_passed`: plus passes when base_status == plus_status == "pass"); pass@1 is
+  `"scores"`' mean of the per-problem estimates (Codex's estimator), averaged in task order; the evaluator's own
+  aggregate is not stored.
+- `multipl_e` → `{"scores", "ids", "status"}`: a completions file per problem as `completions.py` writes it,
   holding the completions whose judged program (`main.py:34`) is not in the verdict cache (§7), `timed_workers()`
   judges at once with `--max-workers 1` (main.py's default `cpu_count() − 1`; a compile past its wall-clock limit
   scores "SyntaxError", `eval_cpp.py`). Kept in the cache (`judged`): every result but a Timeout, an exit code of −1
-  (a killed compile) or −9, and a SyntaxError other than g++'s exit 1. pass@1 is `multipl_e_pass_at_1` of the
-  statuses: `pass_k.py`'s estimator (`for_file`, c = status "OK" with exit code 0, which "OK" implies) per problem,
-  averaged in problem order (`pass_k.py` averages in directory order). `multipl_e_check`'s program ends at the
-  function's closing "}" (the stop token "\n}" cut).
+  (a killed compile) or −9, and a SyntaxError other than g++'s exit 1. pass@k counts status "OK" (`pass_k.py`'s c,
+  "OK" with exit code 0, which "OK" implies), averaged in problem order (`pass_k.py` averages in directory order).
+  `multipl_e_check`'s program ends at the function's closing "}" (the stop token "\n}" cut).
 - `INFILLING_EVALUATE`: `evaluation.py` `evaluate_functional_correctness`'s `check_correctness` at its default 3 s per
   sample, over the middles not in the verdict cache (keyed by benchmark, task id and middle; "timed out" not kept);
   `reliability_guard` disables what a run-time import would call, hence the CLI modules imported first.
-  `infilling` → `{"pass@1", "scores", "ids", "completions", "result"}` (per problem "passed", "failed: <exception>" or
-  "timed out", `execution.py`); clusters from task id `<Benchmark>/HumanEval/<n>/<span>`.
-- Records (`codegen_scores`, `parse_scores` and `infilling_record` build them from completion texts): `generation`
-  `{benchmark: {"greedy": scores | "completions" (one per task), "latency"; "sampled": scores | "n_sample",
-  "completions" (per task, its `N_SAMPLE` in seed order; written to the sidecar), "latency"}}`; `filtered_generation`
-  adds `"filtered"`: scores | `"completions"`, `"attempts"`, `"accepted"`, `"latency"`; `parse_generation`
-  `{benchmark: {"parses", "indentation", "syntax"} | evalplus | {"outcomes", "completions", "latency"}}`;
+  `infilling(name, problems, middles, record)` → `{"pass@1", "scores", "ids", "completions", "result"}` | record (per
+  problem "passed", "failed: <exception>" or "timed out", `execution.py`); clusters from task id
+  `<Benchmark>/HumanEval/<n>/<span>`.
+- Records (`codegen_scores`, `parse_scores`, `filtered_record` and `infilling` build them from completion texts):
+  `generation` `{benchmark: {"greedy": scores | "completions" (one per task), "latency"; "sampled": scores |
+  "n_sample", "completions" (per task, its `N_SAMPLE` in seed order; written to the sidecar), "latency"}}`;
+  `filtered_generation` adds `"filtered"`: scores | `"completions"`, `"attempts"`, `"accepted"`, `"latency"`;
+  `parse_generation` `{benchmark: {"parses", "indentation", "syntax"} | evalplus | {"outcomes", "completions",
+  "latency"}}`;
   `fim_generation` `{"<benchmark>/<mode>": {"greedy", "greedy_reference_lines"}}` (`filtered_generation`'s second
   result adds `"filtered"` in SPM); `FimRun.lines` (`reference_lines`): single-line 1, multi-line each reference's
   line count, random-span none. Every evaluator is a fresh process (`exec`), never a fork of the torch/CUDA process.
@@ -656,7 +668,9 @@ Per module and symbol; what §1–§9 state is not repeated.
 - `VerdictCache(kind, identity)`: one SQLite table (key: SHA-256 of kind, identity, `environment()` and the payload;
   value: the result as JSON) in WAL mode, so concurrent evaluations share `paths.VERDICTS`; `get` and `put` hold a
   process-wide lock over one connection, opened on `VerdictCache.path` (`paths.VERDICTS`; `eval.rescore` sets a
-  temporary one first). `environment()`: `sys.version` and every installed distribution's name and version.
+  temporary one first), SQLite's default 5 s lock wait (writes are single short transactions); `get` queries at most
+  the connection's `SQLITE_LIMIT_VARIABLE_NUMBER` keys a statement. `environment()`: `sys.version` and every installed
+  distribution's name and version.
 
 ### `scripts/standard_eval.sh`
 
@@ -721,8 +735,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 - `step_masks`: the syntax constraints' masks by one `syntax_constraint.masks` call, in parallel without the GIL,
   straight into the decoder's pinned rows; a non-eager BOS candidate is decided by the caller once chosen (`confirm`).
   A rejected eager BOS clears its bit; an emptied row counts as allowing none.
-- `PAGE` = 64: a stored prompt takes whole pages anywhere in the store; at most 63 positions of a prompt unused.
-- `Stored.used`: the run (`NativeDecoder.runs`, one per `generate` call) that last used it.
+- `NativeDecoder.stored`: {prompt: its first position in the store}; `used`: the store positions taken.
 - `NativeDecoder`:
   - Determinism: decode.cu computes each slot and each prefill row alone in a fixed order; a sample's noise depends on
     the seed and generated position only. The e4m3 KV cache (a scale per position and head) lets tokens differ from

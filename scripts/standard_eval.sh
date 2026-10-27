@@ -1,8 +1,8 @@
 #!/bin/bash
 # Standard-protocol cross-check: the benchmarks' own harness CLIs, unmodified (EvalPlus codegen --greedy; MultiPL-E
-# automodel_vllm.py, T = 0.2, top-p 0.95, 20 completions), on an exported checkpoint served by vLLM 0.32.0 through its
-# Transformers backend; scored by the harnesses' evaluators in the nanochat image. <out dir> must be empty or new:
-# both harnesses skip samples already in it.
+# automodel_vllm.py, T = 0.2, top-p 0.95, 20 completions: copies of eval/code_eval.py TEMPERATURE, TOP_P, N_SAMPLE),
+# on an exported checkpoint served by vLLM 0.32.0 through its Transformers backend; scored by the harnesses'
+# evaluators in the nanochat image. <out dir> must be empty or new: both harnesses skip samples already in it.
 #
 #   scripts/standard_eval.sh <exported model dir> <out dir> [generate|score]   (default both)
 set -euo pipefail

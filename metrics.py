@@ -9,7 +9,6 @@ import keyword
 import re
 import statistics
 import time
-import warnings
 from collections import Counter
 from collections.abc import Sequence
 from typing import Literal
@@ -103,13 +102,12 @@ def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
     """How a program compiles: "indentation" (IndentationError, checked first), "syntax" or "parses".
     TokEval companion post's classification (arXiv 2608.18062 App. F.3, fn. 15); parser overflow counts as syntax, and
     so does CPython 3.12.3's ValueError for f"{x:{y=}}" (python/cpython#121130, fixed in 3.12.5)."""
-    with warnings.catch_warnings(action="ignore"):
-        try:
-            compile(source, "<completion>", "exec")
-        except IndentationError:
-            return "indentation"
-        except (SyntaxError, MemoryError, RecursionError, ValueError):
-            return "syntax"
+    try:
+        compile(source, "<completion>", "exec")
+    except IndentationError:
+        return "indentation"
+    except (SyntaxError, MemoryError, RecursionError, ValueError):
+        return "syntax"
     return "parses"
 
 

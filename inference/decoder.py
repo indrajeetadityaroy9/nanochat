@@ -124,17 +124,6 @@ def step_masks(out: np.ndarray, constrained: list[tuple[int, Constraint, bool]])
     return masked, empty
 
 
-# prompt-store page in positions (pages as vLLM's PagedAttention, arXiv 2309.06180)
-PAGE = 64
-
-
-@dataclass
-class Stored:
-    """A prompt in the store: its pages, and the run (NativeDecoder.runs, generate calls) that last used it."""
-    pages: list[int]
-    used: int
-
-
 @dataclass
 class Slot:
     """A request in a slot: index, request, slot and first-token host times (time.perf_counter), generated tokens."""
@@ -194,9 +183,9 @@ class NativeDecoder:
         device = model.embed_tokens.weight.device
         config = np.array([L, C, model.layers[0].mlp.up_proj.weight.size(0), VOCAB_SIZE, max_length, prompt_store,
                            bos_token_id], dtype=np.int32)
-        # the prompt store: {prompt: its pages}, the free pages, the runs started
-        self.stored: dict[tuple[int, ...], Stored] = {}
-        self.runs = 0
+        # the prompt store: {prompt: its first store position}, the positions taken
+        self.stored: dict[tuple[int, ...], int] = {}
+        self.used = 0
         self.timings: dict[int, tuple[float, float, float]] = {}  # generate's request timestamps
         self.bos = bos_token_id
         # dec_destroy (the finalizer) releases every native resource; the buffers it reads are this object's tensors
@@ -209,7 +198,7 @@ class NativeDecoder:
         weakref.finalize(self, lib.dec_destroy, self.handle)
         self.batch = lib.dec_batch(self.handle)
         self.tokens = np.zeros(2 * self.batch, dtype=np.int32)  # dec_tokens: the choices, then their alternatives
-        self.free = list(range(lib.dec_store(self.handle) // PAGE))
+        self.store = lib.dec_store(self.handle)
         # the pinned host masks decode.cu copies to the masked slots (dec_masks), a Constraint's mask per slot
         self.masks = np.ctypeslib.as_array(lib.dec_masks(self.handle),
                                            shape=(self.batch, VOCAB_SIZE // np.iinfo(np.uint32).bits))
@@ -219,13 +208,11 @@ class NativeDecoder:
     def start(self, b: int, index: int, request: Request) -> Slot:
         """Start request `index` in slot b at its prompt's last token; earlier positions loaded or queued to prefill."""
         n = len(request.input_ids) - 1  # the positions before the prompt's last token
-        stored = self.stored.get(tuple(request.input_ids))
-        if stored is not None:
-            stored.used = self.runs
-            for i, page in enumerate(stored.pages):
-                self.lib.dec_load_prompt(self.handle, b, i * PAGE, page * PAGE, min(PAGE, n - i * PAGE))
-        else:
+        at = self.stored.get(tuple(request.input_ids))
+        if at is None:
             self.pending.append((b, request.input_ids))
+        else:
+            self.lib.dec_load_prompt(self.handle, b, 0, at, n)
         self.lib.dec_set_prompt(self.handle, b, request.input_ids[-1], n, request.temperature, request.top_p,
                                 request.seed)
         return Slot(index, request, start=time.perf_counter())
@@ -244,23 +231,14 @@ class NativeDecoder:
         self.pending = []
 
     def save(self, b: int, input_ids: list[int]) -> None:
-        """Keep slot b's prompt K and V in free pages, evicting prompts unused in this and the previous run (least
-        recently used first) if pages are short; not kept if still short or already stored."""
+        """Keep slot b's prompt K and V in the store's next free positions, unless already stored or too few are left
+        (a prompt is stored once per decoder and never evicted)."""
         key, n = tuple(input_ids), len(input_ids) - 1
-        need = -(-n // PAGE)
-        if key in self.stored:
+        if key in self.stored or self.used + n > self.store:
             return
-        for old in sorted((k for k, s in self.stored.items() if s.used < self.runs - 1),
-                          key=lambda k: self.stored[k].used):
-            if len(self.free) >= need:
-                break
-            self.free += self.stored.pop(old).pages
-        if len(self.free) < need:
-            return
-        pages = [self.free.pop() for _ in range(need)]
-        for i, page in enumerate(pages):
-            self.lib.dec_save_prompt(self.handle, b, i * PAGE, page * PAGE, min(PAGE, n - i * PAGE))
-        self.stored[key] = Stored(pages, self.runs)
+        self.lib.dec_save_prompt(self.handle, b, 0, self.used, n)
+        self.stored[key] = self.used
+        self.used += n
 
     def confirm(self, slots: list[Slot | None], chosen: list[int], *, eager: set[int]) -> None:
         """A chosen lazy BOS that syntax_constraint.ends rejects gives way to the step's alternative (dec_take_alt).
@@ -283,7 +261,6 @@ class NativeDecoder:
         Raises ValueError when len(input_ids) + max_new_tokens - 1 > max_length or a constraint allows no token.
         Sets timings: {request index: (start, first, end)}, host time.perf_counter seconds."""
         lib, handle, B, bos, max_length = self.lib, self.handle, self.batch, self.bos, self.max_length
-        self.runs += 1
         self.timings = {}
         queue, slots = enumerate(requests), [None] * B
         stopping = []  # slots whose last token awaits its stopping criteria

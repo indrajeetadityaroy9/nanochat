@@ -22,7 +22,6 @@ import sys
 import tempfile
 import threading
 import tokenize
-import warnings
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -41,13 +40,16 @@ from paths import PCH
 # they rejected 0 of 100 correct candidates (docs/evaluation.md §7). reportReturnType is off: it rejects 3 HumanEval+
 # reference solutions and alone rejected no incorrect HumanEval+ candidate.
 PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue")
-# A basedpyright process's limit: the largest normal round (FIM multi-line, 5,815 programs) takes 27.6 s; one generated
-# program held its 400-program batch > 47 min. A stalling program in a round of N costs (ceil(log2 N) + 1) timeouts.
+# The configuration python_diagnostics writes (pyrightconfig.json), also the basedpyright verdicts' cache identity
+PYRIGHT_CONFIG = {"typeCheckingMode": "off", **dict.fromkeys(PYRIGHT_RULES, "error")}
+# A basedpyright process's limit: one process over the largest normal round (FIM multi-line, 5,815 programs) takes
+# 27.6 s, a group (at most max(PYRIGHT_GROUP, ceil(N / timed_workers())) programs) a few seconds; one generated program
+# held its 400-program batch > 47 min. A stalling program in a group of G costs (ceil(log2 G) + 1) timeouts.
 PYRIGHT_TIMEOUT = 60
-# Concurrent basedpyright processes per call and the fewest programs each checks (process start ≈ 0.5 s): a call of N
-# programs runs min(16, ceil(N / 100)) processes, e.g. the 5,815-program FIM multi-line round in 16 groups (one process
-# over it takes 27.6 s; 16 processes over 5,450 programs measured 4.5x faster than one)
-PYRIGHT_PROCESSES, PYRIGHT_GROUP = 16, 100
+# The fewest programs a basedpyright process checks: a process starts in ≈ 0.4 s and then checks ≈ 2.7 ms per program
+# (5,450 programs in 15.3 s), so a group of 100 spends about as long starting as checking; a call of N programs runs
+# ceil(N / max(100, ceil(N / timed_workers()))) processes, one per timed-check core at most
+PYRIGHT_GROUP = 100
 # A failure of basedpyright itself in python_diagnostics' output (timeout, internal error): never kept in VerdictCache
 PYRIGHT_FAILURE = "1:1: basedpyright: "
 # MultiPL-E judge's per-step timeout (safe_subprocess/__init__.py:33, eval_cpp.py) and its compiler flags (eval_cpp.py)
@@ -56,18 +58,21 @@ CPP_TIMEOUT, CPP_FLAGS = 15, ("-std=c++17",)
 EXAMPLES_TIMEOUT = 3
 # Codex's temperature for samples selected by unit tests (arXiv 2107.03374 §3.3, Fig. 1: the pass@100 optimum)
 TEMPERATURE = 0.8
+# Codex's nucleus for all its sampling (arXiv 2107.03374 §3.2: top p 0.95), the filtered search's and the sampled mode's
+TOP_P = 0.95
 # Candidates per task, the greedy one included: pass@10 (Codex Table 1; EvalPlus, arXiv 2305.01210 Table 3)
 ATTEMPTS = 10
-# Cores of the process's starting affinity kept free of timed checks: the decoder's host thread and syntax masks, and
-# the next checkpoint's start (suite.evaluate); timed checks run on the others, at most one child per core (EvalPlus
-# warns against an oversubscribed test bed, docs/execution.md)
+# Cores of the process's starting affinity that the evaluation process tree keeps to, its timed children excepted
+# (suite.evaluate): the decoder's host thread, its syntax masks (rayon) and the in-process checks of the filtered
+# search, which used 13.0-15.5 cores (30-s means, at most 18.6) of a d24 benchmarks evaluation on the 64-core GH200
+# host; timed checks run on the others (EvalPlus warns against an oversubscribed test bed, docs/execution.md)
 DECODE_CORES = 16
 
 
 @functools.cache
 def cores() -> tuple[frozenset[int], frozenset[int]]:
     """(decode cores, timed-check cores): the last DECODE_CORES of the affinity the process starts with and the rest
-    (both all of it when it has no more than DECODE_CORES). Called before suite.evaluate pins the process."""
+    (both all of it when it has no more, as eval.rescore under a smaller cpuset). Called before suite.evaluate pins."""
     allowed = sorted(os.sched_getaffinity(0))
     if len(allowed) <= DECODE_CORES:
         return frozenset(allowed), frozenset(allowed)
@@ -82,6 +87,29 @@ def timed(command: list) -> list:
 def timed_workers() -> int:
     """Concurrent timed-check children: one per timed-check core."""
     return len(cores()[1])
+
+
+@functools.cache
+def timed_budget() -> threading.Semaphore:
+    """The process's timed_workers() slots for timed-check children, one per timed-check core."""
+    return threading.Semaphore(timed_workers())
+
+
+@contextlib.contextmanager
+def timed_slots(n: int = 1) -> Iterator[None]:
+    """n of timed_budget()'s slots, held while the timed children they cover run: the scorer thread's evaluators (all
+    slots) and the filtered searches' checks (one each) share them, so at most one timed child runs per timed-check
+    core. Taken one at a time: the one caller taking several (the scorer thread, or eval.rescore's main thread) waits
+    for single holders to finish, which never wait on slots themselves."""
+    budget, taken = timed_budget(), 0
+    try:
+        for _ in range(n):
+            budget.acquire()
+            taken += 1
+        yield
+    finally:
+        for _ in range(taken):
+            budget.release()
 
 
 # examples_pass's child: the program under evalplus.eval.utils reliability_guard, applied as EvalPlus's test runs do
@@ -111,29 +139,26 @@ print("EXAMPLES_DONE")
 
 
 def compile_error(program: str) -> list[str]:
-    """syntax_constraint.syntax_error, then the compiler's own errors on a parsed program ("line:col: SyntaxError:
-    message", or the exception's type and message): 'return' outside function, duplicate argument and the like, which
-    ast.parse (the syntax constraint's end) accepts and every run of the program raises."""
-    found = syntax_error(program)
-    if found:
-        return found
-    with warnings.catch_warnings(action="ignore"):
-        try:
-            compile(program, "program.py", "exec")
-        except SyntaxError as e:
-            return [f"{e.lineno}:{e.offset}: SyntaxError: {e.msg}"]
-        except (MemoryError, RecursionError) as e:
-            return [f"{type(e).__name__}: {e}"]
+    """The compiler's error on a program ("line:col: SyntaxError: message", or the exception's type and message), []
+    if it compiles: syntax errors, and 'return' outside function, duplicate argument and the like, which ast.parse (the
+    syntax constraint's end) accepts and every run of the program raises. Parser overflow (MemoryError, RecursionError)
+    and CPython 3.12.3's ValueError for f"{x:{y=}}" (python/cpython#121130) are failures."""
+    try:
+        compile(program, "program.py", "exec")
+    except SyntaxError as e:
+        return [f"{e.lineno}:{e.offset}: SyntaxError: {e.msg}"]
+    except (MemoryError, RecursionError, ValueError) as e:
+        return [f"{type(e).__name__}: {e}"]
     return []
 
 
 @functools.cache
 def verdict_cache(kind: Literal["basedpyright", "examples", "g++"], timeout: float | None = None) -> VerdictCache:
-    """The VerdictCache of a check: its parameters, and for g++ compiler_identity (cache.environment holds the Python
-    packages', basedpyright and evalplus included)."""
-    identity = {"basedpyright": lambda: [PYRIGHT_RULES, "typeCheckingMode off"],
+    """The VerdictCache of a check: its parameters, and for g++ the compiler (compiler()'s digest; cache.environment
+    holds the Python packages', basedpyright and evalplus included)."""
+    identity = {"basedpyright": lambda: PYRIGHT_CONFIG,
                 "examples": lambda: [RUN_EXAMPLES, query_maximum_memory_bytes(), timeout],
-                "g++": lambda: [compiler_identity(), *CPP_FLAGS, "-fsyntax-only"]}[kind]()
+                "g++": lambda: [compiler().name, *CPP_FLAGS, "-fsyntax-only"]}[kind]()
     return VerdictCache(kind, json.dumps(identity))
 
 
@@ -160,24 +185,26 @@ def python_diagnostics(programs: list[str], pool: ThreadPoolExecutor) -> list[li
             paths[i].parent.mkdir()
             paths[i].write_text(programs[i], encoding="utf-8")
         config = Path(tmp, "pyrightconfig.json")
-        config.write_text(json.dumps({"typeCheckingMode": "off", **dict.fromkeys(PYRIGHT_RULES, "error")}),
-                          encoding="utf-8")
+        config.write_text(json.dumps(PYRIGHT_CONFIG), encoding="utf-8")
 
         def check(group: dict[int, Path]) -> list[dict]:
             """basedpyright's diagnostics of group's programs; a program it cannot check gets its failure in out."""
             while group:
                 # its own session: on a timeout the whole group dies, the node process python -m basedpyright starts
                 # included (killing the wrapper alone leaves node checking the stalling program)
-                process = subprocess.Popen(timed([sys.executable, "-m", "basedpyright", "--outputjson", "--pythonpath",
-                                                  sys.executable, "--project", config, *group.values()]), cwd=tmp,
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                           start_new_session=True)
-                try:
-                    # exit status 1 when it reports errors; the JSON report is on stdout either way
-                    stdout, stderr = process.communicate(timeout=PYRIGHT_TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.communicate()
+                with timed_slots():
+                    process = subprocess.Popen(timed([sys.executable, "-m", "basedpyright", "--outputjson",
+                                                      "--pythonpath", sys.executable, "--project", config,
+                                                      *group.values()]), cwd=tmp, stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE, text=True, start_new_session=True)
+                    try:
+                        # exit status 1 when it reports errors; the JSON report is on stdout either way
+                        stdout, stderr = process.communicate(timeout=PYRIGHT_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate()
+                        stdout = None
+                if stdout is None:  # timed out: the slot is free again before the halves take theirs
                     if len(group) == 1:
                         out[next(iter(group))].append(f"{PYRIGHT_FAILURE}timeout after {PYRIGHT_TIMEOUT} s")
                         return []
@@ -194,11 +221,10 @@ def python_diagnostics(programs: list[str], pool: ThreadPoolExecutor) -> list[li
                 group = {k: p for k, p in group.items() if k != i}
             return []
 
-        # at most PYRIGHT_PROCESSES concurrent processes over disjoint contiguous groups of at least PYRIGHT_GROUP
-        # programs: a program's diagnostics do not depend on its group (each in its own directory, none imports
-        # another)
+        # one process per timed-check core at most, over disjoint contiguous groups of at least PYRIGHT_GROUP programs:
+        # a program's diagnostics do not depend on its group (each in its own directory, none imports another)
         items = list(paths.items())
-        size = max(PYRIGHT_GROUP, -(-len(items) // PYRIGHT_PROCESSES))
+        size = max(PYRIGHT_GROUP, -(-len(items) // timed_workers()))
         reports = list(pool.map(check, [dict(items[k:k + size]) for k in range(0, len(items), size)]))
         for d in (d for report in reports for d in report):
             if d["severity"] == "error" and d.get("rule") in PYRIGHT_RULES:
@@ -232,10 +258,11 @@ def solution_diagnostics(solution: str, entry_point: str) -> list[str]:
 @functools.cache
 def compiler() -> Path:
     """The directory of the C++ checks' `g++`: the system g++ with <bits/stdc++.h> forced first (-include) as a
-    precompiled header, built once per compiler, flags and header under PCH/<hash> (a file lock serializes builders;
-    the wrapper, written last, marks a finished build). Every MultiPL-E C++ prompt (558 of 558 at the pinned revision)
-    begins "#include<assert.h>\\n#include<bits/stdc++.h>\\n", so the forced header declares nothing a judged program
-    would not see: assert.h is re-read (it has no include guard) and bits/stdc++.h's headers are guarded. Same
+    precompiled header, built once per compiler, flags and header under PCH/<digest of them> (the C++ verdict caches'
+    compiler identity; a file lock serializes builders; the wrapper, written last, marks a finished build). Every
+    MultiPL-E C++ prompt (558 of 558 at the pinned revision) begins "#include<assert.h>\\n#include<bits/stdc++.h>\\n",
+    so the forced header declares nothing a judged program would not see: assert.h is re-read (it has no include
+    guard) and bits/stdc++.h's headers are guarded. Same
     verdicts, a compile 4.0x and -fsyntax-only 5.3x faster [measured on 30 programs, 20-core aarch64; GCC manual,
     "Precompiled Headers": -include works with a precompiled header]."""
     gxx = shutil.which("g++")
@@ -243,7 +270,7 @@ def compiler() -> Path:
     trace = subprocess.run([gxx, *CPP_FLAGS, "-x", "c++", "-fsyntax-only", "-H", "-"],
                            input="#include <bits/stdc++.h>\n", capture_output=True, text=True, check=True).stderr
     header = Path(next(line[2:] for line in trace.splitlines() if line.startswith(". ")))
-    digest = hashlib.sha256(json.dumps([gxx, version, CPP_FLAGS]).encode() + header.read_bytes()).hexdigest()[:16]
+    digest = hashlib.sha256(json.dumps([gxx, version, CPP_FLAGS]).encode() + header.read_bytes()).hexdigest()
     target = PCH / digest
     with open(PCH / ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -259,13 +286,6 @@ def compiler() -> Path:
     return target
 
 
-@functools.cache
-def compiler_identity() -> str:
-    """compiler()'s `g++ -v` and wrapper, for the VerdictCaches of C++ checks."""
-    return json.dumps([subprocess.run(["g++", "-v"], capture_output=True, text=True, check=True).stderr,
-                       (compiler() / "g++").read_text(encoding="utf-8")])
-
-
 def cpp_diagnostics(program: str) -> list[str]:
     """`g++ -std=c++17 -fsyntax-only`'s error lines on the program (compiler()'s g++; [] if it compiles; ["timeout"]
     past CPP_TIMEOUT), kept in VerdictCache unless g++ timed out or failed other than by reporting errors (status 1)."""
@@ -273,7 +293,7 @@ def cpp_diagnostics(program: str) -> list[str]:
     [stored] = cache.get([program])
     if stored is not None:
         return stored
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, timed_slots():
         Path(tmp, "program.cpp").write_text(program, encoding="utf-8")
         try:
             result = subprocess.run(timed([compiler() / "g++", *CPP_FLAGS, "-fsyntax-only", "program.cpp"]), cwd=tmp,
@@ -305,8 +325,8 @@ def examples(prompt: str) -> list[tuple[str, str]]:
 
 def examples_pass(found: list[tuple[str, str]], program: str, *, timeout: float | None = EXAMPLES_TIMEOUT) -> bool:
     """Whether the program passes the examples (RUN_EXAMPLES) in a fresh isolated interpreter within timeout (on the
-    timed-check cores; untimed, timeout None, on the caller's); True without examples. Kept in VerdictCache unless
-    the run timed out or a signal ended it."""
+    timed-check cores, in a timed slot; untimed, timeout None, on the caller's); True without examples. Kept in
+    VerdictCache unless the run timed out or a signal ended it."""
     if not found:
         return True
     data = json.dumps({"program": program, "examples": found})
@@ -315,7 +335,7 @@ def examples_pass(found: list[tuple[str, str]], program: str, *, timeout: float 
     if stored is not None:
         return stored
     command = [sys.executable, "-I", "-c", RUN_EXAMPLES]
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, contextlib.nullcontext() if timeout is None else timed_slots():
         try:
             result = subprocess.run(command if timeout is None else timed(command), input=data, cwd=tmp,
                                     capture_output=True, text=True, timeout=timeout)
@@ -340,19 +360,20 @@ def vetted_examples(tasks: list[tuple[str, str]]) -> list[list[tuple[str, str]]]
 
 def verdicts(checks: list[tuple[list[tuple[str, str]], str, list[str]]], *, language: Literal["python", "cpp"],
              pool: ThreadPoolExecutor) -> list[bool]:
-    """Whether each (vetted examples, program, known diagnostics) is accepted: no diagnostic (known or found) and, for
-    Python, the examples pass (run only without diagnostics; a run stops at the first failing example). A program
-    with a known diagnostic is rejected unchecked. Checks run on pool (not the caller's)."""
-    unknown = [checks[k] for k, (_, _, known) in enumerate(checks) if not known]
+    """Whether each (vetted examples, program, known diagnostics) is accepted: no diagnostic (known or found) and the
+    examples pass (run only without diagnostics; a run stops at the first failing example; C++ tasks have none). A
+    program with a known diagnostic is rejected unchecked. Checks run on pool (not the caller's)."""
+    unknown = [check for check in checks if not check[2]]
     programs = [program for _, program, _ in unknown]
     found = python_diagnostics(programs, pool) if language == "python" else list(pool.map(cpp_diagnostics, programs))
-    passed = iter(pool.map(lambda c, d: not d and (language == "cpp" or examples_pass(*c[:2])), unknown, found))
+    passed = iter(pool.map(lambda c, d: not d and examples_pass(*c[:2]), unknown, found))
     return [not known and next(passed) for _, _, known in checks]
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Candidate:
-    """A task's candidates[0] is greedy, candidates[a] for a > 0 a sample with seed a at TEMPERATURE."""
+    """A task's candidates[0] is greedy; candidates[a] for a > 0 of task i a sample at TEMPERATURE from the TOP_P
+    nucleus with seed ATTEMPTS i + a (the sampled mode's scheme: no two attempts of a search share a seed)."""
     ids: list[int]
     accepted: bool  # verdicts'
 
@@ -391,12 +412,12 @@ def search(generator: NativeDecoder, searches: list[Search],
 
     def requests() -> Iterator[Request]:
         for attempt in range(ATTEMPTS):
-            sampling = {"temperature": 0.0 if attempt == 0 else TEMPERATURE, "seed": attempt}
             for s, x in enumerate(searches):
                 for i in range(x.count):
                     if accepted_at[s][i] is None:
                         issued.append((attempt, s, i))
-                        yield dataclasses.replace(x.request(i), **sampling)
+                        yield (x.request(i) if attempt == 0 else dataclasses.replace(
+                            x.request(i), temperature=TEMPERATURE, top_p=TOP_P, seed=ATTEMPTS * i + attempt))
 
     def prepare(key: tuple[int, int, int], ids: list[int]) -> None:
         try:
