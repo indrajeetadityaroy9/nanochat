@@ -1,5 +1,6 @@
 /*
- * q/k prologue, norm -> gain -> RoPE (arXiv 2505.09388 §2), forward and backward in one pass each. Backward from
+ * q/k prologue, norm -> gain -> RoPE (transformers modeling_qwen3.py Qwen3Attention.forward, Qwen3RMSNorm; QK-Norm:
+ * arXiv 2505.09388 §2), forward and backward in one pass each. Backward from
  * recomputed n: dm1 = dy1 cos - dy2 sin, dm2 = dy1 sin + dy2 cos, dg = sum_rows dm n, dn = dm g,
  * dx = rstd (dn - n mean(dn n)); dg without atomics: per-block partials summed in block order (k_gain_sum).
  */

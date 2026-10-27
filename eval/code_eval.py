@@ -54,10 +54,11 @@ HUMANEVAL_X = {"repo_id": "zai-org/humaneval-x", "revision": "62c78627f3072a1454
 EVALPLUS = {"humaneval_plus": ("humaneval", get_human_eval_plus), "mbpp_plus": ("mbpp", get_mbpp_plus)}
 MULTIPL_E_BENCHMARKS = ("humaneval_cpp", "mbpp_cpp")
 INFILLING = ("single-line", "multi-line", "random-span")
-FIM_MODES = ("psm", "spm")  # the two orders the packer trains (arXiv 2207.14255 App. D)
+FIM_MODES = ("psm", "spm")  # the two orders the packer trains (arXiv 2207.14255 §3, App. D)
 FILTERED_MODE = "spm"
 # Sampled mode: Codex (arXiv 2107.03374 §2.1 unbiased pass@k; §3.3, Fig. 5: T = 0.2 for pass@1; top p: verify.TOP_P);
-# MultiPL-E's pass@1 (arXiv 2208.08227: T = 0.2; completions.py --top-p 0.95); StarCoder2 (arXiv 2402.19173 §7.1.2)
+# MultiPL-E's pass@1 (arXiv 2208.08227 §IV-B: T = 0.2; completions.py --top-p 0.95); StarCoder2 (arXiv 2402.19173
+# §7.1.2)
 N_SAMPLE, TEMPERATURE = 20, 0.2
 # EvalPlus's most new tokens of a completion (evalplus/provider/base.py:13 max_new_tokens)
 EVALPLUS_MAX_NEW_TOKENS = 768

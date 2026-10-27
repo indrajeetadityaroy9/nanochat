@@ -42,7 +42,7 @@ stream while the layer's norm reads the unrounded value (§3 Embedding; `decode.
 | Embedding | token table 32,768 × C (`VOCAB_SIZE` = 2^15: 256 bytes, 32,508 merges, BOS and 3 FIM sentinels, `docs/corpus.md` §5), RMS-normed, no positional embedding |
 | Residual | per layer x = `resid_lambdas[i]`·x + `x0_lambdas[i]`·x0, x0 the normed embedding (LOG 2026-01-11) |
 | Norms, linears | gain-free RMS norm, eps = FLT_EPSILON, statistics in fp32 (`norm`); bias-free linears; untied `lm_head` |
-| Attention | MHA, H = C / 128 heads of `HEAD_DIM` = 128; q and k: per-head RMS norm, × a learned per-dim gain shared by the heads (`q_norm_weight`, `k_norm_weight`), then RoPE over the full head, rotation by −θ, θ = `ROPE_THETA` = 10^6 (92d63d4 `gpt.py:57-65`); causal within each attention segment, one per packed piece of a document (FA4 varlen over `cu_seqlens`, `docs/corpus.md` §8–§9; ProLong, arXiv 2410.02660 App. B.2) |
+| Attention | MHA, H = C / 128 heads of `HEAD_DIM` = 128; q and k: per-head RMS norm, × a learned per-dim gain shared by the heads (`q_norm_weight`, `k_norm_weight`), then RoPE over the full head, rotation by −θ, θ = `ROPE_THETA` = 10^6 (92d63d4 `gpt.py:57-65`); causal within each attention segment, one per packed piece of a document (FA4 varlen over `cu_seqlens`, `docs/corpus.md` §8–§9; document masks improved both long- and short-context results in ProLong's continued long-context training, arXiv 2410.02660 App. B.2) |
 | Windows | `layer_windows`: layers i ≡ 3 (mod 4) and the last attend the whole context, the others the 512 keys before the query (513 with itself); d24: 6 full, 18 windowed |
 | Value embeddings | `has_ve`: alternating layers, the last included (12 of 24): v ← v + 2σ(n W_g^T)_head · bf16(E_i[ids]), n the normed stream, W_g (H × C) `ve_gate`, E_i a per-layer V × C table |
 | MLP | ReLU², hidden 4C |
@@ -93,12 +93,11 @@ read is not ablated.
 - **Value embeddings, kept** (from the literature): per-layer token-indexed tables are modded-nanogpt record #14's and
   MoVE's LaVE baseline, V = V + g ⊙ M_t with g = 2σ(x W_g) (arXiv 2601.22887 §4.1), on half the layers; LaVE ×1 gains
   0.016, 0.010 and 0.010 validation bpb at D12, D20 and D32 (§4.2 Table 1). nanochat found alternating layers best
-  and the gate helpful (LOG 2026-01-17). Not ResFormer's first-layer value reuse, a different mechanism. None of the
-  reference code models has them.
+  and the gate helpful (LOG 2026-01-17). None of the reference code models has them.
 - **Learnable QK-norm gains, kept** (not ablated): per-head qk-layernorm with head-dim learnable parameters is arXiv
-  2309.14322's default, slightly better than across the model dimension (§3.2.5, Fig. E.8); nGPT finds fixed scales
-  "only a slight degradation" (arXiv 2410.01131 §3.3; App. A.9: "negligible degradation (≤0.3%) in validation loss";
-  Table 5: fixed s_qk = 1 costs +0.11%). At the d16 proxy's code bits per byte (0.42724, τ×1 seed 0 of
+  2309.14322's default, slightly better than across the model dimension (§3.2.5, Fig. E.8). In nGPT, a normalized
+  Transformer (0.5B parameters, 1K context, ~52B tokens), a fixed s_qk = 1 costs +0.11% validation loss (arXiv
+  2410.01131 App. A.9, Table 5). At the d16 proxy's code bits per byte (0.42724, τ×1 seed 0 of
   `results/muon_wd_timescale_20tpp.jsonl`) +0.11% is ≈ 0.0005, which the shared test's margin z·σ·√(2/n)
   (`docs/experiments.md` §1) reaches at n ≈ 400 seeds per arm [estimate]. The gains train under AdamW without
   decay (`docs/training.md` §3).
@@ -106,24 +105,24 @@ read is not ablated.
   solve the problem of logit shift in the final softmax" (Chameleon, arXiv 2405.09818 §2.3). Output-logit divergence
   occurs "in models with no weight decay regardless of scale … Weight decay also mitigates this instability for the
   larger models we test" (arXiv 2309.14322 §3.1.2); `lm_head` is weight-decayed (`docs/training.md` §3) and no
-  earlier-recipe `peak_lr` run, uncapped, diverged up to ×8 (`docs/training.md` §5), so no z-loss. Effect sizes:
-  Gemma 2 caps the final layer (arXiv 2408.00118 §2); modded-nanogpt record #9 added a cap at 30 (val loss 3.2844 →
-  3.2791, one run each) and record #18 lowered it to 15 (steps to the 3.28 target 1,490 → 1,390; 80 runs at 1,390
-  steps, mean 3.2791, one-sided p = 0.0001 for a mean below 3.28); nanochat at d24 found caps from 5 to 30 about
-  equal except 5 (much worse), 20 best by ~1e-3 val loss (LOG 2026-03-02), while 92d63d4 `gpt.py:511-515` keeps 15.
+  earlier-recipe `peak_lr` run, uncapped, diverged up to ×8 (`docs/training.md` §5), so no z-loss. The cap is Gemma
+  2's soft_cap·tanh(logits/soft_cap) (final layer 30, arXiv 2408.00118 §2). Effect sizes: modded-nanogpt record #9
+  added it at 30 (val loss 3.2844 → 3.2791 between the record's last two incremental runs, one run each) and record
+  #18 lowered it to 15 (steps to the 3.28 target 1,490 → 1,390; 80 runs at 1,390 steps, mean 3.2791, one-sided
+  p = 0.0001 for a mean below 3.28); nanochat at d24 found caps from 5 to 30 about equal except 5 (much worse), 20
+  best by ~1e-3 val loss (LOG 2026-03-02), while 92d63d4 `gpt.py:511-515` keeps 15.
   Its cost: 0.58% of the 8K step (§3). The designed ablation and its detection power: `docs/experiments.md` §3.
 - **RoPE base 10^6 from the first step:** above the 32K context's lower bound of arXiv 2405.14591 (Table 2: 6.4e5);
   large from the start as Llama 3 (500,000, arXiv 2407.21783 §3.2); base 10k against 500k at 8K changes Gemma 2B's
   perplexity 4.4627 → 4.4485 (Wiki) and 6.4429 → 6.4593 (FlanV2), under 0.33% and of mixed sign (arXiv 2410.06205
-  Table 2). Qwen2.5-Coder instead raises 10^4 to 10^6 at its repository stage (arXiv 2409.12186 §3.2.2).
+  Table 2).
 - **ReLU², not SwiGLU:** nanochat measured SwiGLU at matched parameters and FLOPs worse at d12 and d24 on steps,
   wall clock and FLOPs (LOG 2026-02-05); a gated MLP would also need a gated decode MLP (`model/kernels/decode.cu`
   hard-codes relu², `EPI_RELU2`).
 - **SSSL windows of 512:** nanochat's SSSL pattern with the last layer full (LOG 2026-01-11); Gemma 3 finds the
   local:global ratio of minimal impact up to 7:1 and the window reducible "significantly without impacting
-  perplexity" (arXiv 2503.19786 §5.2, Fig. 3–4; windows 512–4,096 at 1:1 and 3:1). StarCoder2's long-context
-  stage uses a 4,096-token window in a 16,384-token context (arXiv 2402.19173 §6.3).
-- **Shape:** MobileLLM's deep-and-thin ratio (arXiv 2402.14905). A deeper, thinner alternative at about d24's
+  perplexity" (arXiv 2503.19786 §5.2, Fig. 3–4: 2B and 9B models; windows 512–4,096 at 1:1 and 3:1).
+- **Shape:** the shape rule's MobileLLM ratio (§1). A deeper, thinner alternative at about d24's
   non-embedding parameters, 35 × 640 (193,070,080), costs M 3,234,201,600 per token at 8K (+14.2%) and nominal
   1,827,033,600 (+6.9%) [arithmetic], so an equal-token comparison gives it more compute; its 5 heads would need
   their own `ve_gate.cu` instance and GEMM tiles (the code is d24's: H = 6, C = 768).
@@ -157,10 +156,10 @@ architecture-specific target (sm_90a: `decode.cu`'s wgmma) and `-DHEAD_DIM=128`,
 the command, the file and every header>.so` (written to a temporary file unique to the build and renamed, so
 concurrent first builds, from any process or container, never share a file), loaded by ctypes once per process.
 `crate_module` does the same for the Rust crates through cargo (`corpus/crate`, `docs/corpus.md` §6; `inference/syntax`,
-`docs/evaluation.md` §7). The kernels follow ThunderKittens' layout: shared headers (`common.cuh`: 16-byte vector loads
+`docs/evaluation.md` §7). The kernels share headers (`common.cuh`: 16-byte vector loads
 and stores, a fixed-order butterfly warp sum, resident-block counts for persistent grids; `qk_row.cuh`: the q/k row
-math (RMS norm, gain, RoPE) shared by `qk_prologue.cu` and the decoder's `decode.cu`) and one self-contained file per
-kernel with its C entry points. Each op is a
+math (RMS norm, gain, RoPE) shared by `qk_prologue.cu` and the decoder's `decode.cu`); each kernel is one
+self-contained file with its C entry points. Each op is a
 `torch.library` custom op with a fake implementation, so `torch.compile(fullgraph=True)` traces one graph per stage
 (`train/loop.py`).
 
@@ -195,7 +194,7 @@ tree's run-to-run spread (§4).
 | q/k prologue per position | `62b50c2` | +0.3%; forward 250.3 → 183.6 µs per call | | | 200-step Δ +0.0035 |
 | Post-attention norm in GEMM epilogues | `373b549` | 338,039 → 341,919 (+1.15%) | 274,783 → 276,661 (+0.68%) | peak 64.5 → 61.1 GiB; nsys GPU time 4,355 → 4,296 ms per step | 200-step Δ −0.0071; y vs fp64 2.6e-3 (bf16 path 3.2e-3) |
 | Token-ordered value-embedding backward | `eaf14d0` | 344,768 → 350,185 (+1.57%) | 277,238 → 280,201 (+1.07%) | ve_gate 161.9 → 92.6 ms per step; peak unchanged | 200-step Δ +0.0095 |
-| dW accumulated into the fp32 `.grad` by cuBLAS `addmm` (β = 1, Megatron-LM's gradient-accumulation fusion) + one bf16 copy per weight per update | `f499be7` | 344,925 → 347,634 (+0.79%) | 275,613 → 277,383 (+0.64%) | peak 61.6 → 62.0 GiB | neutral |
+| dW accumulated into the fp32 `.grad` by cuBLAS `addmm` (β = 1) + one bf16 copy per weight per update | `f499be7` | 344,925 → 347,634 (+0.79%) | 275,613 → 277,383 (+0.64%) | peak 61.6 → 62.0 GiB | neutral |
 | FA4 window layers: persistent forward, bf16 dQ | `0e627ff` | 344,967 → 348,218 (+0.94%; forward alone +0.32%) | 276,538 → 278,524 (+0.72%) | | window dQ vs fp32 accumulation norm rel 2.45e-3; 200-step Δ +0.009 |
 | MLP activation saved by the forward | `6299e84` | 356,259 → 361,324 (+1.42%) | 282,256 → 285,118 (+1.01%) | peak 61.8 → 75.3 GiB (32K 61.7 → 75.2) | not bitwise (§4); 200-step at ×2.797 last-100 Δ −0.0027 (same-seed noise 0.005) |
 | Fused q/k/v projection, one attention op | `70025d8` | 356,431 → 359,180 (+0.77%) | 283,357 → 285,776 (+0.85%) | peak +1.7 GiB warm (75.1 → 76.8) | out, dk, dv, k-gain and value-embedding gradients bitwise; dq, q-gain 1e-6–2e-5; 10 steps bitwise through step 3, then max Δ 1.6e-5 (parent against itself 1.3e-5) |
@@ -243,12 +242,15 @@ Notes on the rows:
   most 5 bf16 partials (one per 128-key block of the 512-key window); full layers would sum T/128 (64 at 8K, 256 at
   32K) and keep FA4's fp32 accumulator and FA4's own launch and tile shapes, the fastest timed on the d24 shapes (the
   persistent and tile variants measured for them: `docs/experiments.md` §5).
-- **Real segments only.** FA4 schedules work for every segment it is given, so padding segments cost time without
-  changing outputs (McCormick, "Optimizing Training with FlashAttention varlen", 2026); the op passes the first
-  `segments` + 1 offsets (`flash_attn.py` `segmented`).
-- **Design sources.** The gate kernel and its token-ordered backward follow TileKernels' Engram gate and
-  weight-gradient reduce; the norm in GEMM epilogues follows TileKernels' mHC norm kernels and DeepGEMM's in-GEMM
-  pre-norm statistics; dW into `.grad` follows DeepGEMM's D = C + A·B and Megatron-LM's gradient-accumulation fusion.
+- **Real segments only.** FA4's varlen forward launches CTAs for every segment it is given (`flash_fwd_sm90.py`
+  `SingleTileVarlenScheduler`), so padding segments cost time without changing outputs, as over-padding `cu_seqlens`
+  did in McCormick, "Optimizing Training with FlashAttention varlen" (2026); the op passes the first `segments` + 1
+  offsets (`flash_attn.py` `segmented`).
+- **Design sources.** The gate kernel follows TileKernels' Engram gate kernels, whose weight gradient (per-persistent-
+  block partials summed by `engram_grad_w_reduce`) has the QK-gain gradient's scheme; the norm in GEMM epilogues
+  follows TileKernels' mHC norm kernels (split squared-sum partials reduced to the RMS norm) and DeepGEMM's in-GEMM
+  pre-norm statistics (`sm90_tf32_hc_prenorm_gemm`: row squared sums inside the GEMM); dW into `.grad` follows
+  DeepGEMM's D = C + A·B and Megatron-LM's gradient-accumulation fusion (`wgrad_gemm_accum_fp32` into `main_grad`).
 
 On the GH200 the GEMMs run at the 700 W cap's ceiling; the step profile, the latest rates and the memory peak are
 `docs/training.md` §7. Rejected or not pursued kernels and systems changes (FP8, hand
@@ -267,12 +269,12 @@ Two choices are deliberately not bitwise to their predecessors: the saved MLP ac
 relu² of the fp32 pre-activation rounded once, not relu² of the bf16 pre-activation) and the gate kernel's fp32
 reduction order.
 
-**Non-bitwise atomics.** FA4's backward (fp32 dQ atomics in full layers, bf16 reduce-adds in window layers), the
-token-table backward (compiled: Inductor decomposes `embedding_dense_backward` into an accumulating index_put, lowered
-to an fp32 `atomic_add` scatter; torch 2.14 `torch/_decomp/decompositions.py`, `torch/_inductor/lowering.py`) and the
-value-embedding table's 16-byte atomics accumulate in no fixed order, so gradients are not bitwise across runs and
-step losses differ between processes from step 3 (two of five 4-step runs at `fb86efc`, the GEMM configurations
-identical). Everything else is fixed by construction: GEMM tiles (`CONFIGS`, `DPSUM_CONFIG`,
+**Non-bitwise atomics.** FA4's backward (fp32 dQ bulk reduce-adds in full layers, bf16 reduce-adds in window layers),
+the token-table backward (compiled: Inductor decomposes `embedding_dense_backward` into an accumulating index_put,
+lowered to an fp32 `atomic_add` scatter; torch 2.14 `torch/_decomp/decompositions.py`, `torch/_inductor/lowering.py`)
+and the value-embedding table's 16-byte atomics accumulate in no fixed order, so gradients are not bitwise across
+runs and step losses differ between processes from step 3 (two of five 4-step runs at `fb86efc`, the GEMM
+configurations identical). Everything else is fixed by construction: GEMM tiles (`CONFIGS`, `DPSUM_CONFIG`,
 `cross_entropy.py`'s explicit tiles, `lm_losses`' fp32-output `torch.mm`), the QK-gain gradient's summation order
 (`qkp_backward_blocks`: half the device's resident blocks, partials summed in block order), the warp sums
 (`common.cuh` `warp_sum`) and Inductor's coordinate-descent tuning off (`docs/training.md` §8). GEMM configurations do
@@ -341,8 +343,8 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   256, and 128 × 224 or 128 × 256) and QuACK's static persistent scheduler (`is_dynamic_persistent=False`; the
   `down_dx` GEMM of `relu2_mlp_bwd` passes `dynamic_scheduler=True`, the default of QuACK's `gemm_dact`).
   `CONFIGS` holds d24's calls (C = 768) only; the d8 and d16 entries are at `67192ab`.
-  M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`. The benchmark is
-  `quack/autotuner.py` (L2-cold CUDA-graph medians of every candidate, exclusive GPU). An explicit config bypasses
+  M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`. The benchmark is `quack/gemm_runtime/autotune.py` (L2-cold
+  CUDA-graph medians of every eligible candidate, exclusive GPU). An explicit config bypasses
   QuACK's tuner whatever `tuned` says (`quack/epilogue/frontend.py`: the tuner runs only for `config=None`). `gemm`
   calls `gemm_tuned.fn` because QuACK's `gemm`/`gemm_add` take no config. `DPSUM_CONFIG` is the fastest tile_n = 128
   configuration on 98,304 × 768 × 768.
@@ -360,8 +362,8 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   logits; its `sum_exp` sums the plain exponentials while D carries 1 − tanh², so the gradient GEMMs read
   dz = (softmax − onehot)(1 − tanh²); `cap_label_fix` applies the derivative to the label entry `lce_glue` rewrote.
 - Constants: `CHUNK` the least-memory size among those equally fast on a d24 micro-batch, also the evaluation's rows
-  per fp32 GEMM (1 GiB of logits); `TILE_N1` the fastest admissible tile (§3 notes); `TILE_N2` QuACK's tile_n2 rule at
-  C = 768 (192; 256 at C = 256 and 512).
+  per fp32 GEMM (1 GiB of logits); `TILE_N1` the fastest admissible tile (§3 notes); `TILE_N2` QuACK's tile_n2 rule
+  (`linear_cross_entropy.py`: 192 if C % 192 = 0, else 256) at C = 768 (192; 256 at C = 256 and 512).
 - `lm_loss` is opaque to `torch.compile` (CuTe DSL GEMMs, Triton kernels, gradients computed in the forward); labels
   int64, dx in x's dtype; `lm_loss_grad` multiplies the saved gradients by dloss, dx's product in fp32 rounded once.
   `step_shares` weights sum the micro-batch means to the mean over every valid label of the step.
@@ -379,8 +381,8 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 - `PersistentVarlenScheduler`: FA4's SM90 forward launches one CTA per (segment m-block, head)
   (`flash_fwd_sm90.py` `FlashAttentionForwardSm90.__call__`, `SingleTileVarlenScheduler`); the subclass reuses
   `VarlenDecoder.decode`. `PersistentForwardSm90` doubles sQ's allocation (the rest of FA4's `SharedStorageQKV`
-  unchanged; FA4's `Q_in_regs` layout, which `interface.py` never selects, is not offered) because FA4 stages O in sQ,
-  which the producer refills (`FlashAttentionForwardSm90.mma`).
+  unchanged; FA4's `Q_in_regs` layout, which `interface.py` never selects, is not offered) because FA4's sO is a view
+  of sQ (`flash_fwd_sm90.py`), which a persistent CTA's next Q load would overwrite [inference].
 - `BackwardSm90Bf16dQ`: replaces FA4's fp32 `dq_accum` (zero-filled, converted by `flash_bwd_postprocess.py`): the
   consumers stage dQ × softmax scale as bf16 rows and the dQ warp reduce-adds each row into dq (PTX ISA
   `cp.reduce.async.bulk .add.noftz.bf16`). `mma_one_m_block` restates FA4's (`mma_dkv_is_rs`,
@@ -390,10 +392,10 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   dO for dpsum. `fa4_window_left` → None also avoids plain causal attention running on FA4's local kernel
   (`interface.py` `_resolve_causal_local_window`). `heads` views have token stride 3C.
 - FA4 version: 4.0.0b36 (`pyproject.toml`). Its changes over 4.0.0b35 are SM100-only (the backward's accumulate-tile
-  order, a generic hdim-256 backward, a tile-N override knob, a host config module); the SM90 forward and backward
-  kernels, the tile scheduler, `_bwd_preprocess`, `_tile_size_bwd_sm90`, `_resolve_causal_local_window` and the JIT
-  cache the subclasses and hooks use are unchanged, and the SM90 path of `flash_bwd_postprocess.py` is unchanged in
-  effect.
+  order, a generic hdim-256 backward, a tile-N override knob, an unused host config module); the SM90 forward and
+  backward kernels, the tile scheduler, `_bwd_preprocess`, `_tile_size_bwd_sm90`, `_resolve_causal_local_window` and
+  the JIT cache the subclasses and hooks use are unchanged, and the SM90 path of `flash_bwd_postprocess.py` is
+  unchanged in effect.
 - CUTLASS DSL 4.8.1 warns `UserWarning: Argument aux_data (position N) cannot be converted to a JitArgument` when it
   compiles a kernel whose `__call__` takes FA4's `AuxData`: position 17 for `PersistentForwardSm90`
   (`FlashAttentionForwardSm90.__call__`), 21 for `BackwardSm90Bf16dQ` (`FlashAttentionBackwardSm90.__call__`),
@@ -469,5 +471,5 @@ Repositories, at the commit, file or record cited: `karpathy/nanochat` (92d63d4 
 `scripts/base_train.py`; e85db6b `nanochat/gpt.py`; `dev/LOG.md` 2026-01-11, 2026-01-17, 2026-02-05, 2026-03-02);
 `KellerJordan/modded-nanogpt` (records #5, #8, #9, #14, #18); `Dao-AILab/flash-attention` (FlashAttention-4 4.0.0b36,
 `flash_attn.cute`); `Dao-AILab/quack` 0.6.5; `deepseek-ai/DeepGEMM`, `deepseek-ai/TileKernels` (design sources);
-`HazyResearch/ThunderKittens` (kernel layout); `NVIDIA/Megatron-LM` (gradient-accumulation fusion);
-`huggingface/transformers` (`modeling_qwen3.py`). LeCun et al., "Efficient BackProp" (1998) §4.6.
+`NVIDIA/Megatron-LM` (gradient-accumulation fusion); `huggingface/transformers` (`modeling_qwen3.py`). LeCun et al.,
+"Efficient BackProp" (1998) §4.6.

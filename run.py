@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from train.schedule import RunPlan
 
 # A run with more than one evaluated checkpoint also keeps analysis checkpoints (docs/training.md §6): full state
-# every FULL_STATE_EVERY steps (OLMo's and Pythia's cadence, arXiv 2304.01373 §2.4), fp32 weights only at steps 1, 2,
+# every FULL_STATE_EVERY steps (Pythia's cadence, arXiv 2304.01373 §2.4), fp32 weights only at steps 1, 2,
 # 4, ..., EARLY_WEIGHTS_LAST (Pythia's log-spaced early checkpoints) and at repo_level_start + AFTER_STAGE_WEIGHTS
 FULL_STATE_EVERY = 1000
 EARLY_WEIGHTS_LAST = 512

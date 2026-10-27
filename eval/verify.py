@@ -1,7 +1,6 @@
 """
 Post-generation checks (syntax, basedpyright, g++ -fsyntax-only, the prompt's own examples) and the resampling search
-of the filtered mode: a greedy candidate, then seeded samples until one passes (Codex, arXiv 2107.03374 §3.5;
-AlphaCode, arXiv 2203.07814 §4.5).
+of the filtered mode: a greedy candidate, then seeded samples until one passes (Codex, arXiv 2107.03374 §3.5).
 """
 
 import ast
@@ -57,7 +56,8 @@ PYRIGHT_FAILURE = "1:1: basedpyright: "
 CPP_TIMEOUT, CPP_FLAGS = 15, ("-std=c++17",)
 # HumanEval's execution timeout (human_eval/evaluation.py:43)
 EXAMPLES_TIMEOUT = 3
-# Codex's temperature for samples selected by unit tests (arXiv 2107.03374 §3.3, Figs. 5-6: the pass@100 optimum)
+# Codex's temperature for samples selected by unit tests (arXiv 2107.03374 §3.3, Figs. 5-6: its 679M model's pass@100
+# optimum)
 TEMPERATURE = 0.8
 # Codex's nucleus for all its sampling (arXiv 2107.03374 §3.2: top p 0.95), the filtered search's and the sampled mode's
 TOP_P = 0.95

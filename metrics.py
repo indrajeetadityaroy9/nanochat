@@ -77,11 +77,13 @@ def offset_bpb(corpora: dict, weights: dict[str, float]) -> list[float | None]:
 
 
 def mixture_bpb_summary(corpora: dict, weights: dict[str, float]) -> dict:
-    """mixture_bpb of rows with its standard error and 95% normal interval (arXiv 2411.00640 Eq. 3). corpora:
+    """mixture_bpb of rows with its standard error and 95% normal interval (arXiv 2411.00640 Eq. 3 within each stratum;
+    the strata and the ratio's delta method are this code's). corpora:
     {corpus: {"row_bits", "row_bytes", "row_clusters", "rows"}}, the strata of a sample at fixed weights; within one,
     clusters of rows are independent (eval/bpb.py row_clusters). With a_c = weights[c] / rows_c, R = Σ a_c bits_c /
     Σ a_c bytes_c and, by the delta method, se² = Σ_c a_c² m_c s_c² / (Σ_c a_c bytes_c)², s_c² the sample variance
-    (ddof 1) of corpus c's m_c cluster sums of bits - R bytes (clustered errors, Eq. 4, per stratum)."""
+    (ddof 1) of corpus c's m_c cluster sums of bits - R bytes (clustered errors, arXiv 2411.00640 Eq. 4, per
+    stratum)."""
     scale = {c: w / corpora[c]["rows"] for c, w in weights.items()}
     nbytes = sum(a * np.sum(corpora[c]["row_bytes"]) for c, a in scale.items())
     bpb = float(sum(a * np.sum(corpora[c]["row_bits"]) for c, a in scale.items()) / nbytes)
@@ -156,7 +158,7 @@ def measure_errors(evaluation: dict) -> dict[str, dict]:
             "pass@1": summary([s[0] == "pass" for p in parse for s in p["base_status"]])}
 
 
-# CrossCodeEval's patterns (amazon-science/cceval 40c68d2 eval_utils.py remove_comments, string_pattern,
+# CrossCodeEval's patterns (amazon-science/cceval 40c68d2 scripts/eval_utils.py remove_comments, string_pattern,
 # IDENTIFIER_REGEX); keywords as dpu-utils keywordlist.py lists them (keyword.kwlist without True and False)
 COMMENT = re.compile(r"#.*|//.*")
 STRING = re.compile(r'"([^"\\]*(\\.[^"\\]*)*)"|\'([^\'\\]*(\\.[^\'\\]*)*)\'')
@@ -237,7 +239,7 @@ def summary(scores: ArrayLike, clusters: ArrayLike | None = None) -> dict:
     return out | {"se": float(fit.bse[0]), "interval": (float(low), float(high))}
 
 
-# The GPU's dense BF16 peak: H100 SXM5 / GH200 (NVIDIA H100 datasheet, 989.4 TFLOP/s without sparsity)
+# The GPU's dense BF16 peak: H100 SXM5 / GH200 (half the 1,979 TFLOP/s "with sparsity" of NVIDIA's H100 SXM specs)
 PEAK_FLOPS = 989.4e12
 
 
@@ -273,8 +275,8 @@ def parabola_vertex(x: Sequence[float], y: Sequence[float]) -> tuple[float, floa
 
 
 def latency(starts: ArrayLike, firsts: ArrayLike, ends: ArrayLike, new_tokens: ArrayLike, *, duration: float) -> dict:
-    """Decoding latency in seconds (vllm-project/vllm benchmarks/serve.py calculate_metrics): ttft, tpot, e2el and
-    output_throughput; tpot over requests of more than one token, None if none (vLLM reports 0)."""
+    """Decoding latency in seconds (vllm-project/vllm v0.32.0 vllm/benchmarks/serve.py calculate_metrics): ttft, tpot,
+    e2el and output_throughput; tpot over requests of more than one token, None if none (vLLM reports 0)."""
     start, first, end = (np.asarray(t, dtype=np.float64) for t in (starts, firsts, ends))
     n = np.asarray(new_tokens)
     many = n > 1

@@ -1,6 +1,6 @@
 /* Decoding of a nanochat CausalLM (model/modeling.py) in MAX_BATCH slots (inference/decoder.py): a step runs one graph
  * (greedy) or two (body, head) of dependent kernels, advancing each active slot by one greedy, sampled or nucleus token
- * within its allowed set. Batched prefill; a prompt store reuses prompts' K and V (as arXiv 2312.07104). Numerics
+ * within its allowed set. Batched prefill; an exact-prompt store, never evicted, reuses prompts' K and V. Numerics
  * follow the compiled training forward op by op, except the e4m3 KV cache (a scale per position and head). */
 #include <initializer_list>
 #include <limits.h>
@@ -97,8 +97,9 @@ static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, i
     return (float)-log(-log(ldexp(2.0 * (double)r + 1.0, -DBL_MANT_DIG)));
 }
 
-/* Slot GEMM: out[b][r] = W[r] . x[b], bf16 operands, fp32 accumulators; RELU2 out = bf16(relu(s) s) (QuACK gemm_act
- * relu_sq); ARGMAX: each warp's maximum key per slot, then one atomicMax (an exact maximum, so any order). */
+/* Slot GEMM: out[b][r] = W[r] . x[b], bf16 operands, fp32 accumulators; RELU2 out = bf16(relu(s) s) (QuACK
+ * gemm_norm_act relu_sq); ARGMAX: each warp's maximum key per slot, then one atomicMax (an exact maximum, so any
+ * order). */
 
 typedef struct {
     const bf16 *w;               /* [rows][cols] */

@@ -102,18 +102,18 @@ C.9 Table 85: 130M, batch 128 and 256 both 3.240, 512 3.257).
 - **One lr and one weight decay** for every group, as Moonlight shares "learning rate η, weight decay λ" among matrix
   and non-matrix parameters (§2.2). Per-group candidates were not adopted (`docs/experiments.md` §4).
 - **Weight decay** by the τ law (`tau_weight_decay`): the EMA timescale 1/(η·λ) is τ* = 1.084·TPP^−0.527 of the run's
-  steps (Power Lines, arXiv 2505.13738 Finding 3, App. E.3.1; arXiv 2405.13698), so λ = 1/(η·τ*·steps), 0.15322 for
-  the base run. The law is fit on AdamW over TPP 20–1280 (the base run's 528 inside). Muon takes the same law: under
-  μP a fixed independent weight decay stays optimal across TPP for both Adam and Muon (arXiv 2512.05620 App. H.5), and
-  Muon's only scaling-sensitive hyperparameter is its lr (arXiv 2509.02046 §3.3 Table 4). The Muon-specific timescale
-  runs: `docs/experiments.md` §4.
+  steps (Power Lines, arXiv 2505.13738 Finding 3, App. E.3.1), so λ = 1/(η·τ*·steps), 0.15322 for the base run. The
+  law is fit on AdamW over TPP 20–1280 (the base run's 528 inside). Muon takes the same law: under μP a fixed
+  independent weight decay stays optimal across TPP for both Adam and Muon (arXiv 2512.05620 App. H.5, IsoFLOP sweeps
+  whose optima lie at 6.6–13.3 TPP), and Muon's only scaling-sensitive hyperparameter is its lr (arXiv 2509.02046 §3.3
+  Table 4). The Muon-specific timescale runs: `docs/experiments.md` §4.
 - **Clipping**: the accumulated gradient's global norm clipped to `MAX_GRAD_NORM` = 1.0 before both optimizers
   (DeepSeek LLM §2.3), the pre-clip norm logged every step. Adam is invariant to the gradient's scale (arXiv 1412.6980
-  §2.1) and Newton–Schulz divides its input by its norm (`torch/optim/_muon.py` `_zeropower_via_newtonschulz`, after
-  KellerJordan/Muon), so under a slowly varying gradient scale the clip damps only spikes [inference]; the largest
-  recorded norm is 10.76 (`results/peak_lr-curves.jsonl` at `81fb386`, d8 at 200, ×1, step 14,202), far below the
-  ~5e7–2e11 at which Megatron-LM PR 5395 reports a 1.0 clip stalling training (Muon and AdamW alike: the clipped
-  gradients fall below the optimizers' eps floors).
+  §2.1) and Newton–Schulz divides its input by its norm (`torch/optim/_muon.py` `_zeropower_via_newtonschulz`), so
+  under a slowly varying gradient scale the clip damps only spikes [inference]; the largest recorded norm is 10.76
+  (`results/peak_lr-curves.jsonl` at `81fb386`, d8 at 200, ×1, step 14,202), far below the ~5e7–2e11 at which
+  Megatron-LM PR 5395 reports a 1.0 clip stalling training (an SFT of Qwen3.5-35B-A3B; Muon and AdamW alike: the
+  clipped gradients fall below the optimizers' eps floors).
 
 | | The base model | Reference code models |
 |---|---|---|
@@ -143,10 +143,10 @@ other arms: `docs/experiments.md` §4.
   and 3.21–4.07 at d24, and none diverged (`results/peak_lr-curves.jsonl` at `81fb386`). No paper fixes a warmup for
   Muon.
 - **Decay**: linear to zero, (steps − s)/(steps − 40), through the repository stage: linear decay to zero is "around
-  0.84% better than the optimal WSD", its gap to a 10× decay grows with tokens per parameter, and its gain over
-  cosine decay to zero is small but consistent across peak lrs (arXiv 2502.15938 §4.2, Figs. 6 and 8, Table 1's text).
-  DeepSeek-Coder instead holds its final lr for long context (arXiv 2401.14196 §3.6);
-  Qwen2.5-Coder states no schedule for its repository stage.
+  0.84% better than the optimal WSD" (610M, 80 TPP), its gap to a 10× decay grows with tokens per parameter, and its
+  gain over cosine decay to zero is small but consistent across peak lrs (arXiv 2502.15938 §4.2, Figs. 6 and 8, Table
+  1's caption). DeepSeek-Coder instead holds its final lr for long context (arXiv 2401.14196 §3.6); Qwen2.5-Coder
+  states no schedule for its repository stage.
 - **Repository stage**: its first step at 3,811/69,834 = 5.46% of peak [arithmetic].
 - **Last step**: 1/(steps − 40) of peak, not 0: 1.432e-5 at 69,874 steps [arithmetic], ~70× below arXiv 2502.15938's
   smallest nonzero minimum, 0.1% of peak (App. C.7).
@@ -330,11 +330,11 @@ the graph's compilation, and a step after a save the save (below); `tokens_per_s
 **Diagnostics** (`train/diagnostics.py`). In the `train` record: per-corpus training loss (Σ loss / Σ valid labels
 over the corpus's rows, rows assigned by `mixture.mixture_rows`); the capped logits' logsumexp maximum and mean
 square over valid positions (PaLM's z-loss quantity, arXiv 2204.02311 §5); the largest QK-norm gain (with the
-normed q and k it bounds the attention logits [inference]; Kimi K2's QK-Clip bounds their maximum, arXiv 2507.20534
-§2.1); every `UPDATE_STATS_EVERY` = 10th step the GPU's telemetry, read on the host from NVML (the image's pynvml,
-initialized once with a handle to the model's GPU) when the record is written, while the next step runs, with no
-device synchronization; a record written before a save or at the last step reads an idle GPU (the pending record is
-logged before the save; in the base run only step 0's, before `weights-1.pt`):
+normed q and k it bounds the attention logits [inference], whose growth Kimi K2 reports destabilizing Muon training,
+arXiv 2507.20534 §2.1); every `UPDATE_STATS_EVERY` = 10th step the GPU's telemetry, read on the host from NVML (the
+image's pynvml, initialized once with a handle to the model's GPU) when the record is written, while the next step
+runs, with no device synchronization; a record written before a save or at the last step reads an idle GPU (the
+pending record is logged before the save; in the base run only step 0's, before `weights-1.pt`):
 `gpu_power_watts` (`nvmlDeviceGetPowerUsage` / 1000, a 1 s running average on Hopper, NVML API reference),
 `gpu_sm_clock_mhz` (`nvmlDeviceGetClockInfo(NVML_CLOCK_SM)`), `gpu_temperature_c`
 (`nvmlDeviceGetTemperature(NVML_TEMPERATURE_GPU)`, the die) and `gpu_memory_used_bytes` (`nvmlDeviceGetMemoryInfo`
@@ -383,7 +383,7 @@ evaluated; the schedule is experimental configuration, held only in `run.py`'s c
 | Set | Steps (base run) | Content | Count × size | Basis |
 |---|---|---|---|---|
 | evaluated | each tenth of 69,874, and 66,063 | full state | 11 × 5.588 GB | the evaluations of the run (§9) |
-| grid | every `FULL_STATE_EVERY` = 1,000 below the last step | full state | 69 × 5.588 GB | Pythia's checkpoint every 1,000 iterations (arXiv 2304.01373 §2.4); OLMo's intermediate checkpoints at intervals of 1,000 steps (arXiv 2402.00838 §5) |
+| grid | every `FULL_STATE_EVERY` = 1,000 below the last step | full state | 69 × 5.588 GB | Pythia's checkpoint every 1,000 iterations (arXiv 2304.01373 §2.4) |
 | early | 1, 2, 4, …, `EARLY_WEIGHTS_LAST` = 512 | fp32 weights and model `config` (`weights-<step>.pt`) | 10 × 2.089 GB | Pythia's log-spaced early checkpoints (arXiv 2304.01373 §2.4) |
 | after the stage switch | `repo_level_start` + `AFTER_STAGE_WEIGHTS` (100, 200, 400, 800, 1,600): 66,163 … 67,663 | fp32 weights and `config` | 5 × 2.089 GB | the early set's log spacing at the context switch |
 
@@ -403,9 +403,8 @@ ones for the steps it repeats (`metrics.train_steps`).
 
 **Divergence.** A non-finite loss or gradient norm writes a `failure` record and ends training; the job returns, the
 sweep continues and a rerun skips the run (`metrics.diverged`); its experiment record has `measures` null and
-`diverged_at` set. Both instabilities of arXiv 2309.14322 (§1, §3.1) "appear at high learning rates in small
-models"; no `peak_lr` arm diverged (§5). Any other failure fails its job: the sweep's other jobs still run (Hydra's
-basic launcher runs every job of the sweep), then the sweep raises and writes no experiment records.
+`diverged_at` set; no `peak_lr` arm diverged (§5). Any other failure fails its job: the sweep's other jobs still run
+(Hydra's basic launcher runs every job of the sweep), then the sweep raises and writes no experiment records.
 
 **Experiment records** (`ablations/records.py` `Records`, an experiment's Hydra callback, when the sweep ends):
 
@@ -540,7 +539,7 @@ Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/
 
 Not implemented: the repository pre-trains and evaluates a base model. Supervised fine-tuning on function-completion
 exercises has large published effects at this scale: 180M tokens of exercises took a 1.3B model's HumanEval pass@1
-from 29% to 50.6% (arXiv 2306.11644 §2, §2.3, Fig. 2.1); OpenCoder-1.5B went from HumanEval+ 49.4 to 67.7
+from 29% to 50.6% (arXiv 2306.11644 §2, Fig. 2.1, Table 1); OpenCoder-1.5B went from HumanEval+ 49.4 to 67.7
 and MBPP+ 58.7 to 61.9 base to instruct (arXiv 2411.04905 Tables 6, 7; not controlled). The format would be
 completion, not chat (no chat tokens, `corpus/tokenizer.py` `SPECIAL_TOKENS`), the loss on the solution and BOS alone;
 candidate data `OpenCoder-LLM/opc-sft-stage2` and `opc-annealing-corpus`; preconditions: decontamination by entry
@@ -572,11 +571,12 @@ needs only the records.
 
 **`train/diagnostics.py`.** Groups are named `adamw[i]`, `muon[i]` in step order. The logsumexp statistics come from
 `lm_loss`'s per-position outputs (`model/ops/cross_entropy.py`), which require grad. AdamW's update RMS is computed
-from its state as lr·m̂/(√v̂ + eps) (`torch/optim/adamw.py`), Muon's from `Muon.update_norms`; `end_step` runs after
-the optimizers stepped but before the schedulers, so each group's lr is still the step's. Host values (two pinned
-fp64 buffers, alternating by step): 4 scalars (loss, `grad_norm`, logsumexp max and square sum), the step row, the
-update row (measured steps only), then each row's loss sum and valid count; `record` copies the rows into the
-sidecar's memory maps as float32 and reads `qk_norm_gain_max` as the step row's largest `gain_max/` value.
+from its state as lr·m̂/(√v̂ + eps) (`torch/optim/adam.py`, which `AdamW` subclasses), Muon's from
+`Muon.update_norms`; `end_step` runs after the optimizers stepped but before the schedulers, so each group's lr is
+still the step's. Host values (two pinned fp64 buffers, alternating by step): 4 scalars (loss, `grad_norm`, logsumexp
+max and square sum), the step row, the update row (measured steps only), then each row's loss sum and valid count;
+`record` copies the rows into the sidecar's memory maps as float32 and reads `qk_norm_gain_max` as the step row's
+largest `gain_max/` value.
 
 **`train/optim.py`.** `Muon` follows `torch/optim/_muon.py` `_single_tensor_muon` (momentum lerp, Nesterov, which is
 `torch.optim.Muon`'s default and the only mode `Muon.step` implements, bf16 Newton–Schulz, decoupled weight decay,
@@ -663,11 +663,8 @@ model-provider clients, which only its code generation imports.
 | 2304.01373 | Pythia: A Suite for Analyzing Large Language Models Across Training and Scaling |
 | 2306.11644 | Textbooks Are All You Need |
 | 2308.12950 | Code Llama: Open Foundation Models for Code |
-| 2309.14322 | Small-scale proxies for large-scale Transformer training instabilities |
 | 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming -- The Rise of Code Intelligence |
-| 2402.00838 | OLMo: Accelerating the Science of Language Models |
-| 2405.13698 | How to set AdamW's weight decay as you scale model and dataset size |
 | 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2409.19913 | Scaling Optimal LR Across Token Horizons |
 | 2411.00640 | Adding Error Bars to Evals: A Statistical Approach to Language Model Evaluations |
@@ -683,6 +680,6 @@ model-provider clients, which only its code generation imports.
 | 2512.22382 | Completed Hyperparameter Transfer across Modules, Width, Depth, Batch & Duration |
 
 Repositories: `karpathy/nanochat` (92d63d4, 07c4dd4, `dev/LOG.md` 2026-01-10); `KellerJordan/modded-nanogpt` (PR #144);
-`KellerJordan/Muon`; `zichongli5/NorMuon` (`normuon.py` `normuon_update`);
+`zichongli5/NorMuon` (`normuon.py` `normuon_update`);
 `NVIDIA/Megatron-LM` (PR 5395); `openai/human-eval-infilling`, `nuprl/MultiPL-E`, `evalplus/evalplus` (§8's commits);
 `OpenCoder-LLM/opc-sft-stage2`, `OpenCoder-LLM/opc-annealing-corpus` (datasets).

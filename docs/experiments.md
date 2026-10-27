@@ -122,7 +122,7 @@ code is removed; it is cited at `67192ab` (`python -m ablations.tokenizer_split_
 
 Not built: tiktoken encodes by merge rank alone, which cannot express PickyBPE's token removals (arXiv 2409.04599
 Alg. 1–2) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.1–3.2); SuperBPE moved HumanEval and MBPP pass@10 in
-opposite directions, neither significantly (arXiv 2503.13423 Table 1).
+opposite directions at 8B, neither significantly (arXiv 2503.13423 Table 1).
 
 **Intrinsic measures** (`intrinsic` at `67192ab`, on each arm's tokenized val splits):
 
@@ -227,21 +227,22 @@ vocabulary. **Verdict: not run; sa-bpe kept.** bpe ties sa-bpe in compression (3
 designed); the fused control's harm is documented (the post: MBPP 0.22–0.25 against 0.02–0.17) and sa-bpe holds no
 entry fusing punctuation with a line break; the hybrid compresses 0.2% worse and is untested as a whole, an open idea
 rather than a worse one. Within a vocabulary-construction method corpus token count varies little while
-pre-tokenization and segmentation change accuracy (arXiv 2402.18376 §5.3); GPT-4's and Punct's patterns show no
-significant difference on code at 7B (arXiv 2402.01035 App. E, Table 5; at 1.5B and 32K ids Punct scored higher,
-Table 11). **Limits:** one draw, one vocabulary size; two seeds at d16; the post's evidence is one ~1.27B model with
-128K–131K ids, mostly on MBPP; σ from d8 runs on other data; the control's effect documented up to 50% code; document
-units of non-repository text untested.
+pre-tokenization and segmentation change accuracy (English tasks; arXiv 2402.18376 §5.3). In continued training on
+code, GPT-4's and Punct's patterns show no significant difference for Llama 2 7B at 80K ids (arXiv 2402.01035 App. E,
+Table 5); at 1.5B and 32K ids Punct scored higher (Table 11). **Limits:** one draw, one vocabulary size; two seeds at
+d16; the post's evidence is one ~1.27B model with 128K–131K ids, mostly on MBPP; σ from d8 runs on other data; the
+control's effect documented up to 50% code; document units of non-repository text untested.
 
 ## 3. Architecture
 
 **Output-logit softcap as an experiment (`logit_softcap`, D5).** c·tanh(z/c) with c = 15 against none, in the
 training loss, the evaluation losses and decoding; z-loss the other option. Design: d16 at 20 tokens per parameter on
 the sa-bpe arm's data, 4 paired seeds, adopt iff code bits per byte better by > 0.0047 and MBPP+ parsing not worse;
-~9 GPU-h. The only cap-against-none measurement, modded-nanogpt record #9 (−0.0053 nats), is ≈ 0.0021 bpb at
-3.6–3.7 bytes per token, which this design detects ~14% of the time [arithmetic: one-sided power at the n = 4
-margin, σ = 0.0034]. Verdict: not run; c = 15 adopted on the literature at the fused cap's cost, +0.58% of the 8K
-step, above the 0.3% bar (basis, and why no z-loss: `docs/architecture.md` §2; implementation §3).
+~9 GPU-h. Modded-nanogpt record #9 added a cap of 30 against none (one run each: val loss 3.2844 → 3.2791,
+−0.0053 nats per token); carried to 3.6–3.7 bytes per token that is ≈ 0.0021 bpb [estimate], which this design
+detects ~14% of the time [arithmetic: one-sided power at the n = 4 margin, σ = 0.0034]. Verdict: not run; c = 15
+adopted on the literature at the fused cap's cost, +0.58% of the 8K step, above the 0.3% bar (basis, and why no
+z-loss: `docs/architecture.md` §2; implementation §3).
 
 **Grouped-query attention.** 2:1 query:KV heads at d16 (4 query, 2 KV heads; seed 0) against the optimizer screen's
 MHA baselines (§4): last-200 train loss 1.3358 against 1.3244 (s0) / 1.3168 (s1); code bpb 8K / 32K 0.4435 / 0.4254
@@ -250,8 +251,8 @@ against 0.4394 / 0.4212 (s1 0.4380 / 0.4196); all bpb 0.5263 / 0.5132 against 0.
 [unverified: no record]. Verdict: rejected, loss and bpb worse beyond the seed spread; not committed. All arms ran at
 the law's lr (× 1), not the earlier recipe's base × 2.797 [inference: the screen's baselines; §4]. The code keeps MHA
 with the KV-cache arithmetic of `docs/architecture.md` §2. Other attention levers ranked with it (more local layers,
-attention sinks, gated attention) were not run; full-efficiency short windows in the literature align the window to
-tiles, an architecture change (§5, window attention).
+attention sinks, gated attention) were not run; tile-aligned short windows (as modded-nanogpt record #16's block
+sliding window) would change the architecture [inference] (§5, window attention).
 
 **Block Attention Residuals** (arXiv 2603.15031 §3.2): Block AttnRes matches a baseline trained with 1.25× more compute
 (Abstract); at 194M activated parameters its validation loss is 1.909 against the baseline's 1.931 (§5.1 Table 2;
@@ -259,8 +260,8 @@ tiles, an architecture change (§5, window attention).
 
 **Partial key offset** (modded-nanogpt record #49). Not adopted for the same reason [inference]. Not run.
 
-**Multi-token prediction.** Reported to hurt models of this size on code benchmarks (arXiv 2404.19737 Fig. 3). Not
-adopted.
+**Multi-token prediction.** At 0.3B and 0.6B, 4-token prediction scores below next-token prediction on MBPP and
+HumanEval (code models of 0.3B–13B; arXiv 2404.19737 §3.1 Fig. 3, Table S7); d24 has 0.52B parameters. Not adopted.
 
 ## 4. Optimization
 
@@ -282,17 +283,17 @@ parsing worse (7 problems parse more under it, 119 under the baseline; recompute
 `mbpp_plus` `outcomes`). τ×½ seed 0 trained with autograd kept on the step's statistics in `train/diagnostics.py`
 (fixed in `acb1e5e`, from seed 1 on): its throughput and peak memory are not comparable; that the update was
 unchanged is [inference] (statistics only). Verdict: stopped after 3 of 12 runs; the τ law stays for Muon (basis
-`docs/training.md` §3). Specific to this experiment: halving or doubling lr or weight decay does equal or worse
-(arXiv 2512.05620 App. H.3); doubling Muon's weight decay (0.1 → 0.2) costs 0.009–0.020 loss (arXiv 2509.02046 App.
-C.9 Tables 82–87), ≈ 0.0035–0.008 bpb [arithmetic at 3.62 bytes per token], at or below the margin; a d8 point at 200
-is the small-proxy transfer the nanochat sweep warns against (§1).
+`docs/training.md` §3). Specific to this experiment: halving or doubling lr or weight decay from that paper's
+transferred values does equal or worse (arXiv 2512.05620 App. H.3, Fig. 11); doubling Muon's weight decay (0.1 → 0.2)
+costs 0.009–0.020 loss at 130M–520M (arXiv 2509.02046 App. C.9 Tables 82–87), ≈ 0.0035–0.008 bpb [arithmetic at
+3.62 bytes per token], at or below the margin; a d8 point at 200 is the small-proxy transfer the nanochat sweep warns
+against (§1).
 
 **AdamW group learning rate (`adamw_group_lr`, D6).** The AdamW groups (the tables `embed_tokens`, `lm_head`, value
 embeddings, weight-decayed; the 1-D parameters, not) × ¼ and × 4 with weight decay ÷ the same factor (the tables'
 decay timescale held), Muon untouched; karpathy/nanochat 92d63d4 uses per-group lrs. Design: {¼, 1, 4} × seeds 0, 1,
 d16 on the sa-bpe arm's data at its `max_tokens_per_param`; the 3-point vertex, adopted iff its end beat × 1 (margin
-0.0067); ~4 GPU-h. Verdict: not run; one lr for every group, as Moonlight shares lr and weight decay "among matrix and
-non-matrix parameters" (arXiv 2502.16982 §2.2; `docs/training.md` §3).
+0.0067); ~4 GPU-h. Verdict: not run; one lr for every group (basis: `docs/training.md` §3).
 
 **Scalar learning rates (`scalar_learning_rates`, D6).** `x0_lambdas` and `resid_lambdas` (1-D, AdamW) at
 karpathy/nanochat 92d63d4's lrs, 0.5 and 0.005 × √(B/2^19) (0.375 and 0.00375 at 294,912 tokens per step), every other
@@ -314,8 +315,9 @@ base s1: paired Δ +0.0008 over the last half (22/22 windows positive), code 0.4
 against an additive prediction of −0.0048. Verdict: dropped; NorMuon alone adopted (`docs/training.md` §3).
 
 **Cautious weight decay** (arXiv 2510.12402). Same screen: lower loss mid-run (−0.022 near 50%), worse at the end
-(last-200 +0.0108, code bpb +0.0023 / +0.0043), −1.25% tok/s [unverified: no record]. Verdict: rejected (the paper
-finds the loss-minimizing λ essentially unchanged under it, Fig. 1).
+(last-200 +0.0108, code bpb +0.0023 / +0.0043), −1.25% tok/s [unverified: no record]. Verdict: rejected. The paper
+finds the loss-minimizing λ essentially unchanged under it (338M on C4, Fig. 1), so the baseline's λ suits it; the
+lower final loss it reports there did not reproduce in this one-seed screen.
 
 ## 5. Kernels and systems
 
@@ -333,8 +335,9 @@ power cap (TE held higher SM clocks, 1,681–1,750 against 1,521 MHz at ~660 W);
 separate cast passes and the transposed FP8 copies Hopper's FP8 weight-gradient GEMMs need, which at K = 768 outweigh
 the faster GEMMs; +8–10 GB from TE saving the bf16 fc1 output and FP8 transposes; likely lost Inductor fusion
 [inference]. (d) cuTile 1.7.0 on sm_90: a naive FP8 GEMM 361–666 TFLOP/s against cuBLAS FP8 856–1,334 on the d24
-shapes. DeepGEMM's README requires FP8 casts fused into the producing kernels, which these were not. Verdict: FP8 does
-not pay at this size; training is bf16 (`docs/architecture.md` §4). [unverified: no record for (a)–(d)]
+shapes. DeepGEMM's README leaves FP8 casts to the user, to fuse into prior kernels; these casts were unfused.
+Verdict: FP8 does not pay at this size; training is bf16 (`docs/architecture.md` §4). [unverified: no record for
+(a)–(d)]
 
 **Two runs on one GPU.** d16, 150 steps: one run 808.7K tok/s; two time-sliced processes 743.9K together (−8.0%); two
 MPS clients 825.0K (+2.0%). Under MPS an illegal memory access in one client kills every client (a device-side assert
@@ -353,9 +356,10 @@ FA4 on real d24 segments, ms per call at 8K (32K): window forward 0.369 (0.364) 
 0.359 (0.355); forward with QK-norm + RoPE fused 0.985 (1.029) against prologue + forward 0.546 (0.556), each K block
 transformed ~5 times; window backward 1.193 (1.294) against FA4 0.771 (0.828); a prologue backward reading FA4's fp32 dq
 accumulator 0.823 against 0.405 for the dq post-process plus the plain prologue backward, so the combined op is
-−0.90% at 8K. PDL in the qk prologue +0.02%. FA3 not pursued. FlashMLA fuses Q-norm + RoPE into attention (Blackwell),
-the evidence that motivated the fused forward. FA4's software exp2 polynomial in place of the SFU in the capped loss:
-+2.9 to +3.3 ms. Verdict: rejected; FA4 with the persistent window forward and the separate qk prologue
+−0.90% at 8K. PDL in the qk prologue +0.02%. FA3 not pursued. FlashMLA's sm100 `fused_norm_rope_attn_rope_cast`
+fuses Q-norm and RoPE into attention (its README), the evidence that motivated the fused forward. FA4's software exp2
+polynomial (`flash_attn/cute/utils.py` `ex2_emulation`) in place of the SFU in the capped loss: +2.9 to +3.3 ms.
+Verdict: rejected; FA4 with the persistent window forward and the separate qk prologue
 (`docs/architecture.md` §3). [unverified: no record]
 
 **Window attention (`window-attn` `2bf0e12`).** Real 8K micro-batches: the window forward runs at 332 TFLOP/s true
@@ -373,7 +377,7 @@ per layer and micro-batch, ≤ 66 ms/step by byte arithmetic). A QuACK epilogue 
 Bisect: plain store 544, + aux 660, + v-store predication 649, + per-head rstd 771, + RoPE partner from registers
 1,110 µs: the norm alone spends the budget. Two TMA-staged tables in one QuACK epilogue deadlock the GEMM. Verdict:
 rejected; the qk prologue stays (`docs/architecture.md` §3). Separately, the qk prologue runs at 3.36 / 3.3 TB/s
-forward / backward (~7% headroom), so TileKernels' prologue design was not ported.
+forward / backward (~7% headroom), so TileKernels' RoPE kernel (`transform/rope_kernel.py`) was not ported.
 
 **Residual mix + norm in the down-projection epilogue (`mlp-out-mix` `c165408`, `mlp-out-mix-land` `76e32e8`,
 `mlp-out-mix-v2` `ce30108`).** Ceiling ≤ 58 ms/step (floor 15) by byte arithmetic. Route (a), the row's norm finished
@@ -410,8 +414,9 @@ ms: rejected. Verdict: QuACK and cuBLAS `addmm` (`docs/architecture.md` §3). [u
 
 **Linear cross entropy's strip GEMMs at d24.** The dX (8,192 × 768, K = 2^15) and dW (2^15 × 768, K = 8,192) GEMMs
 of `model/ops/cross_entropy.py` swept over QuACK 0.6.5's SM90 space (`quack/gemm_config.py` `_get_sm90_configs`: tile_N
-128–256, cooperative or pingpong, clusters (2, 1) and (1, 2); tile_M 128 and 256) on one real capped d24 chunk;
-every output bitwise the production config's. dX: production (128, 192, cluster (2, 1)) within noise of the best,
+128–256, cooperative or pingpong, clusters (2, 1) and (1, 2); tile_M 128 and 256, and 192 pingpong at N 128)
+on one real capped d24 chunk; every output bitwise the production config's. dX: production (128, 192, cluster
+(2, 1)) within noise of the best,
 (256, 192, (2, 1)) −2.3% isolated (0.18 ms per micro-batch); dW: (128, 256, (2, 1)) against production (128, 192,
 (1, 2)) −5.5% isolated on random operands, +0.8% on the real chunk, and −0.54 ms (−2.1%) for the whole 98,304-row op
 in 5 alternated rounds; tile_M 256 dW +15–45%. At most ~0.5 ms of a ~269 ms d24 micro-batch (≈ 0.2% [estimate]),
@@ -423,8 +428,8 @@ q/k norm + RoPE in the projection GEMM, RMSNorm in the next GEMM and dW accumula
 ≤ 1% at `a81410c` [estimate] — later superseded: RMSNorm in the GEMM landed as `373b549`, dW accumulation as
 `f499be7`, the preprocess half of the FA4 item as `db1e90e` (their gains: `docs/architecture.md` §3), while
 q/k norm + RoPE in the GEMM lost (`qkv-epi`, above); Liger and Cut Cross-Entropy losses (Cut Cross-Entropy, arXiv
-2411.09009 §5.1 Table 1: loss + gradient 6% slower than torch.compile, its gain memory), fused RMSNorm/RoPE libraries,
-DCP checkpointing. DeepEP does not apply (one GPU, dense model).
+2411.09009 §5.1 Table 1, Gemma 2 2B's 256K vocabulary on an A100: loss + gradient 6% slower than torch.compile, its
+gain memory), fused RMSNorm/RoPE libraries, DCP checkpointing. DeepEP does not apply (one GPU, dense model).
 
 ## 6. Evaluation and inference
 
@@ -545,7 +550,6 @@ pair of one unit scoring 0; ln as in pchizhov/sa-bpe 9fff32d `sabpe/scoring.py`.
 | 2409.04599 | BPE Gets Picky: Efficient Vocabulary Refinement During Tokenizer Training |
 | 2411.09009 | Cut Your Losses in Large-Vocabulary Language Models (Cut Cross-Entropy) |
 | 2412.19437 | DeepSeek-V3 Technical Report |
-| 2502.16982 | Muon is Scalable for LLM Training (Moonlight) |
 | 2503.13423 | SuperBPE: Space Travel for Language Models |
 | 2504.00178 | Boundless Byte Pair Encoding: Breaking the Pre-tokenization Barrier |
 | 2504.09246 | Type-Constrained Code Generation with Language Models |

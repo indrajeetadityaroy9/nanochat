@@ -40,7 +40,7 @@ numbers were recomputed on CPU from the curated shards and the tokenized and pac
 | `ultradata_code_l3_python`, `_cpp` | openbmb/UltraData-Code, L3 | EXERCISE | `content` | 2610.23960 §2.4 |
 | `nemotron_rewriting_python` | nvidia/Nemotron-Pretraining-Code-v2 | SYNTHETIC_FILE | `content` | 2512.20848 §2.2.2 |
 | `nemotron_transpilation_cpp` | nvidia/Nemotron-Pretraining-Code-v2 | SYNTHETIC_FILE | `content` | 2512.20848 §2.2.2 |
-| `codexglue_python` (train split) | google/code_x_glue_ct_code_to_text | FUNCTION | `code` | 2102.04664 |
+| `codexglue_python` (train split) | google/code_x_glue_ct_code_to_text | FUNCTION | `code` | 2102.04664 §3.9 |
 | `ultradata_math_l3_*` (4 formats) | openbmb/UltraData-Math, L3 | TEXT | `content` | 2602.09003 §2.2.4 |
 | `codeforces_cots` | open-r1/codeforces-cots | CONVERSATION | `prompt` + `generation` | |
 | `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks | NOTEBOOK | `text` | 2402.19173 §2.4.2 |
@@ -137,7 +137,8 @@ repaired text is kept with its `id` recomputed, and a file no subset repairs is 
 2. Leading-indentation tabs expand to tab stops of 8 (Python 2 Language Reference §2.1.8).
 3. Every fixer of `fissix.fixes` (2to3), under the recursion limit `RECURSION` = 6,000 (2to3 recurses over the parse
    tree; at Python's default 1,000 it fails on 800 nested blocks, at 6,000 not on 1,600; `ast.parse`'s depth limits
-   are CPython's own, its result unchanged from limit 1,000 to 100,000); 2to3 adds a missing final line end.
+   are CPython's own, its result unchanged from limit 1,000 to 100,000); `two_to_three` adds a missing final line end
+   before 2to3.
 
 **Exact deduplication.** One row per `id` over every source (before the split), the first in `SOURCES` order, then
 file and row (`curate.duplicates`); every empty text is dropped with the copies.
@@ -277,9 +278,9 @@ The build (§10) therefore pulls the shipped tokenizer, and tokenize and pack re
   `SPECIAL_TOKENS`: `<|bos|>` (id 32,764) and the FIM sentinels `<｜fim▁begin｜>`, `<｜fim▁hole｜>`, `<｜fim▁end｜>`
   (32,765–32,767; the names of DeepSeek-Coder's released tokenizer, `deepseek-ai/deepseek-coder-6.7b-base`
   `tokenizer.json`; the paper writes `<|fim_start|>`, `<|fim_hole|>`, `<|fim_end|>`, arXiv 2401.14196 §3.1.2).
-  SA-BPE's models use 32,768 ids (arXiv 2604.14053 App. B, Table 5); DeepSeek-Coder uses 32,000 (arXiv 2401.14196
-  §3.2); StarCoder2 found that "increasing the vocabulary size to 100K did not improve performance" (arXiv 2402.19173
-  §6.2); Dagan et al. measured HumanEval pass@1 20.52–20.84 from 32K to 256K at 1.5B, not monotone in the size (arXiv
+  SA-BPE's models use 32,768 ids (arXiv 2604.14053 App. B, Table 5); StarCoder2 found that "increasing the vocabulary
+  size to 100K did not improve performance" (arXiv 2402.19173 §6.2); Dagan et al. measured HumanEval pass@1
+  20.52–20.84 from 32K to 256K on an NL-pretrained 1.5B model given each tokenizer, not monotone in the size (arXiv
   2402.01035 §3.2, Table 3).
 - **Trainer** (`crate/train.rs` `train`, called by `train_tokenizer.main`): byte-level BPE within the chunks of the
   split pattern, each merge the pair of highest F·ln R (SA-BPE's F·log R, arXiv 2604.14053 §4.1, ln natural as in its
@@ -301,8 +302,9 @@ The build (§10) therefore pulls the shipped tokenizer, and tokenize and pack re
   (`train_tokenizer.SAMPLE_BYTES`, §11).
   Codeforces-CoTs (32K stage only) is not sampled. Tokenizer training data should be "representative of
   model training data" (arXiv 2405.05417 §5); across tokenizer training mixes a subset's compression "only varies by 5
-  to 6 percentage points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); proportional weights gave lower
-  FLORES+ bits per byte than equal ones (arXiv 2610.12144 App. D Table 6, §5.2).
+  to 6 percentage points", higher as the mix holds more of it (arXiv 2402.01035 §2.3); across 30 languages, weights
+  proportional to each language's data gave lower FLORES+ bits per byte than equal ones (arXiv 2610.12144 §5.2, App. D
+  Table 6).
 - **Authorship units** (SA-BPE's R): the lowercased repository for repository files and functions (SA-BPE's unit);
   every other document its own unit (arXiv 2604.14053 §6 suggests "documents, books, or document collections" for
   natural language, untested there).
@@ -430,15 +432,16 @@ on master; no supply corpus overdraws).
 
 - **Code 87%, text and mathematics 13%** (`CODE_SHARE`): DeepSeek-Coder's "87% source code, 10% English code-related
   natural language corpus, and 3% code-unrelated Chinese natural language corpus" (arXiv 2401.14196 §2), its natural
-  language taken to cover web text (10%) and mathematics (3%) [inference]. Qwen2.5-Coder uses code:text:math 70:20:10
-  (arXiv 2409.12186 §3.1.2).
+  language taken to cover web text (10%) and mathematics (3%) [inference]. Qwen2.5-Coder's 7B comparison found
+  code:text:math 70:20:10 above 85:10:5 and 100:0:0, and uses it (arXiv 2409.12186 §3.1.2, Table 3).
 - **Synthetic code 30% of code** [inference for code]: good mixtures' share of rephrased synthetic data, "converging
   to ∼30% for rephrased synthetic data" (Kang et al., arXiv 2510.01631 §1), measured on web text; its Limitations say
   the findings "may not directly apply to other generation methods (e.g., synthetic code, dialogues)". Code papers
   only bound the share: 10% synthetic code helps in code-only pretraining from scratch (arXiv 2408.10914 §3.4);
   UltraData-Code L2 with its synthetic L3 at 1:1 helps in continued pretraining (arXiv 2610.23960 Table 6; with
-  CodeAlchemy's code-qa set instead, EvalPlus falls below L2 alone); rewritten-only code drops MBPP to 5.6 against
-  58.7 for raw code and a 50-50 mix keeps 60.3 (arXiv 2606.10087 §3, RQ1, Table 4). The share is not ablated. The
+  CodeAlchemy's code-qa set instead, EvalPlus falls below L2 alone); annealing a base model on 100B tokens,
+  rewritten-only code drops MBPP to 5.6 against 58.7 for raw code and a 50-50 mix keeps 60.3 (arXiv 2606.10087 §3,
+  RQ1, Table 4). The share is not ablated. The
   curated synthetic sources hold up to 0.30 × 1.092 ≈ 0.328 of code (§1) [arithmetic]; the file stage's repository
   partitions hold 2.05× their draw at 0.30 and 1.43× at 0 (118.11B tokens; computed on master).
 - **The 32K stage keeps text and mathematics:** OpenCoder's anneal keeps "84% of the annealing data" from "the original
@@ -484,8 +487,8 @@ container: module, block, translation unit, compound statement, declaration list
 `layout.grammar`), else after its last line-ending token, else before its last token that starts a character. A piece
 drawn as a FIM example fits its row with its BOS, the example and the target BOS: its window first leaves room for the
 three sentinels and shrinks by any excess of the built example. Each piece is its own attention segment (document
-masking: IntraDoc lowers perplexity over UniChunk, arXiv 2402.13991 §3.2). A shard's documents are cut in parallel
-(rayon), longest first.
+masking: IntraDoc lowers perplexity over UniChunk, arXiv 2402.13991 §3.2, Table 1). A shard's documents are cut in
+parallel (rayon), longest first.
 
 **Worker stack** (`crate/lib.rs` `nanochat_crate`): rayon's global pool takes the process's `RLIMIT_STACK` soft limit
 (64 MiB under `scripts/container.sh`'s `--ulimit stack=67108864:-1`), not std's 2 MiB: a worker waiting in a join runs
@@ -515,11 +518,11 @@ files (arXiv 2402.19173 §5.1) [arithmetic].
 | SPM, else PSM | 0.5 | [2]; AST-FIM's "50% PSM and 50% SPM", untested there (arXiv 2506.00204 §5.1) |
 
 [1] DeepSeek-Coder chose 0.5 (document level, PSM only), as a 100% rate gave its weakest code completion (arXiv
-2401.14196 §3.1.2); Code Llama applies FIM at 0.9, half PSM and half SPM, to documents not cut across contexts (arXiv
-2308.12950 §2.3); FIM rates up to 0.9 cost no left-to-right performance (arXiv 2207.14255 §4.2), and "context-level
+2401.14196 §3.1.2); FIM rates up to 0.9 cost no left-to-right performance (arXiv 2207.14255 §4.2), and "context-level
 FIM yields a consistent and significant improvement over document-level FIM" (§4.4); at rate 0.7 AST-FIM kept
-HumanEval+ and MBPP+ "nearly identical to the baseline L2R model" (arXiv 2506.00204 §6.1). No paper covers FIM over
-whole multi-file repository texts, as in the 32K stage. [2] Joint PSM/SPM training matches or beats either mode alone
+HumanEval+ and MBPP+ "nearly identical to the baseline L2R model" (arXiv 2506.00204 §6.1). No cited paper measures
+FIM over whole multi-file repository texts, as in the 32K stage (Qwen2.5-Coder applies repo-level FIM unablated, arXiv
+2409.12186 §3.2.2). [2] Joint PSM/SPM training matches or beats either mode alone
 in Bavarian et al.'s one controlled comparison, except a near-tie (SPM single-line 0.622 joint vs 0.625 PSM-only),
 and a pure-SPM model cannot infill in PSM (arXiv 2207.14255 §3.1, §4.3 Table 1); §8.1 recommends joint training.
 [3] An AST node starts after its indentation and ends before its line break, so without the rule no AST-FIM PSM
@@ -668,7 +671,7 @@ standardized and checked files before rebuilding.
   measured [inference]: a worker holds at least three copies of its partition (the read table, its sorted copy, the
   contents as Python strings for `topological_sort`). It sets the worker count only, not the output.
 - `shard_documents`: `ntile(SPLIT) OVER (ORDER BY id)` over train rows. `database()` turns off
-  `preserve_insertion_order` (DuckDB documentation, Guides, Troubleshooting, "Out of Memory Errors", the guide of
+  `preserve_insertion_order` (DuckDB 2.0 documentation, Guides, Performance, "Out-of-Memory Issues", the guide of
   `parallel.MEMORY`). `RECURSION` and `SAMPLE_ROWS` are the settings the published dataset was built with.
 
 **`corpus/publish.py`.** `CONTENTS` and `COLUMNS` are the card's account of each folder and column.
@@ -707,8 +710,8 @@ order).
   relative level l (dots, `importlib.util.resolve_name`): base = the file's l-th ancestor (`Path::ancestors`; above
   the root no file), target = base/m, exact paths `target.py` (with a module m), `target/__init__.py`, per name
   `target/n.py`, `target/n/__init__.py`.
-- `cpp`: a quoted include is searched first in the including file's directory as GCC and Clang do; `cleaned` (Pike's
-  cleanname) rejects a leading `..`.
+- `cpp`: a quoted include is searched first in the including file's directory as GCC and Clang do; `cleaned` (Plan 9's
+  `cleanname`, as `path-clean` ports it) rejects a leading `..`.
 - `topological_sort`: every import node of a tree is used, also of a tree with syntax errors (error recovery keeps the
   nodes it parsed); a file's dependencies exclude itself, sorted and deduplicated.
 
@@ -785,7 +788,7 @@ sources in both stages); `IN_PART` groups read the same fraction of each source 
 
 **`corpus/parallel.py`.** Workers are spawned (no inherited threads or state). `memory` reads the container's cgroup v2
 `memory.max` (the GH200 host mounts cgroup v2); `max` means no limit. `MEMORY` is half of it, as DuckDB's guide
-("Out of Memory Errors") advises a `memory_limit` of 50–60% because some operations bypass its buffer manager.
+("Out-of-Memory Issues") advises a `memory_limit` of 50–60% because some operations bypass its buffer manager.
 `ordered` keeps at most `window` tasks outstanding and yields results in task order.
 
 ## References
@@ -793,24 +796,23 @@ sources in both stages); `IN_PART` groups read the same fraction of each source 
 | arXiv | Work | § |
 |---|---|---|
 | 2102.04664 | CodeXGLUE | 1 |
-| 2205.10487 | Hernandez et al., repeated data | 7 |
-| 2207.14255 | Bavarian et al., fill-in-the-middle | 8 |
-| 2308.12950 | Code Llama | 8 |
+| 2205.10487 | Hernandez et al., Scaling Laws and Interpretability of Learning from Repeated Data | 7 |
+| 2207.14255 | Bavarian et al., Efficient Training of Language Models to Fill in the Middle | 8 |
 | 2401.14196 | DeepSeek-Coder | 3, 5, 6, 7, 8 |
-| 2402.01035 | Dagan et al., tokenizers for code | 1, 5 |
-| 2402.13991 | Zhao et al., sequence composition | 8 |
-| 2402.19173 | StarCoder2 | 1, 5, 8 |
-| 2404.10830 | Ding et al., Best-Fit packing | 8 |
-| 2405.05417 | Land and Bartolo, under-trained tokens ("Fishing for Magikarp") | 5 |
-| 2408.10914 | Aryabumi et al., code in pretraining | 7 |
-| 2409.12186 | Qwen2.5-Coder | 3, 7 |
+| 2402.01035 | Dagan et al., Getting the most out of your tokenizer for pre-training and domain adaptation | 1, 5 |
+| 2402.13991 | Zhao et al., Analysing the Impact of Sequence Composition on Language Model Pre-Training | 8 |
+| 2402.19173 | StarCoder2 and The Stack v2 | 1, 5, 8 |
+| 2404.10830 | Ding et al., Fewer Truncations Improve Language Modeling | 8 |
+| 2405.05417 | Land and Bartolo, Fishing for Magikarp (under-trained tokens) | 5 |
+| 2408.10914 | Aryabumi et al., To Code, or Not To Code? Exploring Impact of Code in Pre-training | 7 |
+| 2409.12186 | Qwen2.5-Coder | 3, 7, 8 |
 | 2411.04905 | OpenCoder | 7 |
 | 2502.02737 | SmolLM2 (Stack-Edu) | 1 |
 | 2506.00204 | AST-FIM | 8, 11 |
-| 2510.01631 | Kang et al., rephrased synthetic data | 7 |
+| 2510.01631 | Kang et al., Demystifying Synthetic Data in LLM Pre-training | 7 |
 | 2512.20848 | Nemotron 3 Nano (Nemotron-Pretraining-Code-v2) | 1 |
-| 2602.09003 | UltraData-Math | 1 |
-| 2604.14053 | SA-BPE | 5 |
+| 2602.09003 | Data Science and Technology Towards AGI Part I: Tiered Data Management (UltraData-Math) | 1 |
+| 2604.14053 | Chizhov et al., From Where Words Come (SA-BPE) | 5 |
 | 2606.10087 | CodeAlchemy | 7 |
 | 2610.12144 | Language-specific effects of tokenizer choice | 5 |
 | 2610.23960 | UltraData-Code | 1, 7 |

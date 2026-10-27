@@ -18,7 +18,7 @@ NORMUON_BETA2, NORMUON_EPS = 0.95, 1e-10
 
 def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float:
     """Weight decay whose EMA timescale 1 / (lr wd) is tau* = TAU_C TPP^TAU_E of the run's steps (Power Lines,
-    arXiv 2505.13738 Finding 3; arXiv 2405.13698)."""
+    arXiv 2505.13738 Finding 3)."""
     return 1 / (lr * TAU_C * tokens_per_param ** TAU_E * steps)
 
 

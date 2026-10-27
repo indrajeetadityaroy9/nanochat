@@ -17,7 +17,7 @@ def memory() -> int:
     return physical if text == "max" else min(physical, int(text))
 
 
-# Half: DuckDB documentation, Guides, Troubleshooting, "Out of Memory Errors" (some operations bypass its limit)
+# Half: DuckDB documentation, Guides, Performance, "Out-of-Memory Issues" (some operations bypass its limit)
 MEMORY = memory() // 2
 
 
