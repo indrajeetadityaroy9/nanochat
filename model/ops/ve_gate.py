@@ -16,7 +16,7 @@ def ve_forward(n: Tensor, v: Tensor, input_ids: Tensor, table: Tensor, w: Tensor
     out, gate = v.new_empty(v.shape), v.new_empty((input_ids.numel(), w.size(0)), dtype=torch.float32)
     cuda_library("ve_gate").ve_forward(pointer(n), pointer(v), ctypes.c_longlong(v.stride(1)), pointer(input_ids),
                                        pointer(table), pointer(w), pointer(out), pointer(gate),
-                                       ctypes.c_longlong(input_ids.numel()), w.size(0), stream())
+                                       ctypes.c_longlong(input_ids.numel()), stream())
     return out, gate
 
 
@@ -29,5 +29,5 @@ def ve_backward(dv: Tensor, n: Tensor, ids: Tensor, order: Tensor, table: Tensor
     dn, dz = torch.empty_like(n), torch.empty_like(gate, dtype=torch.bfloat16)
     cuda_library("ve_gate").ve_backward(pointer(dv), ctypes.c_longlong(dv.stride(1)), pointer(ids), pointer(order),
                                         pointer(table), pointer(w), pointer(gate), pointer(dn), pointer(table.grad),
-                                        pointer(dz), ctypes.c_longlong(ids.numel()), w.size(0), stream())
+                                        pointer(dz), ctypes.c_longlong(ids.numel()), stream())
     return dn, torch.mm(dz.t(), n.view(-1, n.size(-1)), out_dtype=w.dtype)

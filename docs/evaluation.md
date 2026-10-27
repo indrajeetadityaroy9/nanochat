@@ -1,8 +1,8 @@
 # Evaluation and inference
 
 How a checkpoint is scored (likelihoods, the parse measure, the code benchmarks), every metric and error bar the
-repository computes (`metrics.py`), the decoder that generates every completion, the syntax constraint and checks of
-the filtered mode, and the export through which transformers, vLLM and the benchmarks' own harnesses run the model.
+repository computes (`metrics.py`), the decoder that generates every completion, and the syntax constraint and checks
+of the filtered mode; §8 records the export and cross-check tools that ran the model elsewhere (removed at `67192ab`).
 The code is the specification; each statement names the file and symbol that define it.
 
 Markers: [arithmetic] derived from code numbers; [inference] reasoning, not measured; [estimate]; [unverified] a
@@ -13,26 +13,24 @@ setting; "d16 checkpoint" is a 20-tokens-per-parameter d16 run's final checkpoin
 
 | File | Section |
 |---|---|
-| `eval/suite.py` (`evaluate`, `write_evaluation`, `read_evaluation`, `samples_path`, `record`, `evaluation_path`), `eval/rescore.py` (`rescore`, `differences`) | §1 |
-| `eval/bpb.py` (`likelihood`, `val_bits`, `pooled`, `solution_bits`, `sums`, `sample_rows`) | §2 |
-| `eval/code_eval.py` (`tasks`, `parse_generation`, `generation`, `fim_generation`, `filtered_generation`, `vetted`, `codegen_scoring`, `codegen_scores`, `parse_scores`, `reference_lines`, evaluator wrappers) | §1, §3, §4 |
+| `eval/suite.py` (`evaluate`, `write_evaluation`, `record`, `evaluation_path`, `pin`, `resolved`) | §1 |
+| `eval/bpb.py` (`likelihood`, `val_bits`, `solution_bits`, `sums`, `sample_rows`) | §2 |
+| `eval/code_eval.py` (`tasks`, `parse_generation`, `generation`, `fim_generation`, `filtered_generation`, `vetted`, `codegen_runs`, `codegen_record`, `parse_record`, `fim_runs`, evaluator wrappers) | §1, §3, §4 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function) | §5 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `fim_prompt`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
 | `inference/syntax_constraint.py`; `inference/syntax/` (`lib.rs`, `lexer.rs`, `parser.rs`, `vocab.rs`, `python.lark`, `Cargo.toml`, `Cargo.lock`) | §7 |
-| `inference/export_hf.py`, `inference/modeling_nanochat.py`, `scripts/standard_eval.sh` | §8 |
 | `eval/__init__.py`, `inference/__init__.py` (empty package markers) | — |
 
 ## 1. Protocol
 
-`eval/suite.py` `evaluate(tokenizer, run_name=, step=, generate=, previous=)` loads the checkpoint onto the GPU and
-writes `RUNS/<run>/eval-<step>.json`: the likelihood metrics (`"8k"`, `"32k"`, `"solution"`, §2), the parse measure
-(`"parse"`, §3) and, with `generate="benchmarks"`, the generation benchmarks (`"codegen"`, `"fim"`, §4); with
-`generate="parse"` both are null.
+`eval/suite.py` `evaluate(tokenizer, run_name=, step=, generate=, previous=, released=)` loads the checkpoint onto the
+GPU and writes `RUNS/<run>/eval-<step>.json`: the likelihood metrics (`"8k"`, `"32k"`, `"solution"`, §2), the parse
+measure (`"parse"`, §3) and, with `generate="benchmarks"`, the generation benchmarks (`"codegen"`, `"fim"`, §4); with
+`generate="parse"` both are null. Its affinity split (`verify.cores`) needs more than `DECODE_CORES` = 16 cores.
 Every completion scored is stored: in the record, except the sampled mode's (20 per problem, §4), which
 `write_evaluation` moves to the sidecar `eval-<step>.samples.json.gz` (gzip JSON, `{benchmark: each task's
-completions}` in task order), named with its sha256 in the record's `"samples"` (null without benchmarks);
-`read_evaluation` restores them.
+completions}` in task order), named with its sha256 in the record's `"samples"` (null without benchmarks).
 The base model's checkpoints are evaluated with `"benchmarks"`, ablation runs with `"parse"` (which checkpoints and
 when: `docs/training.md` §6). `record(run_name, log)` gathers a run's non-train log records and its evaluations in
 step order, the unit of `results/<experiment>.jsonl` (`docs/training.md` §6).
@@ -72,28 +70,14 @@ pipelining (`a41415e`) took the full benchmarks evaluation from 1,472 to 1,064 s
 scoring with no GPU work 483 → 8.4 s, 0 per-sample changes where the protocol was unchanged; with the decoder of
 `4385748` (§6), 862 s.
 
-**Scorer replay** (`python -m eval.rescore <eval-json> [--out <path>]`, the nanochat image without a GPU) replays the
-scorers and checkers on a record's stored completions, sampled ones included; it does not replay the evaluation.
-Every scorer reruns (EvalPlus base and plus, MultiPL-E's judge, the infilling checks, parse outcomes, the filtered
-mode's verdicts) through the code `evaluate` uses (`code_eval.codegen_scoring`, `codegen_scores`, `parse_scores`,
-`infilling`, `filtered_record`, `vetted`, `verify.verdicts` on the timed-check cores, `bpb.pooled`), against an empty
-`VerdictCache` of its own (a temporary database), so no verdict is read from `paths.VERDICTS`; the replay is compared
-with the record field by field, written with `write_evaluation` to `--out`, and the command exits 1 if any field
-differs. A filtered record's chosen completion is the accepted candidate, else the greedy one, which the search tried
-first and rejected, so its verdict replays the stored `"accepted"`. Copied from the record, as they need the model or
-the packed corpus, and so not validated by an equal replay: the likelihood sums and sample weights (`"corpora"`,
-`"weights"`, `"solution"`; `"bpb"`, `"errors"` and `"offset_bpb"` are recomputed), the searches' `"attempts"` and
-every `"latency"`. Timed checks can differ under heavy CPU load (above). A change to the evaluation is therefore
-validated in two parts, both required: the canonical
-comparison of a new record with a reference record of the same checkpoint covers every model-derived field
-(generations, attempts, likelihoods, solution bits; latency excluded), and `eval.rescore` on the new record and its
-sidecar (exit 0) covers the scorers and checkers on its stored completions. On a d24 `eval-3307.json` of base
-`c053bdc`, its 22,000 sampled completions synthesized from the stored greedy, filtered and parse ones (no stored
-record held sampled completions), 0 fields differed and the sidecars' sha256 matched: in 449 s on cores 32–63 with
-the replay code of base `c053bdc`, and again with the merged sharded, timed-core checkers and an empty verdict cache
-(untimed: the CPU was shared). The sidecar adds
-0.22 MB there (≤ 1.5 MB [estimate] for 22,000 distinct samples, as gzip compresses the greedy completions) beside the
-25.3 MB record, whose size does not change.
+**Validation of a change.** The canonical comparison of a new record with a reference record of the same checkpoint
+covers every model-derived field (generations, attempts, likelihoods, solution bits; latency excluded). A CPU scorer
+replay, `eval/rescore.py` (removed at `67192ab`), reran every scorer and checker (EvalPlus base and plus, MultiPL-E's
+judge, the infilling checks, parse outcomes, the filtered mode's verdicts) on a record's stored completions against an
+empty verdict cache and compared field by field; on a d24 `eval-3307.json` of base `c053bdc`, its 22,000 sampled
+completions synthesized from the stored greedy, filtered and parse ones, 0 fields differed and the sidecars' sha256
+matched (449 s on cores 32–63). The sidecar adds 0.22 MB there (≤ 1.5 MB [estimate] for 22,000 distinct samples, as
+gzip compresses the greedy completions) beside the 25.3 MB record, whose size does not change.
 
 ## 2. Likelihood metrics
 
@@ -191,8 +175,8 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
 
 ## 5. Metrics and statistics
 
-`metrics.py` is the repository's one source of metrics, torch-free so training, evaluation and analyses import it
-alike; `eval.rescore` recomputes a record's aggregates with the same functions (§1). Every public function:
+`metrics.py` is the repository's one source of metrics, torch-free so training, evaluation and the experiment records
+import it alike. Every public function:
 
 | Function | Computes | Source definition; library |
 |---|---|---|
@@ -413,29 +397,25 @@ Mbpp/630's reference fails as EvalPlus scores it (sanitize drops its helper).
 
 ## 8. Export, vLLM and the standard-protocol cross-check
 
-**Export** (`python -m inference.export_hf <checkpoint.pt> <dir>`, nanochat image; a model trained with the corpus
-tokenizer, `corpus.tokenizer.TOKENIZER`) writes a Hugging Face directory:
+The model ran outside `NativeDecoder` through three tools, removed at `67192ab` (validation tools, not on the
+reproduction path; paths and symbols below are that commit's):
 
-- `model.safetensors`: matrices and tables bf16; `_keep_in_fp32_modules_strict` (the per-dim and per-layer vectors,
-  the value-embedding gates) fp32;
-- `config.json`: `model_type` "nanochat", `auto_map` to `modeling_nanochat.py` (copied beside it); the per-layer
-  windows as Gemma 3's `layer_types` + `sliding_window` = 513 (FA4's `window_left` + 1: 512 keys before the query
-  and its own); `value_embedding_layers`; `final_logit_softcapping`; `rms_norm_eps` = FLT_EPSILON;
-- `generation_config.json`: BOS ends a generation (a document's and a FIM middle's end in training);
-- `tokenizer.json`: transformers' `TikTokenConverter` of the tiktoken ranks and split pattern, special tokens in
-  `SPECIAL_TOKENS` order (the same ids, `docs/corpus.md` §5), BOS prepended.
-
-**Model file** (`inference/modeling_nanochat.py`, torch and transformers only): the model for transformers
-(`AutoModelForCausalLM.from_pretrained(<dir>, trust_remote_code=True)`) and for vLLM's Transformers backend (`vllm
-serve <dir> --trust-remote-code`, `LLM(<dir>, trust_remote_code=True)`: paged attention with per-layer sliding windows,
-CUDA graphs, torch.compile, `_keep_in_fp32_modules_strict` honored). Layout as transformers' Qwen3; no architectural
-change was needed. The model's own pieces are PyTorch expressions at the training kernels' precision: q/k RMS norm,
-fp32 gain and rotation by −θ with fp64-computed fp32 tables (transformers' and vLLM's rotary embeddings rotate by +θ,
-so neither is used), the value embeddings (they read `input_ids` in every layer), the residual mix in fp32
-(`docs/architecture.md` §1, §4), and the head as the evaluation computes it (fp32 output, the cap in fp32; vLLM via
-`config.json`'s `head_dtype`); the MLP and the residual additions stay bf16. vLLM runs in its own image
-(`vllm/vllm-openai:v0.32.0` at a pinned digest, `scripts/standard_eval.sh`), which the NGC-based nanochat image cannot
-hold.
+- **Export** (`inference/export_hf.py`): a Hugging Face directory of a checkpoint. `model.safetensors` (matrices and
+  tables bf16; the per-dim and per-layer vectors and the value-embedding gates fp32, `_keep_in_fp32_modules_strict`);
+  `config.json` (`model_type` "nanochat", `auto_map` to the model file copied beside it; the per-layer windows as
+  Gemma 3's `layer_types` + `sliding_window` = 513, FA4's `window_left` + 1; `value_embedding_layers`;
+  `final_logit_softcapping`; `rms_norm_eps` = FLT_EPSILON); `generation_config.json` (BOS ends a generation);
+  `tokenizer.json` (transformers' `TikTokenConverter` of the tiktoken ranks and split pattern, special tokens in
+  `SPECIAL_TOKENS` order, `docs/corpus.md` §5, BOS prepended).
+- **Model file** (`inference/modeling_nanochat.py`, torch and transformers only): the model for transformers
+  (`AutoModelForCausalLM`, `trust_remote_code`) and vLLM's Transformers backend (paged attention with per-layer
+  sliding windows, CUDA graphs, torch.compile), in Qwen3's layout, with the training kernels' precision as PyTorch
+  expressions: q/k RMS norm, fp32 gain and rotation by −θ with fp64-computed fp32 tables (both libraries' rotary
+  embeddings rotate by +θ), the value embeddings, the residual mix in fp32 (`docs/architecture.md` §1, §4) and the
+  head's fp32 output and cap (vLLM: `config.json`'s `head_dtype`); the MLP and residual additions bf16. vLLM ran in
+  its own image (`vllm/vllm-openai:v0.32.0` at a pinned digest), which the NGC-based image cannot hold.
+- **Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir>`): the harnesses' own CLIs,
+  unmodified, on the export served by vLLM (below).
 
 **Agreement with the training forward** (a d16 checkpoint at 5 tokens per parameter, step 1,707; 16 val rows of 8K
 from 8 corpora, 130,911 scored tokens; greedy continuations of the 542 HumanEval+/MBPP+ prompts; GH200, `2d49bb1`
@@ -456,15 +436,13 @@ FIM single-line line exact match PSM 0.022, SPM 0.368, against `NativeDecoder`'s
 (`7794e2f`) ran at its rate and, in the same execution mode, gave the same logits (eager: mean KL 4.25·10⁻⁴ on
 HumanEval+ for both) [unverified: no record or commit].
 
-**Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir>`): the
-harnesses' own CLIs, unmodified, on the export served by vLLM: `evalplus.codegen --backend vllm --greedy` on
-HumanEval+ and MBPP+ (direct completion) scored by `evalplus.evaluate`, and MultiPL-E's `automodel_vllm.py` on
-humaneval-cpp and mbpp-cpp (T = 0.2, top-p 0.95, 20 completions) judged by `evaluation/src/main.py` and `pass_k.py`,
-both at the §4 pins. Generation runs on the GPU in vLLM's image into an empty output directory (both harnesses skip
-cached samples), scoring on the CPU in the nanochat image. The protocols as published differ from §4 in prompt
-tokenization (text through `tokenizer.json`), MultiPL-E's budget (`max_model_len` 2,048 and 1,024 new tokens,
-against 1,024 positions in all here) and their samplers. On the d16 checkpoint above (commits as above), EvalPlus's
-CLI gave HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 against this suite's greedy 0.061/0.061 and 0.045/0.037.
+**Standard-protocol cross-check**: `evalplus.codegen --backend vllm --greedy` on HumanEval+ and MBPP+ (direct
+completion) scored by `evalplus.evaluate`, and MultiPL-E's `automodel_vllm.py` on humaneval-cpp and mbpp-cpp
+(T = 0.2, top-p 0.95, 20 completions) judged by `evaluation/src/main.py` and `pass_k.py`, both at the §4 pins. The
+protocols as published differ from §4 in prompt tokenization (text through `tokenizer.json`), MultiPL-E's budget
+(`max_model_len` 2,048 and 1,024 new tokens, against 1,024 positions in all here) and their samplers. On the d16
+checkpoint above (commits as above), EvalPlus's CLI gave HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 against this
+suite's greedy 0.061/0.061 and 0.045/0.037.
 
 ## 9. Validation of the harness
 
@@ -499,7 +477,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 | Kind | Fields |
 |---|---|
-| `run` (each process start) | `step` (first step it trains), `plan` (`schedule.RunPlan`), `config` (`run.py` `RunConfig`; its `seed` sets initialization and data order), `data_key` (`Tokenizer.data_key`; with `plan`, `config` and the stage mixtures, what the stale guard `run.recipe_changed` compares), `model` (`ModelConfig` at the stage of the starting weights: file-level, or the checkpoint's), `num_parameters`, `flops_per_token` (`non_embedding_flops_per_token`, M of arXiv 2401.02954 §3.2 Eq. 2), `model_flops_per_token` (at that stage), `learning_rate` and `weight_decay` (`{"adamw": [per group], "muon": [per group]}` as the optimizers hold them; a resumed process's from its checkpoint), `stage` (`corpus/mixture.py` `Stage` as run, mixture as {corpus: row weight}) |
+| `run` (each process start) | `step` (first step it trains), `plan` (`schedule.RunPlan`), `config` (`run.py` `RunConfig`; initialization and data order from `train/loop.py` `SEED` = 0), `data_key` (`Tokenizer.data_key`), `model` (`ModelConfig` at the stage of the starting weights: file-level, or the checkpoint's), `num_parameters`, `flops_per_token` (`non_embedding_flops_per_token`, M of arXiv 2401.02954 §3.2 Eq. 2), `model_flops_per_token` (at that stage), `learning_rate` and `weight_decay` (`{"adamw": [per group], "muon": [per group]}` as the optimizers hold them; a resumed process's from its checkpoint), `stage` (`corpus/mixture.py` `Stage` as run, mixture as {corpus: row weight}) |
 | `stage` (switch to the repo-level stage) | `step`, `stage`, `model_flops_per_token` (repo-level), `peak_memory_bytes`, `peak_reserved_bytes` (`torch.cuda.max_memory_allocated`/`max_memory_reserved` over the file-level stage; both reset at the switch) |
 | `train` (each optimizer step, 0-based) | `step`; `num_input_tokens_seen` (row positions after it, padding included); `loss` (mean next-token loss in nats over valid labels, fp64); `learning_rate` (LambdaLR's); `grad_norm` (global L2 before clipping, arXiv 1211.5063 §3.2: the L2 norm of the step's per-tensor norms in the diagnostics sidecar, `docs/training.md` §6); `step_seconds` (device time between CUDA events at the previous step's end and its own; `train/loop.py` reads a step's values one step late); `tokens_per_second` (row positions / `step_seconds`); `model_flops` (`executed_model_flops` of the step's micro-batches); `mfu`; `train/diagnostics.py`'s `max_logsumexp`, `mean_square_logsumexp` (logits' logsumexp over valid positions: maximum and mean square, PaLM's z-loss quantity, arXiv 2204.02311 §5), `qk_norm_gain_max` (the largest of the sidecar's per-layer q and k gain ‖g‖∞), `corpus_loss` ({corpus: mean loss of its rows}); every 10th step the GPU's NVML telemetry (pynvml, one handle to the model's GPU), read when the record is written (during the next step): `gpu_power_watts` (`nvmlDeviceGetPowerUsage` / 1000, NVML's average over its last sample period), `gpu_sm_clock_mhz` (`nvmlDeviceGetClockInfo`, SM clock), `gpu_temperature_c` (`nvmlDeviceGetTemperature`, die), `gpu_memory_used_bytes` (`nvmlDeviceGetMemoryInfo().used`, the device's used memory, every process included). Per-tensor and per-group gradient norms, parameter norms and update RMS live only in the sidecar (`docs/training.md` §6) |
 | `end` (last step trained) | `step`, `peak_memory_bytes`, `peak_reserved_bytes` over the last stage (since the switch or the process start) |
@@ -547,7 +525,6 @@ Per module and symbol; what §1–§9 state is not repeated.
   CUDA context stays until the process ends). `previous` gates the scorer thread (its first job waits) and the
   filtered searches.
 - `write_evaluation`: the sidecar is `gzip.compress(..., mtime=0)`, so equal completions give an equal sha256.
-  `read_evaluation` raises ValueError when the sidecar's sha256 differs from the record's.
 - `record`: `{"run_name", "records" (non-train kinds: run, stage, end, failure), "evaluations"}`, one per run in
   `RESULTS/<experiment>.jsonl` (`ablations/records.py`); evaluations as written, sidecars not read.
 
@@ -559,10 +536,10 @@ Per module and symbol; what §1–§9 state is not repeated.
   batches are `corpus/loader.py` `PretrainingBatches` tuples (a loader ends with its sample's last micro-batch).
   Padding `cu_seqlens` by its last offset leaves empty segments the attention never reads; `searchsorted(right=True)`
   maps a position to its segment. OFFSETS reach 128 KiB, beyond a 32K row's span in bytes.
-- `val_bits` → `pooled(corpora, weights, stage)` → `{"corpora": {corpus: {"bits", "bytes", "offset_bits",
-  "offset_bytes", "row_bits", "row_bytes", "rows"}}, "bpb": {group | "all"}, "errors": {group}, "offset_bpb": {group},
-  "weights": {corpus}}`; weights are `Stage.shares` at the total train packed rows; the last micro-batch is filled with
-  empty rows (index −1), dropped from the row sums.
+- `val_bits` → `{"corpora": {corpus: {"bits", "bytes", "offset_bits", "offset_bytes", "row_bits", "row_bytes",
+  "rows"}}, "bpb": {group | "all"}, "errors": {group}, "offset_bpb": {group}, "weights": {corpus}}`; weights are
+  `Stage.shares` at the total train packed rows; the last micro-batch is filled with empty rows (index −1), dropped
+  from the row sums.
 - `solution_bits` → `{benchmark: sums | per-solution "row_bits", "row_bytes" in benchmark order}`, in
   `FILE_LEVEL_STAGE` micro-batches, one example and one attention segment per row. The prompt ends after the
   solution's leading blank lines (through the last leading line break); the first scored token is found by
@@ -587,11 +564,12 @@ Per module and symbol; what §1–§9 state is not repeated.
   healed bytes (`decoder.Reemit`, possibly over several tokens) are skipped. `completion`: `decode_bytes` then UTF-8
   with replacement, as `enc.decode`. `fim_lines`: a non-empty middle written up to BOS or the budget gets a final "\n";
   an empty middle stays empty.
-- `decoder`: `max_length` = len(input_ids) + max_new_tokens − 1; created after `torch.cuda.empty_cache()`, since slots
-  and prompt store are sized by free memory (for the filtered searches, which run after the likelihood pass, this
-  returns that pass's blocks). Prompt stores: codegen, each prompt shared by its greedy request and samples; filtered,
-  the prompts the rounds repeat (left-to-right ones healed: a token shorter, the budget a token longer), one decoder
-  for all seven searches whose `max_length` is the longest of either kind; parse and FIM greedy none (no repeats).
+- Decoders (`NativeDecoder`, one per generate call): `max_length` the longest len(input_ids) + max_new_tokens − 1 of
+  the call's requests; `NativeDecoder.__init__` empties the allocator's cache first, since slots and prompt store are
+  sized by free memory (for the filtered searches, which run after the likelihood pass, this returns that pass's
+  blocks). Prompt stores: codegen, each prompt shared by its greedy request and samples; filtered, the prompts the
+  rounds repeat (left-to-right ones healed: a token shorter, the budget a token longer), one decoder for all seven
+  searches whose `max_length` is the longest of either kind; parse and FIM greedy none (no repeats).
 - `generate_groups`: `done(g, ids in request order, latency)`, latency's duration from the group's first start to its
   last end with other groups interleaved; groups finish as soon as their last request ends.
 - `Filtered.record`: `{"attempts", "accepted", "latency"}` per task; unaccepted tasks score the greedy candidate.
@@ -607,9 +585,9 @@ Per module and symbol; what §1–§9 state is not repeated.
   evaluation (`8be5e90`).
 - `EVALPLUS_EVALUATE`: `evaluate(..., parallel=timed_workers())` (default half), `os._exit(0)` after the output file:
   `stucking_checker`, a non-daemon thread sleeping 20 s per check. `evalplus` → `{"scores": {"base", "plus"}, "ids",
-  "base_status", "plus_status"}` (`evalplus_passed`: plus passes when base_status == plus_status == "pass"); pass@1 is
-  `"scores"`' mean of the per-problem estimates (Codex's estimator), averaged in task order; the evaluator's own
-  aggregate is not stored.
+  "base_status", "plus_status"}` (plus passes when base_status == plus_status == "pass"); pass@1 is `"scores"`' mean
+  of the per-problem estimates (Codex's estimator), averaged in task order; the evaluator's own aggregate is not
+  stored.
 - `multipl_e` → `{"scores", "ids", "status"}`: a completions file per problem as `completions.py` writes it,
   holding the completions whose judged program (`main.py:34`) is not in the verdict cache (§7), `timed_workers()`
   judges at once with `--max-workers 1` (main.py's default `cpu_count() − 1`; a compile past its wall-clock limit
@@ -623,14 +601,14 @@ Per module and symbol; what §1–§9 state is not repeated.
   `infilling(name, problems, middles, record)` → `{"pass@1", "scores", "ids", "completions", "result"}` | record (per
   problem "passed", "failed: <exception>" or "timed out", `execution.py`); clusters from task id
   `<Benchmark>/HumanEval/<n>/<span>`.
-- Records (`codegen_scores`, `parse_scores`, `filtered_record` and `infilling` build them from completion texts):
+- Records (`codegen_record`, `parse_record`, `filtered_record` and `infilling` build them from completion texts):
   `generation` `{benchmark: {"greedy": scores | "completions" (one per task), "latency"; "sampled": scores |
   "n_sample", "completions" (per task, its `N_SAMPLE` in seed order; written to the sidecar), "latency"}}`;
   `filtered_generation` adds `"filtered"`: scores | `"completions"`, `"attempts"`, `"accepted"`, `"latency"`;
   `parse_generation` `{benchmark: {"parses", "indentation", "syntax"} | evalplus | {"outcomes", "completions",
   "latency"}}`;
   `fim_generation` `{"<benchmark>/<mode>": {"greedy", "greedy_reference_lines"}}` (`filtered_generation`'s second
-  result adds `"filtered"` in SPM); `FimRun.lines` (`reference_lines`): single-line 1, multi-line each reference's
+  result adds `"filtered"` in SPM); `FimRun.lines` (`fim_runs`): single-line 1, multi-line each reference's
   line count, random-span none. Every evaluator is a fresh process (`exec`), never a fork of the torch/CUDA process.
 
 ### `eval/verify.py`
@@ -667,20 +645,9 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 - `VerdictCache(kind, identity)`: one SQLite table (key: SHA-256 of kind, identity, `environment()` and the payload;
   value: the result as JSON) in WAL mode, so concurrent evaluations share `paths.VERDICTS`; `get` and `put` hold a
-  process-wide lock over one connection, opened on `VerdictCache.path` (`paths.VERDICTS`; `eval.rescore` sets a
-  temporary one first), SQLite's default 5 s lock wait (writes are single short transactions); `get` queries at most
-  the connection's `SQLITE_LIMIT_VARIABLE_NUMBER` keys a statement. `environment()`: `sys.version` and every installed
-  distribution's name and version.
-
-### `scripts/standard_eval.sh`
-
-- vLLM image `vllm/vllm-openai:v0.32.0` at a pinned digest with its own torch; the export's `modeling_nanochat.py`
-  loads with `trust_remote_code`. EvalPlus as `pyproject.toml` pins it, fetched as a GitHub archive (the image has no
-  git; `SETUPTOOLS_SCM_PRETEND_VERSION`), into a venv over the image's vLLM; MultiPL-E at `docker/Dockerfile`'s commit.
-  Direct completion (the tokenizer has no chat template). Outputs: `evalplus/<dataset>/…_eval_results.json`,
-  `multipl-e/<dataset>/`, `pass_k.csv`; `*.raw.jsonl` (codegen's unsanitized copy) skipped in scoring. Skipped cached
-  samples: evalplus codegen's "already cached", MultiPL-E's `completion_limit`; the model is always `/model`. Caches
-  (Hugging Face datasets, vLLM's compiled graphs) in `artifacts/cache`; the model and output mount at `/model`, `/out`.
+  process-wide lock over one connection, SQLite's default 5 s lock wait (writes are single short transactions); `get`
+  queries at most the connection's `SQLITE_LIMIT_VARIABLE_NUMBER` keys a statement. `environment()`: `sys.version` and
+  every installed distribution's name and version.
 
 ### `inference/syntax_constraint.py`
 
@@ -765,44 +732,6 @@ Per module and symbol; what §1–§9 state is not repeated.
   - a constraint allowing no token (not even BOS) raises ValueError.
   - `timings`: read on the host once each step's tokens arrive (no further device synchronization): when the request
     took its slot, when its first generated token arrived (end for a request without one), and the step finishing it.
-
-### `inference/export_hf.py`
-
-- `model.safetensors`: the training state dict's names under `model.` (`lm_head.weight` as is); bf16 as the training
-  ops round them; the fp32 set is `modeling_nanochat`'s `_keep_in_fp32_modules_strict`, as it reads them.
-- `config.json`: `architectures` NanochatForCausalLM; `model.modeling.layer_windows` as Gemma 3's `layer_types` +
-  `sliding_window` (keys attended including the query's own); `model.modeling.has_ve`'s layers; MLP width the
-  `up_proj` rows; eps FLT_EPSILON (`model.ops.linear` `EPS`, the norms' epsilon).
-- tokenizer: ByteLevel BPE, the split pattern as an Oniguruma Split (its possessive quantifiers are Oniguruma syntax);
-  special tokens after the mergeable ones in `corpus.tokenizer.SPECIAL_TOKENS` order (the converter's order, so the
-  same ids); BOS prepended by `TemplateProcessing`; `tokenizer_config.json` beside `tokenizer.json`.
-
-### `inference/modeling_nanochat.py`
-
-- Copied into the export directory and named in `config.json`'s `auto_map` (Hugging Face's custom-code convention);
-  torch and transformers only. vLLM's Transformers backend (vLLM docs, "Transformers backend") honors
-  `_keep_in_fp32_modules_strict`, the per-layer sliding windows (`layer_types`), `final_logit_softcapping` and
-  `head_dtype` (`LogitsProcessor._apply_head`: the head's fp32 output, the cap in fp32) with its own attention, KV
-  cache, torch.compile and CUDA graphs.
-- Attention through `ALL_ATTENTION_FUNCTIONS` with each layer's window (`layer_types` "sliding_attention" /
-  "full_attention" and `sliding_window`, as Qwen3 and Gemma 3), so the same code runs in transformers (eager, sdpa,
-  `generate` with a cache) and in vLLM.
-- Precision, as the training kernels keep fp32:
-  - q/k (`model/kernels/qk_row.cuh`): per-head RMS norm (eps FLT_EPSILON), fp32 gain, rotation by −θ over the full
-    head, (m1, m2) → (m1 cos + m2 sin, m2 cos − m1 sin), angles t·θ^(−2i/D) in fp64 rounded once to fp32
-    (`CausalLM.init_buffers`), one bf16 rounding. transformers' and vLLM's rotary embeddings rotate by +θ.
-  - value embeddings (`model/kernels/ve_gate.cu`): v + 2·sigmoid(n Wᵀ) per head × table[input_ids], gate logits fp32,
-    the mix rounded once.
-  - per layer h = resid_lambda·h + x0_lambda·x0 in fp32, rounded once; the per-dim and per-layer vectors and the gate
-    stay fp32 (`_keep_in_fp32_modules_strict`).
-  - head: `torch.mm(…, out_dtype=float32)` of the bf16 weight, the cap in fp32, as `model/ops/cross_entropy.py`
-    `lm_losses`.
-- `NanochatConfig` fields: vocab_size, hidden_size, intermediate_size, num_hidden_layers, num_attention_heads
-  (= num_key_value_heads), head_dim, max_position_embeddings, rope_parameters {"rope_theta"}, sliding_window (keys
-  attended including the query's own), layer_types, value_embedding_layers, final_logit_softcapping, rms_norm_eps.
-- `Gate`: vLLM's Transformers backend swaps every `nn.Linear` for its own layer, whose weight
-  `_keep_in_fp32_modules_strict` does not upcast (its keep_in_fp32 skips tensors with a `weight_loader`); an
-  `nn.Linear` gate would be read in bf16 there instead of training's fp32.
 
 ### `model/kernels/decode.cu`
 

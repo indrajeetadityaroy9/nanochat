@@ -29,12 +29,13 @@ static __device__ __forceinline__ void unpack(const uint4 &u, float *v) {
 constexpr int THREADS = 256;  /* warps per block: THREADS / WARP */
 constexpr int RUN = 16;       /* backward: consecutive token-order positions per warp */
 static_assert(RUN <= WARP, "a warp's positions are held one per lane");
+/* Heads per row at d24: C = H HEAD_DIM = 768 */
+constexpr int H = 6, C = H * HEAD_DIM, CHUNKS = C / (WARP * VEC);
+static_assert(C % (WARP * VEC) == 0, "a row is whole warp-wide chunks");
 
-template <int H> __global__ void __launch_bounds__(THREADS)
+__global__ void __launch_bounds__(THREADS)
 ve_forward_kernel(const bf16 *n, const bf16 *v, int64_t v_stride, const int *idx, const float *table, const float *w,
                   bf16 *out, float *gate, int64_t rows) {
-    constexpr int C = H * HEAD_DIM, CHUNKS = C / (WARP * VEC);
-    static_assert(C % (WARP * VEC) == 0, "a row is whole warp-wide chunks");
     __shared__ __align__(16) float ws[H * C];
     for (int i = threadIdx.x; i < H * C; i += blockDim.x) ws[i] = w[i];
     __syncthreads();
@@ -87,8 +88,7 @@ ve_forward_kernel(const bf16 *n, const bf16 *v, int64_t v_stride, const int *idx
 }
 
 /* acc (this lane's chunks of a row) added into dtable row `row`, one 16-byte atomic per 4 fp32. */
-template <int CHUNKS> static __device__ __forceinline__ void add_row(float *row, const float (&acc)[CHUNKS][VEC],
-                                                                     int lane) {
+static __device__ __forceinline__ void add_row(float *row, const float (&acc)[CHUNKS][VEC], int lane) {
 #pragma unroll
     for (int k = 0; k < CHUNKS; k++) {
         float4 *t = reinterpret_cast<float4 *>(row + (k * WARP + lane) * VEC);
@@ -98,12 +98,11 @@ template <int CHUNKS> static __device__ __forceinline__ void add_row(float *row,
     }
 }
 
-template <int H> __global__ void __launch_bounds__(THREADS, 2)
+__global__ void __launch_bounds__(THREADS, 2)
 ve_backward_kernel(const bf16 *__restrict__ dout, int64_t dout_stride, const int *__restrict__ ids,
                    const int64_t *__restrict__ order,
                    const float *__restrict__ table, const float *__restrict__ w, const float *__restrict__ gate,
                    bf16 *__restrict__ dn, float *dtable, bf16 *__restrict__ dz_out, int64_t rows) {
-    constexpr int C = H * HEAD_DIM, CHUNKS = C / (WARP * VEC);
     __shared__ __align__(16) float ws[H * C];
     for (int i = threadIdx.x; i < H * C; i += blockDim.x) ws[i] = w[i];
     __syncthreads();
@@ -194,46 +193,22 @@ ve_backward_kernel(const bf16 *__restrict__ dout, int64_t dout_stride, const int
     }
 }
 
-template <int H> static void forward(const void *n, const void *v, long long v_stride, const void *idx,
-                                     const void *table, const void *w, void *out, void *gate, long long rows,
-                                     cudaStream_t s) {
-    static const int blocks = resident_blocks(ve_forward_kernel<H>, THREADS);
-    ve_forward_kernel<H><<<blocks, THREADS, 0, s>>>((const bf16 *)n, (const bf16 *)v, v_stride, (const int *)idx,
-                                                    (const float *)table, (const float *)w, (bf16 *)out,
-                                                    (float *)gate, rows);
-}
-
-template <int H> static void backward(const void *dout, long long dout_stride, const void *ids, const void *order,
-                                      const void *table, const void *w, const void *gate, void *dn, void *dtable,
-                                      void *dz, long long rows, cudaStream_t s) {
-    static const int blocks = resident_blocks(ve_backward_kernel<H>, THREADS);
-    ve_backward_kernel<H><<<blocks, THREADS, 0, s>>>((const bf16 *)dout, dout_stride, (const int *)ids,
-                                                     (const int64_t *)order, (const float *)table, (const float *)w,
-                                                     (const float *)gate, (bf16 *)dn, (float *)dtable, (bf16 *)dz,
-                                                     rows);
-}
-
-/* H: heads per row (C = H * HEAD_DIM), the widths model/ops/linear.py CONFIGS holds (2, 4, 6). v_stride: elements
- * between v's rows. */
+/* v_stride: elements between v's rows. */
 extern "C" void ve_forward(const void *n, const void *v, long long v_stride, const void *idx, const void *table,
-                           const void *w, void *out, void *gate, long long rows, int H, void *stream) {
-    const cudaStream_t s = (cudaStream_t)stream;
-    switch (H) {
-        case 2: forward<2>(n, v, v_stride, idx, table, w, out, gate, rows, s); break;
-        case 4: forward<4>(n, v, v_stride, idx, table, w, out, gate, rows, s); break;
-        case 6: forward<6>(n, v, v_stride, idx, table, w, out, gate, rows, s); break;
-    }
+                           const void *w, void *out, void *gate, long long rows, void *stream) {
+    static const int blocks = resident_blocks(ve_forward_kernel, THREADS);
+    ve_forward_kernel<<<blocks, THREADS, 0, (cudaStream_t)stream>>>(
+        (const bf16 *)n, (const bf16 *)v, v_stride, (const int *)idx, (const float *)table, (const float *)w,
+        (bf16 *)out, (float *)gate, rows);
 }
 
 /* ids: int32 tokens in visiting order, idx[order]; order: int64 permutation sorting idx; dtable fp32, accumulated
  * into; dz bf16 (rows, H). */
 extern "C" void ve_backward(const void *dout, long long dout_stride, const void *ids, const void *order,
                             const void *table, const void *w, const void *gate, void *dn, void *dtable, void *dz,
-                            long long rows, int H, void *stream) {
-    const cudaStream_t s = (cudaStream_t)stream;
-    switch (H) {
-        case 2: backward<2>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); break;
-        case 4: backward<4>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); break;
-        case 6: backward<6>(dout, dout_stride, ids, order, table, w, gate, dn, dtable, dz, rows, s); break;
-    }
+                            long long rows, void *stream) {
+    static const int blocks = resident_blocks(ve_backward_kernel, THREADS);
+    ve_backward_kernel<<<blocks, THREADS, 0, (cudaStream_t)stream>>>(
+        (const bf16 *)dout, dout_stride, (const int *)ids, (const int64_t *)order, (const float *)table,
+        (const float *)w, (const float *)gate, (bf16 *)dn, (float *)dtable, (bf16 *)dz, rows);
 }

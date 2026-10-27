@@ -40,15 +40,10 @@ def evaluation_path(run_name: str, step: int) -> Path:
     return RUNS / run_name / f"eval-{step}.json"
 
 
-def samples_path(path: Path) -> Path:
-    """The sampled-completions sidecar of an evaluation record: eval-<step>.samples.json.gz beside it."""
-    return path.with_name(f"{path.stem}.samples.json.gz")
-
-
 def write_evaluation(path: Path, evaluation: dict) -> None:
     """Write an evaluation: the record at path with "samples" {"file", "sha256"} (null without generation benchmarks)
-    in place of every sampled record's "completions", which go to samples_path(path), gzip-compressed JSON
-    {benchmark: each task's completions}. NaN and infinities raise."""
+    in place of every sampled record's "completions", which go to eval-<step>.samples.json.gz beside it,
+    gzip-compressed JSON {benchmark: each task's completions}. NaN and infinities raise."""
     record, samples = dict(evaluation), None
     if evaluation["codegen"] is not None:
         record["codegen"] = {name: records | {"sampled": {k: v for k, v in records["sampled"].items()
@@ -57,23 +52,10 @@ def write_evaluation(path: Path, evaluation: dict) -> None:
         data = gzip.compress(json.dumps({name: records["sampled"]["completions"]
                                          for name, records in evaluation["codegen"].items()},
                                         allow_nan=False).encode(), mtime=0)
-        samples_path(path).write_bytes(data)
-        samples = {"file": samples_path(path).name, "sha256": hashlib.sha256(data).hexdigest()}
+        sidecar = path.with_name(f"{path.stem}.samples.json.gz")
+        sidecar.write_bytes(data)
+        samples = {"file": sidecar.name, "sha256": hashlib.sha256(data).hexdigest()}
     path.write_text(json.dumps(record | {"samples": samples}, allow_nan=False), encoding="utf-8")
-
-
-def read_evaluation(path: Path) -> dict:
-    """An evaluation as evaluate made it: the record at path without "samples", each sampled record's "completions"
-    read back from the sidecar it names (its sha256 checked)."""
-    evaluation = json.loads(path.read_text(encoding="utf-8"))
-    samples = evaluation.pop("samples")
-    if samples is not None:
-        data = (path.parent / samples["file"]).read_bytes()
-        if hashlib.sha256(data).hexdigest() != samples["sha256"]:
-            raise ValueError(f"{samples['file']}: sha256 differs from {path}'s")
-        for name, completions in json.loads(gzip.decompress(data)).items():
-            evaluation["codegen"][name]["sampled"]["completions"] = completions
-    return evaluation
 
 
 def resolved(records: dict) -> dict:

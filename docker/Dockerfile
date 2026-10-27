@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-# nanochat image (sm_90): NGC PyTorch (torch, Triton, CUDA, nvcc and numpy, outside uv.lock) with uv.lock's packages
-# in a venv over it; base images pinned by manifest digest, git dependencies by commit. No code or data baked in:
+# nanochat image (sm_90): NGC PyTorch (torch, Triton, CUDA, nvcc, numpy, nvidia-ml-py; outside uv.lock) with uv.lock's
+# packages in a venv over it; base images pinned by manifest digest, git dependencies by commit. No code or data baked in:
 # scripts/container.sh mounts the checkout at WORKDIR, and the entrypoint (paths.py) creates artifacts/ before every
 # command.
 
-FROM ghcr.io/astral-sh/uv:0.13.4@sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b AS uv
+FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
 
 FROM nvcr.io/nvidia/pytorch:26.09-py3@sha256:6e8ccc607fc2a51e3741667b86316a0889418ba8b78ed0ba96e8d282b648a7a6
 COPY --from=uv /uv /usr/local/bin/uv

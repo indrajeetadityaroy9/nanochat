@@ -1,13 +1,12 @@
 """
-The corpus's tokenizer (CORPUS/tokenizer: tokenizer.tiktoken, tokenizer.pattern), encoded by tiktoken; a vocabulary's
-tokenized and packed data are keyed by its data key.
+The corpus's tokenizer (CORPUS/tokenizer: tokenizer.tiktoken, tokenizer.pattern), encoded by tiktoken; the tokenized
+and packed data are keyed by its data key.
 """
 
 import base64
 import functools
 import hashlib
 import json
-from pathlib import Path
 
 import numpy as np
 import tiktoken
@@ -15,7 +14,6 @@ import tiktoken
 from paths import CORPUS
 
 TOKENIZER = CORPUS / "tokenizer"
-ABLATION = CORPUS / "tokenizer-ablation"
 
 BOS = "<|bos|>"
 # FIM sentinels named as in deepseek-ai/deepseek-coder-6.7b-base tokenizer.json (arXiv 2401.14196 §3.1.2)
@@ -37,8 +35,8 @@ def tiktoken_file(mergeable: list[bytes]) -> str:
 class Tokenizer:
     """A vocabulary: its mergeable tokens' bytes in rank order, then SPECIAL_TOKENS, encoded by tiktoken."""
 
-    def __init__(self, mergeable: list[bytes], pattern: str, *, tokenized: Path) -> None:
-        self.tokenized, self.pattern, self.mergeable = tokenized, pattern, mergeable
+    def __init__(self, mergeable: list[bytes], pattern: str) -> None:
+        self.pattern, self.mergeable = pattern, mergeable
         self.bos_token_id = len(mergeable)
         self.special_tokens = {token: len(mergeable) + i for i, token in enumerate(SPECIAL_TOKENS)}
         # a special token's bytes are its text; its document length 0
@@ -52,16 +50,10 @@ class Tokenizer:
                                      mergeable_ranks={token: rank for rank, token in enumerate(mergeable)})
 
 
-def save(directory: Path, mergeable: list[bytes], pattern: str) -> None:
-    """A vocabulary's tokenizer.tiktoken and tokenizer.pattern, which get_tokenizer loads."""
-    (directory / "tokenizer.tiktoken").write_text(tiktoken_file(mergeable), newline="")
-    (directory / "tokenizer.pattern").write_text(pattern, newline="")
-
-
 @functools.cache
-def get_tokenizer(directory: Path) -> Tokenizer:
-    """The vocabulary in `directory`, its tokenized and packed data in directory.parent / "tokenized"."""
-    with open(directory / "tokenizer.tiktoken", "rb") as f:
+def get_tokenizer() -> Tokenizer:
+    """The corpus's tokenizer, from TOKENIZER."""
+    with open(TOKENIZER / "tokenizer.tiktoken", "rb") as f:
         mergeable = [base64.b64decode(line.split()[0]) for line in f]
-    with open(directory / "tokenizer.pattern", newline="") as f:
-        return Tokenizer(mergeable, f.read(), tokenized=directory.parent / "tokenized")
+    with open(TOKENIZER / "tokenizer.pattern", newline="") as f:
+        return Tokenizer(mergeable, f.read())

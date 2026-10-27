@@ -105,29 +105,25 @@ def blob_texts(task: tuple[Path, int]) -> pa.Table:
 
 
 def fetch(source: str, file: str) -> Path:
-    """The local path of one of the source's Hub files, written via .partial; an existing file is kept."""
+    """The local path of one of the source's Hub files."""
     spec = SOURCES[source]
     path = raw_dir(source) / file
-    if path.exists():
-        return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(path.name + ".partial")
     if spec.repo != EDU:
         read = columns(spec)
         with HfFileSystem().open(f"datasets/{spec.repo}/{file}", "rb") as remote:
             hub = pq.ParquetFile(remote)
-            with pq.ParquetWriter(partial, pa.schema([hub.schema_arrow.field(c) for c in read]),
+            with pq.ParquetWriter(path, pa.schema([hub.schema_arrow.field(c) for c in read]),
                                   compression=COMPRESSION) as writer:
                 for g in range(hub.num_row_groups):
                     writer.write_table(hub.read_row_group(g, columns=read))
     else:
         meta = hf_hub_download(spec.repo, file, repo_type="dataset")
         with (ProcessPoolExecutor(mp_context=SPAWN) as pool,
-              pq.ParquetWriter(partial, pq.read_schema(meta).append(pa.field("text", pa.string())),
+              pq.ParquetWriter(path, pq.read_schema(meta).append(pa.field("text", pa.string())),
                                compression=COMPRESSION) as writer):
             for table in pool.map(blob_texts, [(meta, g) for g in range(pq.ParquetFile(meta).num_row_groups)]):
                 writer.write_table(table)
-    partial.rename(path)
     return path
 
 

@@ -122,25 +122,20 @@ def check_row_group(task: tuple[str, int, int]) -> pa.Table:
 
 
 def check(source: str, files: int, pool: ProcessPoolExecutor) -> None:
-    """checked_path of each of a Python source's standardized files not yet checked (via .partial), as many row groups
-    in flight as MEMORY holds of the largest."""
-    metadata = {k: pq.read_metadata(standardized_path(source, k)) for k in range(files)
-                if not checked_path(source, k).exists()}
-    groups = {k: md.num_row_groups for k, md in metadata.items()}
-    tasks = [(source, k, g) for k, n in groups.items() for g in range(n)]
-    largest = max((md.row_group(g).total_byte_size for md in metadata.values() for g in range(md.num_row_groups)),
-                  default=MEMORY)
+    """checked_path of each of a Python source's standardized files, as many row groups in flight as MEMORY holds of
+    the largest."""
+    metadata = [pq.read_metadata(standardized_path(source, k)) for k in range(files)]
+    tasks = [(source, k, g) for k, md in enumerate(metadata) for g in range(md.num_row_groups)]
+    largest = max(md.row_group(g).total_byte_size for md in metadata for g in range(md.num_row_groups))
+    checked_path(source, 0).parent.mkdir(parents=True)
     writers: dict[int, pq.ParquetWriter] = {}
     for (_, k, g), table in zip(tasks, ordered(pool, check_row_group, tasks, MEMORY // largest), strict=True):
-        path = checked_path(source, k)
-        partial = path.with_name(path.name + ".partial")
         if g == 0:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            writers[k] = pq.ParquetWriter(partial, SOURCES[source].category.schema, compression=COMPRESSION)
+            writers[k] = pq.ParquetWriter(checked_path(source, k), SOURCES[source].category.schema,
+                                          compression=COMPRESSION)
         writers[k].write_table(table)
-        if g == groups[k] - 1:
+        if g == metadata[k].num_row_groups - 1:
             writers.pop(k).close()
-            partial.rename(path)
 
 
 # ---- 2. dedup
@@ -153,9 +148,9 @@ def duplicates(paths: dict[str, list[Path]]) -> dict[str, pa.Table]:
         f"FROM read_parquet({[str(p) for p in files]}, file_row_number = true)"
         for i, files in enumerate(paths.values()))
     with database() as con:
-        drops = con.execute(f"SELECT source, file, row FROM (SELECT id, source, file, row, row_number() OVER "
-                            f"(PARTITION BY id ORDER BY source, file, row) AS n FROM ({union})) "
-                            f"WHERE n > 1 OR id = '{EMPTY}'").to_arrow_table()
+        drops = con.sql(f"SELECT source, file, row FROM (SELECT id, source, file, row, row_number() OVER "
+                        f"(PARTITION BY id ORDER BY source, file, row) AS n FROM ({union})) "
+                        f"WHERE n > 1 OR id = '{EMPTY}'").to_arrow_table()
     return {source: drops.filter(pc.equal(drops["source"], i)).select(["file", "row"])
             for i, source in enumerate(paths)}
 

@@ -1,7 +1,7 @@
 # Training
 
-How the base model and every ablation run are trained on one GH200: stages, plan, optimizers, schedule, the peak
-learning-rate calibration, the run app and its records, hardware and throughput, reproducibility and the commands.
+How the base model (d24) is trained on one GH200: stages, plan, optimizers, schedule, the peak learning-rate
+calibration, the run app and its records, hardware and throughput, reproducibility and the commands.
 The code is the specification. Markers: [arithmetic] derived from code numbers; [inference] reasoning not measured;
 [estimate]; [unverified] a figure without a record. Measurements name their commit (GH200 at 700 W, exclusive A/B).
 
@@ -9,13 +9,13 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 
 |File|Section|
 |---|---|
-|`run.py` (`RunConfig`, `run_name`, `plan_of`, `base_plan`, `checkpoint_steps`, `analysis_steps`, `phase`, `evaluations`, `recipe_changed`, `job`, `lr_multiplier`)|§2, §5, §6|
+|`run.py` (`RunConfig`, `run_name`, `plan_of`, `checkpoint_steps`, `analysis_steps`, `training`, `evaluations`, `job`)|§2, §5, §6|
 |`conf/run.yaml`, `conf/experiment/pretrain.yaml`|§5, §6, §9|
 |`train/schedule.py` (`plan`, `RunPlan`, `WARMUP_STEPS`, `lr_lambda`)|§2, §4|
-|`train/stages.py` (`drawn`, `stage_mixture`, `stage_batches`, `max_tokens_per_param`)|§1, §5, §8|
+|`train/stages.py` (`drawn`, `stage_batches`, `max_tokens_per_param`)|§1, §5, §8|
 |`train/optim.py` (`optimizers`, `Muon`, `tau_weight_decay`, `update`, `MAX_GRAD_NORM`)|§3|
-|`train/loop.py` (`train`), `train/diagnostics.py` (`Diagnostics`, `sidecar`), `train/checkpoint.py`|§6, §8|
-|`ablations/peak_lr.py` (`records`, `check`, `fit`, `analysis`); `conf/experiment/peak_lr_d24.yaml`; `results/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
+|`train/loop.py` (`train`, `SEED`), `train/diagnostics.py` (`Diagnostics`, `sidecar`), `train/checkpoint.py`|§6, §8|
+|`ablations/peak_lr.py` (`lr_multiplier`); `conf/experiment/peak_lr_d24.yaml`; `results/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
 |`ablations/records.py` (`Records`, `record`)|§6|
 |`scripts/setup.sh`, `scripts/container.sh`, `scripts/release.sh`, `paths.py`|§7, §9|
 |`docker/Dockerfile`, `pyproject.toml`, `uv.lock`|§8|
@@ -30,10 +30,10 @@ The loss is next-token cross entropy, the packs' FIM pieces read as FIM examples
 repository stage's first step the loop sets the 32K context and recompiles the model.
 
 `train/stages.py` `stage_batches`: a stage's micro-batches in the run's order, each corpus's packed rows permuted once
-by the seed and drawn by the stage's weights at the rows the run draws (`mixture.weights`); a run that would draw more
-rows of a corpus than its packs hold raises. `max_tokens_per_param`: the tokens per non-embedding parameter of the most
-whole micro-batches bisection finds at which no stage overdraws, not necessarily the largest (not monotone, since the
-batch steps up with the count). A run's `tokens_per_param` defaults to it, so no stage reads a document twice.
+by the seed and drawn by the stage's weights at the rows the run draws (`mixture.weights`). `max_tokens_per_param`:
+the tokens per non-embedding parameter of the most whole micro-batches bisection finds at which no stage overdraws,
+not necessarily the largest (not monotone, since the batch steps up with the count). A run's `tokens_per_param`
+defaults to it, so no stage reads a document twice.
 
 | | The base model | Reference code models |
 |---|---|---|
@@ -46,14 +46,15 @@ decoder layers and `lm_head`, what the token budget counts) and M DeepSeek LLM's
 file-level context (`non_embedding_flops_per_token`, Eq. 2, arXiv 2401.02954 §3.2; both `docs/architecture.md` §1):
 
 - tokens D = `round(tokens_per_param · N)`, compute C = M·D;
-- batch B = 0.2920·C^0.3271 tokens in whole micro-batches (at least one), steps = D // B;
+- batch B = 0.2920·C^0.3271 tokens in whole micro-batches, steps = D // B;
 - `repo_level_start` = steps − `round(REPO_LEVEL_SHARE · steps)`;
 - the law's peak lr η = 0.3118·C^−0.1250 (§3.1 Eq. 1), times `learning_rate_scale` (`run.py` `plan_of`; §5).
 
-Every run, an ablation arm included, takes the base model's plan at its `num_hidden_layers` and `tokens_per_param`
-(`run.base_plan`), so runs differing in other fields match in batch, steps and lr. Recomputed on the CPU from master,
-the corpus's packs and `results/peak_lr_d24.jsonl` (peak lr at the base multiplier 2.7192600, §5; weight decay by §3's
-law):
+Both experiments take the d24 plan at their `tokens_per_param` (`run.py` `plan_of`): the base run at
+`max_tokens_per_param`, the `peak_lr` arms at 5. Recomputed on the CPU from master, the corpus's packs and
+`results/peak_lr_d24.jsonl` (peak lr at the base multiplier 2.7192600, §5; weight decay by §3's law); the d16 and d8
+rows, the settings of the ablations (`docs/experiments.md` §1), by `67192ab`'s code, where `RunConfig` still set the
+depth:
 
 | Run | Tokens/param | Micro-batches | Steps | Repo start | Tokens | Law lr | Peak lr | Weight decay |
 |---|---|---|---|---|---|---|---|---|
@@ -64,9 +65,9 @@ law):
 | d8 at 200 | 199.993 | 2 | 14,937 | 14,122 | 2.937B | 1.8326e-3 | 4.9834e-3 | 0.2022 |
 | d24 at 5 (`peak_lr`) | 4.999 | 3 | 3,307 | 3,127 | 0.975B | 1.5443e-3 | | |
 
-N and M per depth: `docs/architecture.md` §1. `max_tokens_per_param` of the corpus's tokenizer is 6,990 at d8 and
-1,529 at d16. The stages' token budgets are sized by `mixture.MAX_STEPS` (`docs/corpus.md` §7), the table's second
-d24 row (`b065ad7`); the plan on the packs is 69,611 steps (+0.04%), whose draws `stage_batches` checks.
+N and M: `docs/architecture.md` §1. At `67192ab`, `max_tokens_per_param` of the corpus's tokenizer was 6,990 at d8
+and 1,529 at d16. The stages' token budgets are sized by `mixture.MAX_STEPS` (`docs/corpus.md` §7), the table's
+second d24 row (`b065ad7`); the plan on the packs is 69,611 steps (+0.04%).
 
 **FLOP count (`ba01bb5`, `b065ad7`).** The plan uses Eq. 2's M (full attention at the 8K context in every layer),
 the definition §3.1 Eq. 1's constants were fit with (§3.2: "M includes the computational overhead of attention
@@ -157,21 +158,17 @@ multiplier of the law changed ×0.9105 over 40× its tokens (the optimum itself 
 
 **Arms.** × 1, 2, 4 at d24 at 5; seed 0; 3 runs, each the current recipe at its setting (corpus tokenizer and mixture,
 cap, `generate` "parse"): `conf/experiment/peak_lr_d24.yaml`, whose records are `results/peak_lr_d24.jsonl` and its
-`-curves.jsonl` (§6). A grid extension re-launches the sweep with the extra multiplier added to its
-`learning_rate_scale` list; completed runs are skipped and recorded again.
+`-curves.jsonl` (§6).
 
-**Rule** (`ablations/peak_lr.py` `analysis`):
-- every record is checked against the current recipe (`check`, the job's stale guard `run.recipe_changed`): its
-  `run` record's `plan`, `data_key` and `config`, and the mixture of its `run` and `stage` records, must equal what
-  the current code computes for its `RunConfig` (`plan_of`, `train/stages.py` `stage_mixture`), else it raises;
-- `fit`: code bits per byte against u = ln(multiplier), a diverged run worse than any evaluated one: extend the grid
-  ×2 while the lowest-code run is at an end; else the vertex of the parabola through the lowest-code run and its two
-  neighbours (`metrics.parabola_vertex`, `docs/evaluation.md` §5; arXiv 2409.19913 §3.1 fits quadratics in log lr),
-  or that run itself when its upper neighbour diverged;
-- the base multiplier is the vertex; the base lr is it times the law's lr on the base plan.
+**Rule** (`ablations/peak_lr.py` `lr_multiplier`): the base multiplier is the vertex of the parabola through the three
+runs' code bits per byte against u = ln(multiplier) (`metrics.parabola_vertex`, `docs/evaluation.md` §5; arXiv
+2409.19913 §3.1 fits quadratics in log lr); the base lr is it times the law's lr on the base plan. The recorded
+minimum is interior (× 2) and no run diverged, so the vertex lies inside the grid. `67192ab`'s `fit` also covered the
+outcomes the records did not take (extend the grid × 2 when the lowest-code run is at an end; that run itself when
+its upper neighbour diverged) and re-checked each record against the current recipe (`check`); the code keeps the
+rule the records took.
 
-**Result** (`results/peak_lr_d24.jsonl`; 3,307 steps of 294,912 tokens; bits per byte; no run diverged; `check`
-passes on every record):
+**Result** (`results/peak_lr_d24.jsonl`; 3,307 steps of 294,912 tokens; bits per byte; no run diverged):
 
 | Measure | × 1 | × 2 | × 4 | Vertex | Curvature | Base multiplier | Base peak lr |
 |---|---|---|---|---|---|---|---|
@@ -233,8 +230,7 @@ between the × 1 and × 2 arms' (1.5443e-3, 3.0886e-3): the law lowers the lr wi
 lowers it by 1/1.1186 at d8 and 1/1.0776 at d24, hence the re-based vertices), and an earlier mixture (each run's
 `run` and `stage` records): at 8K eleven corpora (Stack-Edu, UltraData code and Stack-v3 L2 Python and C++, Kaggle
 notebooks, Codeforces CoTs, ClimbMix 0.10, two math corpora), at 32K the six Stack-Edu and UltraData Python and C++
-corpora (file-level code, not repositories) over the last 41 of 746, 815 of 14,937 and 180 of 3,307 steps. `check`
-rejects these records.
+corpora (file-level code, not repositories) over the last 41 of 746, 815 of 14,937 and 180 of 3,307 steps.
 
 | Setting | Plan | × 1 | × 2 | × 4 | × 8 | Vertex (recorded lr) | Curvature | Re-based |
 |---|---|---|---|---|---|---|---|---|
@@ -248,41 +244,41 @@ moved with the horizon, against both rules. The removed d8-transfer estimator, v
 net horizon exponent −0.1193, m_D = 105.25 and m_B = 5 the base plan's token and batch ratios over d24 at 5), gave
 the base multiplier 2.7970369: peak lr 2.4136e-3 on the base plan of `81fb386`'s packs.
 
-**`lr_multiplier`.** `conf/run.yaml` sets every run's `learning_rate_scale` to `${lr_multiplier:}`, a cached resolver:
-`run.py` `lr_multiplier` evaluates `analysis` over the experiment's records at launch and returns its `vertex`.
-No copy is stored: `check` recomputes each run's plan and stage mixtures from the current code and packs.
-`RunConfig`'s own default 1.0 is the law's lr (the `peak_lr_d24` experiment sets it per arm), so every other run's
-name carries the resolved multiplier (§6). A launch other than `peak_lr_d24` fails until its records exist.
+**`lr_multiplier`.** `conf/run.yaml` sets every run's `learning_rate_scale` to `${lr_multiplier:}`, a cached resolver
+(`ablations/peak_lr.py` `lr_multiplier`, registered by `run.py`): it fits the experiment's records at launch and
+returns the vertex; no copy is stored. `RunConfig`'s own default 1.0 is the law's lr (the `peak_lr_d24` experiment
+sets it per arm, so it never resolves the multiplier), and the base run's name carries the resolved multiplier (§6).
+A launch other than `peak_lr_d24` fails until its records exist.
 
 ## 6. Runs and records
 
-Every run, an ablation's or the base model's, is a `run.py` `RunConfig` (Hydra, hydra-core 1.3.7), trained by
-`train/loop.py` `train` and evaluated by `eval/suite.py` `evaluate` (`docs/evaluation.md` §1). Its defaults are the
-base model's recipe:
+Both experiments' runs are `run.py` `RunConfig`s (Hydra, hydra-core 1.3.8, omegaconf 2.3.1), trained by
+`train/loop.py` `train` and evaluated by `eval/suite.py` `evaluate` (`docs/evaluation.md` §1). The model is d24
+(`docs/architecture.md` §1), initialized and its data ordered by `train/loop.py` `SEED` = 0. The fields' defaults are
+the base model's recipe:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `num_hidden_layers` | 24 | depth; the width follows (`docs/architecture.md` §1) |
 | `tokens_per_param` | None | the data's `max_tokens_per_param` (§1) |
-| `seed` | 0 | initialization and data order |
-| `tokenizer` | "corpus" | `CORPUS/tokenizer`, else an arm under `CORPUS/tokenizer-ablation/` |
 | `learning_rate_scale` | 1.0 | times the law's lr; `conf/run.yaml` sets `${lr_multiplier:}` (§5) |
 | `num_checkpoints` | 1 | evenly spaced evaluated checkpoints, the last the final model; > 1 adds `repo_level_start` and the analysis checkpoints |
-| `generate` | "parse" | `evaluate`'s mode: "parse" (ablations) or "benchmarks" (base) |
+| `generate` | "parse" | `evaluate`'s mode: "parse" (`peak_lr`) or "benchmarks" (base) |
 
 `conf/run.yaml` composes the `run_schema` ConfigStore node, an experiment (`conf/experiment/<name>.yaml`, which sets
-or sweeps fields) and the command line's overrides. Every invocation is a Hydra multirun, so the run's directory is
-`RUNS/<run_name>` and an experiment's callback runs when the sweep ends: `python run.py experiment=<name>`, or one run,
-e.g. `python run.py num_hidden_layers=8 tokens_per_param=0.5 tokenizer=sa-bpe`. The experiments in `conf/` are
-`pretrain` (`num_checkpoints` 10, `generate` "benchmarks", the `Records` callback) and `peak_lr_d24` (§5). The
-output-logit cap is the model's, not a run field (`docs/architecture.md` §1).
+or sweeps fields) and the command line's overrides. Every invocation is a Hydra multirun (`hydra.mode: MULTIRUN`, one
+job without sweep parameters), so the run's directory is `RUNS/<run_name>` (`hydra.sweep.dir` `${runs:}`, `subdir`
+`${run_name:}`) and the experiment's `Records` callback runs when the sweep ends: `python run.py experiment=pretrain`
+(`num_checkpoints` 10, `generate` "benchmarks") and `python run.py experiment=peak_lr_d24` (§5). The output-logit cap
+is the model's, not a run field (`docs/architecture.md` §1). The records of `67192ab` and earlier carry the
+`RunConfig` fields since removed (`num_hidden_layers` 24, `seed` 0, `tokenizer` "corpus" in every record of
+`results/peak_lr_d24.jsonl`), all at their defaults, which no run name includes.
 
-**Names.** `run_name`: the fields that differ from `RunConfig()`, sorted, `k=v` joined by `,` (`defaults` if none), so
-a run two experiments share is trained once. The base model's run (`experiment=pretrain`) is
+**Names.** `run_name`: the fields that differ from `RunConfig()`, sorted, `k=v` joined by `,` (`defaults` if none).
+The base model's run (`experiment=pretrain`) is
 `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10` (the multiplier resolved by
-`lr_multiplier`, §5), a d16 seed-1 run `learning_rate_scale=2.7192599564485445,num_hidden_layers=16,seed=1`. Its
-directory `artifacts/runs/<run_name>/` holds `.hydra/` (the composed config), `metrics.jsonl` (the run log; each line
-carries `run_name`, `attempt`, `kind`, `time`), the diagnostics sidecar (below), `checkpoint-<step>.pt` and
+`lr_multiplier`, §5). Its directory `artifacts/runs/<run_name>/` holds `.hydra/` (the composed config),
+`metrics.jsonl` (the run log; each line carries `run_name`, `attempt`, `kind`, `time`), the diagnostics sidecar
+(below), `checkpoint-<step>.pt` and
 `weights-<step>.pt`, `eval-<step>.json` with its sampled-completions sidecar `eval-<step>.samples.json.gz`
 (`docs/evaluation.md` §1) and `run.log`. The run log's records (`train/loop.py`; field definitions in
 `docs/evaluation.md` §10):
@@ -331,12 +327,12 @@ alternated 25-step windows after 8 warm-up steps; every 10th step within the win
 with or without, `7e77833`). The per-micro-batch statistics are taken without autograd: a graph through the
 pinned-buffer copies would chain every step's onto the last, a leak of ~12.7 MiB per step at d24 (`1f23203`).
 
-**Job** (`run.job`): the stale guard (`run.recipe_changed`: a recorded `run` record whose `plan`, `data_key` or
-`config`, or a `run` or `stage` record whose mixture, differs from the current code's raises "recipe changed" until
-the run's directory is deleted; `ablations/peak_lr.py` `check` applies the same test to its records); the run is
-skipped if every checkpoint's evaluation exists or it diverged; else training (`run.phase`), then the unevaluated
-checkpoints' evaluations (`run.evaluations`, overlapped, §11), each phase in a fresh spawned process
-(`torch.compile`'s recompile limit and the caching allocator are per process).
+**Job** (`run.job`): the run is skipped if every checkpoint's evaluation exists or it diverged; else training
+(`run.training`, which resumes, below), then the unevaluated checkpoints' evaluations (`run.evaluations`,
+overlapped, §11), each phase in a fresh spawned process (`torch.compile`'s recompile limit and the caching allocator
+are per process). A relaunch thus finishes a run's training and evaluates the checkpoints still missing an
+evaluation. Runs are not re-checked against the current recipe: `67192ab`'s stale guard `run.recipe_changed`
+(a recorded plan, tokenizer data key, config or stage mixture differing from the current code's) is removed.
 
 **Checkpoints and resume.** Each is written to a temporary file and renamed, so a kill mid-save leaves the previous
 one (`train/checkpoint.py`). Full state (`checkpoint-<step>.pt`: `model`, `optimizers`, model `config`,
@@ -365,10 +361,10 @@ a run with one checkpoint restarts from step 0. A resumed attempt's records supe
 it repeats (`metrics.train_steps`).
 
 **Divergence.** A non-finite loss or gradient norm writes a `failure` record and ends training; the job returns, the
-sweep continues and a rerun skips the run (`metrics.diverged`). Both instabilities of arXiv 2309.14322 §3.1 "appear
-at high learning rates in small models"; `peak_lr`'s `fit` counts such a run worse than any evaluated one. Any other
-failure fails its job: the sweep's other jobs still run (Hydra's basic launcher runs every job of the sweep), then the
-sweep raises and writes no experiment records.
+sweep continues and a rerun skips the run (`metrics.diverged`); its experiment record has `measures` null and
+`diverged_at` set. Both instabilities of arXiv 2309.14322 §3.1 "appear at high learning rates in small models"; no
+`peak_lr` arm diverged (§5). Any other failure fails its job: the sweep's other jobs still run (Hydra's basic
+launcher runs every job of the sweep), then the sweep raises and writes no experiment records.
 
 **Experiment records** (`ablations/records.py` `Records`, an experiment's Hydra callback, when the sweep ends):
 
@@ -380,7 +376,7 @@ sweep raises and writes no experiment records.
 The ablation records and their status: `docs/experiments.md` §1. `results/muon_wd_timescale_20tpp.jsonl` and
 `results/scalar_learning_rates.json[l]` (whose `.json` holds an analysis, `docs/experiments.md` §4) were written by
 earlier code: without the output-logit cap (`model.final_logit_softcapping` null) and with `RunConfig` fields since
-removed, so the stale guard raises "recipe changed" on their directories.
+removed.
 
 ## 7. Hardware and throughput
 
@@ -392,12 +388,12 @@ enforced; the software power cap is active in every sample of the d24 8K step). 
 shares a 1,000 W budget and draws 888–910 W with the CPU busy [unverified: samples not kept], so no heavy CPU job runs
 beside a measured run. `scripts/setup.sh` locks the SM clock at `clocks.max.sm` (1,980 MHz): the d24 8K step 3.0%
 faster, d16 1.7% (`4ade225`). Under training the cap still lowers the clock to averages of 1,492–1,647 MHz across the
-d24 profiles: sustained GEMMs run ~14% below their isolated speed. The lock was found off on 10-27 (`nvidia-smi`'s
-locked clocks do not persist across a driver reload or reboot; how it was lost is unknown). [inference] The unlocked
-rate at `104488d`, 366,864 tok/s, equals `067e60b`'s 365,466 with the softcap's −0.58% in between, so that row and
-the later A/B arms were likely unlocked too (their relative gains are unaffected: both arms alike). Re-applied
-mid-rehearsal, the 8K rate went from 362,451 to 371–374K tok/s over the remaining 1,300 steps (not a controlled A/B;
-`4ade225`'s +3.0% is); the base run's launch re-applies the lock in its exclusive job.
+d24 profiles: sustained GEMMs run ~14% below their isolated speed. The lock was found off before the d24 rehearsal
+(`nvidia-smi`'s locked clocks do not persist across a driver reload or reboot; how it was lost is unknown). [inference]
+The unlocked rate at `104488d`, 366,864 tok/s, equals `067e60b`'s 365,466 with the softcap's −0.58% in between, so
+that row and the later A/B arms were likely unlocked too (their relative gains are unaffected: both arms alike).
+Re-applied mid-rehearsal, the 8K rate went from 362,451 to 371–374K tok/s over the remaining 1,300 steps (not a
+controlled A/B; `4ade225`'s +3.0% is); `scripts/setup.sh` re-applies the lock and is re-run after a reboot (§9).
 
 **Step profile** (d24, 8K, nsys; the baseline of `373b549`'s A/B): 4,355 ms of GPU time per step, 99.4% busy: GEMMs
 60.5% (~680 TFLOP/s), FlashAttention-4 18.9% (34.7% at 32K; the 512-window layers at 283–336 TFLOP/s against 511–600
@@ -437,17 +433,18 @@ Concurrent runs and MPS sharing are not used (`docs/experiments.md` §5).
 
 ## 8. Reproducibility
 
-**Environment.** `docker/Dockerfile` pins by digest uv 0.13.4 and NGC PyTorch 26.09 (PyTorch 2.14.0a0 with Triton,
-CUDA and nvcc; torch and numpy are excluded from the lock, `pyproject.toml` `exclude-dependencies`), Rust 1.99.1 for
-the crates, and openai/human-eval-infilling (`88062ff`) and nuprl/MultiPL-E (`3025a53`) by commit; the image's own
-FlashAttention is uninstalled so the locked `flash_attn.cute` is imported. `pyproject.toml` pins every direct
-dependency (e.g. `hydra-core==1.3.7`, `quack-kernels==0.6.5`, `flash-attn-4==4.0.0b35`, `tokenizers==0.23.3`;
-evalplus `26d6d00` by git revision), `uv.lock` the rest. `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0` keeps fp32 matmuls fp32
+**Environment.** `docker/Dockerfile` pins by digest uv 0.13.6 and NGC PyTorch 26.09 (PyTorch 2.14.0a0 with Triton,
+CUDA and nvcc; torch, Triton, numpy and nvidia-ml-py come from the image and are excluded from the lock,
+`pyproject.toml` `exclude-dependencies`), Rust 1.99.1 for the crates, and openai/human-eval-infilling (`88062ff`) and
+nuprl/MultiPL-E (`3025a53`) by commit; the image's own FlashAttention is uninstalled so the locked `flash_attn.cute`
+is imported. `pyproject.toml` pins every direct dependency at its newest release (e.g. `hydra-core==1.3.8`,
+`quack-kernels==0.6.5`, `flash-attn-4==4.0.0b36`, `duckdb==2.0.0`; evalplus `26d6d00` by git revision),
+`uv.lock` the rest. `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0` keeps fp32 matmuls fp32
 (the NGC image sets 1); `OMP_NUM_THREADS=1` (parallelism is by process); compiler and kernel caches live in
 `artifacts/cache`.
 
-**Data order.** Each corpus's packed rows are permuted once by the run's seed (NumPy `RandomState`, whose stream is
-frozen across NumPy versions; `stage_batches`), which also seeds the initialization; rows go to corpora by the
+**Data order.** Each corpus's packed rows are permuted once by `train/loop.py` `SEED` = 0 (NumPy `RandomState`, whose
+stream is frozen across NumPy versions; `stage_batches`), which also seeds the initialization; rows go to corpora by the
 loader's Weyl sequence (`mixture.mixture_rows`; `docs/corpus.md` §9). The order does not depend on the CPU
 [inference].
 
@@ -474,8 +471,7 @@ it is re-run after a reboot (the clock lock). After logging in again, every comm
 `scripts/container.sh` (the checkout mounted at `/workspace/nanochat`, NGC's documented run flags, an unlimited stack
 hard limit for evalplus's `reliability_guard`), whose entrypoint creates `artifacts/` (§11, `paths.py`).
 
-1. **Corpus**: the tokenizer ablation's vocabularies, intrinsic measures and data, the corpus's tokenizer, tokenize,
-   pack and the smoke check, in the order of `docs/corpus.md` §10.
+1. **Corpus**: the corpus's tokenizer, tokenization and packing, in the order of `docs/corpus.md` §10.
 2. **Peak lr**: `scripts/container.sh python run.py experiment=peak_lr_d24` (§5; the 3 runs and their evaluations),
    writing the records `lr_multiplier` reads.
 3. **Train**: `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'` trains both stages with
@@ -483,7 +479,8 @@ hard limit for evalplus's `reliability_guard`), whose entrypoint creates `artifa
    84 analysis checkpoints (§6), evaluates the 11 with every benchmark and writes `results/pretrain.jsonl` and
    `results/pretrain-curves.jsonl`. Expected time: §7.
 4. **Release**: `HF_TOKEN=<write token> scripts/release.sh <run_name> <repo>` uploads the run's full-state and
-   weights-only checkpoints, `metrics.jsonl` and the diagnostics sidecar, evaluations, `.hydra/` and `results/` to a
+   weights-only checkpoints, `metrics.jsonl` and the diagnostics sidecar, evaluations, `.hydra/`, the corpus tokenizer
+   (`artifacts/corpus/tokenizer/`, which `load_model`'s tokenizer reads) and `results/` to a
    Hugging Face model repository; `scripts/container.sh hf download <repo> --local-dir /workspace/nanochat` restores
    them where `load_model` and a resumed run read them.
 
@@ -504,11 +501,11 @@ point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/p
 
 **`run.py`.** The app process plans on the meta device (`model/modeling.py` `meta_model`) and never initializes CUDA.
 Its top level imports no torch, model, training or evaluation code because the workers of `eval/code_eval.py`'s
-sanitize pool (a forkserver) import it as the phases' main module. `register` runs only in the app's process:
-`ablations/peak_lr.py` and `ablations/records.py` import the file again as `run`, whose registrations would fail.
-`run_name` omits default fields, so a field added with a default renames no run, and a changed default would keep a
-run's name under a new meaning; the stale guard's `config` comparison closes that gap. `job`:
-a training phase that fails without a `failure` record raises `ChildProcessError`; one that diverged ends the job.
+sanitize pool (a forkserver) import it as the phases' main module. The resolvers and the schema are registered only
+in the app's process (`if __name__ == "__main__"`): `ablations/records.py` imports the file again as `run`, whose
+registrations would fail. `run_name` omits default fields, so a field added with a default renames no run, and a
+changed default would keep a run's name under a new meaning. `job`: a training phase that fails without a `failure`
+record raises `ChildProcessError`; one that diverged ends the job.
 `evaluations` runs the checkpoints' evaluations in fresh processes, checkpoint k + 1's started once k's has released
 the GPU (`eval/suite.py` `evaluate` sets its `released` Event, `docs/evaluation.md` §1) or ended; once any started one
 has failed no further evaluation starts, and `ChildProcessError` is raised once every started one has ended.
@@ -516,12 +513,9 @@ has failed no further evaluation starts, and `ChildProcessError` is raised once 
 `conf/run.yaml` disables Hydra's job logging, whose default file `${hydra.job.name}.log` would be
 `RUNS/<run_name>/run.log`, the phases' log.
 
-**`ablations/peak_lr.py`.** `records` reads the experiment's records; `check` applies `run.recipe_changed` to each
-run's recorded records, so the recorded lr is the law's at the current FLOP count times the arm's
-multiplier. `fit` returns `{curvature, vertex, code}`; the parabola through the lowest-code run and its neighbours has
-positive curvature by construction; where the rule would extend the grid (the lowest-code run at an end) or its lower
-neighbour diverged, `fit` raises. The base model's plan is `plan_of(RunConfig())`, whose `learning_rate_scale` 1.0 is
-the law's lr.
+**`ablations/peak_lr.py`.** `lr_multiplier` reads `results/peak_lr_d24.jsonl` in its recorded order (× 1, 2, 4) and
+returns e^vertex; the fitted parabola's curvature (0.0086, §5) is positive. It imports no `run` code: the resolver
+needs only the records.
 
 **`train/loop.py`.** A step composes `optim.py` (optimizers, weight decay, clip), `schedule.py` (stage, lr),
 `stages.py` (micro-batches in data order) and `model/ops/cross_entropy.py` `step_shares` (micro-batch loss weights).
@@ -546,7 +540,9 @@ in-place gradients are those the ops accumulate into (`model/modeling.py` `accum
 synchronizes the host.
 
 **`train/stages.py`.** `corpus/pack.py` packs each stage's documents apart, so no document is read twice;
-`PretrainingBatches` stops at an exhausted corpus, hence the overdraw check.
+`PretrainingBatches` stops at an exhausted corpus, which `max_tokens_per_param` rules out for the base run; the
+`peak_lr` arms at 5 tokens per parameter trained all 3,307 steps (`results/peak_lr_d24.jsonl`). `67192ab`'s
+`stage_mixture` also raised on an overdraw.
 
 **`ablations/records.py`.** The peak memory is the maximum over the `stage` record (the file-level stage's peak) and
 the `end` record (the last stage's). Each run's log is read once.
@@ -567,7 +563,8 @@ build cache; the clock lock does not survive a reboot, so the script is re-run a
 directory name under `artifacts/runs`; `release.sh` uploads an explicit list of the run's files.
 
 **`docker/Dockerfile`.**
-- NGC supplies torch, Triton, the CUDA libraries, nvcc (`native.py`) and numpy (the image's numba pins it below 2.5).
+- NGC supplies torch, Triton, the CUDA libraries, nvcc (`native.py`), numpy (the image's numba pins it below 2.5) and
+  nvidia-ml-py (`pynvml`, `train/diagnostics.py`).
   The venv (`--system-site-packages`) gives every locked package the lock's version over the image's copy. Digests
   are each tag as resolved when pinned.
 - The image's regular `flash_attn` package (FA2 with an FA4 beta inside) is uninstalled: it would hide
@@ -593,8 +590,9 @@ directory name under `artifacts/runs`; `release.sh` uploads an explicit list of 
   `artifacts/cache`, reused by every later container.
 
 **`pyproject.toml`.** `lark[interegular]`: `Lark(strict=True)` checks terminal collisions
-(`inference/syntax_constraint.py`). Excluded: torch and numpy (the image's) and evalplus's model-provider clients,
-which only its code generation uses.
+(`inference/syntax_constraint.py`); `omegaconf==2.3.1` is the newest hydra-core 1.3.8 accepts (`<2.4`). Excluded:
+the image's torch, Triton, numpy and nvidia-ml-py, and evalplus's model-provider clients and transformers, which only
+its code generation imports.
 
 ## References
 

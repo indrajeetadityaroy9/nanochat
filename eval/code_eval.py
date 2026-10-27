@@ -22,7 +22,6 @@ from typing import Literal, NamedTuple
 
 import human_eval_infilling
 import pyarrow.parquet as pq
-import torch
 from evalplus.data import get_human_eval_plus, get_mbpp_plus
 from evalplus.provider.utility import EOS, extra_eos_for_direct_completion
 from evalplus.sanitize import sanitize
@@ -124,13 +123,6 @@ def completion(tokenizer: Tokenizer, task: Task, ids: list[int], *, special: Lit
     ids = [t for t in ids if t < bos] if special == "skip" else list(itertools.takewhile(lambda t: t < bos, ids))
     text = tokenizer.enc.decode_bytes(ids)[len(healed):].decode("utf-8", "replace")  # as enc.decode
     return text[:min([j for j in (text.find(s) for s in task.stopwords) if j >= 0], default=len(text))]
-
-
-def decoder(model: CausalLM, tokenizer: Tokenizer, *, max_length: int, prompt_store: int) -> NativeDecoder:
-    """A NativeDecoder for requests of at most max_length positions, keeping up to prompt_store prompt positions,
-    sized by free device memory after empty_cache."""
-    torch.cuda.empty_cache()
-    return NativeDecoder(model, bos_token_id=tokenizer.bos_token_id, max_length=max_length, prompt_store=prompt_store)
 
 
 def generate_groups(generator: NativeDecoder, groups: list[list[Request]],
@@ -275,17 +267,11 @@ def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: l
     evaluated = [result["eval"][t.task_id] for t in items]
     base_status = [[v["base_status"] for v in vs] for vs in evaluated]
     plus_status = [[v["plus_status"] for v in vs] for vs in evaluated]
-    base, plus = evalplus_passed(base_status, plus_status)
+    base = [[b == "pass" for b in bs] for bs in base_status]  # evalplus/evaluate.py's pass@k outcomes
+    plus = [[b == p == "pass" for b, p in zip(bs, ps, strict=True)]
+            for bs, ps in zip(base_status, plus_status, strict=True)]
     return {"scores": {"base": pass_scores(base), "plus": pass_scores(plus)},
             "ids": [t.task_id for t in items], "base_status": base_status, "plus_status": plus_status}
-
-
-def evalplus_passed(base_status: list[list[str]], plus_status: list[list[str]]) -> tuple[list[list[bool]], ...]:
-    """Each sample's base and plus outcome (evalplus/evaluate.py's pass@k outcomes: base passes on base_status "pass",
-    plus on base_status == plus_status == "pass")."""
-    return ([[b == "pass" for b in bs] for bs in base_status],
-            [[b == p == "pass" for b, p in zip(bs, ps, strict=True)]
-             for bs, ps in zip(base_status, plus_status, strict=True)])
 
 
 @functools.cache
@@ -421,15 +407,6 @@ class CodegenRun(NamedTuple):
     score: Callable[[list[Task], list[list[str]]], dict]
 
 
-def codegen_scoring(pool: ProcessPoolExecutor, name: str) -> tuple[Callable[[Task, str], tuple[str, list[str]]],
-                                                                  Literal["python", "cpp"],
-                                                                  Callable[[list[Task], list[list[str]]], dict]]:
-    """An EvalPlus or MultiPL-E benchmark's (check, language, score) of CodegenRun."""
-    if name in EVALPLUS:
-        return functools.partial(evalplus_check, pool), "python", functools.partial(evalplus, pool, name)
-    return multipl_e_check, "cpp", multipl_e
-
-
 def codegen_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]],
                  pool: ProcessPoolExecutor) -> dict[str, CodegenRun]:
     """The CodegenRun of each EvalPlus and MultiPL-E benchmark."""
@@ -438,34 +415,29 @@ def codegen_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]],
     for name in EVALPLUS:
         items = benchmarks[name]
         runs[name] = CodegenRun(items, [[bos, *tokenizer.enc.encode_ordinary(t.prompt)] for t in items],
-                                [EVALPLUS_MAX_NEW_TOKENS] * len(items), "skip", *codegen_scoring(pool, name))
+                                [EVALPLUS_MAX_NEW_TOKENS] * len(items), "skip", functools.partial(evalplus_check, pool),
+                                "python", functools.partial(evalplus, pool, name))
     for name in MULTIPL_E_BENCHMARKS:
         items = benchmarks[name]
         prompts = [[bos, *tokenizer.enc.encode_ordinary(t.prompt.strip())] for t in items]
         # At most 1024 tokens of prompt and completion, BOS included (automodel.py:67); the longest prompt is 600 tokens
         # under the corpus tokenizer
-        runs[name] = CodegenRun(items, prompts, [1024 - len(p) for p in prompts], "stop",
-                                *codegen_scoring(pool, name))
+        runs[name] = CodegenRun(items, prompts, [1024 - len(p) for p in prompts], "stop", multipl_e_check, "cpp",
+                                multipl_e)
     return runs
 
 
 def codegen_record(tokenizer: Tokenizer, run: CodegenRun, mode: Literal["greedy", "sampled"],
                    generated: list[list[int]], timing: dict) -> dict:
-    """generation's record of a benchmark's greedy or sampled ids (a task's samples in seed order)."""
+    """generation's record of a benchmark's greedy or sampled ids: the evaluator's scores, the completions (greedy: one
+    per task; sampled: each task's N_SAMPLE in seed order) and latency."""
     n = 1 if mode == "greedy" else N_SAMPLE
     texts = [completion(tokenizer, run.items[j // n], ids, special=run.special, healed=b"")
              for j, ids in enumerate(generated)]
-    return codegen_scores(run.score, run.items, mode, [texts[n * i:n * (i + 1)] for i in range(len(run.items))],
-                          timing)
-
-
-def codegen_scores(score: Callable[[list[Task], list[list[str]]], dict], items: list[Task],
-                   mode: Literal["greedy", "sampled"], samples: list[list[str]], timing: dict) -> dict:
-    """codegen_record of each task's completion texts: the evaluator's scores, the completions (greedy: one per task;
-    sampled: each task's N_SAMPLE in seed order) and latency."""
-    scores = score(items, samples)
+    samples = [texts[n * i:n * (i + 1)] for i in range(len(run.items))]
+    scores = run.score(run.items, samples)
     if mode == "greedy":
-        return scores | {"completions": [text for text, in samples], "latency": timing}
+        return scores | {"completions": texts, "latency": timing}
     return scores | {"n_sample": N_SAMPLE, "completions": samples, "latency": timing}
 
 
@@ -488,9 +460,9 @@ def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list
                                    stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=b""),
                                    temperature=TEMPERATURE, top_p=TOP_P, seed=N_SAMPLE * i + k)
                            for i, (t, p, m) in enumerate(rows) for k in range(N_SAMPLE)])
-    generator = decoder(model, tokenizer,
-                        max_length=max(len(r.input_ids) + r.max_new_tokens - 1 for group in groups for r in group),
-                        prompt_store=sum(len(p) for run in runs.values() for p in run.prompts))
+    generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,
+                              max_length=max(len(r.input_ids) + r.max_new_tokens - 1 for g in groups for r in g),
+                              prompt_store=sum(len(p) for run in runs.values() for p in run.prompts))
     results = {name: dict.fromkeys(("greedy", "sampled")) for name in runs}
 
     def done(g: int, generated: list[list[int]], timing: dict) -> None:
@@ -519,14 +491,10 @@ def vetted(benchmarks: dict[str, list[Task]]) -> dict[str, list[list[tuple[str, 
 
 def parse_record(pool: ProcessPoolExecutor, tokenizer: Tokenizer, name: str, items: list[Task], dropped: list[bytes],
                  generated: list[list[int]], timing: dict) -> dict:
-    """parse_generation's record of generated ids (parse_scores)."""
-    return parse_scores(pool, name, items, [completion(tokenizer, t, ids, special="skip", healed=d)
-                                            for t, ids, d in zip(items, generated, dropped, strict=True)], timing)
-
-
-def parse_scores(pool: ProcessPoolExecutor, name: str, items: list[Task], completions: list[str],
-                 timing: dict) -> dict:
-    """parse_record of completion texts: parse_outcome shares, EvalPlus's scores, outcomes, completions and latency."""
+    """parse_generation's record of generated ids: parse_outcome shares, EvalPlus's scores, outcomes, completions and
+    latency."""
+    completions = [completion(tokenizer, t, ids, special="skip", healed=d)
+                   for t, ids, d in zip(items, generated, dropped, strict=True)]
     outcomes = [parse_outcome(t.prompt + c) for t, c in zip(items, completions, strict=True)]
     return (parse_shares(outcomes) | evalplus(pool, name, items, [[c] for c in completions])
             | {"outcomes": outcomes, "completions": completions, "latency": timing})
@@ -540,9 +508,9 @@ def parse_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str
     healed = {name: [heal_tokens(tokenizer, [bos, *tokenizer.enc.encode_ordinary(t.prompt)]) for t in benchmarks[name]]
               for name in EVALPLUS}
     budget = EVALPLUS_MAX_NEW_TOKENS + 1  # and a token for the bytes heal_tokens drops
-    generator = decoder(model, tokenizer,
-                        max_length=max(len(h) + budget - 1 for prompts in healed.values() for h, _, _ in prompts),
-                        prompt_store=0)  # each healed prompt is requested once
+    generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,
+                              max_length=max(len(h) + budget - 1 for prompts in healed.values() for h, _, _ in prompts),
+                              prompt_store=0)  # each healed prompt is requested once
     names = list(healed)
     results = dict.fromkeys(names)
 
@@ -575,14 +543,9 @@ def fim_runs(tokenizer: Tokenizer) -> dict[str, FimRun]:
                             max(len(tokenizer.enc.encode_ordinary(p["canonical_solution"])) for p in problems),
                             {mode: [fim_prompt(tokenizer, p["prompt"], p["suffix"], mode=mode) for p in problems]
                              for mode in FIM_MODES},
-                            reference_lines(name, problems))
+                            {"single-line": [1] * len(problems),
+                             "multi-line": [p["canonical_solution"].count("\n") for p in problems]}.get(name))
     return runs
-
-
-def reference_lines(name: str, problems: list[dict]) -> list[int] | None:
-    """An INFILLING benchmark's FimRun.lines: single-line 1, multi-line each reference middle's, random-span none."""
-    return {"single-line": [1] * len(problems),
-            "multi-line": [p["canonical_solution"].count("\n") for p in problems]}.get(name)
 
 
 def fim_generation(model: CausalLM, tokenizer: Tokenizer, *,
@@ -593,9 +556,9 @@ def fim_generation(model: CausalLM, tokenizer: Tokenizer, *,
     keys = [(name, mode) for name in INFILLING for mode in FIM_MODES]
     groups = [[Request(input_ids=p, max_new_tokens=runs[name].max_new_tokens) for p in runs[name].prompts[mode]]
               for name, mode in keys]
-    generator = decoder(model, tokenizer,
-                        max_length=max(len(r.input_ids) + r.max_new_tokens - 1 for group in groups for r in group),
-                        prompt_store=0)
+    generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,
+                              max_length=max(len(r.input_ids) + r.max_new_tokens - 1 for g in groups for r in g),
+                              prompt_store=0)
     results = {f"{name}/{mode}": {} for name, mode in keys}
 
     def done(g: int, generated: list[list[int]], timing: dict) -> None:
@@ -629,8 +592,9 @@ def filtered_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[
     # every request fits the decoder's max_length, the longest of either kind (a slot count changes no tokens)
     lengths = ([(p, m) for run in runs.values() for p, m in zip(run.prompts, run.budgets, strict=True)]
                + [(p, run.max_new_tokens) for run in fims.values() for p in run.prompts[FILTERED_MODE]])
-    generator = decoder(model, tokenizer, max_length=max(len(p) + m - 1 for p, m in lengths),
-                        prompt_store=sum(len(p) for p, _ in lengths))
+    generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,
+                              max_length=max(len(p) + m - 1 for p, m in lengths),
+                              prompt_store=sum(len(p) for p, _ in lengths))
     keys, results = list(searches), {}
 
     def done(s: int, tried: list[list[Candidate]], timing: dict) -> None:

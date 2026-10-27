@@ -17,8 +17,8 @@ tokenized and packed data under the corpus's tokenizer.
 | `corpus/schema.py` (categories, `SPLIT`, `SAMPLE_FILE`) | 2, 3 |
 | `corpus/curate.py` (check, dedup, split, shards) | 3 |
 | `corpus/publish.py` (`DATASET`, card, push, pull) | 4 |
-| `corpus/tokenizer.py`, `corpus/train_tokenizer.py`, `corpus/crate/train.rs` | 5 |
-| `results/tokenizer_split_merge-vocabularies.json` (the tokenizer sample) | 5 |
+| `corpus/tokenizer.py`, `corpus/train_tokenizer.py` (the tokenizer step), `corpus/crate/train.rs` | 5, 10 |
+| `results/tokenizer_split_merge-vocabularies.json` (the tokenizer sample, `5ba5025`) | 5 |
 | `corpus/tokenize.py`, `corpus/crate/repository.rs` (`topological_sort`) | 6 |
 | `corpus/parallel.py` (`MEMORY`, `ordered`, `SPAWN`) | 3, 6 |
 | `corpus/mixture.py` | 1, 7 |
@@ -55,12 +55,12 @@ transpilation (Qwen3-32B, arXiv 2512.20848 §2.2.2), UltraData-Math L3 and Codef
 dataset card [unverified]).
 
 **Fetch** (`prepare.fetch`): only the columns the source's standardizer reads (`prepare.columns`), row group by row
-group, written to `<file>.partial` and renamed when whole; an existing raw file is kept. Stack-Edu's Hub files are
+group, into `raw/<source>/<Hub path>`. Stack-Edu's Hub files are
 metadata, downloaded whole; each row group's blobs are read from Software Heritage's public S3 bucket by `blob_id`,
 gunzipped and decoded with their `src_encoding` (`prepare.blob_texts`); a blob the bucket lacks or that does not decode
 has no text. `FETCHES` = 4 files at once (Stack-Edu one at a time, `prepare.prepare`): the throughput peak reading one
 column of 8 UltraData-Code L3 files, 8.5, 11.5, 12.4 and 10.5 MB/s at 1, 2, 4 and 8 files in flight (`c1a7d7b`).
-A request that fails under obstore's default retries fails its file, and `prepare` is run again (fetched files kept).
+A request that fails under obstore's default retries fails its file, and `prepare` is run again (every file refetched).
 
 **Extent** (`prepare.extent`): a source of a group read in part (`mixture.IN_PART`: synthetic code, ClimbMix,
 UltraData-Math L3) fetches the fewest Hub files, in the SHA-1 order of their paths, whose text bytes (from Parquet
@@ -80,8 +80,8 @@ intrinsic record's `train_tokens_over_draw` is ≥ 1.017 (sa-bpe-fused, syntheti
 `results/tokenizer_split_merge-intrinsic.json`). Under the corpus's tokenizer the train splits hold 1.096 (synthetic,
 draw 25.32B), 1.071 (text, 10.26B) and 1.167 (math, 3.08B) × their group's draw (tokens of the tokenized train splits,
 computed on master; the intrinsic record's 1.169 for math estimates tokens from bytes, `docs/experiments.md` §2). A
-source whose packed shards fall short of its draw stops `pack` (`pack.take`); a larger run or share than the extents
-hold needs `prepare`, `curate` and `publish push` again.
+source whose packed shards fall short of its draw stops `pack` (`pack.fit`: the shard iterator is exhausted); a larger
+run or share than the extents hold needs `prepare`, `curate` and `publish push` again.
 
 `mixture.BYTES_PER_TOKEN` is the reference tokenizer's (SA-BPE within `SPLIT_PATTERN`, trained before this corpus),
 used for every token count made before the corpus's tokenizer exists (extents, the tokenizer sample):
@@ -130,7 +130,7 @@ UltraData-Stack-v3-L2 and UltraData-Code L2 Python, Nemotron rewriting, CodeXGLU
 (Python 3.12). A file that does not is repaired by the smallest subset of these steps that makes it parse
 (`curate.repaired`: steps 1–2 where they change the text, and 2to3; every subset by size, then in step order); the
 repaired text is kept with its `id` recomputed, and a file no subset repairs is dropped. Output:
-`checked/<source>/<k>.parquet` (an existing file is kept; `prepare` removes them).
+`checked/<source>/<k>.parquet` (`prepare` removes them before rebuilding).
 1. Stack v3's placeholders `<EMAIL>`, `<KEY>`, `<NAME>`, `<PASSWORD>` become the bare word.
 2. Leading-indentation tabs expand to tab stops of 8 (Python 2 Language Reference §2.1.8).
 3. Every fixer of `fissix.fixes` (2to3), under the recursion limit `RECURSION` = 6,000 (2to3 recurses over the parse
@@ -164,12 +164,13 @@ part (§8).
 
 ## 4. Published dataset and provenance
 
-`corpus/publish.py`, `DATASET` = `iaroy/nanochat-data` (private on the Hub). The tree is `curated/`'s,
-`<source>/<split>/<k>.parquet` (1,812 shards: 6 × 100 repository, 12 × 101 others; 160,061,439,381 bytes), and
-`README.md`, the card (`publish.card`: layout, schema, per folder its contents, columns, origin and rows; the Hub's
-viewer off, as its Parquet converter would merge mixed schemas). The shards were committed at `a4ec1a08` ("nanochat
-corpus, curated", 2026-10-24); `main` is `b091cb47`, after two commits (`f7cafdd8`, `b091cb47`) that removed a
-`manifest.json` and its mention in the card (`HfApi.list_repo_commits`).
+`corpus/publish.py`, `DATASET` = `iaroy/nanochat-data` (private on the Hub). `push` writes the tree
+`<source>/<split>/<k>.parquet` (`curated/`'s: 1,812 shards, 6 × 100 repository, 12 × 101 others; 160,061,439,381
+bytes), `tokenizer/tokenizer.{tiktoken,pattern}` (`CORPUS/tokenizer`, §5) and `README.md`, the card (`publish.card`:
+layout, schema, per folder its contents, columns, origin and rows, the tokenizer; the Hub's viewer off, as its Parquet
+converter would merge mixed schemas). The shards were committed at `a4ec1a08` ("nanochat corpus, curated",
+2026-10-24); `main` is `b091cb47`, after two commits (`f7cafdd8`, `b091cb47`) that removed a `manifest.json` and its
+mention in the card (`HfApi.list_repo_commits`); `b091cb47` predates the tokenizer's addition to `push`.
 
 | Folder | Columns | Train rows | Val rows | Parquet GB |
 |---|---|---|---|---|
@@ -194,12 +195,12 @@ corpus, curated", 2026-10-24); `main` is `b091cb47`, after two commits (`f7cafdd
 | All | | 177,115,767 | 1,771,524 | 160.06 |
 
 - **Push** (`publish push`): writes the card, deletes every file the dataset holds but `.gitattributes` in one commit,
-  uploads the shards in preupload calls, each closed once it reaches `PREUPLOAD` = 4 GiB (an LFS upload URL expires
-  900 s after its batch call, `X-Amz-Expires=900`, `publish.py:17`, so 4 GiB needs at least 4.6 MiB/s [arithmetic];
-  the Hub skips objects it holds, so a rerun uploads the rest), adds them in one commit and squashes the history into
-  one commit.
-- **Pull** (`publish pull`): `snapshot_download` of `main`'s `<source>/**` into `CORPUS/curated`. `main` holds 1,814
-  files: the 1,812 shards, `README.md` and `.gitattributes`.
+  uploads the shards and the tokenizer's two files in preupload calls, each closed once it reaches `PREUPLOAD` = 4 GiB
+  (an LFS upload URL expires 900 s after its batch call, `X-Amz-Expires=900`, `publish.py:17`, so 4 GiB needs at least
+  4.6 MiB/s [arithmetic]; the Hub skips objects it holds, so a rerun uploads the rest), adds them in one commit and
+  squashes the history into one commit.
+- **Pull** (`publish pull`): `snapshot_download` of `main`'s `<source>/**` into `CORPUS/curated` and of `tokenizer/*`
+  into `CORPUS/tokenizer`. At `b091cb47` `main` holds 1,814 files: the 1,812 shards, `README.md` and `.gitattributes`.
 - **Provenance.** The SHA-256 of every local shard in `CORPUS/curated` equals the Hub's LFS hash at `b091cb47`
   (`HfApi.dataset_info(files_metadata=True)`): 1,812 shards, none missing or extra, 160,061,439,381 bytes (computed on
   master). Training reads only the packs derived from it (§6–§9); the seeded generators (data order, FIM's ChaCha8)
@@ -208,12 +209,23 @@ corpus, curated", 2026-10-24); `main` is `b091cb47`, after two commits (`f7cafdd
 ## 5. Tokenizer
 
 `corpus/tokenizer.py` loads the corpus's tokenizer from `CORPUS/tokenizer` (`tokenizer.tiktoken`, `tokenizer.pattern`),
-encoded by tiktoken. It is the sa-bpe arm of `ablations/tokenizer_split_merge.py` (step `vocabularies`), its two files
-copied byte-identical (SHA-256, computed on master) from `tokenizer-ablation/sa-bpe/`; no code path writes
-`CORPUS/tokenizer`. The other arms, the intrinsic comparison and why the ablation's training runs were not run are
-`docs/experiments.md` §2. Its data key is `054a5beebb0fbcb3e21b5f62f2545e49b79d8620ba75322c1804f5a004283e3a`
-(recomputed on master; `results/tokenizer_split_merge-vocabularies.json`), under which the whole corpus is tokenized
-and packed (§6, §8).
+encoded by tiktoken (`get_tokenizer`); the dataset ships it (`publish pull`, §4). It is the sa-bpe arm of the tokenizer
+ablation (`docs/experiments.md` §2: the other arms, the intrinsic comparison and why the ablation's training runs were
+not run). Its data key is `054a5beebb0fbcb3e21b5f62f2545e49b79d8620ba75322c1804f5a004283e3a`
+(`results/tokenizer_split_merge-vocabularies.json`, `5ba5025`), under which the whole corpus is tokenized and packed
+(§6, §8).
+
+**Method and provenance.** `python -m corpus.train_tokenizer` (`train_tokenizer.main`) is the method: the sample, the
+trainer and the settings below, written to `CORPUS/tokenizer`. The shipped tokenizer (tiktoken file SHA-256
+`59e8b637…`, pattern `47a359ca…`) was trained by the same method (the ablation's `vocabularies` step at `5ba5025`) on
+an earlier build of the curated corpus: the sample of the published dataset (§4) has the record's 3,988,600
+documents, but its bytes and units differ per source
+(stack_edu_python 1,195,186,384 bytes and 384,926 units against the record's 1,186,614,352 and 384,949; kaggle_notebooks
+195,259,329 bytes against 206,881,801; codexglue_python, stack_edu_cpp, climbmix and both Nemotron sources also
+differ). On the published dataset the step writes an equivalent tokenizer, not the shipped one: tiktoken file
+`0f9f7bc0…`, data key `3246901b3b651b320713bfd6ee408be0d53ff8098a0a9f0c1d321179105b41a0`, `tokenizer.pattern`
+identical; byte-identical to the sa-bpe arm of `ablations/tokenizer_split_merge.py` at `67192ab` on the same data.
+The build (§10) therefore pulls the shipped tokenizer, and tokenize and pack reproduce data key `054a5bee…`.
 
 - **Vocabulary: 32,768 ids** (`model/config.py` `VOCAB_SIZE` = 2^15): the 256 bytes, 32,508 merges, then
   `SPECIAL_TOKENS`: `<|bos|>` (id 32,764) and the FIM sentinels `<｜fim▁begin｜>`, `<｜fim▁hole｜>`, `<｜fim▁end｜>`
@@ -223,15 +235,14 @@ and packed (§6, §8).
   §3.2); StarCoder2 found that "increasing the vocabulary size to 100K did not improve performance" (arXiv 2402.19173
   §6.2); Dagan et al. measured HumanEval pass@1 20.52–20.84 from 32K to 256K at 1.5B, not monotone in the size (arXiv
   2402.01035 §3.2, Table 3).
-- **Trainer** (`train_tokenizer.train`, `crate/train.rs`): byte-level BPE within the chunks of the split pattern,
-  each merge the pair of highest F·ln R (score `"sa-bpe"`; `"frequency"`, highest F, serves the ablation's arms):
-  SA-BPE's F·log R, arXiv 2604.14053 §4.1, ln natural as in its released `scoring.py` (`math.log`);
-  F the pair's frequency, R the number of authorship units holding it in the current segmentation, where
-  the paper counts repositories; a pair of one unit scores 0); ties to the higher F, then the smaller pair; a merge
-  whose bytes are already a token is skipped, as a vocabulary maps bytes to one id. Every merge is an argmax with
-  fixed tie-breaks, so the result does not depend on the worker count. Of SA-BPE's Table 3 scores, F·log R has the
-  highest compression (3.643) and far fewer verified under-trained tokens than F (72 against 640); Table 4's F·log R·L
-  is not used, as for natural language "the language aspect must be avoided" (§6).
+- **Trainer** (`crate/train.rs` `train`, called by `train_tokenizer.main`): byte-level BPE within the chunks of the
+  split pattern, each merge the pair of highest F·ln R (SA-BPE's F·log R, arXiv 2604.14053 §4.1, ln natural as in its
+  released `scoring.py`, `math.log`; F the pair's frequency, R the number of authorship units holding it in the
+  current segmentation, where the paper counts repositories; a pair of one unit scores 0); ties to the higher F, then
+  the smaller pair; a merge whose bytes are already a token is skipped, as a vocabulary maps bytes to one id. Every
+  merge is an argmax with fixed tie-breaks, so the result does not depend on the worker count. Of SA-BPE's Table 3
+  scores, F·log R has the highest compression (3.643) and far fewer verified under-trained tokens than F (72 against
+  640); Table 4's F·log R·L is not used, as for natural language "the language aspect must be avoided" (§6).
 - **`SPLIT_PATTERN`**: cl100k's with digit runs of one or two (karpathy/nanochat's) and no line break after a
   punctuation run, so no token joins `"):"` to its line break:
   `'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]|\s+(?!\S)|\s+`.
@@ -272,14 +283,13 @@ and packed (§6, §8).
 | ultradata_math_l3_multi_style | 0.106 | 0.0309 | 20,995 | 0.105 | 20,995 |
 | ultradata_math_l3_textbook_exercise | 0.089 | 0.0309 | 31,798 | 0.089 | 31,798 |
 
-- **Intrinsic** (`results/tokenizer_split_merge-intrinsic.json`, evaluation text the 18 sources' val splits,
+- **Intrinsic** (`results/tokenizer_split_merge-intrinsic.json`, `ebd8058`, evaluation text the 18 sources' val splits,
   6.21 GB): sa-bpe holds 3.624 bytes per token over the file stage and 3.442 on Stack-Edu Python, and passed the
-  validity checks the record holds (at `ebd8058`, on 200 val documents per source: chunks cover the text, tiktoken
-  equals the merges replayed, every text decodes; master's `train_tokenizer.fidelity` checks each source's first val
-  row group, up to 155 s for climbmix's 122,880 documents and 72.5M chunks, `2b32aef`).
+  validity checks the record holds (on 200 val documents per source: chunks cover the text, tiktoken equals the merges
+  replayed, every text decodes).
 - **Data key** (`Tokenizer.data_key`): SHA-256 of the JSON list [pattern, {BOS: id}, tiktoken file] (the FIM sentinels
-  after BOS do not enter it); a vocabulary's tokenized and packed data live in
-  `<its directory's parent>/tokenized/<corpus>-<data key>/` (`layout.split_path`).
+  after BOS do not enter it); the tokenized and packed data live in `CORPUS/tokenized/<corpus>-<data key>/`
+  (`layout.TOKENIZED`, `layout.split_path`).
 
 ## 6. Tokenization and repository samples
 
@@ -318,7 +328,7 @@ several sources hold, the first source's file is kept (`mixture.REPOSITORY_SOURC
 holds twice keeps its first row (`repository_samples(one_per_path=True)`); a repository's files are
 its samples in order. `tokenize_repo_level_stage` takes train partitions from the last (99) backwards until their
 documents hold the stage's repository draw, `CODE_SHARE` × the stage's tokens less Codeforces-CoTs' train tokens, and
-adds partition 0 as val; it raises if all partitions together hold less. Under sa-bpe: partitions 95–99,
+adds partition 0 as val. Under sa-bpe: partitions 95–99,
 5,450,009,703 train tokens for a draw of 4,563,412,330, Codeforces-CoTs' train tokens being 305,068,694 (computed on
 master).
 
@@ -413,7 +423,7 @@ and context, `<split>-T<seq_len>` (`layout.packed_path`):
 
 **What each stage packs** (`pack.main`; no document is packed twice):
 - File stage: the repository sources' train partitions not taken by the 32K stage and the supply sources, whole; each
-  source read in part, its leading shards, one more while its draw exceeds its rows (`pack.fit`, `pack.take`).
+  source read in part, its leading shards, one more while its draw exceeds its rows (`pack.fit`).
 - 32K stage: the repositories corpora and Codeforces-CoTs, whole; ClimbMix and UltraData-Math L3, the shards after
   the file stage's, as above.
 - Every val split, whole, at the seq_len of each stage that reads it.
@@ -520,22 +530,16 @@ docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/workspace/n
 (steps that read the Hub add `-e HF_HOME=/tmp/hf -e HF_HUB_DISABLE_XET=1 -e HF_TOKEN=<token>`).
 
 Once, to build the published dataset:
-1. **Prepare**: `python -m corpus.prepare` fetches and standardizes every source's extent (§1–§2); fetched files are
-   kept, so a rerun downloads only what it lacks.
+1. **Prepare**: `python -m corpus.prepare` fetches and standardizes every source's extent (§1–§2).
 2. **Curate**: `python -m corpus.curate` (§3).
-3. **Publish**: `python -m corpus.publish push` (§4).
+3. **Tokenizer**: `python -m corpus.train_tokenizer` trains sa-bpe on the sample into `CORPUS/tokenizer`
+   (`tokenizer.TOKENIZER`, §5). The shipped tokenizer is this step's output on an earlier curated build (§5).
+4. **Publish**: `python -m corpus.publish push` uploads the curated shards and the tokenizer (§4).
 
-From a pull of the dataset (`python -m corpus.publish pull`, run by `scripts/setup.sh`):
-4. **Tokenizer**: `python -m ablations.tokenizer_split_merge vocabularies` trains every arm into
-   `CORPUS/tokenizer-ablation/<arm>/`; `intrinsic` and `data` measure the arms (`docs/experiments.md` §2). An arm's
-   extent margin (`results/tokenizer_split_merge-intrinsic.json`) below 1 means a group read in part is too small for
-   it: raise `mixture.SPREAD`, then prepare, curate and publish again.
-5. **Copy**: sa-bpe's `tokenizer.tiktoken` and `tokenizer.pattern` from `CORPUS/tokenizer-ablation/sa-bpe/` to
-   `CORPUS/tokenizer` (`tokenizer.TOKENIZER`); every later step reads it.
-6. **Tokenize**: `python -m corpus.tokenize` (§6), ending with the 32K stage's repository partitions.
-7. **Pack**: `python -m corpus.pack` (§7–§8); it stops naming any source that holds fewer rows than its draw.
-8. **Smoke** (a manual check; no module runs it): the first micro-batches of both stages (`loader.PretrainingBatches`
-   at the stages' weights), decoded; each step's group composition and FIM share.
+From a pull of the dataset (`python -m corpus.publish pull`, run by `scripts/setup.sh`: the curated shards and the
+shipped tokenizer):
+5. **Tokenize**: `python -m corpus.tokenize` (§6), ending with the 32K stage's repository partitions.
+6. **Pack**: `python -m corpus.pack` (§7–§8); it stops when a source holds fewer rows than its draw.
 
 ## 11. Implementation reference
 
@@ -550,7 +554,6 @@ Detail of the code not stated in §1–§10, by module and symbol.
 | `checked/<source>/<k>.parquet` | a Python source's standardized file after the check |
 | `curated/<source>/<split>/<k>.parquet` | curated shard k (the published dataset; `sources.CURATED`) |
 | `tokenizer/tokenizer.{tiktoken,pattern}` | the corpus's tokenizer |
-| `tokenizer-ablation/<arm>/`, `tokenizer-ablation/tokenized/` | the ablation's arms and their data |
 | `tokenized/<corpus>-<data key>/<split>.*` | tokenized split (`.bin`, `.idx`, `.json`), packs `-T<seq_len>.*` |
 
 - `Source`: `files` maps each language (a Linguist name for code) to the glob of its Hub files (`codeforces_cots` maps
@@ -577,9 +580,9 @@ web text). `prepare` removes the source's standardized and checked files before 
   exception (its grammar's parse and tokenize errors and more).
 - `repaired`: steps 1–2 enter only where they change the text, 2to3 always; a file 2to3 alone repairs keeps its tabs
   and placeholders.
-- `check`: the remaining files' row groups are one stream (no file's slowest group idles the pool), as many in flight
+- `check`: every file's row groups are one stream (no file's slowest group idles the pool), as many in flight
   as `MEMORY` holds of the largest (a checked group is about its standardized size); a result waits until every
-  earlier one is written; output via `.partial`.
+  earlier one is written.
 - `duplicates`: DuckDB `row_number() OVER (PARTITION BY id ORDER BY source, file, row)`; drops `n > 1` and the id of
   the empty text (`EMPTY`). `undropped`: anti-join on (file index, row number).
 - `shuffle`: repository rows as Hive partitions `shuffle/<source>/part=<residue>/` (DuckDB `COPY … PARTITION_BY`
@@ -593,18 +596,15 @@ web text). `prepare` removes the source's standardized and checked files before 
 
 **`corpus/publish.py`.** `CONTENTS` and `COLUMNS` are the card's account of each folder and column.
 
-**`corpus/tokenizer.py`.** `ABLATION` = `CORPUS/tokenizer-ablation`. BOS starts every piece of a packed row; as a target
-it ends a document or a FIM middle. `token_bytes` holds a special token's text; `token_lengths` its document length 0.
-`get_tokenizer` reads line i of `tokenizer.tiktoken` as token i (base64, rank i).
+**`corpus/tokenizer.py`.** BOS starts every piece of a packed row; as a target it ends a document or a FIM middle.
+`token_bytes` holds a special token's text; `token_lengths` its document length 0. `get_tokenizer` reads line i of
+`tokenizer.tiktoken` as token i (base64, rank i), once per process.
 
 **`corpus/train_tokenizer.py`.** `SAMPLE_BYTES` comes from the reference tokenizer's curated splits' footers (that
 data is not on the Hub). `byte_shares` counts tokens at `BYTES_PER_TOKEN`. A unit id is the lowercased repository
-(one unit across the sources holding it) or the document's `id` (a hex SHA-1, never a GitHub owner/name). `sample`
-reads row groups in parallel and keeps the sample in order. `fidelity`: tiktoken encodes a chunk by merge rank (the
-rank of the joined bytes), which need not equal the training segmentation, so the two are compared; Python `regex`
-chunks equal fancy-regex's; the reference segmentation is Hugging Face tokenizers' BPE model over the merges with each
-byte spelled as its Latin-1 character (pairs merged by rank, every occurrence from the left as `train.rs`
-`merge_pair`, never a pair whose bytes another made); the first val row group is the unit the split is read in.
+(one unit across the sources holding it) or the document's `id` (a hex SHA-1, never a GitHub owner/name), numbered
+densely in sample order. `sample` reads row groups in parallel and keeps the sample in order. `main` writes merge i as
+token 256 + i (the bytes of its pair joined) and fails if `CORPUS/tokenizer` exists.
 
 **`corpus/crate/train.rs`** (rustbpe's design, karpathy/rustbpe). Documents are split into chunks by the pattern (one
 fancy-regex per worker, one chunk table per worker and hash shard, shards merged in parallel); each distinct chunk is a
@@ -616,8 +616,7 @@ counts the entry keeps an upper bound (initially the number of sources): an exis
 merge only creates pairs holding the new token), R changes only when F does, and a created pair occurs only in words
 of the merged pair, so its R is at most the merged pair's. An entry is taken only when F and R are exact, so every
 merge is the argmax of the exact score; a pair seen in one source scores 0 and merges only after every pair seen in
-several; ln instead of log changes no argmax. Ties: higher F, then the smaller pair (rustbpe's order). `"frequency"`
-never counts R.
+several; ln instead of log changes no argmax. Ties: higher F, then the smaller pair (rustbpe's order).
 
 **`corpus/crate/repository.rs`.**
 - Queries: Python pattern 0 `import_statement`, 1 `import_from_statement` (`from __future__` is its own node kind,
@@ -686,7 +685,7 @@ each, and writes the chosen ones from the tokens already computed. Output direct
 
 **`corpus/pack.py`.** `packed_shards` packs a shard only as the window reaches it. `write` offsets each shard's FIM
 range into the split's FIM tokens and writes each row's first piece. `pack_stage` starts each corpus read in part with
-one shard; `fit` takes more while `weights` reports an overdraw, and raises if a whole corpus overdraws. Val splits
+one shard; `fit` takes more while `weights` reports an overdraw. Val splits
 are packed in threads beside the stages, so a val shard's longest document does not hold up the cores.
 
 **`corpus/loader.py`.** `orders`: per corpus, row ids in read order, −1 an empty (all-padding) row; `start` skips each
@@ -700,7 +699,7 @@ the piece's end in `.idx` offsets.
 packed rows (after); a Stage's `tokens` are the `MAX_STEPS` plan's, and any other run draws by its shares at its size.
 `PART` maps each source of a group read in part to its group (such a group has the same sources in both stages);
 `IN_PART` groups read the same fraction of each source (`prepare.extent`). `REPOSITORIES` is one corpus per language,
-as a pack call parses one grammar. `SPREAD` is checked per arm by the intrinsic step (`train_tokens_over_draw`).
+as a pack call parses one grammar. `SPREAD` was checked per tokenizer arm (`train_tokens_over_draw`, §1).
 
 **`corpus/parallel.py`.** Workers are spawned (no inherited threads or state). `memory` reads the container's cgroup v2
 `memory.max` (the GH200 host mounts cgroup v2); `max` means no limit. The other half of memory is left to other

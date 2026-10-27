@@ -71,11 +71,9 @@ DECODE_CORES = 16
 
 @functools.cache
 def cores() -> tuple[frozenset[int], frozenset[int]]:
-    """(decode cores, timed-check cores): the last DECODE_CORES of the affinity the process starts with and the rest
-    (both all of it when it has no more, as eval.rescore under a smaller cpuset). Called before suite.evaluate pins."""
+    """(decode cores, timed-check cores): the last DECODE_CORES of the affinity the process starts with and the rest.
+    Called before suite.evaluate pins."""
     allowed = sorted(os.sched_getaffinity(0))
-    if len(allowed) <= DECODE_CORES:
-        return frozenset(allowed), frozenset(allowed)
     return frozenset(allowed[-DECODE_CORES:]), frozenset(allowed[:-DECODE_CORES])
 
 
@@ -99,16 +97,15 @@ def timed_budget() -> threading.Semaphore:
 def timed_slots(n: int = 1) -> Iterator[None]:
     """n of timed_budget()'s slots, held while the timed children they cover run: the scorer thread's evaluators (all
     slots) and the filtered searches' checks (one each) share them, so at most one timed child runs per timed-check
-    core. Taken one at a time: the one caller taking several (the scorer thread, or eval.rescore's main thread) waits
-    for single holders to finish, which never wait on slots themselves."""
-    budget, taken = timed_budget(), 0
+    core. Taken one at a time: the one caller taking several (the scorer thread) waits for single holders to finish,
+    which never wait on slots themselves."""
+    budget = timed_budget()
+    for _ in range(n):
+        budget.acquire()
     try:
-        for _ in range(n):
-            budget.acquire()
-            taken += 1
         yield
     finally:
-        for _ in range(taken):
+        for _ in range(n):
             budget.release()
 
 

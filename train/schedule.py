@@ -28,12 +28,12 @@ class RunPlan:
 
 def plan(*, model: CausalLM, tokens_per_param: float) -> RunPlan:
     """Plan of `model` at `tokens_per_param`: C = M D (M: Eq. 2 FLOPs per token at the file-level context),
-    B_opt = 0.2920 C^0.3271 tokens in whole micro-batches (at least one), eta_opt = 0.3118 C^-0.1250 (DeepSeek LLM,
+    B_opt = 0.2920 C^0.3271 tokens in whole micro-batches, eta_opt = 0.3118 C^-0.1250 (DeepSeek LLM,
     arXiv 2401.02954 §3.1 Eq. 1), for both stages."""
     params = num_non_embedding_params(model)
     tokens = round(tokens_per_param * params)
     compute = non_embedding_flops_per_token(model) * tokens
-    batch_size = max(1, round(0.2920 * compute ** 0.3271 / MICRO_BATCH_TOKENS)) * MICRO_BATCH_TOKENS
+    batch_size = round(0.2920 * compute ** 0.3271 / MICRO_BATCH_TOKENS) * MICRO_BATCH_TOKENS
     max_steps = tokens // batch_size
     return RunPlan(
         batch_size=batch_size, gradient_accumulation_steps=batch_size // MICRO_BATCH_TOKENS,

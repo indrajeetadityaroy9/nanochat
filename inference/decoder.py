@@ -135,11 +135,13 @@ class Slot:
 
 
 class NativeDecoder:
-    """Decoding by decode.cu of up to `batch` slots sized by free device memory; a request's tokens depend on neither
-    the batch nor the store. max_length: a slot's cache positions, at most max_position_embeddings; prompt_store:
-    positions requested for the prompt store."""
+    """Decoding by decode.cu of up to `batch` slots sized by free device memory after emptying the allocator's cache;
+    a request's tokens depend on neither the batch nor the store. max_length: a slot's cache positions (at most
+    max_position_embeddings, each request's len(input_ids) + max_new_tokens - 1 at most); prompt_store: positions
+    requested for the prompt store."""
     @torch.no_grad()
     def __init__(self, model: CausalLM, *, bos_token_id: int, max_length: int, prompt_store: int):
+        torch.cuda.empty_cache()
         lib = cuda_library("decode")
         lib.dec_create.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dec_create.restype = ctypes.c_void_p
@@ -162,10 +164,7 @@ class NativeDecoder:
         lib.dec_take_alt.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self.lib = lib
         cfg = model.config
-        L, C, T = cfg.num_hidden_layers, cfg.hidden_size, cfg.max_position_embeddings
-        if not 1 < max_length <= T:
-            raise ValueError(f"max_length {max_length} outside (1, max_position_embeddings {T}]")
-        self.max_length = max_length
+        L, C = cfg.num_hidden_layers, cfg.hidden_size
         # the forward's bf16 GEMM copies (CausalLM.refresh_gemm_weights), bf16 lm_head and value-embedding tables (the
         # forward's rounding at use); fp32 embedding, q/k norms, gate, rotary as modeling.py has them
         weights = [model.embed_tokens.weight, model.cos, model.sin, model.lm_head.weight.bfloat16()]
@@ -258,9 +257,9 @@ class NativeDecoder:
     @torch.no_grad()
     def generate(self, requests: Iterable[Request]) -> Iterator[tuple[int, list[int]]]:
         """Continuations of requests, consumed lazily; yields (request index, generated ids) in completion order.
-        Raises ValueError when len(input_ids) + max_new_tokens - 1 > max_length or a constraint allows no token.
+        Raises ValueError when a constraint allows no token.
         Sets timings: {request index: (start, first, end)}, host time.perf_counter seconds."""
-        lib, handle, B, bos, max_length = self.lib, self.handle, self.batch, self.bos, self.max_length
+        lib, handle, B, bos = self.lib, self.handle, self.batch, self.bos
         self.timings = {}
         queue, slots = enumerate(requests), [None] * B
         stopping = []  # slots whose last token awaits its stopping criteria
@@ -276,11 +275,6 @@ class NativeDecoder:
         def fill(b):
             """Slot b takes the next request (NativeDecoder.start), or idles once none is left."""
             for i, request in queue:
-                if request.max_new_tokens < 1:  # its finish test would never fire: decoding past max_length
-                    raise ValueError(f"request {i}: max_new_tokens {request.max_new_tokens} < 1")
-                if (end := len(request.input_ids) + request.max_new_tokens - 1) > max_length:
-                    raise ValueError(f"request {i}: len(input_ids) {len(request.input_ids)} + max_new_tokens "
-                                     f"{request.max_new_tokens} - 1 = {end} > max_length {max_length}")
                 slots[b] = self.start(b, i, request)
                 flags[0, b] = True
                 return

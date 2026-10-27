@@ -6,7 +6,7 @@ defaults:
   # Hydra's job log would be RUNS/<run_name>/run.log, the phases' log
   - override hydra/job_logging: none
 
-# the law's peak lr times the base multiplier (run.py lr_multiplier); resolved, so run names carry it
+# the law's peak lr times the base multiplier (ablations/peak_lr.py lr_multiplier); resolved, so run names carry it
 learning_rate_scale: ${lr_multiplier:}
 
 hydra:

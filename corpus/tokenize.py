@@ -1,6 +1,6 @@
 """
-Tokenize the curated corpus under a vocabulary into <split>.bin, .idx and .json per corpus and split, and the 32K
-stage's per-repository corpora (mixture.REPOSITORIES); output is independent of the worker count.
+Tokenize the curated corpus under the corpus's tokenizer into <split>.bin, .idx and .json per corpus and split, and the
+32K stage's per-repository corpora (mixture.REPOSITORIES); output is independent of the worker count.
 
 python -m corpus.tokenize
 """
@@ -9,7 +9,7 @@ import functools
 import itertools
 import json
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,20 +29,20 @@ from corpus.sources import (
     text_bytes,
     texts,
 )
-from corpus.tokenizer import TOKENIZER, get_tokenizer
+from corpus.tokenizer import get_tokenizer
 
 Documents = tuple[np.ndarray, np.ndarray]  # tokens, document lengths
 # Peak memory per partition text byte: ru_maxrss of a spawned worker, the larger of both languages' (C++)
 PEAK = 8.18
 
 
-def encode(documents: list[str], tokenizer_path: Path, threads: ThreadPoolExecutor | None = None) -> Documents:
-    """(tokens, document lengths) of documents, longest first on `threads` if given; special-token text encodes as
-    ordinary text."""
-    enc = get_tokenizer(tokenizer_path).enc
+def encode(documents: list[str], mapper: Callable) -> Documents:
+    """(tokens, document lengths) of documents, longest first through `mapper` (map, or a thread pool's map);
+    special-token text encodes as ordinary text."""
+    enc = get_tokenizer().enc
     order = sorted(range(len(documents)), key=lambda i: -len(documents[i]))
     ids = [np.zeros(0, TOKEN_DTYPE)] * len(documents)
-    for i, tokens in zip(order, (threads.map if threads else map)(
+    for i, tokens in zip(order, mapper(
             lambda i: enc.encode_to_numpy(documents[i], disallowed_special=()).astype(TOKEN_DTYPE), order),
             strict=True):
         ids[i] = tokens
@@ -50,10 +50,10 @@ def encode(documents: list[str], tokenizer_path: Path, threads: ThreadPoolExecut
     return np.concatenate(ids), lengths
 
 
-def row_group_documents(task: tuple[str, Path, int, Path]) -> Documents:
+def row_group_documents(task: tuple[str, Path, int]) -> Documents:
     """The documents of one curated row group (curated_documents)."""
-    source, path, g, tokenizer_path = task
-    return encode(curated_documents(source, pq.ParquetFile(path).read_row_group(g)), tokenizer_path)
+    source, path, g = task
+    return encode(curated_documents(source, pq.ParquetFile(path).read_row_group(g)), map)
 
 
 def language_sources(language: str) -> list[str]:
@@ -61,9 +61,9 @@ def language_sources(language: str) -> list[str]:
     return [s for s in mixture.REPOSITORY_SOURCES if SOURCES[s].language == language]
 
 
-def repository_documents(task: tuple[str, str, int, Path]) -> Documents:
+def repository_documents(task: tuple[str, str, int]) -> Documents:
     """The repository documents of one partition of one language's repository sources."""
-    language, split, part, tokenizer_path = task
+    language, split, part = task
     sources = language_sources(language)
     schema = pa.schema([("repo_name", pa.string()), ("relative_path", pa.string()), ("content", pa.large_string())])
     table = pa.concat_tables(
@@ -77,13 +77,12 @@ def repository_documents(task: tuple[str, str, int, Path]) -> Documents:
     documents = ["".join(files[a:b]) for a, b in itertools.pairwise([0, *ends])]
     del files
     with ThreadPoolExecutor(os.cpu_count()) as threads:
-        return encode(documents, tokenizer_path, threads)
+        return encode(documents, threads.map)
 
 
-def tokenize_split(corpus: str, split: str, tokenizer_path: Path, shards: list[int], results: Iterable[Documents]
-                   ) -> None:
+def tokenize_split(corpus: str, split: str, shards: list[int], results: Iterable[Documents]) -> None:
     """A corpus's split into <split>.bin, .idx and .json; shards[k] of the results are curated shard k's."""
-    path = split_path(corpus, split, get_tokenizer(tokenizer_path))
+    path = split_path(corpus, split, get_tokenizer())
     print(f"Tokenizing {len(shards)} {split} shards ({sum(shards):,} tasks) of '{corpus}' into {path}.bin", flush=True)
     per_shard, offset, results = [], 0, iter(results)
     with open(path.with_suffix(".bin"), "wb") as bin_file, open(path.with_suffix(".idx"), "wb") as idx_file:
@@ -99,18 +98,17 @@ def tokenize_split(corpus: str, split: str, tokenizer_path: Path, shards: list[i
     path.with_suffix(".json").write_text(json.dumps({"files": per_shard}))
 
 
-def tokenize_source(source: str, split: str, tokenizer_path: Path, pool: Executor, *, leading: int | None = None
-                    ) -> None:
-    """A source's curated split, or its `leading` curated shards, a row group per task."""
-    tasks = [[(source, path, g, tokenizer_path) for g in range(pq.read_metadata(path).num_row_groups)]
-             for path in curated_shards(source, split)[:leading]]
-    tokenize_split(source, split, tokenizer_path, [len(shard) for shard in tasks],
-                  pool.map(row_group_documents, [task for shard in tasks for task in shard]))  # in task order
+def tokenize_source(source: str, split: str, pool: Executor) -> None:
+    """A source's curated split, a row group per task."""
+    tasks = [[(source, path, g) for g in range(pq.read_metadata(path).num_row_groups)]
+             for path in curated_shards(source, split)]
+    tokenize_split(source, split, [len(shard) for shard in tasks],
+                   pool.map(row_group_documents, [task for shard in tasks for task in shard]))  # in task order
 
 
-def shard_tokens(corpus: str, split: str, tokenizer_path: Path) -> np.ndarray:
+def shard_tokens(corpus: str, split: str) -> np.ndarray:
     """The tokens of each curated shard of a tokenized split."""
-    tokenizer = get_tokenizer(tokenizer_path)
+    tokenizer = get_tokenizer()
     offsets = np.memmap(split_path(corpus, split, tokenizer).with_suffix(".idx"), dtype=np.int64, mode="r")
     return np.diff(offsets[shard_bounds(corpus, split, tokenizer)])
 
@@ -132,66 +130,54 @@ def repository_window() -> int:
     largest = max(sum(text_bytes(pq.read_metadata(curated_dir(s, split) / f"{part}.parquet"), "content")
                       for s in language_sources(language))
                   for language, split, part in repository_tasks(train_parts()))
-    return max(1, int(MEMORY / (PEAK * largest)))
+    return int(MEMORY / (PEAK * largest))
 
 
-def write_repositories(tokenizer_path: Path, parts: list[int], results: Iterator[Documents]) -> None:
+def write_repositories(parts: list[int], results: Iterator[Documents]) -> None:
     """The repositories corpora's splits from results, in repository_tasks(parts) order."""
-    tokenizer = get_tokenizer(tokenizer_path)
     for corpus in mixture.REPOSITORIES.values():
-        split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
-        tokenize_split(corpus, "val", tokenizer_path, [1], results)
-        tokenize_split(corpus, "train", tokenizer_path, [1] * len(parts), results)
+        split_path(corpus, "val", get_tokenizer()).parent.mkdir(parents=True)
+        tokenize_split(corpus, "val", [1], results)
+        tokenize_split(corpus, "train", [1] * len(parts), results)
         print(f"{corpus}: train partitions {parts[0]}..{parts[-1]}, "
-              f"{shard_tokens(corpus, 'train', tokenizer_path).sum():,} tokens", flush=True)
+              f"{shard_tokens(corpus, 'train').sum():,} tokens", flush=True)
 
 
-def tokenize_repositories(tokenizer_path: Path, parts: list[int], pool: Executor) -> None:
-    """The repositories corpora of train partitions `parts` and of val partition 0."""
-    tasks = [(*task, tokenizer_path) for task in repository_tasks(parts)]
-    write_repositories(tokenizer_path, parts, ordered(pool, repository_documents, tasks, repository_window()))
-
-
-def tokenize_repo_level_stage(tokenizer_path: Path, pool: Executor, need: float) -> list[int]:
-    """tokenize_repositories of the fewest trailing train partitions holding `need` tokens; returns them.
-    Raises RuntimeError when all partitions together hold less."""
+def tokenize_repo_level_stage(pool: Executor, need: float) -> None:
+    """The repositories corpora of val partition 0 and of the fewest trailing train partitions holding `need` tokens."""
     parts, languages = train_parts(), list(mixture.REPOSITORIES)
-    tasks = [(language, "val", 0, tokenizer_path) for language in languages]
-    tasks += [(language, "train", part, tokenizer_path) for part in reversed(parts) for language in languages]
+    tasks = [(language, "val", 0) for language in languages]
+    tasks += [(language, "train", part) for part in reversed(parts) for language in languages]
     results = ordered(pool, repository_documents, tasks, repository_window())
     held, total = {}, 0
-    for (language, split, part, _), documents in zip(tasks, results, strict=False):
+    for (language, split, part), documents in zip(tasks, results, strict=False):
         held[language, split, part] = documents
         total += len(documents[0]) if split == "train" else 0
         if split == "train" and language == languages[-1] and total >= need:
             break
     results.close()
-    if total < need:
-        raise RuntimeError(f"the repository partitions hold {total:,} of the {need:,.0f} tokens of the 32K stage")
     chosen = parts[-(len(held) // len(languages) - 1):]
-    write_repositories(tokenizer_path, chosen, (held.pop(task) for task in repository_tasks(chosen)))
-    return chosen
+    write_repositories(chosen, (held.pop(task) for task in repository_tasks(chosen)))
 
 
-def repository_parts(tokenizer_path: Path) -> list[int]:
+def repository_parts() -> list[int]:
     """The train partitions the tokenized repositories corpora hold."""
-    return train_parts()[-len(shard_tokens(mixture.REPOSITORIES["Python"], "train", tokenizer_path)):]
+    return train_parts()[-len(shard_tokens(mixture.REPOSITORIES["Python"], "train")):]
 
 
 def main() -> None:
     """Tokenize every source's splits, then the 32K stage's repositories corpora."""
-    tokenizer = get_tokenizer(TOKENIZER)
     jobs = list(itertools.product(SOURCES, ("val", "train")))
     with ProcessPoolExecutor(mp_context=SPAWN) as pool, ThreadPoolExecutor(len(jobs)) as threads:
         for corpus in SOURCES:
             # tokenize does not resume: a new output directory per corpus and tokenizer
-            split_path(corpus, "val", tokenizer).parent.mkdir(parents=True)
-        list(threads.map(lambda job: tokenize_source(job[0], job[1], TOKENIZER, pool), jobs))
+            split_path(corpus, "val", get_tokenizer()).parent.mkdir(parents=True)
+        list(threads.map(lambda job: tokenize_source(job[0], job[1], pool), jobs))
     # the 32K stage's repository draw: CODE_SHARE of its tokens less its supply sources'
-    need = mixture.CODE_SHARE * mixture.REPO_LEVEL_STAGE.tokens - sum(shard_tokens(s, "train", TOKENIZER).sum()
+    need = mixture.CODE_SHARE * mixture.REPO_LEVEL_STAGE.tokens - sum(shard_tokens(s, "train").sum()
                                                                      for s in mixture.REPO_LEVEL_STAGE.supply)
     with ProcessPoolExecutor(repository_window(), mp_context=SPAWN) as pool:
-        tokenize_repo_level_stage(TOKENIZER, pool, need)
+        tokenize_repo_level_stage(pool, need)
 
 
 if __name__ == "__main__":

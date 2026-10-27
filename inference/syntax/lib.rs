@@ -123,19 +123,11 @@ fn grammar_ends(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>) -> PyRe
     }).collect()))
 }
 
-/// The next masks into rows of the caller's uint32 buffer at address (row r at address + 4 words rows[r]; bit t % 32 of
-/// word t / 32 allows token t), BOS's bit iff a candidate end; whether each row allows some token.
+/// The next masks into distinct rows of the caller's uint32 buffer at address (row r at address + 4 words rows[r]; bit
+/// t % 32 of word t / 32 allows token t), BOS's bit iff a candidate end; whether each row allows some token.
 #[pyfunction]
 fn masks(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>, address: usize, rows: Vec<usize>, words: usize)
          -> PyResult<Vec<bool>> {
-    if rows.len() != constraints.len() {
-        return Err(PyValueError::new_err("one row per constraint"));
-    }
-    let mut sorted = rows.clone();
-    sorted.sort_unstable();
-    if sorted.windows(2).any(|w| w[0] == w[1]) {
-        return Err(PyValueError::new_err("rows must be distinct"));
-    }
     settle(py, &constraints)?;
     let jobs: Vec<_> = constraints.iter().zip(&rows).map(|(c, &row)| {
         let c = c.borrow();
@@ -143,7 +135,7 @@ fn masks(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>, address: usize
     }).collect();
     let bytes = words * 4;
     Ok(py.detach(|| jobs.par_iter().map(|(syntax, state, suffixed, ends_line, row)| {
-        // SAFETY: the caller's buffer holds every row, and the rows are distinct (checked above)
+        // SAFETY: the caller's buffer holds every row, and the rows are distinct (decoder.step_masks: one per slot)
         let bits = unsafe { std::slice::from_raw_parts_mut((address + row * bytes) as *mut u8, bytes) };
         bits.fill(0);
         syntax.allowed(state, bits);

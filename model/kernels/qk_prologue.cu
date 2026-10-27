@@ -20,17 +20,14 @@ __global__ void k_forward(const bf16 *__restrict__ q, const bf16 *__restrict__ k
     float g1[VEC], g2[VEC], cs[VEC], sn[VEC];
     load(gain, g1); load(gain + HALF, g2);
     load(cos + tab, cs); load(sin + tab, sn);
-    for (int h = 0; h < H; h += 2) {
-        const bool pair = h + 1 < H;  /* uniform over the row group, as qk_row_sum's shuffles need */
+    for (int h = 0; h < H; h += 2) {  /* two heads per pass: H = 6 */
         float a1[VEC], a2[VEC], b1[VEC], b2[VEC], y1[VEC], y2[VEC];
         load(x + h * HEAD_DIM, a1); load(x + h * HEAD_DIM + HALF, a2);
-        if (pair) { load(x + (h + 1) * HEAD_DIM, b1); load(x + (h + 1) * HEAD_DIM + HALF, b2); }
+        load(x + (h + 1) * HEAD_DIM, b1); load(x + (h + 1) * HEAD_DIM + HALF, b2);
         qk_rotate(a1, a2, g1, g2, cs, sn, y1, y2);
         store(y + h * HEAD_DIM, y1); store(y + h * HEAD_DIM + HALF, y2);
-        if (pair) {
-            qk_rotate(b1, b2, g1, g2, cs, sn, y1, y2);
-            store(y + (h + 1) * HEAD_DIM, y1); store(y + (h + 1) * HEAD_DIM + HALF, y2);
-        }
+        qk_rotate(b1, b2, g1, g2, cs, sn, y1, y2);
+        store(y + (h + 1) * HEAD_DIM, y1); store(y + (h + 1) * HEAD_DIM + HALF, y2);
     }
 }
 

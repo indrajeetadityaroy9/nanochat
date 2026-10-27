@@ -10,15 +10,17 @@ import numpy as np
 from corpus import mixture
 from corpus.sources import SOURCES
 from corpus.tokenizer import Tokenizer
+from paths import CORPUS
 
+TOKENIZED = CORPUS / "tokenized"
 TOKEN_DTYPE = np.uint16  # pack.rs reads &[u16]
 # pack.rs pack_shard's index entry: [start, end) in the tokenized split, then the FIM example's range in .fim
 PIECE_COLUMNS = 4
 
 
 def split_path(corpus: str, split: str, tokenizer: Tokenizer) -> Path:
-    """The stem of a tokenized split's files (.bin, .idx, .json), in <tokenizer.tokenized>/<corpus>-<data key>/."""
-    return tokenizer.tokenized / f"{corpus}-{tokenizer.data_key}" / split
+    """The stem of a tokenized split's files (.bin, .idx, .json), in TOKENIZED/<corpus>-<data key>/."""
+    return TOKENIZED / f"{corpus}-{tokenizer.data_key}" / split
 
 
 def packed_path(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Path:

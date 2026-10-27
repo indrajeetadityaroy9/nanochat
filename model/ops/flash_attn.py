@@ -154,7 +154,7 @@ class BackwardSm90Bf16dQ(FlashAttentionBackwardSm90):
     def __init__(self, *args, num_heads: int, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_heads = num_heads
-        # The staging and store below are written for FA4 4.0.0b35's hdim-128 causal/local config
+        # The staging and store below are written for FA4 4.0.0b36's hdim-128 causal/local config
         # (_tile_size_bwd_sm90): tile_m 64, tile_hdim 128, dQ_swapAB False, two dQ warpgroups, AtomLayoutMdQ 1, and
         # mma_dkv_is_rs
         # Rows tile_hdim + one 16-byte vector apart: 16-byte aligned, MMA C rows in different banks

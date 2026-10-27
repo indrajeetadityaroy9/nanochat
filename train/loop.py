@@ -7,7 +7,6 @@ import gc
 import math
 from dataclasses import asdict
 from functools import partial
-from pathlib import Path
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
@@ -22,17 +21,20 @@ from train.optim import optimizers, tau_weight_decay, update
 from train.schedule import RunPlan, lr_lambda
 from train.stages import stage_batches
 
+# the seed of the weights' initialization and of the data order
+SEED = 0
 
-def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, checkpoints: frozenset[int],
-          weights: frozenset[int], run_name: str, config: dict) -> None:
+
+def train(*, model: CausalLM, run: RunPlan, checkpoints: frozenset[int], weights: frozenset[int], run_name: str,
+          config: dict) -> None:
     """Train (or resume) run `run_name` of `model` (meta-device shapes at the file-level context) by plan `run` on CUDA.
     Full-state checkpoints after each step count in `checkpoints` (run.max_steps among them; resumed from), fp32
     weights only after each in `weights` (disjoint, never resumed from); `config` (RunConfig as a dict) and the
     tokenizer's data key are recorded with the run."""
     device = torch.device("cuda")
-    tokenizer = get_tokenizer(tokenizer_path)
+    tokenizer = get_tokenizer()
     model.to_empty(device=device)
-    model.init_weights(seed=seed)
+    model.init_weights(seed=SEED)
     # fp32 weight gradients the GEMMs accumulate into across micro-batches (model/ops/linear.py); update zeroes them
     accumulated = accumulated_weights(model)
     for p in accumulated:
@@ -61,7 +63,7 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
     if start_step == run.max_steps:
         return
     compiled = torch.compile(model, dynamic=False, fullgraph=True)
-    read = partial(stage_batches, tokenizer, run=run, seed=seed, device=device)
+    read = partial(stage_batches, tokenizer, run=run, seed=SEED, device=device)
 
     # First step's micro-batches: continue from stage_rows if it stays in the checkpoint's stage
     first = run.stage_at(start_step)

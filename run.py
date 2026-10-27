@@ -18,7 +18,8 @@ from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
 import metrics
-from corpus.tokenizer import ABLATION, TOKENIZER, get_tokenizer
+from ablations.peak_lr import lr_multiplier
+from corpus.tokenizer import get_tokenizer
 from paths import ROOT, RUNS
 
 if TYPE_CHECKING:
@@ -36,11 +37,9 @@ AFTER_STAGE_WEIGHTS = (100, 200, 400, 800, 1600)
 
 @dataclass
 class RunConfig:
-    """A run: the base model's recipe (the defaults, learning_rate_scale's conf/run.yaml's) except the fields set."""
-    num_hidden_layers: int = 24
+    """A run of the base model (d24): its recipe (the defaults, learning_rate_scale's conf/run.yaml's) except the
+    fields set."""
     tokens_per_param: float | None = None  # None: the data's max_tokens_per_param (train/stages.py)
-    seed: int = 0
-    tokenizer: str = "corpus"
     learning_rate_scale: float = 1.0  # times the law's peak lr; conf/run.yaml sets the measured multiplier
     num_checkpoints: int = 1
     generate: str = "parse"
@@ -54,26 +53,16 @@ def run_name(config: RunConfig) -> str:
     return ",".join(f"{name}={value}" for name, value in changed) or "defaults"
 
 
-def tokenizer_path(config: RunConfig) -> Path:
-    return TOKENIZER if config.tokenizer == "corpus" else ABLATION / config.tokenizer
-
-
-def base_plan(*, num_hidden_layers: int, tokens_per_param: float) -> "RunPlan":
-    """The base model's plan at num_hidden_layers and tokens per non-embedding parameter (schedule.plan)."""
+def plan_of(config: RunConfig) -> "RunPlan":
+    """The base model's plan (schedule.plan) at the run's tokens_per_param (default max_tokens_per_param), lr
+    scaled."""
     from model.modeling import meta_model
     from train.schedule import plan
-
-    return plan(model=meta_model(num_hidden_layers=num_hidden_layers), tokens_per_param=tokens_per_param)
-
-
-def plan_of(config: RunConfig) -> "RunPlan":
-    """The base plan at the run's depth and tokens_per_param (default max_tokens_per_param), lr scaled."""
     from train.stages import max_tokens_per_param
 
-    tokens_per_param = (max_tokens_per_param(get_tokenizer(tokenizer_path(config)),
-                                             num_hidden_layers=config.num_hidden_layers)
-                        if config.tokens_per_param is None else config.tokens_per_param)
-    base = base_plan(num_hidden_layers=config.num_hidden_layers, tokens_per_param=tokens_per_param)
+    tokens_per_param = (max_tokens_per_param(get_tokenizer()) if config.tokens_per_param is None
+                        else config.tokens_per_param)
+    base = plan(model=meta_model(), tokens_per_param=tokens_per_param)
     return replace(base, learning_rate=config.learning_rate_scale * base.learning_rate)
 
 
@@ -99,11 +88,9 @@ def training(config: RunConfig, run: "RunPlan") -> None:
     from model.modeling import meta_model
     from train.loop import train
 
-    model = meta_model(num_hidden_layers=config.num_hidden_layers)
     full, weights = analysis_steps(config, run)
-    train(model=model, run=run, tokenizer_path=tokenizer_path(config), seed=config.seed,
-          checkpoints=checkpoint_steps(config, run) | full, weights=weights, run_name=run_name(config),
-          config=asdict(config))
+    train(model=meta_model(), run=run, checkpoints=checkpoint_steps(config, run) | full, weights=weights,
+          run_name=run_name(config), config=asdict(config))
 
 
 def evaluation(config: RunConfig, step: int, previous: "Event | None", released: "Event") -> None:
@@ -111,8 +98,8 @@ def evaluation(config: RunConfig, step: int, previous: "Event | None", released:
 
     # ast.parse's SyntaxWarnings on generated code
     warnings.filterwarnings("ignore", category=SyntaxWarning)
-    suite.evaluate(get_tokenizer(tokenizer_path(config)), run_name=run_name(config), step=step,
-                   generate=config.generate, previous=previous, released=released)
+    suite.evaluate(get_tokenizer(), run_name=run_name(config), step=step, generate=config.generate,
+                   previous=previous, released=released)
 
 
 def logged(log: Path, target: Callable[..., None], kwargs: dict) -> None:
@@ -121,14 +108,6 @@ def logged(log: Path, target: Callable[..., None], kwargs: dict) -> None:
         os.dup2(f.fileno(), 1)
         os.dup2(f.fileno(), 2)
     target(**kwargs)
-
-
-def phase(log: Path, target: Callable[..., None], **kwargs: object) -> int:
-    """target(**kwargs) in a fresh process, its output appended to `log`; its exit code."""
-    process = multiprocessing.get_context("spawn").Process(target=logged, args=(log, target, kwargs))
-    process.start()
-    process.join()
-    return process.exitcode
 
 
 def evaluations(log: Path, checkpoints: list[tuple[RunConfig, int]]) -> None:
@@ -158,58 +137,26 @@ def evaluations(log: Path, checkpoints: list[tuple[RunConfig, int]]) -> None:
         raise ChildProcessError(f"evaluation of {', '.join(failed)} failed ({log})")
 
 
-def recipe_changed(config: RunConfig, log: list[dict]) -> bool:
-    """Whether a run log was trained on another recipe than the current code's for `config`: a run record's plan,
-    tokenizer data key or config, or a run or stage record's mixture (train/stages.py stage_mixture), differs."""
-    if not log:
-        return False
-    from corpus.mixture import FILE_LEVEL_STAGE, REPO_LEVEL_STAGE
-    from train.stages import stage_mixture
-
-    run, tokenizer = plan_of(config), get_tokenizer(tokenizer_path(config))
-    mixtures = {stage.seq_len: stage_mixture(tokenizer, stage, run)[0] for stage in (FILE_LEVEL_STAGE, REPO_LEVEL_STAGE)}
-    return any((r["kind"] == "run" and (r["plan"] != asdict(run) or r["data_key"] != tokenizer.data_key
-                                        or r["config"] != asdict(config)))
-               or (r["kind"] in ("run", "stage") and r["stage"]["mixture"] != mixtures[r["stage"]["seq_len"]])
-               for r in log)
-
-
 def job(config: RunConfig) -> None:
-    """A run's job: stale guard (recipe_changed), skip if every checkpoint is evaluated or the run diverged, then
-    training and its unevaluated checkpoints' evaluations (evaluations). Raises RuntimeError on a changed recipe,
-    ChildProcessError on a failed phase."""
+    """A run's job: skipped if every checkpoint is evaluated or the run diverged; else training (resuming) in a fresh
+    process, then its unevaluated checkpoints' evaluations (evaluations). Raises ChildProcessError on a failed phase
+    other than a divergence."""
     from eval.suite import evaluation_path
 
     name, run = run_name(config), plan_of(config)
-    log = metrics.records(name)
-    if recipe_changed(config, log):
-        raise RuntimeError(f"recipe changed since {name} ran: delete {RUNS / name}")
     unevaluated = [step for step in sorted(checkpoint_steps(config, run)) if not evaluation_path(name, step).exists()]
-    if not unevaluated or metrics.diverged(log) is not None:
+    if not unevaluated or metrics.diverged(metrics.records(name)) is not None:
         return
     output = RUNS / name / "run.log"
-    if phase(output, training, config=config, run=run):
+    process = multiprocessing.get_context("spawn").Process(
+        target=logged, args=(output, training, {"config": config, "run": run}))
+    process.start()
+    process.join()
+    if process.exitcode:
         if metrics.diverged(metrics.records(name)) is not None:
             return
         raise ChildProcessError(f"{name}: training failed ({output})")
     evaluations(output, [(config, step) for step in unevaluated])
-
-
-def lr_multiplier() -> float:
-    """The base multiplier of the law's peak lr: ablations/peak_lr.py analysis over the peak_lr_d24 records."""
-    from ablations.peak_lr import analysis, records
-
-    return analysis(records())["vertex"]
-
-
-def register() -> None:
-    """Register the resolvers and schema, in the app's process only: modules importing this file as `run` would
-    register again and fail."""
-    OmegaConf.register_new_resolver("runs", lambda: str(RUNS))
-    OmegaConf.register_new_resolver(
-        "run_name", lambda *, _root_: run_name(RunConfig(**{f.name: _root_[f.name] for f in fields(RunConfig)})))
-    OmegaConf.register_new_resolver("lr_multiplier", lr_multiplier, use_cache=True)
-    ConfigStore.instance().store(name="run_schema", node=RunConfig)
 
 
 @hydra.main(version_base="1.3", config_path=str(ROOT / "conf"), config_name="run")
@@ -218,5 +165,11 @@ def main(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    register()
+    # the resolvers and schema, in the app's process only: modules importing this file as `run` would register again
+    # and fail
+    OmegaConf.register_new_resolver("runs", lambda: str(RUNS))
+    OmegaConf.register_new_resolver(
+        "run_name", lambda *, _root_: run_name(RunConfig(**{f.name: _root_[f.name] for f in fields(RunConfig)})))
+    OmegaConf.register_new_resolver("lr_multiplier", lr_multiplier, use_cache=True)
+    ConfigStore.instance().store(name="run_schema", node=RunConfig)
     main()

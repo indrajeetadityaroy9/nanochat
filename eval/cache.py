@@ -11,7 +11,6 @@ import json
 import sqlite3
 import sys
 import threading
-from pathlib import Path
 from typing import Any
 
 from paths import VERDICTS
@@ -25,10 +24,8 @@ def environment() -> str:
 
 
 class VerdictCache:
-    """Results of one kind of check under one identity; get and put are thread-safe, and processes share the file.
-    path: the database, set before the first get or put (eval.rescore points it at an empty one)."""
+    """Results of one kind of check under one identity; get and put are thread-safe, and processes share the file."""
     lock = threading.Lock()
-    path: Path = VERDICTS
     connection: sqlite3.Connection | None = None
 
     def __init__(self, kind: str, identity: str):
@@ -38,7 +35,7 @@ class VerdictCache:
     def database(cls) -> sqlite3.Connection:
         """This process's connection (under lock): WAL, so concurrent evaluations read and write the same file."""
         if cls.connection is None:
-            cls.connection = sqlite3.connect(cls.path, check_same_thread=False, isolation_level=None)
+            cls.connection = sqlite3.connect(VERDICTS, check_same_thread=False, isolation_level=None)
             cls.connection.execute("PRAGMA journal_mode=WAL")
             cls.connection.execute("PRAGMA synchronous=NORMAL")
             cls.connection.execute("CREATE TABLE IF NOT EXISTS verdicts (key BLOB PRIMARY KEY, value TEXT NOT NULL)")

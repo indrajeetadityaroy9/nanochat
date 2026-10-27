@@ -110,9 +110,8 @@ def ends(constraints: list[SyntaxConstraint]) -> list[bool]:
 
 
 def masks(constraints: list[SyntaxConstraint], out: np.ndarray, rows: list[int]) -> list[bool]:
-    """Writes the next masks into rows of out (uint32 words; bit t % 32 of word t // 32 allows token t).
-    Returns whether each row allows some token. The assertion is the crate's raw row writes' precondition."""
-    assert out.dtype == np.uint32 and out.flags.c_contiguous and out.ndim == 2 and max(rows) < len(out)
+    """Writes the next masks into distinct rows of out (C-contiguous uint32 words; bit t % 32 of word t // 32 allows
+    token t). Returns whether each row allows some token."""
     allowed = crate_module(CRATE).masks([c.native for c in constraints], out.ctypes.data, rows, out.shape[1])
     for i, (c, row) in enumerate(zip(constraints, rows, strict=True)):
         if c.healing is not None and (healing := c.healing.mask()) is not None:

@@ -1,5 +1,6 @@
 """
-The curated corpus to the Hub (DATASET) and back: push replaces the tree and squashes the history; pull downloads it.
+The curated corpus and the corpus's tokenizer to the Hub (DATASET) and back: push replaces the tree and squashes the
+history; pull downloads it.
 
 python -m corpus.publish push | pull
 """
@@ -10,6 +11,7 @@ from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, sn
 
 from corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
 from corpus.sources import CURATED, SOURCES, curated_dir, footer_rows
+from corpus.tokenizer import TOKENIZER
 from paths import CORPUS
 
 DATASET = "iaroy/nanochat-data"
@@ -79,7 +81,10 @@ def card(rows: dict[str, dict[str, int]]) -> str:
         "## Schema", "",
         "| Column | Meaning |", "|---|---|", *(f"| `{c}` | {m} |" for c, m in COLUMNS.items()), "",
         "## Folders", "",
-        "| Folder | Contents | Columns | Source | Train rows | Val rows |", "|---|---|---|---|---|---|", *folders, ""])
+        "| Folder | Contents | Columns | Source | Train rows | Val rows |", "|---|---|---|---|---|---|", *folders, "",
+        "## Tokenizer", "",
+        "`tokenizer/`: the byte-level BPE vocabulary the nanochat model was trained with, `tokenizer.tiktoken` (each "
+        "token's bytes in base64 and its rank) and `tokenizer.pattern` (the pre-tokenizer's split pattern).", ""])
 
 
 def push() -> None:
@@ -93,6 +98,8 @@ def push() -> None:
                       commit_message="Delete the previous corpus")
     additions = [CommitOperationAdd(path_in_repo=f.relative_to(CURATED).as_posix(), path_or_fileobj=f)
                  for f in sorted(CURATED.glob("*/*/*.parquet"))]
+    additions += [CommitOperationAdd(path_in_repo=f.relative_to(CORPUS).as_posix(), path_or_fileobj=f)
+                  for f in (TOKENIZER / "tokenizer.tiktoken", TOKENIZER / "tokenizer.pattern")]
     additions.append(CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=CORPUS / "README.md"))
     group, size = [], 0
     for addition in additions:
@@ -106,8 +113,10 @@ def push() -> None:
 
 
 def pull() -> None:
+    """The curated shards into CURATED, the tokenizer into TOKENIZER."""
     snapshot_download(DATASET, repo_type="dataset", local_dir=CURATED,
                       allow_patterns=[f"{source}/**" for source in SOURCES])
+    snapshot_download(DATASET, repo_type="dataset", local_dir=CORPUS, allow_patterns=["tokenizer/*"])
 
 
 if __name__ == "__main__":
