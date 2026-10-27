@@ -11,7 +11,6 @@ import itertools
 import json
 import multiprocessing
 import os
-import subprocess
 import sys
 import tempfile
 import warnings
@@ -36,6 +35,7 @@ from eval.verify import (
     Search,
     chosen,
     compiler,
+    run_group,
     search,
     solution_diagnostics,
     timed,
@@ -261,8 +261,8 @@ def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: l
             for (t, _), solution in zip(pairs, solutions, strict=True):
                 f.write(json.dumps({"task_id": t.task_id, "solution": solution}) + "\n")
         with timed_slots(timed_workers()):
-            subprocess.run(timed([sys.executable, "-I", "-c", EVALPLUS_EVALUATE, dataset, path, scored,
-                                  str(timed_workers())]), cwd=tmp, check=True)
+            run_group(timed([sys.executable, "-I", "-c", EVALPLUS_EVALUATE, dataset, path, scored,
+                             str(timed_workers())]), cwd=tmp).check_returncode()
         result = json.loads(scored.read_text(encoding="utf-8"))
     evaluated = [result["eval"][t.task_id] for t in items]
     base_status = [[v["base_status"] for v in vs] for vs in evaluated]
@@ -317,8 +317,8 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
 
         def run(file: Path) -> None:
             with timed_slots():
-                subprocess.run(timed([sys.executable, main, "--file", file, "--output-dir", tmp, "--max-workers", "1"]),
-                               cwd=tmp, env=env, check=True)
+                run_group(timed([sys.executable, main, "--file", file, "--output-dir", tmp, "--max-workers", "1"]),
+                          cwd=tmp, env=env).check_returncode()
 
         with ThreadPoolExecutor(timed_workers()) as pool:
             list(pool.map(run, files.values()))
@@ -384,8 +384,8 @@ def infilling(name: str, problems: list[dict], middles: list[str], record: dict)
             path, scored = Path(tmp, "samples.json"), Path(tmp, "results.json")
             path.write_text(json.dumps([samples[j] for j in todo]), encoding="utf-8")
             with timed_slots(timed_workers()):
-                subprocess.run(timed([sys.executable, "-I", "-c", INFILLING_EVALUATE, name, path, scored,
-                                      str(timed_workers())]), cwd=tmp, check=True)
+                run_group(timed([sys.executable, "-I", "-c", INFILLING_EVALUATE, name, path, scored,
+                                 str(timed_workers())]), cwd=tmp).check_returncode()
             for j, r in zip(todo, json.loads(scored.read_text(encoding="utf-8")), strict=True):
                 result[j] = r
         cache.put([(keys[j], result[j]) for j in todo if result[j] != "timed out"])

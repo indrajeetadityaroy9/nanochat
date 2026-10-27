@@ -82,6 +82,34 @@ def timed(command: list) -> list:
     return ["taskset", "--cpu-list", ",".join(map(str, sorted(cores()[1]))), *command]
 
 
+def run_group(command: list, *, cwd: str, timeout: float | None = None, input: str = "",
+              env: dict | None = None) -> subprocess.CompletedProcess | None:
+    """command, given input on stdin, in a session of its own; None if it still runs after timeout. Its whole process
+    group is killed once it has exited or timed out, so nothing it started (a compiler's cc1plus, a program's children)
+    keeps running on the timed-check cores; output goes through files, which a descendant holding them cannot keep
+    open past the return."""
+    with tempfile.TemporaryFile("w+") as stdin, tempfile.TemporaryFile("w+") as out, \
+            tempfile.TemporaryFile("w+") as err:
+        stdin.write(input)
+        stdin.seek(0)
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdin=stdin, stdout=out, stderr=err, text=True,
+                                   start_new_session=True)
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        else:
+            timed_out = False
+        with contextlib.suppress(ProcessLookupError):  # no member of the group left
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        if timed_out:
+            return None
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(command, process.returncode, out.read(), err.read())
+
+
 def timed_workers() -> int:
     """Concurrent timed-check children: one per timed-check core."""
     return len(cores()[1])
@@ -187,32 +215,25 @@ def python_diagnostics(programs: list[str], pool: ThreadPoolExecutor) -> list[li
         def check(group: dict[int, Path]) -> list[dict]:
             """basedpyright's diagnostics of group's programs; a program it cannot check gets its failure in out."""
             while group:
-                # its own session: on a timeout the whole group dies, the node process python -m basedpyright starts
+                # run_group: on a timeout the whole group dies, the node process python -m basedpyright starts
                 # included (killing the wrapper alone leaves node checking the stalling program)
                 with timed_slots():
-                    process = subprocess.Popen(timed([sys.executable, "-m", "basedpyright", "--outputjson",
-                                                      "--pythonpath", sys.executable, "--project", config,
-                                                      *group.values()]), cwd=tmp, stdout=subprocess.PIPE,
-                                               stderr=subprocess.PIPE, text=True, start_new_session=True)
-                    try:
-                        # exit status 1 when it reports errors; the JSON report is on stdout either way
-                        stdout, stderr = process.communicate(timeout=PYRIGHT_TIMEOUT)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.communicate()
-                        stdout = None
-                if stdout is None:  # timed out: the slot is free again before the halves take theirs
+                    result = run_group(timed([sys.executable, "-m", "basedpyright", "--outputjson", "--pythonpath",
+                                              sys.executable, "--project", config, *group.values()]), cwd=tmp,
+                                       timeout=PYRIGHT_TIMEOUT)
+                if result is None:  # timed out: the slot is free again before the halves take theirs
                     if len(group) == 1:
                         out[next(iter(group))].append(f"{PYRIGHT_FAILURE}timeout after {PYRIGHT_TIMEOUT} s")
                         return []
                     items = list(group.items())
                     return check(dict(items[:len(items) // 2])) + check(dict(items[len(items) // 2:]))
-                if stdout.strip():
-                    return json.loads(stdout)["generalDiagnostics"]
+                # exit status 1 when it reports errors; the JSON report is on stdout either way
+                if result.stdout.strip():
+                    return json.loads(result.stdout)["generalDiagnostics"]
                 # pyright.js sourceFile.check rethrows after its internal-error diagnostic; analyzeProgram then exits 2
-                crash = re.search(r'internal error occurred while type checking file "([^"]+)": (.*)', stderr)
+                crash = re.search(r'internal error occurred while type checking file "([^"]+)": (.*)', result.stderr)
                 if crash is None:
-                    raise RuntimeError(f"basedpyright exited {process.returncode} without a report: {stderr}")
+                    raise RuntimeError(f"basedpyright exited {result.returncode} without a report: {result.stderr}")
                 i = int(Path(crash[1]).parent.name)
                 out[i].append(f"{PYRIGHT_FAILURE}internal error: {crash[2]}")
                 group = {k: p for k, p in group.items() if k != i}
@@ -292,11 +313,10 @@ def cpp_diagnostics(program: str) -> list[str]:
         return stored
     with tempfile.TemporaryDirectory() as tmp, timed_slots():
         Path(tmp, "program.cpp").write_text(program, encoding="utf-8")
-        try:
-            result = subprocess.run(timed([compiler() / "g++", *CPP_FLAGS, "-fsyntax-only", "program.cpp"]), cwd=tmp,
-                                    capture_output=True, text=True, timeout=CPP_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            return ["timeout"]
+        result = run_group(timed([compiler() / "g++", *CPP_FLAGS, "-fsyntax-only", "program.cpp"]), cwd=tmp,
+                           timeout=CPP_TIMEOUT)
+    if result is None:
+        return ["timeout"]
     lines = result.stderr.splitlines()
     found = [] if result.returncode == 0 else (
         [line for line in lines if ": error: " in line or ": fatal error: " in line] or lines[-1:])
@@ -333,11 +353,9 @@ def examples_pass(found: list[tuple[str, str]], program: str, *, timeout: float 
         return stored
     command = [sys.executable, "-I", "-c", RUN_EXAMPLES]
     with tempfile.TemporaryDirectory() as tmp, contextlib.nullcontext() if timeout is None else timed_slots():
-        try:
-            result = subprocess.run(command if timeout is None else timed(command), input=data, cwd=tmp,
-                                    capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return False
+        result = run_group(command if timeout is None else timed(command), cwd=tmp, timeout=timeout, input=data)
+    if result is None:
+        return False
     passed = result.returncode == 0 and result.stdout.endswith("EXAMPLES_DONE\n")
     if result.returncode >= 0:
         cache.put([(data, passed)])

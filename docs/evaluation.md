@@ -50,7 +50,11 @@ the in-process checks, the sanitize workers and the untimed reference runs. Ever
 timed example runs, EvalPlus, MultiPL-E and infilling evaluators) runs on the other cores (`verify.timed`:
 `taskset`); each pool of timed children is sized to those cores (`timed_workers`), as EvalPlus asks of a test bed
 (no oversubscription); the scorer thread's evaluators (all slots) and the filtered searches' checks (one each) share
-one budget of `timed_workers()` slots (`verify.timed_slots`), so at most one timed child runs per such core.
+one budget of `timed_workers()` slots (`verify.timed_slots`), so at most one timed child runs per such core. Every
+timed child starts in a session of its own (`verify.run_group`), and its whole process group is killed once it exits
+or times out: a g++ check killed at its time-out had left its `cc1plus` running on a timed-check core (a d24
+rehearsal checkpoint's evaluation, over 5 min), holding a core the one-child-per-core rule counts as free; output
+goes through files, so a descendant holding them cannot delay the return.
 Basis: on a d24 benchmarks evaluation (GH200, 64 cores, unpinned; ab4 overlap run, the host shared with other jobs
 for part of it, so timing is indicative), the evaluation process used 1.0 core in its unconstrained decodes and
 13.0–15.5 cores (30-s means, at most 18.6) in the filtered searches. Timed verdicts depend on load: an infilling
@@ -358,8 +362,8 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
   program basedpyright cannot check fails: an exception inside its checker (a d16 completion's chained assignments
   overflowing its stack), or a run past the timeout, halved until the stalling program is alone (a d16 MBPP+ candidate
   with 22 repeated `if …: continue` statements in a nested loop held its 400-program batch over 47 min); the
-  timed-out process group is killed. A stalling program costs ⌈log₂ G⌉ + 1 timeouts in a group of G [arithmetic]:
-  8 min at 100–128 programs (a 5,815-program round's groups: 122 on 48 timed-check cores).
+  timed-out process group is killed (`run_group`). A stalling program costs ⌈log₂ G⌉ + 1 timeouts in a group of G
+  [arithmetic]: 8 min at 100–128 programs (a 5,815-program round's groups: 122 on 48 timed-check cores).
   EvalPlus solutions (`solution_diagnostics`): the solution's syntax error, an entry function missing or without a
   `return <value>` in its own body.
 - Examples (`examples_pass`): the prompt's doctest `>>>` examples and Python `assert` lines that the reference program
