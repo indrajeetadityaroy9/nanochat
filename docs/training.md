@@ -589,8 +589,9 @@ directory name under `artifacts/runs`; `release.sh` uploads an explicit list of 
   `flash_attn.cute`. `UV_COMPILE_BYTECODE`: the container's user cannot write bytecode into `/opt/venv`;
   `UV_LINK_MODE=copy`: the uv cache is a separate build mount, which hard links cannot cross. The dependency layer
   rebuilds only when `pyproject.toml` or `uv.lock` change.
-- Rust: rustup's minimal profile; crates fetched on first build go to `CARGO_HOME` in `artifacts/cache`, since the
-  container's user cannot write `/usr/local`.
+- Rust: rustup-init 1.29.2 for the build's `TARGETARCH` (arm64 or amd64), checked against its published SHA-256,
+  installs toolchain 1.99.1 in the minimal profile; crates fetched on first build go to `CARGO_HOME` in
+  `artifacts/cache`, since the container's user cannot write `/usr/local`.
 - openai/human-eval-infilling: `read_problems` reads `<package>/../data`, outside the package, so the checkout goes on
   `sys.path` through a `.pth` file (its `setup.py` declares a console script uv rejects). Its README's "enable
   execution" step uncomments `execution.py:84` `exec(check_program, exec_globals)`; `data.py:13` names

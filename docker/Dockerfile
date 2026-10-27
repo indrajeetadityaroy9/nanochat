@@ -11,9 +11,18 @@ COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH
 WORKDIR /workspace/nanochat
 
-# Rust toolchain (pinned, minimal profile) for the crates, built on first use; CARGO_HOME in artifacts/cache (below)
+# Rust toolchain (pinned, minimal profile) for the crates, built on first use; CARGO_HOME in artifacts/cache (below).
+# rustup-init 1.29.2 for the build's architecture (GH200 arm64, H100 amd64), verified against its published SHA-256
+ARG TARGETARCH
 ENV RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
-RUN curl -sSf https://sh.rustup.rs | CARGO_HOME=/usr/local/cargo sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.99.1
+RUN case $TARGETARCH in \
+      arm64) T=aarch64-unknown-linux-gnu S=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697 ;; \
+      amd64) T=x86_64-unknown-linux-gnu S=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4 ;; \
+    esac && \
+    curl -sSfo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/$T/rustup-init && \
+    echo "$S  /tmp/rustup-init" | sha256sum -c - && chmod +x /tmp/rustup-init && \
+    CARGO_HOME=/usr/local/cargo /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.99.1 && \
+    rm /tmp/rustup-init
 # the image's `flash_attn` (FA2 with an FA4 beta) would hide the locked flash_attn.cute
 RUN python3 -m pip uninstall -y flash-attn flash-attn-4
 
