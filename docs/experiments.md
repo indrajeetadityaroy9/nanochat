@@ -43,7 +43,7 @@ The removed experiments' yamls, modules and knobs went in `f05d17c`, the remaini
 `results/scalar_learning_rates.json[l]` are historical records, their run directories gone (their bits-per-byte errors
 recomputed from the stored row sums and the packs, `docs/evaluation.md` §5).
 
-**Proxy settings.** No affordable run reaches the base model (d24 at 526.13 tokens per non-embedding parameter,
+**Proxy settings.** No affordable run reaches the base model (d24 at 528.12 tokens per non-embedding parameter,
 `docs/training.md` §2). Ranking at a single small size (150M parameters) picks the better of two data recipes at the
 1B target in ~80% of comparisons (DataDecide, arXiv 2504.11393 Abstract); architecture rankings can change with scale
 (arXiv 2207.10551 §1). The d16 proxy at 20 tokens per parameter on the sa-bpe arm's data trains 4,552 steps of 294,912

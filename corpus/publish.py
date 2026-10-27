@@ -9,6 +9,7 @@ import argparse
 
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, snapshot_download
 
+from corpus.decontaminate import RECORD
 from corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
 from corpus.sources import CURATED, SOURCES, curated_dir, footer_rows
 from corpus.tokenizer import TOKENIZER
@@ -71,7 +72,10 @@ def card(rows: dict[str, dict[str, int]]) -> str:
         "# nanochat pretraining corpus", "",
         f"Text for pretraining a Python and C++ code model from scratch: {total:,} documents from "
         f"{len(rows)} sources. Every text has LF line ends and no byte-order mark; every Python file "
-        "parses as Python 3, repaired from Python 2 where it did not; exact copies are removed across all sources.", "",
+        "parses as Python 3, repaired from Python 2 where it did not; exact copies are removed across all sources. "
+        "Train rows sharing a 10-gram of whitespace-separated words with a prompt or reference program of the scored "
+        "benchmarks (HumanEval+, MBPP+, MultiPL-E's HumanEval and MBPP in C++, HumanEval-X C++, HumanEval infilling) "
+        "are removed; `decontamination.json` lists each (shard, row before removal, benchmark tasks).", "",
         "## Layout", "",
         "One folder per source, each with `train/` and `val/` Parquet shards. Validation holds 1% of each source: "
         "whole repositories in the repository folders (`stack_edu_*`, `ultradata_stack_v3_l2_*`, "
@@ -96,7 +100,8 @@ def push() -> None:
                  for f in sorted(CURATED.glob("*/*/*.parquet"))]
     additions += [CommitOperationAdd(path_in_repo=f.relative_to(CORPUS).as_posix(), path_or_fileobj=f)
                   for f in (TOKENIZER / "tokenizer.tiktoken", TOKENIZER / "tokenizer.pattern")]
-    additions.append(CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=CORPUS / "README.md"))
+    additions += [CommitOperationAdd(path_in_repo=RECORD.name, path_or_fileobj=RECORD),
+                  CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=CORPUS / "README.md")]
     group, size = [], 0
     for addition in additions:
         group.append(addition)
@@ -107,13 +112,13 @@ def push() -> None:
     added = {a.path_in_repo for a in additions} | {".gitattributes"}
     deletions = [CommitOperationDelete(f) for f in api.list_repo_files(DATASET, repo_type="dataset") if f not in added]
     api.create_commit(DATASET, repo_type="dataset", operations=deletions + additions,
-                      commit_message="nanochat corpus, curated")
+                      commit_message="nanochat corpus, curated and decontaminated")
 
 
 def pull() -> None:
-    """The curated shards into CURATED, the tokenizer into TOKENIZER."""
+    """The curated shards and their decontamination record into CURATED, the tokenizer into TOKENIZER."""
     snapshot_download(DATASET, repo_type="dataset", local_dir=CURATED,
-                      allow_patterns=[f"{source}/**" for source in SOURCES])
+                      allow_patterns=[f"{source}/**" for source in SOURCES] + [RECORD.name])
     snapshot_download(DATASET, repo_type="dataset", local_dir=CORPUS, allow_patterns=["tokenizer/*"])
 
 

@@ -186,11 +186,16 @@ fn fim_example(text: &str, fim: &Fim, grammar: &Grammar, bpe: &CoreBPE, mut rng:
     let spm = rng.random_bool(fim.spm);
     let random = rng.random_bool(fim.random);
     let ast = (!random).then(|| ast_middle(text, grammar, fim, &mut rng)).flatten();
-    let (mut a, b) = ast.unwrap_or_else(|| random_span(text, &mut rng));
+    let (mut a, mut b) = ast.unwrap_or_else(|| random_span(text, &mut rng));
+    // the line-level infilling layout (arXiv 2207.14255 §2.2): an AST middle starting its line takes the line's
+    // indentation and, ending at a line end, its line break, so the middle is whole lines and the suffix starts a line
     if ast.is_some() && rng.random_bool(fim.line_start) {
         let line = text[..a].rfind('\n').map_or(0, |i| i + 1);
         if text[line..a].bytes().all(|c| c == b' ' || c == b'\t') {
             a = line;
+            if text[b..].starts_with('\n') {
+                b += 1;
+            }
         }
     }
     let (prefix, middle, suffix) = (bpe.encode_ordinary(&text[..a]), bpe.encode_ordinary(&text[a..b]), bpe.encode_ordinary(&text[b..]));

@@ -168,10 +168,11 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
   protocol, no post-processing). `greedy_reference_lines` also scores the greedy single- and multi-line middles cut to
   the reference middle's raw line count (`fim_lines`; the rule of arXiv 2505.18789 Table 1, whose Fig. 4 code skips
   blank and comment lines and drops the final "\n"): a separate metric, since it reads the reference. The references'
-  middles are whole lines, each ending in "\n", while the model, trained on character-level and AST spans whose
-  middles rarely end in "\n" (`docs/corpus.md` §8), rarely ends at a line end: on a d16 checkpoint single-line SPM
-  greedy pass@1 was 0.074 as generated against 0.437 cut (`a41415e`). Infilling records add CrossCodeEval's similarity
-  scores against the reference middle (§5), all clustered by HumanEval problem.
+  middles are whole lines, each ending in "\n"; the packer trains that layout for AST middles that start and end a
+  line (`docs/corpus.md` §8, about 35% of PSM middles). A d16 checkpoint trained before that rule, whose middles
+  rarely ended in "\n", rarely ended at a line end: single-line SPM greedy pass@1 was 0.074 as generated against
+  0.437 cut (`a41415e`). Infilling records add CrossCodeEval's similarity scores against the reference middle (§5),
+  all clustered by HumanEval problem.
 - **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E drew 200 and the
   BigCode leaderboard 50: the same estimate with more variance per problem [inference] (MultiPL-E reports its pass@1
   stable from about 20 samples, arXiv 2208.08227 [unverified: section not checked]). Its pass@10 is the unbiased
@@ -185,9 +186,12 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
   human-eval-infilling at their pinned commits (the FIM line cut, the MultiPL-E data pin and the example checks'
   sandbox were the deviations, fixed in `a41415e`). `char` is unsigned on ARM64 and signed on x86, so a MultiPL-E C++
   program that depends on it can score differently [inference].
-- **Contamination.** `corpus/` has no decontamination step against the scored benchmarks (the only decontaminated
-  data are the publisher's `*_decontaminated` splits of `open-r1/codeforces-cots`, `corpus/sources.py`): a benchmark
-  problem present in the training data inflates its score.
+- **Contamination.** The train splits are decontaminated against every scored benchmark (`docs/corpus.md` §3): a
+  row sharing a 10-gram of words with a task's prompt or reference program is dropped (Qwen2.5-Coder's rule, arXiv
+  2409.12186 §5), 491,203 rows, among them text of every HumanEval+ task and 372 of 378 MBPP+ tasks; before it,
+  `ultradata_stack_v3_l2_python` alone held 6,447 train documents with both a HumanEval+ task's signature and its
+  docstring's first line, 161 of the 161 tasks checkable that way [unverified: a probe without a record]. Paraphrases
+  that share no 10-gram remain, as under the cited rule.
 - **Evaluator processes.** EvalPlus's `sanitize` parses every line span of a program, hence a sanitize worker per
   CPU. MultiPL-E's `main.py --dir` judges a directory's problems serially, hence a `--file` process per problem.
   human-eval-infilling's CLI forks a Manager and a Process per sample from one interpreter's thread pool, so its rate

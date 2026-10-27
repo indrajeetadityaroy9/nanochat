@@ -58,7 +58,7 @@ depth:
 
 | Run | Tokens/param | Micro-batches | Steps | Repo start | Tokens | Law lr | Peak lr | Weight decay |
 |---|---|---|---|---|---|---|---|---|
-| d24 base (`max_tokens_per_param` 526.134) | 526.127 | 15 (1,474,560 tokens) | 69,611 | 65,814 | 102.65B (97.05B at 8K, 5.60B at 32K) | 8.6290e-4 | 2.3465e-3 | 0.15342 |
+| d24 base (`max_tokens_per_param` 528.122) | 528.115 | 15 (1,474,560 tokens) | 69,874 | 66,063 | 103.03B (97.41B at 8K, 5.62B at 32K) | 8.6250e-4 | 2.3454e-3 | 0.15322 |
 | d24 at `mixture.MAX_STEPS` | 525.893 | 15 | 69,580 | 65,785 | 102.60B | 8.6295e-4 | 2.3466e-3 | 0.15345 |
 | d16 at 20 | 19.998 | 3 | 4,552 | 4,304 | 1.342B | 1.6686e-3 | 4.5373e-3 | 0.2166 |
 | d8 at 20 | 19.997 | 1 | 2,987 | 2,824 | 0.294B | 2.4438e-3 | 6.6455e-3 | 0.2253 |
@@ -67,7 +67,8 @@ depth:
 
 N and M: `docs/architecture.md` §1. At `67192ab`, `max_tokens_per_param` of the corpus's tokenizer was 6,990 at d8
 and 1,529 at d16. The stages' token budgets are sized by `mixture.MAX_STEPS` (`docs/corpus.md` §7), the table's
-second d24 row (`b065ad7`); the plan on the packs is 69,611 steps (+0.04%).
+second d24 row (`b065ad7`); the plan on the decontaminated corpus's packs (`docs/corpus.md` §3) is 69,874 steps
+(+0.42%).
 
 **FLOP count (`ba01bb5`, `b065ad7`).** The plan uses Eq. 2's M (full attention at the 8K context in every layer),
 the definition §3.1 Eq. 1's constants were fit with (§3.2: "M includes the computational overhead of attention
@@ -94,8 +95,8 @@ C.9 Table 85: 130M, batch 128 and 256 both 3.240, 512 3.257).
 - **One lr and one weight decay** for every group, as Moonlight shares "learning rate η, weight decay λ" among matrix
   and non-matrix parameters (§2.2). Per-group candidates were not adopted (`docs/experiments.md` §4).
 - **Weight decay** by the τ law (`tau_weight_decay`): the EMA timescale 1/(η·λ) is τ* = 1.084·TPP^−0.527 of the run's
-  steps (Power Lines, arXiv 2505.13738 Finding 3, App. E.3.1; arXiv 2405.13698), so λ = 1/(η·τ*·steps), 0.15342 for
-  the base run. The law is fit on AdamW over TPP 20–1280 (the base run's 526 inside). Muon takes the same law: under
+  steps (Power Lines, arXiv 2505.13738 Finding 3, App. E.3.1; arXiv 2405.13698), so λ = 1/(η·τ*·steps), 0.15322 for
+  the base run. The law is fit on AdamW over TPP 20–1280 (the base run's 528 inside). Muon takes the same law: under
   μP a fixed independent weight decay stays optimal across TPP for both Adam and Muon (arXiv 2512.05620 App. H.5), and
   Muon's only scaling-sensitive hyperparameter is its lr (arXiv 2509.02046 §3.3 Table 4). The Muon-specific timescale
   runs: `docs/experiments.md` §4.
@@ -137,8 +138,8 @@ modded-nanogpt PR #144 (on top of Polar Express, −15 steps over 20 runs); karp
   cosine decay to zero is small but consistent across peak lrs (arXiv 2502.15938 §4.2, Figs. 6 and 8).
   DeepSeek-Coder instead holds its final lr for long context (arXiv 2401.14196 §3.6);
   Qwen2.5-Coder states no schedule for its repository stage.
-- **Repository stage**: its first step at 3,797/69,571 = 5.46% of peak [arithmetic].
-- **Last step**: 1/(steps − 40) of peak, not 0: 1.437e-5 at 69,611 steps [arithmetic], ~70× below arXiv 2502.15938's
+- **Repository stage**: its first step at 3,811/69,834 = 5.46% of peak [arithmetic].
+- **Last step**: 1/(steps − 40) of peak, not 0: 1.432e-5 at 69,874 steps [arithmetic], ~70× below arXiv 2502.15938's
   smallest nonzero minimum, 0.1% of peak (App. C.7).
 
 ## 5. Peak learning-rate calibration
@@ -172,13 +173,13 @@ rule the records took.
 
 | Measure | × 1 | × 2 | × 4 | Vertex | Curvature | Base multiplier | Base peak lr |
 |---|---|---|---|---|---|---|---|
-| code (8K, the fitted measure) | 0.41322 | 0.40544 | 0.40591 | × 2.7193 | 0.0086 | 2.7192600 | 2.3465e-3 |
+| code (8K, the fitted measure) | 0.41322 | 0.40544 | 0.40591 | × 2.7193 | 0.0086 | 2.7192600 | 2.3454e-3 |
 | code at 32K (`repo_32k`) | 0.40859 | 0.40131 | 0.40227 | | | | |
 | solutions | 0.49200 | 0.48710 | 0.48498 | | | | |
 
 The best arm (× 2) beats the law (× 1) by 0.0078 code bpb; × 4 is 0.0005 behind it. The vertex, 2.7192600 times the
-law's lr, is the base multiplier, 2.8% below the earlier recipe's 2.7970369 [arithmetic]: peak lr 2.3465e-3 and
-weight decay 0.15342 on the base plan (§2).
+law's lr, is the base multiplier, 2.8% below the earlier recipe's 2.7970369 [arithmetic]: peak lr 2.3454e-3 and
+weight decay 0.15322 on the base plan (§2).
 
 **Precision and robustness** (each evaluation's `errors`, `docs/evaluation.md` §2, §5, with `row_clusters`, added to
 the arms' records at `dba27e6`: val rows clustered by document, corpora as strata; the × 2 arm): 8K code 0.0022
@@ -195,7 +196,7 @@ interval. The same fit on the other likelihood measures of the three evaluations
 |---|---|---|---|---|---|
 | code, 8K (the rule) | 0.41322 | 0.40544 | 0.40591 | × 2 | × 2.719 |
 | code, 32K | 0.40859 | 0.40131 | 0.40227 | × 2 | × 2.610 |
-| code, 8K and 32K by the base run's stage tokens (97.05B, 5.60B) | | | | | × 2.713 |
+| code, 8K and 32K by the base run's stage tokens (97.41B, 5.62B) | | | | | × 2.713 |
 | repositories beyond 8K (`repo_beyond_8k`) | 0.36366 | 0.35736 | 0.35858 | × 2 | × 2.527 |
 | benchmark solutions (`solutions`; 706 rows, standard error 0.0090) | 0.49200 | 0.48710 | 0.48498 | × 4 | × 4.782 |
 | all, 8K / 32K | 0.49386 / 0.49250 | 0.48499 / 0.48403 | 0.48533 / 0.48479 | × 2 | × 2.756 / × 2.672 |
@@ -231,7 +232,7 @@ test p = 4e-6), one trained model each, while two seeds of one D7 arm differ mor
   their file times no longer show it]).
 
 **Adopted** for the base run: `learning_rate_scale` = `lr_multiplier` = 2.7192599564485445 (records at `b7f5be9`) on
-the §2 plan (69,611 steps of 1,474,560 tokens, peak lr 2.3465e-3, weight decay 0.15342), run
+the §2 plan (69,874 steps of 1,474,560 tokens, peak lr 2.3454e-3, weight decay 0.15322), run
 `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10` (§6, §9). Its absolute peak lr lies
 between the × 1 and × 2 arms' (1.5443e-3, 3.0886e-3): the law lowers the lr with the base plan's compute.
 
@@ -326,8 +327,8 @@ only GPU telemetry. In the sidecar, per tensor and per layer:
 
 | File | Row | Columns (`diagnostics.json` names them) |
 |---|---|---|
-| `diagnostics-step.npy` | step s, every step (69,611 × 316 for the base run) | `grad_norm/<tensor>`: each of the 220 parameter tensors' gradient L2 norm before clipping, in `named_parameters` order; `gain_max/<tensor>`: each layer's q and k QK-norm gain ‖g‖∞ after the step (48); `resid_lambdas/<i>`, `x0_lambdas/<i>` after the step (24 each) |
-| `diagnostics-update.npy` | step 10·r, every `UPDATE_STATS_EVERY` = 10th step (6,962 × 440) | `param_norm/<tensor>`: L2 norm after the step; `update_rms/<tensor>`: RMS of lr × update without weight decay (AdamW's lr·m̂/(√v̂ + eps) from its state, NorMuon's adjusted-lr update) |
+| `diagnostics-step.npy` | step s, every step (69,874 × 316 for the base run) | `grad_norm/<tensor>`: each of the 220 parameter tensors' gradient L2 norm before clipping, in `named_parameters` order; `gain_max/<tensor>`: each layer's q and k QK-norm gain ‖g‖∞ after the step (48); `resid_lambdas/<i>`, `x0_lambdas/<i>` after the step (24 each) |
+| `diagnostics-update.npy` | step 10·r, every `UPDATE_STATS_EVERY` = 10th step (6,988 × 440) | `param_norm/<tensor>`: L2 norm after the step; `update_rms/<tensor>`: RMS of lr × update without weight decay (AdamW's lr·m̂/(√v̂ + eps) from its state, NorMuon's adjusted-lr update) |
 
 The arrays are `.npy` float32 (`numpy.load(..., mmap_mode="r")`), preallocated at the run's first start with NaN in
 every row not yet logged; `diagnostics.json` also lists each tensor's name, shape, optimizer group (`adamw[0]`
@@ -361,10 +362,10 @@ evaluated; the schedule is experimental configuration, held only in `run.py`'s c
 
 | Set | Steps (base run) | Content | Count × size | Basis |
 |---|---|---|---|---|
-| evaluated | each tenth of 69,611, and 65,814 | full state | 11 × 5.588 GB | the evaluations of the run (§9) |
+| evaluated | each tenth of 69,874, and 66,063 | full state | 11 × 5.588 GB | the evaluations of the run (§9) |
 | grid | every `FULL_STATE_EVERY` = 1,000 below the last step | full state | 69 × 5.588 GB | Pythia's checkpoint every 1,000 iterations (arXiv 2304.01373 §2.4); OLMo's intermediate checkpoints at intervals of 1,000 steps (arXiv 2402.00838 §5) |
 | early | 1, 2, 4, …, `EARLY_WEIGHTS_LAST` = 512 | fp32 weights and model `config` (`weights-<step>.pt`) | 10 × 2.089 GB | Pythia's log-spaced early checkpoints (arXiv 2304.01373 §2.4) |
-| after the stage switch | `repo_level_start` + `AFTER_STAGE_WEIGHTS` (100, 200, 400, 800, 1,600): 65,914 … 67,414 | fp32 weights and `config` | 5 × 2.089 GB | the early set's log spacing at the context switch |
+| after the stage switch | `repo_level_start` + `AFTER_STAGE_WEIGHTS` (100, 200, 400, 800, 1,600): 66,163 … 67,663 | fp32 weights and `config` | 5 × 2.089 GB | the early set's log spacing at the context switch |
 
 The base run's sets are disjoint: 80 full states and 15 weights-only files, 478.4 GB [arithmetic] (a full state
 is the fp32 weights, AdamW's two moments of the 352,327,728 table and vector elements, Muon's momentum of
@@ -446,8 +447,8 @@ of its 169,924,608) is 7.47 GiB [arithmetic]. The allocator's peak reserve is 73
 by 4/3, to ≈ 95.0 GiB in all [estimate: activation memory proportional to tokens], 0.5 GiB below the device before
 the CUDA context, which the allocator does not count. The micro-batch also quantizes every run's batch (§2).
 
-**Time estimate** [estimate]: 97.05B tokens at 365,466 tok/s and 5.60B at 287,476 are 73.8 + 5.4 h; with the cap's
-+0.58% at 8K, 79.6 h; across the arms' span ≈ 79–80 h of training, plus the 95 checkpoint saves (§6; their time
+**Time estimate** [estimate]: 97.41B tokens at 365,466 tok/s and 5.62B at 287,476 are 74.0 + 5.4 h; with the cap's
++0.58% at 8K, 79.9 h; across the arms' span ≈ 80 h of training, plus the 95 checkpoint saves (§6; their time
 is the next steps' `step_seconds` excess, unmeasured) and the 11 evaluated checkpoints' benchmark evaluations.
 
 Concurrent runs and MPS sharing are not used (`docs/experiments.md` §5).
@@ -496,7 +497,7 @@ hard limit for evalplus's `reliability_guard`), whose entrypoint creates `artifa
 2. **Peak lr**: `scripts/container.sh python run.py experiment=peak_lr_d24` (§5; the 3 runs and their evaluations),
    writing the records `lr_multiplier` reads.
 3. **Train**: `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'` trains both stages with
-   11 evaluated checkpoints (each tenth of the 69,611 steps and step 65,814, the repository stage's start) and the
+   11 evaluated checkpoints (each tenth of the 69,874 steps and step 66,063, the repository stage's start) and the
    84 analysis checkpoints (§6), evaluates the 11 with every benchmark and writes `results/pretrain.jsonl` and
    `results/pretrain-curves.jsonl`. Expected time: §7.
 4. **Release**: `HF_TOKEN=<write token> scripts/release.sh <run_name> <repo>` uploads the run's full-state and

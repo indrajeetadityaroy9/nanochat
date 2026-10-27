@@ -1,6 +1,7 @@
-//! The corpus crate (Python module nanochat_crate): SA-BPE tokenizer training (arXiv 2604.14053), repository samples
-//! and the packer of training rows.
+//! The corpus crate (Python module nanochat_crate): SA-BPE tokenizer training (arXiv 2604.14053), repository samples,
+//! benchmark decontamination and the packer of training rows.
 
+mod decontaminate;
 mod pack;
 mod repository;
 mod train;
@@ -69,5 +70,6 @@ fn nanochat_crate(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .map_err(|e| PyValueError::new_err(format!("rayon's global pool: {e}")))?;
     m.add_function(wrap_pyfunction!(train::train, m)?)?;
     m.add_function(wrap_pyfunction!(repository::topological_sort, m)?)?;
+    m.add_class::<decontaminate::Grams>()?;
     m.add_function(wrap_pyfunction!(pack::pack, m)?)
 }
