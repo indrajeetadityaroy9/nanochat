@@ -72,13 +72,16 @@ $$\text{need} = \frac{\text{draw}(g)}{\sum_{s \in g} \text{bytes}_s / \text{BPT}
 
 where draw(g) is the tokens both stages draw of the group (`mixture.draw`, §7), BPT the reference tokenizer's bytes per
 token (`mixture.BYTES_PER_TOKEN`, below) and 100/99 the train split's share (§3). Every other source fetches all its
-files. `SPREAD` = 0.06 covers a retrained tokenizer compressing a source better than the reference [inference]: across
-tokenizer training mixes "the NSL on any given subset only varies by 5 to 6 percentage points" (arXiv 2402.01035
-§2.3). Under the corpus's tokenizer the train splits hold 1.096 (synthetic, draw 25.32B), 1.071 (text, 10.26B) and
-1.167 (math, 3.08B) × their group's draw (tokens of the tokenized train splits, computed on master; the intrinsic
-record's 1.169 for math estimates tokens from bytes, `docs/experiments.md` §2). A source whose packed shards fall
-short of its draw stops `pack` (`pack.take`); a larger run or share than the extents hold needs `prepare`, `curate`
-and `publish push` again.
+files. `SPREAD` = 0.06 widens the target relatively, for a retrained tokenizer compressing a source better than the
+reference [inference]. Across tokenizer training mixes NSL "only varies by 5 to 6 percentage points" (arXiv 2402.01035
+§2.3); as a relative spread of token counts that is 6.9% for code (NSL 75.54–80.78) and 6.4% for English
+(84.86–90.28), Fig. 2 [arithmetic], so 0.06 sits slightly below the paper's spread. It held for every arm: the
+intrinsic record's `train_tokens_over_draw` is ≥ 1.017 (sa-bpe-fused, synthetic 1.0173;
+`results/tokenizer_split_merge-intrinsic.json`). Under the corpus's tokenizer the train splits hold 1.096 (synthetic,
+draw 25.32B), 1.071 (text, 10.26B) and 1.167 (math, 3.08B) × their group's draw (tokens of the tokenized train splits,
+computed on master; the intrinsic record's 1.169 for math estimates tokens from bytes, `docs/experiments.md` §2). A
+source whose packed shards fall short of its draw stops `pack` (`pack.take`); a larger run or share than the extents
+hold needs `prepare`, `curate` and `publish push` again.
 
 `mixture.BYTES_PER_TOKEN` is the reference tokenizer's (SA-BPE within `SPLIT_PATTERN`, trained before this corpus),
 used for every token count made before the corpus's tokenizer exists (extents, the tokenizer sample):
@@ -142,7 +145,9 @@ scored benchmarks (`docs/evaluation.md` §4).
 category's (§2): a repository (lowercased, as GitHub's names are case-insensitive), a Codeforces problem, or the
 document itself. The split is per source: a validation repository's file can occur in train rewritten (Nemotron
 rewriting, transpilation) or as an exercise written from it (UltraData-Code L3), sources split by document; no
-published column links the two [inference].
+published column links the two [inference]. `SPLIT` also sets the train shards: each document source's 100
+(`ntile`) and the repository sources' 99 partitions, the granularity at which `pack` adds shards of a source read in
+part (§8).
 
 **Shards**, `curated/<source>/<split>/<k>.parquet`, zstd:
 - **Repository sources** (REPOSITORY_FILE): one shard per residue partition, `val/0.parquet` and `train/1..99.parquet`.
@@ -190,7 +195,7 @@ corpus, curated", 2026-10-24); `main` is `b091cb47`, after two commits (`f7cafdd
 
 - **Push** (`publish push`): writes the card, deletes every file the dataset holds but `.gitattributes` in one commit,
   uploads the shards in preupload calls, each closed once it reaches `PREUPLOAD` = 4 GiB (an LFS upload URL expires
-  900 s after its batch call, `X-Amz-Expires=900`, `publish.py:20`, so 4 GiB needs at least 4.6 MiB/s [arithmetic];
+  900 s after its batch call, `X-Amz-Expires=900`, `publish.py:17`, so 4 GiB needs at least 4.6 MiB/s [arithmetic];
   the Hub skips objects it holds, so a rerun uploads the rest), adds them in one commit and squashes the history into
   one commit.
 - **Pull** (`publish pull`): `snapshot_download` of `main`'s `<source>/**` into `CORPUS/curated`. `main` holds 1,814
@@ -433,18 +438,19 @@ next BOS is a target come first and cut pieces last, which keeps no slot for a B
 one curated shard.
 
 **FIM** (`pack.FIM_RATE`, `RANDOM_SPAN_RATE`, `SINGLE_NODE_RATE`, `LINE_START_RATE`, `SPM_RATE`), in the train splits
-of repository code only (`layout.fim_packed`: the six repository sources and the repositories corpora). On sa-bpe's
-packs FIM examples hold 50.0–50.4% of each such corpus's piece tokens, 29.7% of the 8K stage's tokens and 40.9% of the
-32K stage's (each corpus's FIM share of its piece tokens weighted by the stage weights, computed on the packs of
-`81fb386`); StarCoder2's two 50% draws (repository, then chunk)
-give ≈25% of its source files (arXiv 2402.19173 §5.1) [arithmetic].
+of repository code only (`layout.fim_packed`: the six repository sources and the repositories corpora). The scope is
+an untested choice: synthetic files and functions, though whole programs in a known language (`Category.code`), get
+neither FIM nor statement cuts, both set by one switch (`layout.grammar`). On sa-bpe's packs FIM examples hold
+50.0–50.4% of each such corpus's piece tokens, 29.7% of the 8K stage's tokens and 40.9% of the 32K stage's (each
+corpus's FIM share of its piece tokens weighted by the stage weights, computed on the packs of `81fb386`); StarCoder2's
+two 50% draws (repository, then chunk) give ≈25% of its source files (arXiv 2402.19173 §5.1) [arithmetic].
 
 | Parameter | Value | Evidence |
 |---|---|---|
 | Rate, per piece, drawn before its cut (context-level) | 0.5 | [1] |
 | Middle: random character span, else AST | 0.1 | "90% use our AST-FIM, and 10% use Rand-FIM" (arXiv 2506.00204 §5.1) |
 | AST middle: Single-Node (node weighted by its bytes), else Aligned-Span (character IoU) | 0.5 | "an equal mix of two masking methods" (arXiv 2506.00204 §3.3) |
-| AST middle starting its line: the line's indentation in the middle | 0.5 | [3] |
+| AST middle starting its line: the line's indentation in the middle | 0.5 | the rule: [3]; the value: the one rate tested, against no rule (`dc76110`, d16 retrain `1671b56`: PSM single-line exact match 0.022 → 0.175, SPM 0.367 → 0.356; below) |
 | SPM, else PSM | 0.5 | [2]; AST-FIM's "50% PSM and 50% SPM", untested there (arXiv 2506.00204 §5.1) |
 
 [1] DeepSeek-Coder chose 0.5 (document level, PSM only), as a 100% rate gave its weakest code completion (arXiv
@@ -577,8 +583,10 @@ web text). `prepare` removes the source's standardized and checked files before 
 - `duplicates`: DuckDB `row_number() OVER (PARTITION BY id ORDER BY source, file, row)`; drops `n > 1` and the id of
   the empty text (`EMPTY`). `undropped`: anti-join on (file index, row number).
 - `shuffle`: repository rows as Hive partitions `shuffle/<source>/part=<residue>/` (DuckDB `COPY … PARTITION_BY`
-  creates the partition directories, not their parent), removed after `curate_partition`. A partition worker holds
-  its partition twice at peak (table and sorted copy), so workers = min(cores, `MEMORY` / (2 × largest)).
+  creates the partition directories, not their parent), removed after `curate_partition`. Workers = min(cores,
+  `MEMORY` / (2 × largest)), largest the biggest partition's uncompressed Parquet bytes; the factor 2 is not measured
+  [inference]: a worker holds at least three copies of its partition (the read table, its sorted copy, the contents
+  as Python strings for `topological_sort`). It sets the worker count only, not the output.
 - `shard_documents`: `ntile(SPLIT) OVER (ORDER BY id)` over train rows. `database()` turns off
   `preserve_insertion_order` (DuckDB documentation, Guides, Troubleshooting, "Out of Memory Errors", the guide of
   `parallel.MEMORY`). `RECURSION` and `SAMPLE_ROWS` are the settings the published dataset was built with.

@@ -9,6 +9,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -25,16 +26,17 @@ CORPUS_CRATE = Path(__file__).resolve().parent / "corpus" / "crate"
 
 
 def native_library(name: str, command: list[str], sources: list[Path], build: Callable[[Path], None]) -> Path:
-    """NATIVE/<name>-<sha256(command, sources)>.so, built by build(tmp) and renamed atomically, so concurrent first
-    builds never share a file."""
+    """NATIVE/<name>-<sha256(command, sources)>.so, built by build(tmp) into a temporary file unique to the build and
+    renamed atomically, so concurrent first builds (any process, any container) never share a file."""
     digest = hashlib.sha256(" ".join(command).encode())
     for source in sources:
         digest.update(source.read_bytes())
     path = NATIVE / f"{name}-{digest.hexdigest()}.so"
     if not path.exists():
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        build(tmp)
-        tmp.replace(path)
+        fd, tmp = tempfile.mkstemp(suffix=".tmp", prefix=f"{path.name}.", dir=NATIVE)
+        os.close(fd)
+        build(Path(tmp))
+        Path(tmp).replace(path)
     return path
 
 
@@ -51,7 +53,7 @@ def stream() -> ctypes.c_void_p:
 
 @functools.cache
 def cuda_library(name: str) -> ctypes.CDLL:
-    """model/kernels/<name>.cu built by nvcc for the GH200's arch-specific target sm_90a (wgmma, setmaxnreg) with
+    """model/kernels/<name>.cu built by nvcc for the GH200's arch-specific target sm_90a (decode.cu's wgmma) with
     HEAD_DIM, keyed by the command, the file and every header; loaded once per process."""
     source = KERNELS / f"{name}.cu"
     command = ["nvcc", "-gencode=arch=compute_90a,code=sm_90a", f"-DHEAD_DIM={HEAD_DIM}", "-Xcompiler", "-fPIC",

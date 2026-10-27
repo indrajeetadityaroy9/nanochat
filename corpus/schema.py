@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 
-SPLIT = 100  # 1% of groups held out
+SPLIT = 100  # 1% of groups held out; also each document source's train shards (ntile) and the repository partitions
 # the published dataset's codec
 COMPRESSION = "zstd"
 

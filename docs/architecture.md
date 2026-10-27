@@ -115,7 +115,7 @@ read is not ablated.
   stage uses a 4,096-token window in a 16,384-token context (arXiv 2402.19173 §6.3).
 - **Shape:** MobileLLM's deep-and-thin ratio (arXiv 2402.14905). A deeper, thinner alternative at about d24's
   non-embedding parameters, 35 × 640 (193,070,080), costs M 3,234,201,600 per token at 8K (+14.2%) and nominal
-  1,826,833,920 (+6.9%) [arithmetic], so an equal-token comparison gives it more compute; its 5 heads are not among
+  1,827,033,600 (+6.9%) [arithmetic], so an equal-token comparison gives it more compute; its 5 heads are not among
   the head counts `ve_gate.cu` compiles (2, 4, 6).
 - **head_dim 128:** compiled into the kernels (`HEAD_DIM`, `native.py`); nanochat found 128 better than 64 (LOG
   2026-01-17).
@@ -143,13 +143,14 @@ DeepSeek-Coder the FIM rate (arXiv 2401.14196 Fig. 3); none ablates gains, resid
 ## 3. GPU implementation
 
 **Build** (`native.py`). `cuda_library(name)` builds `model/kernels/<name>.cu` with one nvcc command for the GH200's
-architecture-specific target (sm_90a: wgmma, setmaxnreg) and `-DHEAD_DIM=128`, into `NATIVE/<name>-<sha256 of
-the command, the file and every header>.so` (written to a temporary file and renamed, so concurrent first builds never
-share a file), loaded by ctypes once per process. `crate_module` does the same for the Rust crates through cargo
-(`corpus/crate`, `docs/corpus.md` §6; `inference/syntax`, `docs/evaluation.md` §7). The kernels follow ThunderKittens'
-layout: shared headers (`common.cuh`: 16-byte vector loads and stores, a fixed-order butterfly warp sum, resident-block
-counts for persistent grids; `qk_row.cuh`: the q/k row math (RMS norm, gain, RoPE) shared by `qk_prologue.cu` and
-the decoder's `decode.cu`) and one self-contained file per kernel with its C entry points. Each op is a
+architecture-specific target (sm_90a: `decode.cu`'s wgmma) and `-DHEAD_DIM=128`, into `NATIVE/<name>-<sha256 of
+the command, the file and every header>.so` (written to a temporary file unique to the build and renamed, so
+concurrent first builds, from any process or container, never share a file), loaded by ctypes once per process.
+`crate_module` does the same for the Rust crates through cargo (`corpus/crate`, `docs/corpus.md` §6; `inference/syntax`,
+`docs/evaluation.md` §7). The kernels follow ThunderKittens' layout: shared headers (`common.cuh`: 16-byte vector loads
+and stores, a fixed-order butterfly warp sum, resident-block counts for persistent grids; `qk_row.cuh`: the q/k row
+math (RMS norm, gain, RoPE) shared by `qk_prologue.cu` and the decoder's `decode.cu`) and one self-contained file per
+kernel with its C entry points. Each op is a
 `torch.library` custom op with a fake implementation, so `torch.compile(fullgraph=True)` traces one graph per stage
 (`train/loop.py`).
 
@@ -217,7 +218,7 @@ Notes on the rows:
   of the 8K stage's 73.8 h is ~26 min [arithmetic, `docs/training.md` §7]; the cap's 32K cost is not measured.
 - **dpsum.** QuACK's autotuner does not pin tile_n, so `DPSUM_CONFIG` is fixed: the fastest QuACK SM90 configuration
   with tile_n = 128 on the d24 shape (172.2 µs; cluster (2, 1) 172.8, tile_m 192 212.4 / 218.3, cooperative 256
-  268.5 / 270.4); `fa4_rows` takes 7.5 µs.
+  268.5 / 270.4); `fa4_rows` took 7.5 µs at `db1e90e` (256-thread blocks; the current launch is not timed alone).
 - **Value-embedding backward.** RUN = 16 positions per warp (isolated backward 222 / 203 / 251 µs at RUN 8 / 16 / 32),
   2 blocks of 256 threads per SM (`ve_gate.cu`).
 - **q/k prologue forward.** Two heads' loads in flight per thread group: `k_forward` 250.3 → 183.6 µs per call at d24
@@ -320,9 +321,9 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   d rstd = Σ(dpreact·preact) / rstd and ∂rstd/∂h = −rstd³ h / C, giving the docstring's dh; the row sum is a reduce
   of the dact epilogue (`relu2_dact_rstd`), the rest the dX GEMM's epilogue (`norm_bwd_apply`, C = dy, h a tile load).
 - `sm90`: the point of QuACK's SM90 space (`quack/gemm_config.py` `_get_sm90_configs`) with the given tile, cluster
-  and operand order; the space sets pingpong (tile_m 128 or 192 up to tile_n 208) or cooperative (tile_m 256, tile_n
-  224 and 256) and QuACK's static persistent scheduler (`is_dynamic_persistent=False`; the `down_dx` GEMM of
-  `relu2_mlp_bwd` passes `dynamic_scheduler=True`, the default of QuACK's `gemm_dact`).
+  and operand order; the space sets pingpong (tile_m 128 with tile_n up to 208, and 192 × 128) or cooperative (tile_m
+  256, and 128 × 224 or 128 × 256) and QuACK's static persistent scheduler (`is_dynamic_persistent=False`; the
+  `down_dx` GEMM of `relu2_mlp_bwd` passes `dynamic_scheduler=True`, the default of QuACK's `gemm_dact`).
   `CONFIGS` holds exactly the d8, d16 and d24 widths (`meta_model`; the head counts `ve_gate.cu` compiles), so a model
   of another width fails at its first GEMM; M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`. The benchmark is
   `quack/autotuner.py` (L2-cold CUDA-graph medians of every candidate, exclusive GPU). An explicit config bypasses

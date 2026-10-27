@@ -110,7 +110,9 @@ BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.
                    "nemotron_rewriting_python": 3.909, "nemotron_transpilation_cpp": 3.651, "codexglue_python": 4.028,
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
-# NSL "only varies by 5 to 6 percentage points" across tokenizer training mixes (arXiv 2402.01035 §2.3)
+# Relative widening of a byte target for a retrained tokenizer's compression: below the 6.4% (English) to 6.9% (code)
+# relative NSL spread across training mixes of arXiv 2402.01035 Fig. 2 [arithmetic]; it held for every tokenizer arm
+# (results/tokenizer_split_merge-intrinsic.json train_tokens_over_draw >= 1.017)
 SPREAD = 0.06
 
 

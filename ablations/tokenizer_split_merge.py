@@ -61,7 +61,7 @@ def provenance() -> dict:
                             check=True).stdout.strip()
     return {"commit": commit, "utc": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
             "host": platform.node(), "machine": platform.machine(), "cpus": os.cpu_count(),
-            "memory_gb": memory() / 2**30, "python": platform.python_version(),
+            "memory_gb": memory() / 2**30, "python": platform.python_version(),  # memory_gb: GiB (the records' key)
             "packages": {name: importlib.metadata.version(name)
                          for name in ("tiktoken", "tokenizers", "numpy", "scipy", "pyarrow", "regex")}}
 

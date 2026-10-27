@@ -240,7 +240,8 @@ def main() -> None:
             curated_dir(source, split).mkdir(parents=True)
         if spec.category == REPOSITORY_FILE:
             shuffle(source, paths[source], drops[source])
-            # a partition worker holds its partition twice at peak (the table and its sorted copy)
+            # the factor 2 is not measured [inference]: a partition worker holds at least three copies of its
+            # partition (the read table, its sorted copy, the contents as Python strings for topological_sort)
             largest = max(sum(md.row_group(g).total_byte_size for md in map(pq.read_metadata, part.iterdir())
                               for g in range(md.num_row_groups)) for part in shuffle_dir(source).iterdir())
             with ProcessPoolExecutor(min(os.cpu_count(), MEMORY // (2 * largest)), mp_context=SPAWN) as pool:
