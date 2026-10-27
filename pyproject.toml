@@ -18,17 +18,20 @@ dependencies = [
     "psutil==7.2.2",
     "pyarrow==26.0.0",
     "quack-kernels==0.6.5",
+    "safetensors==0.8.0",
     "statsmodels==0.15.0",
     "tiktoken==0.14.0",
+    "tokenizers==0.23.3",
     # with fire: the requirements of the human-eval-infilling and MultiPL-E checkouts (docker/Dockerfile)
     "tqdm==4.70.1",
+    "transformers==5.21.0",
 ]
 
 [tool.uv]
 # the NGC platform stack, and evalplus's model-provider clients (its unused code generation)
 exclude-dependencies = [
     "torch", "triton", "numpy", "nvidia-ml-py",
-    "openai", "anthropic", "google-generativeai", "boto3", "ollama", "transformers",
+    "openai", "anthropic", "google-generativeai", "boto3", "ollama",
 ]
 
 [tool.uv.sources]
