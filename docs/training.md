@@ -357,7 +357,9 @@ is the fp32 weights, AdamW's two moments of the 352,327,728 table and vector ele
 state gives a resume point every 1,000 steps and any 1,000-step point as a branch for an intervention, as Pythia's
 intermediate optimizer state did (arXiv 2304.01373 §3.1). The early and post-switch weights are fp32: a step-1
 update relative to the initial weight RMS, ≈ 0.2·lr/40 ÷ 768^−½ = 3.3e-4 [arithmetic], is below bf16's 2^−8.
-A save's time falls into the next step's `step_seconds`. A relaunched run resumes from its newest full-state
+A save's time falls into the next step's `step_seconds`: in the d24 rehearsal (§7) a weights-only save added 0.84–1.02 s
+to it, a full state 2.18–2.25 s (the first 3.31 s, the one at the stage switch 4.01 s), ≈ 190 s over the base run's
+95 saves, 0.07% of its training [arithmetic]. A relaunched run resumes from its newest full-state
 checkpoint (weights, optimizer state, the scheduler at its step, the data position), never from a weights-only one;
 a run with one checkpoint restarts from step 0. A resumed attempt's records supersede the earlier ones for the steps
 it repeats (`metrics.train_steps`).
@@ -390,7 +392,12 @@ enforced; the software power cap is active in every sample of the d24 8K step). 
 shares a 1,000 W budget and draws 888–910 W with the CPU busy [unverified: samples not kept], so no heavy CPU job runs
 beside a measured run. `scripts/setup.sh` locks the SM clock at `clocks.max.sm` (1,980 MHz): the d24 8K step 3.0%
 faster, d16 1.7% (`4ade225`). Under training the cap still lowers the clock to averages of 1,492–1,647 MHz across the
-d24 profiles: sustained GEMMs run ~14% below their isolated speed.
+d24 profiles: sustained GEMMs run ~14% below their isolated speed. The lock was found off on 10-27 (`nvidia-smi`'s
+locked clocks do not persist across a driver reload or reboot; how it was lost is unknown). [inference] The unlocked
+rate at `104488d`, 366,864 tok/s, equals `067e60b`'s 365,466 with the softcap's −0.58% in between, so that row and
+the later A/B arms were likely unlocked too (their relative gains are unaffected: both arms alike). Re-applied
+mid-rehearsal, the 8K rate went from 362,451 to 371–374K tok/s over the remaining 1,300 steps (not a controlled A/B;
+`4ade225`'s +3.0% is); the base run's launch re-applies the lock in its exclusive job.
 
 **Step profile** (d24, 8K, nsys; the baseline of `373b549`'s A/B): 4,355 ms of GPU time per step, 99.4% busy: GEMMs
 60.5% (~680 TFLOP/s), FlashAttention-4 18.9% (34.7% at 32K; the 512-window layers at 283–336 TFLOP/s against 511–600
@@ -404,11 +411,14 @@ for full attention), memory-bound kernels 19.8%, the optimizer 0.6%. The step is
 |---|---|---|---|---|
 | Baseline (the profile above) | 2.81M / 2.37M | 803,750 (MFU 0.391) / 638,405 | 338,039 (0.450) | 273,536 (0.465) |
 | Master as a whole, `eeb0c53` | | | 356,259 (0.473) | 282,256 (0.483) |
-| Latest A/B arm, `067e60b` | | | 365,466 (0.4857) | 287,476 |
+| Latest A/B arm, `067e60b` (unlocked) | | | 365,466 (0.4857) | 287,476 |
+| d24 rehearsal, `a4abe78`: in-loop medians of the whole run, locked from step 600 | | | 373,250 (0.498) | 298,601 |
 
 Later landings were timed as A/B arms only, spanning 362,972–365,466 tok/s at 8K and 286,555–287,482 at 32K
 (`fb86efc`, `db1e90e`, `067e60b`). The output-logit cap (`e24333d`) adds 1.56 ms per micro-batch, 0.58% of the 8K
-step (its 32K cost unmeasured; `docs/architecture.md` §3).
+step (its 32K cost unmeasured; `docs/architecture.md` §3). The rehearsal (`dev-ignore`, not a recipe): the base recipe
+at 5 tokens per parameter (3,307 steps of 294,912 tokens, the repository stage from 3,127, the peak-lr sweep's d24
+plan) at the calibrated × 2.7193, `num_checkpoints=3`, killed after step 1,050 and resumed from step 1,000.
 
 **Memory.** The d24 10-step peak is 71.11 GiB allocated at 8K, warm and cold (`e24333d`), of the GPU's 95.58 GiB
 (97,871 MiB). A micro-batch holds whole rows of both contexts, so its size is a multiple of 32,768 tokens;
