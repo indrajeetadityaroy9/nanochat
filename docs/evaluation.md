@@ -92,15 +92,21 @@ karpathy/nanochat's `evaluate_bpb`. Sums are fp64 on the device, reduced in a fi
   bytes per context bucket (`CONTEXTS = (8192,)`: positions ≤ 8K, which both stages train, and > 8K, which only the
   repository stage trains; Code Llama's loss by context length, arXiv 2308.12950 §3.3, Fig. 4a), per byte-offset
   bucket (`OFFSETS`: doublings from 1 KiB to 128 KiB of the target's segment before it, so tokenizers compare at equal
-  bytes of context, arXiv 2503.13423 §3.1, App. B.1) and per sampled row. Pooled per group (code, text, math) and
-  over all corpora by the stage's train row shares (`Stage.shares`, `docs/corpus.md` §7) with `metrics.mixture_bpb`,
-  `offset_bpb` and `mixture_bpb_summary` (§5).
+  bytes of context, arXiv 2503.13423 §3.1, App. B.1) and per sampled row, with the row's cluster (`row_clusters`).
+  Pooled per group (code, text, math) and over all corpora by the stage's train row shares (`Stage.shares`,
+  `docs/corpus.md` §7) with `metrics.mixture_bpb`, `offset_bpb` and `mixture_bpb_summary` (§5).
 - **Sample** (`sample_rows`, `VAL_TOKENS = 80 × 2^19`, nanochat's `--eval-tokens`): per corpus, n = min(rows,
   ⌈VAL_TOKENS / (micro-batch × seq_len)⌉ × micro-batch) rows, row ⌊j · rows / n⌋ for j < n: systematic, because the
   packer orders each shard's rows longest first, so a prefix would over-represent long documents. Models of one
   tokenizer are scored on identical rows, models of different tokenizers on identical documents when a split lies
   within the sample (scored whole), so the subsample's sampling error cancels in differences. `cu_seqlens` is padded
   to the corpora's most segments (one compiled graph).
+- **Clusters** (`row_clusters`): the packer cuts a document longer than a row into pieces on several rows, so sampled
+  rows are not independent: rows holding pieces of one document, directly or through other rows, share a cluster (the
+  components of the row–document graph), the sample's independent unit. At 8K the 49,765 code rows form 44,829
+  clusters (up to 135 rows); at 32K the 2,667 code rows form 2,255, and one `repositories_python` document of 58.8M
+  tokens spans 93 of that corpus's 1,281 sampled rows: 7.7% of its bytes at 0.10 bits per byte against the corpus's
+  0.39 and 93% of the 32K code variance (the × 2 arm of `results/peak_lr_d24.jsonl`) [arithmetic, from the packs].
 - **Reference solutions** (`solution_bits`, `SOLUTION_BENCHMARKS`): the bits of HumanEval+'s and MBPP+'s canonical
   solutions (EvalPlus) and HumanEval-X C++'s (arXiv 2303.17568; MultiPL-E has none) given their prompts, one example
   per 8K row, BOS first: the task loss of arXiv 2412.04403 §2.2. A continuous correct-answer likelihood makes
@@ -142,7 +148,7 @@ Generation modes (`generation`, `fim_generation`, `filtered_generation`):
 |---|---|---|
 | `greedy` | left-to-right argmax, one completion per problem; FIM in both orders | pass@1 as DeepSeek-Coder (arXiv 2401.14196 §4.1), StarCoder2 (arXiv 2402.19173 §7.1.1) and EvalPlus's leaderboard report it |
 | `sampled` (EvalPlus, MultiPL-E) | `N_SAMPLE` 20 per problem at `TEMPERATURE` 0.2 from the nucleus `TOP_P` 0.95 (arXiv 1904.09751); sample k of problem i seeded N_SAMPLE · i + k | pass@1 (and pass@10) by Codex's unbiased estimator (arXiv 2107.03374 §2.1; T and p from §3.2–3.3), as MultiPL-E and StarCoder2 (§7.1.2) sample |
-| `filtered` | the greedy candidate, then samples at T = 0.8 (`verify.TEMPERATURE`) from the nucleus `verify.TOP_P` 0.95 (Codex's setting for all its sampling, §3.2), attempt a of task i seeded `ATTEMPTS` · i + a, until one has no post-generation diagnostic and passes its prompt's own examples, at most `verify.ATTEMPTS` = 10; left-to-right prompts healed; Python and FIM middles under the syntax constraint (§7); FIM in SPM only (`FILTERED_MODE`) | filtered pass@1 of the accepted candidate, else the greedy one (Codex §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
+| `filtered` | the greedy candidate, then samples at T = 0.8 (`verify.TEMPERATURE`) from the nucleus `verify.TOP_P` 0.95 (Codex's setting for all its sampling, §3.2), attempt a of task i seeded `ATTEMPTS` · i + a, until one has no post-generation diagnostic and passes its prompt's own examples, at most `verify.ATTEMPTS` = 10; left-to-right prompts healed; Python and FIM middles under the syntax constraint (§7); FIM in SPM only (`FILTERED_MODE`) | filtered pass@1: the evaluator's pass rate of one chosen completion per task over all tasks, the accepted candidate, else the task's greedy candidate (attempt 0, decoded with this mode's healing and constraint, so not always the `greedy` mode's completion) (Codex §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
 
 Each record also holds `"scores"` (`metrics.summary` of the per-problem scores, §5), the completions as scored (the
 sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the decoding's `"latency"`
@@ -157,14 +163,17 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
   reference middle (§5), all clustered by HumanEval problem.
 - **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E drew 200 and the
   BigCode leaderboard 50: the same estimate with more variance per problem [inference] (MultiPL-E reports its pass@1
-  stable from about 20 samples, arXiv 2208.08227 [unverified: section not checked]). The filtered mode's T = 0.8 is
-  Codex's pass@100 optimum (higher temperatures are optimal for larger k, §3.3). HumanEval infilling is greedy,
-  not arXiv 2207.14255's sampling. The prompts' examples overlap the scored base tests (MBPP+: nearly every prompt
-  assert calls the entry function on a base input; HumanEval+: many tasks share a doctest input), so the filtered mode
-  favours base over plus pass@1 (`verify.py`). Prompts, stops, budgets and scorers were checked against EvalPlus,
-  MultiPL-E and human-eval-infilling at their pinned commits (the FIM line cut, the MultiPL-E data pin and the
-  example checks' sandbox were the deviations, fixed in `a41415e`). `char` is unsigned on ARM64 and signed on x86, so
-  a MultiPL-E C++ program that depends on it can score differently [inference].
+  stable from about 20 samples, arXiv 2208.08227 [unverified: section not checked]). Its pass@10 is the unbiased
+  pass@10 of T = 0.2 sampling, not the published pass@10 protocol (Codex takes each k at its best temperature, §3.3;
+  MultiPL-E's `pass_k.py` reports pass@10 only for its T = 0.8 runs), so it is not comparable with those tables. The
+  filtered mode's T = 0.8 is Codex's pass@100 optimum (higher temperatures are optimal for larger k, §3.3). HumanEval
+  infilling is greedy, not arXiv 2207.14255's pass rate of 100–200 samples per task at T = 0.2 (Fig. 6, Table 1).
+  The prompts' examples overlap the scored base tests (MBPP+: nearly every prompt assert calls the entry function on
+  a base input; HumanEval+: many tasks share a doctest input), so the filtered mode favours base over plus pass@1
+  (`verify.py`). Prompts, stops, budgets and scorers were checked against EvalPlus, MultiPL-E and
+  human-eval-infilling at their pinned commits (the FIM line cut, the MultiPL-E data pin and the example checks'
+  sandbox were the deviations, fixed in `a41415e`). `char` is unsigned on ARM64 and signed on x86, so a MultiPL-E C++
+  program that depends on it can score differently [inference].
 - **Contamination.** `corpus/` has no decontamination step against the scored benchmarks (the only decontaminated
   data are the publisher's `*_decontaminated` splits of `open-r1/codeforces-cots`, `corpus/sources.py`): a benchmark
   problem present in the training data inflates its score.
@@ -184,23 +193,22 @@ import it alike. Every public function:
 | `bpb(*pooled)` | Σ bits / Σ bytes over context buckets and arguments | The Pile, arXiv 2101.00027 §3.1 |
 | `mixture_bpb(corpora, weights, buckets=)` | Σ_c w_c · bits_c / rows_c over Σ_c w_c · bytes_c / rows_c: the bits per byte of val rows drawn with row weights w | as The Pile pools its components |
 | `offset_bpb` | `mixture_bpb` per byte-offset bucket (None where no target is); a bucket pools the documents long enough to reach it, so the curve mixes context use with document composition | arXiv 2308.12950 Fig. 4a; 2503.13423 App. B.1 |
-| `bpb_summary(bits, nbytes, row_weights=)` | the ratio Σw·bits / Σw·bytes over rows (0-byte rows dropped) as the WLS fit of row bpb on a constant with weights w × bytes; standard error HC1 (the delta-method ratio standard error × √(n/(n−1))); 95% normal interval | Miller, arXiv 2411.00640 Eq. 1, 5–6; statsmodels `WLS` |
-| `mixture_bpb_summary` | `bpb_summary` of every sampled row of a group, a row of corpus c weighted w_c / rows_c (the `mixture_bpb` weights) | as above |
+| `mixture_bpb_summary(corpora, weights)` | `mixture_bpb` of the rows, R = Σ_c a_c · bits_c / Σ_c a_c · bytes_c (a_c = w_c / rows_c), with its standard error as a stratified cluster sample: the corpora are strata at fixed weights, each corpus's clusters of rows (`row_clusters`, §2) its independent units; by the delta method se² = Σ_c a_c² · m_c · s_c² / (Σ_c a_c · bytes_c)², s_c² the sample variance (ddof 1) of the m_c cluster sums of bits − R · bytes; 95% normal interval. For one corpus of one-row clusters it is the HC1 error of the WLS fit of row bpb on a constant weighted by bytes (statsmodels; equal to 1e-15 on real records) | Miller, arXiv 2411.00640 Eq. 1, 3, 4 (per stratum); numpy |
 | `parse_outcome(source)` | `compile()` → "parses", "indentation" (IndentationError, TabError; checked first) or "syntax" (other SyntaxError; MemoryError and RecursionError of the parser, and its ValueError of §10, count here) | TokEval's companion post ("How the failing generations fail"; arXiv 2608.18062 App. F.3, fn. 15) |
 | `parse_shares` | each outcome's share of a benchmark's completions | — |
 | `measures(evaluation, steps, repo_level_start=)` | a run's compared measures (table below) | — |
-| `measure_errors(evaluation)` | their error bars: `code`, `text`, `math`, `repo_32k` by `mixture_bpb_summary`; `solutions` by `bpb_summary`; the parse shares and `pass@1` by `summary` over problems; none for `repo_beyond_8k`, `tokens_per_second`, `mfu` | Miller Eq. 1 |
+| `measure_errors(evaluation)` | their error bars: `code`, `text`, `math`, `repo_32k` from the evaluation's `errors` (`mixture_bpb_summary`); `solutions` by `mixture_bpb_summary` over two strata at their solution counts (the pooled ratio): HumanEval (HumanEval+ and HumanEval-X C++ solutions of problem i one cluster) and MBPP+; the parse shares and `pass@1` by `summary` over problems; none for `repo_beyond_8k`, `tokens_per_second`, `mfu` | Miller Eq. 1, 4 |
 | `line_exact_match` | `prediction.strip() == reference.strip()` | SantaCoder (arXiv 2301.03988 §6.1.2; bigcode-evaluation-harness `santacoder_fim.py`), DeepSeek-Coder §4.2 |
 | `code_lines`, `exact_match` | comment-stripped (`#`, `//` to the line end), stripped non-empty lines; equal lines | CrossCodeEval (arXiv 2310.11248 §4; amazon-science/cceval `40c68d2`) |
 | `edit_similarity` | 100 when equal, 0 when either is empty, else round(100 × difflib `SequenceMatcher` ratio) of the comment-stripped strings | cceval's fuzzywuzzy 0.18 without python-Levenshtein (difflib) |
 | `identifiers`, `identifier_match` | identifiers after removing comments and string literals, Python keywords excluded (True and False kept); exact match of the lists, F1 over the sets (0 when both are empty) | cceval `extract_identifiers` |
 | `completion_scores` | per sample: `line_em`, `em`, `es` (0–100), `id_em`, `id_f1` | cceval's per-sample results |
 | `pass_at_k(passed, k)` | each problem's pass@k estimate from its samples | Codex's unbiased estimator (arXiv 2107.03374 §2.1); `human_eval_infilling` `estimate_pass_at_k` |
-| `summary(scores, clusters=)` | mean of question scores (each score a mean of question-level scores, a problem's pass@k estimate one of them: Miller §3.1 [unverified: paper text not in the extracted set]); OLS on a constant: unclustered, se = s/√n (sample variance over n − 1, Miller Eq. 1); clustered, Liang–Zeger CR0 without small-sample correction (Miller Eq. 4 except for Eq. 4's (n − 1) in its diagonal term); 95% normal interval (Eq. 5–6); a constant score has se 0 | statsmodels `OLS` |
-| `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends: itself and up to window_l before it (`layer_windows`: 512, or the context for full layers), the convention of `attended_keys`; records written before the query's own key was counted (`results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), 73,728 lower: 641,826,816 at 8K, 1,245,806,592 at 32K | PaLM, arXiv 2204.02311 App. B; torchtitan's count without the causal halving |
+| `summary(scores, clusters=)` | mean of question scores (each score a mean of question-level scores, a problem's pass@k estimate one of them: Miller §3.1 [unverified: paper text not in the extracted set]); OLS on a constant: unclustered, se = s/√n (sample variance over n − 1, Miller Eq. 1); clustered, Liang–Zeger CR0 without small-sample correction (Miller Eq. 4 except for Eq. 4's (n − 1) in its diagonal term); 95% normal interval (Eq. 3); a constant score has se 0 | statsmodels `OLS` |
+| `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends: itself and up to window_l before it (`layer_windows`: 512, or the context for full layers), the convention of `attended_keys`; records written before the query's own key was counted (`results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), 73,728 lower: 641,826,816 at 8K, 1,245,806,592 at 32K | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT [unverified: App. B is not in the extracted text]; torchtitan's count without the causal halving |
 | `attended_keys(lengths, window)` | Σ over segments of Σ_p min(p, window + 1): the keys each query attends causally within its segment, itself included | — |
-| `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B; Megatron-LM's causal, per-document counting |
-| `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12, the H100 SXM5 / GH200 dense BF16 peak) | PaLM App. B |
+| `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B [unverified, as above]; Megatron-LM's causal, per-document counting |
+| `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12, the H100 SXM5 / GH200 dense BF16 peak) | PaLM §4.1 |
 | `parabola_vertex(x, y)` | (a, −b/2a) of the least-squares parabola (numpy `polyfit`, degree 2); used by `docs/training.md` §5 | — |
 | `latency(starts, firsts, ends, new_tokens, duration=)` | `ttft` (first − start), `tpot` ((end − first)/(n − 1), requests of > 1 token; None if none), `e2el`, each mean, median, p99; `output_throughput` | vLLM `benchmarks/serve.py` `calculate_metrics` |
 
@@ -223,9 +231,14 @@ micro-batch's segment lengths, read from the loader without a device synchroniza
 and the nominal count: `docs/architecture.md` §1. Executed FLOPs per token of a row holding one document are
 1,479,503,808 at 8K and 2,160,975,600 at 32K [arithmetic, recomputed on CPU], below nominal (a query attends only its
 own segment's earlier keys) and lower still with packed documents; M is 3.8× the executed count at 32K [arithmetic], so
-an M-based utilization would exceed 100%. `torch.utils.flop_counter` would count the same once each custom op registered
-its formula, but per step it would read `cu_seqlens` on the host (a device sync) and dispatch every op through Python.
-FLOPs count 2 per multiply-add; rematerialization is not counted (PaLM App. B's MFU definition). `tokens_per_second` is
+an M-based utilization would exceed 100%. On the d24 rehearsal's train records (`docs/training.md` §7) a step's
+executed FLOPs are 0.744–0.799 (median 0.771) of nominal × its tokens at 8K and 0.442–0.652 (median 0.548) at 32K
+[recomputed from `model_flops`, itself recomputed exactly from the loader's segment lengths on sampled steps]: a
+nominal-count MFU would read 0.644 at 8K and 0.926 at 32K (medians), the latter above the 0.71 the step's GEMMs
+reach at the 700 W cap (`docs/training.md` §7), as nominal counts keys outside a query's segment and causal past.
+`torch.utils.flop_counter` would count the same once each custom op registered its formula, but per step it would
+read `cu_seqlens` on the host (a device sync) and dispatch every op through Python.
+FLOPs count 2 per multiply-add; rematerialization is not counted (PaLM §4.1's MFU definition). `tokens_per_second` is
 the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint FlashAttention reports (arXiv 2205.14135),
 `peak_reserved_bytes` the allocator's. Measured MFU: `docs/training.md` §7.
 
@@ -458,6 +471,20 @@ suite's greedy 0.061/0.061 and 0.045/0.037.
 - **EvalPlus scoring** (`b8057ff`): the evaluator's 20 s exit stall removed (`os._exit` after writing) and all cores
   used: HumanEval+ 22.5 → 9.6 s, MBPP+ 28.0 → 12.6 s; identical verdicts per task against the previous code on a d16
   checkpoint's completions.
+- **Scorer replay** (`1243e81`, cores 32–63, an empty verdict cache): the official evaluators on every stored
+  completion of the d24 benchmarks record `generate=benchmarks,learning_rate_scale=2.0,tokens_per_param=5.0`
+  `eval-3307.json` (EvalPlus parse, greedy, filtered and sampled; MultiPL-E greedy, filtered and sampled; infilling
+  greedy, `greedy_reference_lines` and filtered) gave the stored verdict for 63,899 of 63,902 samples; the other 3, MBPP
+  C++ sampled completions stored "Timeout", ran "Exception" (a stack overflow after 13.4–14.6 s against the 15-s
+  limit), a failure either way, so no score changed. The harnesses' own CLIs on that record's greedy completions
+  (human-eval-infilling's `evaluate_functional_correctness` on single-line and random-span SPM, MultiPL-E's
+  `main.py --dir` and `pass_k.py` on both C++ benchmarks) gave its pass@1 exactly (0.0823, 0.0195, 0.0745, 0.1184).
+  Every stored score of the seven d24 evaluation records (the peak-lr arms' `eval-3307.json`, the × 1 and × 2
+  benchmarks records, the rehearsal's `eval-1102.json` and `eval-2205.json`: parse shares, pass@k, infilling and
+  completion scores, filtered attempts) recomputes exactly from the per-sample fields, and the aggregate formulas of
+  EvalPlus's `evaluate` and MultiPL-E's `pass_k.py` agree with `"scores"` within 4 ulp; `completion_scores` equals a
+  transcription of cceval `40c68d2` (fuzzywuzzy 0.18 `fuzz.ratio` on difflib) on all 156,640 stored middle–reference
+  pairs of the four benchmarks records.
 - **Reference model** [unverified: no record or commit]: deepseek-coder-1.3b-base through DeepSeek's harness gave
   HumanEval 0.305 (paper 0.348, arXiv 2401.14196 Table 3; transformers 5 drops its BOS) and MBPP 0.466 (paper 0.462);
   this suite's EvalPlus scorer agreed on 163 of 164 problems.
@@ -478,24 +505,24 @@ Per module and symbol; what §1–§9 state is not repeated.
 | Kind | Fields |
 |---|---|
 | `run` (each process start) | `step` (first step it trains), `plan` (`schedule.RunPlan`), `config` (`run.py` `RunConfig`; initialization and data order from `train/loop.py` `SEED` = 0), `data_key` (`Tokenizer.data_key`), `model` (`ModelConfig` at the stage of the starting weights: file-level, or the checkpoint's), `num_parameters`, `flops_per_token` (`non_embedding_flops_per_token`, M of arXiv 2401.02954 §3.2 Eq. 2), `model_flops_per_token` (at that stage), `learning_rate` and `weight_decay` (`{"adamw": [per group], "muon": [per group]}` as the optimizers hold them; a resumed process's from its checkpoint), `stage` (`corpus/mixture.py` `Stage` as run, mixture as {corpus: row weight}) |
-| `stage` (switch to the repo-level stage) | `step`, `stage`, `model_flops_per_token` (repo-level), `peak_memory_bytes`, `peak_reserved_bytes` (`torch.cuda.max_memory_allocated`/`max_memory_reserved` over the file-level stage; both reset at the switch) |
-| `train` (each optimizer step, 0-based) | `step`; `num_input_tokens_seen` (row positions after it, padding included); `loss` (mean next-token loss in nats over valid labels, fp64); `learning_rate` (LambdaLR's); `grad_norm` (global L2 before clipping, arXiv 1211.5063 §3.2: the L2 norm of the step's per-tensor norms in the diagnostics sidecar, `docs/training.md` §6); `step_seconds` (device time between CUDA events at the previous step's end and its own; `train/loop.py` reads a step's values one step late); `tokens_per_second` (row positions / `step_seconds`); `model_flops` (`executed_model_flops` of the step's micro-batches); `mfu`; `train/diagnostics.py`'s `max_logsumexp`, `mean_square_logsumexp` (logits' logsumexp over valid positions: maximum and mean square, PaLM's z-loss quantity, arXiv 2204.02311 §5), `qk_norm_gain_max` (the largest of the sidecar's per-layer q and k gain ‖g‖∞), `corpus_loss` ({corpus: mean loss of its rows}); every 10th step the GPU's NVML telemetry (pynvml, one handle to the model's GPU), read when the record is written (during the next step): `gpu_power_watts` (`nvmlDeviceGetPowerUsage` / 1000, NVML's average over its last sample period), `gpu_sm_clock_mhz` (`nvmlDeviceGetClockInfo`, SM clock), `gpu_temperature_c` (`nvmlDeviceGetTemperature`, die), `gpu_memory_used_bytes` (`nvmlDeviceGetMemoryInfo().used`, the device's used memory, every process included). Per-tensor and per-group gradient norms, parameter norms and update RMS live only in the sidecar (`docs/training.md` §6) |
+| `stage` (switch to the repo-level stage) | `step`, `stage`, `model_flops_per_token` (repo-level), `peak_memory_bytes`, `peak_reserved_bytes` (`torch.cuda.max_memory_allocated`/`max_memory_reserved` since the process start: the file-level stage, or its part after a resume; both reset at the switch) |
+| `train` (each optimizer step, 0-based) | `step`; `num_input_tokens_seen` (row positions after it, padding included); `loss` (mean next-token loss in nats over the step's valid labels, Σ loss / Σ labels over its micro-batches by `step_shares`, computed in fp32 on the capped logits by the `lm_loss` call that gives the gradient); `learning_rate` (LambdaLR's); `grad_norm` (global L2 before clipping, arXiv 1211.5063 §3.2: the L2 norm of the step's per-tensor norms in the diagnostics sidecar, the norm the clip uses, `docs/training.md` §6); `step_seconds` (device time between CUDA events at the previous step's end and its own, so it includes a save or compilation before the step; `train/loop.py` reads a step's values one step late); `tokens_per_second` (row positions / `step_seconds`); `model_flops` (`executed_model_flops` of the step's micro-batches); `mfu`; `train/diagnostics.py`'s `max_logsumexp`, `mean_square_logsumexp` (the capped logits' logsumexp over valid positions: maximum and mean square, PaLM's z-loss quantity, arXiv 2204.02311 §5), `qk_norm_gain_max` (the largest of the sidecar's per-layer q and k gain ‖g‖∞ after the step), `corpus_loss` ({corpus: Σ loss / Σ valid labels over its rows}); every 10th step the GPU's NVML telemetry (pynvml, one handle to the model's GPU), read when the record is written (during the next step): `gpu_power_watts` (`nvmlDeviceGetPowerUsage` / 1000, a 1 s running average on Hopper), `gpu_sm_clock_mhz` (`nvmlDeviceGetClockInfo`, SM clock), `gpu_temperature_c` (`nvmlDeviceGetTemperature`, die), `gpu_memory_used_bytes` (`nvmlDeviceGetMemoryInfo().used`, the device's used memory, every process included). Per-tensor and per-group gradient norms, parameter norms and update RMS live only in the sidecar (`docs/training.md` §6) |
 | `end` (last step trained) | `step`, `peak_memory_bytes`, `peak_reserved_bytes` over the last stage (since the switch or the process start) |
 | `failure` (non-finite loss or gradient norm; the run stops) | `step` |
 
 - `train_steps`: attempts only grow down the file, so the last record per step wins. `curves`: columns in first-seen
   field order; none for a run diverged at step 0.
-- `mixture_bpb_summary`: corpora carry `"row_bits"`, `"row_bytes"` (`eval/bpb.py` `val_bits`' per sampled row) and
-  `"rows"`. `offset_bpb`: corpora carry `"offset_bits"`, `"offset_bytes"`, `"rows"`; bucket i holds the targets after
-  [OFFSETS[i−1], OFFSETS[i]) bytes of their segment.
-- `bpb_summary`: statsmodels `WLS(...).fit(cov_type="HC1", use_t=False)`, whose estimate is the ratio of sums; HC1's
-  √(n/(n−1)) plays Eq. 1's n − 1. `summary`: `OLS` with `use_t=False`; clustered fit `cov_type="cluster"`,
-  `use_correction=False`; returns `n` and the number of clusters.
-- `parse_outcome`: warnings suppressed during `compile`; MemoryError and RecursionError count as "syntax", as
-  `syntax_constraint.syntax_error` counts them, and so does the ValueError CPython 3.12.3's compiler raises in place of
-  parsing an f-string debug expression in a format spec, `f"{x:{y=}}"` (python/cpython#121130, fixed in 3.12.5): the
-  image's interpreter cannot run such a program. The classification source is the post's section "How the failing
-  generations fail".
+- `mixture_bpb_summary`: corpora carry `"row_bits"`, `"row_bytes"`, `"row_clusters"` (`eval/bpb.py` `val_bits`' per
+  sampled row) and `"rows"`; its `"bpb"` is the ratio of row sums (equal to `mixture_bpb`'s of bucket sums to
+  rounding); it returns `"rows"` and `"clusters"`. `offset_bpb`: corpora carry `"offset_bits"`, `"offset_bytes"`,
+  `"rows"`; bucket i holds the targets after [OFFSETS[i−1], OFFSETS[i]) bytes of their segment.
+- `summary`: `OLS` with `use_t=False`; clustered fit `cov_type="cluster"`, `use_correction=False`; returns `n` and
+  the number of clusters.
+- `parse_outcome`: one `compile` (warnings are not errors, so no warning changes an outcome); MemoryError and
+  RecursionError count as "syntax", as `syntax_constraint.syntax_error` counts them, and so does the ValueError
+  CPython 3.12.3's compiler raises in place of parsing an f-string debug expression in a format spec, `f"{x:{y=}}"`
+  (python/cpython#121130, fixed in 3.12.5): the image's interpreter cannot run such a program. The classification
+  source is the post's section "How the failing generations fail".
 - CrossCodeEval patterns: `COMMENT` (cceval `eval_utils.py` `remove_comments`: `#` and `//` to the line end, strings
   included), `STRING` (`string_pattern`, removed before identifiers are read), `IDENTIFIER` (`IDENTIFIER_REGEX`, matched
   at the start of NLTK `RegexpTokenizer(r"\w+")`'s words); `code_lines` is cceval `process_examples`, `identifiers`
@@ -537,9 +564,12 @@ Per module and symbol; what §1–§9 state is not repeated.
   Padding `cu_seqlens` by its last offset leaves empty segments the attention never reads; `searchsorted(right=True)`
   maps a position to its segment. OFFSETS reach 128 KiB, beyond a 32K row's span in bytes.
 - `val_bits` → `{"corpora": {corpus: {"bits", "bytes", "offset_bits", "offset_bytes", "row_bits", "row_bytes",
-  "rows"}}, "bpb": {group | "all"}, "errors": {group}, "offset_bpb": {group}, "weights": {corpus}}`; weights are
-  `Stage.shares` at the total train packed rows; the last micro-batch is filled with empty rows (index −1), dropped
-  from the row sums.
+  "row_clusters", "rows"}}, "bpb": {group | "all"}, "errors": {group | "all"}, "offset_bpb": {group | "all"},
+  "weights": {corpus}}`; weights are `Stage.shares` at the total train packed rows; the last micro-batch is filled
+  with empty rows (index −1), dropped from the row sums.
+- `row_clusters(split, rows)`: a piece's document is the `.idx` range holding its start; labels are each component's
+  least row by min-label propagation over the row–document pairs (the partition of scipy's `connected_components`
+  on all 25 sampled corpora at 8K and 32K), renumbered 0…m − 1.
 - `solution_bits` → `{benchmark: sums | per-solution "row_bits", "row_bytes" in benchmark order}`, in
   `FILE_LEVEL_STAGE` micro-batches, one example and one attention segment per row. The prompt ends after the
   solution's leading blank lines (through the last leading line break); the first scored token is found by
@@ -598,7 +628,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 - `INFILLING_EVALUATE`: `evaluation.py` `evaluate_functional_correctness`'s `check_correctness` at its default 3 s per
   sample, over the middles not in the verdict cache (keyed by benchmark, task id and middle; "timed out" not kept);
   `reliability_guard` disables what a run-time import would call, hence the CLI modules imported first.
-  `infilling(name, problems, middles, record)` → `{"pass@1", "scores", "ids", "completions", "result"}` | record (per
+  `infilling(name, problems, middles, record)` → `{"scores", "ids", "completions", "result"}` | record (per
   problem "passed", "failed: <exception>" or "timed out", `execution.py`); clusters from task id
   `<Benchmark>/HumanEval/<n>/<span>`.
 - Records (`codegen_record`, `parse_record`, `filtered_record` and `infilling` build them from completion texts):
@@ -636,8 +666,9 @@ Per module and symbol; what §1–§9 state is not repeated.
   imported by MBPP's `test_imports`); a failing example exits 1.
 - `verdicts`: Python diagnostics from one `python_diagnostics` call; C++ diagnostics and examples on the caller's
   pool, each a child process on the timed-check cores; programs with known diagnostics skip both. `search`: attempt
-  a uses temperature 0 for a = 0, else TEMPERATURE with seed a; each candidate's check is built on a thread as it
-  completes; `done(s, …)` from search s's judge thread once it has no pending task or has run its last round.
+  0 of task i is greedy, attempt a > 0 samples at `TEMPERATURE` from the `TOP_P` nucleus with seed `ATTEMPTS` · i + a;
+  each candidate's check is built on a thread as it completes; `done(s, …)` from search s's judge thread once it has
+  no pending task or has run its last round.
   Latency counts a search's kept candidates, its duration the sum over rounds of the span from their first start to
   their last end.
 

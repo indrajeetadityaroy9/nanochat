@@ -180,11 +180,15 @@ The best arm (× 2) beats the law (× 1) by 0.0078 code bpb; × 4 is 0.0005 behi
 law's lr, is the base multiplier, 2.8% below the earlier recipe's 2.7970369 [arithmetic]: peak lr 2.3465e-3 and
 weight decay 0.15342 on the base plan (§2).
 
-**Precision and robustness** (each evaluation's `errors`, `docs/evaluation.md` §5; marginal standard errors over val
-rows, the × 2 arm): 8K code 0.0008 (49,765 rows), 32K code 0.0035 (2,667 rows), 8K all 0.0013. × 1's deficit, 0.0078,
-is ≈ 10 of them; × 2 and × 4 differ by 0.00047, under one: the measure brackets a flat optimum over × 2–× 4, and
-× 2.7193 is the parabola's point estimate without an interval (the arms share val rows, so a paired difference would
-be tighter; not computed). The same fit on the other likelihood measures of the three evaluations (`metrics.measures`):
+**Precision and robustness** (each evaluation's `errors`, `docs/evaluation.md` §2, §5: val rows clustered by
+document, corpora as strata; the × 2 arm): 8K code 0.0022 (49,765 rows, 44,829 clusters), 32K code 0.0157 (2,667
+rows, 2,255 clusters; 93% of its variance one 58.8M-token repository), 8K all 0.0020. The arms score identical rows,
+so their differences are paired (arXiv 2411.00640 §4.2; `metrics.mixture_bpb_summary` of the per-row bit
+differences [arithmetic]): 8K code × 1 − × 2 = +0.00778 (standard error 0.00003), × 4 − × 2 = +0.00047 (0.00002).
+The val sample therefore resolves every arm; what it does not measure is training noise, one seed per arm: two seeds
+of one d16 arm differ by 0.0019 code bpb (`results/muon_wd_timescale_20tpp.jsonl`, τ × ½), four times the × 2–× 4
+gap. The measure brackets a flat optimum over × 2–× 4, and × 2.7193 is the parabola's point estimate without an
+interval. The same fit on the other likelihood measures of the three evaluations (`metrics.measures`):
 
 | Measure | × 1 | × 2 | × 4 | Lowest | Vertex |
 |---|---|---|---|---|---|
@@ -192,32 +196,37 @@ be tighter; not computed). The same fit on the other likelihood measures of the 
 | code, 32K | 0.40859 | 0.40131 | 0.40227 | × 2 | × 2.610 |
 | code, 8K and 32K by the base run's stage tokens (97.05B, 5.60B) | | | | | × 2.713 |
 | repositories beyond 8K (`repo_beyond_8k`) | 0.36366 | 0.35736 | 0.35858 | × 2 | × 2.527 |
-| benchmark solutions (`solutions`; 706 rows, standard error 0.0089) | 0.49200 | 0.48710 | 0.48498 | × 4 | × 4.782 |
+| benchmark solutions (`solutions`; 706 rows, standard error 0.0090) | 0.49200 | 0.48710 | 0.48498 | × 4 | × 4.782 |
 | all, 8K / 32K | 0.49386 / 0.49250 | 0.48499 / 0.48403 | 0.48533 / 0.48479 | × 2 | × 2.756 / × 2.672 |
 | math, 8K / 32K | 0.53770 / 0.53733 | 0.52497 / 0.52459 | 0.52556 / 0.52518 | × 2 | × 2.743 / × 2.744 |
 | text, 8K / 32K | 1.07390 / 1.07466 | 1.05797 / 1.05881 | 1.05734 / 1.05821 | × 4 | × 2.910 / × 2.906 |
 
 The mixture measures' vertices span × 2.53–2.91: −7% to +7% of the base lr, ≤ 0.00005 bpb at the fitted curvature
-[arithmetic]. The solutions measure alone falls through × 4 and puts its vertex beyond the grid, but over 706 rows its
-× 2–× 4 gap (0.0021) is under one standard error; at the code fit's curvature its × 4.78 would cost 0.0027 code bpb
-[arithmetic]. The parse measure's generations (single seed, greedy): HumanEval+ base pass@1 0.067 / 0.104 / 0.110
-(standard error 0.020–0.025), MBPP+ 0.114 / 0.132 / 0.127 (0.016–0.017), MBPP+ parse rate 0.825 / 0.894 / 0.775;
-none resolves × 2 from × 4, and the rule reads none of them.
+[arithmetic]. The solutions measure alone falls through × 4 and puts its vertex beyond the grid, but its × 2–× 4 gap
+(0.0021) is 1.5 paired standard errors (0.0014; marginal 0.0090 over 706 rows); at the code fit's curvature its × 4.78
+would cost 0.0027 code bpb [arithmetic]. The parse measure's generations (single seed, greedy): HumanEval+ base pass@1
+0.067 / 0.104 / 0.110 (standard error 0.020–0.025), MBPP+ 0.114 / 0.132 / 0.127 (0.016–0.017), × 2's paired
+differences from × 1 and × 4 at most 2.1 standard errors (HumanEval+ against × 1, exact sign test p = 0.07); MBPP+
+parse rate 0.825 / 0.894 / 0.775, where × 2 parses 70 problems × 4 does not and × 4 25 that × 2 does not (exact sign
+test p = 4e-6), one trained model each, while two seeds of one D7 arm differ more (pooled unparsed 0.293 and 0.133,
+`docs/experiments.md` §1). The rule reads none of them.
 
 **Dynamics** (the arms' `metrics.jsonl`, `train` records; × 1 / × 2 / × 4):
-- training loss (50-step means): × 4 leads until step 445, then trails × 2 (+0.011 at step 1,000, +0.002 at the
-  end); × 2 − × 1 holds at −0.022 from step ~1,500; final 1.229 / 1.207 / 1.209;
+- training loss (trailing 50-step means): × 4 leads until step 468, then trails × 2 (+0.011 at step 1,000, +0.002 at
+  the end); × 2 − × 1 stays within −0.020 to −0.024 from step 1,500; final 1.230 / 1.208 / 1.210;
 - clipping: 41 / 35 / 25 steps above `MAX_GRAD_NORM`, the last at steps 45 / 40 / 26; median gradient norm after
   step 40 0.181 / 0.131 / 0.110; every loss and norm finite;
-- 31 loss spikes (a step above the previous 50-step mean by 0.15) at the same steps in all three arms and of the
-  same size (+0.188 on average): batches of the fixed data order, not the lr; Stack-Edu Python's own loss exceeds
-  its mean by > 0.3 nats in 16 of them;
-- largest logsumexp 16.6 / 17.9 / 19.1 and largest QK-norm gain 1.69 / 1.93 / 2.25, each level from step ~3,000;
+- 31 loss spikes in the file-level stage (a step above the previous 50-step mean by 0.15) at the same steps in all
+  three arms and of the same size (+0.188 on average): batches of the fixed data order, not the lr; Stack-Edu Python's
+  own loss exceeds its mean by > 0.3 nats in 16 of them;
+- largest logsumexp 16.6 / 17.9 / 19.1 (steps 2,531 / 1,129 / 1,344) and largest QK-norm gain 1.69 / 1.93 / 2.25,
+  the gains at that level from step ~3,000;
   parameter norm of the Muon group at the end 377 / 719 / 1,426, roughly ∝ lr, as the τ law's fixed η·λ implies
   [inference];
 - the repository stage (step 3,127, lr at 5.5% of peak): the 20-step mean loss falls by 0.012 in each arm;
-- 361–362K / 288K tok/s at 8K / 32K, MFU 0.483, peak 71.10 GiB, 2,739–2,774 s of training per arm, independent of
-  the lr. The sweep ran at `5e06eb8`: 10,322 s for the three arms with their evaluations (698 s each in parse mode).
+- 361–362K / 288K tok/s at 8K / 32K, MFU 0.481–0.483, peak 71.10 GiB, 2,739–2,774 s of training per arm, independent
+  of the lr. The sweep ran at `5e06eb8`: about 10,320 s for the three arms with their evaluations (668–697 s each in
+  parse mode, from the `end` record to the evaluation file).
 
 **Adopted** for the base run: `learning_rate_scale` = `lr_multiplier` = 2.7192599564485445 (records at `b7f5be9`) on
 the §2 plan (69,611 steps of 1,474,560 tokens, peak lr 2.3465e-3, weight decay 0.15342), run
@@ -269,9 +278,10 @@ or sweeps fields) and the command line's overrides. Every invocation is a Hydra 
 job without sweep parameters), so the run's directory is `RUNS/<run_name>` (`hydra.sweep.dir` `${runs:}`, `subdir`
 `${run_name:}`) and the experiment's `Records` callback runs when the sweep ends: `python run.py experiment=pretrain`
 (`num_checkpoints` 10, `generate` "benchmarks") and `python run.py experiment=peak_lr_d24` (§5). The output-logit cap
-is the model's, not a run field (`docs/architecture.md` §1). The records of `67192ab` and earlier carry the
-`RunConfig` fields since removed (`num_hidden_layers` 24, `seed` 0, `tokenizer` "corpus" in every record of
-`results/peak_lr_d24.jsonl`), all at their defaults, which no run name includes.
+is the model's, not a run field (`docs/architecture.md` §1). The run logs of `67192ab` and earlier carry the
+`RunConfig` fields since removed (`num_hidden_layers` 24, `seed` 0, `tokenizer` "corpus" in each `run` record of
+`results/peak_lr_d24.jsonl`'s `records`), all at their defaults, which no run name includes; each line's `config` is
+the current `RunConfig`, as `ablations/records.py` regenerates the file from the run directories.
 
 **Names.** `run_name`: the fields that differ from `RunConfig()`, sorted, `k=v` joined by `,` (`defaults` if none).
 The base model's run (`experiment=pretrain`) is
@@ -287,27 +297,33 @@ The base model's run (`experiment=pretrain`) is
 |---|---|---|
 | `run` | each process start | first step, `plan`, `config` (the `RunConfig`), the tokenizer's `data_key`, the model config, `num_parameters`, M (`flops_per_token`), PaLM's nominal `model_flops_per_token` (`docs/evaluation.md` §5), each group's `learning_rate` and `weight_decay`, the stage and its mixture |
 | `train` | each step | `loss`, `num_input_tokens_seen`, `learning_rate`, `grad_norm` (before clipping), `step_seconds`, `tokens_per_second`, executed `model_flops`, `mfu`, the diagnostics |
-| `stage` | the repository stage's first step | the stage and mixture, its nominal FLOPs per token, the file-level stage's peak allocated and reserved memory |
+| `stage` | the repository stage's first step | the stage and mixture, its nominal FLOPs per token, the peak allocated and reserved memory since the process start (the file-level stage, or its part after a resume) |
 | `end` | after the last step | the last stage's peak allocated and reserved memory |
 | `failure` | a non-finite loss or gradient norm | the step |
 
-A step's values are copied to pinned host memory without blocking and logged after the next step is launched, so
-the device never drains; its time runs between CUDA events at the previous step's end and its own.
+A step's `loss` is the mean next-token loss in nats over its valid labels (`corpus/loader.py` `IGNORE_INDEX` marks
+padding and a BOS that is no target): each micro-batch's mean, weighted by its share of the step's valid labels
+(`model/ops/cross_entropy.py` `step_shares`), so Σ loss / Σ labels pooled over the micro-batches, computed in fp32 by
+the same `lm_loss` call, on the capped logits, that gives the gradient. A step's values are copied to pinned host
+memory without blocking and logged after the next step is launched, so the device never drains; its time runs
+between CUDA events at the previous step's end and its own, so a process's first step and the stage switch's carry
+the graph's compilation, and a step after a save the save (below); `tokens_per_second` is the step's row positions
+(padding included) over that time.
 
-**Diagnostics** (`train/diagnostics.py`). In the `train` record: per-corpus training loss (rows assigned by
-`mixture.mixture_rows`); the output logits' logsumexp maximum and mean square over valid positions (PaLM's z-loss
-quantity, arXiv 2204.02311 §5); the largest QK-norm gain (attention-logit growth, the quantity Kimi K2's QK-Clip
-bounds, arXiv 2507.20534 §2.1); every `UPDATE_STATS_EVERY` = 10th step the GPU's telemetry, read on the host from
-NVML (the image's pynvml, initialized once with a handle to the model's GPU) when the record is written, while the
-next step runs, with no device synchronization: `gpu_power_watts` (`nvmlDeviceGetPowerUsage`, NVML's average over
-its last sample period), `gpu_sm_clock_mhz` (SM clock), `gpu_temperature_c` (die) and `gpu_memory_used_bytes` (the
-device's, every process included), which relate `step_seconds` to the 700 W cap and the clock lock (§7). These are
-the run's only GPU telemetry. In the sidecar, per tensor
-and per layer:
+**Diagnostics** (`train/diagnostics.py`). In the `train` record: per-corpus training loss (Σ loss / Σ valid labels
+over the corpus's rows, rows assigned by `mixture.mixture_rows`); the capped logits' logsumexp maximum and mean
+square over valid positions (PaLM's z-loss quantity, arXiv 2204.02311 §5); the largest QK-norm gain
+(attention-logit growth, the quantity Kimi K2's QK-Clip bounds, arXiv 2507.20534 §2.1); every
+`UPDATE_STATS_EVERY` = 10th step the GPU's telemetry, read on the host from NVML (the image's pynvml, initialized
+once with a handle to the model's GPU) when the record is written, while the next step runs, with no device
+synchronization: `gpu_power_watts` (`nvmlDeviceGetPowerUsage`, a 1 s running average on Hopper, NVML API
+reference), `gpu_sm_clock_mhz` (SM clock), `gpu_temperature_c` (die) and `gpu_memory_used_bytes` (the device's,
+every process included), which relate `step_seconds` to the 700 W cap and the clock lock (§7). These are the run's
+only GPU telemetry. In the sidecar, per tensor and per layer:
 
 | File | Row | Columns (`diagnostics.json` names them) |
 |---|---|---|
-| `diagnostics-step.npy` | step s, every step (69,611 × 316 for the base run) | `grad_norm/<tensor>`: each of the 220 parameter tensors' gradient L2 norm before clipping, in `named_parameters` order; `gain_max/<tensor>`: each layer's q and k QK-norm gain ‖g‖∞ (48); `resid_lambdas/<i>`, `x0_lambdas/<i>` (24 each) |
+| `diagnostics-step.npy` | step s, every step (69,611 × 316 for the base run) | `grad_norm/<tensor>`: each of the 220 parameter tensors' gradient L2 norm before clipping, in `named_parameters` order; `gain_max/<tensor>`: each layer's q and k QK-norm gain ‖g‖∞ after the step (48); `resid_lambdas/<i>`, `x0_lambdas/<i>` after the step (24 each) |
 | `diagnostics-update.npy` | step 10·r, every `UPDATE_STATS_EVERY` = 10th step (6,962 × 440) | `param_norm/<tensor>`: L2 norm after the step; `update_rms/<tensor>`: RMS of lr × update without weight decay (AdamW's lr·m̂/(√v̂ + eps) from its state, NorMuon's adjusted-lr update) |
 
 The arrays are `.npy` float32 (`numpy.load(..., mmap_mode="r")`), preallocated at the run's first start with NaN in
@@ -353,12 +369,13 @@ is the fp32 weights, AdamW's two moments of the 352,327,728 table and vector ele
 state gives a resume point every 1,000 steps and any 1,000-step point as a branch for an intervention, as Pythia's
 intermediate optimizer state did (arXiv 2304.01373 §3.1). The early and post-switch weights are fp32: a step-1
 update relative to the initial weight RMS, ≈ 0.2·lr/40 ÷ 768^−½ = 3.3e-4 [arithmetic], is below bf16's 2^−8.
-A save's time falls into the next step's `step_seconds`: in the d24 rehearsal (§7) a weights-only save added 0.84–1.02 s
-to it, a full state 2.18–2.25 s (the first 3.31 s, the one at the stage switch 4.01 s), ≈ 190 s over the base run's
-95 saves, 0.07% of its training [arithmetic]. A relaunched run resumes from its newest full-state
-checkpoint (weights, optimizer state, the scheduler at its step, the data position), never from a weights-only one;
-a run with one checkpoint restarts from step 0. A resumed attempt's records supersede the earlier ones for the steps
-it repeats (`metrics.train_steps`).
+A save's time falls into the next step's `step_seconds`: in the d24 rehearsal (§7), over the 8K median step, a
+weights-only save added 0.84–1.02 s to it, a full state 2.18–2.25 s (4.01 s over the 32K median at the stage switch,
+the 32K graph's compilation included; the resumed process's first step, compilation without a save, 3.31 s),
+≈ 190 s over the base run's 95 saves, 0.07% of its training [arithmetic]. A relaunched run resumes from its newest
+full-state checkpoint (weights, optimizer state, the scheduler at its step, the data position), never from a
+weights-only one; a run with one checkpoint restarts from step 0. A resumed attempt's records supersede the earlier
+ones for the steps it repeats (`metrics.train_steps`).
 
 **Divergence.** A non-finite loss or gradient norm writes a `failure` record and ends training; the job returns, the
 sweep continues and a rerun skips the run (`metrics.diverged`); its experiment record has `measures` null and
@@ -392,8 +409,9 @@ d24 profiles: sustained GEMMs run ~14% below their isolated speed. The lock was 
 (`nvidia-smi`'s locked clocks do not persist across a driver reload or reboot; how it was lost is unknown). [inference]
 The unlocked rate at `104488d`, 366,864 tok/s, equals `067e60b`'s 365,466 with the softcap's −0.58% in between, so
 that row and the later A/B arms were likely unlocked too (their relative gains are unaffected: both arms alike).
-Re-applied mid-rehearsal, the 8K rate went from 362,451 to 371–374K tok/s over the remaining 1,300 steps (not a
-controlled A/B; `4ade225`'s +3.0% is); `scripts/setup.sh` re-applies the lock and is re-run after a reboot (§9).
+Re-applied mid-rehearsal, the 8K rate went from a median of 360,410 tok/s (steps 0–599) to 374,203 (steps
+600–3,126; not a controlled A/B; `4ade225`'s +3.0% is); `scripts/setup.sh` re-applies the lock and is re-run after a
+reboot (§9).
 
 **Step profile** (d24, 8K, nsys; the baseline of `373b549`'s A/B): 4,355 ms of GPU time per step, 99.4% busy: GEMMs
 60.5% (~680 TFLOP/s), FlashAttention-4 18.9% (34.7% at 32K; the 512-window layers at 283–336 TFLOP/s against 511–600
@@ -408,7 +426,7 @@ for full attention), memory-bound kernels 19.8%, the optimizer 0.6%. The step is
 | Baseline (the profile above) | 2.81M / 2.37M | 803,750 (MFU 0.391) / 638,405 | 338,039 (0.450) | 273,536 (0.465) |
 | Master as a whole, `eeb0c53` | | | 356,259 (0.473) | 282,256 (0.483) |
 | Latest A/B arm, `067e60b` (unlocked) | | | 365,466 (0.4857) | 287,476 |
-| d24 rehearsal, `a4abe78`: in-loop medians of the whole run, locked from step 600 | | | 373,250 (0.498) | 298,601 |
+| d24 rehearsal, `a4abe78`: in-loop medians of the whole run, locked from step 600 | | | 373,168 (0.498) | 298,565 (0.508) |
 
 Later landings were timed as A/B arms only, spanning 362,972–365,466 tok/s at 8K and 286,555–287,482 at 32K
 (`fb86efc`, `db1e90e`, `067e60b`). The output-logit cap (`e24333d`) adds 1.56 ms per micro-batch, 0.58% of the 8K

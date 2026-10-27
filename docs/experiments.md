@@ -39,7 +39,9 @@ run's default `learning_rate_scale`, is `docs/training.md` §5.
 | GQA screen | 2:1 query:KV heads | d16 at 20 | 1 | rejected (§3) |
 
 The removed experiments' yamls, modules and knobs went in `f05d17c`, the remaining ablation fields and steps after
-`67192ab`; the designs below are their record.
+`67192ab`; the designs below are their record. `results/muon_wd_timescale_20tpp.jsonl` and
+`results/scalar_learning_rates.json[l]` are historical records, their run directories gone (their bits-per-byte errors
+recomputed from the stored row sums and the packs, `docs/evaluation.md` §5).
 
 **Proxy settings.** No affordable run reaches the base model (d24 at 526.13 tokens per non-embedding parameter,
 `docs/training.md` §2). Ranking at a single small size (150M parameters) picks the better of two data recipes at the

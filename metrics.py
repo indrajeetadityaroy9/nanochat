@@ -76,26 +76,25 @@ def offset_bpb(corpora: dict, weights: dict[str, float]) -> list[float | None]:
     return [b / y if y else None for b, y in zip(bits, nbytes, strict=True)]
 
 
-def bpb_summary(bits: ArrayLike, nbytes: ArrayLike, *, row_weights: ArrayLike | None = None) -> dict:
-    """Bits per byte Σw bits / Σw bytes of rows (0-byte rows dropped) with its row-level standard error.
-    WLS of row bpb on a constant, weights w x bytes, HC1: the delta-method ratio se times √(n / (n - 1))."""
-    y = np.asarray(nbytes, dtype=np.float64)
-    w = y if row_weights is None else y * np.asarray(row_weights, dtype=np.float64)
-    keep = y > 0
-    r = np.asarray(bits, dtype=np.float64)[keep] / y[keep]
-    fit = sm.WLS(r, np.ones_like(r), weights=w[keep]).fit(cov_type="HC1", use_t=False)
-    low, high = fit.conf_int()[0]
-    return {"bpb": float(fit.params[0]), "se": float(fit.bse[0]), "interval": (float(low), float(high)),
-            "rows": int(keep.sum())}
-
-
 def mixture_bpb_summary(corpora: dict, weights: dict[str, float]) -> dict:
-    """mixture_bpb over all buckets with its bpb_summary error; a row of corpus c weighs weights[c] / rows."""
-    names = list(weights)
-    return bpb_summary(np.concatenate([corpora[c]["row_bits"] for c in names]),
-                       np.concatenate([corpora[c]["row_bytes"] for c in names]),
-                       row_weights=np.concatenate([np.full(len(corpora[c]["row_bits"]), weights[c] / corpora[c]["rows"])
-                                                   for c in names]))
+    """mixture_bpb of rows with its standard error and 95% normal interval (arXiv 2411.00640 Eq. 3). corpora:
+    {corpus: {"row_bits", "row_bytes", "row_clusters", "rows"}}, the strata of a sample at fixed weights; within one,
+    clusters of rows are independent (eval/bpb.py row_clusters). With a_c = weights[c] / rows_c, R = Σ a_c bits_c /
+    Σ a_c bytes_c and, by the delta method, se² = Σ_c a_c² m_c s_c² / (Σ_c a_c bytes_c)², s_c² the sample variance
+    (ddof 1) of corpus c's m_c cluster sums of bits - R bytes (clustered errors, Eq. 4, per stratum)."""
+    scale = {c: w / corpora[c]["rows"] for c, w in weights.items()}
+    nbytes = sum(a * np.sum(corpora[c]["row_bytes"]) for c, a in scale.items())
+    bpb = float(sum(a * np.sum(corpora[c]["row_bits"]) for c, a in scale.items()) / nbytes)
+    variance, clusters = 0.0, 0
+    for c, a in scale.items():
+        residuals = np.asarray(corpora[c]["row_bits"]) - bpb * np.asarray(corpora[c]["row_bytes"])
+        sums = np.bincount(corpora[c]["row_clusters"], weights=residuals)
+        variance += a**2 * sums.size * sums.var(ddof=1)
+        clusters += sums.size
+    se = float(np.sqrt(variance) / nbytes)
+    half = statistics.NormalDist().inv_cdf(0.975) * se
+    return {"bpb": bpb, "se": se, "interval": (bpb - half, bpb + half),
+            "rows": sum(corpora[c]["rows"] for c in weights), "clusters": clusters}
 
 
 def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
@@ -137,14 +136,20 @@ def measures(evaluation: dict, steps: dict[int, dict], *, repo_level_start: int)
 
 
 def measure_errors(evaluation: dict) -> dict[str, dict]:
-    """Error bars of measures' evaluation measures (arXiv 2411.00640 Eq. 1): bpb by val rows, shares by problem."""
+    """Error bars of measures' evaluation measures (arXiv 2411.00640): bpb by mixture_bpb_summary, shares by problem.
+    solutions: two strata, HumanEval (HumanEval+ and HumanEval-X C++ hold its problems in one order, HumanEval/i and
+    CPP/i, a cluster each) and MBPP+, at their solution counts (the pooled bpb)."""
     parse = evaluation["parse"].values()
     outcomes = [o for p in parse for o in p["outcomes"]]
-    solutions = evaluation["solution"].values()
+    plus, cpp, mbpp = (evaluation["solution"][name] for name in ("humaneval_plus", "humaneval_x_cpp", "mbpp_plus"))
+    problems = len(plus["row_bits"])
+    strata = {"humaneval": {k: plus[k] + cpp[k] for k in ("row_bits", "row_bytes")}
+              | {"row_clusters": [*range(problems)] * 2, "rows": 2 * problems},
+              "mbpp": {"row_bits": mbpp["row_bits"], "row_bytes": mbpp["row_bytes"],
+                       "row_clusters": range(len(mbpp["row_bits"])), "rows": len(mbpp["row_bits"])}}
     return {"code": evaluation["8k"]["errors"]["code"], "text": evaluation["8k"]["errors"]["text"],
             "math": evaluation["8k"]["errors"]["math"], "repo_32k": evaluation["32k"]["errors"]["code"],
-            "solutions": bpb_summary(np.concatenate([s["row_bits"] for s in solutions]),
-                                     np.concatenate([s["row_bytes"] for s in solutions])),
+            "solutions": mixture_bpb_summary(strata, {name: s["rows"] for name, s in strata.items()}),
             "unparsed": summary([o != "parses" for o in outcomes]),
             "indentation": summary([o == "indentation" for o in outcomes]),
             "syntax": summary([o == "syntax" for o in outcomes]),
@@ -218,7 +223,7 @@ def pass_at_k(passed: Sequence[Sequence[bool]], k: int) -> np.ndarray:
 
 def summary(scores: ArrayLike, clusters: ArrayLike | None = None) -> dict:
     """{"mean", "se", "interval", "n", "clusters"} of question scores by OLS on a constant (arXiv 2411.00640).
-    Unclustered: Eq. 1; clustered: Liang-Zeger CR0 without small-sample correction; 95% normal interval (Eq. 5-6)."""
+    Unclustered: Eq. 1; clustered: Liang-Zeger CR0 without small-sample correction; 95% normal interval (Eq. 3)."""
     s = np.asarray(scores, dtype=np.float64)
     mean = float(s.mean())
     groups = None if clusters is None else np.unique(np.asarray(clusters), return_inverse=True)[1]

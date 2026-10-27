@@ -336,7 +336,8 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 **`model/ops/cross_entropy.py`**
 - `lm_loss` follows `quack/linear_cross_entropy.py` `scaled_exp_linear_cross_entropy_fwd` (its calls and tiles), per
   `CHUNK` rows. The logits GEMM's epilogue stores E = bf16(2^(z·log2 e − k)), k the rounded maximum of the row's
-  `TILE_N1`-wide tile, with each tile's sum of exponentials and the label's fp32 logit (not z). `lce_glue` forms
+  `TILE_N1`-wide tile, with each tile's sum of exponentials and the label's capped logit z[t] in fp32 (the
+  recorded logsumexp is loss + z[t], `lm_loss`'s last output). `lce_glue` forms
   logsumexp − z[t] from the fp32 accumulators, fixes E at the label and writes each row's power-of-two rescalings.
   dx = (1/n)·dz W (bf16) and dW = (1/n)·dzᵀ x (fp32, accumulated across chunks, `add_to_output`) are GEMMs on E whose
   A-operand load applies the rescalings: dz = v·(u·E) row-wise, u exact powers of two, v fp32.

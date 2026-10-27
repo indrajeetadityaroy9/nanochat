@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 
 from corpus.layout import packed_rows, stage_rows
-from corpus.loader import IGNORE_INDEX, PretrainingBatches
+from corpus.loader import IGNORE_INDEX, PackedSplit, PretrainingBatches
 from corpus.mixture import FILE_LEVEL_STAGE, NON_CODE, REPO_LEVEL_STAGE, Stage
 from corpus.tokenizer import Tokenizer
 from metrics import mixture_bpb, mixture_bpb_summary, offset_bpb
@@ -67,6 +67,24 @@ def sample_rows(stage: Stage) -> int:
     return -(-VAL_TOKENS // (stage.micro_batch_size * stage.seq_len)) * stage.micro_batch_size
 
 
+def row_clusters(split: PackedSplit, rows: np.ndarray) -> list[int]:
+    """A cluster label per row of a packed split: rows holding pieces of one document, directly or through other rows,
+    share one (the components of the row-document graph), so rows of different labels hold different documents."""
+    counts = split.rows[rows + 1] - split.rows[rows]
+    pieces = np.repeat(split.rows[rows] - np.cumsum(counts) + counts, counts) + np.arange(counts.sum())
+    documents = np.unique(np.searchsorted(split.offsets, split.pieces[pieces, 0], side="right"), return_inverse=True)[1]
+    row = np.repeat(np.arange(len(rows)), counts)
+    label = np.arange(len(rows))
+    while True:  # each document takes its rows' least label, each row its documents', until none changes
+        least = np.full(documents.max() + 1, len(rows))
+        np.minimum.at(least, documents, label[row])
+        update = label.copy()
+        np.minimum.at(update, row, least[documents])
+        if np.array_equal(update, label):
+            return np.unique(label, return_inverse=True)[1].tolist()
+        label = update
+
+
 def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> dict:
     """Val evaluation of a stage's corpora over a systematic sample of their packed val rows.
     Returns {"corpora", "bpb", "errors", "offset_bpb", "weights"}, pooled by the stage's train row shares."""
@@ -87,7 +105,8 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
     for name, loader in loaders.items():
         scored = sums(losses, loader, token_bytes, num_segments=num_segments)
         n = sampled[name]
-        corpora[name] = scored | {"row_bits": scored["row_bits"][:n], "row_bytes": scored["row_bytes"][:n], "rows": n}
+        corpora[name] = scored | {"row_bits": scored["row_bits"][:n], "row_bytes": scored["row_bytes"][:n],
+                                  "row_clusters": row_clusters(loader.packed[name], samples[name][:n]), "rows": n}
     rows = stage_rows(tokenizer, stage)
     weights = stage.shares(rows, sum(rows.values()))
     groups = {"code": stage.code} | {name: stage.groups[name].sources for name in NON_CODE}
