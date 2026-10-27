@@ -377,7 +377,8 @@ per layer and micro-batch, ≤ 66 ms/step by byte arithmetic). A QuACK epilogue 
 Bisect: plain store 544, + aux 660, + v-store predication 649, + per-head rstd 771, + RoPE partner from registers
 1,110 µs: the norm alone spends the budget. Two TMA-staged tables in one QuACK epilogue deadlock the GEMM. Verdict:
 rejected; the qk prologue stays (`docs/architecture.md` §3). Separately, the qk prologue runs at 3.36 / 3.3 TB/s
-forward / backward (~7% headroom), so TileKernels' RoPE kernel (`transform/rope_kernel.py`) was not ported.
+forward / backward (~7% headroom), so TileKernels' RoPE kernel (`tile_kernels/transform/rope_kernel.py`) was not
+ported.
 
 **Residual mix + norm in the down-projection epilogue (`mlp-out-mix` `c165408`, `mlp-out-mix-land` `76e32e8`,
 `mlp-out-mix-v2` `ce30108`).** Ceiling ≤ 58 ms/step (floor 15) by byte arithmetic. Route (a), the row's norm finished

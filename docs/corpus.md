@@ -432,8 +432,10 @@ on master; no supply corpus overdraws).
 
 - **Code 87%, text and mathematics 13%** (`CODE_SHARE`): DeepSeek-Coder's "87% source code, 10% English code-related
   natural language corpus, and 3% code-unrelated Chinese natural language corpus" (arXiv 2401.14196 §2), its natural
-  language taken to cover web text (10%) and mathematics (3%) [inference]. Qwen2.5-Coder's 7B comparison found
-  code:text:math 70:20:10 above 85:10:5 and 100:0:0, and uses it (arXiv 2409.12186 §3.1.2, Table 3).
+  language taken to cover web text (10%) and mathematics (3%) [inference]. Qwen2.5-Coder's 7B comparison of
+  code:text:math 100:0:0, 85:10:5 and 70:20:10 chose 70:20:10, best on its math and general benchmarks and above 85:10:5
+  on code, while 100:0:0 scored higher on its two code benchmarks (49.8 and 40.3 against 48.3 and 38.3; arXiv
+  2409.12186 §3.1.2, Table 3).
 - **Synthetic code 30% of code** [inference for code]: good mixtures' share of rephrased synthetic data, "converging
   to ∼30% for rephrased synthetic data" (Kang et al., arXiv 2510.01631 §1), measured on web text; its Limitations say
   the findings "may not directly apply to other generation methods (e.g., synthetic code, dialogues)". Code papers

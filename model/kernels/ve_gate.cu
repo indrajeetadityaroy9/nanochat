@@ -2,8 +2,7 @@
  * Value-embedding gate and mix: z = n W^T (fp32), gate = 2 sigmoid(z), out = bf16(v + gate[head] bf16(table[idx])).
  * Backward: dgate[h] = sum_head dout ve, dz = 2 dgate (1 - s) s with s = gate / 2, dn = bf16(dz W), dve =
  * bf16(gate[head] dout) summed per run of equal tokens (token order) and added into dtable with 16-byte atomics.
- * Design source: deepseek-ai/TileKernels' Engram gate kernels; the gate weight's gradient as per-block partials
- * summed in block order (as its engram_grad_w_reduce).
+ * Design source: deepseek-ai/TileKernels' Engram gate kernels.
  */
 #include "common.cuh"
 

@@ -77,8 +77,8 @@ def offset_bpb(corpora: dict, weights: dict[str, float]) -> list[float | None]:
 
 
 def mixture_bpb_summary(corpora: dict, weights: dict[str, float]) -> dict:
-    """mixture_bpb of rows with its standard error and 95% normal interval (arXiv 2411.00640 Eq. 3 within each stratum;
-    the strata and the ratio's delta method are this code's). corpora:
+    """mixture_bpb of rows with its standard error and 95% normal interval (arXiv 2411.00640 Eq. 3; the strata and the
+    ratio's delta method are this code's). corpora:
     {corpus: {"row_bits", "row_bytes", "row_clusters", "rows"}}, the strata of a sample at fixed weights; within one,
     clusters of rows are independent (eval/bpb.py row_clusters). With a_c = weights[c] / rows_c, R = Σ a_c bits_c /
     Σ a_c bytes_c and, by the delta method, se² = Σ_c a_c² m_c s_c² / (Σ_c a_c bytes_c)², s_c² the sample variance

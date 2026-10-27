@@ -121,7 +121,7 @@ read is not ablated.
   hard-codes relu², `EPI_RELU2`).
 - **SSSL windows of 512:** nanochat's SSSL pattern with the last layer full (LOG 2026-01-11); Gemma 3 finds the
   local:global ratio of minimal impact up to 7:1 and the window reducible "significantly without impacting
-  perplexity" (arXiv 2503.19786 §5.2, Fig. 3–4: 2B and 9B models; windows 512–4,096 at 1:1 and 3:1).
+  perplexity" (arXiv 2503.19786 §5.2: Fig. 3, 2B and 9B models; Fig. 4, 2B, windows 512–4,096 at 1:1 and 3:1).
 - **Shape:** the shape rule's MobileLLM ratio (§1). A deeper, thinner alternative at about d24's
   non-embedding parameters, 35 × 640 (193,070,080), costs M 3,234,201,600 per token at 8K (+14.2%) and nominal
   1,827,033,600 (+6.9%) [arithmetic], so an equal-token comparison gives it more compute; its 5 heads would need
@@ -343,8 +343,9 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   256, and 128 × 224 or 128 × 256) and QuACK's static persistent scheduler (`is_dynamic_persistent=False`; the
   `down_dx` GEMM of `relu2_mlp_bwd` passes `dynamic_scheduler=True`, the default of QuACK's `gemm_dact`).
   `CONFIGS` holds d24's calls (C = 768) only; the d8 and d16 entries are at `67192ab`.
-  M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`. The benchmark is `quack/gemm_runtime/autotune.py` (L2-cold
-  CUDA-graph medians of every eligible candidate, exclusive GPU). An explicit config bypasses
+  M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`. The benchmark is QuACK's `Autotuner` (`quack/autotuner.py`; the
+  epilogue ops reach it through `quack/gemm_runtime/autotune.py`): L2-cold CUDA-graph medians of every eligible
+  candidate, exclusive GPU. An explicit config bypasses
   QuACK's tuner whatever `tuned` says (`quack/epilogue/frontend.py`: the tuner runs only for `config=None`). `gemm`
   calls `gemm_tuned.fn` because QuACK's `gemm`/`gemm_add` take no config. `DPSUM_CONFIG` is the fastest tile_n = 128
   configuration on 98,304 × 768 × 768.
