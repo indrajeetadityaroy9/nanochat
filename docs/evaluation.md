@@ -1,8 +1,8 @@
 # Evaluation and inference
 
 How a checkpoint is scored (likelihoods, the parse measure, the code benchmarks), every metric and error bar the
-repository computes (`metrics.py`), the decoder that generates every completion, and the syntax constraint and checks
-of the filtered mode; §8 records the export and cross-check tools that ran the model elsewhere (removed at `cd4edbe`).
+repository computes (`metrics.py`), the decoder that generates every completion, the syntax constraint and checks of
+the filtered mode, and the Hugging Face export of a checkpoint (§8, with the earlier vLLM path and cross-check).
 The code is the specification; each statement names the file and symbol that define it.
 
 Markers: [arithmetic] derived from code numbers; [inference] reasoning, not measured; [estimate]; [unverified] a
@@ -20,6 +20,7 @@ setting; "d16 checkpoint" is a 20-tokens-per-parameter d16 run's final checkpoin
 | `metrics.py` (every function) | §5 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `fim_prompt`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
 | `inference/syntax_constraint.py`; `inference/syntax/` (`lib.rs`, `lexer.rs`, `parser.rs`, `vocab.rs`, `python.lark`, `Cargo.toml`, `Cargo.lock`) | §7 |
+| `inference/export_hf.py` (`export`), `inference/modeling_nanochat.py` (`NanochatForCausalLM`, `NanochatModel`, `NanochatConfig`) | §8 |
 | `eval/__init__.py`, `inference/__init__.py` (empty package markers) | — |
 
 ## 1. Protocol
@@ -430,27 +431,81 @@ Mbpp/630's reference fails as EvalPlus scores it (sanitize drops its helper).
 
 ## 8. Export, vLLM and the standard-protocol cross-check
 
-The model ran outside `NativeDecoder` through three tools, removed at `cd4edbe` (validation tools, not on the
-reproduction path; paths and symbols below are those of `67192ab`, their last commit):
+`inference/export_hf.py` `export` (`python -m inference.export_hf <checkpoint.pt> <out dir>`) writes a full-state
+`checkpoint-<step>.pt` or a weights-only `weights-<step>.pt` (`train/checkpoint.py`) as a Hugging Face model directory,
+which `AutoModelForCausalLM.from_pretrained(<dir>, trust_remote_code=True)` and `AutoTokenizer.from_pretrained(<dir>)`
+load (transformers 5.21.0, tokenizers 0.23.3, safetensors 0.8.0, `pyproject.toml`):
 
-- **Export** (`inference/export_hf.py`): a Hugging Face directory of a checkpoint. `model.safetensors` (matrices and
-  tables bf16; the per-dim and per-layer vectors and the value-embedding gates fp32, `_keep_in_fp32_modules_strict`);
-  `config.json` (`model_type` "nanochat", `auto_map` to the model file copied beside it; the per-layer windows as
-  Gemma 3's `layer_types` + `sliding_window` = 513, FA4's `window_left` + 1; `value_embedding_layers`;
-  `final_logit_softcapping`; `rms_norm_eps` = FLT_EPSILON); `generation_config.json` (BOS ends a generation);
-  `tokenizer.json` (transformers' `TikTokenConverter` of the tiktoken ranks and split pattern, special tokens in
-  `SPECIAL_TOKENS` order, `docs/corpus.md` §5, BOS prepended).
-- **Model file** (`inference/modeling_nanochat.py`, torch and transformers only): the model for transformers
-  (`AutoModelForCausalLM`, `trust_remote_code`) and vLLM's Transformers backend (paged attention with per-layer
-  sliding windows, CUDA graphs, torch.compile), in Qwen3's layout, with the training kernels' precision as PyTorch
-  expressions: q/k RMS norm, fp32 gain and rotation by −θ with fp64-computed fp32 tables (both libraries' rotary
-  embeddings rotate by +θ), the value embeddings, the residual mix in fp32 (`docs/architecture.md` §1, §4) and the
-  head's fp32 output and cap (vLLM: `config.json`'s `head_dtype`); the MLP and residual additions bf16. vLLM ran in
-  its own image (`vllm/vllm-openai:v0.32.0` at a pinned digest), which the NGC-based image cannot hold.
-- **Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir>`): the harnesses' own CLIs,
-  unmodified, on the export served by vLLM (below).
+- `model.safetensors`: the checkpoint's `"model"` tensors (`lm_head.weight`, the rest under `model.`), each in the
+  precision the training forward reads it: bf16 the token and value embeddings and every matrix (`CausalLM.hidden`
+  casts the embedding to bf16, `ve_gate.cu` rounds each table entry to bf16, the GEMMs read the `weight_bf16` and
+  `qkv_bf16` copies, `lm_losses` casts the head); fp32 the q/k gains, `resid_lambdas`, `x0_lambdas` and the
+  value-embedding gates (`NanochatPreTrainedModel._keep_in_fp32_modules_strict`, which a bf16 load keeps fp32). d24:
+  522,190,848 bf16 and 61,488 fp32 values, 1.04 GB.
+- `config.json`: `model_type` "nanochat", `auto_map` to `modeling_nanochat.py` (copied beside it); `hidden_size`,
+  `intermediate_size` 4C, `num_hidden_layers`, `num_attention_heads` = `num_key_value_heads` = C/128, `head_dim` 128;
+  `max_position_embeddings` the checkpoint's context (8,192 or 32,768); `rope_parameters` θ = `ROPE_THETA`; the
+  per-layer windows (`layer_windows`) as Gemma 3's `layer_types` + `sliding_window` = 513 (transformers' window counts
+  the query: 512 keys before it + 1); `value_embedding_layers` (`has_ve`); `final_logit_softcapping`; `rms_norm_eps` =
+  FLT_EPSILON (`EPS`); `tie_word_embeddings` false; `dtype` bfloat16; BOS (32,764) as `bos_token_id` and
+  `eos_token_id`, also in `generation_config.json` (BOS ends a generation).
+- `tokenizer.json`, `tokenizer_config.json`: transformers' `TikTokenConverter` of the corpus tokenizer's
+  `tokenizer.tiktoken` and split pattern with `SPECIAL_TOKENS` after the ranks (BOS 32,764, the FIM sentinels
+  32,765–32,767; `docs/corpus.md` §5) as a `PreTrainedTokenizerFast`, BOS prepended to every encoding
+  (`TemplateProcessing`), BOS as EOS, `model_max_length` the context.
 
-**Agreement with the training forward** (a d16 checkpoint at 5 tokens per parameter, step 1,707; 16 val rows of 8K
+**Model file** (`inference/modeling_nanochat.py`, torch and transformers only): `CausalLM` (`docs/architecture.md`
+§1) in Qwen3's layout (`NanochatForCausalLM`, `NanochatModel`, `NanochatDecoderLayer`), with the training kernels'
+precision as PyTorch expressions: q/k RMS norm, fp32 gain and rotation by −θ with fp64-computed fp32 tables
+(`qk_row.cuh` `qk_rotate`; transformers' rotary embeddings rotate by +θ), the value-embedding mix v + 2σ(W·n)·ve in
+fp32 (`ve_gate.cu`), the residual mix λr·x + λ0·x0 in fp32 rounded once (`docs/architecture.md` §1, §4), and the
+head's fp32 logits (`F.linear` of the operands cast to fp32, which equals the bf16 GEMM's fp32 output up to summation
+order: a product of two bf16 values is exact in fp32) capped in fp32; the MLP and the residual additions run in the
+load's dtype. Attention is transformers' attention interface (`sdpa` by default, `eager_attention_forward` otherwise)
+under transformers' causal and sliding-window masks; positions count from 0 per sequence (plus the cache length),
+and `generate` keeps a `DynamicCache` built from `layer_types`. The training forward attends within each packed
+piece (`cu_seqlens`); the model file attends over its whole input, so a packed row is scored segment by segment.
+
+**Agreement with the training forward** (`6df56ee`; CPU, fp32 load, `sdpa`): the d24 rehearsal's `checkpoint-1102.pt`
+(8K; `docs/training.md` §7) against its evaluation record `eval-1102.json`, whose per-row bits come from the compiled
+bf16 `CausalLM.losses` on the GH200. Val rows j = 0 and ⌊n/2⌋ of `"8k"` `"corpora"` (packed row ⌊j·rows/n⌋, §2
+`val_bits`), each piece its own sequence from position 0:
+
+| Corpus | j | Pieces | Bytes (record = export) | Record bits | Export bits | Δbpb |
+|---|---|---|---|---|---|---|
+| `stack_edu_python` | 0 | 1 | 30,002 | 17,775.800 | 17,776.240 | +1.47e-5 |
+| `stack_edu_python` | 2,562 | 3 | 28,866 | 15,539.657 | 15,541.906 | +7.79e-5 |
+| `stack_edu_cpp` | 0 | 1 | 31,781 | 10,972.315 | 10,968.337 | −1.25e-4 |
+| `stack_edu_cpp` | 2,562 | 2 | 19,245 | 8,904.176 | 8,902.762 | −7.35e-5 |
+| `nemotron_rewriting_python` | 0 | 3 | 24,182 | 16,724.599 | 16,724.021 | −2.39e-5 |
+| `nemotron_rewriting_python` | 2,562 | 8 | 32,999 | 12,859.194 | 12,858.569 | −1.90e-5 |
+| `climbmix` | 0 | 1 | 35,508 | 41,729.856 | 41,728.255 | −4.51e-5 |
+| `climbmix` | 2,562 | 11 | 34,957 | 44,428.046 | 44,427.145 | −2.58e-5 |
+| `ultradata_math_l3_qa` | 0 | 1 | 23,677 | 17,729.465 | 17,724.509 | −2.09e-4 |
+| `ultradata_math_l3_qa` | 558 | 8 | 23,068 | 12,879.215 | 12,880.222 | +4.37e-5 |
+| Pooled | | | 284,285 | 199,542.32 | 199,531.96 | −3.64e-5 |
+
+Every row's bytes equal the record's; the pooled bits differ by −5.19e-5 relative. Loaded in bf16 (CPU), the same rows
+differ by at most 1.15e-4 bpb and by +6.7e-6 relative pooled. The 164 HumanEval+ `"solution"` rows (27,104 bytes,
+median 148 per row; bytes equal) differ in fp32 by −3.99e-4 relative pooled (Δbpb −1.97e-4), per row |Δbpb| mean
+8.8e-4 and max 5.4e-3 (the per-row bit differences' standard deviation 0.134 bits), in bf16 by −8.4e-5 pooled, per
+row mean 1.0e-3 and max 4.7e-3 (0.157 bits): per-row differences of one size in either precision, on rows this short
+rounding noise rather than a difference of the model [inference].
+`tokenizer.json` encodes 171 texts (the HumanEval+ prompts with solutions, the decoded pieces of the rows j = 0) as
+BOS + tiktoken's `encode_ordinary`, and maps the four special tokens to 32,764–32,767. The 32K exports of
+`checkpoint-3307.pt` and of `weights-3227.pt` give finite logits on a 9,001-token input. Greedy `generate` of 64
+tokens from HumanEval/0's prompt equals the uncached forward's argmax at every step, and a bf16 load generates the
+same tokens.
+
+**Earlier export, vLLM and the standard-protocol cross-check** (to `67192ab`; vLLM support removed and
+`scripts/standard_eval.sh` deleted at `cd4edbe`). The same export and model file also served vLLM's Transformers
+backend (paged attention with per-layer sliding windows, CUDA graphs, torch.compile; `_supports_attention_backend`,
+the head in fp32 through `config.json`'s `head_dtype`), in its own image (`vllm/vllm-openai:v0.32.0` at a pinned
+digest), which the NGC-based image cannot hold; the head was `torch.mm` with an fp32 `out_dtype` (CUDA only).
+`scripts/standard_eval.sh <exported dir> <out dir>` ran the harnesses' own CLIs, unmodified, on the export served by
+vLLM.
+
+**Agreement then** (a d16 checkpoint at 5 tokens per parameter, step 1,707; 16 val rows of 8K
 from 8 corpora, 130,911 scored tokens; greedy continuations of the 542 HumanEval+/MBPP+ prompts; GH200, `2d49bb1`
 and the head variant): the bf16 head was the main difference. With the fp32 head the export's mean KL(train ‖
 export) under transformers is 1.97·10⁻⁴ (bf16 head 3.09·10⁻⁴), top-1 agreement 0.9940 (0.9903), the bpb bias

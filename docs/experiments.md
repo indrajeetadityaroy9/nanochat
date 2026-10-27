@@ -17,7 +17,7 @@ without a record, or a paper value its extracted text lacks.
 | Branch `scalar-learning-rates` `e6e3837` (on `origin`; the run trained at its child `61e316a`) | §4 |
 | Commit `f05d17c` (removes the D6/D7 experiments, the tokenizer runs, `RunConfig.muon_tau_scale`, `adamw_learning_rate_scale`, `scalar_learning_rates`, `ablations/contrast.py`) | §1, §2, §4 |
 | Commit `7794e2f` (removes the native vLLM model class) | §6 |
-| `eval/rescore.py`, `inference/export_hf.py`, `inference/modeling_nanochat.py`, `scripts/standard_eval.sh` at `67192ab`, removed | §6 |
+| `eval/rescore.py`, `scripts/standard_eval.sh` and the export's vLLM support (`config.json` `head_dtype`, `_supports_attention_backend`) at `67192ab`, removed | §6 |
 
 ## 1. Protocol and status
 
@@ -434,12 +434,12 @@ Transformers backend ran at the same rate and, in the same execution mode, gave 
 plugin image were removed as a second implementation of the model. The export and vLLM path that replaced it:
 `docs/evaluation.md` §8.
 
-**Export, vLLM path and scorer replay** (removed at `cd4edbe`). `inference/export_hf.py` and
-`inference/modeling_nanochat.py` ran checkpoints under transformers and vLLM, `scripts/standard_eval.sh` the
-harnesses' own CLIs on them, `eval/rescore.py` replayed a record's scorers on its stored completions; each validated
-the evaluation (their measurements: `docs/evaluation.md` §1, §8) and none produces a record of the base run or the
-`peak_lr` calibration, so the code keeps `NativeDecoder` and the scorers `evaluate` runs (`docs/evaluation.md` §1,
-§6). Without the export nothing imports transformers or safetensors.
+**vLLM path and scorer replay** (removed at `cd4edbe`). The export (`inference/export_hf.py`,
+`inference/modeling_nanochat.py`; current code, `docs/evaluation.md` §8) also ran under vLLM's Transformers backend,
+`scripts/standard_eval.sh` ran the harnesses' own CLIs on it, `eval/rescore.py` replayed a record's scorers on its
+stored completions; each validated the evaluation (their measurements: `docs/evaluation.md` §1, §8) and none produces
+a record of the base run or the `peak_lr` calibration, so the code keeps `NativeDecoder` and the scorers `evaluate`
+runs (`docs/evaluation.md` §1, §6).
 
 **Type-constrained decoding** (arXiv 2504.09246). Not used; Python syntax is constrained and types are checked after
 generation (basis: `docs/evaluation.md` §7).

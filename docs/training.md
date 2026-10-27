@@ -504,7 +504,11 @@ hard limit for evalplus's `reliability_guard`), whose entrypoint creates `artifa
    weights-only checkpoints, `metrics.jsonl` and the diagnostics sidecar, evaluations, `.hydra/`, the corpus tokenizer
    (`artifacts/corpus/tokenizer/`, which `load_model`'s tokenizer reads) and `results/` to a
    Hugging Face model repository; `scripts/container.sh hf download <repo> --local-dir /workspace/nanochat` restores
-   them where `load_model` and a resumed run read them.
+   them where `load_model` and a resumed run read them. A checkpoint as a transformers model (`docs/evaluation.md` §8)
+   goes to its own model repository: `scripts/container.sh python -m inference.export_hf
+   artifacts/runs/<run_name>/checkpoint-<step>.pt artifacts/export/<run_name>-<step>`, then
+   `HF_TOKEN=<write token> scripts/container.sh hf upload <model repo>
+   /workspace/nanochat/artifacts/export/<run_name>-<step> . --repo-type model`.
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored) holds `corpus/`,
 `runs/<run_name>/` and `cache/`; `results/` (tracked) holds the records the paper's tables are drawn from.
@@ -620,9 +624,10 @@ directory name under `artifacts/runs`; `release.sh` uploads an explicit list of 
   `artifacts/cache`, reused by every later container.
 
 **`pyproject.toml`.** `lark[interegular]`: `Lark(strict=True)` checks terminal collisions
-(`inference/syntax_constraint.py`); `omegaconf==2.3.1` is the newest hydra-core 1.3.8 accepts (`<2.4`). Excluded:
-the image's torch, Triton, numpy and nvidia-ml-py, and evalplus's model-provider clients and transformers, which only
-its code generation imports.
+(`inference/syntax_constraint.py`); `omegaconf==2.3.1` is the newest hydra-core 1.3.8 accepts (`<2.4`);
+`transformers`, `tokenizers` and `safetensors` are `inference/export_hf.py`'s (`docs/evaluation.md` §8), the venv's
+tokenizers 0.23.3 over the image's 0.23.2. Excluded: the image's torch, Triton, numpy and nvidia-ml-py, and evalplus's
+model-provider clients, which only its code generation imports.
 
 ## References
 
