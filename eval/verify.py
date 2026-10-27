@@ -272,6 +272,7 @@ def compiler() -> Path:
     header = Path(next(line[2:] for line in trace.splitlines() if line.startswith(". ")))
     digest = hashlib.sha256(json.dumps([gxx, version, CPP_FLAGS]).encode() + header.read_bytes()).hexdigest()
     target = PCH / digest
+    PCH.mkdir(parents=True, exist_ok=True)
     with open(PCH / ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not (target / "g++").exists():
