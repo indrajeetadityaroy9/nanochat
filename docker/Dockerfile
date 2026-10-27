@@ -32,6 +32,31 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv --system-site-packages --python /usr/bin/python3 $VIRTUAL_ENV && \
     uv sync --frozen --active
 
+# evalplus (pyproject.toml's pin) untrusted_check shares progress, stat and details with the sample's process through
+# lock-guarded multiprocessing objects; a sample killed at its time-out while it holds the lock deadlocks the parent's
+# read (evalplus/eval/__init__.py:274; observed on HumanEval/148). The child is their only writer: they take no lock,
+# and the parent joins the child after terminate/kill, so it reads them only once the writer has exited. Each exact
+# source string must occur once (the build fails otherwise); the file's CRLF endings are kept.
+RUN <<'EOF' python
+import compileall, pathlib, sysconfig
+path = pathlib.Path(sysconfig.get_path("purelib")) / "evalplus" / "eval" / "__init__.py"
+with open(path, newline="") as f:
+    source = f.read()
+for old, new in (
+    ('progress = Value("i", 0)\r\n', 'progress = Value("i", 0, lock=False)\r\n'),
+    ('stat = Value("i", _UNKNOWN)\r\n', 'stat = Value("i", _UNKNOWN, lock=False)\r\n'),
+    ('details = Array("b", [False for _ in range(len(inputs))])\r\n',
+     'details = Array("b", [False for _ in range(len(inputs))], lock=False)\r\n'),
+    ("    if p.is_alive():\r\n        p.kill()\r\n        time.sleep(0.1)\r\n",
+     "    if p.is_alive():\r\n        p.kill()\r\n        time.sleep(0.1)\r\n    p.join()\r\n"),
+):
+    assert source.count(old) == 1, old
+    source = source.replace(old, new)
+with open(path, "w", newline="") as f:
+    f.write(source)
+assert compileall.compile_file(str(path), quiet=1)
+EOF
+
 # openai/human-eval-infilling: the checkout on sys.path (.pth; read_problems reads <package>/../data; its requirements
 # are in pyproject.toml), execution enabled (its README's step) and HumanEval-RandomSpan.jsonl.gz, the name
 # data.py:13 reads, linked to the shipped file

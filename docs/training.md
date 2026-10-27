@@ -599,6 +599,13 @@ directory name under `artifacts/runs`; `release.sh` uploads an explicit list of 
   Its requirements: fire and tqdm pinned in `pyproject.toml`, numpy the image's.
 - nuprl/MultiPL-E: `evaluation/src/main.py` (`eval_cpp.py`: `g++ -std=c++17`, the image's g++) and `pass_k.py`;
   dependencies (tqdm, numpy) as above.
+- evalplus's `untrusted_check` (`evalplus/eval/__init__.py`) is patched in the image: its shared `progress`, `stat`
+  and `details` take no lock and the parent joins the child after terminating or killing it. Unpatched, a sample
+  killed at its time-out while holding the shared array's lock left the parent blocked on its read (line 274) forever:
+  the d24 rehearsal's checkpoint-1102 evaluation hung on a sampled HumanEval/148 completion, and through the shared
+  timed-children budget (`docs/evaluation.md` §1) the filtered search with it. The child is the arrays' only writer, so
+  the parent's reads after the join see its final values; a sample stuck in one C call is killed and scored time-out
+  in 5.1 s. The patch asserts each replaced source string occurs once, so another evalplus revision fails the build.
 - The cache variables (`HF_HOME`, `TORCHINDUCTOR_CACHE_DIR`, `TRITON_CACHE_DIR`, `QUACK_CACHE_DIR`,
   `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR`, `CARGO_HOME`) are set under `XDG_CACHE_HOME`, the checkout's
   `artifacts/cache` (`paths.CACHE`); `90-nanochat-paths.sh` in NGC's `entrypoint.d` runs `paths.py`.
