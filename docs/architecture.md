@@ -378,6 +378,12 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   kernels, the tile scheduler, `_bwd_preprocess`, `_tile_size_bwd_sm90`, `_resolve_causal_local_window` and the JIT
   cache the subclasses and hooks use are unchanged, and the SM90 path of `flash_bwd_postprocess.py` is unchanged in
   effect.
+- The one warning a run prints, once per process when FA4's `_flash_attn_bwd` first compiles its SM90 backward, is
+  upstream: CUTLASS DSL 4.8.1's `UserWarning: Argument aux_data (position 21) cannot be converted to a JitArgument`.
+  FA4 passes `AuxData(aux_tensors, aux_scalars)` = `AuxData(None, None)` without auxiliary tensors (`interface.py`), a
+  NamedTuple the DSL cannot make a runtime argument, so it holds it as a compile-time constant, which the kernel's
+  `const_expr(aux_data.tensors is not None)` branch expects: no effect on the kernel. Present with 4.0.0b35 too; this
+  code never passes `aux_data`, and no newer FA4 or CUTLASS DSL release exists.
 
 **`model/ops/qk_prologue.py`, `model/kernels/qk_prologue.cu`, `model/kernels/qk_row.cuh`**
 - Called inside the attention op; norm → gain → RoPE is transformers' `modeling_qwen3.py` `Qwen3Attention.forward`
