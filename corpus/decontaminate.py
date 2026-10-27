@@ -3,7 +3,8 @@ Benchmark decontamination of the curated train splits: a row whose text shares a
 with a scored benchmark's prompt or reference program is dropped (Qwen2.5-Coder's rule, arXiv 2409.12186 §5; the
 10-gram filter of DeepSeek-Coder, arXiv 2401.14196 §2.4). Val splits are untouched (held out, never trained). A shard
 with a dropped row is rewritten with its row groups (a repository source's: whole samples) less those rows; RECORD
-lists every dropped row. Shards in parallel, a process per CPU. Runs once, on curate's shards.
+lists every dropped row, written once every shard is matched and before any is rewritten. Shards in parallel, a process
+per CPU. Runs once, on curate's shards.
 
 python -m corpus.decontaminate
 """
@@ -76,12 +77,9 @@ def worker_init(texts: list[str]) -> None:
     GRAMS = corpus_crate().Grams(texts, n=N)
 
 
-def decontaminate_shard(path: Path) -> list[tuple[int, list[int]]]:
-    """A train shard without its matched rows; returns them (shard_matches)."""
-    found = shard_matches(GRAMS, path)
-    if found:
-        drop_rows(path, [row for row, _ in found])
-    return found
+def worker_matches(path: Path) -> list[tuple[int, list[int]]]:
+    """shard_matches of a shard with the worker's GRAMS."""
+    return shard_matches(GRAMS, path)
 
 
 def main() -> None:
@@ -89,15 +87,19 @@ def main() -> None:
     corpus_crate()  # built once here, before the workers load it
     with RECORD.open("x") as record:  # once: a second run finds nothing and would record nothing
         shards = [(source, path) for source in SOURCES for path in curated_shards(source, "train")]
-        dropped = {source: [] for source in SOURCES}
         with ProcessPoolExecutor(mp_context=SPAWN, initializer=worker_init, initargs=(list(texts),)) as pool:
-            for (source, path), found in zip(shards, pool.map(decontaminate_shard, [p for _, p in shards]),
-                                             strict=True):
-                dropped[source] += [[int(path.stem), row, tests] for row, tests in found]
+            found = list(pool.map(worker_matches, [path for _, path in shards]))
+            dropped = {source: [] for source in SOURCES}
+            for (source, path), rows in zip(shards, found, strict=True):
+                dropped[source] += [[int(path.stem), row, tests] for row, tests in rows]
+            # each dropped row: [shard, its row in the shard before decontamination, indices into "benchmarks"];
+            # written before any shard is rewritten, so a run stopped while rewriting leaves the record whole
+            json.dump({"n": N, "benchmarks": names, "dropped": dropped}, record)
+            record.flush()
+            rewritten = [(path, [row for row, _ in rows]) for (_, path), rows in zip(shards, found, strict=True) if rows]
+            list(pool.map(drop_rows, *zip(*rewritten, strict=True)))
         for source, rows in dropped.items():
             print(f"{source}: {len(rows):,} train rows dropped", flush=True)
-        # each dropped row: [shard, its row in the shard before decontamination, indices into "benchmarks"]
-        json.dump({"n": N, "benchmarks": names, "dropped": dropped}, record)
 
 
 if __name__ == "__main__":

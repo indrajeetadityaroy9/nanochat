@@ -217,7 +217,7 @@ Notes on the rows:
   QuACK 0.6.5's `scaled_exp_linear_cross_entropy_fwd` at the same `tile_n1`.
 - **The cap.** The removed capped path (bf16 capped logits, a logits-sized derivative buffer, a cross-entropy pass, an
   autotuned dX GEMM) cost +9.4 ms and +6 GiB over uncapped (28.04 → 37.44 ms, 6.14 → 12.14 GiB). Over the run, 0.58%
-  of the 8K stage's 73.8 h is ~26 min [arithmetic, `docs/training.md` §7]; the cap's 32K cost is not measured.
+  of the 8K stage's 74.0 h is ~26 min [arithmetic, `docs/training.md` §7]; the cap's 32K cost is not measured.
 - **dpsum.** QuACK's autotuner does not pin tile_n, so `DPSUM_CONFIG` is fixed: the fastest QuACK SM90 configuration
   with tile_n = 128 on the d24 shape (172.2 µs; cluster (2, 1) 172.8, tile_m 192 212.4 / 218.3, cooperative 256
   268.5 / 270.4); `fa4_rows` took 7.5 µs at `db1e90e` (256-thread blocks; the current launch is not timed alone).

@@ -78,8 +78,8 @@ reference [inference]. Across tokenizer training mixes NSL "only varies by 5 to 
 §2.3); as a relative spread of token counts that is 6.9% for code (NSL 75.54–80.78) and 6.4% for English
 (84.86–90.28), Fig. 2 [arithmetic], so 0.06 sits slightly below the paper's spread. It held for every arm: the
 intrinsic record's `train_tokens_over_draw` is ≥ 1.017 (sa-bpe-fused, synthetic 1.0173;
-`results/tokenizer_split_merge-intrinsic.json`). Under the corpus's tokenizer the train splits hold 1.096 (synthetic,
-draw 25.32B), 1.071 (text, 10.26B) and 1.167 (math, 3.08B) × their group's draw (tokens of the tokenized train splits,
+`results/tokenizer_split_merge-intrinsic.json`). Under the corpus's tokenizer the train splits hold 1.092 (synthetic,
+draw 25.32B), 1.071 (text, 10.26B) and 1.166 (math, 3.08B) × their group's draw (tokens of the tokenized train splits,
 computed on master; the intrinsic record's 1.169 for math estimates tokens from bytes, `docs/experiments.md` §2). A
 source whose packed shards fall short of its draw stops `pack` (`pack.fit`: the shard iterator is exhausted); a larger
 run or share than the extents hold needs `prepare`, `curate` and `publish push` again.
@@ -171,8 +171,8 @@ step runs once (`RECORD` opened exclusively). On the published curated build it 
 
 The dropped rows match every HumanEval+ task and infilling program, 372 of 378 MBPP+ tasks, 157 of 164 HumanEval-X C++
 references, and 142 of 161 and 289 of 397 of MultiPL-E's HumanEval and MBPP C++ prompts. The rule also drops common
-code that shares a 10-gram with a reference solution: of `ultradata_stack_v3_l2_python`'s rows, the most matched texts
-are Mbpp/733 (13,996 rows) and HumanEval/31, `is_prime` (8,539).
+code that shares a 10-gram with a reference solution: of `ultradata_stack_v3_l2_python`'s rows, the most matched MBPP+
+and HumanEval+ texts are Mbpp/733 (13,996 rows) and HumanEval/31, `is_prime` (8,539).
 
 **Split.** A row is validation when `md5_number(group) % 100 = 0` (DuckDB; `schema.SPLIT` = 100), the group being its
 category's (§2): a repository (lowercased, as GitHub's names are case-insensitive), a Codeforces problem, or the
@@ -188,9 +188,10 @@ part (§8).
   (`sources.repository_samples`, the crate's `topological_sort`, §6), written in sample order, a sample's files in
   dependency order. Columns
   `schema.SAMPLE_FILE`: `repo_name`, `relative_path`, `content`, `sample`. A row group holds whole samples, at least
-  `SAMPLE_ROWS` = 65,536 files (the last excepted), so a reader of row groups never splits a sample. A row group is
-  a tokenize task; its peak is 1.71 GiB (a 235 MiB group of `ultradata_code_l2_python`), 3.14 GiB at 122,880 files,
-  and three published shards re-cut at 122,880 files tokenize identically (`c1a7d7b`).
+  `SAMPLE_ROWS` = 65,536 files as curated (the last excepted; decontamination's dropped files leave fewer, §3), so a
+  reader of row groups never splits a sample. A row group is a tokenize task; its peak is 1.71 GiB (a 235 MiB group of
+  `ultradata_code_l2_python`), 3.14 GiB at 122,880 files, and three published shards re-cut at 122,880 files tokenize
+  identically (`c1a7d7b`).
 - **Every other source**: its category's columns; validation rows in `val/0.parquet` and train rows over
   `train/0..99.parquet` (`ntile(100)`), each in `id` order (a uniform order, `id` being a hash), so any leading shards
   are a uniform sample.
@@ -206,7 +207,8 @@ were committed at `a4ec1a08` ("nanochat corpus, curated", 2026-10-24); `dc5391b4
 tokenizer, sha256 `59e8b637…`, §5) on `b091cb47`, which had removed a `manifest.json`; `main` is `dbe57a81`
 ("nanochat corpus, curated and decontaminated", 2026-10-27): the 1,682 shards with a dropped row rewritten (the
 document sources' by pyarrow's writer where DuckDB's `COPY` had written them, hence their larger files), the other 130
-and every val shard byte-identical to `dc5391b4`'s, the record and the card added, the tokenizer unchanged.
+(the 112 untouched train shards and the 18 val shards) byte-identical to `dc5391b4`'s, the record and the card added,
+the tokenizer unchanged.
 
 | Folder | Columns | Train rows | Val rows | Parquet GB |
 |---|---|---|---|---|
@@ -256,11 +258,11 @@ not run). Its data key is `054a5beebb0fbcb3e21b5f62f2545e49b79d8620ba75322c1804f
 **Method and provenance.** `python -m corpus.train_tokenizer` (`train_tokenizer.main`) is the method: the sample, the
 trainer and the settings below, written to `CORPUS/tokenizer`. The shipped tokenizer (tiktoken file SHA-256
 `59e8b637…`, pattern `47a359ca…`) was trained by the same method (the ablation's `vocabularies` step at `5ba5025`) on
-an earlier build of the curated corpus: the sample of the published dataset (§4) has the record's 3,988,600
-documents, but its bytes and units differ per source
-(stack_edu_python 1,195,186,384 bytes and 384,926 units against the record's 1,186,614,352 and 384,949; kaggle_notebooks
-195,259,329 bytes against 206,881,801; codexglue_python, stack_edu_cpp, climbmix and both Nemotron sources also
-differ). On the published dataset the step writes an equivalent tokenizer, not the shipped one: tiktoken file
+an earlier build of the curated corpus: the sample of the dataset at `dc5391b4` (§4, before decontamination) has the
+record's 3,988,600 documents, but its bytes and units differ per source (stack_edu_python 1,195,186,384 bytes and
+384,926 units against the record's 1,186,614,352 and 384,949; kaggle_notebooks 195,259,329 bytes against
+206,881,801; codexglue_python, stack_edu_cpp, climbmix and both Nemotron sources also differ). On that dataset the
+step writes an equivalent tokenizer, not the shipped one: tiktoken file
 `0f9f7bc0…`, data key `3246901b3b651b320713bfd6ee408be0d53ff8098a0a9f0c1d321179105b41a0`, `tokenizer.pattern`
 identical; byte-identical to the sa-bpe arm of `ablations/tokenizer_split_merge.py` at `67192ab` on the same data.
 The build (§10) therefore pulls the shipped tokenizer, and tokenize and pack reproduce data key `054a5bee…`.
@@ -347,8 +349,9 @@ file", arXiv 2401.14196 §2.2) and ends with a line end, added when missing (`so
 §2.1.2, C++23 [lex.phases] phase 2); a line break in a path is written `\r` or `\n`, and a C++ file ending in a
 backslash gets an empty line, so phase 2 splices no comment onto it (C++23 [lex.phases]).
 
-**The corpus crate** (`corpus/crate/`, pyo3 module `nanochat_crate`): `train` (§5), `topological_sort` (below) and
-`pack` (§8), built by cargo and imported through `native.corpus_crate` (`native.crate_module`).
+**The corpus crate** (`corpus/crate/`, pyo3 module `nanochat_crate`): `train` (§5), `Grams` (decontamination, §3),
+`topological_sort` (below) and `pack` (§8), built by cargo and imported through `native.corpus_crate`
+(`native.crate_module`).
 
 **Import-connected samples** (`crate/repository.rs` `topological_sort`, DeepSeek-Coder §2.2): a file depends on the
 files its Python imports or C++ includes name, read from its tree-sitter tree and resolved by path within the
@@ -367,7 +370,7 @@ holds twice keeps its first row (`repository_samples(one_per_path=True)`); a rep
 its samples in order. `tokenize_repo_level_stage` takes train partitions from the last (99) backwards until their
 documents hold the stage's repository draw, `CODE_SHARE` × the stage's tokens less Codeforces-CoTs' train tokens, and
 adds partition 0 as val. Under sa-bpe: partitions 95–99,
-5,450,009,703 train tokens for a draw of 4,563,412,330, Codeforces-CoTs' train tokens being 305,068,694 (computed on
+5,434,219,035 train tokens for a draw of 4,567,423,536, Codeforces-CoTs' train tokens being 301,057,488 (computed on
 master).
 
 **Parallelism.** Row groups (sources) and (language, partition) tasks (repositories) are the units of work, written in
@@ -428,7 +431,7 @@ on master; no supply corpus overdraws).
   UltraData-Code L2 with its synthetic L3 at 1:1 helps in continued pretraining (arXiv 2610.23960 Table 6; with
   CodeAlchemy's code-qa set instead, EvalPlus falls below L2 alone); rewritten-only code drops MBPP to 5.6 against
   58.7 for raw code and a 50-50 mix keeps 60.3 (arXiv 2606.10087 §3, RQ1, Table 4). The share is not ablated. The
-  curated synthetic sources hold up to 0.30 × 1.096 ≈ 0.329 of code (§1) [arithmetic]; the file stage's repository
+  curated synthetic sources hold up to 0.30 × 1.092 ≈ 0.328 of code (§1) [arithmetic]; the file stage's repository
   partitions hold 2.05× their draw at 0.30 and 1.43× at 0 (118.11B tokens; computed on master).
 - **The 32K stage keeps text and mathematics:** OpenCoder's anneal keeps "84% of the annealing data" from "the original
   distribution" against "catastrophic forgetting" (arXiv 2411.04905 §2.2).
@@ -604,6 +607,7 @@ Detail of the code not stated in §1–§10, by module and symbol.
 | `standardized/<source>/<k>.parquet` | fetched file k in its category's schema |
 | `checked/<source>/<k>.parquet` | a Python source's standardized file after the check |
 | `curated/<source>/<split>/<k>.parquet` | curated shard k (the published dataset; `sources.CURATED`) |
+| `curated/decontamination.json` | the train rows decontamination dropped (`decontaminate.RECORD`, §3) |
 | `tokenizer/tokenizer.{tiktoken,pattern}` | the corpus's tokenizer |
 | `tokenized/<corpus>-<data key>/<split>.*` | tokenized split (`.bin`, `.idx`, `.json`), packs `-T<seq_len>.*` |
 

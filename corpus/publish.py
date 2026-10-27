@@ -1,6 +1,6 @@
 """
-The curated corpus and the corpus's tokenizer to the Hub (DATASET) and back: push replaces the tree in one commit;
-pull downloads it.
+The curated corpus, its decontamination record and the corpus's tokenizer to the Hub (DATASET) and back: push replaces
+the tree in one commit; pull downloads it.
 
 python -m corpus.publish push | pull
 """
@@ -92,8 +92,9 @@ def card(rows: dict[str, dict[str, int]]) -> str:
 
 
 def push() -> None:
-    """Write the card, preupload the shards, the tokenizer's two files and the card in batches of PREUPLOAD bytes, then
-    replace the dataset's tree in one commit (the files it no longer has deleted, the rest added)."""
+    """Write the card, preupload the shards, the decontamination record, the tokenizer's two files and the card in
+    batches of PREUPLOAD bytes, then replace the dataset's tree in one commit (the files it no longer has deleted, the
+    rest added)."""
     (CORPUS / "README.md").write_text(card(curated()))
     api = HfApi()
     additions = [CommitOperationAdd(path_in_repo=f.relative_to(CURATED).as_posix(), path_or_fileobj=f)
