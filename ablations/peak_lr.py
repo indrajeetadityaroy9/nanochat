@@ -5,16 +5,12 @@ to the base plan. The runs: conf/experiment/peak_lr_d24.yaml.
 """
 import json
 import math
-from dataclasses import asdict
 
 import numpy as np
 
 import metrics
-from corpus.mixture import FILE_LEVEL_STAGE, REPO_LEVEL_STAGE
-from corpus.tokenizer import get_tokenizer
 from paths import RESULTS
-from run import RunConfig, plan_of, tokenizer_path
-from train.stages import stage_mixture
+from run import RunConfig, plan_of, recipe_changed
 
 EXPERIMENT = "peak_lr_d24"
 
@@ -25,17 +21,9 @@ def records() -> list[dict]:
 
 
 def check(line: dict) -> None:
-    """Raises unless the run trained the current recipe: its recorded plan, tokenizer data key and each stage's
-    mixture are those the current code computes for its RunConfig."""
-    config = RunConfig(**line["config"])
-    run = plan_of(config)
-    tokenizer = get_tokenizer(tokenizer_path(config))
-    mixtures = {stage.seq_len: stage_mixture(tokenizer, stage, run)[0]
-                for stage in (FILE_LEVEL_STAGE, REPO_LEVEL_STAGE)}
-    for r in line["records"]:
-        changed = r["kind"] == "run" and (r["plan"] != asdict(run) or r["data_key"] != tokenizer.data_key)
-        if changed or (r["kind"] in ("run", "stage") and r["stage"]["mixture"] != mixtures[r["stage"]["seq_len"]]):
-            raise RuntimeError(f"{line['run_name']}: not trained on the current recipe; re-run its experiment")
+    """Raises unless the run trained the current recipe (run.recipe_changed over its recorded records)."""
+    if recipe_changed(RunConfig(**line["config"]), line["records"]):
+        raise RuntimeError(f"{line['run_name']}: not trained on the current recipe; re-run its experiment")
 
 
 def fit(lines: list[dict]) -> dict:

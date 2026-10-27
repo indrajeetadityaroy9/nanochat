@@ -25,11 +25,12 @@ def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float
 class Muon(torch.optim.Muon):
     """NorMuon (arXiv 2510.05491 Alg. 1 lines 7-9) on torch.optim.Muon's update, Newton-Schulz batched per shape (may
     round differently from per-matrix mm): rows of O divided by sqrt(v) + eps, v an EMA of their mean square, then
-    rescaled to O's Frobenius norm. Sets update_square: sum of squared (adjusted lr x update) norms, on the device."""
+    rescaled to O's Frobenius norm. Sets update_norms: per shape, (its parameters, their (adjusted lr x update) norms
+    on the device)."""
 
     @torch.no_grad()
     def step(self) -> None:
-        squares = []
+        self.update_norms = []
         for group in self.param_groups:
             lr, momentum = group["lr"], group["momentum"]
             a, b, c = group["ns_coefficients"]
@@ -63,8 +64,7 @@ class Muon(torch.optim.Muon):
                 torch._foreach_mul_(params, 1 - lr * group["weight_decay"])
                 adjusted = _adjust_lr(lr, group["adjust_lr_fn"], shape)
                 torch._foreach_add_(params, x.unbind(0), alpha=-adjusted)
-                squares.append(torch.linalg.vector_norm(x).square() * adjusted**2)
-        self.update_square = torch.stack(squares).sum()
+                self.update_norms.append((params, torch.linalg.vector_norm(x, dim=(-2, -1)) * adjusted))
 
 
 def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tuple[torch.optim.Optimizer, ...]:
@@ -80,15 +80,19 @@ def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tup
 
 
 def update(model: torch.nn.Module, opts: tuple[torch.optim.Optimizer, ...],
-           accumulated: list[torch.nn.Parameter]) -> torch.Tensor:
+           accumulated: list[torch.nn.Parameter]) -> tuple[torch.Tensor, torch.Tensor]:
     """Clip the accumulated gradients' global norm to MAX_GRAD_NORM, step every optimizer, zero `accumulated`'s grads in
-    place and free the rest. Returns the pre-clip norm on the device."""
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+    place and free the rest. Returns, on the device, each parameter's pre-clip gradient norm (model.parameters()
+    order) and their global norm, which the clip uses (torch.nn.utils.clip_grad_norm_'s computation)."""
+    params = list(model.parameters())
+    norms = torch.stack(torch._foreach_norm([p.grad for p in params]))
+    norm = torch.linalg.vector_norm(norms)
+    torch.nn.utils.clip_grads_with_norm_(params, MAX_GRAD_NORM, norm)
     for opt in opts:
         opt.step()
     in_place = set(accumulated)
-    for p in model.parameters():
+    for p in params:
         if p not in in_place:
             p.grad = None
     torch._foreach_zero_([p.grad for p in accumulated])
-    return norm
+    return norms, norm

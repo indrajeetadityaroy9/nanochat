@@ -1,5 +1,6 @@
 # @package _global_
-# Base-model pre-training: the defaults, checkpoints at each tenth and the repository stage's start, all benchmarks
+# Base-model pre-training: the defaults, evaluated checkpoints at each tenth and the repository stage's start (with
+# them run.py's analysis checkpoints, never evaluated), all benchmarks
 num_checkpoints: 10
 generate: benchmarks
 

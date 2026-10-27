@@ -1,6 +1,6 @@
 """
 Training loop: next-token loss over the file-level, then the repo-level stage, the packs' FIM pieces read as FIM
-examples (DeepSeek-Coder, arXiv 2401.14196 §3.1); each start resumes from the run's newest checkpoint.
+examples (DeepSeek-Coder, arXiv 2401.14196 §3.1); each start resumes from the run's newest full-state checkpoint.
 """
 
 import gc
@@ -16,7 +16,7 @@ import metrics
 from corpus.tokenizer import get_tokenizer
 from model.modeling import CausalLM, accumulated_weights, non_embedding_flops_per_token, num_matmul_params
 from model.ops.cross_entropy import step_shares
-from train.checkpoint import checkpoint_path, save_checkpoint
+from train.checkpoint import checkpoint_path, save_checkpoint, weights_path
 from train.diagnostics import Diagnostics
 from train.optim import optimizers, tau_weight_decay, update
 from train.schedule import RunPlan, lr_lambda
@@ -24,10 +24,11 @@ from train.stages import stage_batches
 
 
 def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, checkpoints: frozenset[int],
-          run_name: str, config: dict) -> None:
+          weights: frozenset[int], run_name: str, config: dict) -> None:
     """Train (or resume) run `run_name` of `model` (meta-device shapes at the file-level context) by plan `run` on CUDA.
-    Checkpoints after each step count in `checkpoints` (run.max_steps among them); `config` (RunConfig as a dict) and
-    the tokenizer's data key are recorded with the run."""
+    Full-state checkpoints after each step count in `checkpoints` (run.max_steps among them; resumed from), fp32
+    weights only after each in `weights` (disjoint, never resumed from); `config` (RunConfig as a dict) and the
+    tokenizer's data key are recorded with the run."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer(tokenizer_path)
     model.to_empty(device=device)
@@ -66,7 +67,8 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
     first = run.stage_at(start_step)
     mixture, train_iter = read(stage=first, start=stage_rows if first is stage else 0)
     batches = [next(train_iter) for _ in range(run.gradient_accumulation_steps)]
-    diagnostics = Diagnostics(model, opts, gradient_accumulation_steps=run.gradient_accumulation_steps)
+    diagnostics = Diagnostics(model, opts, gradient_accumulation_steps=run.gradient_accumulation_steps,
+                              run_name=run_name, max_steps=run.max_steps)
     diagnostics.set_stage(first, mixture)
     # this process's attempt index; lr and weight decay as the optimizers hold them (a resumed run's: its checkpoint's)
     attempt = sum(r["kind"] == "run" for r in metrics.records(run_name))
@@ -95,31 +97,38 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
 
     def log(step: int, learning_rate: float, model_flops: int, values: torch.Tensor, layout: tuple,
             start: torch.cuda.Event, end: torch.cuda.Event) -> None:
-        """A step's train record once its values reach the host, or its failure record (raising)."""
+        """A step's sidecar rows and train record once its values reach the host, or its failure record (raising)."""
         end.synchronize()
-        values = values.tolist()
-        loss_value, grad_norm_value = values[:2]
+        values = values.numpy()
+        diagnosed = diagnostics.record(values, layout)  # a failed step's sidecar rows included
+        loss_value, grad_norm_value = float(values[0]), float(values[1])
         if not (math.isfinite(loss_value) and math.isfinite(grad_norm_value)):
+            diagnostics.flush()
             metrics.append(run_name, {"kind": "failure", "step": step}, attempt=attempt)
             raise FloatingPointError(f"{run_name} step {step}: loss {loss_value}, grad_norm {grad_norm_value}")
         dt = start.elapsed_time(end) / 1000
         metrics.append(run_name, {"kind": "train", "step": step, "num_input_tokens_seen": (step + 1) * run.batch_size,
                                   "loss": loss_value, "learning_rate": learning_rate, "grad_norm": grad_norm_value,
                                   "step_seconds": dt, "tokens_per_second": run.batch_size / dt,
-                                  "model_flops": model_flops, "mfu": metrics.mfu(model_flops, dt)}
-                       | diagnostics.record(values, layout), attempt=attempt)
+                                  "model_flops": model_flops, "mfu": metrics.mfu(model_flops, dt)} | diagnosed,
+                       attempt=attempt)
 
     while True:
-        if pending is not None and step in checkpoints:
+        if pending is not None and (step in checkpoints or step in weights):
             # the last step's values checked finite before a checkpoint (run.max_steps among them) saves its weights
             log(*pending)
             pending = None
-        # state after `step` steps at the stage they trained in
+        # state after `step` steps at the stage they trained in; the sidecar's rows up to it on disk with a full state
         if step != start_step and step in checkpoints:
             save_checkpoint(checkpoint_path(run_name, step), {"model": model.state_dict(),
                                                               "optimizers": [opt.state_dict() for opt in opts],
                                                               "config": asdict(model.config),
                                                               "stage_rows": stage_rows})
+            diagnostics.flush()
+            gc.collect()
+        if step in weights:
+            save_checkpoint(weights_path(run_name, step), {"model": model.state_dict(),
+                                                           "config": asdict(model.config)})
             gc.collect()
         if step == run.max_steps:
             metrics.append(run_name, {"kind": "end", "step": step,
@@ -156,9 +165,9 @@ def train(*, model: CausalLM, run: RunPlan, tokenizer_path: Path, seed: int, che
                                                         windows=model.window_sizes)
             if reading:
                 upcoming.append(next(train_iter))
-        grad_norm = update(model, opts, accumulated)
+        grad_norms, grad_norm = update(model, opts, accumulated)
         model.refresh_gemm_weights()
-        values, layout = diagnostics.end_step(step, torch.stack(losses).sum(), grad_norm)
+        values, layout = diagnostics.end_step(step, torch.stack(losses).sum(), grad_norm, grad_norms)
         for scheduler in schedulers:
             scheduler.step()
         stage_rows += len(batches) * stage.micro_batch_size

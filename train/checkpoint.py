@@ -1,5 +1,7 @@
 """
-Checkpoints RUNS/<run_name>/checkpoint-<step>.pt: a run's full state, written to a temp file then renamed (atomic).
+Checkpoints, each written to a temp file then renamed (atomic): RUNS/<run_name>/checkpoint-<step>.pt, a run's full
+state (resumed from; evaluated if among run.checkpoint_steps); weights-<step>.pt, its fp32 weights and model config
+only (for analysis; never resumed from or evaluated).
 """
 
 from pathlib import Path
@@ -12,6 +14,10 @@ from paths import RUNS
 
 def checkpoint_path(run_name: str, step: int) -> Path:
     return RUNS / run_name / f"checkpoint-{step}.pt"
+
+
+def weights_path(run_name: str, step: int) -> Path:
+    return RUNS / run_name / f"weights-{step}.pt"
 
 
 def save_checkpoint(path: Path, checkpoint: dict) -> None:

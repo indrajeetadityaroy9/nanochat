@@ -9,12 +9,12 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 
 |File|Section|
 |---|---|
-|`run.py` (`RunConfig`, `run_name`, `plan_of`, `base_plan`, `checkpoint_steps`, `phase`, `job`, `lr_multiplier`)|§2, §5, §6|
+|`run.py` (`RunConfig`, `run_name`, `plan_of`, `base_plan`, `checkpoint_steps`, `analysis_steps`, `phase`, `evaluations`, `recipe_changed`, `job`, `lr_multiplier`)|§2, §5, §6|
 |`conf/run.yaml`, `conf/experiment/pretrain.yaml`|§5, §6, §9|
 |`train/schedule.py` (`plan`, `RunPlan`, `WARMUP_STEPS`, `lr_lambda`)|§2, §4|
 |`train/stages.py` (`drawn`, `stage_mixture`, `stage_batches`, `max_tokens_per_param`)|§1, §5, §8|
 |`train/optim.py` (`optimizers`, `Muon`, `tau_weight_decay`, `update`, `MAX_GRAD_NORM`)|§3|
-|`train/loop.py` (`train`), `train/diagnostics.py` (`Diagnostics`), `train/checkpoint.py`|§6, §8|
+|`train/loop.py` (`train`), `train/diagnostics.py` (`Diagnostics`, `sidecar`), `train/checkpoint.py`|§6, §8|
 |`ablations/peak_lr.py` (`records`, `check`, `fit`, `analysis`); `conf/experiment/peak_lr_d24.yaml`; `results/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
 |`ablations/records.py` (`Records`, `record`)|§6|
 |`scripts/setup.sh`, `scripts/container.sh`, `scripts/release.sh`, `paths.py`|§7, §9|
@@ -25,7 +25,7 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 The corpus side (mixture, packs, FIM, loader) is `docs/corpus.md` §7–§9. Training reads two stages
 (`corpus/mixture.py` `FILE_LEVEL_STAGE`, `REPO_LEVEL_STAGE`; `RunPlan.stage_at`): 8,192-token files, then
 32,768-token repositories over the last `REPO_LEVEL_SHARE` (5.45%) of the steps, in micro-batches of
-`MICRO_BATCH_TOKENS` = 98,304 tokens (12 rows at 8K, 3 at 32K; the stages' basis: `docs/corpus.md` §7; the size: §7).
+`MICRO_BATCH_TOKENS` = 98,304 tokens (12 rows at 8K, 3 at 32K; the size: §7; the stages' basis: `docs/corpus.md` §7).
 The loss is next-token cross entropy, the packs' FIM pieces read as FIM examples (`docs/corpus.md` §8). At the
 repository stage's first step the loop sets the 32K context and recompiles the model.
 
@@ -161,9 +161,9 @@ cap, `generate` "parse"): `conf/experiment/peak_lr_d24.yaml`, whose records are 
 `learning_rate_scale` list; completed runs are skipped and recorded again.
 
 **Rule** (`ablations/peak_lr.py` `analysis`):
-- every record is checked against the current recipe (`check`): its `run` record's `plan` and `data_key`, and the
-  mixture of its `run` and `stage` records, must equal what the current code computes for its `RunConfig`
-  (`plan_of`, `train/stages.py` `stage_mixture`), else it raises;
+- every record is checked against the current recipe (`check`, the job's stale guard `run.recipe_changed`): its
+  `run` record's `plan`, `data_key` and `config`, and the mixture of its `run` and `stage` records, must equal what
+  the current code computes for its `RunConfig` (`plan_of`, `train/stages.py` `stage_mixture`), else it raises;
 - `fit`: code bits per byte against u = ln(multiplier), a diverged run worse than any evaluated one: extend the grid
   ×2 while the lowest-code run is at an end; else the vertex of the parabola through the lowest-code run and its two
   neighbours (`metrics.parabola_vertex`, `docs/evaluation.md` §5; arXiv 2409.19913 §3.1 fits quadratics in log lr),
@@ -267,7 +267,7 @@ base model's recipe:
 | `seed` | 0 | initialization and data order |
 | `tokenizer` | "corpus" | `CORPUS/tokenizer`, else an arm under `CORPUS/tokenizer-ablation/` |
 | `learning_rate_scale` | 1.0 | times the law's lr; `conf/run.yaml` sets `${lr_multiplier:}` (§5) |
-| `num_checkpoints` | 1 | evenly spaced checkpoints, the last the final model; > 1 adds `repo_level_start` |
+| `num_checkpoints` | 1 | evenly spaced evaluated checkpoints, the last the final model; > 1 adds `repo_level_start` and the analysis checkpoints |
 | `generate` | "parse" | `evaluate`'s mode: "parse" (ablations) or "benchmarks" (base) |
 
 `conf/run.yaml` composes the `run_schema` ConfigStore node, an experiment (`conf/experiment/<name>.yaml`, which sets
@@ -282,9 +282,10 @@ a run two experiments share is trained once. The base model's run (`experiment=p
 `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10` (the multiplier resolved by
 `lr_multiplier`, §5), a d16 seed-1 run `learning_rate_scale=2.7192599564485445,num_hidden_layers=16,seed=1`. Its
 directory `artifacts/runs/<run_name>/` holds `.hydra/` (the composed config), `metrics.jsonl` (the run log; each line
-carries `run_name`, `attempt`, `kind`, `time`), `checkpoint-<step>.pt`, `eval-<step>.json` with its sampled-completions
-sidecar `eval-<step>.samples.json.gz` (`docs/evaluation.md` §1) and `run.log`. The run log's records (`train/loop.py`;
-field definitions in `docs/evaluation.md` §10):
+carries `run_name`, `attempt`, `kind`, `time`), the diagnostics sidecar (below), `checkpoint-<step>.pt` and
+`weights-<step>.pt`, `eval-<step>.json` with its sampled-completions sidecar `eval-<step>.samples.json.gz`
+(`docs/evaluation.md` §1) and `run.log`. The run log's records (`train/loop.py`; field definitions in
+`docs/evaluation.md` §10):
 
 | `kind` | When | Content |
 |---|---|---|
@@ -297,27 +298,63 @@ field definitions in `docs/evaluation.md` §10):
 A step's values are copied to pinned host memory without blocking and logged after the next step is launched, so
 the device never drains; its time runs between CUDA events at the previous step's end and its own.
 
-**Diagnostics** (`train/diagnostics.py`, `7e77833`): per-corpus training loss (rows assigned by
+**Diagnostics** (`train/diagnostics.py`). In the `train` record: per-corpus training loss (rows assigned by
 `mixture.mixture_rows`); the output logits' logsumexp maximum and mean square over valid positions (PaLM's z-loss
 quantity, arXiv 2204.02311 §5); the largest QK-norm gain (attention-logit growth, the quantity Kimi K2's QK-Clip
-bounds, arXiv 2507.20534 §2.1); every `UPDATE_STATS_EVERY` = 10th step each optimizer
-group's update RMS (without weight decay) and parameter norm, which cost 0.50% of d24 throughput when taken every step
-(351.4K / 351.8K against 349.9K / 349.8K tok/s, GH200, alternated 25-step windows after 8 warm-up steps; every 10th
-step within the windows' spread, 341,290–341,471 tok/s with or without, `7e77833`). The per-micro-batch statistics
-are taken without autograd: a graph through the pinned-buffer copies would chain every step's onto the last, a leak
-of ~12.7 MiB per step at d24 (`1f23203`).
+bounds, arXiv 2507.20534 §2.1). In the sidecar, per tensor and per layer:
 
-**Job** (`run.job`): the stale guard (a recorded `run` record whose `plan`, `data_key` or `config` differs from the
-current one raises "recipe changed" until the run's directory is deleted); the run is skipped if
-its final checkpoint's evaluation exists or it diverged; else training, then each checkpoint's evaluation, each in a
-fresh spawned process (`run.phase`: `torch.compile`'s recompile limit and the caching allocator are per process).
+| File | Row | Columns (`diagnostics.json` names them) |
+|---|---|---|
+| `diagnostics-step.npy` | step s, every step (69,611 × 316 for the base run) | `grad_norm/<tensor>`: each of the 220 parameter tensors' gradient L2 norm before clipping, in `named_parameters` order; `gain_max/<tensor>`: each layer's q and k QK-norm gain ‖g‖∞ (48); `resid_lambdas/<i>`, `x0_lambdas/<i>` (24 each) |
+| `diagnostics-update.npy` | step 10·r, every `UPDATE_STATS_EVERY` = 10th step (6,962 × 440) | `param_norm/<tensor>`: L2 norm after the step; `update_rms/<tensor>`: RMS of lr × update without weight decay (AdamW's lr·m̂/(√v̂ + eps) from its state, NorMuon's adjusted-lr update) |
 
-**Checkpoints and resume.** `run.checkpoint_steps`: `round(steps·k/n)` for k = 1…n, plus `repo_level_start` when
-n > 1. A checkpoint (`train/checkpoint.py`) is the run's full state (`model`, `optimizers`, model `config`,
-`stage_rows`), written to a temporary file and renamed, so a kill mid-save leaves the previous one. A relaunched run
-resumes from its newest checkpoint (weights, optimizer state, the scheduler at its step, the data position); a run
-with one checkpoint restarts from step 0. A resumed attempt's records supersede the earlier ones for the steps it
-repeats (`metrics.train_steps`).
+The arrays are `.npy` float32 (`numpy.load(..., mmap_mode="r")`), preallocated at the run's first start with NaN in
+every row not yet logged; `diagnostics.json` also lists each tensor's name, shape, optimizer group (`adamw[0]`
+tables, `adamw[1]` vectors, `muon[0]` matrices) and decoder layer. A row is written when its step is logged, so a
+resumed attempt overwrites the rows of the steps it repeats, as its records supersede in `metrics.jsonl`; a diverged
+step's row is written before its `failure` record. The rows reach disk with each full-state checkpoint. The sidecar
+is the one record of per-tensor and per-group values: a group's parameter norm is √(Σ norm²) and its update RMS
+√(Σ n·rms² / Σ n) over its tensors (n their element counts). `metrics.jsonl`'s `grad_norm` is the L2 norm of the
+step's row of `grad_norm/` columns: `optim.update` takes the per-tensor norms with `torch._foreach_norm`, as
+`torch.nn.utils.clip_grad_norm_` does, and clips with their total (`clip_grads_with_norm_`). Disk for the base run:
+88.0 MB and 12.3 MB [arithmetic]. All values reach the host through the step's pinned buffer, read one step late;
+the per-step columns add one `torch.stack` of norms the clip already computes and two 24-element copies, and the
+every-10th columns reuse the `_foreach_norm` and AdamW-state kernels the per-group values used [inference]. Taking
+the per-group values every step cost 0.50% of d24 throughput (351.4K / 351.8K against 349.9K / 349.8K tok/s, GH200,
+alternated 25-step windows after 8 warm-up steps; every 10th step within the windows' spread, 341,290–341,471 tok/s
+with or without, `7e77833`). The per-micro-batch statistics are taken without autograd: a graph through the
+pinned-buffer copies would chain every step's onto the last, a leak of ~12.7 MiB per step at d24 (`1f23203`).
+
+**Job** (`run.job`): the stale guard (`run.recipe_changed`: a recorded `run` record whose `plan`, `data_key` or
+`config`, or a `run` or `stage` record whose mixture, differs from the current code's raises "recipe changed" until
+the run's directory is deleted; `ablations/peak_lr.py` `check` applies the same test to its records); the run is
+skipped if every checkpoint's evaluation exists or it diverged; else training (`run.phase`), then the unevaluated
+checkpoints' evaluations (`run.evaluations`, overlapped, §11), each phase in a fresh spawned process
+(`torch.compile`'s recompile limit and the caching allocator are per process).
+
+**Checkpoints and resume.** Each is written to a temporary file and renamed, so a kill mid-save leaves the previous
+one (`train/checkpoint.py`). Full state (`checkpoint-<step>.pt`: `model`, `optimizers`, model `config`,
+`stage_rows`) is saved at `run.checkpoint_steps`, `round(steps·k/n)` for k = 1…n plus `repo_level_start` when
+n > 1, the only checkpoints evaluated. A run with n > 1 also keeps `run.analysis_steps`' checkpoints, never
+evaluated; the schedule is experimental configuration, held only in `run.py`'s constants:
+
+| Set | Steps (base run) | Content | Count × size | Basis |
+|---|---|---|---|---|
+| evaluated | each tenth of 69,611, and 65,814 | full state | 11 × 5.588 GB | the evaluations of the run (§9) |
+| grid | every `FULL_STATE_EVERY` = 1,000 below the last step | full state | 69 × 5.588 GB | Pythia's checkpoint every 1,000 iterations (arXiv 2304.01373 §2.4); OLMo's intermediate checkpoints at intervals of 1,000 steps (arXiv 2402.00838 §5) |
+| early | 1, 2, 4, …, `EARLY_WEIGHTS_LAST` = 512 | fp32 weights and model `config` (`weights-<step>.pt`) | 10 × 2.089 GB | Pythia's log-spaced early checkpoints (arXiv 2304.01373 §2.4) |
+| after the stage switch | `repo_level_start` + `AFTER_STAGE_WEIGHTS` (100, 200, 400, 800, 1,600): 65,914 … 67,414 | fp32 weights and `config` | 5 × 2.089 GB | the early set's log spacing at the context switch |
+
+The base run's sets are disjoint: 80 full states and 15 weights-only files, 478.4 GB [arithmetic] (a full state
+is the fp32 weights, AdamW's two moments of the 352,327,728 table and vector elements, Muon's momentum of
+169,924,608 and NorMuon's row moments). Weights-only steps exclude every full-state step. The grid's optimizer
+state gives a resume point every 1,000 steps and any 1,000-step point as a branch for an intervention, as Pythia's
+intermediate optimizer state did (arXiv 2304.01373 §3.1). The early and post-switch weights are fp32: a step-1
+update relative to the initial weight RMS, ≈ 0.2·lr/40 ÷ 768^−½ = 3.3e-4 [arithmetic], is below bf16's 2^−8.
+A save's time falls into the next step's `step_seconds`. A relaunched run resumes from its newest full-state
+checkpoint (weights, optimizer state, the scheduler at its step, the data position), never from a weights-only one;
+a run with one checkpoint restarts from step 0. A resumed attempt's records supersede the earlier ones for the steps
+it repeats (`metrics.train_steps`).
 
 **Divergence.** A non-finite loss or gradient norm writes a `failure` record and ends training; the job returns, the
 sweep continues and a rerun skips the run (`metrics.diverged`). Both instabilities of arXiv 2309.14322 §3.1 "appear
@@ -369,14 +406,16 @@ step (its 32K cost unmeasured; `docs/architecture.md` §3).
 
 **Memory.** The d24 10-step peak is 71.11 GiB allocated at 8K, warm and cold (`e24333d`), of the GPU's 95.58 GiB
 (97,871 MiB). A micro-batch holds whole rows of both contexts, so its size is a multiple of 32,768 tokens;
-`MICRO_BATCH_TOKENS` is 3 of them, the most with headroom: the step's persistent state (fp32 weights and gradients of
+`MICRO_BATCH_TOKENS` is 3 of them, the most that fits: the step's persistent state (fp32 weights and gradients of
 the 522,252,336 parameters, AdamW's two moments of the 352,327,728 outside Muon, Muon's momentum and bf16 GEMM copies
-of its 169,924,608) is 7.47 GiB [arithmetic], and 4 rows of 32K would scale the remaining 63.64 GiB by 4/3, to
-≈ 92.3 GiB in all [estimate: activation memory proportional to tokens], 3.3 GiB below the device. The micro-batch also
-quantizes every run's batch (§2).
+of its 169,924,608) is 7.47 GiB [arithmetic]. The allocator's peak reserve is 73.14 GiB (`results/peak_lr_d24.jsonl`
+`peak_reserved_bytes`, 2.04 GiB above the allocated peak); 4 rows of 32K would scale its 65.67 GiB above the state
+by 4/3, to ≈ 95.0 GiB in all [estimate: activation memory proportional to tokens], 0.5 GiB below the device before
+the CUDA context, which the allocator does not count. The micro-batch also quantizes every run's batch (§2).
 
 **Time estimate** [estimate]: 97.05B tokens at 365,466 tok/s and 5.60B at 287,476 are 73.8 + 5.4 h; with the cap's
-+0.58% at 8K, 79.6 h; across the arms' span ≈ 79–80 h of training, plus the 11 checkpoints' benchmark evaluations.
++0.58% at 8K, 79.6 h; across the arms' span ≈ 79–80 h of training, plus the 95 checkpoint saves (§6; their time
+is the next steps' `step_seconds` excess, unmeasured) and the 11 evaluated checkpoints' benchmark evaluations.
 
 Concurrent runs and MPS sharing are not used (`docs/experiments.md` §5).
 
@@ -424,11 +463,13 @@ unlimited stack hard limit for evalplus's `reliability_guard`).
 2. **Peak lr**: `scripts/container.sh python run.py experiment=peak_lr_d24` (§5; the 3 runs and their evaluations),
    writing the records `lr_multiplier` reads.
 3. **Train**: `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'` trains both stages with
-   11 checkpoints (each tenth of the 69,611 steps and step 65,814, the repository stage's start), evaluates each with
-   every benchmark and writes `results/pretrain.jsonl` and `results/pretrain-curves.jsonl`. Expected time: §7.
-4. **Release**: `scripts/release.sh <run_name> <repo>` uploads the run's checkpoints, `metrics.jsonl`, evaluations,
-   `.hydra/` and `results/` to a Hugging Face model repository; `scripts/container.sh hf download <repo> --local-dir
-   /workspace/nanochat` restores them where `load_model` and a resumed run read them.
+   11 evaluated checkpoints (each tenth of the 69,611 steps and step 65,814, the repository stage's start) and the
+   84 analysis checkpoints (§6), evaluates the 11 with every benchmark and writes `results/pretrain.jsonl` and
+   `results/pretrain-curves.jsonl`. Expected time: §7.
+4. **Release**: `scripts/release.sh <run_name> <repo>` uploads the run's full-state and weights-only checkpoints,
+   `metrics.jsonl` and the diagnostics sidecar, evaluations, `.hydra/` and `results/` to a Hugging Face model
+   repository; `scripts/container.sh hf download <repo> --local-dir /workspace/nanochat` restores them where
+   `load_model` and a resumed run read them.
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored) holds `corpus/`,
 `runs/<run_name>/` and `cache/`; `results/` (tracked) holds the records the paper's tables are drawn from.
@@ -453,14 +494,14 @@ sanitize pool (a forkserver) import it as the phases' main module. `register` ru
 run's name under a new meaning; the stale guard's `config` comparison closes that gap. `job`:
 a training phase that fails without a `failure` record raises `ChildProcessError`; one that diverged ends the job.
 `evaluations` runs the checkpoints' evaluations in fresh processes, checkpoint k + 1's started once k's has released
-the GPU (`eval/suite.py` `released_path`, `docs/evaluation.md` §1) or ended; a failure starts no further evaluation,
-and `ChildProcessError` is raised once every started one has ended.
+the GPU (`eval/suite.py` `released_path`, `docs/evaluation.md` §1) or ended; once any started one has failed no
+further evaluation starts, and `ChildProcessError` is raised once every started one has ended.
 `evaluation` silences `ast.parse`'s `SyntaxWarning`s on generated code (`eval/verify.py`, `inference/`).
 `conf/run.yaml` disables Hydra's job logging, whose default file `${hydra.job.name}.log` would be
 `RUNS/<run_name>/run.log`, the phases' log.
 
-**`ablations/peak_lr.py`.** `records` reads the experiment's records; `check` compares each run's recorded `plan`
-with `plan_of` of its `RunConfig`, so the recorded lr is the law's at the current FLOP count times the arm's
+**`ablations/peak_lr.py`.** `records` reads the experiment's records; `check` applies `run.recipe_changed` to each
+run's recorded records, so the recorded lr is the law's at the current FLOP count times the arm's
 multiplier. `fit` returns `{curvature, vertex, code}`; the parabola through the lowest-code run and its neighbours has
 positive curvature by construction; where the rule would extend the grid (the lowest-code run at an end) or its lower
 neighbour diverged, `fit` raises. The base model's plan is `plan_of(RunConfig())`, whose `learning_rate_scale` 1.0 is
@@ -472,10 +513,11 @@ the law's lr.
 
 **`train/diagnostics.py`.** Groups are named `adamw[i]`, `muon[i]` in step order. The logsumexp statistics come from
 `lm_loss`'s per-position outputs (`model/ops/cross_entropy.py`), which require grad. AdamW's update RMS is computed
-from its state as lr·m̂/(√v̂ + eps) (`torch/optim/adamw.py`), Muon's from `Muon.update_square`; `end_step` runs after
+from its state as lr·m̂/(√v̂ + eps) (`torch/optim/adamw.py`), Muon's from `Muon.update_norms`; `end_step` runs after
 the optimizers stepped but before the schedulers, so each group's lr is still the step's. Host values (two pinned
-fp64 buffers, alternating by step): 5 scalars, then each group's update and parameter squared norms (measured steps
-only), then each row's loss sum and valid count.
+fp64 buffers, alternating by step): 4 scalars (loss, `grad_norm`, logsumexp max and square sum), the step row, the
+update row (measured steps only), then each row's loss sum and valid count; `record` copies the rows into the
+sidecar's memory maps as float32 and reads `qk_norm_gain_max` as the step row's largest `gain_max/` value.
 
 **`train/optim.py`.** `Muon` follows `torch/optim/_muon.py` `_single_tensor_muon` (momentum lerp, Nesterov, which is
 `torch.optim.Muon`'s default and the only mode `Muon.step` implements, bf16 Newton–Schulz, decoupled weight decay,
@@ -483,8 +525,9 @@ only), then each row's loss sum and valid count.
 `mm`/`addmm`. State `second_momentum_buffer` is one fp32 per row (output neuron in
 `nn.Linear`'s (out, in) layout). The rescale to O's Frobenius norm (zichongli5/NorMuon `normuon.py` `normuon_update`)
 lets `match_rms_adamw` scale the update as Muon's, the target of Alg. 1 line 10's rescale to RMS 0.2·lr.
-`update_square` excludes weight decay. `update`'s in-place gradients are those the ops accumulate into
-(`model/modeling.py` `accumulated_weights`); it never synchronizes the host.
+`update_norms` (per shape: the parameters and their adjusted-lr update norms) excludes weight decay. `update`'s
+in-place gradients are those the ops accumulate into (`model/modeling.py` `accumulated_weights`); it never
+synchronizes the host.
 
 **`train/stages.py`.** `corpus/pack.py` packs each stage's documents apart, so no document is read twice;
 `PretrainingBatches` stops at an exhausted corpus, hence the overdraw check.
@@ -495,7 +538,7 @@ the `end` record (the last stage's). Each run's log is read once.
 **`paths.py`.** `artifacts/` is gitignored; a missing directory fails at first use (Hydra creates
 `RUNS/<run_name>` before its job starts). `CORPUS` holds the corpus pipeline's stages (`corpus/__init__.py`), filled
 by `python -m corpus.publish pull`; `NATIVE` sits beside the image's compiler caches in `artifacts/cache`; `results/`
-is tracked (`results/.gitkeep`).
+is tracked.
 
 **Scripts.** `setup.sh` (Lambda's Ubuntu image): the CDI spec serves `container.sh`'s `--device nvidia.com/gpu=all`;
 the docker group applies at the next login, so `sg docker` runs the script's docker commands; idempotent through the
@@ -539,12 +582,13 @@ which only its code generation uses.
 | 1412.6980 | Adam: A Method for Stochastic Optimization |
 | 1910.04209 | On the adequacy of untuned warmup for adaptive optimization |
 | 2204.02311 | PaLM: Scaling Language Modeling with Pathways |
-| 2205.10287 | On the SDEs and Scaling Rules for Adaptive Gradient Algorithms |
+| 2304.01373 | Pythia: A Suite for Analyzing Large Language Models Across Training and Scaling |
 | 2306.11644 | Textbooks Are All You Need |
 | 2308.12950 | Code Llama: Open Foundation Models for Code |
 | 2309.14322 | Small-scale proxies for large-scale Transformer training instabilities |
 | 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming -- The Rise of Code Intelligence |
+| 2402.00838 | OLMo: Accelerating the Science of Language Models |
 | 2405.13698 | How to set AdamW's weight decay as you scale model and dataset size |
 | 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2409.19913 | Scaling Optimal LR Across Token Horizons |

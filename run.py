@@ -26,6 +26,13 @@ if TYPE_CHECKING:
 
     from train.schedule import RunPlan
 
+# A run with more than one evaluated checkpoint also keeps analysis checkpoints (docs/training.md §6): full state
+# every FULL_STATE_EVERY steps (OLMo's and Pythia's cadence, arXiv 2304.01373 §2.4), fp32 weights only at steps 1, 2,
+# 4, ..., EARLY_WEIGHTS_LAST (Pythia's log-spaced early checkpoints) and at repo_level_start + AFTER_STAGE_WEIGHTS
+FULL_STATE_EVERY = 1000
+EARLY_WEIGHTS_LAST = 512
+AFTER_STAGE_WEIGHTS = (100, 200, 400, 800, 1600)
+
 
 @dataclass
 class RunConfig:
@@ -77,16 +84,29 @@ def checkpoint_steps(config: RunConfig, run: "RunPlan") -> frozenset[int]:
     return frozenset(steps | {run.repo_level_start} if n > 1 else steps)
 
 
+def analysis_steps(config: RunConfig, run: "RunPlan") -> tuple[frozenset[int], frozenset[int]]:
+    """The analysis checkpoints' (full-state, weights-only) step counts below run.max_steps, the weights-only ones
+    disjoint from every full state; none if num_checkpoints is 1."""
+    if config.num_checkpoints == 1:
+        return frozenset(), frozenset()
+    full = frozenset(range(FULL_STATE_EVERY, run.max_steps, FULL_STATE_EVERY))
+    weights = ({2**k for k in range(EARLY_WEIGHTS_LAST.bit_length())}
+               | {run.repo_level_start + s for s in AFTER_STAGE_WEIGHTS})
+    return full, frozenset(s for s in weights if s < run.max_steps) - full - checkpoint_steps(config, run)
+
+
 def training(config: RunConfig, run: "RunPlan") -> None:
     from model.modeling import meta_model
     from train.loop import train
 
     model = meta_model(num_hidden_layers=config.num_hidden_layers)
+    full, weights = analysis_steps(config, run)
     train(model=model, run=run, tokenizer_path=tokenizer_path(config), seed=config.seed,
-          checkpoints=checkpoint_steps(config, run), run_name=run_name(config), config=asdict(config))
+          checkpoints=checkpoint_steps(config, run) | full, weights=weights, run_name=run_name(config),
+          config=asdict(config))
 
 
-def evaluation(config: RunConfig, step: int, previous: "Event | None" = None) -> None:
+def evaluation(config: RunConfig, step: int, previous: "Event | None") -> None:
     from eval import suite
 
     # ast.parse's SyntaxWarnings on generated code
@@ -132,7 +152,7 @@ def evaluations(log: Path, checkpoints: list[tuple[RunConfig, int]]) -> None:
         while not ended.wait(1) and not released.exists():
             pass
         previous = ended
-        if ended.is_set() and process.exitcode:
+        if any(not w.is_alive() and p.exitcode for _, _, p, w in started):
             break
     failed = []
     for config, step, process, watcher in started:
@@ -144,26 +164,41 @@ def evaluations(log: Path, checkpoints: list[tuple[RunConfig, int]]) -> None:
         raise ChildProcessError(f"evaluation of {', '.join(failed)} failed ({log})")
 
 
+def recipe_changed(config: RunConfig, log: list[dict]) -> bool:
+    """Whether a run log was trained on another recipe than the current code's for `config`: a run record's plan,
+    tokenizer data key or config, or a run or stage record's mixture (train/stages.py stage_mixture), differs."""
+    if not log:
+        return False
+    from corpus.mixture import FILE_LEVEL_STAGE, REPO_LEVEL_STAGE
+    from train.stages import stage_mixture
+
+    run, tokenizer = plan_of(config), get_tokenizer(tokenizer_path(config))
+    mixtures = {stage.seq_len: stage_mixture(tokenizer, stage, run)[0] for stage in (FILE_LEVEL_STAGE, REPO_LEVEL_STAGE)}
+    return any((r["kind"] == "run" and (r["plan"] != asdict(run) or r["data_key"] != tokenizer.data_key
+                                        or r["config"] != asdict(config)))
+               or (r["kind"] in ("run", "stage") and r["stage"]["mixture"] != mixtures[r["stage"]["seq_len"]])
+               for r in log)
+
+
 def job(config: RunConfig) -> None:
-    """A run's job: stale guard, skip if evaluated or diverged, then training and its checkpoints' evaluations
-    (evaluations). Raises RuntimeError on a changed recipe, ChildProcessError on a failed phase."""
+    """A run's job: stale guard (recipe_changed), skip if every checkpoint is evaluated or the run diverged, then
+    training and its unevaluated checkpoints' evaluations (evaluations). Raises RuntimeError on a changed recipe,
+    ChildProcessError on a failed phase."""
     from eval.suite import evaluation_path
 
     name, run = run_name(config), plan_of(config)
-    data_key = get_tokenizer(tokenizer_path(config)).data_key
     log = metrics.records(name)
-    if any(r["plan"] != asdict(run) or r["data_key"] != data_key or r["config"] != asdict(config)
-           for r in log if r["kind"] == "run"):
+    if recipe_changed(config, log):
         raise RuntimeError(f"recipe changed since {name} ran: delete {RUNS / name}")
-    if evaluation_path(name, run.max_steps).exists() or metrics.diverged(log) is not None:
+    unevaluated = [step for step in sorted(checkpoint_steps(config, run)) if not evaluation_path(name, step).exists()]
+    if not unevaluated or metrics.diverged(log) is not None:
         return
     output = RUNS / name / "run.log"
     if phase(output, training, config=config, run=run):
         if metrics.diverged(metrics.records(name)) is not None:
             return
         raise ChildProcessError(f"{name}: training failed ({output})")
-    evaluations(output, [(config, step) for step in sorted(checkpoint_steps(config, run))
-                         if not evaluation_path(name, step).exists()])
+    evaluations(output, [(config, step) for step in unevaluated])
 
 
 def lr_multiplier() -> float:
