@@ -2,30 +2,83 @@
 A checkpoint's evaluation (RUNS/<run_name>/eval-<step>.json: likelihoods, the parse measure and the generation
 benchmarks) and a run's record (its non-train log records and evaluations).
 """
+import contextlib
+import gc
+import gzip
+import hashlib
 import json
+import os
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
+import psutil
 import torch
 
 from corpus.tokenizer import Tokenizer
 from eval.bpb import likelihood
-from eval.code_eval import (
-    filtered_generation,
-    fim_filtered_generation,
-    fim_generation,
-    generation,
-    parse_generation,
-    sanitizers,
-    tasks,
-)
-from model.modeling import CausalLM
+from eval.code_eval import filtered_generation, fim_generation, generation, parse_generation, sanitizers, tasks, vetted
+from eval.verify import cores
 from paths import RUNS
+from train.checkpoint import load_model
+
+if TYPE_CHECKING:
+    from multiprocessing.synchronize import Event
+
+
+def pin(cpus: frozenset[int]) -> None:
+    """Every thread of this process and of its descendants (and what they start later) to cpus."""
+    for process in [psutil.Process(), *psutil.Process().children(recursive=True)]:
+        with contextlib.suppress(psutil.Error, ProcessLookupError, FileNotFoundError):
+            for thread in process.threads():
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.sched_setaffinity(thread.id, cpus)
 
 
 def evaluation_path(run_name: str, step: int) -> Path:
     return RUNS / run_name / f"eval-{step}.json"
+
+
+def released_path(run_name: str, step: int) -> Path:
+    """The marker an evaluation creates once it holds no GPU memory (evaluate)."""
+    return RUNS / run_name / f"eval-{step}.released"
+
+
+def samples_path(path: Path) -> Path:
+    """The sampled-completions sidecar of an evaluation record: eval-<step>.samples.json.gz beside it."""
+    return path.with_name(f"{path.stem}.samples.json.gz")
+
+
+def write_evaluation(path: Path, evaluation: dict) -> None:
+    """Write an evaluation: the record at path with "samples" {"file", "sha256"} (null without generation benchmarks)
+    in place of every sampled record's "completions", which go to samples_path(path), gzip-compressed JSON
+    {benchmark: each task's completions}. NaN and infinities raise."""
+    record, samples = dict(evaluation), None
+    if evaluation["codegen"] is not None:
+        record["codegen"] = {name: records | {"sampled": {k: v for k, v in records["sampled"].items()
+                                                          if k != "completions"}}
+                             for name, records in evaluation["codegen"].items()}
+        data = gzip.compress(json.dumps({name: records["sampled"]["completions"]
+                                         for name, records in evaluation["codegen"].items()},
+                                        allow_nan=False).encode(), mtime=0)
+        samples_path(path).write_bytes(data)
+        samples = {"file": samples_path(path).name, "sha256": hashlib.sha256(data).hexdigest()}
+    path.write_text(json.dumps(record | {"samples": samples}, allow_nan=False), encoding="utf-8")
+
+
+def read_evaluation(path: Path) -> dict:
+    """An evaluation as evaluate made it: the record at path without "samples", each sampled record's "completions"
+    read back from the sidecar it names (its sha256 checked)."""
+    evaluation = json.loads(path.read_text(encoding="utf-8"))
+    samples = evaluation.pop("samples")
+    if samples is not None:
+        data = (path.parent / samples["file"]).read_bytes()
+        if hashlib.sha256(data).hexdigest() != samples["sha256"]:
+            raise ValueError(f"{samples['file']}: sha256 differs from {path}'s")
+        for name, completions in json.loads(gzip.decompress(data)).items():
+            evaluation["codegen"][name]["sampled"]["completions"] = completions
+    return evaluation
 
 
 def resolved(records: dict) -> dict:
@@ -33,27 +86,57 @@ def resolved(records: dict) -> dict:
     return {k: v.result() if isinstance(v, Future) else resolved(v) for k, v in records.items()}
 
 
-def evaluate(model: CausalLM, tokenizer: Tokenizer, *, run_name: str, step: int,
-             generate: Literal["benchmarks", "parse"]) -> None:
-    """Write evaluation_path(run_name, step) of `model` (on the GPU); with generate "parse", codegen and fim are null.
-    Results do not depend on the GPU order except timed checks, which heavy CPU load can fail."""
+def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Literal["benchmarks", "parse"],
+             previous: "Event | None" = None) -> None:
+    """Write evaluation_path(run_name, step) of the checkpoint, loaded onto the GPU; with generate "parse", codegen and
+    fim are null. After the last GPU phase the model, decoders and compiled graphs are dropped, the allocator's cache
+    emptied, the process tree kept to verify.cores()'s timed-check cores and released_path created (holding the
+    device memory left), while scoring finishes. previous: set once the previous checkpoint's evaluation has ended;
+    until then the process keeps to verify.cores()'s decode cores, and the official scoring and the filtered searches'
+    timed checks wait for it, so they never share the CPU with another checkpoint's. Results do not depend on the GPU
+    order except timed checks, which heavy CPU load can fail."""
+    decode, timed = cores()  # the starting affinity's split, taken before any pin
+    if previous is not None and not previous.is_set():
+        # rayon sizes its pool once, from the affinity at first use
+        os.environ.setdefault("RAYON_NUM_THREADS", str(len(decode | timed)))
+        pin(decode)
+        threading.Thread(target=lambda: (previous.wait(), pin(decode | timed)), daemon=True).start()
     benchmarks = tasks()
+    model = load_model(run_name, step, device=torch.device("cuda"))
     codegen = fim = None
-    with sanitizers() as pool, ThreadPoolExecutor(1) as scorers:
+    with sanitizers() as pool, ThreadPoolExecutor(1) as scorers, ThreadPoolExecutor(1) as background:
+        if previous is not None:
+            scorers.submit(previous.wait)
+        # the filtered searches' vetted examples, CPU work (untimed reference runs) during the GPU phases below
+        found = background.submit(vetted, benchmarks) if generate == "benchmarks" else None
         parse = parse_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
         if generate == "benchmarks":
             codegen = generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
             fim = fim_generation(model, tokenizer, scorers=scorers)
         results = likelihood(model, tokenizer, benchmarks, device=torch.device("cuda"))
         if generate == "benchmarks":
-            for name, record in filtered_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers).items():
+            if previous is not None:
+                previous.wait()
+            filtered, fim_filtered = filtered_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers,
+                                                         found=found.result())
+            for name, record in filtered.items():
                 codegen[name]["filtered"] = record
-            for key, record in fim_filtered_generation(model, tokenizer, scorers=scorers).items():
+            for key, record in fim_filtered.items():
                 fim[key]["filtered"] = record
+        del model
+        torch._dynamo.reset()  # compiled graphs and their guards' references
+        gc.collect()  # the decoders' native memory goes with their objects (NativeDecoder's finalizer)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        free, total = torch.cuda.mem_get_info()
+        released = {"allocated": torch.cuda.memory_allocated(), "reserved": torch.cuda.memory_reserved(),
+                    "free": free, "total": total}
+        print(f"GPU released: {released}", flush=True)
+        pin(timed)
+        released_path(run_name, step).write_text(json.dumps(released), encoding="utf-8")
         results |= {"parse": resolved(parse), "codegen": None if codegen is None else resolved(codegen),
                     "fim": None if fim is None else resolved(fim)}
-    evaluation = {"run_name": run_name, "step": step} | results
-    evaluation_path(run_name, step).write_text(json.dumps(evaluation, allow_nan=False), encoding="utf-8")
+    write_evaluation(evaluation_path(run_name, step), {"run_name": run_name, "step": step} | results)
 
 
 def record(run_name: str, log: list[dict]) -> dict:

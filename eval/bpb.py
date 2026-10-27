@@ -89,7 +89,12 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
         n = sampled[name]
         corpora[name] = scored | {"row_bits": scored["row_bits"][:n], "row_bytes": scored["row_bytes"][:n], "rows": n}
     rows = stage_rows(tokenizer, stage)
-    weights = stage.shares(rows, sum(rows.values()))
+    return pooled(corpora, stage.shares(rows, sum(rows.values())), stage)
+
+
+def pooled(corpora: dict, weights: dict[str, float], stage: Stage) -> dict:
+    """val_bits' record of scored corpora pooled by row weights over the stage's groups: {"corpora", "bpb", "errors",
+    "offset_bpb", "weights"}."""
     groups = {"code": stage.code} | {name: stage.groups[name].sources for name in NON_CODE}
     group_weights = {group: {c: weights[c] for c in members} for group, members in groups.items()} | {"all": weights}
     return {"corpora": corpora, "bpb": {group: mixture_bpb(corpora, w) for group, w in group_weights.items()},

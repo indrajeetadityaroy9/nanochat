@@ -10,8 +10,12 @@ CORPUS = ARTIFACTS / "corpus"
 RUNS = ARTIFACTS / "runs"
 # native libraries and their build directories (native.py)
 NATIVE = ARTIFACTS / "cache" / "native"
+# checks' results kept across evaluations (eval/cache.py)
+VERDICTS = ARTIFACTS / "cache" / "verdicts.sqlite"
+# g++ with a precompiled <bits/stdc++.h>, a directory per compiler (eval/verify.py compiler)
+PCH = ARTIFACTS / "cache" / "pch"
 RESULTS = ROOT / "results"       # tracked records (ablations/records.py)
 
 if __name__ == "__main__":
-    for directory in (CORPUS, RUNS, NATIVE):
+    for directory in (CORPUS, RUNS, NATIVE, PCH):
         directory.mkdir(parents=True, exist_ok=True)

@@ -1,10 +1,12 @@
 """
 Run app (Hydra, conf/run.yaml): each job trains a RunConfig (train/loop.py) and evaluates its checkpoints
-(eval/suite.py), each phase in a fresh process. The top level imports no torch, model, training or evaluation code:
-eval/code_eval.py's forkserver workers import this module.
+(eval/suite.py), each phase in a fresh process; a checkpoint's evaluation starts once the previous one has released
+the GPU. The top level imports no torch, model, training or evaluation code: eval/code_eval.py's forkserver workers
+import this module.
 """
 import multiprocessing
 import os
+import threading
 import warnings
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields, replace
@@ -20,6 +22,8 @@ from corpus.tokenizer import ABLATION, TOKENIZER, get_tokenizer
 from paths import ROOT, RUNS
 
 if TYPE_CHECKING:
+    from multiprocessing.synchronize import Event
+
     from train.schedule import RunPlan
 
 
@@ -82,17 +86,13 @@ def training(config: RunConfig, run: "RunPlan") -> None:
           checkpoints=checkpoint_steps(config, run), run_name=run_name(config), config=asdict(config))
 
 
-def evaluation(config: RunConfig, step: int) -> None:
-    import torch
-
+def evaluation(config: RunConfig, step: int, previous: "Event | None" = None) -> None:
     from eval import suite
-    from train.checkpoint import load_model
 
     # ast.parse's SyntaxWarnings on generated code
     warnings.filterwarnings("ignore", category=SyntaxWarning)
-    name = run_name(config)
-    suite.evaluate(load_model(name, step, device=torch.device("cuda")), get_tokenizer(tokenizer_path(config)),
-                   run_name=name, step=step, generate=config.generate)
+    suite.evaluate(get_tokenizer(tokenizer_path(config)), run_name=run_name(config), step=step,
+                   generate=config.generate, previous=previous)
 
 
 def logged(log: Path, target: Callable[..., None], kwargs: dict) -> None:
@@ -111,9 +111,42 @@ def phase(log: Path, target: Callable[..., None], **kwargs: object) -> int:
     return process.exitcode
 
 
+def evaluations(log: Path, checkpoints: list[tuple[RunConfig, int]]) -> None:
+    """Each (config, step)'s evaluation in a fresh process, output appended to `log`. Checkpoint k + 1's starts once
+    k's has released the GPU (suite.released_path) or ended, with previous = k's end (suite.evaluate); none starts
+    after a failure. Raises ChildProcessError, once every started evaluation has ended, if any failed."""
+    from eval.suite import released_path
+
+    spawn = multiprocessing.get_context("spawn")
+    started, previous = [], None
+    for config, step in checkpoints:
+        released = released_path(run_name(config), step)
+        released.unlink(missing_ok=True)
+        ended = spawn.Event()
+        process = spawn.Process(target=logged, args=(log, evaluation, {"config": config, "step": step,
+                                                                         "previous": previous}))
+        process.start()
+        watcher = threading.Thread(target=lambda p=process, e=ended: (p.join(), e.set()))
+        watcher.start()
+        started.append((config, step, process, watcher))
+        while not ended.wait(1) and not released.exists():
+            pass
+        previous = ended
+        if ended.is_set() and process.exitcode:
+            break
+    failed = []
+    for config, step, process, watcher in started:
+        watcher.join()
+        released_path(run_name(config), step).unlink(missing_ok=True)
+        if process.exitcode:
+            failed.append(f"{run_name(config)} step {step}")
+    if failed:
+        raise ChildProcessError(f"evaluation of {', '.join(failed)} failed ({log})")
+
+
 def job(config: RunConfig) -> None:
-    """A run's job: stale guard, skip if evaluated or diverged, then training and each checkpoint's evaluation.
-    Raises RuntimeError on a changed recipe, ChildProcessError on a failed phase."""
+    """A run's job: stale guard, skip if evaluated or diverged, then training and its checkpoints' evaluations
+    (evaluations). Raises RuntimeError on a changed recipe, ChildProcessError on a failed phase."""
     from eval.suite import evaluation_path
 
     name, run = run_name(config), plan_of(config)
@@ -129,9 +162,8 @@ def job(config: RunConfig) -> None:
         if metrics.diverged(metrics.records(name)) is not None:
             return
         raise ChildProcessError(f"{name}: training failed ({output})")
-    for step in sorted(checkpoint_steps(config, run)):
-        if not evaluation_path(name, step).exists() and phase(output, evaluation, config=config, step=step):
-            raise ChildProcessError(f"{name}: evaluation of step {step} failed ({output})")
+    evaluations(output, [(config, step) for step in sorted(checkpoint_steps(config, run))
+                         if not evaluation_path(name, step).exists()])
 
 
 def lr_multiplier() -> float:

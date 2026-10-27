@@ -282,8 +282,9 @@ a run two experiments share is trained once. The base model's run (`experiment=p
 `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10` (the multiplier resolved by
 `lr_multiplier`, §5), a d16 seed-1 run `learning_rate_scale=2.7192599564485445,num_hidden_layers=16,seed=1`. Its
 directory `artifacts/runs/<run_name>/` holds `.hydra/` (the composed config), `metrics.jsonl` (the run log; each line
-carries `run_name`, `attempt`, `kind`, `time`), `checkpoint-<step>.pt`, `eval-<step>.json` and `run.log`. The run
-log's records (`train/loop.py`; field definitions in `docs/evaluation.md` §10):
+carries `run_name`, `attempt`, `kind`, `time`), `checkpoint-<step>.pt`, `eval-<step>.json` with its sampled-completions
+sidecar `eval-<step>.samples.json.gz` (`docs/evaluation.md` §1) and `run.log`. The run log's records (`train/loop.py`;
+field definitions in `docs/evaluation.md` §10):
 
 | `kind` | When | Content |
 |---|---|---|
@@ -447,6 +448,9 @@ sanitize pool (a forkserver) import it as the phases' main module. `register` ru
 `run_name` omits default fields, so a field added with a default renames no run, and a changed default would keep a
 run's name under a new meaning; the stale guard's `config` comparison closes that gap. `job`:
 a training phase that fails without a `failure` record raises `ChildProcessError`; one that diverged ends the job.
+`evaluations` runs the checkpoints' evaluations in fresh processes, checkpoint k + 1's started once k's has released
+the GPU (`eval/suite.py` `released_path`, `docs/evaluation.md` §1) or ended; a failure starts no further evaluation,
+and `ChildProcessError` is raised once every started one has ended.
 `evaluation` silences `ast.parse`'s `SyntaxWarning`s on generated code (`eval/verify.py`, `inference/`).
 `conf/run.yaml` disables Hydra's job logging, whose default file `${hydra.job.name}.log` would be
 `RUNS/<run_name>/run.log`, the phases' log.
