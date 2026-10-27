@@ -50,7 +50,8 @@ PYRIGHT_TIMEOUT = 60
 # (5,450 programs in 15.3 s), so a group of 100 spends about as long starting as checking; a call of N programs runs
 # ceil(N / max(100, ceil(N / timed_workers()))) processes, one per timed-check core at most
 PYRIGHT_GROUP = 100
-# A failure of basedpyright itself in python_diagnostics' output (timeout, internal error): never kept in VerdictCache
+# A failure of basedpyright itself in python_diagnostics' output (timeout, internal error, killed without a report):
+# never kept in VerdictCache
 PYRIGHT_FAILURE = "1:1: basedpyright: "
 # MultiPL-E judge's per-step timeout (safe_subprocess/__init__.py:33, eval_cpp.py) and its compiler flags (eval_cpp.py)
 CPP_TIMEOUT, CPP_FLAGS = 15, ("-std=c++17",)
@@ -192,8 +193,9 @@ def python_diagnostics(programs: list[str], pool: ThreadPoolExecutor) -> list[li
     kept in VerdictCache. Each program sits in a directory of its own; basedpyright processes check disjoint groups of
     them concurrently, on pool (not the caller's). A program basedpyright cannot check fails: an exception inside its
     checker (e.g. RangeError on deep inference chains) aborts that process without a report, so the rest of its group
-    are checked again without it; a run past PYRIGHT_TIMEOUT is split in halves until the program that stalls it is
-    alone."""
+    are checked again without it; a run past PYRIGHT_TIMEOUT, or one killed by a signal without a report (node killed
+    out of memory), is split in halves until the program that fails it is alone; any other exit without a report
+    raises."""
     out = [compile_error(program) for program in programs]
     compiled = [i for i, found in enumerate(out) if not found]
     cache = verdict_cache("basedpyright")
@@ -221,19 +223,24 @@ def python_diagnostics(programs: list[str], pool: ThreadPoolExecutor) -> list[li
                     result = run_group(timed([sys.executable, "-m", "basedpyright", "--outputjson", "--pythonpath",
                                               sys.executable, "--project", config, *group.values()]), cwd=tmp,
                                        timeout=PYRIGHT_TIMEOUT)
-                if result is None:  # timed out: the slot is free again before the halves take theirs
+                # exit status 1 when it reports errors; the JSON report is on stdout either way
+                if result is not None and result.stdout.strip():
+                    return json.loads(result.stdout)["generalDiagnostics"]
+                # pyright.js sourceFile.check rethrows after its internal-error diagnostic; analyzeProgram then exits 2
+                crash = None if result is None else re.search(
+                    r'internal error occurred while type checking file "([^"]+)": (.*)', result.stderr)
+                # a death by a signal (negative status, or a wrapper's exit status 128 + signal) without a report
+                killed = result is not None and crash is None and not 0 <= result.returncode <= 128
+                if result is not None and crash is None and not killed:
+                    raise RuntimeError(f"basedpyright exited {result.returncode} without a report: {result.stderr}")
+                if crash is None:  # timed out or killed: halved until the program alone fails; the slot is free again
                     if len(group) == 1:
-                        out[next(iter(group))].append(f"{PYRIGHT_FAILURE}timeout after {PYRIGHT_TIMEOUT} s")
+                        failure = (f"timeout after {PYRIGHT_TIMEOUT} s" if result is None
+                                   else f"exit {result.returncode} without a report")
+                        out[next(iter(group))].append(f"{PYRIGHT_FAILURE}{failure}")
                         return []
                     items = list(group.items())
                     return check(dict(items[:len(items) // 2])) + check(dict(items[len(items) // 2:]))
-                # exit status 1 when it reports errors; the JSON report is on stdout either way
-                if result.stdout.strip():
-                    return json.loads(result.stdout)["generalDiagnostics"]
-                # pyright.js sourceFile.check rethrows after its internal-error diagnostic; analyzeProgram then exits 2
-                crash = re.search(r'internal error occurred while type checking file "([^"]+)": (.*)', result.stderr)
-                if crash is None:
-                    raise RuntimeError(f"basedpyright exited {result.returncode} without a report: {result.stderr}")
                 i = int(Path(crash[1]).parent.name)
                 out[i].append(f"{PYRIGHT_FAILURE}internal error: {crash[2]}")
                 group = {k: p for k, p in group.items() if k != i}
@@ -255,7 +262,8 @@ def python_diagnostics(programs: list[str], pool: ThreadPoolExecutor) -> list[li
 
 def solution_diagnostics(solution: str, entry_point: str) -> list[str]:
     """Certain failures of an EvalPlus solution its own checks miss: the solution's syntax error, and an entry function
-    missing or without `return <value>` in its own body (every call returns None)."""
+    missing or without `return <value>` in its own body (every call returns None, or a generator, which equals no
+    expected output)."""
     unparsed = syntax_error(solution)
     if unparsed:
         return unparsed

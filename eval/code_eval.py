@@ -564,7 +564,9 @@ def fim_generation(model: CausalLM, tokenizer: Tokenizer, *,
     def done(g: int, generated: list[list[int]], timing: dict) -> None:
         name, mode = keys[g]
         run, record = runs[name], results[f"{name}/{mode}"]
-        middles = [tokenizer.enc.decode(ids) for ids in generated]
+        # a FIM sentinel (ids > BOS) ends the middle too, as the first special token ends a MultiPL-E completion
+        middles = [tokenizer.enc.decode(list(itertools.takewhile(lambda t: t < tokenizer.bos_token_id, ids)))
+                   for ids in generated]
         record["greedy"] = scorers.submit(infilling, name, run.problems, middles, {"latency": timing})
         if run.lines is not None:
             record["greedy_reference_lines"] = scorers.submit(

@@ -2,7 +2,7 @@
 
 How a checkpoint is scored (likelihoods, the parse measure, the code benchmarks), every metric and error bar the
 repository computes (`metrics.py`), the decoder that generates every completion, and the syntax constraint and checks
-of the filtered mode; §8 records the export and cross-check tools that ran the model elsewhere (removed at `67192ab`).
+of the filtered mode; §8 records the export and cross-check tools that ran the model elsewhere (removed at `cd4edbe`).
 The code is the specification; each statement names the file and symbol that define it.
 
 Markers: [arithmetic] derived from code numbers; [inference] reasoning, not measured; [estimate]; [unverified] a
@@ -76,7 +76,7 @@ scoring with no GPU work 483 → 8.4 s, 0 per-sample changes where the protocol 
 
 **Validation of a change.** The canonical comparison of a new record with a reference record of the same checkpoint
 covers every model-derived field (generations, attempts, likelihoods, solution bits; latency excluded). A CPU scorer
-replay, `eval/rescore.py` (removed at `67192ab`), reran every scorer and checker (EvalPlus base and plus, MultiPL-E's
+replay, `eval/rescore.py` (removed at `cd4edbe`), reran every scorer and checker (EvalPlus base and plus, MultiPL-E's
 judge, the infilling checks, parse outcomes, the filtered mode's verdicts) on a record's stored completions against an
 empty verdict cache and compared field by field; on a d24 `eval-3307.json` of base `c053bdc`, its 22,000 sampled
 completions synthesized from the stored greedy, filtered and parse ones, 0 fields differed and the sidecars' sha256
@@ -97,8 +97,14 @@ karpathy/nanochat's `evaluate_bpb`. Sums are fp64 on the device, reduced in a fi
   repository stage trains; Code Llama's loss by context length, arXiv 2308.12950 §3.3, Fig. 4a), per byte-offset
   bucket (`OFFSETS`: doublings from 1 KiB to 128 KiB of the target's segment before it, so tokenizers compare at equal
   bytes of context, arXiv 2503.13423 §3.1, App. B.1) and per sampled row, with the row's cluster (`row_clusters`).
-  Pooled per group (code, text, math) and over all corpora by the stage's train row shares (`Stage.shares`,
-  `docs/corpus.md` §7) with `metrics.mixture_bpb`, `offset_bpb` and `mixture_bpb_summary` (§5).
+  Pooled per group (code, text, math) and over all corpora with `metrics.mixture_bpb`, `offset_bpb` and
+  `mixture_bpb_summary` (§5) by one fixed evaluation mixture, `Stage.shares` (`docs/corpus.md` §7) at the stage's
+  total packed train rows: the fixed shares as trained, a "supply" corpus at its packed rows over all packed rows, not
+  over the rows a run draws (its training share), so supply corpora weigh 0.61× their base-run share at 8K (notebooks
+  0.0095 against 0.0156) and 0.85× at 32K (traces 0.0470 against 0.0554). Every record, the peak-lr calibration's
+  included, uses these weights; under the base run's mixture a d24 rehearsal checkpoint's 8K code bpb is 0.000784
+  higher (0.499136 against 0.498352, a third of its standard error) and `all` 0.000674, text and math unchanged,
+  recomputable from a record's per-corpus sums.
 - **Sample** (`sample_rows`, `VAL_TOKENS = 80 × 2^19`, nanochat's `--eval-tokens`): per corpus, n = min(rows,
   ⌈VAL_TOKENS / (micro-batch × seq_len)⌉ × micro-batch) rows, row ⌊j · rows / n⌋ for j < n: systematic, because the
   packer orders each shard's rows longest first, so a prefix would over-represent long documents. Models of one
@@ -142,9 +148,9 @@ App. C.1), its budget and stops (the post: 256 tokens) and in compiling the unsa
 | Benchmark | Problems | Prompt; budget; stops | Evaluator | Data pin |
 |---|---|---|---|---|
 | HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) | 164, 378 | `prompt.strip() + "\n"`; 768 new tokens; EvalPlus's EOS + `extra_eos_for_direct_completion`, special tokens skipped, tabs → 4 spaces, `sanitize(prompt + completion, entry point)` (EvalPlus's base-model codegen) | `evalplus.evaluate` (`timed_workers()` parallel on the timed-check cores, `EVALPLUS_EVALUATE`, §1; its `untrusted_check` patched against a lock deadlock in the image, verdicts unchanged, `docs/training.md` §11): per-sample statuses; base and plus pass@1 by its estimator, averaged in task order (§10) | evalplus `26d6d00` (`pyproject.toml`); HumanEvalPlus v0.1.10, MbppPlus v0.2.0 |
-| HumanEval, MBPP in C++ (MultiPL-E, arXiv 2208.08227) | 161, 397 | `prompt.strip()`; 1,024 positions of prompt and completion, BOS included (the longest prompt is 600 tokens under the corpus tokenizer [arithmetic], so `automodel.py`'s empty completion for a prompt of ≥ 1,024 tokens never applies); the row's stop tokens, the first special token ends it | MultiPL-E `evaluation/src/main.py --file … --max-workers 1` per problem, `timed_workers()` at once on the timed-check cores (§1; g++ -std=c++17 with the precompiled `<bits/stdc++.h>` of §7, 15 s compile, 15 s run); pass@1 by `pass_k.py`'s estimator, averaged in problem order (§10) | dataset `nuprl/MultiPL-E` at `3a9e8d2` (the revision MultiPL-E's `completions.py` pins); evaluator `3025a53` (`docker/Dockerfile`) |
+| HumanEval, MBPP in C++ (MultiPL-E, arXiv 2208.08227) | 161, 397 | `prompt.strip()`; 1,024 positions of prompt and completion, BOS included (the longest prompt is 600 tokens under the corpus tokenizer [arithmetic], so `automodel.py`'s empty completion for a prompt of ≥ 1,024 tokens never applies); the row's stop tokens, the first special token ends it | MultiPL-E `evaluation/src/main.py --file … --max-workers 1` per problem, `timed_workers()` at once on the timed-check cores (§1; g++ -std=c++17 with the precompiled `<bits/stdc++.h>` of §7, 15 s compile, 15 s run); pass@1 by Codex's estimator (`metrics.pass_at_k`, equal to `pass_k.py`'s), averaged in problem order (§10) | dataset `nuprl/MultiPL-E` at `3a9e8d2` (the revision MultiPL-E's `completions.py` pins); evaluator `3025a53` (`docker/Dockerfile`) |
 | HumanEval-X C++ (arXiv 2303.17568) | 164 | reference solutions only (§2) | — | `zai-org/humaneval-x` at `62c7862` |
-| HumanEval infilling single-line, multi-line, random-span (arXiv 2207.14255) | 1,033, 5,815, 1,640 [arithmetic: `read_problems`] | PSM and SPM prompts (`decoder.fim_prompt`, the packer's layout, `docs/corpus.md` §8); middle until BOS, at most the benchmark's longest reference middle in tokens; not healed (a FIM prompt ends with a sentinel or with the prefix encoded alone, the training format) | the package's `check_correctness` per middle (3 s) in a fork pool of `timed_workers()` workers on the timed-check cores (`INFILLING_EVALUATE`, §1) | `openai/human-eval-infilling` `88062ff` (`docker/Dockerfile`) |
+| HumanEval infilling single-line, multi-line, random-span (arXiv 2207.14255) | 1,033, 5,815, 1,640 [arithmetic: `read_problems`] | PSM and SPM prompts (`decoder.fim_prompt`, the packer's layout, `docs/corpus.md` §8); middle until BOS or another special token (a FIM sentinel, as the first special token ends a MultiPL-E completion), at most the benchmark's longest reference middle in tokens; not healed (a FIM prompt ends with a sentinel or with the prefix encoded alone, the training format) | the package's `check_correctness` per middle (3 s) in a fork pool of `timed_workers()` workers on the timed-check cores (`INFILLING_EVALUATE`, §1) | `openai/human-eval-infilling` `88062ff` (`docker/Dockerfile`) |
 
 Generation modes (`generation`, `fim_generation`, `filtered_generation`):
 
@@ -152,19 +158,20 @@ Generation modes (`generation`, `fim_generation`, `filtered_generation`):
 |---|---|---|
 | `greedy` | left-to-right argmax, one completion per problem; FIM in both orders | pass@1 as DeepSeek-Coder (arXiv 2401.14196 §4.1), StarCoder2 (arXiv 2402.19173 §7.1.1) and EvalPlus's leaderboard report it |
 | `sampled` (EvalPlus, MultiPL-E) | `N_SAMPLE` 20 per problem at `TEMPERATURE` 0.2 from the nucleus `TOP_P` 0.95 (arXiv 1904.09751); sample k of problem i seeded N_SAMPLE · i + k | pass@1 (and pass@10) by Codex's unbiased estimator (arXiv 2107.03374 §2.1; T and p from §3.2–3.3), as MultiPL-E and StarCoder2 (§7.1.2) sample |
-| `filtered` | the greedy candidate, then samples at T = 0.8 (`verify.TEMPERATURE`) from the nucleus `verify.TOP_P` 0.95 (Codex's setting for all its sampling, §3.2), attempt a of task i seeded `ATTEMPTS` · i + a, until one has no post-generation diagnostic and passes its prompt's own examples, at most `verify.ATTEMPTS` = 10; left-to-right prompts healed; Python and FIM middles under the syntax constraint (§7); FIM in SPM only (`FILTERED_MODE`) | filtered pass@1: the evaluator's pass rate of one chosen completion per task over all tasks, the accepted candidate, else the task's greedy candidate (attempt 0, decoded with this mode's healing and constraint, so not always the `greedy` mode's completion) (Codex §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
+| `filtered` | the greedy candidate, then samples at T = 0.8 (`verify.TEMPERATURE`) from the nucleus `verify.TOP_P` 0.95 (Codex's setting for all its sampling, §3.2), attempt a of task i seeded `ATTEMPTS` · i + a, until one has no post-generation diagnostic and passes those of its prompt's examples that the reference solution passes (`vetted`, §7: an errata filter derived from the reference; it drops HumanEval/47's and /116's wrong examples and their infilling spans' copies), at most `verify.ATTEMPTS` = 10; left-to-right prompts healed; Python and FIM middles under the syntax constraint (§7); FIM in SPM only (`FILTERED_MODE`) | filtered pass@1: the evaluator's pass rate of one chosen completion per task over all tasks, the accepted candidate, else the task's greedy candidate (attempt 0, decoded with this mode's healing and constraint, so not always the `greedy` mode's completion) (Codex §3.5; AlphaCode, arXiv 2203.07814 §4.5): a system measurement, not comparable to pass@1 tables |
 
 Each record also holds `"scores"` (`metrics.summary` of the per-problem scores, §5), the completions as scored (the
 sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the decoding's `"latency"`
 (`metrics.latency`); a filtered record holds the attempts per task and whether one was accepted.
 
-- **Infilling.** The middle is scored as generated, up to BOS or the budget (the package's protocol, no
-  post-processing). `greedy_reference_lines` also scores the greedy single- and multi-line middles cut to the
-  reference middle's line count (`fim_lines`; arXiv 2505.18789 Table 1, Fig. 4): a separate metric, since it reads the
-  reference. The references' middles are whole lines while the model, trained on character-level and AST spans
-  (`docs/corpus.md` §8), rarely ends at a line end: on a d16 checkpoint single-line SPM greedy pass@1 was 0.074 as
-  generated against 0.437 cut (`a41415e`). Infilling records add CrossCodeEval's similarity scores against the
-  reference middle (§5), all clustered by HumanEval problem.
+- **Infilling.** The middle is scored as generated, up to BOS, another special token or the budget (the package's
+  protocol, no post-processing). `greedy_reference_lines` also scores the greedy single- and multi-line middles cut to
+  the reference middle's raw line count (`fim_lines`; the rule of arXiv 2505.18789 Table 1, whose Fig. 4 code skips
+  blank and comment lines and drops the final "\n"): a separate metric, since it reads the reference. The references'
+  middles are whole lines, each ending in "\n", while the model, trained on character-level and AST spans whose
+  middles rarely end in "\n" (`docs/corpus.md` §8), rarely ends at a line end: on a d16 checkpoint single-line SPM
+  greedy pass@1 was 0.074 as generated against 0.437 cut (`a41415e`). Infilling records add CrossCodeEval's similarity
+  scores against the reference middle (§5), all clustered by HumanEval problem.
 - **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E drew 200 and the
   BigCode leaderboard 50: the same estimate with more variance per problem [inference] (MultiPL-E reports its pass@1
   stable from about 20 samples, arXiv 2208.08227 [unverified: section not checked]). Its pass@10 is the unbiased
@@ -206,9 +213,9 @@ import it alike. Every public function:
 | `code_lines`, `exact_match` | comment-stripped (`#`, `//` to the line end), stripped non-empty lines; equal lines | CrossCodeEval (arXiv 2310.11248 §4; amazon-science/cceval `40c68d2`) |
 | `edit_similarity` | 100 when equal, 0 when either is empty, else round(100 × difflib `SequenceMatcher` ratio) of the comment-stripped strings | cceval's fuzzywuzzy 0.18 without python-Levenshtein (difflib) |
 | `identifiers`, `identifier_match` | identifiers after removing comments and string literals, Python keywords excluded (True and False kept); exact match of the lists, F1 over the sets (0 when both are empty) | cceval `extract_identifiers` |
-| `completion_scores` | per sample: `line_em`, `em`, `es` (0–100), `id_em`, `id_f1` | cceval's per-sample results |
+| `completion_scores` | per sample: `line_em`, `em`, `es` (0–100), `id_em`, `id_f1`, over the whole middle: cceval's `postprocess_code_lines` (its cut after the prediction's first statement) is not applied, and `//` to the line end is stripped as cceval strips it, in Python too (floor divisions included) | cceval's per-sample results |
 | `pass_at_k(passed, k)` | each problem's pass@k estimate from its samples | Codex's unbiased estimator (arXiv 2107.03374 §2.1); `human_eval_infilling` `estimate_pass_at_k` |
-| `summary(scores, clusters=)` | mean of question scores (each score a mean of question-level scores, a problem's pass@k estimate one of them: Miller §3.1 [unverified: paper text not in the extracted set]); OLS on a constant: unclustered, se = s/√n (sample variance over n − 1, Miller Eq. 1); clustered, Liang–Zeger CR0 without small-sample correction (Miller Eq. 4 except for Eq. 4's (n − 1) in its diagonal term); 95% normal interval (Eq. 3); a constant score has se 0 | statsmodels `OLS` |
+| `summary(scores, clusters=)` | mean of question scores (each score a mean of question-level scores, a problem's pass@k estimate one of them: Miller §3.1 [unverified: paper text not in the extracted set]); OLS on a constant: unclustered, se = s/√n (sample variance over n − 1, Miller Eq. 1); clustered, Liang–Zeger CR0 without small-sample correction (Miller Eq. 4 except for Eq. 4's (n − 1) in its diagonal term); 95% normal interval (Eq. 3), not clipped to [0, 1]; a constant score (0 passes, say) has se 0 and a zero-width interval, so a near-zero pass rate needs an exact or Wilson interval in reporting (computable from the per-problem scores) | statsmodels `OLS` |
 | `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends: itself and up to window_l before it (`layer_windows`: 512, or the context for full layers), the convention of `attended_keys`; records written before the query's own key was counted (`results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), 73,728 lower: 641,826,816 at 8K, 1,245,806,592 at 32K | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT [unverified: App. B is not in the extracted text]; torchtitan's count without the causal halving |
 | `attended_keys(lengths, window)` | Σ over segments of Σ_p min(p, window + 1): the keys each query attends causally within its segment, itself included | — |
 | `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B [unverified, as above]; Megatron-LM's causal, per-document counting |
@@ -259,10 +266,10 @@ the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint Flas
   [inference].
 - **Step.** The model's forward at one position (`docs/architecture.md` §1), GEMMs on wgmma tensor cores fed by TMA,
   attention streaming each slot's window through shared memory with the scores on tensor cores (f16, exact for e4m3
-  keys and the bf16 q). Numerics follow the compiled training forward op by op (bf16 copies of the matrices; fp32
-  rotary table, q/k norm gains and value-embedding gate; the residual mix as Inductor fuses it, `ca18db5`), except the
-  KV cache: e4m3 with one fp32 scale per position and head (amax / 448), half the bytes a step reads; scores and
-  softmax stay fp32.
+  keys and the bf16 q's elements of magnitude ≥ 2⁻¹⁴; smaller ones become f16 subnormals). Numerics follow the
+  compiled training forward op by op (bf16 copies of the matrices; fp32 rotary table, q/k norm gains and
+  value-embedding gate; the residual mix as Inductor fuses it, `ca18db5`), except the KV cache: e4m3 with one fp32
+  scale per position and head (amax / 448), half the bytes a step reads; scores and softmax stay fp32.
 - **Prefill and prompt store.** A new request's prompt but its last token runs as rows of one batched pass through
   the step's body (up to 1,024 rows of any prompts per launch, each row computed as a step would), so its slot starts
   at the prompt's last token. Its K and V are copied to the prompt store's next free positions (prefix reuse as
@@ -272,10 +279,12 @@ the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint Flas
 - **Request** (`Request`): `input_ids`, `max_new_tokens`, `stopping_criteria`, `temperature` (0: argmax, ties to the
   lowest id; > 0: Gumbel-max sampling of softmax(z / T), the noise a Philox function of (seed, generated position,
   token) alone, arXiv 1411.0030 §2), `top_p` (< 1: the fewest most likely allowed tokens holding top_p of the
-  probability, arXiv 1904.09751 §3.1, `k_nucleus`; transformers' `TopPLogitsWarper`, the sampler of MultiPL-E's
-  `automodel.py` and bigcode-evaluation-harness), `seed`, `constraint`. Sampled logits are capped, z = c·tanh(s/c)
-  with the model's `final_logit_softcapping`; a greedy choice needs no cap (tanh is increasing). Generation ends at
-  BOS (excluded), the budget, or the stopping criteria (evaluated while the next step runs).
+  probability, a tie at the cut kept whole, arXiv 1904.09751 §3.1, `k_nucleus`; transformers' `TopPLogitsWarper`, the
+  sampler of MultiPL-E's `automodel.py` and bigcode-evaluation-harness), `seed`, `constraint`. Sampled logits are
+  capped, z = c·tanh(s/c) with the model's `final_logit_softcapping`; a greedy choice needs no cap (tanh is
+  increasing). A request needs len(input_ids) + max_new_tokens − 1 ≤ `max_length` cache positions, and `max_length`
+  at most the rotary table's; either excess raises ValueError (`decode.cu` writes and reads positions unchecked).
+  Generation ends at BOS (excluded), the budget, or the stopping criteria (evaluated while the next step runs).
 - **Constraints.** A step with a sampled or constrained slot launches the body, writes the constraints' masks while it
   runs (the syntax constraints' in one parallel call straight into pinned mask rows, §7), then the head, which chooses
   within each slot's mask and also computes its best allowed token but BOS; a chosen BOS that the syntax constraint
@@ -360,10 +369,11 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
   exceeds `PYRIGHT_TIMEOUT` = 60 s (one process over the largest round, FIM multi-line's 5,815 programs, takes 27.6 s;
   16 processes over 5,450 programs ran 4.5× faster than one on a 20-core aarch64 host [unverified: no record]). A
   program basedpyright cannot check fails: an exception inside its checker (a d16 completion's chained assignments
-  overflowing its stack), or a run past the timeout, halved until the stalling program is alone (a d16 MBPP+ candidate
-  with 22 repeated `if …: continue` statements in a nested loop held its 400-program batch over 47 min); the
-  timed-out process group is killed (`run_group`). A stalling program costs ⌈log₂ G⌉ + 1 timeouts in a group of G
-  [arithmetic]: 8 min at 100–128 programs (a 5,815-program round's groups: 122 on 48 timed-check cores).
+  overflowing its stack), or a run past the timeout or killed by a signal without a report (its node process, out of
+  memory say), halved until the failing program is alone (a d16 MBPP+ candidate with 22 repeated `if …: continue`
+  statements in a nested loop held its 400-program batch over 47 min); the timed-out process group is killed
+  (`run_group`). A stalling program costs ⌈log₂ G⌉ + 1 timeouts in a group of G [arithmetic]: 8 min at 100–128
+  programs (a 5,815-program round's groups: 122 on 48 timed-check cores).
   EvalPlus solutions (`solution_diagnostics`): the solution's syntax error, an entry function missing or without a
   `return <value>` in its own body.
 - Examples (`examples_pass`): the prompt's doctest `>>>` examples and Python `assert` lines that the reference program
@@ -389,11 +399,11 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
   a checkout on `sys.path` it is no installed distribution; the interpreter's version and every installed package's)
   and the exact program text, so an evaluation skips programs an earlier one checked. A result within a time limit is
   kept as first observed (at that check's load); the g++ and basedpyright limits are not keyed (a lower limit would
-  reuse results found under a higher one). Kept: basedpyright diagnostics except its timeouts and internal errors, g++
-  diagnostics except timeouts and exit statuses other than 0 and 1, example runs not ended by the timeout or a signal;
-  the official judges'
-  results likewise (§10 `multipl_e`, `infilling`). EvalPlus's verdicts are not kept: a test past its time limit
-  fails like a wrong answer (`untrusted_check`), so a timing failure cannot be told from the program's own.
+  reuse results found under a higher one). Kept: basedpyright diagnostics except its failures (timeouts, internal
+  errors, exits without a report), g++ diagnostics except timeouts and exit statuses other than 0 and 1, example runs
+  not ended by the timeout or a signal; the official judges' results likewise (§10 `multipl_e`, `infilling`).
+  EvalPlus's verdicts are not kept: a test past its time limit fails like a wrong answer (`untrusted_check`), so a
+  timing failure cannot be told from the program's own.
 
 `search` runs all seven filtered searches (HumanEval+, MBPP+, both C++ benchmarks and the three FIM benchmarks) from
 one `generate` call with no round barrier: requests come in attempt order (every task's attempt 0, then attempt 1,
@@ -408,14 +418,16 @@ accepted candidate, else the greedy one.
 
 Basis (both d16 checkpoints' full 10-candidate HumanEval+ and MBPP+ pools, `2d49bb1`): the three rules and the vetted
 examples rejected none of the 100 candidates that pass EvalPlus plus (95% upper bound 3.6%); without the examples
-check filtered plus pass@1 fell 1.1–1.8 points. The removed checks: `docs/experiments.md` §6.
+check filtered plus pass@1 fell 1.1–1.8 points. FIM middles are not covered by that basis: a middle that appends an
+uncalled helper with an undefined name passes the official test yet fails `reportUndefinedVariable` (3 greedy SPM
+middles of a d24 rehearsal checkpoint, `eval-1102`). The removed checks: `docs/experiments.md` §6.
 `reportCallIssue` rejects one reference, Mbpp/130 (`max(d, key=d.get)` on a `defaultdict`, an overload miss);
 Mbpp/630's reference fails as EvalPlus scores it (sanitize drops its helper).
 
 ## 8. Export, vLLM and the standard-protocol cross-check
 
-The model ran outside `NativeDecoder` through three tools, removed at `67192ab` (validation tools, not on the
-reproduction path; paths and symbols below are that commit's):
+The model ran outside `NativeDecoder` through three tools, removed at `cd4edbe` (validation tools, not on the
+reproduction path; paths and symbols below are those of `67192ab`, their last commit):
 
 - **Export** (`inference/export_hf.py`): a Hugging Face directory of a checkpoint. `model.safetensors` (matrices and
   tables bf16; the per-dim and per-layer vectors and the value-embedding gates fp32, `_keep_in_fp32_modules_strict`);
@@ -510,7 +522,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 |---|---|
 | `run` (each process start) | `step` (first step it trains), `plan` (`schedule.RunPlan`), `config` (`run.py` `RunConfig`; initialization and data order from `train/loop.py` `SEED` = 0), `data_key` (`Tokenizer.data_key`), `model` (`ModelConfig` at the stage of the starting weights: file-level, or the checkpoint's), `num_parameters`, `flops_per_token` (`non_embedding_flops_per_token`, M of arXiv 2401.02954 §3.2 Eq. 2), `model_flops_per_token` (at that stage), `learning_rate` and `weight_decay` (`{"adamw": [per group], "muon": [per group]}` as the optimizers hold them; a resumed process's from its checkpoint), `stage` (`corpus/mixture.py` `Stage` as run, mixture as {corpus: row weight}) |
 | `stage` (switch to the repo-level stage) | `step`, `stage`, `model_flops_per_token` (repo-level), `peak_memory_bytes`, `peak_reserved_bytes` (`torch.cuda.max_memory_allocated`/`max_memory_reserved` since the process start: the file-level stage, or its part after a resume; both reset at the switch) |
-| `train` (each optimizer step, 0-based) | `step`; `num_input_tokens_seen` (row positions after it, padding included); `loss` (mean next-token loss in nats over the step's valid labels, Σ loss / Σ labels over its micro-batches by `step_shares`, computed in fp32 on the capped logits by the `lm_loss` call that gives the gradient); `learning_rate` (LambdaLR's); `grad_norm` (global L2 before clipping, arXiv 1211.5063 §3.2: the L2 norm of the step's per-tensor norms in the diagnostics sidecar, the norm the clip uses, `docs/training.md` §6); `step_seconds` (device time between CUDA events at the previous step's end and its own, so it includes a save or compilation before the step; `train/loop.py` reads a step's values one step late); `tokens_per_second` (row positions / `step_seconds`); `model_flops` (`executed_model_flops` of the step's micro-batches); `mfu`; `train/diagnostics.py`'s `max_logsumexp`, `mean_square_logsumexp` (the capped logits' logsumexp over valid positions: maximum and mean square, PaLM's z-loss quantity, arXiv 2204.02311 §5), `qk_norm_gain_max` (the largest of the sidecar's per-layer q and k gain ‖g‖∞ after the step), `corpus_loss` ({corpus: Σ loss / Σ valid labels over its rows}); every 10th step the GPU's NVML telemetry (pynvml, one handle to the model's GPU), read when the record is written (during the next step): `gpu_power_watts` (`nvmlDeviceGetPowerUsage` / 1000, a 1 s running average on Hopper), `gpu_sm_clock_mhz` (`nvmlDeviceGetClockInfo`, SM clock), `gpu_temperature_c` (`nvmlDeviceGetTemperature`, die), `gpu_memory_used_bytes` (`nvmlDeviceGetMemoryInfo().used`, the device's used memory, every process included). Per-tensor and per-group gradient norms, parameter norms and update RMS live only in the sidecar (`docs/training.md` §6) |
+| `train` (each optimizer step, 0-based) | `step`; `num_input_tokens_seen` (row positions after it, padding included); `loss` (mean next-token loss in nats over the step's valid labels, Σ loss / Σ labels over its micro-batches by `step_shares`, computed in fp32 on the capped logits by the `lm_loss` call that gives the gradient); `learning_rate` (LambdaLR's); `grad_norm` (global L2 before clipping, arXiv 1211.5063 §3.2: the L2 norm of the step's per-tensor norms in the diagnostics sidecar, the norm the clip uses, `docs/training.md` §6); `step_seconds` (device time between CUDA events at the previous step's end and its own, so it includes a save or compilation before the step; `train/loop.py` reads a step's values one step late); `tokens_per_second` (row positions / `step_seconds`); `model_flops` (`executed_model_flops` of the step's micro-batches); `mfu`; `train/diagnostics.py`'s `max_logsumexp`, `mean_square_logsumexp` (the capped logits' logsumexp over valid positions: maximum and mean square, PaLM's z-loss quantity, arXiv 2204.02311 §5), `qk_norm_gain_max` (the largest of the sidecar's per-layer q and k gain ‖g‖∞ after the step), `corpus_loss` ({corpus: Σ loss / Σ valid labels over its rows}); every 10th step the GPU's NVML telemetry (pynvml, one handle to the model's GPU), read when the record is written (while the next step runs; a record written during a checkpoint save, the first compilation or after the last step reads an idle GPU): `gpu_power_watts` (`nvmlDeviceGetPowerUsage` / 1000, a 1 s running average on Hopper), `gpu_sm_clock_mhz` (`nvmlDeviceGetClockInfo`, SM clock), `gpu_temperature_c` (`nvmlDeviceGetTemperature`, die), `gpu_memory_used_bytes` (`nvmlDeviceGetMemoryInfo().used`, the device's used memory, every process included). Per-tensor and per-group gradient norms, parameter norms and update RMS live only in the sidecar (`docs/training.md` §6) |
 | `end` (last step trained) | `step`, `peak_memory_bytes`, `peak_reserved_bytes` over the last stage (since the switch or the process start) |
 | `failure` (non-finite loss or gradient norm; the run stops) | `step` |
 
@@ -547,10 +559,15 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 ### `eval/suite.py`
 
-- `evaluate`: record `{"run_name", "step", "8k", "32k", "solution", "parse", "codegen", "fim", "samples"}` (the
-  parts' layouts: `eval/bpb.py` and `eval/code_eval.py` below; `"samples"`: `{"file", "sha256"}`); NaN and infinities
-  raise (`allow_nan=False`). Timed checks: EvalPlus's time limits, `verify.py`'s and the evaluators' timeouts.
-  `resolved` replaces each scoring future by its result in key order.
+- `evaluate`: record `{"run_name", "step", "8k", "32k", "solution", "parse", "codegen", "fim", "samples",
+  "provenance"}` (the parts' layouts: `eval/bpb.py` and `eval/code_eval.py` below; `"samples"`: `{"file", "sha256"}`;
+  `"provenance"`: `{"source_sha256", "environment", "started", "finished"}`, `source_digest`'s SHA-256 over each code
+  and configuration file's path and bytes at the evaluation's start (the top-level `.py`, `.toml` and `.lock` files
+  and `SOURCE_TREES`), `cache.environment`'s Python version and installed distributions, and the evaluation's start
+  and end in Unix seconds); NaN and infinities raise (`allow_nan=False`). Timed checks: EvalPlus's time limits,
+  `verify.py`'s and the evaluators' timeouts. `resolved` replaces each scoring future by its result in key order.
+  `write_atomically`: the sidecar, then the record, each written to `<name>.tmp` and renamed over its path, so an
+  `eval-<step>.json` that exists is whole (`run.job` skips its checkpoint).
 - GPU release: `torch._dynamo.reset()`, `gc.collect()` (a `NativeDecoder`'s finalizer frees its native memory),
   `torch.cuda.empty_cache()`; the log line "GPU released" gives the allocated, reserved and free bytes after it (the
   CUDA context stays until the process ends). `previous` gates the scorer thread (its first job waits) and the
@@ -566,10 +583,12 @@ Per module and symbol; what §1–§9 state is not repeated.
   `{"offset_bits", "offset_bytes"}` per offset bucket and `{"row_bits", "row_bytes"}` per row, over every batch;
   batches are `corpus/loader.py` `PretrainingBatches` tuples (a loader ends with its sample's last micro-batch).
   Padding `cu_seqlens` by its last offset leaves empty segments the attention never reads; `searchsorted(right=True)`
-  maps a position to its segment. OFFSETS reach 128 KiB, beyond a 32K row's span in bytes.
+  maps a position to its segment. The last offset bucket (≥ 128 KiB) holds 0.15% of a 32K evaluation's bytes (a
+  `peak_lr_d24` record: repositories and long ClimbMix rows).
 - `val_bits` → `{"corpora": {corpus: {"bits", "bytes", "offset_bits", "offset_bytes", "row_bits", "row_bytes",
   "row_clusters", "rows"}}, "bpb": {group | "all"}, "errors": {group | "all"}, "offset_bpb": {group | "all"},
-  "weights": {corpus}}`; weights are `Stage.shares` at the total train packed rows; the last micro-batch is filled
+  "weights": {corpus}}`; weights are `Stage.shares` at the total train packed rows (§2: the fixed evaluation
+  mixture, not a run's draw); the last micro-batch is filled
   with empty rows (index −1), dropped from the row sums.
 - `row_clusters(split, rows)`: a piece's document is the `.idx` range holding its start; labels are each component's
   least row by min-label propagation over the row–document pairs (the partition of scipy's `connected_components`
@@ -596,14 +615,16 @@ Per module and symbol; what §1–§9 state is not repeated.
   check, `score` the evaluator. `FimRun.prompts`: per FIM order.
 - `KeywordsStoppingCriteria`: incremental UTF-8 decoding; search restarts where a stop sequence could still begin; the
   healed bytes (`decoder.Reemit`, possibly over several tokens) are skipped. `completion`: `decode_bytes` then UTF-8
-  with replacement, as `enc.decode`. `fim_lines`: a non-empty middle written up to BOS or the budget gets a final "\n";
-  an empty middle stays empty.
+  with replacement, as `enc.decode`. FIM middles: the generated ids up to the first special token (a sentinel; the
+  decoder stops at BOS), decoded. `fim_lines`: a non-empty middle written up to BOS, a sentinel or the budget gets a
+  final "\n"; an empty middle stays empty.
 - Decoders (`NativeDecoder`, one per generate call): `max_length` the longest len(input_ids) + max_new_tokens − 1 of
-  the call's requests; `NativeDecoder.__init__` empties the allocator's cache first, since slots and prompt store are
-  sized by free memory (for the filtered searches, which run after the likelihood pass, this returns that pass's
-  blocks). Prompt stores: codegen, each prompt shared by its greedy request and samples; filtered, the prompts the
-  rounds repeat (left-to-right ones healed: a token shorter, the budget a token longer), one decoder for all seven
-  searches whose `max_length` is the longest of either kind; parse and FIM greedy none (no repeats).
+  the call's requests (a request beyond it raises, §6); `NativeDecoder.__init__` empties the allocator's cache first,
+  since slots and prompt store are sized by free memory (for the filtered searches, which run after the likelihood
+  pass, this returns that pass's blocks). Prompt stores: codegen, each prompt shared by its greedy request and
+  samples; filtered, the prompts the rounds repeat (left-to-right ones healed: a token shorter, the budget a token
+  longer), one decoder for all seven searches whose `max_length` is the longest of either kind; parse and FIM greedy
+  none (no repeats).
 - `generate_groups`: `done(g, ids in request order, latency)`, latency's duration from the group's first start to its
   last end with other groups interleaved; groups finish as soon as their last request ends.
 - `Filtered.record`: `{"attempts", "accepted", "latency"}` per task; unaccepted tasks score the greedy candidate.
@@ -654,8 +675,11 @@ Per module and symbol; what §1–§9 state is not repeated.
   so the installed packages resolve; exit status 1 on errors, the JSON report on stdout either way. An exception in
   one file's check aborts the whole run (pyright.js `sourceFile.check` rethrows after its internal-error diagnostic,
   `analyzeProgram` exits 2 without a report): the file named on stderr gets "1:1: basedpyright: internal error: …"
-  and the rest are checked again. Measured case: one program of a d16 checkpoint's 346-program filtered MBPP+ round
-  (`RangeError: Maximum call stack size exceeded`); the other 345 programs' results equal those of a run without it.
+  and the rest are checked again; an exit without a report and without that stderr line by a signal (a negative
+  status, or one above 128 from a wrapper: node killed, out of memory say) is handled as a timeout, the group halved
+  until the program alone gets "1:1: basedpyright: exit <status> without a report"; any other such exit raises.
+  Measured case: one program of a d16 checkpoint's 346-program filtered MBPP+ round (`RangeError: Maximum call stack
+  size exceeded`); the other 345 programs' results equal those of a run without it.
 - `solution_diagnostics`: sanitize reduces source (prompt + completion) to the entry function and its dependencies and
   keeps a parseable span; the entry function is its last top-level definition, nested functions, lambdas and classes
   excluded from the `return` search; a solution that does not parse returns its syntax error.
@@ -798,7 +822,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 | `k_wgmma` | x = xo + u Wprojᵀ |
 | `k_norm` | hn = norm(x) |
 | `k_wgmma` | the choice from s = hn W_lmᵀ over the slot's allowed tokens (all if none): argmax s at temperature 0, else argmax s/T + Gumbel noise, by atomicMax on a packed key; a nucleus-sampled slot's s stored instead (head only) |
-| `k_nucleus` | a nucleus-sampled slot's choice: that argmax over the fewest most likely allowed tokens holding top_p of softmax(s/T) (head only) |
+| `k_nucleus` | a nucleus-sampled slot's choice: that argmax over the fewest most likely allowed tokens holding top_p of softmax(s/T), a tie at the cut kept whole (head only) |
 | `k_commit` | the choice (and its alternative) becomes each active slot's next input |
 
 - **Numerics** (model/modeling.py's compiled forward, torch.compile as training and bpb run it, op by op): bf16 copies

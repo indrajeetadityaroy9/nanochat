@@ -165,6 +165,9 @@ class NativeDecoder:
         self.lib = lib
         cfg = model.config
         L, C = cfg.num_hidden_layers, cfg.hidden_size
+        if max_length > model.cos.size(0):  # decode.cu reads the rotary table at every cache position
+            raise ValueError(f"max_length {max_length} exceeds the rotary table's {model.cos.size(0)} positions")
+        self.max_length = max_length
         # the forward's bf16 GEMM copies (CausalLM.refresh_gemm_weights), bf16 lm_head and value-embedding tables (the
         # forward's rounding at use); fp32 embedding, q/k norms, gate, rotary as modeling.py has them
         weights = [model.embed_tokens.weight, model.cos, model.sin, model.lm_head.weight.bfloat16()]
@@ -207,6 +210,9 @@ class NativeDecoder:
     def start(self, b: int, index: int, request: Request) -> Slot:
         """Start request `index` in slot b at its prompt's last token; earlier positions loaded or queued to prefill."""
         n = len(request.input_ids) - 1  # the positions before the prompt's last token
+        if n + request.max_new_tokens > self.max_length:  # its cache positions: decode.cu writes them unchecked
+            raise ValueError(f"request {index}: {n + 1} prompt and {request.max_new_tokens} new tokens need "
+                             f"{n + request.max_new_tokens} positions, max_length {self.max_length}")
         at = self.stored.get(tuple(request.input_ids))
         if at is None:
             self.pending.append((b, request.input_ids))

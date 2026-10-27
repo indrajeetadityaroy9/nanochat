@@ -475,8 +475,8 @@ in Bavarian et al.'s one controlled comparison, except a near-tie (SPM single-li
 and a pure-SPM model cannot infill in PSM (arXiv 2207.14255 §3.1, §4.3 Table 1); §8.1 recommends joint training.
 [3] An AST node starts after its indentation, so without the rule no AST-FIM PSM example has a prefix ending in a line
 break and a middle starting with indentation, the layout of line-level infilling (HumanEval single-line and
-multi-line infilling mask "different spans of non-empty lines", arXiv 2207.14255 §2.2; all 1,033 single-line
-prefixes end in a line break [unverified]).
+multi-line infilling mask "different spans of non-empty lines", arXiv 2207.14255 §2.2; all 1,033 single-line and
+5,815 multi-line prefixes end in a line break [arithmetic: `read_problems`]).
 
 **The line-start rule's basis** (d16 at 20 tokens per parameter; infilling measures `docs/evaluation.md` §4–§5). The
 training format matches the evaluation prompts (sentinel ids, sections encoded separately, the BOS ending the middle).
@@ -489,6 +489,11 @@ With `LINE_START_RATE` = 0.5 (`dc76110`: 15.6% of PSM examples on train shards h
 the packs before `81fb386` 15.1–15.7% for Python and 8.6–12.6% for C++, first 100k FIM examples per corpus),
 the d16 retrained on the repacked data (`1671b56`) infills single lines in PSM at line exact match 0.175 (pass@1
 0.037 → 0.161; multi-line 0.008 → 0.045), SPM 0.367 → 0.356, code bpb unchanged (8K 0.4392; 32K 0.4210 → 0.4208).
+An AST node also ends before its line break, so a PSM middle rarely carries the final "\n" every single- and
+multi-line reference middle ends with: of 20,000 sampled FIM examples per corpus on the sa-bpe packs (data key
+`054a5bee`), 1.06% of PSM middles end in "\n" in stack_edu_python, 0.80% in ultradata_stack_v3_l2_python and 0.58%
+in repositories_python, and 54–58% of the middles that start a line end just before its line break, the suffix
+starting with it (`docs/evaluation.md` §4).
 
 - A FIM piece is decoded to text; its middle is a random span with probability 0.1, else an AST-FIM span on its
   tree-sitter parse, or a random span when the piece does not parse or has no node below the root.

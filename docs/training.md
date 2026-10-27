@@ -180,9 +180,10 @@ The best arm (× 2) beats the law (× 1) by 0.0078 code bpb; × 4 is 0.0005 behi
 law's lr, is the base multiplier, 2.8% below the earlier recipe's 2.7970369 [arithmetic]: peak lr 2.3465e-3 and
 weight decay 0.15342 on the base plan (§2).
 
-**Precision and robustness** (each evaluation's `errors`, `docs/evaluation.md` §2, §5: val rows clustered by
-document, corpora as strata; the × 2 arm): 8K code 0.0022 (49,765 rows, 44,829 clusters), 32K code 0.0157 (2,667
-rows, 2,255 clusters; 93% of its variance one 58.8M-token repository), 8K all 0.0020. The arms score identical rows,
+**Precision and robustness** (each evaluation's `errors`, `docs/evaluation.md` §2, §5, with `row_clusters`, added to
+the arms' records at `dba27e6`: val rows clustered by document, corpora as strata; the × 2 arm): 8K code 0.0022
+(49,765 rows, 44,829 clusters), 32K code 0.0157 (2,667 rows, 2,255 clusters; 93% of its variance one 58.8M-token
+repository), 8K all 0.0020. The arms score identical rows,
 so their differences are paired (arXiv 2411.00640 §4.2; `metrics.mixture_bpb_summary` of the per-row bit
 differences [arithmetic]): 8K code × 1 − × 2 = +0.00778 (standard error 0.00003), × 4 − × 2 = +0.00047 (0.00002).
 The val sample therefore resolves every arm; what it does not measure is training noise, one seed per arm: two seeds
@@ -226,7 +227,8 @@ test p = 4e-6), one trained model each, while two seeds of one D7 arm differ mor
 - the repository stage (step 3,127, lr at 5.5% of peak): the 20-step mean loss falls by 0.012 in each arm;
 - 361–362K / 288K tok/s at 8K / 32K, MFU 0.481–0.483, peak 71.10 GiB, 2,739–2,774 s of training per arm, independent
   of the lr. The sweep ran at `5e06eb8`: about 10,320 s for the three arms with their evaluations (668–697 s each in
-  parse mode, from the `end` record to the evaluation file).
+  parse mode, from the `end` record to the evaluation file [unverified: the records were rewritten at `dba27e6`, so
+  their file times no longer show it]).
 
 **Adopted** for the base run: `learning_rate_scale` = `lr_multiplier` = 2.7192599564485445 (records at `b7f5be9`) on
 the §2 plan (69,611 steps of 1,474,560 tokens, peak lr 2.3465e-3, weight decay 0.15342), run
@@ -315,8 +317,9 @@ over the corpus's rows, rows assigned by `mixture.mixture_rows`); the capped log
 square over valid positions (PaLM's z-loss quantity, arXiv 2204.02311 §5); the largest QK-norm gain
 (attention-logit growth, the quantity Kimi K2's QK-Clip bounds, arXiv 2507.20534 §2.1); every
 `UPDATE_STATS_EVERY` = 10th step the GPU's telemetry, read on the host from NVML (the image's pynvml, initialized
-once with a handle to the model's GPU) when the record is written, while the next step runs, with no device
-synchronization: `gpu_power_watts` (`nvmlDeviceGetPowerUsage`, a 1 s running average on Hopper, NVML API
+once with a handle to the model's GPU) when the record is written, while the next step runs (a record written during
+a checkpoint save, the first compilation or after the last step reads an idle GPU), with no device synchronization:
+`gpu_power_watts` (`nvmlDeviceGetPowerUsage`, a 1 s running average on Hopper, NVML API
 reference), `gpu_sm_clock_mhz` (SM clock), `gpu_temperature_c` (die) and `gpu_memory_used_bytes` (the device's,
 every process included), which relate `step_seconds` to the 700 W cap and the clock lock (§7). These are the run's
 only GPU telemetry. In the sidecar, per tensor and per layer:

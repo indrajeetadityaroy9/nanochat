@@ -434,7 +434,7 @@ Transformers backend ran at the same rate and, in the same execution mode, gave 
 plugin image were removed as a second implementation of the model. The export and vLLM path that replaced it:
 `docs/evaluation.md` §8.
 
-**Export, vLLM path and scorer replay** (removed at `67192ab`). `inference/export_hf.py` and
+**Export, vLLM path and scorer replay** (removed at `cd4edbe`). `inference/export_hf.py` and
 `inference/modeling_nanochat.py` ran checkpoints under transformers and vLLM, `scripts/standard_eval.sh` the
 harnesses' own CLIs on them, `eval/rescore.py` replayed a record's scorers on its stored completions; each validated
 the evaluation (their measurements: `docs/evaluation.md` §1, §8) and none produces a record of the base run or the

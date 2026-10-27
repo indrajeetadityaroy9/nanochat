@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import json
 import os
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -17,13 +18,17 @@ import torch
 
 from corpus.tokenizer import Tokenizer
 from eval.bpb import likelihood
+from eval.cache import environment
 from eval.code_eval import filtered_generation, fim_generation, generation, parse_generation, sanitizers, tasks, vetted
 from eval.verify import cores
-from paths import RUNS
+from paths import ROOT, RUNS
 from train.checkpoint import load_model
 
 if TYPE_CHECKING:
     from multiprocessing.synchronize import Event
+
+# The checkout's code and configuration trees (beside its top-level .py, .toml and .lock files)
+SOURCE_TREES = ("ablations", "conf", "corpus", "docker", "eval", "inference", "model", "scripts", "train")
 
 
 def pin(cpus: frozenset[int]) -> None:
@@ -40,6 +45,26 @@ def evaluation_path(run_name: str, step: int) -> Path:
     return RUNS / run_name / f"eval-{step}.json"
 
 
+def source_digest() -> str:
+    """SHA-256 over the checkout's code and configuration: each file's path relative to ROOT and its bytes, in path
+    order (bytecode caches excluded), so a record names the code that produced it; a checkout's digest is computed the
+    same way."""
+    files = [p for p in ROOT.iterdir() if p.is_file() and p.suffix in (".py", ".toml", ".lock")]
+    files += [p for tree in SOURCE_TREES for p in (ROOT / tree).rglob("*")
+              if p.is_file() and "__pycache__" not in p.parts]
+    digest = hashlib.sha256()
+    for p in sorted(files):
+        digest.update(p.relative_to(ROOT).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def write_atomically(path: Path, data: bytes) -> None:
+    """path holds data or its previous state, never a part (run.job takes an existing eval-<step>.json as done)."""
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
 def write_evaluation(path: Path, evaluation: dict) -> None:
     """Write an evaluation: the record at path with "samples" {"file", "sha256"} (null without generation benchmarks)
     in place of every sampled record's "completions", which go to eval-<step>.samples.json.gz beside it,
@@ -53,9 +78,9 @@ def write_evaluation(path: Path, evaluation: dict) -> None:
                                          for name, records in evaluation["codegen"].items()},
                                         allow_nan=False).encode(), mtime=0)
         sidecar = path.with_name(f"{path.stem}.samples.json.gz")
-        sidecar.write_bytes(data)
+        write_atomically(sidecar, data)
         samples = {"file": sidecar.name, "sha256": hashlib.sha256(data).hexdigest()}
-    path.write_text(json.dumps(record | {"samples": samples}, allow_nan=False), encoding="utf-8")
+    write_atomically(path, json.dumps(record | {"samples": samples}, allow_nan=False).encode())
 
 
 def resolved(records: dict) -> dict:
@@ -71,7 +96,10 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
     dropped, the allocator's cache emptied, the process tree moved to the timed-check cores and `released` set, while
     scoring finishes. previous: set once the previous checkpoint's evaluation has ended; the official scoring and the
     filtered searches' timed checks wait for it, so they never share the CPU with another checkpoint's. Results do not
-    depend on the GPU order except timed checks, which heavy CPU load can fail."""
+    depend on the GPU order except timed checks, which heavy CPU load can fail. The record's "provenance": the source
+    digest (taken at the start, as the code is imported), the environment (eval/cache.py) and the evaluation's start
+    and end times (Unix seconds)."""
+    started, source = time.time(), source_digest()
     decode, timed = cores()  # the starting affinity's split, taken before the pin
     os.environ["RAYON_NUM_THREADS"] = str(len(decode))  # rayon sizes its pool once, at first use
     pin(decode)
@@ -109,7 +137,10 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
         released.set()
         results |= {"parse": resolved(parse), "codegen": None if codegen is None else resolved(codegen),
                     "fim": None if fim is None else resolved(fim)}
-    write_evaluation(evaluation_path(run_name, step), {"run_name": run_name, "step": step} | results)
+    provenance = {"source_sha256": source, "environment": json.loads(environment()), "started": started,
+                  "finished": time.time()}
+    write_evaluation(evaluation_path(run_name, step),
+                     {"run_name": run_name, "step": step} | results | {"provenance": provenance})
 
 
 def record(run_name: str, log: list[dict]) -> dict:
