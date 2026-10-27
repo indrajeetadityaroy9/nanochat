@@ -28,7 +28,8 @@ def export(checkpoint: Path, out: Path) -> None:
     state = torch.load(checkpoint, map_location="cpu", mmap=True)
     config = ModelConfig(**state["config"])
     n, C, T = config.num_hidden_layers, config.hidden_size, config.max_position_embeddings
-    # bf16 what the training forward reads in bf16 (the GEMM copies, the embedding cast, ve_gate.cu's table rounding)
+    # bf16 what modeling.py reads in bf16 (the GEMM copies, the embedding cast, ve_gate.cu's table rounding); the
+    # compiled forward's x0 is the fp32 embedding row's norm (Inductor drops the cast; decode.cu k_norm EMBED)
     fp32 = set(NanochatPreTrainedModel._keep_in_fp32_modules_strict)
     save_file({(k if k == "lm_head.weight" else f"model.{k}"):
                v.to(torch.float32 if fp32 & set(k.split(".")) else torch.bfloat16).contiguous()

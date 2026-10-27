@@ -53,7 +53,7 @@ impl Grammar {
 }
 
 /// The byte ranges between consecutive items of every container (and the root's leading and trailing ranges); no range
-/// borders an ERROR node.
+/// between two items borders an ERROR node.
 fn statement_gaps(tree: &Tree, grammar: &Grammar, text: &[u8]) -> Vec<(usize, usize)> {
     let root = tree.root_node();
     let end = |node: &Node| node.end_byte() - (node.end_byte() > 0 && text[node.end_byte() - 1] == b'\n') as usize;

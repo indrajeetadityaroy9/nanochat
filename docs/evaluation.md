@@ -33,8 +33,8 @@ Every completion scored is stored: in the record, except the sampled mode's (20 
 `write_evaluation` moves to the sidecar `eval-<step>.samples.json.gz` (gzip JSON, `{benchmark: each task's
 completions}` in task order), named with its sha256 in the record's `"samples"` (null without benchmarks).
 The base model's checkpoints are evaluated with `"benchmarks"`, ablation runs with `"parse"` (which checkpoints and
-when: `docs/training.md` §6). `record(run_name, log)` gathers a run's non-train log records and its evaluations in
-step order, the unit of `results/<experiment>.jsonl` (`docs/training.md` §6).
+when: `docs/training.md` §6). `record(run_name, log)` gathers a run's non-train log records (in log order) and its
+evaluations (in step order), the unit of `results/<experiment>.jsonl` (`docs/training.md` §6).
 
 Order of work (`evaluate`): the unconstrained decodes (`parse_generation`, `generation`, `fim_generation`), the
 likelihood pass, then the filtered searches (`filtered_generation`: the seven benchmarks' searches in shared rounds,
@@ -50,16 +50,18 @@ process tree (`suite.evaluate` pins it there, rayon's pool sized to them): the d
 the in-process checks, the sanitize workers and the untimed reference runs. Every timed check (basedpyright, g++,
 timed example runs, EvalPlus, MultiPL-E and infilling evaluators) runs on the other cores (`verify.timed`:
 `taskset`); each pool of timed children is sized to those cores (`timed_workers`), as EvalPlus asks of a test bed
-(no oversubscription); the scorer thread's evaluators (all slots) and the filtered searches' checks (one each) share
-one budget of `timed_workers()` slots (`verify.timed_slots`), so at most one timed child runs per such core. Every
+(no oversubscription); the scorer thread's evaluators (EvalPlus's and the infilling evaluator: all slots; MultiPL-E's:
+one per file) and the filtered searches' checks (one each) share one budget of `timed_workers()` slots
+(`verify.timed_slots`), so at most one timed child runs per such core. Every
 timed child starts in a session of its own (`verify.run_group`), and its whole process group is killed once it exits
 or times out: a g++ check killed at its time-out had left its `cc1plus` running on a timed-check core (a d24
-rehearsal checkpoint's evaluation, over 5 min), holding a core the one-child-per-core rule counts as free; output
-goes through files, so a descendant holding them cannot delay the return.
-Basis: on a d24 benchmarks evaluation (GH200, 64 cores, unpinned; ab4 overlap run, the host shared with other jobs
-for part of it, so timing is indicative), the evaluation process used 1.0 core in its unconstrained decodes and
-13.0–15.5 cores (30-s means, at most 18.6) in the filtered searches. Timed verdicts depend on load: an infilling
-check that takes 2.22–2.24 s on an idle core (3 s limit) timed out in one of two runs of the same checkpoint.
+rehearsal checkpoint's evaluation, over 5 min [unverified: no record]), holding a core the one-child-per-core rule
+counts as free; output goes through files, so a descendant holding them cannot delay the return.
+Basis of `DECODE_CORES` (`09b2cef`) [unverified: no record]: on a d24 benchmarks evaluation (GH200, 64 cores,
+unpinned, the host shared with other jobs for part of it, so timing is indicative), the evaluation process used 1.0
+core in its unconstrained decodes and 13.0–15.5 cores (30-s means, at most 18.6) in the filtered searches. Timed
+verdicts depend on load: an infilling check that takes 2.22–2.24 s on an idle core (3 s limit) timed out in one of two
+runs of the same checkpoint.
 
 Checkpoints overlap (`run.py` `evaluations`, one process per checkpoint): once checkpoint k's last GPU phase ends,
 `evaluate` drops the model, the decoders (their native memory goes with them) and the compiled graphs, empties the
@@ -69,20 +71,18 @@ cores. k + 1's official scoring and filtered searches wait for k's process to en
 one checkpoint shares a core with another checkpoint's work; k + 1's decoders take the free memory as always (a slot
 count changes timing, not tokens, §6).
 
-Measured on a d16 checkpoint (GH200): before the pipeline, the codegen half's 969 s were 36% CPU scoring with the GPU
-idle, 28% likelihood, 15% generation (85–96% SM busy), 22% filtered search [unverified: no record or commit];
-pipelining (`a41415e`) took the full benchmarks evaluation from 1,472 to 1,064 s (−28%), GPU idle 57.4% → 34.2%,
-scoring with no GPU work 483 → 8.4 s, 0 per-sample changes where the protocol was unchanged; with the decoder of
+Measured on the d16 checkpoint (step 4552, exclusive GH200): before the pipeline, the codegen half's 969 s were 36% CPU
+scoring with the GPU idle, 28% likelihood, 15% generation (85–96% SM busy), 22% filtered search [unverified: no record
+or commit]; pipelining (`a41415e`) took the full benchmarks evaluation from 1,472 to 1,064 s (−28%), GPU idle (SM
+< 5%) 57.4% → 34.2%, scoring with no GPU work 483 → 8 s; per-sample statuses: 0 flips in parse, codegen and FIM
+greedy and random-span, 1 in random-span SPM filtered (a failure inside human-eval-infilling); with the decoder of
 `4385748` (§6), 862 s.
 
 **Validation of a change.** The canonical comparison of a new record with a reference record of the same checkpoint
-covers every model-derived field (generations, attempts, likelihoods, solution bits; latency excluded). A CPU scorer
-replay, `eval/rescore.py` (removed at `cd4edbe`), reran every scorer and checker (EvalPlus base and plus, MultiPL-E's
-judge, the infilling checks, parse outcomes, the filtered mode's verdicts) on a record's stored completions against an
-empty verdict cache and compared field by field; on a d24 `eval-3307.json` of base `c053bdc`, its 22,000 sampled
-completions synthesized from the stored greedy, filtered and parse ones, 0 fields differed and the sidecars' sha256
-matched (449 s on cores 32–63). The sidecar adds 0.22 MB there (≤ 1.5 MB [estimate] for 22,000 distinct samples, as
-gzip compresses the greedy completions) beside the 25.3 MB record, whose size does not change.
+covers every model-derived field (generations, attempts, likelihoods, solution bits; latency excluded); the scorer
+replays (`eval/rescore.py` at `49aebbb`, the official evaluators at `1243e81`): §9. Sidecars of 22,000 sampled
+completions are 0.68 MB (the × 2 peak-lr arm's benchmarks `eval-3307`, record 25.3 MB) and 0.91 and 0.71 MB (the
+rehearsal's `eval-1102`, `eval-2205`).
 
 ## 2. Likelihood metrics
 
@@ -95,17 +95,20 @@ karpathy/nanochat's `evaluate_bpb`. Sums are fp64 on the device, reduced in a fi
   (`FILE_LEVEL_STAGE`) always, at 32K (`REPO_LEVEL_STAGE`) only for a model at the 32K context
   (`max_position_embeddings == 32768`), else null. This is the AR loss of arXiv 2207.14255 §2. Per corpus: bits and
   bytes per context bucket (`CONTEXTS = (8192,)`: positions ≤ 8K, which both stages train, and > 8K, which only the
-  repository stage trains; Code Llama's loss by context length, arXiv 2308.12950 §3.3, Fig. 4a), per byte-offset
+  repository stage trains; Code Llama's perplexity by context length, arXiv 2308.12950 §3.3, Fig. 4a), per byte-offset
   bucket (`OFFSETS`: doublings from 1 KiB to 128 KiB of the target's segment before it, so tokenizers compare at equal
   bytes of context, arXiv 2503.13423 §3.1, App. B.1) and per sampled row, with the row's cluster (`row_clusters`).
   Pooled per group (code, text, math) and over all corpora with `metrics.mixture_bpb`, `offset_bpb` and
   `mixture_bpb_summary` (§5) by one fixed evaluation mixture, `Stage.shares` (`docs/corpus.md` §7) at the stage's
   total packed train rows: the fixed shares as trained, a "supply" corpus at its packed rows over all packed rows, not
-  over the rows a run draws (its training share), so supply corpora weigh 0.61× their base-run share at 8K (notebooks
-  0.0095 against 0.0156) and 0.85× at 32K (traces 0.0470 against 0.0554). Every record, the peak-lr calibration's
-  included, uses these weights; under the base run's mixture a d24 rehearsal checkpoint's 8K code bpb is 0.000784
-  higher (0.499136 against 0.498352, a third of its standard error) and `all` 0.000674, text and math unchanged,
-  recomputable from a record's per-corpus sums.
+  over the rows a run draws (its training share), so supply corpora weigh 0.62× their base-run share at 8K (notebooks
+  0.0095 against 0.0155) and 0.85× at 32K (traces 0.0465 against 0.0544) [arithmetic: the packs' train rows; the base
+  run's 66,063 and 3,811 steps]. Every record, the peak-lr calibration's included, uses these weights, computed from
+  the packs at its evaluation (the records in `results/` and `artifacts/runs/` differ from the current packs' weights
+  by at most 3.2e-4 at 8K and 4.9e-4 at 32K: traces 0.0470); under the base run's mixture the × 2 arm's 8K code bpb
+  (`results/peak_lr_d24.jsonl`) is 0.00062 higher (0.40607 against 0.40544, 0.29 of its standard error) and `all`
+  0.00054, text and math unchanged (32K code: +0.00161, 0.10 standard errors) [arithmetic, from the record's
+  per-corpus sums].
 - **Sample** (`sample_rows`, `VAL_TOKENS = 80 × 2^19`, nanochat's `--eval-tokens`): per corpus, n = min(rows,
   ⌈VAL_TOKENS / (micro-batch × seq_len)⌉ × micro-batch) rows, row ⌊j · rows / n⌋ for j < n: systematic, because the
   packer orders each shard's rows longest first, so a prefix would over-represent long documents. Models of one
@@ -118,15 +121,18 @@ karpathy/nanochat's `evaluate_bpb`. Sums are fp64 on the device, reduced in a fi
   clusters (up to 135 rows); at 32K the 2,667 code rows form 2,255, and one `repositories_python` document of 58.8M
   tokens spans 93 of that corpus's 1,281 sampled rows: 7.7% of its bytes at 0.10 bits per byte against the corpus's
   0.39 and 93% of the 32K code variance (the × 2 arm of `results/peak_lr_d24.jsonl`) [arithmetic, from the packs].
+  Records written before `row_clusters` existed (the benchmarks-mode d24 `eval-3307.json`, `eval-1102.json`,
+  `eval-2205.json`) carry no `"row_clusters"`; their `"errors"` treat rows as independent (the × 2 checkpoint's 8K
+  code se 0.00080 there against 0.00217 in its parse-mode record).
 - **Reference solutions** (`solution_bits`, `SOLUTION_BENCHMARKS`): the bits of HumanEval+'s and MBPP+'s canonical
   solutions (EvalPlus) and HumanEval-X C++'s (arXiv 2303.17568; MultiPL-E has none) given their prompts, one example
   per 8K row, BOS first: the task loss of arXiv 2412.04403 §2.2. A continuous correct-answer likelihood makes
   HumanEval and MBPP decisions predictable where accuracy is trivial (arXiv 2504.11393 §3.4, Fig. 6); BPB raises the
   signal-to-noise ratio of most benchmarks (arXiv 2508.13144 §5.3); the loss on a benchmark's problems and reference
-  solutions tracks pass@1 where held-out loss does not (arXiv 2604.07769 §3.3.1). A solution's leading blank lines
-  count as prompt: EvalPlus's solutions begin with them and a tokenizer joins them to the prompt's last line break, so
-  the prompt would otherwise end inside a token and tokenizers would score different bytes. Scoring starts at the
-  token that starts at the prompt's end (`decode_with_offsets`; none raises).
+  solutions correlates with pass@1 more strongly than held-out loss does (arXiv 2604.07769 §3.3.1). A solution's
+  leading blank lines count as prompt: EvalPlus's solutions begin with them and a tokenizer joins them to the prompt's
+  last line break, so the prompt would otherwise end inside a token and tokenizers would score different bytes.
+  Scoring starts at the token that starts at the prompt's end (`decode_with_offsets`; none raises).
 
 ## 3. Parse measure
 
@@ -138,7 +144,7 @@ stop, special tokens skipped. Each `prompt + completion` is classified by `metri
 IndentationError (TabError included) or another SyntaxError, the classification of TokEval's companion post; the
 record holds each outcome's share and the completions' EvalPlus base and plus pass@1. The measure shows the failures a
 vocabulary's line-break tokens cause (SyntaxError when punctuation fuses with a line break, IndentationError when a
-line break fuses with the indentation after it, in arXiv 2608.18062's models) where pass@1 is near zero. It departs
+line break fuses with the indentation after it, in the companion post's models) where pass@1 is near zero. It departs
 from TokEval's protocol in its prompts (EvalPlus's 0-shot base prompts; TokEval: lm-evaluation-harness, MBPP 3-shot,
 App. C.1), its budget and stops (the post: 256 tokens) and in compiling the unsanitized completion.
 
@@ -148,8 +154,8 @@ App. C.1), its budget and stops (the post: 256 tokens) and in compiling the unsa
 
 | Benchmark | Problems | Prompt; budget; stops | Evaluator | Data pin |
 |---|---|---|---|---|
-| HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) | 164, 378 | `prompt.strip() + "\n"`; 768 new tokens; EvalPlus's EOS + `extra_eos_for_direct_completion`, special tokens skipped, tabs → 4 spaces, `sanitize(prompt + completion, entry point)` (EvalPlus's base-model codegen) | `evalplus.evaluate` (`timed_workers()` parallel on the timed-check cores, `EVALPLUS_EVALUATE`, §1; its `untrusted_check` patched against a lock deadlock in the image, verdicts unchanged, `docs/training.md` §11): per-sample statuses; base and plus pass@1 by its estimator, averaged in task order (§10) | evalplus `26d6d00` (`pyproject.toml`); HumanEvalPlus v0.1.10, MbppPlus v0.2.0 |
-| HumanEval, MBPP in C++ (MultiPL-E, arXiv 2208.08227) | 161, 397 | `prompt.strip()`; 1,024 positions of prompt and completion, BOS included (the longest prompt is 600 tokens under the corpus tokenizer [arithmetic], so `automodel.py`'s empty completion for a prompt of ≥ 1,024 tokens never applies); the row's stop tokens, the first special token ends it | MultiPL-E `evaluation/src/main.py --file … --max-workers 1` per problem, `timed_workers()` at once on the timed-check cores (§1; g++ -std=c++17 with the precompiled `<bits/stdc++.h>` of §7, 15 s compile, 15 s run); pass@1 by Codex's estimator (`metrics.pass_at_k`, equal to `pass_k.py`'s), averaged in problem order (§10) | dataset `nuprl/MultiPL-E` at `3a9e8d2` (the revision MultiPL-E's `completions.py` pins); evaluator `3025a53` (`docker/Dockerfile`) |
+| HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210) | 164, 378 | `prompt.strip() + "\n"`; 768 new tokens; EvalPlus's EOS + `extra_eos_for_direct_completion`, special tokens skipped, tabs → 4 spaces, `sanitize(prompt + completion, entry point)` (EvalPlus's base-model codegen) | `evalplus.evaluate` (`timed_workers()` parallel on the timed-check cores, `EVALPLUS_EVALUATE`, §1; its `untrusted_check` patched against a lock deadlock in the image, verdicts unchanged, `docs/training.md` §11): per-sample statuses; base and plus pass@1 by Codex's estimator (`metrics.pass_at_k`, the formula of EvalPlus's `estimate_pass_at_k`), averaged in task order (§10) | evalplus `26d6d00` (`pyproject.toml`); HumanEvalPlus v0.1.10, MbppPlus v0.2.0 |
+| HumanEval, MBPP in C++ (MultiPL-E, arXiv 2208.08227) | 161, 397 | `prompt.strip()`; 1,024 positions of prompt and completion, BOS included (the longest prompt, a HumanEval C++ one, is 600 tokens with BOS under the corpus tokenizer [arithmetic], so `automodel.py`'s empty completion for a prompt of ≥ 1,024 tokens never applies); the rows' one stop token `"\n}"`, the first special token ends it | MultiPL-E `evaluation/src/main.py --file … --max-workers 1` per problem, `timed_workers()` at once on the timed-check cores (§1; g++ -std=c++17 with the precompiled `<bits/stdc++.h>` of §7, 15 s compile, 15 s run); pass@1 by Codex's estimator (`metrics.pass_at_k`, equal to `pass_k.py`'s), averaged in problem order (§10) | dataset `nuprl/MultiPL-E` at `3a9e8d2` (the revision MultiPL-E's `completions.py` pins); evaluator `3025a53` (`docker/Dockerfile`) |
 | HumanEval-X C++ (arXiv 2303.17568) | 164 | reference solutions only (§2) | — | `zai-org/humaneval-x` at `62c7862` |
 | HumanEval infilling single-line, multi-line, random-span (arXiv 2207.14255) | 1,033, 5,815, 1,640 [arithmetic: `read_problems`] | PSM and SPM prompts (`decoder.fim_prompt`, the packer's layout, `docs/corpus.md` §8); middle until BOS or another special token (a FIM sentinel, as the first special token ends a MultiPL-E completion), at most the benchmark's longest reference middle in tokens; not healed (a FIM prompt ends with a sentinel or with the prefix encoded alone, the training format) | the package's `check_correctness` per middle (3 s) in a fork pool of `timed_workers()` workers on the timed-check cores (`INFILLING_EVALUATE`, §1) | `openai/human-eval-infilling` `88062ff` (`docker/Dockerfile`) |
 
@@ -168,25 +174,26 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
 - **Infilling.** The middle is scored as generated, up to BOS, another special token or the budget (the package's
   protocol, no post-processing). `greedy_reference_lines` also scores the greedy single- and multi-line middles cut to
   the reference middle's raw line count (`fim_lines`; the rule of arXiv 2505.18789 Table 1, whose Fig. 4 code skips
-  blank and comment lines and drops the final "\n"): a separate metric, since it reads the reference. The references'
-  middles are whole lines, each ending in "\n"; the packer trains that layout for AST middles that start and end a
-  line (`docs/corpus.md` §8, about 35% of PSM middles). A d16 checkpoint trained before that rule, whose middles
-  rarely ended in "\n", rarely ended at a line end: single-line SPM greedy pass@1 was 0.074 as generated against
-  0.437 cut (`a41415e`). Infilling records add CrossCodeEval's similarity scores against the reference middle (§5),
-  all clustered by HumanEval problem.
-- **Comparability.** The sampled mode draws 20 samples per problem where Codex and MultiPL-E drew 200 and the
-  BigCode leaderboard 50: the same estimate with more variance per problem [inference] (MultiPL-E reports its pass@1
-  stable from about 20 samples, arXiv 2208.08227 [unverified: section not checked]). Its pass@10 is the unbiased
-  pass@10 of T = 0.2 sampling, not the published pass@10 protocol (Codex takes each k at its best temperature, §3.3;
-  MultiPL-E's `pass_k.py` reports pass@10 only for its T = 0.8 runs), so it is not comparable with those tables. The
-  filtered mode's T = 0.8 is Codex's pass@100 optimum (higher temperatures are optimal for larger k, §3.3). HumanEval
-  infilling is greedy, not arXiv 2207.14255's pass rate of 100–200 samples per task at T = 0.2 (Fig. 6, Table 1).
-  The prompts' examples overlap the scored base tests (MBPP+: nearly every prompt assert calls the entry function on
-  a base input; HumanEval+: many tasks share a doctest input), so the filtered mode favours base over plus pass@1
-  (`verify.py`). Prompts, stops, budgets and scorers were checked against EvalPlus, MultiPL-E and
-  human-eval-infilling at their pinned commits (the FIM line cut, the MultiPL-E data pin and the example checks'
-  sandbox were the deviations, fixed in `a41415e`). `char` is unsigned on ARM64 and signed on x86, so a MultiPL-E C++
-  program that depends on it can score differently [inference].
+  blank and comment lines and drops the final "\n"): a separate metric, since it reads the reference. The single- and
+  multi-line references' middles are whole lines, each ending in "\n"; the packer trains that layout for AST middles
+  that start and end a line (`docs/corpus.md` §8: 35.2–37.2% of the Python corpora's PSM middles end in "\n"). A d16
+  checkpoint trained before that rule, whose middles rarely ended in "\n", rarely ended at a line end: single-line SPM
+  greedy pass@1 was 0.074 as generated against 0.437 cut (`a41415e`). Infilling records add CrossCodeEval's
+  similarity scores against the reference middle (§5), all clustered by HumanEval problem.
+- **Comparability.** The sampled mode draws 20 samples per problem where Codex (arXiv 2107.03374 §2.1) and MultiPL-E
+  drew 200 and the BigCode leaderboard 50 (arXiv 2402.19173 §7.1.2): the same estimate with more variance per problem
+  [inference] (MultiPL-E notes its pass@1 rates stabilize around 20 samples, arXiv 2208.08227 §4.2, footnote 6). Its
+  pass@10 is the unbiased pass@10 of T = 0.2 sampling, not the published pass@10 protocol (Codex takes each k at its
+  best temperature, §3.3; MultiPL-E's `pass_k.py`, without `-k`, reports pass@10 only for its T = 0.8 runs, and §4.2
+  takes pass@10 at T = 0.8), so it is not comparable with those tables. The filtered mode's T = 0.8 is Codex's
+  pass@100 optimum (higher temperatures are optimal for larger k, §3.3). HumanEval infilling is greedy, not arXiv
+  2207.14255's pass rate of 100–200 samples per task at T = 0.2 (Fig. 6, Table 1). The prompts' examples overlap the
+  scored base tests (MBPP+: 373 of the 378 prompt asserts call the entry function on a base input; HumanEval+: 121 of
+  the 176 doctest examples of its 75 tasks with examples do [arithmetic: EvalPlus data, `verify.examples`]), so the
+  filtered mode favours base over plus pass@1 (`verify.py`). Prompts, stops, budgets and scorers were checked against
+  EvalPlus, MultiPL-E and human-eval-infilling at their pinned commits (the FIM line cut, the MultiPL-E data pin and
+  the example checks' sandbox were the deviations, fixed in `a41415e`). `char` is unsigned on ARM64 and signed on x86,
+  so a MultiPL-E C++ program that depends on it can score differently [inference].
 - **Contamination.** The train splits are decontaminated against every scored benchmark (`docs/corpus.md` §3): a
   row sharing a 10-gram of words with a task's prompt or reference program is dropped (Qwen2.5-Coder's rule, arXiv
   2409.12186 §5), 491,203 rows, among them text of every HumanEval+ task and 372 of 378 MBPP+ tasks; before it,
@@ -196,7 +203,7 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
 - **Evaluator processes.** EvalPlus's `sanitize` parses every line span of a program, hence a sanitize worker per
   CPU. MultiPL-E's `main.py --dir` judges a directory's problems serially, hence a `--file` process per problem.
   human-eval-infilling's CLI forks a Manager and a Process per sample from one interpreter's thread pool, so its rate
-  is bound by that interpreter's GIL (4 or 64 threads about the same), hence `INFILLING_EVALUATE`'s fork pool.
+  is bound by that interpreter's GIL at any worker count (`9d61a1b`), hence `INFILLING_EVALUATE`'s fork pool.
 
 ## 5. Metrics and statistics
 
@@ -205,25 +212,25 @@ import it alike. Every public function:
 
 | Function | Computes | Source definition; library |
 |---|---|---|
-| `append`, `records`, `train_steps`, `diverged`, `curves` | the run log `RUNS/<run>/metrics.jsonl` (record kinds and fields: §10, `metrics.py`): append one JSON record with `run_name`, `attempt`, `time` (NaN and infinities raise, `allow_nan=False`); read it; the latest attempt's train record per step; the last failure record's step or None; train records as columns in step order (None where a record lacks the field) | — |
+| `append`, `records`, `train_steps`, `diverged`, `curves` | the run log `RUNS/<run>/metrics.jsonl` (record kinds and fields: `docs/training.md` §6; file format: §10): append one JSON record with `run_name`, `attempt`, `time` (NaN and infinities raise, `allow_nan=False`); read it; the latest attempt's train record per step; the last failure record's step or None; train records as columns in step order (every field but `run_name` and `kind`; None where a record lacks the field) | — |
 | `bpb(*pooled)` | Σ bits / Σ bytes over context buckets and arguments | The Pile, arXiv 2101.00027 §3.1 |
-| `mixture_bpb(corpora, weights, buckets=)` | Σ_c w_c · bits_c / rows_c over Σ_c w_c · bytes_c / rows_c: the bits per byte of val rows drawn with row weights w | as The Pile pools its components |
+| `mixture_bpb(corpora, weights, buckets=)` | Σ_c w_c · bits_c / rows_c over Σ_c w_c · bytes_c / rows_c (rows_c the corpus's scored rows): the bits per byte of val rows drawn with row weights w | as The Pile pools its components |
 | `offset_bpb` | `mixture_bpb` per byte-offset bucket (None where no target is); a bucket pools the documents long enough to reach it, so the curve mixes context use with document composition | arXiv 2308.12950 Fig. 4a; 2503.13423 App. B.1 |
 | `mixture_bpb_summary(corpora, weights)` | `mixture_bpb` of the rows, R = Σ_c a_c · bits_c / Σ_c a_c · bytes_c (a_c = w_c / rows_c), with its standard error as a stratified cluster sample: the corpora are strata at fixed weights, each corpus's clusters of rows (`row_clusters`, §2) its independent units; by the delta method se² = Σ_c a_c² · m_c · s_c² / (Σ_c a_c · bytes_c)², s_c² the sample variance (ddof 1) of the m_c cluster sums of bits − R · bytes; 95% normal interval. For one corpus of one-row clusters it is the HC1 error of the WLS fit of row bpb on a constant weighted by bytes (statsmodels; equal to 1e-15 on real records) | Miller, arXiv 2411.00640 Eq. 1, 3, 4 (per stratum); numpy |
-| `parse_outcome(source)` | `compile()` → "parses", "indentation" (IndentationError, TabError; checked first) or "syntax" (other SyntaxError; MemoryError and RecursionError of the parser, and its ValueError of §10, count here) | TokEval's companion post ("How the failing generations fail"; arXiv 2608.18062 App. F.3, fn. 15) |
+| `parse_outcome(source)` | `compile()` → "parses", "indentation" (IndentationError, TabError; checked first) or "syntax" (other SyntaxError; MemoryError and RecursionError of the parser, and its ValueError of §10, count here) | TokEval's companion post, section "How the failing generations fail" (linked from arXiv 2608.18062 App. F.3, fn. 15) |
 | `parse_shares` | each outcome's share of a benchmark's completions | — |
 | `measures(evaluation, steps, repo_level_start=)` | a run's compared measures (table below) | — |
 | `measure_errors(evaluation)` | their error bars: `code`, `text`, `math`, `repo_32k` from the evaluation's `errors` (`mixture_bpb_summary`); `solutions` by `mixture_bpb_summary` over two strata at their solution counts (the pooled ratio): HumanEval (HumanEval+ and HumanEval-X C++ solutions of problem i one cluster) and MBPP+; the parse shares and `pass@1` by `summary` over problems; none for `repo_beyond_8k`, `tokens_per_second`, `mfu` | Miller Eq. 1, 4 |
-| `line_exact_match` | `prediction.strip() == reference.strip()` | SantaCoder (arXiv 2301.03988 §6.1.2; bigcode-evaluation-harness `santacoder_fim.py`), DeepSeek-Coder §4.2 |
-| `code_lines`, `exact_match` | comment-stripped (`#`, `//` to the line end), stripped non-empty lines; equal lines | CrossCodeEval (arXiv 2310.11248 §4; amazon-science/cceval `40c68d2`) |
+| `line_exact_match` | `prediction.strip() == reference.strip()` | SantaCoder's single-line exact match (arXiv 2301.03988 §5.4; the strip: bigcode-evaluation-harness `santacoder_fim.py`), DeepSeek-Coder §4.2 |
+| `code_lines`, `exact_match` | comment-stripped (`#`, `//` to the line end), stripped non-empty lines; equal lines | CrossCodeEval (arXiv 2310.11248 §3.2; amazon-science/cceval `40c68d2`) |
 | `edit_similarity` | 100 when equal, 0 when either is empty, else round(100 × difflib `SequenceMatcher` ratio) of the comment-stripped strings | cceval's fuzzywuzzy 0.18 without python-Levenshtein (difflib) |
 | `identifiers`, `identifier_match` | identifiers after removing comments and string literals, Python keywords excluded (True and False kept); exact match of the lists, F1 over the sets (0 when both are empty) | cceval `extract_identifiers` |
 | `completion_scores` | per sample: `line_em`, `em`, `es` (0–100), `id_em`, `id_f1`, over the whole middle: cceval's `postprocess_code_lines` (its cut after the prediction's first statement) is not applied, and `//` to the line end is stripped as cceval strips it, in Python too (floor divisions included) | cceval's per-sample results |
 | `pass_at_k(passed, k)` | each problem's pass@k estimate from its samples | Codex's unbiased estimator (arXiv 2107.03374 §2.1); `human_eval_infilling` `estimate_pass_at_k` |
-| `summary(scores, clusters=)` | mean of question scores (each score a mean of question-level scores, a problem's pass@k estimate one of them: Miller §3.1 [unverified: paper text not in the extracted set]); OLS on a constant: unclustered, se = s/√n (sample variance over n − 1, Miller Eq. 1); clustered, Liang–Zeger CR0 without small-sample correction (Miller Eq. 4 except for Eq. 4's (n − 1) in its diagonal term); 95% normal interval (Eq. 3), not clipped to [0, 1]; a constant score (0 passes, say) has se 0 and a zero-width interval, so a near-zero pass rate needs an exact or Wilson interval in reporting (computable from the per-problem scores) | statsmodels `OLS` |
-| `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends: itself and up to window_l before it (`layer_windows`: 512, or the context for full layers), the convention of `attended_keys`; records written before the query's own key was counted (`results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), 73,728 lower: 641,826,816 at 8K, 1,245,806,592 at 32K | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT [unverified: App. B is not in the extracted text]; torchtitan's count without the causal halving |
+| `summary(scores, clusters=)` | mean of question scores (a question's score may itself be a mean, of its K answers in Miller §3.1, so a problem's pass@k estimate is one [inference]); OLS on a constant: unclustered, se = s/√n (sample variance over n − 1, Miller Eq. 1); clustered, Liang–Zeger CR0 without small-sample correction (Miller Eq. 4 except for Eq. 4's (n − 1) in its diagonal term); 95% normal interval (Eq. 3), not clipped to [0, 1]; a constant score (0 passes, say) has se 0 and a zero-width interval, so a near-zero pass rate needs an exact or Wilson interval in reporting (computable from the per-problem scores) | statsmodels `OLS` |
+| `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends: itself and up to window_l before it (`layer_windows`: 512, or the context for full layers), the convention of `attended_keys`; records written before the query's own key was counted (`results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), lower by 12 · C per windowed layer (d16: 12 · 512 · 12 = 73,728): 641,826,816 at 8K, 1,245,806,592 at 32K (d24: 165,888 lower) | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT; torchtitan's count without the causal halving |
 | `attended_keys(lengths, window)` | Σ over segments of Σ_p min(p, window + 1): the keys each query attends causally within its segment, itself included | — |
-| `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B [unverified, as above]; Megatron-LM's causal, per-document counting |
+| `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B; Megatron-LM's causal, per-document counting |
 | `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12, the H100 SXM5 / GH200 dense BF16 peak) | PaLM §4.1 |
 | `parabola_vertex(x, y)` | (a, −b/2a) of the least-squares parabola (numpy `polyfit`, degree 2); used by `docs/training.md` §5 | — |
 | `latency(starts, firsts, ends, new_tokens, duration=)` | `ttft` (first − start), `tpot` ((end − first)/(n − 1), requests of > 1 token; None if none), `e2el`, each mean, median, p99; `output_throughput` | vLLM `benchmarks/serve.py` `calculate_metrics` |
@@ -255,8 +262,9 @@ reach at the 700 W cap (`docs/training.md` §7), as nominal counts keys outside 
 `torch.utils.flop_counter` would count the same once each custom op registered its formula, but per step it would
 read `cu_seqlens` on the host (a device sync) and dispatch every op through Python.
 FLOPs count 2 per multiply-add; rematerialization is not counted (PaLM §4.1's MFU definition). `tokens_per_second` is
-the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint FlashAttention reports (arXiv 2205.14135),
-`peak_reserved_bytes` the allocator's. Measured MFU: `docs/training.md` §7.
+the observed throughput of PaLM's MFU; `peak_memory_bytes` (`torch.cuda.max_memory_allocated`) is the memory footprint
+in FlashAttention's sense, the most GPU memory required (arXiv 2205.14135 App. B.5; its §4.3 measures attention's
+alone), `peak_reserved_bytes` the allocator's (`max_memory_reserved`). Measured MFU: `docs/training.md` §7.
 
 ## 6. Decoder
 
@@ -287,21 +295,24 @@ the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint Flas
   probability, a tie at the cut kept whole, arXiv 1904.09751 §3.1, `k_nucleus`; transformers' `TopPLogitsWarper`, the
   sampler of MultiPL-E's `automodel.py` and bigcode-evaluation-harness), `seed`, `constraint`. Sampled logits are
   capped, z = c·tanh(s/c) with the model's `final_logit_softcapping`; a greedy choice needs no cap (tanh is
-  increasing). A request needs len(input_ids) + max_new_tokens − 1 ≤ `max_length` cache positions, and `max_length`
-  at most the rotary table's; either excess raises ValueError (`decode.cu` writes and reads positions unchecked).
+  increasing). A request needs `max_new_tokens` ≥ 1 and len(input_ids) + max_new_tokens − 1 ≤ `max_length` cache
+  positions, and `max_length` at most the rotary table's; each violation raises ValueError (`NativeDecoder.start`,
+  `__init__`; `decode.cu` writes and reads positions unchecked).
   Generation ends at BOS (excluded), the budget, or the stopping criteria (evaluated while the next step runs).
 - **Constraints.** A step with a sampled or constrained slot launches the body, writes the constraints' masks while it
   runs (the syntax constraints' in one parallel call straight into pinned mask rows, §7), then the head, which chooses
   within each slot's mask and also computes its best allowed token but BOS; a chosen BOS that the syntax constraint
   rejects gives way to that alternative (the same choice as masking BOS beforehand; a nucleus-sampled slot's BOS is
   decided before the step). `heal_tokens` drops the prompt's last token and returns its `Reemit` constraint: each
-  token must be a proper prefix of the owed bytes or start with them, until they are re-emitted (token healing,
-  Guidance 2023, extended over several tokens as arXiv 2608.18062 App. C.1).
+  token must be a proper prefix of the owed bytes or start with them, until they are re-emitted, possibly over several
+  tokens (token healing, Guidance 2023; generation constrained until the dropped content is re-emitted, as
+  arXiv 2608.18062 App. C.1).
 - **Determinism.** Every sum's order depends on the shapes and the slot's position alone, so a request's tokens do not
   depend on the batch, the store or timing (64 of 64 greedy and 64 of 64 sampled requests identical alone and
-  batched, `4385748`). The FP8 cache makes them differ from the bf16 forward's where two logits nearly tie: agreement
-  with the training forward's greedy choice 0.9916 at `4385748` (137 of 16,261 tokens; every mismatch a top-2 gap
-  < 0.57, median 0.0625) and 0.9920 at `ca18db5`; 216 of 542 greedy HumanEval+/MBPP+ continuations identical to the
+  batched, `4385748`). The FP8 cache makes them differ from the bf16 forward's where two logits nearly tie:
+  teacher-forced agreement with the PyTorch forward's greedy choice 0.9916 of 16,261 tokens at `4385748` (a rerun's
+  121 mismatches each within 0.57 of the forward's top logit, the first divergences' median gap 0.0625) and with the
+  compiled forward's 0.9920 at `ca18db5`; 216 of 542 greedy HumanEval+/MBPP+ continuations identical to the
   training forward's (a bf16 cache instead: `docs/experiments.md` §6).
 - **Memory.** The decoder takes the device's free memory (slots, prefill rows, graphs, store).
 - **Speed** (`4385748`, GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens):
@@ -319,9 +330,9 @@ the observed throughput of PaLM's MFU; `peak_memory_bytes` is the footprint Flas
 ## 7. Syntax-constrained decoding and post-generation checks
 
 **Syntax, not types.** Type-constrained decoding (arXiv 2504.09246) covers TypeScript only. An incomplete constrainer
-(one rejecting valid programs) lowers functional correctness below unconstrained decoding, while a complete one helps
-(arXiv 2606.21619, abstract; §5.3 and a larger gain for small models [unverified: paper text not in the extracted
-set]; its rejection as a design: `docs/experiments.md` §6). Python 3 syntax can be constrained completely, and every
+(one rejecting valid programs) lowers functional correctness below unconstrained decoding (arXiv 2606.21619,
+abstract), while a complete one helps, smaller models the most (§5.3; its rejection as a design: `docs/experiments.md`
+§6). Python 3 syntax can be constrained completely, and every
 Python file of the code categories parses as Python 3 (`curate.repaired`, `docs/corpus.md` §3; UltraData-Code L3's
 exercises and the Kaggle notebooks are not checked), so the model's distribution of program files lies inside the
 constrainer's language [inference]. Types are checked after generation instead.
@@ -348,7 +359,7 @@ Where it is looser than CPython it accepts (over-approximations listed in §10, 
 assignment targets as expressions, free parameter order, unchecked escapes and nesting limits, among others); BOS is
 exact.
 Libraries not used: SynCode (arXiv 2403.01632; its Python grammar, of Lark's `python.lark` lineage, lexes an f-string
-as one regex token, so PEP 701 f-strings such as `f'{x["k"]}'` and PEP 695 type parameters are rejected, and it pins
+as one regex token, so PEP 701 f-strings such as `f"{x["k"]}"` and PEP 695 type parameters are rejected, and it pins
 transformers and a Hugging Face tokenizer), llguidance (no INDENT/DEDENT: one byte may emit several DEDENTs,
 guidance-ai/llguidance issue #107), arXiv 2402.17988 (no released library). C++ is not constrained.
 
@@ -368,7 +379,8 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
   the syntax constraint's end accept: on a d16 checkpoint (`81fb386`) 5, 60 and 6 accepted single-line, multi-line and
   random-span filtered middles did not compile), then basedpyright 1.40.2 with every rule off but
   `reportUndefinedVariable`, `reportAttributeAccessIssue` and `reportCallIssue`: concurrent processes over disjoint
-  contiguous groups of a call's N programs, max(`PYRIGHT_GROUP` = 100, ⌈N / `timed_workers()`⌉) each, so at most one
+  contiguous groups of the N programs of a call that compile and are not cached, max(`PYRIGHT_GROUP` = 100,
+  ⌈N / `timed_workers()`⌉) each, so at most one
   per timed-check core (a program's diagnostics do not depend on its group; a process starts in ≈ 0.4 s and checks
   ≈ 2.7 ms per program, so a group of 100 spends about as long starting as checking), each halved in sequence if it
   exceeds `PYRIGHT_TIMEOUT` = 60 s (one process over the largest round, FIM multi-line's 5,815 programs, takes 27.6 s;
@@ -422,10 +434,11 @@ basedpyright run; examples run only without diagnostics and stop at the first fa
 accepted candidate, else the greedy one.
 
 Basis (both d16 checkpoints' full 10-candidate HumanEval+ and MBPP+ pools, `2d49bb1`): the three rules and the vetted
-examples rejected none of the 100 candidates that pass EvalPlus plus (95% upper bound 3.6%); without the examples
-check filtered plus pass@1 fell 1.1–1.8 points. FIM middles are not covered by that basis: a middle that appends an
-uncalled helper with an undefined name passes the official test yet fails `reportUndefinedVariable` (3 greedy SPM
-middles of a d24 rehearsal checkpoint, `eval-1102`). The removed checks: `docs/experiments.md` §6.
+examples rejected none of the 100 candidates that pass EvalPlus plus (Clopper–Pearson 95% interval's upper bound
+3.6% [arithmetic]); without the examples check filtered plus pass@1 fell 1.1–1.8 points. FIM middles are not covered
+by that basis: a middle that appends an uncalled helper with an undefined name passes the official test yet fails
+`reportUndefinedVariable` (4 greedy SPM middles of a d24 rehearsal checkpoint, `eval-1102`: one single-line, one
+multi-line, two random-span). The removed checks (`bff16d6`): `docs/experiments.md` §6.
 `reportCallIssue` rejects one reference, Mbpp/130 (`max(d, key=d.get)` on a `defaultdict`, an overload miss);
 Mbpp/630's reference fails as EvalPlus scores it (sanitize drops its helper).
 
@@ -436,12 +449,14 @@ Mbpp/630's reference fails as EvalPlus scores it (sanitize drops its helper).
 which `AutoModelForCausalLM.from_pretrained(<dir>, trust_remote_code=True)` and `AutoTokenizer.from_pretrained(<dir>)`
 load (transformers 5.21.0, tokenizers 0.23.3, safetensors 0.8.0, `pyproject.toml`):
 
-- `model.safetensors`: the checkpoint's `"model"` tensors (`lm_head.weight`, the rest under `model.`), each in the
-  precision the training forward reads it: bf16 the token and value embeddings and every matrix (`CausalLM.hidden`
-  casts the embedding to bf16, `ve_gate.cu` rounds each table entry to bf16, the GEMMs read the `weight_bf16` and
-  `qkv_bf16` copies, `lm_losses` casts the head); fp32 the q/k gains, `resid_lambdas`, `x0_lambdas` and the
-  value-embedding gates (`NanochatPreTrainedModel._keep_in_fp32_modules_strict`, which a bf16 load keeps fp32). d24:
-  522,190,848 bf16 and 61,488 fp32 values, 1.04 GB.
+- `model.safetensors`: the checkpoint's `"model"` tensors (`lm_head.weight`, the rest under `model.`): bf16 the token
+  and value embeddings and every matrix (`model/modeling.py` `CausalLM.hidden` casts the embedding to bf16, `ve_gate.cu`
+  rounds each table entry to bf16, the GEMMs read the `weight_bf16` and `qkv_bf16` copies, `lm_losses` casts the head);
+  fp32 the q/k gains, `resid_lambdas`, `x0_lambdas` and the value-embedding gates
+  (`NanochatPreTrainedModel._keep_in_fp32_modules_strict`, which a bf16 load keeps fp32). The compiled training forward
+  differs in one place: Inductor drops `CausalLM.hidden`'s bf16 cast, so its x0 is the norm of the fp32 embedding row
+  (`ca18db5`; §10 `model/kernels/decode.cu` `k_norm`), while the export's is the bf16 row's. d24: 522,190,848 bf16
+  and 61,488 fp32 values, a 1,044,651,640-byte file.
 - `config.json`: `model_type` "nanochat", `auto_map` to `modeling_nanochat.py` (copied beside it); `hidden_size`,
   `intermediate_size` 4C, `num_hidden_layers`, `num_attention_heads` = `num_key_value_heads` = C/128, `head_dim` 128;
   `max_position_embeddings` the checkpoint's context (8,192 or 32,768); `rope_parameters` θ = `ROPE_THETA`; the
@@ -467,8 +482,11 @@ and `generate` keeps a `DynamicCache` built from `layer_types`. The training for
 piece (`cu_seqlens`); the model file attends over its whole input, so a packed row is scored segment by segment.
 
 **Agreement with the training forward** (`6df56ee`; CPU, fp32 load, `sdpa`): the d24 rehearsal's `checkpoint-1102.pt`
-(8K; `docs/training.md` §7) against its evaluation record `eval-1102.json`, whose per-row bits come from the compiled
-bf16 `CausalLM.losses` on the GH200. Val rows j = 0 and ⌊n/2⌋ of `"8k"` `"corpora"` (packed row ⌊j·rows/n⌋, §2
+(8K; `docs/training.md` §7) against a re-evaluation of that checkpoint by `57c9634`'s `eval/suite.py` (`eval/bpb.py`
+and the model code as on master), whose per-row bits come from the compiled bf16 `CausalLM.losses` on the GH200. The
+run directory's earlier `eval-1102.json`, written before `cd4edbe`, has the same rows and bytes, and its per-corpus
+bpb is 0.07% lower to 0.34% higher than the re-evaluation's [unverified: cause not established]. Val rows j = 0 and
+⌊n/2⌋ of `"8k"` `"corpora"` (n the record's `"rows"`; packed row ⌊j·R/n⌋ of the split's R packed rows, §2
 `val_bits`), each piece its own sequence from position 0:
 
 | Corpus | j | Pieces | Bytes (record = export) | Record bits | Export bits | Δbpb |
@@ -516,13 +534,14 @@ and −0.6%, inside their intervals; fp32 residual additions by −14%, with no 
 vLLM and 7–10% slower transformers prefill and decode. EvalPlus pass@1 of the export's greedy continuations stays
 within one standard error (HumanEval+ 0.0488/0.0488 for every variant; MBPP+ 0.0265/0.0238 → 0.0238/0.0212).
 
-**Agreement of the removed class** (a d16 checkpoint served by the earlier native vLLM class, commits
+**Agreement of the removed class** (the d16 step-4,552 checkpoint, 20 tokens per parameter, before `1671b56`'s
+retrain on the repacked set, served by the earlier native vLLM class, commits
 `3c03023`–`ec1c841`, the bf16 head; its logit agreement and speed: `docs/experiments.md` §6): `tokenizer.json`
 encodes 108,026 held-out texts exactly as tiktoken; greedy HumanEval+ 0.067/0.067, MBPP+ 0.056/0.045 (base/plus),
 FIM single-line line exact match PSM 0.022, SPM 0.368, against `NativeDecoder`'s (before `4385748`) 0.061/0.061,
 0.045/0.037, 0.022, 0.367 (standard error of HumanEval+ ≈ 0.019). The Transformers backend that replaced the class
-(`7794e2f`) ran at its rate and, in the same execution mode, gave the same logits (eager: mean KL 4.25·10⁻⁴ on
-HumanEval+ for both) [unverified: no record or commit].
+(`7794e2f`) ran at its rate and, in the same execution mode, gave the same logits against the training forward
+(eager, 207K positions: mean KL 4.25·10⁻⁴ on HumanEval+ for both).
 
 **Standard-protocol cross-check**: `evalplus.codegen --backend vllm --greedy` on HumanEval+ and MBPP+ (direct
 completion) scored by `evalplus.evaluate`, and MultiPL-E's `automodel_vllm.py` on humaneval-cpp and mbpp-cpp
@@ -534,18 +553,25 @@ suite's greedy 0.061/0.061 and 0.045/0.037.
 
 ## 9. Validation of the harness
 
-- **Metrics against their sources** (`c8e97a2`, `5d733a6`, `ee7b645`): edit similarity by difflib as cceval runs it
-  (rapidfuzz, thefuzz and torchmetrics disagree with it on 46–71% of real strings); bpb bucket sums kept as code
-  (torchmetrics `SumMetric` differs); `measures` identical to the previous code on four real d8 runs; MultiPL-E
-  scoring of six real tasks identical after the CSV parse moved to `csv.DictReader`. A d16 checkpoint's FIM
-  single-line SPM greedy line exact match 0.367 ± 0.020, pass@1 0.436.
+- **Metrics against their sources** (`c8e97a2`, `5d733a6`, `ee7b645`): CrossCodeEval's exact match, edit similarity,
+  identifier match and line exact match identical to cceval on 30,794 real strings (`c8e97a2`), edit similarity by
+  difflib as cceval runs it (rapidfuzz, thefuzz and torchmetrics disagree with it on 46–71% of real strings
+  [unverified: no record]); bpb's fixed-order bucket sums kept as code (`index_add_`/`bincount` would use CUDA atomics,
+  `ee7b645`); `measures` identical to the previous code on four real d8 runs (`5d733a6`). A d16 checkpoint's FIM
+  single-line SPM greedy line exact match 0.367 ± 0.020, pass@1 0.436 [unverified: no record].
 - **MultiPL-E judging** (`9d61a1b`): 64 concurrent `main.py` processes × 63 threads oversubscribed g++, and a compile
-  past its wall-clock limit is scored "SyntaxError"; with `--max-workers 1` per file, HumanEval C++ sampled "OK"
-  completions 70 → 175 of 3,220 and pass@1 0.022 → 0.054 (the other C++ benchmark 0.039 → 0.090 [inference:
-  MBPP C++]). FIM scoring through `check_correctness` in a fork pool: 211 → 33 s, 0 changed verdicts.
-- **EvalPlus scoring** (`b8057ff`): the evaluator's 20 s exit stall removed (`os._exit` after writing) and all cores
-  used: HumanEval+ 22.5 → 9.6 s, MBPP+ 28.0 → 12.6 s; identical verdicts per task against the previous code on a d16
-  checkpoint's completions.
+  past its wall-clock limit is scored "SyntaxError"; with `--max-workers 1` per file, a d16 checkpoint's stored
+  sampled completions rescored: HumanEval C++ "OK" 70 → 175 of 3,220 and pass@1 0.022 → 0.054, MBPP C++ "OK" 307 →
+  712 of 7,940 and 0.039 → 0.090, greedy and filtered statuses unchanged. FIM scoring through `check_correctness` in
+  a fork pool: a d8 checkpoint's 9 FIM sets (25,464 executions) 211 → 33 s, 0 changed verdicts.
+- **EvalPlus scoring** (`b8057ff`): the evaluator's 20 s exit stall removed (`os._exit` after writing) and every core
+  used (the timed-check cores since, §1): HumanEval+ 22.5 → 9.6 s, MBPP+ 28.0 → 12.6 s; statuses and pass@1 identical
+  to the previous code on a d8 checkpoint's parse completions.
+- **Record replay** (`eval/rescore.py`, added at `49aebbb` on base `c053bdc`, removed at `cd4edbe`; cores 32–63, an
+  empty verdict cache): every scorer and checker (EvalPlus base and plus, MultiPL-E's judge, the infilling checks,
+  parse outcomes, the filtered mode's verdicts) rerun on a d24 `eval-3307.json`'s stored completions, its 22,000
+  sampled completions synthesized from the stored greedy, filtered and parse ones, and compared field by field: 0
+  fields differed and the sidecars' sha256 matched (449 s); the synthesized sidecar was 0.22 MB.
 - **Scorer replay** (`1243e81`, cores 32–63, an empty verdict cache): the official evaluators on every stored
   completion of the d24 benchmarks record `generate=benchmarks,learning_rate_scale=2.0,tokens_per_param=5.0`
   `eval-3307.json` (EvalPlus parse, greedy, filtered and sampled; MultiPL-E greedy, filtered and sampled; infilling
@@ -563,8 +589,10 @@ suite's greedy 0.061/0.061 and 0.045/0.037.
 - **Reference model** [unverified: no record or commit]: deepseek-coder-1.3b-base through DeepSeek's harness gave
   HumanEval 0.305 (paper 0.348, arXiv 2401.14196 Table 3; transformers 5 drops its BOS) and MBPP 0.466 (paper 0.462);
   this suite's EvalPlus scorer agreed on 163 of 164 problems.
-- **d16 reference** [unverified: no record or commit]: at 20 tokens per parameter, code bpb 0.439, HumanEval+ 0.061,
-  MBPP+ 0.071/0.050.
+- **d16 reference** [unverified: no record or commit; which d16 checkpoint and harness revision produced it is not
+  recorded]: at 20 tokens per parameter, code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050. The suite's greedy
+  MBPP+ on the step-4,552 checkpoint at `3c03023` was 0.045/0.037 (§8), so the two are not the same evaluation
+  [inference].
 
 ## 10. Implementation reference
 
@@ -574,16 +602,8 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 - **Run log** `RUNS/<run_name>/metrics.jsonl` (`append`, `records`): UTF-8 JSON lines, each an object `run_name`,
   `attempt` (the 0-based process start; a resumed run repeats the steps after its checkpoint, the latest attempt's
-  record of a step supersedes earlier ones, records are never rewritten), `kind`, `time` (Unix seconds), then the
-  kind's fields; NaN and infinities are never written (`allow_nan=False`). Kinds and fields:
-
-| Kind | Fields |
-|---|---|
-| `run` (each process start) | `step` (first step it trains), `plan` (`schedule.RunPlan`), `config` (`run.py` `RunConfig`; initialization and data order from `train/loop.py` `SEED` = 0), `data_key` (`Tokenizer.data_key`), `model` (`ModelConfig` at the stage of the starting weights: file-level, or the checkpoint's), `num_parameters`, `flops_per_token` (`non_embedding_flops_per_token`, M of arXiv 2401.02954 §3.2 Eq. 2), `model_flops_per_token` (at that stage), `learning_rate` and `weight_decay` (`{"adamw": [per group], "muon": [per group]}` as the optimizers hold them; a resumed process's from its checkpoint), `stage` (`corpus/mixture.py` `Stage` as run, mixture as {corpus: row weight}) |
-| `stage` (switch to the repo-level stage) | `step`, `stage`, `model_flops_per_token` (repo-level), `peak_memory_bytes`, `peak_reserved_bytes` (`torch.cuda.max_memory_allocated`/`max_memory_reserved` since the process start: the file-level stage, or its part after a resume; both reset at the switch) |
-| `train` (each optimizer step, 0-based) | `step`; `num_input_tokens_seen` (row positions after it, padding included); `loss` (mean next-token loss in nats over the step's valid labels, Σ loss / Σ labels over its micro-batches by `step_shares`, computed in fp32 on the capped logits by the `lm_loss` call that gives the gradient); `learning_rate` (LambdaLR's); `grad_norm` (global L2 before clipping, arXiv 1211.5063 §3.2: the L2 norm of the step's per-tensor norms in the diagnostics sidecar, the norm the clip uses, `docs/training.md` §6); `step_seconds` (device time between CUDA events at the previous step's end and its own, so it includes a save or compilation before the step; `train/loop.py` reads a step's values one step late); `tokens_per_second` (row positions / `step_seconds`); `model_flops` (`executed_model_flops` of the step's micro-batches); `mfu`; `train/diagnostics.py`'s `max_logsumexp`, `mean_square_logsumexp` (the capped logits' logsumexp over valid positions: maximum and mean square, PaLM's z-loss quantity, arXiv 2204.02311 §5), `qk_norm_gain_max` (the largest of the sidecar's per-layer q and k gain ‖g‖∞ after the step), `corpus_loss` ({corpus: Σ loss / Σ valid labels over its rows}); every 10th step the GPU's NVML telemetry (pynvml, one handle to the model's GPU), read when the record is written (while the next step runs; a record written during a checkpoint save, the first compilation or after the last step reads an idle GPU): `gpu_power_watts` (`nvmlDeviceGetPowerUsage` / 1000, a 1 s running average on Hopper), `gpu_sm_clock_mhz` (`nvmlDeviceGetClockInfo`, SM clock), `gpu_temperature_c` (`nvmlDeviceGetTemperature`, die), `gpu_memory_used_bytes` (`nvmlDeviceGetMemoryInfo().used`, the device's used memory, every process included). Per-tensor and per-group gradient norms, parameter norms and update RMS live only in the sidecar (`docs/training.md` §6) |
-| `end` (last step trained) | `step`, `peak_memory_bytes`, `peak_reserved_bytes` over the last stage (since the switch or the process start) |
-| `failure` (non-finite loss or gradient norm; the run stops) | `step` |
+  record of a step supersedes earlier ones, records are never rewritten), `time` (Unix seconds), `kind`, then the
+  kind's fields (kinds and fields: `docs/training.md` §6); NaN and infinities are never written (`allow_nan=False`).
 
 - `train_steps`: attempts only grow down the file, so the last record per step wins. `curves`: columns in first-seen
   field order; none for a run diverged at step 0.
@@ -618,8 +638,10 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 ### `eval/suite.py`
 
-- `evaluate`: record `{"run_name", "step", "8k", "32k", "solution", "parse", "codegen", "fim", "samples",
-  "provenance"}` (the parts' layouts: `eval/bpb.py` and `eval/code_eval.py` below; `"samples"`: `{"file", "sha256"}`;
+- `evaluate`: record `{"run_name", "step", "8k", "32k", "solution", "parse", "codegen", "fim", "provenance",
+  "samples"}` in that key order (the evaluation records under `artifacts/runs/` and in `results/` predate
+  `"provenance"`; the parse-mode and the × 1 benchmarks records also `"samples"`). The parts' layouts: `eval/bpb.py`
+  and `eval/code_eval.py` below; `"samples"`: `{"file", "sha256"}`;
   `"provenance"`: `{"source_sha256", "environment", "started", "finished"}`, `source_digest`'s SHA-256 over each code
   and configuration file's path and bytes at the evaluation's start (the top-level `.py`, `.toml` and `.lock` files
   and `SOURCE_TREES`), `cache.environment`'s Python version and installed distributions, and the evaluation's start
@@ -674,9 +696,10 @@ Per module and symbol; what §1–§9 state is not repeated.
   check, `score` the evaluator. `FimRun.prompts`: per FIM order.
 - `KeywordsStoppingCriteria`: incremental UTF-8 decoding; search restarts where a stop sequence could still begin; the
   healed bytes (`decoder.Reemit`, possibly over several tokens) are skipped. `completion`: `decode_bytes` then UTF-8
-  with replacement, as `enc.decode`. FIM middles: the generated ids up to the first special token (a sentinel; the
-  decoder stops at BOS), decoded. `fim_lines`: a non-empty middle written up to BOS, a sentinel or the budget gets a
-  final "\n"; an empty middle stays empty.
+  with replacement, as `enc.decode`. Greedy FIM middles (`fim_generation`): the generated ids up to the first special
+  token (a sentinel; the decoder stops at BOS), decoded; filtered middles (`filtered_middles`): the ids decoded whole.
+  `fim_lines`: a non-empty middle written up to BOS, a sentinel or the budget gets a final "\n"; an empty middle stays
+  empty.
 - Decoders (`NativeDecoder`, one per generate call): `max_length` the longest len(input_ids) + max_new_tokens − 1 of
   the call's requests (a request beyond it raises, §6); `NativeDecoder.__init__` empties the allocator's cache first,
   since slots and prompt store are sized by free memory (for the filtered searches, which run after the likelihood
@@ -696,7 +719,7 @@ Per module and symbol; what §1–§9 state is not repeated.
   multiprocessing's exit handler joins the workers before concurrent.futures' would stop them, hence the caller's
   `with`. `sanitizer_init` makes EvalPlus's `syntax_check` (which catches SyntaxError and MemoryError) count that
   ValueError as a syntax error, so `code_extract` skips such spans: uncaught, one d16 completion ended a benchmark
-  evaluation (`8be5e90`).
+  evaluation at `8be5e90`; handled since `04afb45`.
 - `EVALPLUS_EVALUATE`: `evaluate(..., parallel=timed_workers())` (default half), `os._exit(0)` after the output file:
   `stucking_checker`, a non-daemon thread sleeping 20 s per check. `evalplus` → `{"scores": {"base", "plus"}, "ids",
   "base_status", "plus_status"}` (plus passes when base_status == plus_status == "pass"); pass@1 is `"scores"`' mean
@@ -740,8 +763,8 @@ Per module and symbol; what §1–§9 state is not repeated.
   Measured case: one program of a d16 checkpoint's 346-program filtered MBPP+ round (`RangeError: Maximum call stack
   size exceeded`); the other 345 programs' results equal those of a run without it.
 - `solution_diagnostics`: sanitize reduces source (prompt + completion) to the entry function and its dependencies and
-  keeps a parseable span; the entry function is its last top-level definition, nested functions, lambdas and classes
-  excluded from the `return` search; a solution that does not parse returns its syntax error.
+  keeps a parseable span; the entry function is the last top-level `def` of the entry point's name, nested functions,
+  lambdas and classes excluded from the `return` search; a solution that does not parse returns its syntax error.
 - `cpp_diagnostics`: error lines ("program.cpp:line:col: error: …", "… fatal error: …"), else the last stderr line.
 - `examples`: HumanEval doctest examples; EvalPlus MBPP+ prompts' asserts (one per docstring; HumanEval/149's
   `assert f(x) => y` prose is not Python). Literals are those `tokenize` yields before it stops (TokenError at an open
@@ -751,9 +774,10 @@ Per module and symbol; what §1–§9 state is not repeated.
   limit (destructive os, shutil, subprocess functions disabled), runs the program as module "program", each example in
   a copy of its namespace plus modules it names but the program does not bind (MBPP+ asserts call `math.isclose`,
   imported by MBPP's `test_imports`); a failing example exits 1.
-- `verdicts`: Python diagnostics from one `python_diagnostics` call; C++ diagnostics and examples on the caller's
-  pool, each a child process on the timed-check cores; programs with known diagnostics skip both. `search`: attempt
-  0 of task i is greedy, attempt a > 0 samples at `TEMPERATURE` from the `TOP_P` nucleus with seed `ATTEMPTS` · i + a;
+- `verdicts`: Python diagnostics from one `python_diagnostics` call; C++ diagnostics and examples on the pool it is
+  given (`search`'s `timed_workers()` threads), each a child process on the timed-check cores; programs with known
+  diagnostics skip both. `search`: attempt 0 of task i is greedy, attempt a > 0 samples at `TEMPERATURE` from the
+  `TOP_P` nucleus with seed `ATTEMPTS` · i + a;
   each candidate's check is built on a thread as it completes; `done(s, …)` from search s's judge thread once it has
   no pending task or has run its last round.
   Latency counts a search's kept candidates, its duration the sum over rounds of the span from their first start to
@@ -847,7 +871,8 @@ Per module and symbol; what §1–§9 state is not repeated.
   - a step's stopping criteria run while the next step runs; a stopped slot's extra token is dropped.
   - a step with a sampled or constrained slot launches the body, writes masks meanwhile (`step_masks`; a mask follows
     from the previous token), then the head (choice by mask and temperature); other steps launch the whole greedy step.
-  - a constraint allowing no token (not even BOS) raises ValueError.
+  - a constraint allowing no token (not even BOS) raises ValueError; so does a request with `max_new_tokens` < 1 or
+    more cache positions than `max_length`, when it takes a slot (`start`, the budget checked first).
   - `timings`: read on the host once each step's tokens arrive (no further device synchronization): when the request
     took its slot, when its first generated token arrived (end for a request without one), and the step finishing it.
 
@@ -880,8 +905,8 @@ Per module and symbol; what §1–§9 state is not repeated.
 | `k_wgmma` | u = relu(hn Wfcᵀ)² |
 | `k_wgmma` | x = xo + u Wprojᵀ |
 | `k_norm` | hn = norm(x) |
-| `k_wgmma` | the choice from s = hn W_lmᵀ over the slot's allowed tokens (all if none): argmax s at temperature 0, else argmax s/T + Gumbel noise, by atomicMax on a packed key; a nucleus-sampled slot's s stored instead (head only) |
-| `k_nucleus` | a nucleus-sampled slot's choice: that argmax over the fewest most likely allowed tokens holding top_p of softmax(s/T), a tie at the cut kept whole (head only) |
+| `k_wgmma` | the choice from s = hn W_lmᵀ over the slot's allowed tokens (all if none): argmax s at temperature 0, else argmax z/T + Gumbel noise with z = c·tanh(s/c), by atomicMax on a packed key; a nucleus-sampled slot's z stored instead (head only) |
+| `k_nucleus` | a nucleus-sampled slot's choice: that argmax over the fewest most likely allowed tokens holding top_p of softmax(z/T), a tie at the cut kept whole (head only) |
 | `k_commit` | the choice (and its alternative) becomes each active slot's next input |
 
 - **Numerics** (model/modeling.py's compiled forward, torch.compile as training and bpb run it, op by op): bf16 copies
@@ -912,7 +937,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 - `copy16`: all of a thread's copies are in flight at once. PDL (`launch`, `pdl_start`): the step's kernels launch
   while their predecessor runs; `griddepcontrol.wait` before anything else (early exits included) means a completed
   kernel implies every earlier one completed; `launch_dependents` lets the successor's blocks be scheduled once every
-  block of this grid has started.
+  block of this grid has passed its `griddepcontrol.wait`.
 - `epilogue`: STORE/RESID/RELU2 write the output; ARGMAX: largest score, lowest row among exact ties (`choice_key`), the
   fp32 logit, or with `CHOICE` over a masked slot's allowed rows (at every temperature) and at T > 0 the score z/T +
   gumbel, z the capped logit c·tanh(s/c); nucleus-sampled slots' logits go to `k_nucleus`.
@@ -927,8 +952,9 @@ Per module and symbol; what §1–§9 state is not repeated.
   the fastest step at d24 (1,024 slots, 256-token prompts) (§6, tuned constants).
 - `k_nucleus`: arXiv 1904.09751 ("The Curious Case of Neural Text Degeneration") §3.1. Hugging Face transformers'
   `TopPLogitsWarper` sorts probabilities ascending and drops every token whose cumulative probability is at most
-  1 − top_p; here e = exp(s/T − max s/T) (0 outside the allowed tokens), and since C is a step function rising at each
-  e, the least bits found by bisection are an e's. The choice's key goes to argmax for `k_commit`; the sums' fixed
+  1 − top_p; here e = exp(z/T − max z/T) of the capped logits z (0 outside the allowed tokens), and since C is a step
+  function rising at each e, the least bits found by bisection are an e's. The choice's key goes to argmax for
+  `k_commit`; the sums' fixed
   order makes the choice depend on the slot alone. A block per slot; inactive, greedy and top_p 1 slots exit.
 - `k_norm`: sum of squares over K in lane-strided order, then `warp_sum`. NORM: v the slot's row of `in`,
   out = bf16(v·r). EMBED: v the row `tokens[b]` of the fp32 table `wte`; x0 = v·r stays fp32 and unrounded because
@@ -973,8 +999,8 @@ Per module and symbol; what §1–§9 state is not repeated.
 - Helpers: `block_max` is an exact maximum, so any order; `copies_wait<N>` waits until at most N of the thread's
   committed copy groups are pending; `mbar_wait` waits for the barrier's phase of the given parity; `launch` is
   `kernel<<<grid, block, smem, stream>>>` as a programmatic dependent of the stream's previous kernel; `to_fp8` is
-  x / scale as saturating e4m3; `capture` instantiates the graph of the work `enqueue` puts on the stream; the failed
-  prompt-store allocation's error is cleared (`cudaGetLastError`) before retrying.
+  x · (1/scale) as saturating e4m3; `capture` instantiates the graph of the work `enqueue` puts on the stream; the
+  failed prompt-store allocation's error is cleared (`cudaGetLastError`) before retrying.
 
 ### `inference/syntax/` (Rust crate `nanochat_syntax`)
 
@@ -1011,7 +1037,8 @@ Per module and symbol; what §1–§9 state is not repeated.
   classes. `Lexicon::new`: Lark's terminal names resolved to indices by the caller. `operator_start`: tokenizer.c's
   f-string punctuation check precedes the two-character operators. `byte`: a character once its bytes are complete.
   `representative`: contexts take non-ASCII characters by these classes alone (identifier start, else identifier
-  character, else any character). `partial`: none = no partial token. `Sub::Sp`: between tokens; `Sub::S`: a string's
+  character, else any character). `partial`: None if no character completes the pending UTF-8 character; the empty
+  terms set = no partial token. `Sub::Sp`: between tokens; `Sub::S`: a string's
   body; in `quote_char` the third quote (after two read) opens a triple-quoted string.
 - `python.lark`: Lark builds its tables (strict mode proves them conflict-free) and the crate reads them as a
   viable-prefix recognizer. Terminals beside the literals are CPython's tokenizer token types; FSTRING_MIDDLE is dropped
@@ -1022,7 +1049,6 @@ Per module and symbol; what §1–§9 state is not repeated.
 
 | arXiv | Title |
 |---|---|
-| 1211.5063 | On the difficulty of training Recurrent Neural Networks |
 | 1411.0030 | A* Sampling |
 | 1904.09751 | The Curious Case of Neural Text Degeneration |
 | 2101.00027 | The Pile: An 800GB Dataset of Diverse Text for Language Modeling |
@@ -1036,7 +1062,6 @@ Per module and symbol; what §1–§9 state is not repeated.
 | 2303.17568 | CodeGeeX: A Pre-Trained Model for Code Generation with Multilingual Benchmarking on HumanEval-X |
 | 2305.01210 | Is Your Code Generated by ChatGPT Really Correct? Rigorous Evaluation of Large Language Models for Code Generation |
 | 2308.12950 | Code Llama: Open Foundation Models for Code |
-| 2309.06180 | Efficient Memory Management for Large Language Model Serving with PagedAttention |
 | 2310.11248 | CrossCodeEval: A Diverse and Multilingual Benchmark for Cross-File Code Completion |
 | 2312.07104 | SGLang: Efficient Execution of Structured Language Model Programs |
 | 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism |
@@ -1044,6 +1069,7 @@ Per module and symbol; what §1–§9 state is not repeated.
 | 2402.17988 | Constrained Decoding for Fill-in-the-Middle Code Language Models via Efficient Left and Right Quotienting of Context-Sensitive Grammars |
 | 2402.19173 | StarCoder 2 and The Stack v2: The Next Generation |
 | 2403.01632 | SynCode: LLM Generation with Grammar Augmentation |
+| 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2411.00640 | Adding Error Bars to Evals: A Statistical Approach to Language Model Evaluations |
 | 2412.04403 | Establishing Task Scaling Laws via Compute-Efficient Model Ladders |
 | 2503.13423 | SuperBPE: Space Travel for Language Models |

@@ -33,7 +33,7 @@ class Stage:
 
     @property
     def rows(self) -> int:
-        """The base model's training rows of seq_len tokens in this stage."""
+        """The MAX_STEPS plan's training rows of seq_len tokens in this stage (they size the packs)."""
         return self.tokens // self.seq_len
 
     @property
@@ -126,8 +126,8 @@ def weights(stage: Stage, rows: dict[str, int], count: int
             ) -> tuple[dict[str, float], dict[str, int], dict[str, int]]:
     """A run's ({corpus: weight}, {corpus: rows drawn}, {corpus: rows drawn beyond its packed rows}) in a stage of
     `count` rows. A "supply" corpus is read whole (its rows over `count`), reweighted until it never overdraws; when
-    that leaves a share negative (a run too short to read it whole), every supply share is the base run's (its rows
-    over stage.rows)."""
+    that leaves a share negative (a run too short to read it whole), every supply share is the MAX_STEPS plan's (its
+    rows over stage.rows)."""
     supply, weighed = set(stage.supply), dict(rows)
     while True:
         shares = stage.shares(weighed, count)

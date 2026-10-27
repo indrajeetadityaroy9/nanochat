@@ -117,7 +117,7 @@ def pack_stage(stage: mixture.Stage, whole: dict[str, list[int]], part: dict[str
 
 
 def main() -> None:
-    """The corpus's packs for the base model's run; val splits in threads beside the stages."""
+    """The corpus's packs, sized by the MAX_STEPS plan (mixture.Stage.rows); val splits in threads beside the stages."""
     corpus_crate()  # built once, before the threads call it
     stages = (mixture.FILE_LEVEL_STAGE, mixture.REPO_LEVEL_STAGE)
     with ThreadPoolExecutor() as threads:

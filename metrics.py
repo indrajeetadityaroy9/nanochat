@@ -1,6 +1,6 @@
 """
 Metrics, torch-free: the run log, bits per byte (arXiv 2101.00027 §3.1), parse outcomes, completion similarity
-(arXiv 2310.11248 §4), pass@k (arXiv 2107.03374 §2.1), error bars (arXiv 2411.00640), model FLOPs utilization
+(arXiv 2310.11248 §3.2), pass@k (arXiv 2107.03374 §2.1), error bars (arXiv 2411.00640), model FLOPs utilization
 (arXiv 2204.02311 App. B) and decoding latency.
 """
 import difflib
@@ -99,8 +99,8 @@ def mixture_bpb_summary(corpora: dict, weights: dict[str, float]) -> dict:
 
 def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
     """How a program compiles: "indentation" (IndentationError, checked first), "syntax" or "parses".
-    TokEval companion post's classification (arXiv 2608.18062 App. F.3, fn. 15); parser overflow counts as syntax, and
-    so does CPython 3.12.3's ValueError for f"{x:{y=}}" (python/cpython#121130, fixed in 3.12.5)."""
+    TokEval companion post's classification (linked from arXiv 2608.18062 App. F.3, fn. 15); parser overflow counts as
+    syntax, and so does CPython 3.12.3's ValueError for f"{x:{y=}}" (python/cpython#121130, fixed in 3.12.5)."""
     try:
         compile(source, "<completion>", "exec")
     except IndentationError:
@@ -165,7 +165,7 @@ PYTHON_KEYWORDS = frozenset(keyword.kwlist) - {"True", "False"}
 
 
 def line_exact_match(prediction: str, reference: str) -> bool:
-    """Whether a middle equals the reference up to surrounding whitespace (arXiv 2301.03988 §6.1.2)."""
+    """Whether a middle equals the reference up to surrounding whitespace (arXiv 2301.03988 §5.4)."""
     return prediction.strip() == reference.strip()
 
 

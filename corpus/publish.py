@@ -71,8 +71,9 @@ def card(rows: dict[str, dict[str, int]]) -> str:
         "---", "pretty_name: nanochat pretraining corpus", "viewer: false", "---", "",
         "# nanochat pretraining corpus", "",
         f"Text for pretraining a Python and C++ code model from scratch: {total:,} documents from "
-        f"{len(rows)} sources. Every text has LF line ends and no byte-order mark; every Python file "
-        "parses as Python 3, repaired from Python 2 where it did not; exact copies are removed across all sources. "
+        f"{len(rows)} sources. Every text has LF line ends and no byte-order mark; every Python file of the "
+        "repository, synthetic and function sources parses as Python 3, repaired from Python 2 where it did not; "
+        "exact copies are removed across all sources. "
         "Train rows sharing a 10-gram of whitespace-separated words with a prompt or reference program of the scored "
         "benchmarks (HumanEval+, MBPP+, MultiPL-E's HumanEval and MBPP in C++, HumanEval-X C++, HumanEval infilling) "
         "are removed; `decontamination.json` lists each (shard, row before removal, benchmark tasks).", "",

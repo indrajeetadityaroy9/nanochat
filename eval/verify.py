@@ -57,7 +57,7 @@ PYRIGHT_FAILURE = "1:1: basedpyright: "
 CPP_TIMEOUT, CPP_FLAGS = 15, ("-std=c++17",)
 # HumanEval's execution timeout (human_eval/evaluation.py:43)
 EXAMPLES_TIMEOUT = 3
-# Codex's temperature for samples selected by unit tests (arXiv 2107.03374 §3.3, Fig. 1: the pass@100 optimum)
+# Codex's temperature for samples selected by unit tests (arXiv 2107.03374 §3.3, Figs. 5-6: the pass@100 optimum)
 TEMPERATURE = 0.8
 # Codex's nucleus for all its sampling (arXiv 2107.03374 §3.2: top p 0.95), the filtered search's and the sampled mode's
 TOP_P = 0.95
@@ -66,7 +66,7 @@ ATTEMPTS = 10
 # Cores of the process's starting affinity that the evaluation process tree keeps to, its timed children excepted
 # (suite.evaluate): the decoder's host thread, its syntax masks (rayon) and the in-process checks of the filtered
 # search, which used 13.0-15.5 cores (30-s means, at most 18.6) of a d24 benchmarks evaluation on the 64-core GH200
-# host; timed checks run on the others (EvalPlus warns against an oversubscribed test bed, docs/execution.md)
+# host; timed checks run on the others (EvalPlus warns against an oversubscribed test bed, its docs/execution.md)
 DECODE_CORES = 16
 
 
@@ -124,10 +124,10 @@ def timed_budget() -> threading.Semaphore:
 
 @contextlib.contextmanager
 def timed_slots(n: int = 1) -> Iterator[None]:
-    """n of timed_budget()'s slots, held while the timed children they cover run: the scorer thread's evaluators (all
-    slots) and the filtered searches' checks (one each) share them, so at most one timed child runs per timed-check
-    core. Taken one at a time: the one caller taking several (the scorer thread) waits for single holders to finish,
-    which never wait on slots themselves."""
+    """n of timed_budget()'s slots, held while the timed children they cover run: the scorer thread's EvalPlus and
+    infilling evaluators (all slots), MultiPL-E's judge runs and the filtered searches' checks (one each) share them,
+    so at most one timed child runs per timed-check core. Taken one at a time: the one caller taking several (the
+    scorer thread) waits for single holders to finish, which never wait on slots themselves."""
     budget = timed_budget()
     for _ in range(n):
         budget.acquire()

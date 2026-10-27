@@ -210,6 +210,8 @@ class NativeDecoder:
     def start(self, b: int, index: int, request: Request) -> Slot:
         """Start request `index` in slot b at its prompt's last token; earlier positions loaded or queued to prefill."""
         n = len(request.input_ids) - 1  # the positions before the prompt's last token
+        if request.max_new_tokens < 1:  # generate's stop test counts from the first generated token
+            raise ValueError(f"request {index}: max_new_tokens {request.max_new_tokens} < 1")
         if n + request.max_new_tokens > self.max_length:  # its cache positions: decode.cu writes them unchecked
             raise ValueError(f"request {index}: {n + 1} prompt and {request.max_new_tokens} new tokens need "
                              f"{n + request.max_new_tokens} positions, max_length {self.max_length}")
