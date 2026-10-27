@@ -92,7 +92,7 @@ class PersistentForwardSm90(flash_fwd_sm90.FlashAttentionForwardSm90):
 
 
 # FA4's persistent JIT cache keys on FA4's sources (cache_utils.get_jit_cache): this file's hash keys the subclasses
-SOURCE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+SOURCE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 PERSISTENT_FWD_CACHE = get_jit_cache(f"fwd_persistent_{SOURCE_HASH}")
 BF16DQ_CACHE = get_jit_cache(f"bwd_bf16dq_{SOURCE_HASH}")
 

@@ -8,7 +8,7 @@ from quack.activation import drelu_sq
 from quack.epilogue.frontend import gemm_epilogue
 from quack.epilogue.library import sq_reduce_mod
 from quack.epilogue.ops import ColVecLoad, ColVecReduce
-from quack.gemm_config import GemmConfig
+from quack.gemm_config import GemmConfig, _get_sm90_configs
 from quack.gemm_interface import gemm_norm_act, gemm_tuned
 from quack.rms_final_reduce import rms_final_reduce
 from torch import Tensor
@@ -20,11 +20,12 @@ from model.config import HEAD_DIM
 EPS = torch.finfo(torch.float32).eps
 
 
-def sm90(tile_m: int, tile_n: int, cluster_m: int, cluster_n: int, *, swap_ab: bool = False,
-         pingpong: bool = True) -> GemmConfig:
-    """An SM90 config of QuACK's autotuning space (quack/gemm_config.py _get_sm90_configs)."""
-    return GemmConfig(tile_m=tile_m, tile_n=tile_n, pingpong=pingpong, is_dynamic_persistent=False,
-                      cluster_m=cluster_m, cluster_n=cluster_n, swap_ab=swap_ab, device_capacity=9)
+def sm90(tile_m: int, tile_n: int, cluster_m: int, cluster_n: int, *, swap_ab: bool = False) -> GemmConfig:
+    """The point of QuACK's SM90 autotuning space (quack/gemm_config.py _get_sm90_configs) with this tile, cluster and
+    operand order; the space sets the rest (pingpong or cooperative by the tile, static persistent scheduler)."""
+    (config,) = (c for c in _get_sm90_configs() if (c.tile_m, c.tile_n, c.cluster_m, c.cluster_n, c.swap_ab)
+                 == (tile_m, tile_n, cluster_m, cluster_n, swap_ab))
+    return config
 
 
 # Per call, width C (d8, d16, d24: ve_gate.cu's head counts 2, 4, 6) -> config at M = 98,304: the lowest mean of three
@@ -38,7 +39,7 @@ CONFIGS: dict[str, dict[int, GemmConfig]] = {
     "up": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(128, 192, 2, 1, swap_ab=True),
            768: sm90(128, 192, 1, 2)},
     "down": {256: sm90(128, 192, 2, 1, swap_ab=True), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 1, 2)},
-    "down_dx": {256: sm90(128, 256, 2, 1, pingpong=False), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 2, 1)},
+    "down_dx": {256: sm90(128, 256, 2, 1), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 2, 1)},
     "up_dx": {256: sm90(128, 128, 1, 2), 512: sm90(192, 128, 1, 2), 768: sm90(128, 192, 1, 2)},
 }
 
@@ -158,6 +159,7 @@ def relu2_mlp_bwd(dy: Tensor, h: Tensor, rstd: Tensor, preact: Tensor, postact: 
                   g_up: Tensor, g_down: Tensor) -> Tensor:
     """dh = dy + dP W_up - (rstd^2 sum(dpreact preact) / C) h, dP = rstd dpreact; dW accumulated into g_up, g_down."""
     dy2, h2, C = dy.reshape(-1, dy.shape[-1]), h.reshape(-1, h.shape[-1]), h.shape[-1]
+    # The dynamic tile scheduler of QuACK's gemm_dact, whose epilogue this extends (quack/gemm_interface.py gemm_dact)
     r = relu2_dact_rstd(dy2, w_down, preact, rstd=rstd, dynamic_scheduler=True, config=CONFIGS["down_dx"][C])
     dp = r["D"]
     torch.addmm(g_down, dy2.t(), postact, out_dtype=g_down.dtype, out=g_down)

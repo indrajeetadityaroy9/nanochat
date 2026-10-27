@@ -1,7 +1,6 @@
 # @package _global_
-# Peak-lr calibration (ablations/peak_lr.py), d24: the law's lr x1, 2, 4 at 5 tokens per parameter, the longest d24
-# run a sweep affords
-num_hidden_layers: 24
+# Peak-lr calibration (ablations/peak_lr.py) of the base model (RunConfig's depth, d24): the law's lr x1, 2, 4 at 5
+# tokens per parameter, the longest d24 run a sweep affords
 tokens_per_param: 5.0
 learning_rate_scale: 1.0
 

@@ -55,10 +55,9 @@ static int sm_count() {
     return count;
 }
 
-/* Blocks of kernel f the whole device holds at once with `threads` threads and `smem` bytes of dynamic shared memory
- * per block: a persistent grid. */
-template <typename F> static int resident_blocks(F f, int threads, size_t smem = 0) {
+/* Blocks of kernel f the whole device holds at once with `threads` threads per block: a persistent grid. */
+template <typename F> static int resident_blocks(F f, int threads) {
     int per_sm;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, f, threads, smem);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, f, threads, 0);
     return per_sm * sm_count();
 }

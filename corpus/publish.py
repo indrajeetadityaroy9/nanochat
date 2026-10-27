@@ -88,9 +88,9 @@ def push() -> None:
     (CORPUS / "README.md").write_text(card(curated()))
     api = HfApi()
     old = [f for f in api.list_repo_files(DATASET, repo_type="dataset") if f != ".gitattributes"]
-    if old:
-        api.create_commit(DATASET, repo_type="dataset", operations=[CommitOperationDelete(f) for f in old],
-                          commit_message="Delete the previous corpus")
+    # huggingface_hub skips an empty commit (create_commit returns the head's info), as on a fresh dataset
+    api.create_commit(DATASET, repo_type="dataset", operations=[CommitOperationDelete(f) for f in old],
+                      commit_message="Delete the previous corpus")
     additions = [CommitOperationAdd(path_in_repo=f.relative_to(CURATED).as_posix(), path_or_fileobj=f)
                  for f in sorted(CURATED.glob("*/*/*.parquet"))]
     additions.append(CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=CORPUS / "README.md"))

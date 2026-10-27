@@ -38,7 +38,8 @@ from native import corpus_crate
 from paths import CORPUS
 
 EMPTY = hashlib.sha1(b"").hexdigest()
-# Fewest files per repository row group (the last excepted), whole samples each: a reader never splits a sample
+# Fewest files per repository row group (the last excepted), whole samples each: a reader never splits a sample; the
+# published dataset's (publish.DATASET) setting
 SAMPLE_ROWS = 65_536
 PLACEHOLDER = re.compile(r"<(EMAIL|KEY|NAME|PASSWORD)>")
 LEADING = re.compile(r"^[ \t]+", re.MULTILINE)

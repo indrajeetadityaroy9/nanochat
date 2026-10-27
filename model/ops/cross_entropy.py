@@ -1,6 +1,6 @@
 """LM-head next-token loss on the capped logits z = c tanh(x W^T / c) (arXiv 2408.00118 §2): the mean over valid labels
-t of logsumexp(z) - z[t]. Training: QuACK's (Dao-AILab/quack) scaled-exp linear cross entropy with the cap fused into
-its epilogue; evaluation: an fp32 GEMM per CHUNK rows."""
+t of logsumexp(z) - z[t], per CHUNK rows. Training: QuACK's (Dao-AILab/quack) scaled-exp linear cross entropy with the
+cap fused into its epilogue; evaluation: an fp32 GEMM."""
 
 import functools
 
@@ -22,11 +22,10 @@ from torch.autograd.function import FunctionCtx
 
 from corpus.loader import IGNORE_INDEX
 
-# Capped evaluation rows per fp32 GEMM, a memory bound: 8,192 x 2^15 x 4 bytes = 1 GiB
+# Rows per loss GEMM, training and evaluation: a multiple of 128 (gradient GEMMs' tile_M) dividing MICRO_BATCH_TOKENS
+# (98,304 = 12 x 8,192), the least memory among the sizes equally fast on a d24 micro-batch (an evaluation chunk's fp32
+# logits 1 GiB); 98,304 rows in one chunk (E past 2^31 elements) faults in QuACK 0.6.5
 CHUNK = 8192
-# Rows per chunk: a multiple of 128 (gradient GEMMs' tile_M) dividing MICRO_BATCH_TOKENS (98,304 = 12 x 8,192);
-# 98,304 rows in one chunk (E past 2^31 elements) faults in QuACK 0.6.5
-LCE_CHUNK = 8192
 # Granularity of k and sum_exp: multiple of 64 (lce_glue's strips) dividing 2^15, at most 208 for pingpong
 TILE_N1 = 128
 # One warp, one row per lane
@@ -71,12 +70,12 @@ def capped_scaled_exp_epi(cap: float):
 
 
 @triton.jit
-def cap_label_fix(E, target, zy, n, V, ignore_index, inv_cap, ROWS: tl.constexpr):
+def cap_label_fix(E, target, zy, V, ignore_index, inv_cap, ROWS: tl.constexpr):
     """E[i, t_i] *= 1 - (zy_i / c)^2 for the valid rows: the cap's derivative at the label entry lce_glue wrote."""
     rows = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
-    t = tl.load(target + rows, mask=rows < n, other=ignore_index)
-    valid = (rows < n) & (t != ignore_index)
-    tanh_y = tl.load(zy + rows, mask=valid, other=0.0) * inv_cap
+    t = tl.load(target + rows)
+    valid = t != ignore_index
+    tanh_y = tl.load(zy + rows) * inv_cap
     at = E + rows.to(tl.int64) * V + t
     tl.store(at, (tl.load(at, mask=valid).to(tl.float32) * (1 - tanh_y * tanh_y)).to(tl.bfloat16), mask=valid)
 
@@ -96,25 +95,24 @@ def strip_tile_n(C: int) -> int:
 
 def scaled_exp_loss(x: Tensor, w: Tensor, labels: Tensor, scale: Tensor,
                     cap: float) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """x (M, C), M whole LCE_CHUNKs, w (V, C) bf16 -> (per-position loss, dx bf16, dW fp32, per-position logsumexp; 0
-    at IGNORE_INDEX), gradients times scale. One chunk's buffers serve every chunk (one stream orders them)."""
+    """x (M, C), M whole CHUNKs, w (V, C) bf16 -> (per-position loss, dx bf16, dW fp32, per-position logsumexp; 0 at
+    IGNORE_INDEX), gradients times scale. One chunk's buffers serve every chunk (one stream orders them)."""
     (M, C), V = x.shape, w.size(0)
     epi, tile_n2 = capped_scaled_exp_epi(cap), strip_tile_n(C)
     loss, zy = x.new_empty(M, dtype=torch.float32), x.new_empty(M, dtype=torch.float32)
     dx, dw = torch.empty_like(x), x.new_empty((V, C), dtype=torch.float32)
-    E, xs, v = x.new_empty((LCE_CHUNK, V)), x.new_empty((LCE_CHUNK, C)), x.new_empty(LCE_CHUNK, dtype=torch.float32)
-    sum_exp, k = (x.new_empty((LCE_CHUNK, V // TILE_N1), dtype=torch.float32) for _ in range(2))
-    strip = x.new_empty((V // 64, LCE_CHUNK))  # each chunk's u, contiguous along its rows
-    for i, start in enumerate(range(0, M, LCE_CHUNK)):
-        c = slice(start, start + LCE_CHUNK)
+    E, xs, v = x.new_empty((CHUNK, V)), x.new_empty((CHUNK, C)), x.new_empty(CHUNK, dtype=torch.float32)
+    sum_exp, k = (x.new_empty((CHUNK, V // TILE_N1), dtype=torch.float32) for _ in range(2))
+    strip = x.new_empty((V // 64, CHUNK))  # each chunk's u, contiguous along its rows
+    for i, start in enumerate(range(0, M, CHUNK)):
+        c = slice(start, start + CHUNK)
         x_c, t_c = x[c], labels[c]
         epi.gemm(x_c, w, E, epi_args={"max_log2": TILE_N1, "sum_exp": sum_exp, "max_log2_out": k, "target": t_c,
                                       "target_logit": zy[c]},
                  tile_M=128, tile_N=TILE_N1, cluster_M=2, cluster_N=1, pingpong=True)
         lce_glue(k, sum_exp, x_c, t_c, zy[c], E, loss[c], strip, v, xs, TILE_N1, ignore_index=IGNORE_INDEX,
                  grad_scale=scale)
-        cap_label_fix[(LCE_CHUNK // FIX_ROWS,)](E, t_c, zy[c], LCE_CHUNK, V, IGNORE_INDEX, 1 / cap, ROWS=FIX_ROWS,
-                                                num_warps=1)
+        cap_label_fix[(CHUNK // FIX_ROWS,)](E, t_c, zy[c], V, IGNORE_INDEX, 1 / cap, ROWS=FIX_ROWS, num_warps=1)
         _lce_vscale_epi.gemm(transform_a_operand(_lce_dx_scale, E, {"u": strip}, 128, 64), w.mT, dx[c],
                              epi_args={"v": v.unsqueeze(0)}, transform_a=_lce_dx_scale, tile_M=128, tile_N=tile_n2,
                              tile_K=64, cluster_M=2, cluster_N=1)
@@ -127,8 +125,8 @@ def scaled_exp_loss(x: Tensor, w: Tensor, labels: Tensor, scale: Tensor,
 @torch.library.custom_op("nanochat::lm_loss", mutates_args=(), device_types="cuda")
 def lm_loss(x: Tensor, weight: Tensor, labels: Tensor,
             final_logit_softcapping: float) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """x (M, C) bf16, M whole LCE_CHUNKs, weight (V, C) fp32 -> (mean loss, dx in x's dtype, dW fp32, per-position
-    loss and logsumexp (M,) fp32, 0 at IGNORE_INDEX, without gradient); gradients are computed in the forward."""
+    """x (M, C) bf16, M whole CHUNKs, weight (V, C) fp32 -> (mean loss, dx in x's dtype, dW fp32, per-position loss
+    and logsumexp (M,) fp32, 0 at IGNORE_INDEX, without gradient); gradients are computed in the forward."""
     scale = 1 / (labels != IGNORE_INDEX).sum().float()
     loss, dx, dw, lse = scaled_exp_loss(x, weight.to(x.dtype), labels, scale, final_logit_softcapping)
     return loss.sum() * scale, dx, dw, loss, lse

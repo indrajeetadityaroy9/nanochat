@@ -12,7 +12,7 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 |`run.py` (`RunConfig`, `run_name`, `plan_of`, `base_plan`, `checkpoint_steps`, `phase`, `job`, `lr_multiplier`)|§2, §5, §6|
 |`conf/run.yaml`, `conf/experiment/pretrain.yaml`|§5, §6, §9|
 |`train/schedule.py` (`plan`, `RunPlan`, `WARMUP_STEPS`, `lr_lambda`)|§2, §4|
-|`train/stages.py` (`max_tokens_per_param`, `stage_batches`)|§1, §8|
+|`train/stages.py` (`drawn`, `stage_mixture`, `stage_batches`, `max_tokens_per_param`)|§1, §5, §8|
 |`train/optim.py` (`optimizers`, `Muon`, `tau_weight_decay`, `update`, `MAX_GRAD_NORM`)|§3|
 |`train/loop.py` (`train`), `train/diagnostics.py` (`Diagnostics`), `train/checkpoint.py`|§6, §8|
 |`ablations/peak_lr.py` (`records`, `check`, `fit`, `analysis`); `conf/experiment/peak_lr_d24.yaml`; `results/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
@@ -25,7 +25,7 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 The corpus side (mixture, packs, FIM, loader) is `docs/corpus.md` §7–§9. Training reads two stages
 (`corpus/mixture.py` `FILE_LEVEL_STAGE`, `REPO_LEVEL_STAGE`; `RunPlan.stage_at`): 8,192-token files, then
 32,768-token repositories over the last `REPO_LEVEL_SHARE` (5.45%) of the steps, in micro-batches of
-`MICRO_BATCH_TOKENS` = 98,304 tokens (12 rows at 8K, 3 at 32K); their basis: `docs/corpus.md` §7.
+`MICRO_BATCH_TOKENS` = 98,304 tokens (12 rows at 8K, 3 at 32K; the stages' basis: `docs/corpus.md` §7; the size: §7).
 The loss is next-token cross entropy, the packs' FIM pieces read as FIM examples (`docs/corpus.md` §8). At the
 repository stage's first step the loop sets the 32K context and recompiles the model.
 
@@ -249,7 +249,7 @@ net horizon exponent −0.1193, m_D = 105.25 and m_B = 5 the base plan's token a
 the base multiplier 2.7970369: peak lr 2.4136e-3 on the base plan of `81fb386`'s packs.
 
 **`lr_multiplier`.** `conf/run.yaml` sets every run's `learning_rate_scale` to `${lr_multiplier:}`, a cached resolver:
-`run.py` `lr_multiplier` evaluates `analysis` over the experiment's records at launch and returns `base_multiplier`.
+`run.py` `lr_multiplier` evaluates `analysis` over the experiment's records at launch and returns its `vertex`.
 No copy is stored: `check` recomputes each run's plan and stage mixtures from the current code and packs.
 `RunConfig`'s own default 1.0 is the law's lr (the `peak_lr_d24` experiment sets it per arm), so every other run's
 name carries the resolved multiplier (§6). A launch other than `peak_lr_d24` fails until its records exist.
@@ -332,11 +332,10 @@ sweep raises and writes no experiment records.
 | `results/<experiment>.jsonl` | per run: `experiment`, `eval/suite.py` `record` (name, run-log records, evaluations), `config`, `measures` and `errors` (`docs/evaluation.md` §5), `offset_bpb` (32K code bits per byte by byte offset), `efficiency` (parameters, FLOPs per token, peak memory), `diverged_at` |
 | `results/<experiment>-curves.jsonl` | per run: its train records as columns (`metrics.curves`) |
 
-The ablation records and their status: `docs/experiments.md` §1; `results/scalar_learning_rates.json` holds an
-analysis written by earlier code (`docs/experiments.md` §4).
-`muon_wd_timescale_20tpp.jsonl` and `scalar_learning_rates.json[l]` were trained by earlier code: without the
-output-logit cap (`model.final_logit_softcapping` null) and with `RunConfig` fields since removed, so the stale guard
-raises "recipe changed" on their directories.
+The ablation records and their status: `docs/experiments.md` §1. `results/muon_wd_timescale_20tpp.jsonl` and
+`results/scalar_learning_rates.json[l]` (whose `.json` holds an analysis, `docs/experiments.md` §4) were written by
+earlier code: without the output-logit cap (`model.final_logit_softcapping` null) and with `RunConfig` fields since
+removed, so the stale guard raises "recipe changed" on their directories.
 
 ## 7. Hardware and throughput
 
@@ -368,8 +367,13 @@ Later landings were timed as A/B arms only, spanning 362,972–365,466 tok/s at 
 (`fb86efc`, `db1e90e`, `067e60b`). The output-logit cap (`e24333d`) adds 1.56 ms per micro-batch, 0.58% of the 8K
 step (its 32K cost unmeasured; `docs/architecture.md` §3).
 
-**Memory.** The d24 10-step peak is 71.11 GiB allocated at 8K, warm and cold (`e24333d`), of 96 GB; a larger
-micro-batch than `MICRO_BATCH_TOKENS` would change every run's batch rounding (§2).
+**Memory.** The d24 10-step peak is 71.11 GiB allocated at 8K, warm and cold (`e24333d`), of the GPU's 95.58 GiB
+(97,871 MiB). A micro-batch holds whole rows of both contexts, so its size is a multiple of 32,768 tokens;
+`MICRO_BATCH_TOKENS` is 3 of them, the most with headroom: the step's persistent state (fp32 weights and gradients of
+the 522,252,336 parameters, AdamW's two moments of the 352,327,728 outside Muon, Muon's momentum and bf16 GEMM copies
+of its 169,924,608) is 7.47 GiB [arithmetic], and 4 rows of 32K would scale the remaining 63.64 GiB by 4/3, to
+≈ 92.3 GiB in all [estimate: activation memory proportional to tokens], 3.3 GiB below the device. The micro-batch also
+quantizes every run's batch (§2).
 
 **Time estimate** [estimate]: 97.05B tokens at 365,466 tok/s and 5.60B at 287,476 are 73.8 + 5.4 h; with the cap's
 +0.58% at 8K, 79.6 h; across the arms' span ≈ 79–80 h of training, plus the 11 checkpoints' benchmark evaluations.

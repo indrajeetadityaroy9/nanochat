@@ -170,7 +170,7 @@ def lr_multiplier() -> float:
     """The base multiplier of the law's peak lr: ablations/peak_lr.py analysis over the peak_lr_d24 records."""
     from ablations.peak_lr import analysis, records
 
-    return analysis(records())["base_multiplier"]
+    return analysis(records())["vertex"]
 
 
 def register() -> None:

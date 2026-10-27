@@ -47,7 +47,7 @@ def encode(documents: list[str], tokenizer_path: Path, threads: ThreadPoolExecut
             strict=True):
         ids[i] = tokens
     lengths = np.array([len(doc) for doc in ids], dtype=np.int64)
-    return np.concatenate([np.zeros(0, TOKEN_DTYPE), *ids]), lengths
+    return np.concatenate(ids), lengths
 
 
 def row_group_documents(task: tuple[str, Path, int, Path]) -> Documents:

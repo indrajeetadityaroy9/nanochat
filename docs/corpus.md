@@ -333,7 +333,8 @@ documents 20.6 vs 22.1 s, outputs identical.
 ## 7. Mixture and stages
 
 `corpus/mixture.py`. The stages are sized for `MAX_STEPS` = 69,580 steps of `BATCH_SIZE` = 15 × `MICRO_BATCH_TOKENS`
-= 1,474,560 tokens (a micro-batch: 12 rows of 8,192 or 3 of 32,768): 102,599,884,800 tokens [arithmetic]. Its last
+= 1,474,560 tokens (the d24 plan at `b065ad7`, `docs/training.md` §2; a micro-batch: 12 rows of 8,192 or 3 of
+32,768): 102,599,884,800 tokens [arithmetic]. Its last
 `REPO_LEVEL_SHARE` = 300B / (5.2T + 300B) = 5.45% of steps (`REPO_LEVEL_STEPS` = 3,795), Qwen2.5-Coder's
 repository-level share (arXiv 2409.12186 §3.2.1–3.2.2), are the 32K stage; the contexts are Qwen2.5-Coder's 8,192 and
 32,768 (§3.2.1, §3.2.2). Any run draws by the stages' shares at its own size (`weights`). The base run (69,611 steps,

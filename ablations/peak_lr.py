@@ -59,4 +59,4 @@ def analysis(lines: list[dict]) -> dict:
     for line in lines:
         check(line)
     d24 = fit(lines)
-    return d24 | {"base_multiplier": d24["vertex"], "base_lr": d24["vertex"] * plan_of(RunConfig()).learning_rate}
+    return d24 | {"base_lr": d24["vertex"] * plan_of(RunConfig()).learning_rate}

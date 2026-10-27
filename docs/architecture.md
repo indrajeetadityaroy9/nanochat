@@ -143,7 +143,7 @@ DeepSeek-Coder the FIM rate (arXiv 2401.14196 Fig. 3); none ablates gains, resid
 ## 3. GPU implementation
 
 **Build** (`native.py`). `cuda_library(name)` builds `model/kernels/<name>.cu` with one nvcc command for the GH200's
-architecture-specific target (sm_90a: wgmma, setmaxnreg) and `-DHEAD_DIM=128`, into `NATIVE/<name>-sm_90a-<sha256 of
+architecture-specific target (sm_90a: wgmma, setmaxnreg) and `-DHEAD_DIM=128`, into `NATIVE/<name>-<sha256 of
 the command, the file and every header>.so` (written to a temporary file and renamed, so concurrent first builds never
 share a file), loaded by ctypes once per process. `crate_module` does the same for the Rust crates through cargo
 (`corpus/crate`, `docs/corpus.md` §6; `inference/syntax`, `docs/evaluation.md` §7). The kernels follow ThunderKittens'
@@ -158,13 +158,13 @@ the decoder's `decode.cu`) and one self-contained file per kernel with its C ent
 | q/k/v projection | `linear.py` `qkv_proj`: one (M, 3C) QuACK GEMM against the stacked bf16 [Wq; Wk; Wv]; q, k, v its column blocks, read by attention as strided views; dX one GEMM with K = 3C; dW three cuBLAS `addmm` (fp32 out, β = 1) straight into each weight's `.grad` |
 | Attention | `flash_attn.py` `attention`: one op holding the q/k prologue, the value-embedding mix, FlashAttention-4 (CuTe DSL) varlen over the micro-batch's real segments only (`segmented`) and `o_proj`; its backward writes every q/k/v gradient into one (B, T, 3C) buffer. Window layers: `PersistentForwardSm90` with `PersistentVarlenScheduler` (one CTA per SM, the output tile staged apart from Q) and `BackwardSm90Bf16dQ` (dQ reduce-added in bf16 by `cp.reduce.async.bulk` into a zeroed bf16 dq: no fp32 accumulator, fp32 zero fill or postprocess; masks only on boundary tiles). Full layers (`fa4_window_left` → None when the window spans T): FA4's causal kernels, fp32 dQ |
 | o_proj, post-attention norm | `linear.py` `residual_rms`: h = residual + O W_o^T and each row's squared sum in the GEMM epilogue (QuACK `sq_reduce_mod`, `rms_final_reduce`), so rstd = (mean(h²) + eps)^−½ without a norm pass; backward `residual_rms_bwd`: dO with FA4's dpsum = rowsum(dO·O) per head summed in the dX epilogue (`dx_dpsum`, `DPSUM_CONFIG`: one 128-column tile per head) |
-| FA4 row statistics | `fa4_rows.cu`: dpsum and lse·log2 e at FA4's padded rows (+inf lse, 0 dpsum on padding) in place of FA4's backward preprocess (`precomputed_dpsum`), which read O and dO again |
+| FA4 row statistics | `fa4_rows.cu`: dpsum and lse·log2 e at FA4's padded rows (+inf lse, 0 dpsum on padding) in place of FA4's backward preprocess (`precomputed_dpsum`), which read O and dO again; one block of m threads per FA4 backward m-block |
 | MLP | `linear.py` `relu2_mlp`: the norm as a row scale, since norm(h)Wᵀ = diag(rstd)·hWᵀ for a gain-free norm: rstd and relu² in the up projection's epilogue (`gemm_norm_act`, pre-activation and activation both stored for the backward), the residual as the down projection's C (`gemm_add`); backward: relu²'s derivative × rstd and the norm's row sum in one epilogue (`relu2_dact_rstd`), the norm's backward in the up projection's dX epilogue (`norm_bwd_apply`); the normed stream is never stored |
 | Tiles | `CONFIGS`: a fixed QuACK SM90 configuration per call and width (C 256, 512, 768: the head counts `ve_gate.cu` compiles) at M = 98,304, each the lowest mean of three runs of QuACK's own autotuning benchmark |
 | q/k prologue | `qk_prologue.cu`: norm → gain → RoPE in fp32, one bf16 rounding per output, one pass per direction; forward one thread group per position, its gains and cos/sin loaded once for the H heads, two heads in flight; gain gradient without atomics (persistent blocks, per-block partials summed in block order) |
 | Value-embedding gate and mix | `ve_gate.cu` (`ve_gate.py`): one warp per row, the gate logits in fp32, the mix rounded once; backward in token order (one `torch.sort` of `input_ids` per micro-batch, shared by the layers through CSE), 16 positions per warp, a run of equal tokens summed in registers and added into the table's `.grad` with one 16-byte atomic per 4 fp32 (two per lane and 8-wide chunk; the zeroed table gradient allocated once per step, when `.grad` is None, then accumulated into; no autograd add); the gate weight's gradient one cuBLAS GEMM from bf16 dz; compiled for H = 2, 4, 6 |
-| Cross entropy, training | `cross_entropy.py` `lm_loss`: QuACK's scaled-exp linear cross entropy per `LCE_CHUNK` = 8,192 rows: the logits GEMM's epilogue (N tile 128, pingpong) stores bf16 rescaled exponentials with each row's tile maxima, sums and the label's fp32 logit; `lce_glue` forms the loss from the fp32 accumulators; dX (bf16) and dW (fp32, accumulated across chunks) GEMMs rescale on the A-operand load, their N tile over C by QuACK's rule (`strip_tile_n`: 192 when it divides C, else 256). No logits tensor and no softmax pass. The cap in the same pipeline: tanh on the fp32 accumulator, the tile maximum capped likewise (tanh is increasing), 1 − tanh² folded into the stored exponentials, the label's entry fixed by one Triton kernel (`cap_label_fix`) |
-| Cross entropy, evaluation | `lm_losses`: per 8,192 rows (`CHUNK`) an fp32-output GEMM and the capped logsumexp in one Inductor-fused kernel (`capped_losses`) |
+| Cross entropy, training | `cross_entropy.py` `lm_loss`: QuACK's scaled-exp linear cross entropy per `CHUNK` = 8,192 rows: the logits GEMM's epilogue (N tile 128, pingpong) stores bf16 rescaled exponentials with each row's tile maxima, sums and the label's fp32 logit; `lce_glue` forms the loss from the fp32 accumulators; dX (bf16) and dW (fp32, accumulated across chunks) GEMMs rescale on the A-operand load, their N tile over C by QuACK's rule (`strip_tile_n`: 192 when it divides C, else 256). No logits tensor and no softmax pass. The cap in the same pipeline: tanh on the fp32 accumulator, the tile maximum capped likewise (tanh is increasing), 1 − tanh² folded into the stored exponentials, the label's entry fixed by one Triton kernel (`cap_label_fix`) |
+| Cross entropy, evaluation | `lm_losses`: per `CHUNK` rows an fp32-output GEMM and the capped logsumexp in one Inductor-fused kernel (`capped_losses`) |
 | Embedding | `F.embedding` of the token table; Inductor fuses the gather, the bf16 cast and the norm without rounding in between (`torch._inductor.config.emulate_precision_casts` off), so the compiled x0 is the norm of the fp32 rows, as `decode.cu` `k_norm` computes it (d8, 98,304 random ids at `8be5e90`: 114 of 25,165,824 elements differ from eager bf16(norm(E[ids])), 6,312,306 from eager norm(bf16(E[ids]))); PyTorch's backward accumulates rows with atomics |
 | Optimizer | Muon's Newton–Schulz batched over same-shape matrices and NorMuon: `docs/training.md` §3 |
 
@@ -202,7 +202,7 @@ Notes on the rows:
   residual mix) run at ~3.6 TB/s.
 - **Linear cross entropy.** On a real d24 micro-batch, chunks of 8,192 to 65,536 rows time alike (24.1–24.4 ms per
   call) while the op's peak grows (0.82 → 4.59 GiB); a 98,304-row chunk faults in QuACK 0.6.5; N tile 128 with pingpong
-  24.2 ms against 256 without 25.5 (`cross_entropy.py` `LCE_CHUNK`, `TILE_N1`); QuACK's own rule for this tile
+  24.2 ms against 256 without 25.5 (`cross_entropy.py` `CHUNK`, `TILE_N1`); QuACK's own rule for this tile
   (`_pick_tile_n1`: 256 at V = 2^15, no pingpong) times +5.8% at C = 768, +3.7% at 512 and −0.3% at 256 against 128
   with pingpong (QuACK 0.6.5's `scaled_exp_linear_cross_entropy_fwd`, uncapped, 98,304 rows, median of 20 calls). The
   strip GEMMs' N tile follows QuACK's rule (`strip_tile_n`); on a 98,304-row micro-batch with the cap (GH200,
@@ -319,8 +319,10 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   (rstd gets no gradient of its own): with P = h W_upᵀ, preact = rstd·P, dP = rstd·dpreact,
   d rstd = Σ(dpreact·preact) / rstd and ∂rstd/∂h = −rstd³ h / C, giving the docstring's dh; the row sum is a reduce
   of the dact epilogue (`relu2_dact_rstd`), the rest the dX GEMM's epilogue (`norm_bwd_apply`, C = dy, h a tile load).
-- `sm90`: a point of QuACK's SM90 space (`quack/gemm_config.py` `_get_sm90_configs`) with QuACK's static persistent
-  scheduler (`is_dynamic_persistent=False`; the `down_dx` GEMM of `relu2_mlp_bwd` passes `dynamic_scheduler=True`).
+- `sm90`: the point of QuACK's SM90 space (`quack/gemm_config.py` `_get_sm90_configs`) with the given tile, cluster
+  and operand order; the space sets pingpong (tile_m 128 or 192 up to tile_n 208) or cooperative (tile_m 256, tile_n
+  224 and 256) and QuACK's static persistent scheduler (`is_dynamic_persistent=False`; the `down_dx` GEMM of
+  `relu2_mlp_bwd` passes `dynamic_scheduler=True`, the default of QuACK's `gemm_dact`).
   `CONFIGS` holds exactly the d8, d16 and d24 widths (`meta_model`; the head counts `ve_gate.cu` compiles), so a model
   of another width fails at its first GEMM; M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`. The benchmark is
   `quack/autotuner.py` (L2-cold CUDA-graph medians of every candidate, exclusive GPU). An explicit config bypasses
@@ -330,7 +332,7 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 
 **`model/ops/cross_entropy.py`**
 - `lm_loss` follows `quack/linear_cross_entropy.py` `scaled_exp_linear_cross_entropy_fwd` (its calls and tiles), per
-  `LCE_CHUNK` rows. The logits GEMM's epilogue stores E = bf16(2^(z·log2 e − k)), k the rounded maximum of the row's
+  `CHUNK` rows. The logits GEMM's epilogue stores E = bf16(2^(z·log2 e − k)), k the rounded maximum of the row's
   `TILE_N1`-wide tile, with each tile's sum of exponentials and the label's fp32 logit (not z). `lce_glue` forms
   logsumexp − z[t] from the fp32 accumulators, fixes E at the label and writes each row's power-of-two rescalings.
   dx = (1/n)·dz W (bf16) and dW = (1/n)·dzᵀ x (fp32, accumulated across chunks, `add_to_output`) are GEMMs on E whose
@@ -338,9 +340,9 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 - Epilogue: `capped_scaled_exp_epi`, QuACK's `scaled_exp_target_epi` (`quack/epilogue/scaled_exp.py`) on the capped
   logits; its `sum_exp` sums the plain exponentials while D carries 1 − tanh², so the gradient GEMMs read
   dz = (softmax − onehot)(1 − tanh²); `cap_label_fix` applies the derivative to the label entry `lce_glue` rewrote.
-- Constants: `LCE_CHUNK` the least-memory size among those equally fast on a d24 micro-batch; `TILE_N1` the fastest
-  admissible tile (§3 notes); `strip_tile_n(C)` QuACK's tile_n2 rule (192 at C = 768, 256 at C = 256 and 512); `CHUNK`
-  does not change the losses.
+- Constants: `CHUNK` the least-memory size among those equally fast on a d24 micro-batch, also the evaluation's rows
+  per fp32 GEMM (1 GiB of logits); `TILE_N1` the fastest admissible tile (§3 notes); `strip_tile_n(C)` QuACK's tile_n2
+  rule (192 at C = 768, 256 at C = 256 and 512).
 - `lm_loss` is opaque to `torch.compile` (CuTe DSL GEMMs, Triton kernels, gradients computed in the forward); labels
   int64, dx in x's dtype; `lm_loss_grad` multiplies the saved gradients by dloss, dx's product in fp32 rounded once.
   `step_shares` weights sum the micro-batch means to the mean over every valid label of the step.
@@ -394,10 +396,10 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 
 **`model/kernels/fa4_rows.cu`**
 - Inputs: dpsum (rows, H) fp32 (the epilogue's per-(row, 128-column tile) partials), lse (H, `lse_stride`) fp32, cu
-  (segments + 1) int32; outputs (H, padded) fp32. One thread per padded row finds its segment by binary search over
-  start_b. Each segment's rows past its length up to a multiple of m, which the segment's last backward m-block loads,
-  get dpsum 0 and lse_log2 +inf (the preprocess's lse = +inf), so their P is 0; rows between
-  start_b + round_up(len_b, m) and start_{b+1} are never read.
+  (segments + 1) int32; outputs (H, padded) fp32. One block of m threads per backward m-block (padded is a multiple of
+  m), one thread per padded row, which finds its segment by binary search over start_b. Each segment's rows past its
+  length up to a multiple of m, which the segment's last backward m-block loads, get dpsum 0 and lse_log2 +inf (the
+  preprocess's lse = +inf), so their P is 0; rows between start_b + round_up(len_b, m) and start_{b+1} are never read.
 
 **`native.py`**
 - The same nvcc command line builds each kernel (one invocation per kernel, on first use); the toolchain is the

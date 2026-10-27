@@ -63,7 +63,7 @@ class Muon(torch.optim.Muon):
                 torch._foreach_mul_(params, 1 - lr * group["weight_decay"])
                 adjusted = _adjust_lr(lr, group["adjust_lr_fn"], shape)
                 torch._foreach_add_(params, x.unbind(0), alpha=-adjusted)
-                squares.append(torch.linalg.vector_norm(x, dtype=torch.float32).square() * adjusted**2)
+                squares.append(torch.linalg.vector_norm(x).square() * adjusted**2)
         self.update_square = torch.stack(squares).sum()
 
 

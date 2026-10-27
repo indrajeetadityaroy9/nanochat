@@ -2,11 +2,10 @@
  * FA4's backward row statistics at its padded rows, replacing flash_bwd_preprocess.py with dpsum from the o_proj dX
  * epilogue: dpsum_pad[h, p] = dpsum[r, h], lse_log2[h, p] = lse[h, r] log2(e) (0 where lse = -inf), p = start_b + r -
  * cu[b], start_b = (cu[b] + b m) / m * m (seqlen_info.py offset_batch, padded=True); rows past a segment's length up
- * to a multiple of m get dpsum 0 and lse_log2 +inf (P = 0).
+ * to a multiple of m get dpsum 0 and lse_log2 +inf (P = 0). One block per backward m-block: padded is a multiple of m.
  */
 #include "common.cuh"
 
-constexpr int THREADS = 256;
 /* The preprocess's LOG2_E = math.log2(math.e) as a Float32 constant */
 constexpr float LOG2_E = 1.4426950408889634f;
 
@@ -14,11 +13,10 @@ static __device__ __forceinline__ long long start(const int *cu, int b, int m) {
     return ((long long)cu[b] + (long long)b * m) / m * m;
 }
 
-__global__ void __launch_bounds__(THREADS)
-k_rows(const float *__restrict__ dpsum, const float *__restrict__ lse, long long lse_stride, const int *__restrict__ cu,
-       int segments, int H, int m, long long padded, float *__restrict__ dpsum_pad, float *__restrict__ lse_log2) {
-    const long long p = (long long)blockIdx.x * THREADS + threadIdx.x;
-    if (p >= padded) return;
+__global__ void k_rows(const float *__restrict__ dpsum, const float *__restrict__ lse, long long lse_stride,
+                       const int *__restrict__ cu, int segments, int H, int m, long long padded,
+                       float *__restrict__ dpsum_pad, float *__restrict__ lse_log2) {
+    const long long p = (long long)blockIdx.x * m + threadIdx.x;
     int lo = 0, hi = segments - 1;  /* the last segment b with start_b <= p */
     while (lo < hi) {
         const int mid = (lo + hi + 1) / 2;
@@ -43,7 +41,7 @@ k_rows(const float *__restrict__ dpsum, const float *__restrict__ lse, long long
 
 extern "C" void fa4_rows(const void *dpsum, const void *lse, long long lse_stride, const void *cu, int segments, int H,
                          int m, long long padded, void *dpsum_pad, void *lse_log2, void *stream) {
-    k_rows<<<(unsigned)((padded + THREADS - 1) / THREADS), THREADS, 0, (cudaStream_t)stream>>>(
+    k_rows<<<(unsigned)(padded / m), m, 0, (cudaStream_t)stream>>>(
         (const float *)dpsum, (const float *)lse, lse_stride, (const int *)cu, segments, H, m, padded,
         (float *)dpsum_pad, (float *)lse_log2);
 }

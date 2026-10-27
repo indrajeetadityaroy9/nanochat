@@ -60,7 +60,7 @@ def cuda_library(name: str) -> ctypes.CDLL:
     def build(path: Path) -> None:
         subprocess.run([*command, path, source], check=True)
 
-    return ctypes.CDLL(native_library(f"{name}-sm_90a", command, [source, *sorted(KERNELS.glob("*.cuh"))], build))
+    return ctypes.CDLL(native_library(name, command, [source, *sorted(KERNELS.glob("*.cuh"))], build))
 
 
 @functools.cache
