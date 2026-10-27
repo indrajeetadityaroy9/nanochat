@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pynvml
 import torch
 from torch import Tensor
 
@@ -48,6 +49,10 @@ class Diagnostics:
         self.gains = [p for _, p in gains]
         self.lambdas = (model.resid_lambdas, model.x0_lambdas)
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        # NVML (the image's pynvml) initialized once; the handle of the model's GPU, found by its UUID
+        pynvml.nvmlInit()
+        uuid = torch.cuda.get_device_properties(model.lm_head.weight.device).uuid
+        self.gpu = pynvml.nvmlDeviceGetHandleByUUID(f"GPU-{uuid}")
         groups = {p: f"{name}[{i}]" for name, opt in zip(("adamw", "muon"), opts, strict=True)
                   for i, group in enumerate(opt.param_groups) for p in group["params"]}
         layers = range(model.config.num_hidden_layers)
@@ -140,9 +145,11 @@ class Diagnostics:
         out = {"max_logsumexp": float(lse_max), "mean_square_logsumexp": float(lse_square / counts.sum()),
                "qk_norm_gain_max": float(values[SCALARS:][self.gain_columns].max()),
                "corpus_loss": {name: float(s / c) for name, s, c in zip(names, sums, counts, strict=True) if c}}
-        if measured:  # NVML's readings now, while the next step runs (torch.cuda's pynvml wrappers; no device sync)
-            out |= {"gpu_power_watts": torch.cuda.power_draw() / 1000, "gpu_sm_clock_mhz": torch.cuda.clock_rate(),
-                    "gpu_temperature_c": torch.cuda.temperature(), "gpu_memory_used_bytes": torch.cuda.device_memory_used()}
+        if measured:  # NVML's readings now, while the next step runs; no device sync
+            out |= {"gpu_power_watts": pynvml.nvmlDeviceGetPowerUsage(self.gpu) / 1000,
+                    "gpu_sm_clock_mhz": pynvml.nvmlDeviceGetClockInfo(self.gpu, pynvml.NVML_CLOCK_SM),
+                    "gpu_temperature_c": pynvml.nvmlDeviceGetTemperature(self.gpu, pynvml.NVML_TEMPERATURE_GPU),
+                    "gpu_memory_used_bytes": pynvml.nvmlDeviceGetMemoryInfo(self.gpu).used}
         return out
 
     def flush(self) -> None:
