@@ -301,7 +301,12 @@ the device never drains; its time runs between CUDA events at the previous step'
 **Diagnostics** (`train/diagnostics.py`). In the `train` record: per-corpus training loss (rows assigned by
 `mixture.mixture_rows`); the output logits' logsumexp maximum and mean square over valid positions (PaLM's z-loss
 quantity, arXiv 2204.02311 §5); the largest QK-norm gain (attention-logit growth, the quantity Kimi K2's QK-Clip
-bounds, arXiv 2507.20534 §2.1). In the sidecar, per tensor and per layer:
+bounds, arXiv 2507.20534 §2.1); every `UPDATE_STATS_EVERY` = 10th step the GPU's telemetry, read on the host through
+`torch.cuda`'s NVML wrappers (pynvml) when the record is written, while the next step runs, with no device
+synchronization: `gpu_power_watts` (`power_draw`, NVML's average over its last sample period, 1/6–1 s),
+`gpu_sm_clock_mhz` (`clock_rate`), `gpu_temperature_c` (die) and `gpu_memory_used_bytes` (the device's, every
+process included), which relate `step_seconds` to the 700 W cap and the clock lock (§7). In the sidecar, per tensor
+and per layer:
 
 | File | Row | Columns (`diagnostics.json` names them) |
 |---|---|---|

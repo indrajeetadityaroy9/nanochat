@@ -3,7 +3,8 @@ Per-step training diagnostics, computed on the device and read one step late wit
 per-corpus loss, logsumexp max and mean square (PaLM's z-loss quantity, arXiv 2204.02311 §5) and the largest QK-norm
 gain; the run's float32 sidecar (RUNS/<run>/COLUMNS_FILE names its columns) gets, every step, each parameter tensor's
 gradient norm before clipping, each QK-norm gain's max norm, resid_lambdas and x0_lambdas, and every
-UPDATE_STATS_EVERY steps each tensor's parameter norm and update RMS (without weight decay).
+UPDATE_STATS_EVERY steps each tensor's parameter norm and update RMS (without weight decay); those steps' train records
+also get the GPU's NVML telemetry (power, SM clock, temperature, used memory), read on the host.
 """
 
 import json
@@ -136,9 +137,13 @@ class Diagnostics:
         sums = np.bincount(corpora, rows[:, 0].flatten(), minlength=len(names))
         counts = np.bincount(corpora, rows[:, 1].flatten(), minlength=len(names))
         # a corpus whose weight is below one row per step may draw no rows in it
-        return {"max_logsumexp": float(lse_max), "mean_square_logsumexp": float(lse_square / counts.sum()),
-                "qk_norm_gain_max": float(values[SCALARS:][self.gain_columns].max()),
-                "corpus_loss": {name: float(s / c) for name, s, c in zip(names, sums, counts, strict=True) if c}}
+        out = {"max_logsumexp": float(lse_max), "mean_square_logsumexp": float(lse_square / counts.sum()),
+               "qk_norm_gain_max": float(values[SCALARS:][self.gain_columns].max()),
+               "corpus_loss": {name: float(s / c) for name, s, c in zip(names, sums, counts, strict=True) if c}}
+        if measured:  # NVML's readings now, while the next step runs (torch.cuda's pynvml wrappers; no device sync)
+            out |= {"gpu_power_watts": torch.cuda.power_draw() / 1000, "gpu_sm_clock_mhz": torch.cuda.clock_rate(),
+                    "gpu_temperature_c": torch.cuda.temperature(), "gpu_memory_used_bytes": torch.cuda.device_memory_used()}
+        return out
 
     def flush(self) -> None:
         """The sidecar's written rows to disk."""
