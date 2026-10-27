@@ -169,8 +169,9 @@ part (§8).
 bytes), `tokenizer/tokenizer.{tiktoken,pattern}` (`CORPUS/tokenizer`, §5) and `README.md`, the card (`publish.card`:
 layout, schema, per folder its contents, columns, origin and rows, the tokenizer; the Hub's viewer off, as its Parquet
 converter would merge mixed schemas). The shards were committed at `a4ec1a08` ("nanochat corpus, curated",
-2026-10-24); `main` is `b091cb47`, after two commits (`f7cafdd8`, `b091cb47`) that removed a `manifest.json` and its
-mention in the card (`HfApi.list_repo_commits`); `b091cb47` predates the tokenizer's addition to `push`.
+2026-10-24); two commits (`f7cafdd8`, `b091cb47`) removed a `manifest.json` and its mention in the card
+(`HfApi.list_repo_commits`), and `main` is `dc5391b4`, one commit on `b091cb47` adding `tokenizer/` (the shipped
+tokenizer, sha256 `59e8b637…`, §5) and the card's tokenizer section; its shards are `b091cb47`'s.
 
 | Folder | Columns | Train rows | Val rows | Parquet GB |
 |---|---|---|---|---|
@@ -200,7 +201,8 @@ mention in the card (`HfApi.list_repo_commits`); `b091cb47` predates the tokeniz
   4.6 MiB/s [arithmetic]; the Hub skips objects it holds, so a rerun uploads the rest), adds them in one commit and
   squashes the history into one commit.
 - **Pull** (`publish pull`): `snapshot_download` of `main`'s `<source>/**` into `CORPUS/curated` and of `tokenizer/*`
-  into `CORPUS/tokenizer`. At `b091cb47` `main` holds 1,814 files: the 1,812 shards, `README.md` and `.gitattributes`.
+  into `CORPUS/tokenizer`. At `dc5391b4` `main` holds 1,816 files: the 1,812 shards, the tokenizer's two files,
+  `README.md` and `.gitattributes`.
 - **Provenance.** The SHA-256 of every local shard in `CORPUS/curated` equals the Hub's LFS hash at `b091cb47`
   (`HfApi.dataset_info(files_metadata=True)`): 1,812 shards, none missing or extra, 160,061,439,381 bytes (computed on
   master). Training reads only the packs derived from it (§6–§9); the seeded generators (data order, FIM's ChaCha8)
