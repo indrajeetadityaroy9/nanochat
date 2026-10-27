@@ -643,14 +643,17 @@ dependencies = [
     { name = "basedpyright" },
     { name = "duckdb" },
     { name = "evalplus" },
+    { name = "fire" },
     { name = "fissix" },
     { name = "flash-attn-4" },
     { name = "huggingface-hub" },
     { name = "hydra-core" },
     { name = "lark", extra = ["interegular"] },
     { name = "nvidia-cutlass-dsl", extra = ["cu13"] },
+    { name = "nvidia-ml-py" },
     { name = "obstore" },
     { name = "omegaconf" },
+    { name = "psutil" },
     { name = "pyarrow" },
     { name = "quack-kernels" },
     { name = "regex" },
@@ -659,6 +662,7 @@ dependencies = [
     { name = "statsmodels" },
     { name = "tiktoken" },
     { name = "tokenizers" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -667,14 +671,17 @@ requires-dist = [
     { name = "basedpyright", specifier = "==1.40.2" },
     { name = "duckdb", specifier = "==1.5.6" },
     { name = "evalplus", git = "https://github.com/evalplus/evalplus?rev=26d6d00bb1fd0fa37f39c99d5290da67891d1c5e" },
+    { name = "fire", specifier = "==0.7.1" },
     { name = "fissix", specifier = "==24.4.24" },
     { name = "flash-attn-4", specifier = "==4.0.0b35" },
     { name = "huggingface-hub", specifier = "==2.2.0" },
     { name = "hydra-core", specifier = "==1.3.7" },
     { name = "lark", extras = ["interegular"], specifier = "==1.3.1" },
     { name = "nvidia-cutlass-dsl", extras = ["cu13"], specifier = "==4.8.1" },
+    { name = "nvidia-ml-py", specifier = "==13.610.43" },
     { name = "obstore", specifier = "==0.12.0" },
     { name = "omegaconf", specifier = "==2.3.1" },
+    { name = "psutil", specifier = "==7.2.2" },
     { name = "pyarrow", specifier = "==26.0.0" },
     { name = "quack-kernels", specifier = "==0.6.5" },
     { name = "regex", specifier = "==2026.9.29" },
@@ -683,6 +690,7 @@ requires-dist = [
     { name = "statsmodels", specifier = "==0.15.0" },
     { name = "tiktoken", specifier = "==0.14.0" },
     { name = "tokenizers", specifier = "==0.23.3" },
+    { name = "tqdm", specifier = "==4.70.1" },
     { name = "transformers", specifier = "==5.20.2" },
 ]
 
@@ -787,6 +795,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b6/3e/63f5b39aab33f21c4ddb0fc5a0f6336eccb4e0b18375f901568c88a3205a/nvidia_cutlass_dsl_libs_cu13-4.8.1-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:862378c0c51a3af2e053b363656501b06f9a54f777eee5be8c0046d780b66956", size = 90996248, upload-time = "2026-10-16T10:48:23.114Z" },
     { url = "https://files.pythonhosted.org/packages/a1/f2/0497bd834c92c8f30d6927388a91903e8e995ab7d1b5cbead87f0fd7187f/nvidia_cutlass_dsl_libs_cu13-4.8.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:50191a381d8cc1393373ae0bc879b0aefa9a256c23c22d4fa1c2fe3dfe57bc90", size = 91954433, upload-time = "2026-10-16T10:48:43.779Z" },
     { url = "https://files.pythonhosted.org/packages/8b/1b/e18ce12c55807418de9f17382df81be029fac136199554a1ff3e51d5ffb3/nvidia_cutlass_dsl_libs_cu13-4.8.1-cp312-cp312-win_amd64.whl", hash = "sha256:362c88258f5bc3146510d4a27be00f1cc8d320b1dfad78359dcd414b476104d8", size = 75186434, upload-time = "2026-10-16T10:49:07.543Z" },
+]
+
+[[package]]
+name = "nvidia-ml-py"
+version = "13.610.43"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f0/b5/a8fbc356f768fa5c9cfd646668fd7d34bf55bdd1c6e20754642a64d930d4/nvidia_ml_py-13.610.43.tar.gz", hash = "sha256:65437eb73d68d0c62c931ca4d45038472faff03bd0b8729abba4b899f70d60f2", size = 52109, upload-time = "2026-06-01T18:54:08.829Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/45/caa600acfab94560807a20a64b5830d2cd3c3202b7f1328644d70b7d6bd8/nvidia_ml_py-13.610.43-py3-none-any.whl", hash = "sha256:f13c72698edef492f985cc225f14faafe68ae065a2e407f45bdf6f4b9b43fde8", size = 53163, upload-time = "2026-06-01T18:54:07.704Z" },
 ]
 
 [[package]]

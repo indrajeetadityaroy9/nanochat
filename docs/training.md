@@ -469,10 +469,10 @@ HF_TOKEN=<read token> scripts/setup.sh
 ```
 
 `scripts/setup.sh` writes the CDI spec, locks the SM clock (§7), joins the docker group, builds the `nanochat` image
-(`docker build -f docker/Dockerfile -t nanochat .`), logs in to the Hub, creates `artifacts/` (`python -m paths`)
-and pulls the curated corpus (`python -m corpus.publish pull`). After logging in again, every command runs in the
-image through `scripts/container.sh` (the checkout mounted at `/workspace/nanochat`, NGC's documented run flags, an
-unlimited stack hard limit for evalplus's `reliability_guard`).
+(`docker build -f docker/Dockerfile -t nanochat .`) and pulls the curated corpus (`python -m corpus.publish pull`);
+it is re-run after a reboot (the clock lock). After logging in again, every command runs in the image through
+`scripts/container.sh` (the checkout mounted at `/workspace/nanochat`, NGC's documented run flags, an unlimited stack
+hard limit for evalplus's `reliability_guard`), whose entrypoint creates `artifacts/` (§11, `paths.py`).
 
 1. **Corpus**: the tokenizer ablation's vocabularies, intrinsic measures and data, the corpus's tokenizer, tokenize,
    pack and the smoke check, in the order of `docs/corpus.md` §10.
@@ -482,10 +482,10 @@ unlimited stack hard limit for evalplus's `reliability_guard`).
    11 evaluated checkpoints (each tenth of the 69,611 steps and step 65,814, the repository stage's start) and the
    84 analysis checkpoints (§6), evaluates the 11 with every benchmark and writes `results/pretrain.jsonl` and
    `results/pretrain-curves.jsonl`. Expected time: §7.
-4. **Release**: `scripts/release.sh <run_name> <repo>` uploads the run's full-state and weights-only checkpoints,
-   `metrics.jsonl` and the diagnostics sidecar, evaluations, `.hydra/` and `results/` to a Hugging Face model
-   repository; `scripts/container.sh hf download <repo> --local-dir /workspace/nanochat` restores them where
-   `load_model` and a resumed run read them.
+4. **Release**: `HF_TOKEN=<write token> scripts/release.sh <run_name> <repo>` uploads the run's full-state and
+   weights-only checkpoints, `metrics.jsonl` and the diagnostics sidecar, evaluations, `.hydra/` and `results/` to a
+   Hugging Face model repository; `scripts/container.sh hf download <repo> --local-dir /workspace/nanochat` restores
+   them where `load_model` and a resumed run read them.
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored) holds `corpus/`,
 `runs/<run_name>/` and `cache/`; `results/` (tracked) holds the records the paper's tables are drawn from.
@@ -551,18 +551,20 @@ synchronizes the host.
 **`ablations/records.py`.** The peak memory is the maximum over the `stage` record (the file-level stage's peak) and
 the `end` record (the last stage's). Each run's log is read once.
 
-**`paths.py`.** `artifacts/` is gitignored; a missing directory fails at first use (Hydra creates
+**`paths.py`.** `artifacts/` is gitignored. The image runs `paths.py` before every command (a hook in NGC's
+`entrypoint.d`, which its entrypoint sources before executing the command; a failure ends the container): it creates
+`CORPUS`, `RUNS`, `NATIVE`, `PCH` and the cache directories the image's environment names (`CACHE_VARIABLES`), so
+a fresh checkout or an emptied cache needs no setup step and code creates no directory (Hydra creates
 `RUNS/<run_name>` before its job starts). `CORPUS` holds the corpus pipeline's stages (`corpus/__init__.py`), filled
-by `python -m corpus.publish pull`; `NATIVE` sits beside the image's compiler caches in `artifacts/cache`; `results/`
-is tracked.
+by `python -m corpus.publish pull`; `results/` is tracked.
 
 **Scripts.** `setup.sh` (Lambda's Ubuntu image): the CDI spec serves `container.sh`'s `--device nvidia.com/gpu=all`;
 the docker group applies at the next login, so `sg docker` runs the script's docker commands; idempotent through the
-build cache and `mkdir(exist_ok=True)`. `container.sh`: `--ipc=host --ulimit memlock=-1 --ulimit stack=67108864` are
-NGC's documented flags, the stack hard limit unlimited (`:-1`) for `evalplus/eval/utils.py`'s `setrlimit`; the Hub
-token is `artifacts/cache/huggingface/token` (`HF_HOME`), written by `scripts/container.sh hf auth login`; the
-dataset is private, so `corpus.publish pull` needs it. `release.sh` needs a write token; `<run_name>` is the
-directory name under `artifacts/runs`.
+build cache; the clock lock does not survive a reboot, so the script is re-run after one. `container.sh`:
+`--ipc=host --ulimit memlock=-1 --ulimit stack=67108864` are NGC's documented flags, the stack hard limit unlimited
+(`:-1`) for `evalplus/eval/utils.py`'s `setrlimit`; `-e HF_TOKEN` passes the caller's Hub token through, never stored
+(the dataset is private, so `corpus.publish pull` needs a read token; `release.sh` a write token). `<run_name>` is the
+directory name under `artifacts/runs`; `release.sh` uploads an explicit list of the run's files.
 
 **`docker/Dockerfile`.**
 - NGC supplies torch, Triton, the CUDA libraries, nvcc (`native.py`) and numpy (the image's numba pins it below 2.5).
@@ -578,9 +580,12 @@ directory name under `artifacts/runs`.
   `sys.path` through a `.pth` file (its `setup.py` declares a console script uv rejects). Its README's "enable
   execution" step uncomments `execution.py:84` `exec(check_program, exec_globals)`; `data.py:13` names
   `HumanEval-RandomSpan.jsonl.gz`, the repository ships `HumanEval-RandomSpanInfilling.jsonl.gz` (symlinked).
-  Dependencies (fire, tqdm, numpy) are in the image.
+  Its requirements: fire and tqdm pinned in `pyproject.toml`, numpy the image's.
 - nuprl/MultiPL-E: `evaluation/src/main.py` (`eval_cpp.py`: `g++ -std=c++17`, the image's g++) and `pass_k.py`;
-  dependencies (tqdm, numpy) in the image.
+  dependencies (tqdm, numpy) as above.
+- The cache variables (`HF_HOME`, `TORCHINDUCTOR_CACHE_DIR`, `TRITON_CACHE_DIR`, `QUACK_CACHE_DIR`,
+  `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR`, `CARGO_HOME`) are set under `XDG_CACHE_HOME`, the checkout's
+  `artifacts/cache` (`paths.CACHE`); `90-nanochat-paths.sh` in NGC's `entrypoint.d` runs `paths.py`.
 - `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1` (NGC's) would run every fp32 cuBLAS matmul in TF32 (10-bit mantissa).
   `OMP_NUM_THREADS=1`: pipeline and evaluation parallelize by process (pools of `os.cpu_count()` workers, rayon).
   `HF_XET_HIGH_PERFORMANCE` saturates network and CPUs on Hub pulls. Inductor, Triton, quack, FlashAttention-4 CuTe

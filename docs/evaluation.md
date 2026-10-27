@@ -456,12 +456,12 @@ FIM single-line line exact match PSM 0.022, SPM 0.368, against `NativeDecoder`'s
 (`7794e2f`) ran at its rate and, in the same execution mode, gave the same logits (eager: mean KL 4.25·10⁻⁴ on
 HumanEval+ for both) [unverified: no record or commit].
 
-**Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir> [generate|score]`): the
+**Standard-protocol cross-check** (`scripts/standard_eval.sh <exported dir> <out dir>`): the
 harnesses' own CLIs, unmodified, on the export served by vLLM: `evalplus.codegen --backend vllm --greedy` on
 HumanEval+ and MBPP+ (direct completion) scored by `evalplus.evaluate`, and MultiPL-E's `automodel_vllm.py` on
 humaneval-cpp and mbpp-cpp (T = 0.2, top-p 0.95, 20 completions) judged by `evaluation/src/main.py` and `pass_k.py`,
-both at the §4 pins. `generate` runs on the GPU in vLLM's image into an empty output directory (both harnesses skip
-cached samples); `score` is CPU work in the nanochat image. The protocols as published differ from §4 in prompt
+both at the §4 pins. Generation runs on the GPU in vLLM's image into an empty output directory (both harnesses skip
+cached samples), scoring on the CPU in the nanochat image. The protocols as published differ from §4 in prompt
 tokenization (text through `tokenizer.json`), MultiPL-E's budget (`max_model_len` 2,048 and 1,024 new tokens,
 against 1,024 positions in all here) and their samplers. On the d16 checkpoint above (commits as above), EvalPlus's
 CLI gave HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 against this suite's greedy 0.061/0.061 and 0.045/0.037.

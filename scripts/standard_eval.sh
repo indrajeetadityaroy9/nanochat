@@ -1,15 +1,15 @@
 #!/bin/bash
 # Standard-protocol cross-check: the benchmarks' own harness CLIs, unmodified (EvalPlus codegen --greedy; MultiPL-E
-# automodel_vllm.py, T = 0.2, top-p 0.95, 20 completions: copies of eval/code_eval.py TEMPERATURE, TOP_P, N_SAMPLE),
-# on an exported checkpoint served by vLLM 0.32.0 through its Transformers backend; scored by the harnesses'
-# evaluators in the nanochat image. <out dir> must be empty or new: both harnesses skip samples already in it.
+# automodel_vllm.py, T = 0.2, top-p 0.95, 20 completions: copies of eval/code_eval.py TEMPERATURE, verify.TOP_P,
+# N_SAMPLE), on an exported checkpoint served by vLLM 0.32.0 through its Transformers backend; scored by the
+# harnesses' evaluators in the nanochat image. <out dir> must be empty or new: both harnesses skip samples already in it.
 #
-#   scripts/standard_eval.sh <exported model dir> <out dir> [generate|score]   (default both)
+#   scripts/standard_eval.sh <exported model dir> <out dir>
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-[ "${3:-both}" = score ] || [ -z "$(ls -A "$2" 2> /dev/null)" ] || { echo "$2 is not empty" >&2; exit 1; }
+[ -z "$(ls -A "$2" 2> /dev/null)" ] || { echo "$2 is not empty" >&2; exit 1; }
 mkdir -p "$2"
-MODEL=$(realpath "$1") OUT=$(realpath "$2") PHASE=${3:-both}
+MODEL=$(realpath "$1") OUT=$(realpath "$2")
 # GitHub archives of the pinned commits (the vLLM image has no git; evalplus's version comes from setuptools-scm)
 EVALPLUS=$(grep -o 'evalplus = { git = "[^"]*", rev = "[^"]*"' "$ROOT/pyproject.toml" | sed -E 's|.*git = "([^"]*)", rev = "([^"]*)"|\1/archive/\2.tar.gz|')
 MULTIPL_E_REV=$(grep -oP '\$MULTIPL_E checkout \K[0-9a-f]{40}' "$ROOT/docker/Dockerfile")
@@ -19,8 +19,7 @@ RUN=(docker run --rm --device nvidia.com/gpu=all --ipc=host --init --ulimit meml
      -v "$ROOT":/workspace/nanochat -v "$MODEL":/model:ro -v "$OUT":/out)
 
 # generation: the harnesses' own vLLM generators, in a virtual environment over the image's vLLM
-[ "$PHASE" = score ] || "${RUN[@]}" -e VLLM_CACHE_ROOT=/workspace/nanochat/artifacts/cache/vllm --entrypoint bash \
-  "$VLLM" -o pipefail -euc "
+"${RUN[@]}" -e VLLM_CACHE_ROOT=/workspace/nanochat/artifacts/cache/vllm --entrypoint bash "$VLLM" -o pipefail -euc "
   uv venv -q --system-site-packages /tmp/venv && . /tmp/venv/bin/activate
   SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 uv pip install -q 'evalplus @ $EVALPLUS' datasets
   for dataset in humaneval mbpp; do
@@ -35,7 +34,7 @@ RUN=(docker run --rm --device nvidia.com/gpu=all --ipc=host --init --ulimit meml
   done"
 
 # scoring: the harnesses' evaluators in the nanochat image
-[ "$PHASE" = generate ] || "${RUN[@]}" nanochat bash -o pipefail -euc "
+"${RUN[@]}" nanochat bash -o pipefail -euc "
   for samples in /out/evalplus/*/*.jsonl; do
     case \$samples in *.raw.jsonl) continue ;; esac  # evalplus codegen's unsanitized copy of the samples
     dataset=\$(basename \$(dirname \$samples)); python -m evalplus.evaluate --dataset \${dataset%%_*} --samples \$samples
