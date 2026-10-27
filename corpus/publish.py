@@ -1,6 +1,6 @@
 """
-The curated corpus and the corpus's tokenizer to the Hub (DATASET) and back: push replaces the tree and squashes the
-history; pull downloads it.
+The curated corpus and the corpus's tokenizer to the Hub (DATASET) and back: push replaces the tree in one commit;
+pull downloads it.
 
 python -m corpus.publish push | pull
 """
@@ -88,14 +88,10 @@ def card(rows: dict[str, dict[str, int]]) -> str:
 
 
 def push() -> None:
-    """Write the card, then replace the dataset's tree in one delete commit, preuploads of PREUPLOAD bytes, one add
-    commit and a history squash."""
+    """Write the card, preupload the shards, the tokenizer's two files and the card in batches of PREUPLOAD bytes, then
+    replace the dataset's tree in one commit (the files it no longer has deleted, the rest added)."""
     (CORPUS / "README.md").write_text(card(curated()))
     api = HfApi()
-    old = [f for f in api.list_repo_files(DATASET, repo_type="dataset") if f != ".gitattributes"]
-    # huggingface_hub skips an empty commit (create_commit returns the head's info), as on a fresh dataset
-    api.create_commit(DATASET, repo_type="dataset", operations=[CommitOperationDelete(f) for f in old],
-                      commit_message="Delete the previous corpus")
     additions = [CommitOperationAdd(path_in_repo=f.relative_to(CURATED).as_posix(), path_or_fileobj=f)
                  for f in sorted(CURATED.glob("*/*/*.parquet"))]
     additions += [CommitOperationAdd(path_in_repo=f.relative_to(CORPUS).as_posix(), path_or_fileobj=f)
@@ -108,8 +104,10 @@ def push() -> None:
         if size >= PREUPLOAD or addition is additions[-1]:
             api.preupload_lfs_files(DATASET, additions=group, repo_type="dataset")
             group, size = [], 0
-    api.create_commit(DATASET, repo_type="dataset", operations=additions, commit_message="nanochat corpus, curated")
-    api.super_squash_history(DATASET, repo_type="dataset", commit_message="nanochat corpus, curated")
+    added = {a.path_in_repo for a in additions} | {".gitattributes"}
+    deletions = [CommitOperationDelete(f) for f in api.list_repo_files(DATASET, repo_type="dataset") if f not in added]
+    api.create_commit(DATASET, repo_type="dataset", operations=deletions + additions,
+                      commit_message="nanochat corpus, curated")
 
 
 def pull() -> None:

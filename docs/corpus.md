@@ -195,11 +195,11 @@ tokenizer, sha256 `59e8b637…`, §5) and the card's tokenizer section; its shar
 | `climbmix` | `id`, `content` | 15,625,644 | 157,894 | 17.39 |
 | All | | 177,115,767 | 1,771,524 | 160.06 |
 
-- **Push** (`publish push`): writes the card, deletes every file the dataset holds but `.gitattributes` in one commit,
-  uploads the shards and the tokenizer's two files in preupload calls, each closed once it reaches `PREUPLOAD` = 4 GiB
-  (an LFS upload URL expires 900 s after its batch call, `X-Amz-Expires=900`, `publish.py:17`, so 4 GiB needs at least
-  4.6 MiB/s [arithmetic]; the Hub skips objects it holds, so a rerun uploads the rest), adds them in one commit and
-  squashes the history into one commit.
+- **Push** (`publish push`): writes the card, uploads the shards, the tokenizer's two files and the card in preupload
+  calls, each closed once it reaches `PREUPLOAD` = 4 GiB (an LFS upload URL expires 900 s after its batch call,
+  `X-Amz-Expires=900`, `publish.py:19`, so 4 GiB needs at least 4.6 MiB/s [arithmetic]; the Hub skips objects it
+  holds, so a rerun uploads the rest), then replaces the tree in one commit: the dataset's files the push no longer
+  has (all but `.gitattributes`) deleted, the rest added; the history is kept.
 - **Pull** (`publish pull`): `snapshot_download` of `main`'s `<source>/**` into `CORPUS/curated` and of `tokenizer/*`
   into `CORPUS/tokenizer`. At `dc5391b4` `main` holds 1,816 files: the 1,812 shards, the tokenizer's two files,
   `README.md` and `.gitattributes`.
