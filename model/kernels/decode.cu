@@ -7,8 +7,14 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <sched.h>
 #include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <utility>
+
+#include <linux/mempolicy.h>
 
 #include <cuda.h>
 #include <curand_kernel.h>
@@ -21,7 +27,7 @@ constexpr int ATTN_WARPS = HEAD_DIM / WARP;        /* an attention block: a thre
 constexpr int MAX_BATCH = 1024;
 constexpr int MASK_BITS = CHAR_BIT * sizeof(unsigned long long);  /* slots per word of a slot mask */
 constexpr int MASK_WORDS = MAX_BATCH / MASK_BITS;                 /* words of a slot mask */
-/* the narrow graphs' slots (Decoder::narrow), tuned at d24 */
+/* the narrow graphs' slots (Decoder::narrow) */
 constexpr int SMALL_BATCH = 256;
 static_assert(MAX_BATCH % MASK_BITS == 0, "slot masks are whole words");
 /* mma.sync m16n8k16 (PTX ISA "Matrix Fragments for mma.m16n8k16"): groupID = lane / GROUP, ACC accumulators a lane */
@@ -502,7 +508,7 @@ static __device__ __forceinline__ float key_score(const float *q, const float *k
     return __fmul_rn(warp_sum(d), rsqrtf((float)HEAD_DIM));
 }
 
-/* k_attn's keys per cp.async run: one MMA_M tile per warp (tuned at d24) */
+/* k_attn's keys per cp.async run: one MMA_M tile per warp */
 constexpr int ATTN_RUN = ATTN_WARPS * MMA_M;
 constexpr int ROW_BYTES = HEAD_DIM * (int)sizeof(bf16);  /* a cached key or value row */
 constexpr int ROW_VECS = ROW_BYTES / (int)sizeof(uint4);  /* its 16-byte vectors */
@@ -693,7 +699,9 @@ typedef struct {
     float *x0;                /* [B][C]: the normed embedding, fp32 (k_norm EMBED) */
     float *qkvf;              /* [B][3][C]: k_prologue's q, k, v */
     bf16 *kc, *vc;            /* [B][L][max_len][C] */
-    bf16 *store_k, *store_v;  /* the prompt store, one allocation: K, then V, [L][store][C] each */
+    /* the prompt store, one allocation: K, then V; a prompt at store position s, n positions long, is the block
+     * [L][n][C] at s L C of each */
+    bf16 *store_k, *store_v;
     cudaStream_t stream;
     /* the whole step, its body (before lm_head), its head: [0] over all slots, [1] over the first SMALL_BATCH */
     cudaGraphExec_t step[2], body[2], head[2];
@@ -726,6 +734,9 @@ template <class F> static void slot_buffers(Decoder *d, F f) {
     f((void **)&d->kc, kv);
     f((void **)&d->vc, kv);
 }
+
+/* The prompt store's bytes per position: K and V of every layer, bf16. */
+static size_t store_position(const Decoder *d) { return 2 * (size_t)d->L * d->C * sizeof(bf16); }
 
 /* f(buffer, bytes per row) for a prefill decoder's buffers; tokens holds [3][rows]: token, position, slot. */
 template <class F> static void row_buffers(Decoder *d, F f) {
@@ -853,11 +864,54 @@ extern "C" void dec_destroy(void *handle) {
             cudaGraphExecDestroy(exec);
     slot_buffers(d, [](void **p, size_t) { cudaFree(*p); });
     cudaFree(d->active);
-    cudaFree(d->store_k);
+    if (d->store_k) {
+        cudaHostUnregister(d->store_k);
+        munmap(d->store_k, store_position(d) * d->store);
+    }
     cudaFreeHost(d->host_tokens);
     cudaFreeHost(d->host_allow);
     free(d->layer);
     free(d);
+}
+
+/* Bytes NUMA node n can still give: MemFree and the page cache it reclaims for them, FilePages less Shmem
+ * (/sys/devices/system/node/node<n>/meminfo); 0 if unknown. */
+static size_t node_available(unsigned n) {
+    char path[64], line[128];
+    snprintf(path, sizeof path, "/sys/devices/system/node/node%u/meminfo", n);
+    size_t kib = 0, value;
+    if (FILE *f = fopen(path, "r")) {
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "Node %*u MemFree: %zu kB", &value) == 1) kib += value;
+            if (sscanf(line, "Node %*u FilePages: %zu kB", &value) == 1) kib += value;
+            if (sscanf(line, "Node %*u Shmem: %zu kB", &value) == 1) kib -= value < kib ? value : kib;
+        }
+        fclose(f);
+    }
+    return kib * 1024;
+}
+
+/* bytes bound to NUMA node n (the GH200's LPDDR5X, never the GPU's HBM node, which the kernel also lists) and
+ * kept from fork's copies and registered, so the copy engines reach them over NVLink-C2C; NULL if they cannot be had,
+ * *failed naming the call that failed */
+static bf16 *host_store(size_t bytes, unsigned n, const char **failed) {
+    void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        *failed = "mmap";
+        return NULL;
+    }
+    const unsigned long node = 1ul << n;
+    madvise(p, bytes, MADV_DONTFORK);
+    if (syscall(SYS_mbind, p, bytes, MPOL_BIND, &node, sizeof node * CHAR_BIT + 1, 0) != 0) {
+        *failed = "mbind (in a container: CAP_SYS_NICE, scripts/container.sh)";
+    } else if (cudaHostRegister(p, bytes, cudaHostRegisterDefault) != cudaSuccess) {
+        cudaGetLastError();  /* clear the failed registration's error */
+        *failed = "cudaHostRegister";
+    } else {
+        return (bf16 *)p;
+    }
+    munmap(p, bytes);
+    return NULL;
 }
 
 extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
@@ -887,6 +941,9 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     for (const void *kernel : {(const void *)k_wgmma<false>, (const void *)k_wgmma<true>})
         CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, WG_SMEM));
     CUDA_CHECK(cudaFuncSetAttribute(k_attn, cudaFuncAttributeMaxDynamicSharedMemorySize, ATTN_SMEM));
+    /* the largest shared-memory carveout (228 KB on the GH200), so three k_attn blocks fit an SM */
+    CUDA_CHECK(cudaFuncSetAttribute(k_attn, cudaFuncAttributePreferredSharedMemoryCarveout,
+                                    cudaSharedmemCarveoutMaxShared));
     /* B: the most slots (<= MAX_BATCH) that fit in free memory after the prefill's MAX_BATCH rows */
     size_t slot = 0, row = 0, free_bytes, total_bytes;
     slot_buffers(d, [&](void **, size_t bytes) { slot += bytes; });
@@ -927,17 +984,16 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     CUDA_CHECK(cudaMemset(pf->active, 0, 2 * MASK_WORDS * sizeof(unsigned long long)));
     d->prefill_rows = pf;
     d->prefill = capture(pf, [pf] { enqueue_body(pf); });
-    /* the prompt store: at most what is left after slots and graphs, shrunk 2 MiB (Hopper's allocation granularity)
-     * at a time until one allocation succeeds (cudaMemGetInfo's free bytes need not fit one allocation) */
-    const size_t position = 2 * (size_t)L * d->C * sizeof(bf16);
-    cudaMemGetInfo(&free_bytes, &total_bytes);
-    if ((size_t)d->store > free_bytes / position) d->store = (int)(free_bytes / position);
-    while (d->store > 0 && cudaMalloc((void **)&d->store_k, position * d->store) != cudaSuccess) {
-        cudaGetLastError();  /* clear the failed allocation's error */
-        const int step = (int)(((2 << 20) + position - 1) / position);
-        d->store = d->store > step ? d->store - step : 0;
-    }
+    /* the prompt store in host memory (host_store), so the slots keep the device memory: the positions requested, at
+     * most half of what the calling thread's node can give, halved until the allocation succeeds */
+    unsigned cpu = 0, node = 0;
+    const size_t host = getcpu(&cpu, &node) == 0 ? node_available(node) / 2 : 0;
+    const char *failed = "getcpu or node_available";
+    if ((size_t)d->store > host / store_position(d)) d->store = (int)(host / store_position(d));
+    while (d->store > 0 && !(d->store_k = host_store(store_position(d) * d->store, node, &failed))) d->store /= 2;
     d->store_v = d->store_k + (size_t)L * d->store * d->C;
+    if (d->store == 0 && cfg[5] > 0)
+        fprintf(stderr, "decode.cu: no prompt store for %d requested positions: %s failed\n", cfg[5], failed);
     return d;
 }
 
@@ -969,20 +1025,19 @@ extern "C" void dec_prefill(void *handle, int n, const int32_t *rows) {
     cudaGraphLaunch(d->prefill, d->stream);
 }
 
-/* Slot b's K and V at [at, at + n) to the prompt store at store_at (to_store) or back: a 2D copy per cache (L rows). */
+/* Slot b's K and V at [at, at + n) to the prompt store at store_at (to_store) or back: one 2D copy per cache, L rows;
+ * the prompt's block in the store is [L][n][C], so the store side's pitch is the width (the slot's: max_len C). */
 static void prompt_copy(Decoder *d, int b, int at, int store_at, int n, bool to_store) {
-    auto copy = [&](void *cache, size_t cache_pitch, void *store, size_t store_pitch, size_t width, size_t height) {
+    const size_t C = d->C, L = d->L, row = C * sizeof(bf16), width = n * row, pitch = d->max_len * row;
+    const size_t in_slot = ((size_t)b * L * d->max_len + at) * C, in_store = (size_t)store_at * L * C;
+    for (auto [cache, store] : {std::pair{d->kc, d->store_k}, std::pair{d->vc, d->store_v}}) {
         if (to_store)
-            cudaMemcpy2DAsync(store, store_pitch, cache, cache_pitch, width, height, cudaMemcpyDeviceToDevice,
-                              d->stream);
+            CUDA_CHECK(cudaMemcpy2DAsync(store + in_store, width, cache + in_slot, pitch, width, L,
+                                         cudaMemcpyDeviceToHost, d->stream));
         else
-            cudaMemcpy2DAsync(cache, cache_pitch, store, store_pitch, width, height, cudaMemcpyDeviceToDevice,
-                              d->stream);
-    };
-    const size_t C = d->C, L = d->L, row = C * sizeof(bf16);
-    const size_t in_slot = ((size_t)b * L * d->max_len + at) * C, in_store = (size_t)store_at * C;
-    for (auto [cache, store] : {std::pair{d->kc, d->store_k}, std::pair{d->vc, d->store_v}})
-        copy(cache + in_slot, d->max_len * row, store + in_store, d->store * row, n * row, L);
+            CUDA_CHECK(cudaMemcpy2DAsync(cache + in_slot, pitch, store + in_store, width, width, L,
+                                         cudaMemcpyHostToDevice, d->stream));
+    }
 }
 
 /* Keep slot b's K and V at [at, at + n), written by the launched steps, in the store at store_at. Stream-ordered. */

@@ -49,7 +49,7 @@ official scoring and filtered searches wait for k's process to end (`previous`).
 Measured on the d16 checkpoint (step 4552, exclusive GH200) [unverified: no record]: unpipelined, the codegen half's
 969 s were 36% CPU scoring with the GPU idle, 28% likelihood, 15% generation, 22% filtered search; pipelining took the
 full benchmarks evaluation from 1,472 to 1,064 s (−28%), GPU idle (SM < 5%) 57.4% → 34.2%, with 0 per-sample status
-flips in parse, codegen and FIM greedy and 1 in random-span SPM filtered; with the current decoder (§6), 862 s.
+flips in parse, codegen and FIM greedy and 1 in random-span SPM filtered.
 
 ## 2. Likelihood metrics
 
@@ -248,11 +248,16 @@ would read 0.644 at 8K and 0.926 at 32K (medians), the latter above the 0.71 the
   norm gains and value-embedding gate; the residual mix as Inductor fuses it (one fma, one bf16 rounding); x0 the norm
   of the fp32 embedding row, since Inductor drops `CausalLM.hidden`'s bf16 cast (`decode.cu` `k_norm`); ReLU² from
   the fp32 accumulators as QuACK's `gemm_norm_act`. Attention differs from FA4's in summation order and in the
-  probabilities' precision: FA4's P·V GEMM reads them as bf16 (`flash_fwd_sm90.py`), this sum as fp32.
+  probabilities' precision: FA4's P·V GEMM reads them as bf16 (`flash_fwd_sm90.py`), this sum as fp32. `k_attn`
+  stages two runs of 64 keys' K and V (64 KB of shared memory, the carveout at its maximum): 3 blocks and 96 KB of K
+  and V in flight per SM [arithmetic].
 - **Prefill and prompt store.** A new request's prompt but its last token runs as rows of one batched pass through the
   step's body (up to 1,024 rows of any prompts per launch, each row computed as a step would), so its slot starts at
   the prompt's last token. Its K and V are copied to the prompt store, and a later request with the same prompt copies
-  them back (K and V depend on the prompt alone); a prompt is stored once per decoder and never evicted.
+  them back (K and V depend on the prompt alone); a prompt is stored once per decoder and never evicted. The store is
+  host memory bound to the calling CPU's NUMA node (the GH200's LPDDR5X; `mbind`, which a container needs
+  `CAP_SYS_NICE` for, `scripts/container.sh`) and registered for the copy engines over NVLink-C2C, so the slots keep
+  the device memory: the positions requested, at most half of what that node can give.
 - **Request** (`Request`): `input_ids`, `max_new_tokens`, `stopping_criteria`, `temperature` (0: argmax, ties to the
   lowest id; > 0: Gumbel-max sampling of softmax(z / T), the noise a Philox4x32-10 function of (seed, generated
   position, token) alone, arXiv 1411.0030 §2), `top_p` (< 1: the fewest most likely allowed tokens holding top_p of
@@ -270,18 +275,7 @@ would read 0.644 at 8K and 0.926 at 32K (medians), the latter above the 0.71 the
   them, until they are re-emitted, possibly over several tokens (token healing, Guidance 2023; generation constrained
   until the dropped content is re-emitted, as arXiv 2608.18062 App. C.1).
 - **Determinism.** Every sum's order depends on the shapes and the slot's position alone, so a request's tokens do not
-  depend on the batch, the store, `max_length` or timing (64 of 64 greedy and 64 of 64 sampled requests identical alone
-  and batched, d24, GH200, with the e4m3 cache that preceded the bf16 one: `docs/experiments.md` §6).
-- **Speed** (GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens; with the
-  e4m3 cache): 94,778 tok/s at d24 and 189,307 at d16, against 21,809 and 66,559 for the per-slot-group GEMV decoder
-  it replaced (4.35×, 2.84×); d24 step 8.27 ms at 1,024 slots, one slot 1.29 ms (GEMV decoder 3.16 ms). A d16
-  checkpoint's per-problem results changed little and in both directions (MBPP+ greedy +4/−5 base, +2/−7 plus;
-  HumanEval+ greedy unchanged; FIM line exact match within 0.002).
-- **Tuned constants** (d24, GH200, 256-token prompts; 1,024 slots and 512 steps unless stated; with the e4m3 cache).
-  GEMM tiles and `WG_STAGES`: 64-row × 64-slot tiles 8.27 ms per step against 8.33 ms for 128 × 128; 4 stages against
-  8.82, 8.44, 8.33, 9.22 ms at 2, 3, 6, 8. `ATTN_RUN`: one MMA tile per warp 8.31 ms against 8.80 (two) and 15.45
-  (four). `SMALL_BATCH` = 256: fastest or within 0.04 ms at 1, 64, 128, 256 active slots against 64, 128, 512 and no
-  narrow graphs (1 slot 1.29 ms, none 1.46; 256 slots 2.81, none 2.97).
+  depend on the batch, the store, `max_length` or timing.
 
 ## 7. Syntax-constrained decoding and post-generation checks
 
@@ -438,8 +432,8 @@ the harnesses' own CLIs, unmodified, on it; why the path is not kept: `docs/expe
   difference. With the fp32 head the export's mean KL(train ‖ export) under transformers is 1.97·10⁻⁴ (bf16 head
   3.09·10⁻⁴), top-1 agreement 0.9940 (0.9903), the bpb bias 5·10⁻⁶ (6.3·10⁻⁵, its interval excluding 0); under vLLM
   top-1 0.9941 (0.9904) and 379 of 542 greedy continuations identical to the training forward's (306). For scale: the
-  uncompiled training forward against the compiled one, KL 3.06·10⁻⁴, top-1 0.9926, 340 identical; `NativeDecoder`
-  (§6), 216 identical. ReLU² and x0 in fp32 changed KL by −1% and −0.6%, inside their intervals; fp32 residual
+  uncompiled training forward against the compiled one, KL 3.06·10⁻⁴, top-1 0.9926, 340 identical. ReLU² and x0 in
+  fp32 changed KL by −1% and −0.6%, inside their intervals; fp32 residual
   additions by −14%, with no gain in greedy agreement or pass@1 under vLLM and 7–10% slower transformers prefill and
   decode. EvalPlus pass@1 of the export's greedy continuations stays within one standard error (HumanEval+
   0.0488/0.0488 for every variant; MBPP+ 0.0265/0.0238 → 0.0238/0.0212).
