@@ -70,7 +70,7 @@ was its loss cost ≤ 0.3% of the 8K step with a cold peak ≤ 93 GiB. What land
 **Cost** [unverified: no record]. GH200, the training code with FA4 on the real segments, batched Newton–Schulz and the
 fused value-embedding gate (before the qk prologue and the later landings of `docs/architecture.md` §3): d8 2.81M /
 2.37M tok/s (8K / 32K), d16 0.80M / 0.64M, d24 0.34M / 0.27M; compile 20 s + 16 s; parse evaluation d8 ~1.7 min,
-d16 ~4.5 min; d16 benchmark evaluation 1,064 s (862 s with the current decoder, `docs/evaluation.md` §6). Per run
+d16 ~4.5 min; d16 benchmark evaluation 1,064 s. Per run
 [estimate]: d16 at 20 tokens per parameter ~33 min, d16 at 31.4 ~50 min, d8 at 200 ~20 min; all designed ablations
 ≈ 20 GPU-h; D7's 200 half on d16 would be 13.4B tokens, ~29 GPU-h. Not running the tokenizer runs saved ~6.7 GPU-h,
 D7's remaining runs ~3.7 GPU-h, the softcap design ~9 GPU-h.
@@ -443,19 +443,6 @@ any task's outcome. Removed:
   program fails them.
 
 The kept checks and their basis: `docs/evaluation.md` §7.
-
-**e4m3 KV cache in `NativeDecoder`** (replaced by bf16, `docs/evaluation.md` §6: one fp32 scale per position and
-head, amax / 448, the scores by f16 MMAs; 38,016 bytes per position at d24 against bf16's 73,728 [arithmetic]).
-Teacher-forced greedy choice agreeing with the compiled training forward's on 0.9920 of 16,261 tokens, with the
-PyTorch forward's on 0.9916 (121 mismatches, each within 0.57 of the forward's top logit, the first divergences'
-median gap 0.0625). On one of the two d16 checkpoints above (the export's head and cap in fp32; greedy continuations
-of the 542 HumanEval+/MBPP+ prompts, 512 new tokens, against the compiled training forward's), a bf16-cache variant
-(scales 1, the scores by bf16 MMAs) gave 363 identical continuations against e4m3's 216 (for scale: the uncompiled
-training forward 340, the export under vLLM 379, `docs/evaluation.md` §8); divergence before the EvalPlus stop 164
-against 299; EvalPlus-scored completions differing from the training forward's 25 and 138 (HumanEval+, MBPP+) against
-52 and 249; pass@1 HumanEval+ 0.0488 for both, MBPP+ base/plus 0.0238/0.0212 (equal to the training forward's)
-against 0.0265/0.0238. Verdict: replaced; completions come from bf16 K and V, the operands the trained model's
-attention reads.
 
 **Speculative decoding.** Lossless by construction; its gains target large-model serving [inference]. Not used.
 
