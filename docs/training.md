@@ -314,13 +314,16 @@ earlier update saw, an online held-out loss [inference].
   2K–3K) to 0.002–0.004 (15K–20K). Every corpus's loss fell between steps 10K and 20,147, from −2.2% (ClimbMix) to
   −6.9% (UltraData-Math L3 QA); the synthetic code and mathematics sources fastest, Stack-Edu and web text slowest.
 - **Loss curve.** The scaling law with LR annealing, L = L₀ + A·S₁^−α − C·S₂, S₁ the summed lr and S₂ the summed
-  annealing momentum mᵢ = λ·mᵢ₋₁ + (ηᵢ₋₁ − ηᵢ) (arXiv 2408.11029 §1 Eq. 1, §3.2 Eq. 5), fitted to the window means
-  (η in units of the peak; α on a grid, L₀, A and C by least squares). Fitted before step 15,000 at the paper's
-  λ = 0.999 (§3.4), it predicts steps 15,250–19,750 within +0.0007 on average (largest 0.0021), a power law in steps
-  within +0.0052 (0.0081). Fitted to every window, it puts the file-level stage's last step (66,062) at 0.940–0.958
-  for λ = 0.99–0.999 [estimate], the power law in steps at 1.011; moving the fit's last point from step 8K to 20K
-  moved the projection by 0.03–0.09, and S₂ overstates the drop as η nears 0 (§6.3; η at step 66,062 is 5.5% of the
-  peak). The paper fits validation loss, this the online held-out training loss.
+  annealing momentum mᵢ = λ·mᵢ₋₁ + (ηᵢ₋₁ − ηᵢ) (arXiv 2408.11029 §1 Eq. 1, §3.2 Eq. 5), the warmup counted at the
+  peak lr as the paper counts it (§3.4), fitted to the window means (η in units of the peak; α on a grid, L₀, A and C
+  by least squares, where the paper minimizes a Huber loss on the log loss, §3.4 Eq. 6). Fitted before step 15,000,
+  it predicts steps 15,250–19,750 within −0.0020 on average (largest 0.0031), a power law in steps within +0.0052
+  (0.0081); fitted through step 20,147, it predicted the windows of steps 20,147–23,147 within −0.0008 on average
+  (largest 0.0017). It puts the file-level stage's last step (66,062) at 0.940–0.941 for λ = 0.99–0.999 [estimate],
+  the power law in steps at 1.011. Fits ending earlier projected lower (0.871–0.876 ending at step 8K, 0.924 at 15K)
+  and under-predicted their holdouts, so the law's extrapolation has run low [inference]; S₂ also overstates the drop
+  as η nears 0 (§6.3; η at step 66,062 is 5.5% of the peak). The paper fits validation loss, this the online held-out
+  training loss.
 - **Stability.** No step after 100 was clipped (gradient norm at most 0.75 against `MAX_GRAD_NORM` = 1.0); 2 steps
   exceeded twice the trailing 500 steps' median gradient norm (largest 2.47×, step 16,305) and 3 losses the trailing
   200 steps' mean by 4 standard deviations, none by 6 (largest 5.7, step 12,257). The logsumexp maximum has stayed at
