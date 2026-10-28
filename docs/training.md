@@ -358,10 +358,13 @@ Eq. 2); with Muon's fixed-RMS update the same steady state puts a matrix's norm 
 
 From step 10K to 20,140 η fell to 0.830 of itself, whose square root is −8.9%; the tables and the attention and MLP
 matrices shrank 2.6–10.9%, while `ve_gate` (decayed too, zero at initialization) still grows toward its steady state
-[inference]. Over the 144 attention and MLP matrices, the median of update RMS over parameter norm fell from 6.62e-6 to
-4.92e-6 (×0.74) between steps 2K and 20,140 as η fell ×0.73: Muon's step follows the schedule. Their median
-gradient-to-weight ratio rose 1.82× from step 5K to 20,140, against 1.14× from η's change alone: the gradient norm
-rises faster than the steady state accounts for [inference], and the paper's runs show it steepening as η nears 0.
+[inference]. Over the 144 attention and MLP matrices (medians of 500-step means), update RMS over η stays at
+0.1760–0.1752 from step 5K to 20,147: Muon's step is the schedule's lr times a fixed RMS. Their gradient-to-weight
+ratio rose 1.65× from step 5K to 20,147, against 1.14× from η's change alone: the gradient norm rises faster than the
+steady state accounts for [inference], and the paper's runs show it steepening as η nears 0. The rise is uneven
+across layers: since step 10K the MLP down projections of layers 12 and 14 grew 12× and 6×, to 5.9e-2 and 1.1e-2
+(the 24 down projections' median 3.8e-3), and the down projections' share of the squared global norm went from 3.8%
+to 10.1%; the v projections hold 70–72% of it, largest in value-embedding layers (15, 19, 13, 17).
 
 **Job** (`run.job`): the run is skipped if every checkpoint's evaluation exists or it diverged; else training
 (resuming, below), then the unevaluated checkpoints' evaluations, overlapped (`run.evaluations`,
