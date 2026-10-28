@@ -239,16 +239,16 @@ would read 0.644 at 8K and 0.926 at 32K (medians), the latter above the 0.71 the
   the next request. A greedy step is one captured CUDA graph and a sampled or constrained step two (body, then head),
   each graph's kernels programmatic dependents of each other (PDL); a second set of graphs over the first
   `SMALL_BATCH` = 256 slots runs while no slot at index ≥ `SMALL_BATCH` is active. A slot's KV cache holds
-  2 · L · max_length · (C + 4H) bytes, 38,016 bytes per position at d24 [arithmetic]. A many-slot step is bound by its
+  2 · L · max_length · C bf16 values, 73,728 bytes per position at d24 [arithmetic]. A many-slot step is bound by its
   KV reads and its GEMMs; a few-slot step by weight reads and kernel launches [inference].
 - **Step.** The model's forward at one position (`docs/architecture.md` §1), GEMMs on wgmma tensor cores fed by TMA,
-  attention streaming each slot's window through shared memory with the scores on tensor cores (f16, exact for e4m3
-  keys and the bf16 q's elements of magnitude ≥ 2⁻¹⁴; smaller ones become f16 subnormals). Numerics follow the
-  compiled training forward op by op: bf16 copies of the matrices; fp32 rotary table, q/k norm gains and
-  value-embedding gate; the residual mix as Inductor fuses it (one fma, one bf16 rounding); x0 the norm of the fp32
-  embedding row, since Inductor drops `CausalLM.hidden`'s bf16 cast (`decode.cu` `k_norm`); ReLU² from the fp32
-  accumulators as QuACK's `gemm_norm_act`. The exception is the KV cache: e4m3 with one fp32 scale per position and
-  head (amax / 448), half the bytes a step reads; scores and softmax stay fp32.
+  attention streaming each slot's window through shared memory with the scores on tensor cores (bf16 q and k, fp32
+  accumulators), softmax and the value sum in fp32. Numerics follow the compiled training forward op by op: bf16
+  copies of the matrices; K and V cached in bf16, the operands the forward's attention reads; fp32 rotary table, q/k
+  norm gains and value-embedding gate; the residual mix as Inductor fuses it (one fma, one bf16 rounding); x0 the norm
+  of the fp32 embedding row, since Inductor drops `CausalLM.hidden`'s bf16 cast (`decode.cu` `k_norm`); ReLU² from
+  the fp32 accumulators as QuACK's `gemm_norm_act`. Attention differs from FA4's in summation order and in the
+  probabilities' precision: FA4's P·V GEMM reads them as bf16 (`flash_fwd_sm90.py`), this sum as fp32.
 - **Prefill and prompt store.** A new request's prompt but its last token runs as rows of one batched pass through the
   step's body (up to 1,024 rows of any prompts per launch, each row computed as a step would), so its slot starts at
   the prompt's last token. Its K and V are copied to the prompt store, and a later request with the same prompt copies
@@ -271,21 +271,17 @@ would read 0.644 at 8K and 0.926 at 32K (medians), the latter above the 0.71 the
   until the dropped content is re-emitted, as arXiv 2608.18062 App. C.1).
 - **Determinism.** Every sum's order depends on the shapes and the slot's position alone, so a request's tokens do not
   depend on the batch, the store, `max_length` or timing (64 of 64 greedy and 64 of 64 sampled requests identical alone
-  and batched, d24, GH200). The FP8 cache makes them differ from the bf16 forward's where two logits nearly tie:
-  teacher-forced agreement with the PyTorch forward's greedy choice 0.9916 of 16,261 tokens (121 mismatches, each
-  within 0.57 of the forward's top logit, the first divergences' median gap 0.0625) and with the compiled forward's
-  0.9920; 216 of 542 greedy HumanEval+/MBPP+ continuations identical to the training forward's (a bf16 cache instead:
-  `docs/experiments.md` §6).
-- **Speed** (GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens):
-  94,778 tok/s at d24 and 189,307 at d16, against 21,809 and 66,559 for the per-slot-group GEMV decoder it replaced
-  (4.35×, 2.84×); d24 step 8.27 ms at 1,024 slots, one slot 1.29 ms (GEMV decoder 3.16 ms). A d16 checkpoint's
-  per-problem results changed little and in both directions (MBPP+ greedy +4/−5 base, +2/−7 plus; HumanEval+ greedy
-  unchanged; FIM line exact match within 0.002).
-- **Tuned constants** (d24, GH200, 256-token prompts; 1,024 slots and 512 steps unless stated). GEMM tiles and
-  `WG_STAGES`: 64-row × 64-slot tiles 8.27 ms per step against 8.33 ms for 128 × 128; 4 stages against 8.82, 8.44,
-  8.33, 9.22 ms at 2, 3, 6, 8. `ATTN_RUN`: one MMA tile per warp 8.31 ms against 8.80 (two) and 15.45 (four).
-  `SMALL_BATCH` = 256: fastest or within 0.04 ms at 1, 64, 128, 256 active slots against 64, 128, 512 and no narrow
-  graphs (1 slot 1.29 ms, none 1.46; 256 slots 2.81, none 2.97).
+  and batched, d24, GH200, with the e4m3 cache that preceded the bf16 one: `docs/experiments.md` §6).
+- **Speed** (GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens; with the
+  e4m3 cache): 94,778 tok/s at d24 and 189,307 at d16, against 21,809 and 66,559 for the per-slot-group GEMV decoder
+  it replaced (4.35×, 2.84×); d24 step 8.27 ms at 1,024 slots, one slot 1.29 ms (GEMV decoder 3.16 ms). A d16
+  checkpoint's per-problem results changed little and in both directions (MBPP+ greedy +4/−5 base, +2/−7 plus;
+  HumanEval+ greedy unchanged; FIM line exact match within 0.002).
+- **Tuned constants** (d24, GH200, 256-token prompts; 1,024 slots and 512 steps unless stated; with the e4m3 cache).
+  GEMM tiles and `WG_STAGES`: 64-row × 64-slot tiles 8.27 ms per step against 8.33 ms for 128 × 128; 4 stages against
+  8.82, 8.44, 8.33, 9.22 ms at 2, 3, 6, 8. `ATTN_RUN`: one MMA tile per warp 8.31 ms against 8.80 (two) and 15.45
+  (four). `SMALL_BATCH` = 256: fastest or within 0.04 ms at 1, 64, 128, 256 active slots against 64, 128, 512 and no
+  narrow graphs (1 slot 1.29 ms, none 1.46; 256 slots 2.81, none 2.97).
 
 ## 7. Syntax-constrained decoding and post-generation checks
 

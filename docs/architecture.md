@@ -117,9 +117,9 @@ nominal; `train/loop.py`).
 - **head_dim 128:** compiled into the kernels (`HEAD_DIM`, `native.py`); the head size is set independently of the
   number of heads (arXiv 2002.07028 Theorem 1); 128 itself has no paper.
 - **MHA, not grouped-query attention:** GQA's benefit is KV-cache memory; its d16 screen is `docs/experiments.md` §3.
-  The decoder's e4m3 cache (`docs/evaluation.md` §6: 38,016 bytes per position at d24) is 44.0 MB for 1,158 positions
+  The decoder's bf16 cache (`docs/evaluation.md` §6: 73,728 bytes per position at d24) is 85.4 MB for 1,158 positions
   (a slot's `max_length`, len(prompt) + max_new_tokens − 1: a 391-token prompt [unverified] and 768 new tokens) and
-  45.1 GB for `decode.cu`'s 1,024 slots (`MAX_BATCH`) [arithmetic], which the GPU holds.
+  87.4 GB for `decode.cu`'s 1,024 slots (`MAX_BATCH`) [arithmetic]; `dec_create` takes the slots free memory holds.
 - **Not adopted:** smear and backout (no paper; provenance: `docs/lineage.md`); Block Attention Residuals, the partial
   key offset and multi-token prediction (`docs/experiments.md` §3).
 
