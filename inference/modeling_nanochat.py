@@ -1,6 +1,6 @@
 """model/modeling.py's CausalLM as a transformers model, for the directory inference/export_hf.py writes (auto_map).
 
-Qwen3's layout (transformers modeling_qwen3.py); q/k rotate by -theta (karpathy/nanochat 92d63d4 nanochat/gpt.py:57-65,
+Qwen3's layout (transformers modeling_qwen3.py); q/k rotate by -theta (arXiv 2104.09864 §3.2.2,
 model/kernels/qk_row.cuh), so no library rotary is used; fp32 where the training forward computes in fp32.
 """
 

@@ -291,8 +291,9 @@ The build (§10) therefore pulls the shipped tokenizer, and tokenize and pack re
   scores, F·log R has the highest compression (3.643) and far fewer verified under-trained tokens than F (72 against
   640); F·log R·L (Table 3: 3.642 and 44; Table 4's "SA-BPE") is not used, as for natural language "the language
   aspect must be avoided" (§6).
-- **`SPLIT_PATTERN`**: karpathy/nanochat's (cl100k's as tiktoken 0.6.0 writes it, with digit runs of one or two)
-  without its `[\r\n]*` after a punctuation run, so no token joins `"):"` to its line break:
+- **`SPLIT_PATTERN`**: cl100k's (as tiktoken 0.6.0 writes it, with digit runs of one or two) without its `[\r\n]*`
+  after a punctuation run, so no token joins `"):"` to its line break (vocabulary tokens holding a line break
+  correlate with lower MBPP pass@1, arXiv 2608.18062 App. F.3, fn. 16):
   `'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]|\s+(?!\S)|\s+`.
 - **Sample** (`train_tokenizer.sample`): `SAMPLE_BYTES` = 13.38e9 bytes of the curated train splits of the file
   stage's 17 sources, each source's share its share of the stage's bytes (`byte_shares`: its token share, §7, at
@@ -689,7 +690,7 @@ numbered densely in sample order. `sample` reads row groups in parallel and keep
 merge i as token 256 + i (the bytes of its pair joined); it creates `CORPUS/tokenizer` only after training, and fails
 there if the directory exists.
 
-**`corpus/crate/train.rs`** (rustbpe's design, karpathy/rustbpe). Documents are split into chunks by the pattern (one
+**`corpus/crate/train.rs`** (rustbpe's design). Documents are split into chunks by the pattern (one
 fancy-regex per worker, one chunk table per rayon fold task and hash shard, shards merged in parallel); each distinct
 chunk is a `Word` (byte ids, count, sorted distinct sources). Pair frequencies update incrementally; a lazy max-heap
 requeues a popped entry whose frequency changed; entries hold the words a pair may occur in. R is exact without a
@@ -816,5 +817,6 @@ sources in both stages); `IN_PART` groups read the same fraction of each source 
 | 2602.09003 | Data Science and Technology Towards AGI Part I: Tiered Data Management (UltraData-Math) | 1 |
 | 2604.14053 | Chizhov et al., From Where Words Come (SA-BPE) | 5 |
 | 2606.10087 | CodeAlchemy | 7 |
+| 2608.18062 | Meister, TokEval: A Tokenizer Evaluation Suite | 5 |
 | 2610.12144 | Language-specific effects of tokenizer choice | 5 |
 | 2610.23960 | UltraData-Code | 1, 7 |

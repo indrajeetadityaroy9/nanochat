@@ -1,6 +1,6 @@
 /*! Byte-level BPE training by source-attributed BPE (SA-BPE, arXiv 2604.14053 §4.1): each merge takes the pair of
     highest F·ln(R) (ln as in pchizhov/sa-bpe scoring.py; 0 for a pair seen in one source), F the pair's frequency, R
-    its distinct sources; ties to the higher F, then the smaller pair. Trainer after rustbpe (karpathy/rustbpe), text
+    its distinct sources; ties to the higher F, then the smaller pair. Trainer after rustbpe, text
     split by fancy-regex as tiktoken (openai/tiktoken) does; R is exact at each merge via a lazy heap of upper bounds. */
 
 use std::cmp::Ordering;

@@ -77,8 +77,8 @@ corpus's packs (`docs/corpus.md` §3) is 69,874 steps (+0.42%).
 
 **FLOP count (`ba01bb5`, `b065ad7`).** The plan uses Eq. 2's M (full attention at the 8K context in every layer),
 the definition §3.1 Eq. 1's constants were fit with (§3.2: "M includes the computational overhead of attention
-operation"); the earlier per-window count (6 per decoder-layer matrix weight + 12·d·window per layer, after
-karpathy/nanochat 92d63d4 `gpt.py` `estimate_flops`; the earlier `peak_lr` records' `flops_per_token` 1,557,467,136)
+operation"); the earlier per-window count (6 per decoder-layer matrix weight + 12·d·window per layer, arXiv
+2204.02311 App. B with the attended window as context; the earlier `peak_lr` records' `flops_per_token` 1,557,467,136)
 is 1.82× lower at d24/8K (on the second d24 row's plan: 12.06 instead of 14.67 micro-batches, lr ×1/0.928).
 The batch is not ablated: Muon's loss is flat across a 2× batch at 8× Chinchilla (arXiv 2509.02046 App.
 C.9 Table 85: 130M, batch 128 and 256 both 3.240, 512 3.257).
@@ -127,8 +127,8 @@ C.9 Table 85: 130M, batch 128 and 256 both 3.240, 512 3.257).
 NorMuon's training loss over the last 50% of steps −0.0029 below the base's (negative in every hundred-step window),
 every bits-per-byte measure better by 0.0003–0.0013. One seed cannot resolve that: base seeds 1 and 0 differ by
 0.0014–0.0027 bpb and the treatment effect's seed spread is unestimated. NorMuon is adopted on the literature: 11.31%
-over Muon at 1.1B (arXiv 2510.05491 abstract); modded-nanogpt PR #144 (on top of Polar Express, −15 steps over 20
-runs); karpathy/nanochat `dev/LOG.md` 2026-01-10 ("a very small improvement", kept). A d24 check (200 steps, the
+over Muon at 1.1B (arXiv 2510.05491 abstract); Adam's final loss in 21.74% / 13.91% fewer steps at 1.1B / 5.4B, Muon's
+10.43% / 6.08% (arXiv 2510.05491 §4.1.2 Table 1). A d24 check (200 steps, the
 earlier recipe's ×2.797, seed 0, 8K; alone on the GPU, not an exclusive A/B): last-20 loss 2.2946 against 2.2967,
 largest gradient norm after step 40 1.153 against 1.387, no spike, −0.08% tok/s, equal peak (77.5 GiB). The screen's
 other arms: `docs/experiments.md` §4.
@@ -138,7 +138,7 @@ other arms: `docs/experiments.md` §4.
 `train/schedule.py` `lr_lambda`, every group's `LambdaLR` multiplier:
 
 - **Warmup**: linear over `WARMUP_STEPS` = 2/(1 − β₂) = 40 steps (arXiv 1910.04209 §4.3, Eq. 14: "linear warmup
-  over τ = 2·(1−β2)^−1 iterations"; karpathy/nanochat 92d63d4 uses 40 at d24); step s trains at (s + 1)/40. In the
+  over τ = 2·(1−β2)^−1 iterations"); step s trains at (s + 1)/40. In the
   earlier recipe's 11 `peak_lr` runs (×1 to ×8, §5) the largest gradient norm of the first 40 steps is 2.46–3.00 at d8
   and 3.21–4.07 at d24, and none diverged (`results/peak_lr-curves.jsonl` at `81fb386`). No paper fixes a warmup for
   Muon.
@@ -495,7 +495,7 @@ loader's Weyl sequence (`mixture.mixture_rows`; `docs/corpus.md` §9). The order
 PyTorch's default, off (`torch._inductor.config.coordinate_descent_tuning`, on only with
 `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`, which neither the image nor `scripts/container.sh` sets). Python's
 garbage collector, whose scans are slow, is frozen and disabled after the first step and collects only after each
-checkpoint or weights save (`train/loop.py`; karpathy/nanochat 07c4dd4).
+checkpoint or weights save (`train/loop.py` `train`).
 
 ## 9. Reproducing the run
 
@@ -679,7 +679,6 @@ model-provider clients, which only its code generation imports.
 | 2512.05620 | Hyperparameter Transfer Enables Consistent Gains of Matrix-Preconditioned Optimizers Across Scales |
 | 2512.22382 | Completed Hyperparameter Transfer across Modules, Width, Depth, Batch & Duration |
 
-Repositories: `karpathy/nanochat` (92d63d4, 07c4dd4, `dev/LOG.md` 2026-01-10); `KellerJordan/modded-nanogpt` (PR #144);
-`zichongli5/NorMuon` (`normuon.py` `normuon_update`);
+Repositories: `zichongli5/NorMuon` (`normuon.py` `normuon_update`);
 `NVIDIA/Megatron-LM` (PR 5395); `openai/human-eval-infilling`, `nuprl/MultiPL-E`, `evalplus/evalplus` (§8's commits);
 `OpenCoder-LLM/opc-sft-stage2`, `OpenCoder-LLM/opc-annealing-corpus` (datasets).

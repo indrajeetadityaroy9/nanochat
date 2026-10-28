@@ -1,7 +1,7 @@
 """
 Likelihood metrics of a checkpoint in bits per byte: held-out val splits (arXiv 2207.14255 §2) per context and
 byte-offset bucket, and reference solutions given their prompts (arXiv 2412.04403 §2.2). Targets of 0 bytes are
-excluded from both sums (karpathy/nanochat 92d63d4 nanochat/loss_eval.py evaluate_bpb).
+excluded from both sums; bits per byte as arXiv 2101.00027 §3.1.
 """
 import math
 import re
@@ -18,7 +18,7 @@ from corpus.tokenizer import Tokenizer
 from metrics import mixture_bpb, mixture_bpb_summary, offset_bpb
 from model.modeling import CausalLM
 
-# nanochat's --eval-tokens (karpathy/nanochat 92d63d4 scripts/base_train.py:73), or the whole split if smaller
+# Validation tokens per corpus (not ablated here), or the whole split if smaller
 VAL_TOKENS = 80 * 2**19
 # Positions both stages train, and positions only the repo-level stage trains
 CONTEXTS = (FILE_LEVEL_STAGE.seq_len,)

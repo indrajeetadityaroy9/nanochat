@@ -1,6 +1,6 @@
 """Value-embedding gate and mix (ve_gate.cu): v + 2 sigmoid(n W^T) per head x bf16(table[input_ids])
-(KellerJordan/modded-nanogpt record #14; arXiv 2601.22887 §4.1 Eq. 6; gate after karpathy/nanochat e85db6b); gate
-logits in fp32, the mix rounded once. The backward adds the table's gradient into table.grad (a leaf requiring grad)."""
+(arXiv 2601.22887 §4.1 Eq. 6); gate logits in fp32, the mix rounded once. The backward adds the table's gradient into
+table.grad (a leaf requiring grad)."""
 
 import ctypes
 

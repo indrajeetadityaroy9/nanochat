@@ -1,4 +1,4 @@
-"""CausalLM after karpathy/nanochat 92d63d4 nanochat/gpt.py: pre-norm decoder layers with x0 mixing, QK-norm with
+"""CausalLM: pre-norm decoder layers (arXiv 2002.04745 §3.1) with x0 mixing (arXiv 2402.02622 §3), QK-norm with
 learned per-dimension gains (arXiv 2309.14322 §3.2.5), SSSL windows, gated value embeddings (arXiv 2601.22887 §4.1),
 ReLU^2 MLP and a capped output c tanh(z / c); fp32 parameters, bf16 activations."""
 
@@ -19,7 +19,7 @@ from model.ops.linear import EPS, qkv_proj, relu2_mlp
 NUM_HIDDEN_LAYERS = 24
 # Width per layer: MobileLLM-350M's deep-and-thin 32 x 960 (arXiv 2402.14905 Table 9)
 ASPECT_RATIO = 960 // 32
-# Output-logit cap c, as karpathy/nanochat 92d63d4 nanochat/gpt.py:511-515
+# Output-logit cap c tanh(z/c) (arXiv 1611.09940 App. A.2; arXiv 2408.00118 §2)
 FINAL_LOGIT_SOFTCAPPING = 15.0
 
 
@@ -33,13 +33,13 @@ class ModelConfig:
 
 
 def has_ve(layer_idx: int, *, num_hidden_layers: int) -> bool:
-    """Alternating layers, the last included (92d63d4 gpt.py:53-55)."""
+    """Alternating layers, the last included (arXiv 2601.22887 §4.1)."""
     return layer_idx % 2 == (num_hidden_layers - 1) % 2
 
 
 def layer_windows(config: ModelConfig) -> list[int]:
     """Keys before each query per layer: SSSL, full context on every fourth layer and the last, else S = 512
-    (LOG 2026-01-11; 92d63d4 gpt.py:287-314; S after arXiv 2503.19786 §5.2)."""
+    (arXiv 2004.05150 §3.1; S after arXiv 2503.19786 §5.2)."""
     n = config.num_hidden_layers
     return [config.max_position_embeddings if i % 4 == 3 or i == n - 1 else 512 for i in range(n)]
 
@@ -134,8 +134,8 @@ class CausalLM(nn.Module):
 
     @torch.no_grad()
     def init_weights(self, *, seed: int) -> None:
-        """Uniform ±sqrt(3/C) ("Efficient BackProp" §4.6); zero o_proj, down_proj (modded-nanogpt record #5), lm_head
-        (record #8), VE gates, x0_lambdas; one resid_lambdas, QK-norm gains; per-tensor seed seed 2^32 + crc32(name)."""
+        """Uniform ±sqrt(3/C) ("Efficient BackProp" §4.6); zero o_proj, down_proj, lm_head (arXiv 1901.09321 §3),
+        VE gates, x0_lambdas; one resid_lambdas, QK-norm gains; per-tensor seed seed 2^32 + crc32(name)."""
         bound = (3 / self.config.hidden_size) ** 0.5
         zero = ("self_attn.o_proj.weight", "mlp.down_proj.weight", "lm_head.weight", "self_attn.ve_gate.weight",
                 "x0_lambdas")
@@ -167,8 +167,8 @@ class CausalLM(nn.Module):
                              [m.weight for m in linears] + [w for m in attentions for w in m.qkv_weights()])
 
     def init_buffers(self) -> None:
-        """fp32 rotary tables (T, HEAD_DIM/2) of t ROPE_THETA^(-2i/HEAD_DIM) (92d63d4 gpt.py:270-285), computed in fp64
-        and rounded once (an fp32 angle errs by up to t 2^-24)."""
+        """fp32 rotary tables (T, HEAD_DIM/2) of t ROPE_THETA^(-2i/HEAD_DIM) (arXiv 2104.09864 §3.2.2), computed in
+        fp64 and rounded once (an fp32 angle errs by up to t 2^-24)."""
         device = self.embed_tokens.weight.device
         exponent = torch.arange(0, HEAD_DIM, 2, dtype=torch.float64, device=device) / HEAD_DIM
         t = torch.arange(self.config.max_position_embeddings, dtype=torch.float64, device=device)
@@ -208,8 +208,8 @@ class CausalLM(nn.Module):
 
 
 def meta_model() -> CausalLM:
-    """The base model on the meta device at the file-level stage's context, by nanochat's shape rule (92d63d4
-    scripts/base_train.py:51-52, 131-134): width ASPECT_RATIO x NUM_HIDDEN_LAYERS, rounded up to whole heads."""
+    """The base model on the meta device at the file-level stage's context, by the shape rule (arXiv 2402.14905
+    Table 9): width ASPECT_RATIO x NUM_HIDDEN_LAYERS, rounded up to whole heads."""
     config = ModelConfig(max_position_embeddings=FILE_LEVEL_STAGE.seq_len, num_hidden_layers=NUM_HIDDEN_LAYERS,
                          hidden_size=-(-NUM_HIDDEN_LAYERS * ASPECT_RATIO // HEAD_DIM) * HEAD_DIM,
                          final_logit_softcapping=FINAL_LOGIT_SOFTCAPPING)
@@ -218,7 +218,8 @@ def meta_model() -> CausalLM:
 
 
 def num_non_embedding_params(model: CausalLM) -> int:
-    """Decoder-layer parameters + lm_head: what the token budget scales with (92d63d4 scripts/base_train.py:263-267)."""
+    """Decoder-layer parameters + lm_head: what the token budget scales with (embeddings excluded, arXiv 2001.08361
+    §1.3; the untied head counted, arXiv 2406.19146 §3.2)."""
     return sum(p.numel() for p in model.layers.parameters()) + model.lm_head.weight.numel()
 
 

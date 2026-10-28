@@ -68,8 +68,8 @@ class Muon(torch.optim.Muon):
 
 
 def optimizers(model: torch.nn.Module, *, lr: float, weight_decay: float) -> tuple[torch.optim.Optimizer, ...]:
-    """(AdamW, Muon) at peak lr; weight decay on matrices, tables and lm_head, not 1-D parameters (karpathy/nanoGPT
-    model.py configure_optimizers)."""
+    """(AdamW, Muon) at peak lr; decoupled weight decay (arXiv 1711.05101 Alg. 2) on matrices, tables and lm_head, not
+    1-D parameters."""
     tables = [model.embed_tokens.weight, model.lm_head.weight, *model.value_embeds.parameters()]
     table_ids = {id(p) for p in tables}
     vectors = [p for p in model.parameters() if p.ndim == 1]

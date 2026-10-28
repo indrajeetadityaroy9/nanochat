@@ -47,9 +47,9 @@ errors recomputed from the stored row sums and the packs in `dba27e6`; the error
 `docs/training.md` §2). Ranking at a single small size (150M parameters) picks the better of two data recipes at the
 1B target in ~80% of comparisons (DataDecide, arXiv 2504.11393 Abstract); architecture rankings can change with scale
 (arXiv 2207.10551 §1). The d16 proxy at 20 tokens per parameter on the sa-bpe arm's data trains 4,552 steps of 294,912
-tokens at peak lr 4.667e-3 (law × 2.797, the earlier recipe's multiplier, `docs/training.md` §5); karpathy/nanochat's
-~320-run optimizer sweep (`dev/LOG.md` 2026-01-19..22) found gains shrinking from ~0.002 bpb at d12 to 0.0007 at d20,
-with d12-tuned values hurting at d20.
+tokens at peak lr 4.667e-3 (law × 2.797, the earlier recipe's multiplier, `docs/training.md` §5). Tuned gains shrink
+with scale: optimizer speedups over a well-tuned AdamW fall from 1.3–1.4× below 1B to 1.1× at 1.2B (arXiv 2509.02046
+§1 Fig. 1), and vanish under incorrect hyperparameter scaling (arXiv 2512.05620 Abstract).
 
 **Shared tests** (were `ablations/contrast.py`, removed in `f05d17c`). An arm against its baseline over the seeds where
 both have an evaluation, α = 0.05:
@@ -100,7 +100,7 @@ code is removed; it is cited at `67192ab` (`python -m ablations.tokenizer_split_
 | hybrid | `HYBRID_PATTERN` | F·ln R | line breaks and indentation as chunks of their own |
 | bpe | `SPLIT_PATTERN` | F | SA-BPE's score against frequency |
 
-- **sa-bpe-fused:** karpathy/nanochat's pattern (92d63d4): `SPLIT_PATTERN` plus `[\r\n]*` after the punctuation run,
+- **sa-bpe-fused:** `FUSED_PATTERN`, `SPLIT_PATTERN` plus cl100k's `[\r\n]*` after the punctuation run,
   so `"):\n"` is one chunk. TokEval's companion post ("Tokenizer Code Ablations", *Differing one regex clause*) deletes
   that clause from GPT-4o's pattern, the tokenizer corpus fixed: MBPP pass@1 0.224, 0.246, 0.220 (gpt4onl) against
   0.167, 0.072, 0.018 (gpt4o), three seeds; across tokenizer corpora of 0–50% code the non-fusing pattern scores
@@ -238,11 +238,8 @@ control's effect documented up to 50% code; document units of non-repository tex
 **Output-logit softcap as an experiment (`logit_softcap`, D5).** c·tanh(z/c) with c = 15 against none, in the
 training loss, the evaluation losses and decoding; z-loss the other option. Design: d16 at 20 tokens per parameter on
 the sa-bpe arm's data, 4 paired seeds, adopt iff code bits per byte better by > 0.0047 and MBPP+ parsing not worse;
-~9 GPU-h. Modded-nanogpt record #9 added a cap of 30 against none (one run each: val loss 3.2844 → 3.2791,
-−0.0053 nats per token); carried to 3.6–3.7 bytes per token that is ≈ 0.0021 bpb [estimate], which this design
-detects ~14% of the time [arithmetic: one-sided power at the n = 4 margin, σ = 0.0034]. Verdict: not run; c = 15
-adopted on the literature at the fused cap's cost, +0.58% of the 8K step, above the 0.3% bar (basis, and why no
-z-loss: `docs/architecture.md` §2; implementation §3).
+~9 GPU-h. Verdict: not run; c = 15 adopted on the literature at the fused cap's cost, +0.58% of the 8K step, above
+the 0.3% bar (basis, and why no z-loss: `docs/architecture.md` §2; implementation §3).
 
 **Grouped-query attention.** 2:1 query:KV heads at d16 (4 query, 2 KV heads; seed 0) against the optimizer screen's
 MHA baselines (§4): last-200 train loss 1.3358 against 1.3244 (s0) / 1.3168 (s1); code bpb 8K / 32K 0.4435 / 0.4254
@@ -251,14 +248,15 @@ against 0.4394 / 0.4212 (s1 0.4380 / 0.4196); all bpb 0.5263 / 0.5132 against 0.
 [unverified: no record]. Verdict: rejected, loss and bpb worse beyond the seed spread; not committed. All arms ran at
 the law's lr (× 1), not the earlier recipe's base × 2.797 [inference: the screen's baselines; §4]. The code keeps MHA
 with the KV-cache arithmetic of `docs/architecture.md` §2. Other attention levers ranked with it (more local layers,
-attention sinks, gated attention) were not run; tile-aligned short windows (as modded-nanogpt record #16's block
-sliding window) would change the architecture [inference] (§5, window attention).
+attention sinks, gated attention) were not run; tile-aligned short windows would change the architecture [inference]
+(§5, window attention).
 
 **Block Attention Residuals** (arXiv 2603.15031 §3.2): Block AttnRes matches a baseline trained with 1.25× more compute
 (Abstract); at 194M activated parameters its validation loss is 1.909 against the baseline's 1.931 (§5.1 Table 2;
 −1.1% [arithmetic]). Not adopted: it would need a native decode path (`docs/evaluation.md` §6) [inference]. Not run.
 
-**Partial key offset** (modded-nanogpt record #49). Not adopted for the same reason [inference]. Not run.
+**Partial key offset** (keys shifted one position on part of the head dimensions; no paper, provenance:
+`docs/lineage.md`). Not adopted for the same reason [inference]. Not run.
 
 **Multi-token prediction.** At 0.3B and 0.6B, 4-token prediction scores below next-token prediction on MBPP and
 HumanEval (code models of 0.3B–13B; arXiv 2404.19737 §3.1 Fig. 3, Table S7); d24 has 0.52B parameters. Not adopted.
@@ -286,17 +284,17 @@ unchanged is [inference] (statistics only). Verdict: stopped after 3 of 12 runs;
 `docs/training.md` §3). Specific to this experiment: halving or doubling lr or weight decay from that paper's
 transferred values does equal or worse (arXiv 2512.05620 App. H.3, Fig. 11); doubling Muon's weight decay (0.1 → 0.2)
 costs 0.009–0.020 loss at 130M–520M (arXiv 2509.02046 App. C.9 Tables 82–87), ≈ 0.0035–0.008 bpb [arithmetic at
-3.62 bytes per token], at or below the margin; a d8 point at 200 is the small-proxy transfer the nanochat sweep warns
-against (§1).
+3.62 bytes per token], at or below the margin; a d8 point at 200 is the small-proxy transfer §1 warns against.
 
 **AdamW group learning rate (`adamw_group_lr`, D6).** The AdamW groups (the tables `embed_tokens`, `lm_head`, value
 embeddings, weight-decayed; the 1-D parameters, not) × ¼ and × 4 with weight decay ÷ the same factor (the tables'
-decay timescale held), Muon untouched; karpathy/nanochat 92d63d4 uses per-group lrs. Design: {¼, 1, 4} × seeds 0, 1,
+decay timescale held), Muon untouched; with Muon's update RMS matched to AdamW's, one lr and one weight decay serve
+matrix and non-matrix parameters (arXiv 2502.16982 §2.2). Design: {¼, 1, 4} × seeds 0, 1,
 d16 on the sa-bpe arm's data at its `max_tokens_per_param`; the 3-point vertex, adopted iff its end beat × 1 (margin
 0.0067); ~4 GPU-h. Verdict: not run; one lr for every group (basis: `docs/training.md` §3).
 
 **Scalar learning rates (`scalar_learning_rates`, D6).** `x0_lambdas` and `resid_lambdas` (1-D, AdamW) at
-karpathy/nanochat 92d63d4's lrs, 0.5 and 0.005 × √(B/2^19) (0.375 and 0.00375 at 294,912 tokens per step), every other
+the per-group lrs 0.5 and 0.005 × √(B/2^19) (0.375 and 0.00375 at 294,912 tokens per step), every other
 group unchanged: a gap from the shared lr too large to bound from the literature. One run (branch
 `scalar-learning-rates` `e6e3837`; trained at `61e316a`, `e6e3837` plus `acb1e5e`'s diagnostics fix; recorded at
 `60b972d`), d16 at 20, against D7's τ×1 seed 0 (same recipe, trees differing by the field). Rule: adopt iff code
@@ -552,6 +550,7 @@ pair of one unit scoring 0; ln as in pchizhov/sa-bpe 9fff32d `sabpe/scoring.py`.
 | 2409.04599 | BPE Gets Picky: Efficient Vocabulary Refinement During Tokenizer Training |
 | 2411.09009 | Cut Your Losses in Large-Vocabulary Language Models (Cut Cross-Entropy) |
 | 2412.19437 | DeepSeek-V3 Technical Report |
+| 2502.16982 | Muon is Scalable for LLM Training |
 | 2503.13423 | SuperBPE: Space Travel for Language Models |
 | 2504.00178 | Boundless Byte Pair Encoding: Breaking the Pre-tokenization Barrier |
 | 2504.09246 | Type-Constrained Code Generation with Language Models |

@@ -136,7 +136,7 @@ def norm_bwd_apply(acc, c, h, corr):
 def relu2_mlp(h: Tensor, rstd: Tensor, w_up: Tensor, w_down: Tensor, g_up: Tensor | None,
               g_down: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
     """h (..., C) un-normed stream, rstd (M,) fp32, g_up/g_down fp32 .grad or None -> (h + MLP(norm(h)), preact,
-    postact (M, 4C) saved for the backward); MLP of karpathy/nanochat 92d63d4 gpt.py:131-141."""
+    postact (M, 4C) saved for the backward); ReLU^2 MLP (arXiv 2109.08668 §3)."""
     h2 = h.reshape(-1, h.shape[-1])
     preact, postact = gemm_norm_act(h2, w_up.t(), rstd=rstd, activation="relu_sq", store_preact=True,
                                     config=CONFIGS["up"])

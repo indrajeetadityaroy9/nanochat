@@ -1,7 +1,7 @@
 /*
  * q/k row math shared by qk_prologue.cu and decode.cu, so the decoder's q and k equal training's bitwise:
  * n = x / sqrt(mean(x^2) + FLT_EPSILON), m = n g, y1 = m1 cos + m2 sin, y2 = -m1 sin + m2 cos (m1, m2 the halves;
- * karpathy/nanochat 92d63d4 gpt.py:57-65). A row is QK_LANES threads, each holding dims o.. and partners o+HALF..
+ * arXiv 2104.09864 §3.2.2). A row is QK_LANES threads, each holding dims o.. and partners o+HALF..
  */
 #pragma once
 

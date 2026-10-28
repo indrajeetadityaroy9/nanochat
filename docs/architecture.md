@@ -26,8 +26,8 @@ Names follow Hugging Face's (`ModelConfig`, `num_hidden_layers`, `hidden_size`, 
 
 ## 1. Model
 
-`CausalLM` is karpathy/nanochat 92d63d4 `nanochat/gpt.py` with the wins of its experiment log (`dev/LOG.md`, "LOG")
-and Qwen3's QK-Norm (arXiv 2505.09388 §2) with learnable per-dimension weights (transformers `modeling_qwen3.py`).
+`CausalLM` is a pre-norm decoder with a final norm before the head (arXiv 2002.04745 §3.1) and Qwen3's QK-Norm
+(arXiv 2505.09388 §2) with learnable per-dimension weights (transformers `modeling_qwen3.py`).
 `CausalLM.hidden`: x0 = norm(E[ids]); before layer i, x ← λr_i·x + λ0_i·x0; `DecoderLayer`:
 h = x + o_proj(Attn(norm(x))), x = h + down(relu(up(norm(h)))²); then the final norm, `lm_head` and the capped cross
 entropy (`CausalLM.forward`).
@@ -40,25 +40,25 @@ stream while the layer's norm reads the unrounded value (§3 Embedding; `decode.
 | Component | Definition (code) |
 |---|---|
 | Embedding | token table 32,768 × C (`VOCAB_SIZE` = 2^15: 256 bytes, 32,508 merges, BOS and 3 FIM sentinels, `docs/corpus.md` §5), RMS-normed, no positional embedding |
-| Residual | per layer x = `resid_lambdas[i]`·x + `x0_lambdas[i]`·x0, x0 the normed embedding (LOG 2026-01-11) |
+| Residual | per layer x = `resid_lambdas[i]`·x + `x0_lambdas[i]`·x0, x0 the normed embedding (learned depth weights initialized to the plain residual stack, after DenseFormer, arXiv 2402.02622 §3) |
 | Norms, linears | gain-free RMS norm, eps = FLT_EPSILON, statistics in fp32 (`norm`); bias-free linears; untied `lm_head` |
-| Attention | MHA, H = C / 128 heads of `HEAD_DIM` = 128; q and k: per-head RMS norm, × a learned per-dim gain shared by the heads (`q_norm_weight`, `k_norm_weight`), then RoPE over the full head, rotation by −θ, θ = `ROPE_THETA` = 10^6 (92d63d4 `gpt.py:57-65`); causal within each attention segment, one per packed piece of a document (FA4 varlen over `cu_seqlens`, `docs/corpus.md` §8–§9; document masks improved both long- and short-context results in ProLong's continued long-context training, arXiv 2410.02660 App. B.2) |
+| Attention | MHA, H = C / 128 heads of `HEAD_DIM` = 128; q and k: per-head RMS norm, × a learned per-dim gain shared by the heads (`q_norm_weight`, `k_norm_weight`), then RoPE over the full head (arXiv 2104.09864 §3.2.2), rotation by −θ, θ = `ROPE_THETA` = 10^6; causal within each attention segment, one per packed piece of a document (FA4 varlen over `cu_seqlens`, `docs/corpus.md` §8–§9; document masks improved both long- and short-context results in ProLong's continued long-context training, arXiv 2410.02660 App. B.2) |
 | Windows | `layer_windows`: layers i ≡ 3 (mod 4) and the last attend the whole context, the others the 512 keys before the query (513 with itself); d24: 6 full, 18 windowed |
 | Value embeddings | `has_ve`: alternating layers, the last included (12 of 24): v ← v + 2σ(n W_g^T)_head · bf16(E_i[ids]), n the normed stream, W_g (H × C) `ve_gate`, E_i a per-layer V × C table |
 | MLP | ReLU², hidden 4C |
 | Output | z = x W^T capped c·tanh(z/c), c = `ModelConfig.final_logit_softcapping` = `FINAL_LOGIT_SOFTCAPPING` = 15 (`meta_model`), in the training loss, the evaluation losses and the decoder's sampling; no z-loss |
 | Precision | fp32 parameters and gradients; bf16 activations (compiled: x0 and the residual mix before its norm in fp32, above) and GEMM operands (bf16 weight copies `weight_bf16`, `qkv_bf16`, refreshed after every update by `refresh_gemm_weights`); fp32 accumulation (§4) |
 
-**Shape rule** (`meta_model`, 92d63d4 `scripts/base_train.py:51-52, 131-134`): C = 30 × `NUM_HIDDEN_LAYERS` (24)
-rounded up to whole 128-wide heads; 30 = MobileLLM-350M's 960 / 32 (arXiv 2402.14905 Table 9). d24: 720 → 768.
+**Shape rule** (`meta_model`): C = 30 × `NUM_HIDDEN_LAYERS` (24) rounded up to whole 128-wide heads; 30 =
+MobileLLM-350M's 960 / 32 (arXiv 2402.14905 Table 9). d24: 720 → 768.
 The code builds d24 only; d8 and d16, the proxies of `docs/experiments.md` §1, are the same rule at 8 and 16 layers
 (built by `meta_model(num_hidden_layers=…)` at `67192ab`, with GEMM tiles and kernel instances for their widths).
 `max_position_embeddings` is the stage's context; `set_stage` recomputes the windows and the rotary tables (computed in
 fp64, rounded once to fp32: `init_buffers`), the weights unchanged.
 
 **Initialization** (`init_weights`): q/k/v_proj, up_proj, the token table and the value-embedding tables uniform on
-±√(3/C) (std C^−½, "Efficient BackProp" §4.6); zero: o_proj and down_proj (each layer starts as the identity,
-modded-nanogpt record #5), `lm_head` (record #8), the gates' W_g (gate 1), `x0_lambdas`; one: `resid_lambdas` and the
+±√(3/C) (std C^−½, "Efficient BackProp" §4.6); zero: o_proj and down_proj (each layer starts as the identity) and
+`lm_head`, as Fixup's rule (arXiv 1901.09321 §3), the gates' W_g (gate 1), `x0_lambdas`; one: `resid_lambdas` and the
 QK-norm weights. Each random tensor draws from a generator seeded by seed·2^32 + crc32(its name).
 
 **Counts** (`num_non_embedding_params`: decoder layers + `lm_head`, what the token budget scales with,
@@ -84,16 +84,13 @@ nominal; `train/loop.py`).
 
 ## 2. Design basis
 
-**Lineage.** Taken from 92d63d4: the block layout, value-embedding layers, ReLU² MLP, SSSL pattern and the cap at 15.
-Not taken: its smear and backout, its QK order (RoPE, then norm, then ×1.2), its short window (a quarter of the
-context rounded up to 128), its RoPE base (10^5) and its init. The gate is nanochat e85db6b's (2·sigmoid, zero init)
-read over the full width rather than its first 32 channels (92d63d4 reads 12 channels with 3·sigmoid); the full-width
-read is not ablated.
+**Not taken:** smear and backout (no paper; provenance: `docs/lineage.md`). The gate 2σ(n W_gᵀ), zero-initialized,
+reads the full width, as MoVE's LaVE (arXiv 2601.22887 §4.1); the full-width read is not ablated.
 
-- **Value embeddings, kept** (from the literature): per-layer token-indexed tables are modded-nanogpt record #14's and
-  MoVE's LaVE baseline, V = V + g ⊙ M_t with g = 2σ(x W_g) (arXiv 2601.22887 §4.1), on half the layers; LaVE ×1 gains
-  0.016, 0.010 and 0.010 validation bpb at D12, D20 and D32 (§4.2 Table 1). nanochat found alternating layers best
-  and the gate helpful (LOG 2026-01-17). None of the reference code models has them.
+- **Value embeddings, kept** (from the literature): per-layer token-indexed tables are MoVE's LaVE baseline,
+  V = V + g ⊙ M_t with g = 2σ(x W_g) (arXiv 2601.22887 §4.1), on half the layers; LaVE ×1 gains 0.016, 0.010 and
+  0.010 validation bpb at D12, D20 and D32 (§4.2 Table 1). The alternating placement and the gate are not ablated
+  here. None of the reference code models has them.
 - **Learnable QK-norm gains, kept** (not ablated): per-head qk-layernorm with head-dim learnable parameters is arXiv
   2309.14322's default, slightly better than across the model dimension (§3.2.5, Fig. E.8). In nGPT, a normalized
   Transformer (0.5B parameters, 1K context, ~52B tokens), a fixed s_qk = 1 costs +0.11% validation loss (arXiv
@@ -106,28 +103,26 @@ read is not ablated.
   occurs "in models with no weight decay regardless of scale … Weight decay also mitigates this instability for the
   larger models we test" (arXiv 2309.14322 §3.1.2); `lm_head` is weight-decayed (`docs/training.md` §3) and no
   earlier-recipe `peak_lr` run, uncapped, diverged up to ×8 (`docs/training.md` §5), so no z-loss. The cap is Gemma
-  2's soft_cap·tanh(logits/soft_cap) (final layer 30, arXiv 2408.00118 §2). Effect sizes: modded-nanogpt record #9
-  added it at 30 (val loss 3.2844 → 3.2791 between the record's last two incremental runs, one run each) and record
-  #18 lowered it to 15 (steps to the 3.28 target 1,490 → 1,390; 80 runs at 1,390 steps, mean 3.2791, one-sided
-  p = 0.0001 for a mean below 3.28); nanochat at d24 found caps from 5 to 30 about equal except 5 (much worse), 20
-  best by ~1e-3 val loss (LOG 2026-03-02), while 92d63d4 `gpt.py:511-515` keeps 15.
+  2's soft_cap·tanh(logits/soft_cap) (final layer 30, arXiv 2408.00118 §2), after logit clipping C·tanh(u) (arXiv
+  1611.09940 App. A.2, C = 10). c = 15 has no paper and is not ablated here.
   Its cost: 0.58% of the 8K step (§3). The designed ablation and its detection power: `docs/experiments.md` §3.
 - **RoPE base 10^6 from the first step:** above the 32K context's lower bound of arXiv 2405.14591 (Table 2: 6.4e5);
   large from the start as Llama 3 (500,000, arXiv 2407.21783 §3.2); base 10k against 500k at 8K changes Gemma 2B's
   perplexity 4.4627 → 4.4485 (Wiki) and 6.4429 → 6.4593 (FlanV2), under 0.33% and of mixed sign (arXiv 2410.06205
   Table 2).
-- **ReLU², not SwiGLU:** nanochat measured SwiGLU at matched parameters and FLOPs worse at d12 and d24 on steps,
-  wall clock and FLOPs (LOG 2026-02-05); a gated MLP would also need a gated decode MLP (`model/kernels/decode.cu`
-  hard-codes relu², `EPI_RELU2`).
-- **SSSL windows of 512:** nanochat's SSSL pattern with the last layer full (LOG 2026-01-11); Gemma 3 finds the
-  local:global ratio of minimal impact up to 7:1 and the window reducible "significantly without impacting
-  perplexity" (arXiv 2503.19786 §5.2: Fig. 3, 2B and 9B models; Fig. 4, 2B, windows 512–4,096 at 1:1 and 3:1).
+- **ReLU², not SwiGLU:** squared ReLU is Primer's most effective modification (arXiv 2109.08668 §3, Fig. 5); against
+  it, SwiGLU beats ReLU at matched parameters and compute (arXiv 2002.05202 Table 1); not ablated here. A gated MLP
+  would also need a gated decode MLP (`model/kernels/decode.cu` hard-codes relu², `EPI_RELU2`).
+- **SSSL windows of 512:** sliding-window layers (arXiv 2004.05150 §3.1) with every fourth and the last layer full;
+  Gemma 3 finds the local:global ratio of minimal impact up to 7:1 and the window reducible "significantly without
+  impacting perplexity" (arXiv 2503.19786 §5.2: Fig. 3, 2B and 9B models; Fig. 4, 2B, windows 512–4,096 at 1:1 and
+  3:1).
 - **Shape:** the shape rule's MobileLLM ratio (§1). A deeper, thinner alternative at about d24's
   non-embedding parameters, 35 × 640 (193,070,080), costs M 3,234,201,600 per token at 8K (+14.2%) and nominal
   1,827,033,600 (+6.9%) [arithmetic], so an equal-token comparison gives it more compute; its 5 heads would need
   their own `ve_gate.cu` instance and GEMM tiles (the code is d24's: H = 6, C = 768).
-- **head_dim 128:** compiled into the kernels (`HEAD_DIM`, `native.py`); nanochat found 128 better than 64 (LOG
-  2026-01-17).
+- **head_dim 128:** compiled into the kernels (`HEAD_DIM`, `native.py`); the head size is set independently of the
+  number of heads (arXiv 2002.07028 Theorem 1); 128 itself has no paper.
 - **MHA, not grouped-query attention:** GQA's benefit is KV-cache memory; its d16 screen is `docs/experiments.md` §3.
   The decoder's e4m3 cache (`docs/evaluation.md` §6: 38,016 bytes per position at d24) is 44.0 MB for 1,158 positions
   (a slot's `max_length`, len(prompt) + max_new_tokens − 1: a 391-token prompt [unverified] and 768 new tokens) and
@@ -309,8 +304,8 @@ bitwise run to run, the two trees a median 3.75e-3 apart: bf16 rounding, not a d
 Per-module detail behind the code's docstrings (paper-facing facts are in §1–§4 and not repeated).
 
 **`model/modeling.py`**
-- `init_weights`: the zero-initialized gate weight gives gate 1; `resid_lambdas` = 1 follows LOG 2026-01-11, the
-  QK-norm gains = 1 transformers' `Qwen3RMSNorm`.
+- `init_weights`: the zero-initialized gate weight gives gate 1; `resid_lambdas` = 1 starts the plain residual stack
+  (arXiv 2402.02622 §3), the QK-norm gains = 1 transformers' `Qwen3RMSNorm`.
 - `GemmLinear.weight_bf16`, `Attention.qkv_bf16` (the stacked [Wq; Wk; Wv] for `qkv_proj`): non-persistent buffers
   refreshed by `refresh_gemm_weights` after init, after a load (a `load_state_dict` post-hook) and after every
   optimizer step; copied in place because a compiled graph holds them; reallocated only when a load assigned weights
@@ -450,10 +445,19 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 
 | arXiv | Title |
 |---|---|
+| 1611.09940 | Neural Combinatorial Optimization with Reinforcement Learning |
+| 1901.09321 | Fixup Initialization: Residual Learning Without Normalization |
+| 2002.04745 | On Layer Normalization in the Transformer Architecture |
+| 2002.05202 | GLU Variants Improve Transformer |
+| 2002.07028 | Low-Rank Bottleneck in Multi-head Attention Models |
+| 2004.05150 | Longformer: The Long-Document Transformer |
+| 2104.09864 | RoFormer: Enhanced Transformer with Rotary Position Embedding |
+| 2109.08668 | Primer: Searching for Efficient Transformers for Language Modeling |
 | 2308.12950 | Code Llama: Open Foundation Models for Code |
 | 2309.14322 | Small-scale proxies for large-scale Transformer training instabilities |
 | 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming -- The Rise of Code Intelligence |
+| 2402.02622 | DenseFormer: Enhancing Information Flow in Transformers via Depth Weighted Averaging |
 | 2402.14905 | MobileLLM: Optimizing Sub-billion Parameter Language Models for On-Device Use Cases |
 | 2402.19173 | StarCoder 2 and The Stack v2: The Next Generation |
 | 2405.09818 | Chameleon: Mixed-Modal Early-Fusion Foundation Models |
@@ -468,9 +472,7 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 | 2505.09388 | Qwen3 Technical Report |
 | 2601.22887 | MoVE: Mixture of Value Embeddings -- A New Axis for Scaling Parametric Memory in Autoregressive Models |
 
-Repositories, at the commit, file or record cited: `karpathy/nanochat` (92d63d4 `nanochat/gpt.py`,
-`scripts/base_train.py`; e85db6b `nanochat/gpt.py`; `dev/LOG.md` 2026-01-11, 2026-01-17, 2026-02-05, 2026-03-02);
-`KellerJordan/modded-nanogpt` (records #5, #8, #9, #14, #18); `Dao-AILab/flash-attention` (FlashAttention-4 4.0.0b36,
+Repositories, at the commit or file cited: `Dao-AILab/flash-attention` (FlashAttention-4 4.0.0b36,
 `flash_attn.cute`); `Dao-AILab/quack` 0.6.5; `deepseek-ai/DeepGEMM`, `deepseek-ai/TileKernels` (design sources);
 `NVIDIA/Megatron-LM` (gradient-accumulation fusion); `huggingface/transformers` (`modeling_qwen3.py`). LeCun et al.,
 "Efficient BackProp" (1998) §4.6.

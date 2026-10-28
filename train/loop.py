@@ -180,7 +180,7 @@ def train(*, model: CausalLM, run: RunPlan, checkpoints: frozenset[int], weights
             log(*pending)
         pending, previous_end = (step, learning_rate, model_flops, values, layout, previous_end, end), end
         if step == start_step:
-            # collector frozen and off after the first step, collecting only after saves (karpathy/nanochat 07c4dd4)
+            # collector frozen and off after the first step, collecting only after saves
             gc.collect()
             gc.freeze()
             gc.disable()

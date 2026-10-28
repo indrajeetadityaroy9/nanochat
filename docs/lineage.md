@@ -1,6 +1,6 @@
 # Literature behind the upstream ideas
 
-The ideas this repository took from karpathy/nanochat ("nanochat"; "LOG" is its `dev/LOG.md` at `92d63d4`) and
+The ideas this repository took from karpathy/nanochat ("nanochat"; "LOG" is its development log `dev/LOG.md`) and
 KellerJordan/modded-nanogpt ("modded"; record #N is row N of its README track-1 table), each with the papers to cite
 for it. Upstream commits, records and LOG entries are provenance only, never evidence. Classes: ADOPTED, ADAPTED,
 PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measurement bears on a choice), NOT TAKEN
@@ -96,7 +96,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   down by √L; Pre-LN trains without the warm-up stage; arXiv 1809.10853 (Baevski & Auli, 2018, §4.1): layer norm
   before the self-attention and FFN blocks "leads to more effective training".
 - **Here.** ADOPTED: `model/modeling.py` `DecoderLayer.forward`, `CausalLM.hidden`; `docs/architecture.md` §1.
-- **Upstream.** nanochat (initial commit); modded-nanogpt first script (`4a452a2`).
+- **Upstream.** nanochat (initial commit); modded-nanogpt (first script).
 
 ### RMS normalization without a learnable gain
 - **Idea.** RMSNorm keeps LayerNorm's re-scaling and drops its re-centering, which it hypothesizes is dispensable, at
@@ -107,7 +107,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   §3.3.1): ablations "show no difference" between the non-parametric layer norm and RMSNorm.
 - **Here.** ADAPTED: `model/modeling.py` `norm`; `docs/architecture.md` §1; eps FLT_EPSILON with fp32 statistics
   (upstream: bf16, torch's default eps).
-- **Upstream.** nanochat (initial commit); modded-nanogpt first script (`4a452a2`).
+- **Upstream.** nanochat (initial commit); modded-nanogpt (first script).
 
 ### RMS-normed token embedding, no positional embedding
 - **Idea.** x0 = norm(E[ids]): a norm right after the embedding lookup keeps the stream's scale independent of the
@@ -153,7 +153,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   6.4e5 for 32K; arXiv 2407.21783 (Llama 3, 2024, §3.2): base 500,000 in pre-training; arXiv 2410.06205 (Barbero et al.,
   2024, §6.1 Table 2): Gemma 2B at 8K, base 10k against 500k, perplexity within 0.33% and of mixed sign.
 - **Here.** ADAPTED: `model/config.py` `ROPE_THETA`; `docs/architecture.md` §2; 10^6 in both stages (upstream 10^5).
-- **Upstream.** nanochat (initial commit), `6ed7d1d`.
+- **Upstream.** nanochat (initial commit; later revised).
 
 ### QK-norm with learned per-dimension gains, fixed 1/√d scale
 - **Idea.** Normalize q and k per head so attention logits cannot grow with parameter norms (near one-hot attention);
@@ -166,7 +166,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
 - **Here.** ADAPTED: `model/modeling.py` `Attention.q_norm_weight`, `k_norm_weight`, `model/kernels/qk_prologue.cu`,
   `model/ops/flash_attn.py` `attention` (scale 1/√128); `docs/architecture.md` §1, §2; norm → gain → RoPE (upstream:
   RoPE → gain-free norm → ×1.2 on q and k).
-- **Upstream.** nanochat (initial commit), `6ed7d1d`, `a825e63`; modded-nanogpt records #5, #20.
+- **Upstream.** nanochat (initial commit; later revised); modded-nanogpt records #5, #20.
 
 ### Multi-head attention with all KV heads (not GQA/MQA)
 - **Idea.** One key/value head per query head; MQA and GQA share KV heads to cut decode memory bandwidth and KV-cache
@@ -244,7 +244,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   the embedding and all earlier block outputs, initialized to the identity (the plain Transformer), reach the
   perplexity of much deeper Transformers.
 - **Here.** ADAPTED: `model/modeling.py` `CausalLM.resid_lambdas`, `x0_lambdas`, `hidden`, `init_weights`;
-  `docs/architecture.md` §1; init 1 / 0 (92d63d4: decaying inits), one shared lr.
+  `docs/architecture.md` §1; init 1 / 0 (upstream: decaying inits), one shared lr.
 - **Upstream.** nanochat LOG 2026-01-11; modded-nanogpt record #9.
 
 ### Gated value embeddings on alternating layers
@@ -254,16 +254,15 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   modded-nanoGPT repository", V + g ⊙ M_t with g = 2σ(x W_g) read from the full hidden width, on half the layers
   (L−1, L−3, …), the gate 1 at zero logits; LaVE ×1 lowers val bpb by 0.016, 0.010 and 0.010 at D12, D20 and D32.
 - **Here.** ADAPTED: `model/modeling.py` `has_ve`, `CausalLM.value_embeds`, `Attention.ve_gate`,
-  `model/kernels/ve_gate.cu`; `docs/architecture.md` §1, §2; the gate reads the full width (nanochat `e85db6b`: 32
-  channels).
-- **Upstream.** nanochat LOG 2026-01-17, `e85db6b`; modded-nanogpt records #14 (tables), #55 (gate).
+  `model/kernels/ve_gate.cu`; `docs/architecture.md` §1, §2; the gate reads the full width (nanochat: 32 channels).
+- **Upstream.** nanochat LOG 2026-01-17; modded-nanogpt records #14 (tables), #55 (gate).
 
 ### Smear, backout, partial key offset
 - **Idea.** Speedrun stream edits: mix each token's embedding with its predecessor's (smear), subtract a mid-layer
   residual before the head (backout), shift keys one position on part of the head dimensions (partial key offset).
 - **Papers.** None: speedrun techniques without a paper; the upstream results are unreviewed observations.
 - **Here.** NOT TAKEN: `docs/architecture.md` §2 (smear, backout), `docs/experiments.md` §3 (partial key offset).
-- **Upstream.** nanochat LOG 2026-01-16, `a825e63`; modded-nanogpt records #34 (smear), #40 (backout), #49 (partial key
+- **Upstream.** nanochat LOG 2026-01-16; modded-nanogpt records #34 (smear), #40 (backout), #49 (partial key
   offset).
 
 ### Output-logit soft cap c·tanh(z/c), c = 15
@@ -274,7 +273,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   in the final softmax".
 - **Here.** ADOPTED: `model/modeling.py` `FINAL_LOGIT_SOFTCAPPING`, `model/ops/cross_entropy.py` `lm_loss`,
   `lm_losses`; `docs/architecture.md` §2, `docs/experiments.md` §3 (designed ablation, not run); c = 15 has no paper.
-- **Upstream.** nanochat (initial commit), LOG 2026-03-02, `6ed7d1d`; modded-nanogpt records #9, #18.
+- **Upstream.** nanochat (initial commit), LOG 2026-03-02; modded-nanogpt records #9, #18.
 
 ### Uniform fan-in initialization, std C^−½
 - **Idea.** Draw each weight with mean 0 and standard deviation m^−½ (m the fan-in) so pre-activations keep unit
@@ -282,8 +281,8 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
 - **Papers.** LeCun, Bottou, Orr & Müller, "Efficient BackProp" (1998, §4.6, Eqs. 15–16): weights drawn from a
   distribution (e.g. uniform) with mean zero and standard deviation m^−½.
 - **Here.** ADAPTED: `model/modeling.py` `CausalLM.init_weights`; `docs/architecture.md` §1; upstream's bound for
-  q/k/v and the value tables, applied also to up_proj and the token table (92d63d4: ×0.4, N(0, 0.8)).
-- **Upstream.** nanochat `48abd7d`; modded-nanogpt record #19.
+  q/k/v and the value tables, applied also to up_proj and the token table (upstream: ×0.4, N(0, 0.8)).
+- **Upstream.** nanochat; modded-nanogpt record #19.
 
 ### Zero-initialized residual-branch outputs and output head
 - **Idea.** Zeroing the last layer of each residual branch starts every block as the identity; a zero head starts
@@ -361,7 +360,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   which lets matrix and non-matrix parameters share "learning rate η, weight decay λ".
 - **Here.** ADAPTED: `train/optim.py` `optimizers` (`adjust_lr_fn="match_rms_adamw"`); `docs/training.md` §3;
   Moonlight's rule replaces upstream's √max(1, rows/cols).
-- **Upstream.** modded-nanogpt record #4, then `4706781`; nanochat.
+- **Upstream.** modded-nanogpt record #4 and later; nanochat.
 
 ### NorMuon: neuron-wise second-moment normalization after orthogonalization
 - **Idea.** Orthogonalized updates have uniform singular values but uneven per-neuron norms; dividing each row of the
@@ -409,7 +408,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   m_τ = −0.527; TPP 20–1280), fit on AdamW, the EMA view applying to other decoupled-decay optimizers;
   arXiv 2405.13698 (Wang, 2024, §3.1 Eqs. 5–6): AdamW as an EMA with 1/τ_iter = ηλ.
 - **Here.** PARALLEL: `train/optim.py` `tau_weight_decay`; `docs/training.md` §3; one law for AdamW and Muon alike.
-- **Upstream.** nanochat LOG 2026-01-10, then `aeff095` (after arXiv 2405.13698; Muon only).
+- **Upstream.** nanochat LOG 2026-01-10 and later (after arXiv 2405.13698; Muon only).
 
 ### Per-group learning rates (AdamW groups, residual scalars)
 - **Idea.** Give each AdamW group (token table, head, value tables, scalars) its own lr, betas, eps and decay, and the
@@ -436,7 +435,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   arXiv 2401.02954 (DeepSeek-AI, 2024, §2.3): gradient clipping set to 1.0.
 - **Here.** ADOPTED: `train/optim.py` `update` (`MAX_GRAD_NORM`); `docs/training.md` §3; kept where both upstreams
   removed it.
-- **Upstream.** nanochat LOG 2026-01-08 (removal); modded-nanogpt `9805cab` (removal).
+- **Upstream.** nanochat LOG 2026-01-08 (removal); modded-nanogpt (removal, early script).
 
 ### Linear warmup over 2/(1 − β₂) steps
 - **Idea.** Ramp the lr linearly at the start, while Adam's second-moment estimate is unreliable; an untuned ramp over
@@ -444,7 +443,7 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
 - **Papers.** arXiv 1910.04209 (Ma, 2019, §4.3 Eq. 14, §4.4): "linear warmup over τ = 2·(1−β2)^−1 iterations" as an
   untuned rule of thumb, more or less interchangeable with RAdam.
 - **Here.** ADOPTED: `train/schedule.py` `WARMUP_STEPS`, `lr_lambda`; `docs/training.md` §4; step s at (s + 1)/40.
-- **Upstream.** nanochat (40 steps since `6ed7d1d`).
+- **Upstream.** nanochat (40 steps).
 
 ### Linear decay to zero, not a trapezoid with a floor
 - **Idea.** Decay the lr linearly from the peak to zero over the whole run, which averages more updates late in
@@ -453,7 +452,8 @@ PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measure
   grows with TPP (111M–1.7B) and is "around 0.84% better than the optimal WSD" (610M, 80 TPP); arXiv 2405.18392
   (Hägele, 2024, Abstract): a constant lr with a cooldown scales "predictably and reliably similar to cosine".
 - **Here.** ADAPTED: `train/schedule.py` `lr_lambda`; `docs/training.md` §4; the last step at 1/(steps − 40) of peak.
-- **Upstream.** modded-nanogpt trapezoid (`93fb178`) and floors (records #19, #26, #72); nanochat warmdown and floor.
+- **Upstream.** modded-nanogpt trapezoid (early script) and floors (records #19, #26, #72); nanochat warmdown and
+  floor.
 
 ### Each group's lr as its peak times one schedule multiplier
 - **Idea.** Store each group's peak lr and multiply it by one function of the step, so every group follows one
@@ -914,6 +914,6 @@ Non-arXiv sources:
     networks", https://kellerjordan.github.io/posts/muon/ (blog)
   - Radford et al., 2019, "Language Models are Unsupervised Multitask Learners" (OpenAI report)
   - Meister, 2026, "Tokenizer Code Ablations" (TokEval companion blog post)
-- Software and data (provenance): karpathy/nanochat (`92d63d4`, `dev/LOG.md`); KellerJordan/modded-nanogpt (records by
+- Software and data (provenance): karpathy/nanochat (`dev/LOG.md`); KellerJordan/modded-nanogpt (records by
   number); karpathy/rustbpe; openai/tiktoken; PyTorch (`torch.optim.Muon`, `torch.compile`); QuACK; datasets
   `karpathy/climbmix-400b-shuffle` and `nvidia/Nemotron-ClimbMix`.

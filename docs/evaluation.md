@@ -87,9 +87,9 @@ rehearsal's `eval-1102`, `eval-2205`).
 ## 2. Likelihood metrics
 
 `eval/bpb.py` `likelihood` runs the compiled `CausalLM.losses` (one graph per row shape). All values are bits per
-byte (§5 `bpb`: summed bits over summed UTF-8 bytes of the targets; tokenizer-independent). Targets of zero bytes
-(BOS, padding, FIM sentinels) are excluded from both sums, as karpathy/nanochat's `evaluate_bpb`. Sums are fp64 on
-the device, reduced in a fixed order.
+byte (§5 `bpb`: summed bits over summed UTF-8 bytes of the targets; tokenizer-independent, arXiv 2101.00027 §3.1).
+Targets of zero bytes (BOS, padding, FIM sentinels) are excluded from both sums. Sums are fp64 on the device, reduced
+in a fixed order.
 
 - **Held-out corpora** (`val_bits`): each corpus's packed val split (`docs/corpus.md` §8) in the stage's rows: at 8K
   (`FILE_LEVEL_STAGE`) always, at 32K (`REPO_LEVEL_STAGE`) only for a model at the 32K context
@@ -110,7 +110,7 @@ the device, reduced in a fixed order.
   (`results/peak_lr_d24.jsonl`) is 0.00062 higher (0.40607 against 0.40544, 0.29 of its standard error) and `all`
   0.00054, text and math unchanged (32K code: +0.00161, 0.10 standard errors) [arithmetic, from the record's
   per-corpus sums].
-- **Sample** (`sample_rows`, `VAL_TOKENS = 80 × 2^19`, nanochat's `--eval-tokens`): per corpus, n = min(rows,
+- **Sample** (`sample_rows`, `VAL_TOKENS = 80 × 2^19`, not ablated here): per corpus, n = min(rows,
   ⌈VAL_TOKENS / (micro-batch × seq_len)⌉ × micro-batch) rows, row ⌊j · rows / n⌋ for j < n: systematic, because the
   packer orders each shard's rows longest first, so a prefix would over-represent long documents. Models of one
   tokenizer are scored on identical rows, models of different tokenizers on identical documents when a split lies
@@ -1089,8 +1089,8 @@ Per module and symbol; what §1–§9 state is not repeated.
 Repositories and other sources, at the commit or file cited: `evalplus/evalplus` (`26d6d00`), `nuprl/MultiPL-E`
 (`3025a53`; dataset `3a9e8d2`), `openai/human-eval-infilling` (`88062ff`), `zai-org/humaneval-x` (`62c7862`),
 `amazon-science/cceval` (`40c68d2`), `bigcode-project/bigcode-evaluation-harness` (`8fc5bae`, `santacoder_fim.py`),
-`pytorch/torchtitan` (`6f22255`), `NVIDIA/Megatron-LM` (`364eef7`), `karpathy/nanochat` (`evaluate_bpb`,
-`--eval-tokens`), `python/cpython` 3.12.3 (`Parser/tokenizer.c`, `Grammar/python.gram`; issue #121130),
-`guidance-ai/llguidance` (issue #107), `vllm-project/vllm` (v0.32.0: `vllm/benchmarks/serve.py`, Transformers
-backend), `huggingface/transformers` (`modeling_qwen3.py`, `TikTokenConverter`), NVIDIA's H100 SXM specifications.
+`pytorch/torchtitan` (`6f22255`), `NVIDIA/Megatron-LM` (`364eef7`), `python/cpython` 3.12.3 (`Parser/tokenizer.c`,
+`Grammar/python.gram`; issue #121130), `guidance-ai/llguidance` (issue #107), `vllm-project/vllm` (v0.32.0:
+`vllm/benchmarks/serve.py`, Transformers backend), `huggingface/transformers` (`modeling_qwen3.py`,
+`TikTokenConverter`), NVIDIA's H100 SXM specifications.
 Token healing: "The Art of Prompt Design: Prompt Boundaries and Token Healing" (Guidance, 2023).

@@ -1,6 +1,6 @@
 """Fused q/k prologue (qk_prologue.cu): per-head RMS norm, fp32 per-dimension gain (transformers modeling_qwen3.py
 Qwen3RMSNorm, Qwen3Attention.forward; QK-Norm: arXiv 2505.09388 §2) and RoPE by
--theta over the full head (karpathy/nanochat 92d63d4 nanochat/gpt.py:57-65); fp32 math, one bf16 rounding per output.
+-theta over the full head (arXiv 2104.09864 §3.2.2); fp32 math, one bf16 rounding per output.
 q, k (B, T, H, HEAD_DIM) bf16 blocks of the fused projection (token stride 3C); gains (HEAD_DIM,), cos/sin fp32."""
 
 import ctypes

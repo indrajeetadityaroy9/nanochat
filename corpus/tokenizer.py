@@ -22,8 +22,8 @@ FIM_BEGIN, FIM_HOLE, FIM_END = ("<\uff5cfim\u2581begin\uff5c>", "<\uff5cfim\u258
 FIM_TOKENS = (FIM_BEGIN, FIM_HOLE, FIM_END)
 SPECIAL_TOKENS = (BOS, *FIM_TOKENS)  # ids after the mergeable tokens, in this order
 
-# karpathy/nanochat's (cl100k's as tiktoken 0.6.0 writes it, digit runs of one or two) without its [\r\n]* after a
-# punctuation run
+# cl100k's (as tiktoken 0.6.0 writes it, digit runs of one or two) without its [\r\n]* after a punctuation run
+# (arXiv 2608.18062 App. F.3, fn. 16)
 SPLIT_PATTERN = (r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++|\s*[\r\n]"""
                  r"""|\s+(?!\S)|\s+""")
 
