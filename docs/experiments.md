@@ -429,8 +429,9 @@ q/k norm + RoPE in the projection GEMM, RMSNorm in the next GEMM and dW accumula
 ≤ 1% at `a81410c` [estimate] — later superseded: RMSNorm in the GEMM landed as `373b549`, dW accumulation as
 `f499be7`, the preprocess half of the FA4 item as `db1e90e` (their gains: `docs/architecture.md` §3), while
 q/k norm + RoPE in the GEMM lost (`qkv-epi`, above); Liger and Cut Cross-Entropy losses (Cut Cross-Entropy, arXiv
-2411.09009 §5.1 Table 1, Gemma 2 2B's 256K vocabulary on an A100: loss + gradient 6% slower than torch.compile, its
-gain memory), fused RMSNorm/RoPE libraries, DCP checkpointing. DeepEP does not apply (one GPU, dense model).
+2411.09009 §5.1 Table 1, Gemma 2 2B's 256K vocabulary, 8,192 tokens, A100: CCE (row 1) takes 145 ms for loss +
+gradient against torch.compile's (row 4) 143 ms, +1.4% [arithmetic] (the §5.1 text says 6%, 2 ms), its gain memory,
+1,164 against 16,000 MB), fused RMSNorm/RoPE libraries, DCP checkpointing. DeepEP does not apply (one GPU, dense model).
 
 ## 6. Evaluation and inference
 
