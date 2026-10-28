@@ -6,8 +6,8 @@ the filtered mode, and the Hugging Face export of a checkpoint (§8, with the ea
 The code is the specification; each statement names the file and symbol that define it.
 
 Markers: [arithmetic] derived from code numbers; [inference] reasoning, not measured; [estimate]; [unverified] a
-figure without a record or commit, or a paper value its extracted text lacks. Measurements name their commit and
-setting; "d16 checkpoint" is a 20-tokens-per-parameter d16 run's final checkpoint.
+figure without a record, or a paper value its extracted text lacks. Measurements give their setting
+(hardware, checkpoint, protocol); "d16 checkpoint" is a 20-tokens-per-parameter d16 run's final checkpoint.
 
 ## Code
 
@@ -50,14 +50,15 @@ process tree (`suite.evaluate` pins it there, rayon's pool sized to them): the d
 the in-process checks, the sanitize workers and the untimed reference runs. Every timed check (basedpyright, g++,
 timed example runs, EvalPlus, MultiPL-E and infilling evaluators) runs on the other cores (`verify.timed`:
 `taskset`); each pool of timed children is sized to those cores (`timed_workers`), as EvalPlus asks of a test bed
-(no oversubscription: `docs/execution.md` "Parallelism" at `26d6d00`); the scorer thread's evaluators (EvalPlus's and
+(no oversubscription: EvalPlus's `docs/execution.md` "Parallelism", at the version pinned in `pyproject.toml`); the
+scorer thread's evaluators (EvalPlus's and
 the infilling evaluator: all slots; MultiPL-E's: one per file) and the filtered searches' checks (one each) share one
 budget of `timed_workers()` slots (`verify.timed_slots`), so at most one timed child runs per such core. Every
 timed child starts in a session of its own (`verify.run_group`), and its whole process group is killed once it exits
 or times out: a g++ check killed at its time-out had left its `cc1plus` running on a timed-check core (a d24
 rehearsal checkpoint's evaluation, over 5 min [unverified: no record]), holding a core the one-child-per-core rule
 counts as free; output goes through files, so a descendant holding them cannot delay the return.
-Basis of `DECODE_CORES` (`09b2cef`) [unverified: no record]: on a d24 benchmarks evaluation (GH200, 64 cores,
+Basis of `DECODE_CORES` [unverified: no record]: on a d24 benchmarks evaluation (GH200, 64 cores,
 unpinned, the host shared with other jobs for part of it, so timing is indicative), the evaluation process used 1.0
 core in its unconstrained decodes and 13.0–15.5 cores (30-s means, at most 18.6) in the filtered searches. Timed
 verdicts depend on load: an infilling check that takes 2.22–2.24 s on an idle core (3 s limit) timed out in one of two
@@ -72,15 +73,17 @@ one checkpoint shares a core with another checkpoint's work; k + 1's decoders ta
 count changes timing, not tokens, §6).
 
 Measured on the d16 checkpoint (step 4552, exclusive GH200): before the pipeline, the codegen half's 969 s were 36% CPU
-scoring with the GPU idle, 28% likelihood, 15% generation (85–96% SM busy), 22% filtered search [unverified: no record
-or commit]; pipelining (`a41415e`) took the full benchmarks evaluation from 1,472 to 1,064 s (−28%), GPU idle (SM
+scoring with the GPU idle, 28% likelihood, 15% generation (85–96% SM busy), 22% filtered search
+[unverified: no record]; pipelining (scoring overlapped with GPU work, same checkpoint and GPU) took the full
+benchmarks evaluation from 1,472 to 1,064 s (−28%), GPU idle (SM
 < 5%) 57.4% → 34.2%, scoring with no GPU work 483 → 8 s; per-sample statuses: 0 flips in parse, codegen and FIM
-greedy and random-span, 1 in random-span SPM filtered (a failure inside human-eval-infilling); with the decoder of
-`4385748` (§6), 862 s.
+greedy and random-span, 1 in random-span SPM filtered (a failure inside human-eval-infilling); with the current
+decoder (§6, wgmma GEMMs and e4m3 KV cache), 862 s.
 
 **Validation of a change.** The canonical comparison of a new record with a reference record of the same checkpoint
 covers every model-derived field (generations, attempts, likelihoods, solution bits; latency excluded); the scorer
-replays (`eval/rescore.py` at `49aebbb`, the official evaluators at `1243e81`): §9. Sidecars of 22,000 sampled
+replays (the record replay by the since-removed `eval/rescore.py`, and the scorer replay of the official evaluators):
+§9. Sidecars of 22,000 sampled
 completions are 0.68 MB (the × 2 peak-lr arm's benchmarks `eval-3307`, record 25.3 MB) and 0.91 and 0.71 MB (the
 rehearsal's `eval-1102`, `eval-2205`).
 
@@ -156,10 +159,10 @@ App. C.1), its budget and stops (the post: 256 tokens) and in compiling the unsa
 
 | Benchmark | Problems | Prompt; budget; stops | Evaluator | Data pin |
 |---|---|---|---|---|
-| HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210, which defines HumanEval+; MBPP+ is its repository's) | 164, 378 | `prompt.strip() + "\n"`; 768 new tokens; EvalPlus's EOS + `extra_eos_for_direct_completion`, special tokens skipped, tabs → 4 spaces, `sanitize(prompt + completion, entry point)` (EvalPlus's base-model codegen) | `evalplus.evaluate` (`timed_workers()` parallel on the timed-check cores, `EVALPLUS_EVALUATE`, §1; its `untrusted_check` patched against a lock deadlock in the image, verdicts unchanged, `docs/training.md` §11): per-sample statuses; base and plus pass@1 by Codex's estimator (`metrics.pass_at_k`, the formula of EvalPlus's `estimate_pass_at_k`), averaged in task order (§10) | evalplus `26d6d00` (`pyproject.toml`); HumanEvalPlus v0.1.10, MbppPlus v0.2.0 |
-| HumanEval, MBPP in C++ (MultiPL-E, arXiv 2208.08227) | 161, 397 | `prompt.strip()`; 1,024 positions of prompt and completion, BOS included (the longest prompt, a HumanEval C++ one, is 600 tokens with BOS under the corpus tokenizer [arithmetic], so `automodel.py`'s empty completion for a prompt of ≥ 1,024 tokens never applies); the rows' one stop token `"\n}"`, the first special token ends it | MultiPL-E `evaluation/src/main.py --file … --max-workers 1` per problem, `timed_workers()` at once on the timed-check cores (§1; g++ -std=c++17 with the precompiled `<bits/stdc++.h>` of §7, 15 s compile, 15 s run); pass@1 by Codex's estimator (`metrics.pass_at_k`, equal to `pass_k.py`'s), averaged in problem order (§10) | dataset `nuprl/MultiPL-E` at `3a9e8d2` (the revision MultiPL-E's `completions.py` pins); evaluator `3025a53` (`docker/Dockerfile`) |
-| HumanEval-X C++ (arXiv 2303.17568) | 164 | reference solutions only (§2) | — | `zai-org/humaneval-x` at `62c7862` |
-| HumanEval infilling single-line, multi-line, random-span (arXiv 2207.14255) | 1,033, 5,815, 1,640 [arithmetic: `read_problems`] | PSM and SPM prompts (`decoder.fim_prompt`, the packer's layout, `docs/corpus.md` §8); middle until BOS or another special token (a FIM sentinel, as the first special token ends a MultiPL-E completion), at most the benchmark's longest reference middle in tokens; not healed (a FIM prompt ends with a sentinel or with the prefix encoded alone, the training format) | the package's `check_correctness` per middle (3 s) in a fork pool of `timed_workers()` workers on the timed-check cores (`INFILLING_EVALUATE`, §1) | `openai/human-eval-infilling` `88062ff` (`docker/Dockerfile`) |
+| HumanEval+, MBPP+ (EvalPlus, arXiv 2305.01210, which defines HumanEval+; MBPP+ is its repository's) | 164, 378 | `prompt.strip() + "\n"`; 768 new tokens; EvalPlus's EOS + `extra_eos_for_direct_completion`, special tokens skipped, tabs → 4 spaces, `sanitize(prompt + completion, entry point)` (EvalPlus's base-model codegen) | `evalplus.evaluate` (`timed_workers()` parallel on the timed-check cores, `EVALPLUS_EVALUATE`, §1; its `untrusted_check` patched against a lock deadlock in the image, verdicts unchanged, `docs/training.md` §11): per-sample statuses; base and plus pass@1 by Codex's estimator (`metrics.pass_at_k`, the formula of EvalPlus's `estimate_pass_at_k`), averaged in task order (§10) | evalplus at the version pinned in `pyproject.toml`; HumanEvalPlus v0.1.10, MbppPlus v0.2.0 |
+| HumanEval, MBPP in C++ (MultiPL-E, arXiv 2208.08227) | 161, 397 | `prompt.strip()`; 1,024 positions of prompt and completion, BOS included (the longest prompt, a HumanEval C++ one, is 600 tokens with BOS under the corpus tokenizer [arithmetic], so `automodel.py`'s empty completion for a prompt of ≥ 1,024 tokens never applies); the rows' one stop token `"\n}"`, the first special token ends it | MultiPL-E `evaluation/src/main.py --file … --max-workers 1` per problem, `timed_workers()` at once on the timed-check cores (§1; g++ -std=c++17 with the precompiled `<bits/stdc++.h>` of §7, 15 s compile, 15 s run); pass@1 by Codex's estimator (`metrics.pass_at_k`, equal to `pass_k.py`'s), averaged in problem order (§10) | dataset `nuprl/MultiPL-E` at the revision MultiPL-E's `completions.py` pins (`eval/code_eval.py` `MULTIPL_E`); evaluator at the version pinned in `docker/Dockerfile` |
+| HumanEval-X C++ (arXiv 2303.17568) | 164 | reference solutions only (§2) | — | `zai-org/humaneval-x` at the revision pinned in `eval/code_eval.py` `HUMANEVAL_X` |
+| HumanEval infilling single-line, multi-line, random-span (arXiv 2207.14255) | 1,033, 5,815, 1,640 [arithmetic: `read_problems`] | PSM and SPM prompts (`decoder.fim_prompt`, the packer's layout, `docs/corpus.md` §8); middle until BOS or another special token (a FIM sentinel, as the first special token ends a MultiPL-E completion), at most the benchmark's longest reference middle in tokens; not healed (a FIM prompt ends with a sentinel or with the prefix encoded alone, the training format) | the package's `check_correctness` per middle (3 s) in a fork pool of `timed_workers()` workers on the timed-check cores (`INFILLING_EVALUATE`, §1) | `openai/human-eval-infilling` at the version pinned in `docker/Dockerfile` |
 
 Generation modes (`generation`, `fim_generation`, `filtered_generation`):
 
@@ -180,7 +183,8 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
   multi-line references' middles are whole lines, each ending in "\n"; the packer trains that layout for AST middles
   that start and end a line (`docs/corpus.md` §8: 35.2–37.2% of the Python corpora's PSM middles end in "\n"). A d16
   checkpoint trained before that rule, whose middles rarely ended in "\n", rarely ended at a line end: single-line SPM
-  greedy pass@1 was 0.074 as generated against 0.437 cut (`a41415e`). Infilling records add CrossCodeEval's
+  greedy pass@1 was 0.074 as generated against 0.437 cut (same checkpoint, rescored uncut). Infilling records add
+  CrossCodeEval's
   similarity scores against the reference middle (§5), all clustered by HumanEval problem.
 - **Comparability.** The sampled mode draws 20 samples per problem where Codex (arXiv 2107.03374 §2.1) and MultiPL-E
   drew 200 and the BigCode leaderboard 50 (arXiv 2402.19173 §7.1.2): the same estimate with more variance per problem
@@ -194,8 +198,8 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
   scored base tests (MBPP+: 373 of the 378 prompt asserts call the entry function on a base input; HumanEval+: 121 of
   the 176 doctest examples of its 75 tasks with examples do [arithmetic: EvalPlus data, `verify.examples`]), so the
   filtered mode favours base over plus pass@1 (`verify.py`). Prompts, stops, budgets and scorers were checked against
-  EvalPlus, MultiPL-E and human-eval-infilling at their pinned commits (the FIM line cut, the MultiPL-E data pin and
-  the example checks' sandbox were the deviations, fixed in `a41415e`). `char` is unsigned on ARM64 and signed on x86,
+  EvalPlus, MultiPL-E and human-eval-infilling at their pinned versions (the FIM line cut, the MultiPL-E data pin and
+  the example checks' sandbox were the deviations, since fixed). `char` is unsigned on ARM64 and signed on x86,
   so a MultiPL-E C++ program that depends on it can score differently [inference].
 - **Contamination.** The train splits are decontaminated against every scored benchmark (`docs/corpus.md` §3): a
   row sharing a 10-gram of words with a task's prompt or reference program is dropped (Qwen2.5-Coder's rule, arXiv
@@ -206,7 +210,8 @@ sampled mode's, each problem's 20 in seed order, in the sidecar, §1) and the de
 - **Evaluator processes.** EvalPlus's `sanitize` parses every line span of a program, hence a sanitize worker per
   CPU. MultiPL-E's `main.py --dir` judges a directory's problems serially, hence a `--file` process per problem.
   human-eval-infilling's CLI forks a Manager and a Process per sample from one interpreter's thread pool, so its rate
-  is bound by that interpreter's GIL at any worker count (`9d61a1b`), hence `INFILLING_EVALUATE`'s fork pool.
+  is bound by that interpreter's GIL at any worker count (measured with the per-core MultiPL-E judging, §9), hence
+  `INFILLING_EVALUATE`'s fork pool.
 
 ## 5. Metrics and statistics
 
@@ -224,8 +229,8 @@ import it alike. Every public function:
 | `parse_shares` | each outcome's share of a benchmark's completions | — |
 | `measures(evaluation, steps, repo_level_start=)` | a run's compared measures (table below) | — |
 | `measure_errors(evaluation)` | their error bars: `code`, `text`, `math`, `repo_32k` from the evaluation's `errors` (`mixture_bpb_summary`); `solutions` by `mixture_bpb_summary` over two strata at their solution counts (the pooled ratio): HumanEval (HumanEval+ and HumanEval-X C++ solutions of problem i one cluster) and MBPP+; the parse shares and `pass@1` by `summary` over problems; none for `repo_beyond_8k`, `tokens_per_second`, `mfu` | Miller Eq. 1, 4 |
-| `line_exact_match` | `prediction.strip() == reference.strip()` | SantaCoder's single-line exact match (arXiv 2301.03988 §5.4; the strip: bigcode-evaluation-harness `8fc5bae` `santacoder_fim.py`) |
-| `code_lines`, `exact_match` | comment-stripped (`#`, `//` to the line end), stripped non-empty lines; equal lines | CrossCodeEval (arXiv 2310.11248 §3.2; amazon-science/cceval `40c68d2`) |
+| `line_exact_match` | `prediction.strip() == reference.strip()` | SantaCoder's single-line exact match (arXiv 2301.03988 §5.4; the strip: bigcode-evaluation-harness `santacoder_fim.py`) |
+| `code_lines`, `exact_match` | comment-stripped (`#`, `//` to the line end), stripped non-empty lines; equal lines | CrossCodeEval (arXiv 2310.11248 §3.2; its repository amazon-science/cceval) |
 | `edit_similarity` | 100 when equal, 0 when either is empty, else round(100 × difflib `SequenceMatcher` ratio) of the comment-stripped strings | cceval's fuzzywuzzy 0.18 without python-Levenshtein (difflib) |
 | `identifiers`, `identifier_match` | identifiers after removing comments and string literals, Python keywords excluded (True and False kept); exact match of the lists, F1 over the sets (0 when both are empty) | cceval `extract_identifiers` |
 | `completion_scores` | per sample: `line_em`, `em`, `es` (0–100), `id_em`, `id_f1`, over the whole middle: cceval's `postprocess_code_lines` (its cut after the prediction's first statement) is not applied, and `//` to the line end is stripped as cceval strips it, in Python too (floor divisions included) | cceval's per-sample `detailed_results` (`em`, `es`, `id_em`, `id_f1`; `scripts/eval_metric.py` `compute_metric_stmt`) |
@@ -233,7 +238,7 @@ import it alike. Every public function:
 | `summary(scores, clusters=)` | mean of question scores (a question's score may itself be a mean, of its K answers in Miller §3.1, so a problem's pass@k estimate is one [inference]); OLS on a constant: unclustered, se = s/√n (sample variance over n − 1, Miller Eq. 1); clustered, Liang–Zeger CR0 without small-sample correction (Miller Eq. 4 except for Eq. 4's (n − 1) in its diagonal term); 95% normal interval (Eq. 3), not clipped to [0, 1]; a constant score (0 passes, say) has se 0 and a zero-width interval, so a near-zero pass rate needs an exact or Wilson interval in reporting (computable from the per-problem scores) | statsmodels `OLS` |
 | `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends: itself and up to window_l before it (`layer_windows`: 512, or the context for full layers), the convention of `attended_keys`; records written before the query's own key was counted (`results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), lower by 12 · C per windowed layer (d16: 12 · 512 · 12 = 73,728): 641,826,816 at 8K, 1,245,806,592 at 32K (d24: 165,888 lower) | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT; torchtitan's count without the causal halving |
 | `attended_keys(lengths, window)` | Σ over segments of Σ_p min(p, window + 1): the keys each query attends causally within its segment, itself included | — |
-| `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B; causal, per-document counting as Megatron-LM `num_floating_point_operations` (`364eef7`, which excludes padding) |
+| `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B; causal, per-document counting as Megatron-LM `num_floating_point_operations` (which excludes padding) |
 | `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12, the H100 SXM5 / GH200 dense BF16 peak) | PaLM §4.1 |
 | `parabola_vertex(x, y)` | (a, −b/2a) of the least-squares parabola (numpy `polyfit`, degree 2); used by `docs/training.md` §5 | — |
 | `latency(starts, firsts, ends, new_tokens, duration=)` | `ttft` (first − start), `tpot` ((end − first)/(n − 1), requests of > 1 token; None if none), `e2el`, each mean, median, p99; `output_throughput` | vLLM v0.32.0 `vllm/benchmarks/serve.py` `calculate_metrics` |
@@ -284,7 +289,7 @@ memory the run's tensors held, `peak_reserved_bytes` the allocator's (`max_memor
   attention streaming each slot's window through shared memory with the scores on tensor cores (f16, exact for e4m3
   keys and the bf16 q's elements of magnitude ≥ 2⁻¹⁴; smaller ones become f16 subnormals). Numerics follow the
   compiled training forward op by op (bf16 copies of the matrices; fp32 rotary table, q/k norm gains and
-  value-embedding gate; the residual mix as Inductor fuses it, `ca18db5`), except the KV cache: e4m3 with one fp32
+  value-embedding gate; the residual mix as Inductor fuses it), except the KV cache: e4m3 with one fp32
   scale per position and head (amax / 448), half the bytes a step reads; scores and softmax stay fp32.
 - **Prefill and prompt store.** A new request's prompt but its last token runs as rows of one batched pass through
   the step's body (up to 1,024 rows of any prompts per launch, each row computed as a step would), so its slot starts
@@ -312,21 +317,23 @@ memory the run's tensors held, `peak_reserved_bytes` the allocator's (`max_memor
   arXiv 2608.18062 App. C.1).
 - **Determinism.** Every sum's order depends on the shapes and the slot's position alone, so a request's tokens do not
   depend on the batch, the store or timing (64 of 64 greedy and 64 of 64 sampled requests identical alone and
-  batched, `4385748`). The FP8 cache makes them differ from the bf16 forward's where two logits nearly tie:
-  teacher-forced agreement with the PyTorch forward's greedy choice 0.9916 of 16,261 tokens at `4385748` (a rerun's
+  batched, d24, GH200). The FP8 cache makes them differ from the bf16 forward's where two logits nearly tie:
+  teacher-forced agreement with the PyTorch forward's greedy choice 0.9916 of 16,261 tokens (a rerun's
   121 mismatches each within 0.57 of the forward's top logit, the first divergences' median gap 0.0625) and with the
-  compiled forward's 0.9920 at `ca18db5`; 216 of 542 greedy HumanEval+/MBPP+ continuations identical to the
+  compiled forward's 0.9920 (after matching its residual mix); 216 of 542 greedy HumanEval+/MBPP+ continuations
+  identical to the
   training forward's (a bf16 cache instead: `docs/experiments.md` §6).
 - **Memory.** The decoder takes the device's free memory (slots, prefill rows, graphs, store).
-- **Speed** (`4385748`, GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens):
+- **Speed** (GH200, fixed-length benchmark: 2,048 random-init requests, 256-token prompts, 512 new tokens):
   94,778 tok/s at d24 and 189,307 at d16, against 21,809 and 66,559 for the per-slot-group GEMV decoder it replaced
   (4.35×, 2.84×); d24 step 8.27 ms at 1,024 slots, one slot 1.29 ms (GEMV decoder 3.16 ms). A d16 checkpoint's
   per-problem results changed little and in both directions (MBPP+ greedy +4/−5 base, +2/−7 plus; HumanEval+ greedy
   unchanged; FIM line exact match within 0.002).
 - **Tuned constants** (d24, GH200, 256-token prompts; 1,024 slots and 512 steps unless stated). GEMM tiles and
-  `WG_STAGES` (`4385748`): 64-row × 64-slot tiles 8.27 ms per step against 8.33 ms for 128 × 128 where they cover
-  every SM; 4 stages against 8.82, 8.44, 8.33, 9.22 ms at 2, 3, 6, 8. `ATTN_RUN` (`4385748`, under the earlier tile
-  dispatch): one MMA tile per warp 8.31 ms against 8.80 (two) and 15.45 (four). `SMALL_BATCH` = 256 (`55e64de`):
+  `WG_STAGES`: 64-row × 64-slot tiles 8.27 ms per step against 8.33 ms for 128 × 128 where they cover
+  every SM; 4 stages against 8.82, 8.44, 8.33, 9.22 ms at 2, 3, 6, 8. `ATTN_RUN` (under the earlier tile
+  dispatch): one MMA tile per warp 8.31 ms against 8.80 (two) and 15.45 (four). `SMALL_BATCH` = 256 (with batched
+  prefill and narrow graphs):
   fastest or within 0.04 ms at 1, 64, 128, 256 active slots against 64, 128, 512 and no narrow graphs (1 slot
   1.29 ms, none 1.46; 256 slots 2.81, none 2.97).
 
@@ -366,7 +373,8 @@ as one regex token, so PEP 701 f-strings such as `f"{x["k"]}"` and PEP 695 type 
 transformers and a Hugging Face tokenizer), llguidance (no INDENT/DEDENT, open guidance-ai/llguidance issue #107; one
 byte may emit several DEDENTs), arXiv 2402.17988 (no released library). C++ is not constrained.
 
-Checks (`55e64de`, `ba01bb5`, `d0a2ec0`): 0 false rejections over 11.4M token steps of 3,000 Python files (the
+Checks (Python files replayed token by token through the constraint, CPU): 0 false rejections over 11.4M token steps
+of 3,000 Python files (the
 standard library, site-packages, this repository; BPE) and 9.2M randomly segmented; no prefix that `ast.parse` accepts
 without the grammar's end; a d16 checkpoint's unconstrained completions (EvalPlus and SPM infilling, greedy and
 sampled) replayed through their constraints: every masked token invalid, outputs token-identical wherever nothing was
@@ -379,7 +387,7 @@ hence the caller's tokenizer. Mask time per step 0.7–2.6 ms (3.4–15.8 ms bef
 - Python (`python_diagnostics`, on the program the scorer runs: EvalPlus's sanitized solution, or FIM prefix + middle
   + suffix): the program compiles (`compile_error`: one `compile()`, whose parser overflow and ValueError of §10 are
   failures and whose own SyntaxErrors, such as `'return' outside function` or a duplicate argument, `ast.parse` and
-  the syntax constraint's end accept: on a d16 checkpoint (`81fb386`) 5, 60 and 6 accepted single-line, multi-line and
+  the syntax constraint's end accept: on a d16 checkpoint 5, 60 and 6 accepted single-line, multi-line and
   random-span filtered middles did not compile), then basedpyright 1.40.2 with every rule off but
   `reportUndefinedVariable`, `reportAttributeAccessIssue` and `reportCallIssue`: concurrent processes over disjoint
   contiguous groups of the N programs of a call that compile and are not cached, max(`PYRIGHT_GROUP` = 100,
@@ -436,12 +444,12 @@ with a known diagnostic (EvalPlus's `solution_diagnostics`) is rejected unchecke
 basedpyright run; examples run only without diagnostics and stop at the first failing one. `chosen` returns the
 accepted candidate, else the greedy one.
 
-Basis (both d16 checkpoints' full 10-candidate HumanEval+ and MBPP+ pools, `2d49bb1`): the three rules and the vetted
+Basis (both d16 checkpoints' full 10-candidate HumanEval+ and MBPP+ pools): the three rules and the vetted
 examples rejected none of the 100 candidates that pass EvalPlus plus (Clopper–Pearson 95% interval's upper bound
 3.6% [arithmetic]); without the examples check filtered plus pass@1 fell 1.1–1.8 points. FIM middles are not covered
 by that basis: a middle that appends an uncalled helper with an undefined name passes the official test yet fails
 `reportUndefinedVariable` (4 greedy SPM middles of a d24 rehearsal checkpoint, `eval-1102`: one single-line, one
-multi-line, two random-span). The removed checks (`bff16d6`): `docs/experiments.md` §6.
+multi-line, two random-span). The removed checks: `docs/experiments.md` §6.
 `reportCallIssue` rejects one reference, Mbpp/130 (`max(d, key=d.get)` on a `defaultdict`, an overload miss);
 Mbpp/630's reference fails as EvalPlus scores it (sanitize drops its helper).
 
@@ -458,7 +466,7 @@ load (transformers 5.21.0, tokenizers 0.23.3, safetensors 0.8.0, `pyproject.toml
   fp32 the q/k gains, `resid_lambdas`, `x0_lambdas` and the value-embedding gates
   (`NanochatPreTrainedModel._keep_in_fp32_modules_strict`, which a bf16 load keeps fp32). The compiled training forward
   differs in one place: Inductor drops `CausalLM.hidden`'s bf16 cast, so its x0 is the norm of the fp32 embedding row
-  (`ca18db5`; §10 `model/kernels/decode.cu` `k_norm`), while the export's is the bf16 row's. d24: 522,190,848 bf16
+  (§10 `model/kernels/decode.cu` `k_norm`), while the export's is the bf16 row's. d24: 522,190,848 bf16
   and 61,488 fp32 values, a 1,044,651,640-byte file.
 - `config.json`: `model_type` "nanochat", `auto_map` to `modeling_nanochat.py` (copied beside it); `hidden_size`,
   `intermediate_size` 4C, `num_hidden_layers`, `num_attention_heads` = `num_key_value_heads` = C/128, `head_dim` 128;
@@ -484,10 +492,11 @@ under transformers' causal and sliding-window masks; positions count from 0 per 
 and `generate` keeps a `DynamicCache` built from `layer_types`. The training forward attends within each packed
 piece (`cu_seqlens`); the model file attends over its whole input, so a packed row is scored segment by segment.
 
-**Agreement with the training forward** (`6df56ee`; CPU, fp32 load, `sdpa`): the d24 rehearsal's `checkpoint-1102.pt`
-(8K; `docs/training.md` §7) against a re-evaluation of that checkpoint by `57c9634`'s `eval/suite.py` (`eval/bpb.py`
+**Agreement with the training forward** (CPU, fp32 load, `sdpa`): the d24 rehearsal's `checkpoint-1102.pt`
+(8K; `docs/training.md` §7) against a re-evaluation of that checkpoint by `eval/suite.py` (`eval/bpb.py`
 and the model code as on master), whose per-row bits come from the compiled bf16 `CausalLM.losses` on the GH200. The
-run directory's earlier `eval-1102.json`, written before `cd4edbe`, has the same rows and bytes, and its per-corpus
+run directory's earlier `eval-1102.json`, written by the earlier multi-path code, has the same rows and bytes, and its
+per-corpus
 bpb is 0.07% lower to 0.34% higher than the re-evaluation's [unverified: cause not established]. Val rows j = 0 and
 ⌊n/2⌋ of `"8k"` `"corpora"` (n the record's `"rows"`; packed row ⌊j·R/n⌋ of the split's R packed rows, §2
 `val_bits`), each piece its own sequence from position 0:
@@ -518,8 +527,8 @@ BOS + tiktoken's `encode_ordinary`, and maps the four special tokens to 32,764�
 tokens from HumanEval/0's prompt equals the uncached forward's argmax at every step, and a bf16 load generates the
 same tokens.
 
-**Earlier export, vLLM and the standard-protocol cross-check** (to `67192ab`; vLLM support removed and
-`scripts/standard_eval.sh` deleted at `cd4edbe`). The same export and model file also served vLLM's Transformers
+**Earlier export, vLLM and the standard-protocol cross-check** (vLLM support and `scripts/standard_eval.sh` since
+removed, with the reduction to one execution path). The same export and model file also served vLLM's Transformers
 backend (paged attention with per-layer sliding windows, CUDA graphs, torch.compile; `_supports_attention_backend`,
 the head in fp32 through `config.json`'s `head_dtype`), in its own image (`vllm/vllm-openai:v0.32.0` at a pinned
 digest), which the NGC-based image cannot hold; the head was `torch.mm` with an fp32 `out_dtype` (CUDA only).
@@ -527,7 +536,7 @@ digest), which the NGC-based image cannot hold; the head was `torch.mm` with an 
 vLLM.
 
 **Agreement then** (a d16 checkpoint at 5 tokens per parameter, step 1,707; 16 val rows of 8K
-from 8 corpora, 130,911 scored tokens; greedy continuations of the 542 HumanEval+/MBPP+ prompts; GH200, `2d49bb1`
+from 8 corpora, 130,911 scored tokens; greedy continuations of the 542 HumanEval+/MBPP+ prompts; GH200
 and the head variant): the bf16 head was the main difference. With the fp32 head the export's mean KL(train ‖
 export) under transformers is 1.97·10⁻⁴ (bf16 head 3.09·10⁻⁴), top-1 agreement 0.9940 (0.9903), the bpb bias
 5·10⁻⁶ (6.3·10⁻⁵, its interval excluding 0); under vLLM top-1 0.9941 (0.9904) and 379 of 542 greedy continuations
@@ -537,13 +546,14 @@ and −0.6%, inside their intervals; fp32 residual additions by −14%, with no 
 vLLM and 7–10% slower transformers prefill and decode. EvalPlus pass@1 of the export's greedy continuations stays
 within one standard error (HumanEval+ 0.0488/0.0488 for every variant; MBPP+ 0.0265/0.0238 → 0.0238/0.0212).
 
-**Agreement of the removed class** (the d16 step-4,552 checkpoint, 20 tokens per parameter, before `1671b56`'s
-retrain on the repacked set, served by the earlier native vLLM class, commits
-`3c03023`–`ec1c841`, the bf16 head; its logit agreement and speed: `docs/experiments.md` §6): `tokenizer.json`
+**Agreement of the removed class** (the d16 step-4,552 checkpoint, 20 tokens per parameter, before the d16 retrain on
+the repacked set with the FIM line-start rule, served by the earlier native vLLM class,
+the bf16 head; its logit agreement and speed: `docs/experiments.md` §6): `tokenizer.json`
 encodes 108,026 held-out texts exactly as tiktoken; greedy HumanEval+ 0.067/0.067, MBPP+ 0.056/0.045 (base/plus),
-FIM single-line line exact match PSM 0.022, SPM 0.368, against `NativeDecoder`'s (before `4385748`) 0.061/0.061,
+FIM single-line line exact match PSM 0.022, SPM 0.368, against the GEMV `NativeDecoder`'s (§6) 0.061/0.061,
 0.045/0.037, 0.022, 0.367 (standard error of HumanEval+ ≈ 0.019). The Transformers backend that replaced the class
-(`7794e2f`) ran at its rate and, in the same execution mode, gave the same logits against the training forward
+(with one model implementation through vLLM's Transformers backend) ran at its rate and, in the same execution mode,
+gave the same logits against the training forward
 (eager, 207K positions: mean KL 4.25·10⁻⁴ on HumanEval+ for both).
 
 **Standard-protocol cross-check**: `evalplus.codegen --backend vllm --greedy` on HumanEval+ and MBPP+ (direct
@@ -551,31 +561,33 @@ completion) scored by `evalplus.evaluate`, and MultiPL-E's `automodel_vllm.py` o
 (T = 0.2, top-p 0.95, 20 completions) judged by `evaluation/src/main.py` and `pass_k.py`, both at the §4 pins. The
 protocols as published differ from §4 in prompt tokenization (text through `tokenizer.json`), MultiPL-E's budget
 (`max_model_len` 2,048 and 1,024 new tokens, against 1,024 positions in all here) and their samplers. On the d16
-checkpoint above (commits as above), EvalPlus's CLI gave HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 against this
+checkpoint above (served as above), EvalPlus's CLI gave HumanEval+ 0.067/0.067 and MBPP+ 0.053/0.042 against this
 suite's greedy 0.061/0.061 and 0.045/0.037.
 
 ## 9. Validation of the harness
 
-- **Metrics against their sources** (`c8e97a2`, `5d733a6`, `ee7b645`): CrossCodeEval's exact match, edit similarity,
-  identifier match and line exact match identical to cceval on 30,794 real strings (`c8e97a2`), edit similarity by
+- **Metrics against their sources**: CrossCodeEval's exact match, edit similarity,
+  identifier match and line exact match identical to cceval on 30,794 real strings, edit similarity by
   difflib as cceval runs it (rapidfuzz, thefuzz and torchmetrics disagree with it on 46–71% of real strings
-  [unverified: no record]); bpb's fixed-order bucket sums kept as code (`index_add_`/`bincount` would use CUDA atomics,
-  `ee7b645`); `measures` identical to the previous code on four real d8 runs (`5d733a6`). A d16 checkpoint's FIM
+  [unverified: no record]); bpb's fixed-order bucket sums kept as code (`index_add_`/`bincount` would use CUDA
+  atomics); `measures` identical to the previous code on four real d8 runs. A d16 checkpoint's FIM
   single-line SPM greedy line exact match 0.367 ± 0.020, pass@1 0.436 [unverified: no record].
-- **MultiPL-E judging** (`9d61a1b`): 64 concurrent `main.py` processes × 63 threads oversubscribed g++, and a compile
+- **MultiPL-E judging** (stored completions rescored, GH200's 64 cores): 64 concurrent `main.py` processes × 63
+  threads oversubscribed g++, and a compile
   past its wall-clock limit is scored "SyntaxError"; with `--max-workers 1` per file, a d16 checkpoint's stored
   sampled completions rescored: HumanEval C++ "OK" 70 → 175 of 3,220 and pass@1 0.022 → 0.054, MBPP C++ "OK" 307 →
   712 of 7,940 and 0.039 → 0.090, greedy and filtered statuses unchanged. FIM scoring through `check_correctness` in
   a fork pool: a d8 checkpoint's 9 FIM sets (25,464 executions) 211 → 33 s, 0 changed verdicts.
-- **EvalPlus scoring** (`b8057ff`): the evaluator's 20 s exit stall removed (`os._exit` after writing) and every core
+- **EvalPlus scoring** (a d8 checkpoint's parse completions): the evaluator's 20 s exit stall removed (`os._exit`
+  after writing) and every core
   used (the timed-check cores since, §1): HumanEval+ 22.5 → 9.6 s, MBPP+ 28.0 → 12.6 s; statuses and pass@1 identical
   to the previous code on a d8 checkpoint's parse completions.
-- **Record replay** (`eval/rescore.py`, added at `49aebbb` on base `c053bdc`, removed at `cd4edbe`; cores 32–63, an
+- **Record replay** (`eval/rescore.py`, since removed; cores 32–63, an
   empty verdict cache): every scorer and checker (EvalPlus base and plus, MultiPL-E's judge, the infilling checks,
   parse outcomes, the filtered mode's verdicts) rerun on a d24 `eval-3307.json`'s stored completions, its 22,000
   sampled completions synthesized from the stored greedy, filtered and parse ones, and compared field by field: 0
   fields differed and the sidecars' sha256 matched (449 s); the synthesized sidecar was 0.22 MB.
-- **Scorer replay** (`1243e81`, cores 32–63, an empty verdict cache): the official evaluators on every stored
+- **Scorer replay** (cores 32–63, an empty verdict cache): the official evaluators on every stored
   completion of the d24 benchmarks record `generate=benchmarks,learning_rate_scale=2.0,tokens_per_param=5.0`
   `eval-3307.json` (EvalPlus parse, greedy, filtered and sampled; MultiPL-E greedy, filtered and sampled; infilling
   greedy, `greedy_reference_lines` and filtered) gave the stored verdict for 63,899 of 63,902 samples; the other 3, MBPP
@@ -587,14 +599,15 @@ suite's greedy 0.061/0.061 and 0.045/0.037.
   benchmarks records, the rehearsal's `eval-1102.json` and `eval-2205.json`: parse shares, pass@k, infilling and
   completion scores, filtered attempts) recomputes exactly from the per-sample fields, and the aggregate formulas of
   EvalPlus's `evaluate` and MultiPL-E's `pass_k.py` agree with `"scores"` within 4 ulp; `completion_scores` equals a
-  transcription of cceval `40c68d2` (fuzzywuzzy 0.18 `fuzz.ratio` on difflib) on all 156,640 stored middle–reference
+  transcription of cceval (fuzzywuzzy 0.18 `fuzz.ratio` on difflib) on all 156,640 stored middle–reference
   pairs of the four benchmarks records.
-- **Reference model** [unverified: no record or commit]: deepseek-coder-1.3b-base through DeepSeek's harness gave
+- **Reference model** [unverified: no record]: deepseek-coder-1.3b-base through DeepSeek's harness gave
   HumanEval 0.305 (paper 0.348, arXiv 2401.14196 Table 3; transformers 5 drops its BOS) and MBPP 0.466 (paper 0.462);
   this suite's EvalPlus scorer agreed on 163 of 164 problems.
-- **d16 reference** [unverified: no record or commit; which d16 checkpoint and harness revision produced it is not
+- **d16 reference** [unverified: no record; which d16 checkpoint and harness revision produced it is not
   recorded]: at 20 tokens per parameter, code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050. The suite's greedy
-  MBPP+ on the step-4,552 checkpoint at `3c03023` was 0.045/0.037 (§8), so the two are not the same evaluation
+  MBPP+ on the step-4,552 checkpoint served by the earlier native vLLM class was 0.045/0.037 (§8), so the two are
+  not the same evaluation
   [inference].
 
 ## 10. Implementation reference
@@ -631,9 +644,9 @@ Per module and symbol; what §1–§9 state is not repeated.
   its last release) without python-Levenshtein, so `fuzz.ratio` is difflib's `SequenceMatcher` (autojunk on); 100
   when equal, 0 when either is empty, rounding by `utils.intr`.
 - `model_flops_per_token`: embedding tables (lookups) and norm gains (elementwise) are not matmul weights; windows are
-  `model/modeling.py` `layer_windows`. Nominal T without the causal halving (pytorch/torchtitan `6f22255`
+  `model/modeling.py` `layer_windows`. Nominal T without the causal halving (pytorch/torchtitan
   `torchtitan/models/common/flops.py` `quadratic_attention_flops_per_token`); executed counting per segment
-  (`cu_seqlens`: a document, a FIM example, a row's padding) as NVIDIA/Megatron-LM `364eef7`
+  (`cu_seqlens`: a document, a FIM example, a row's padding) as NVIDIA/Megatron-LM
   `megatron/training/training.py` `num_floating_point_operations` (Σ L_i² over real documents; padding excluded).
   `executed_model_flops` groups equal windows (`Counter`). `PEAK_FLOPS`: dense BF16, half the 1,979 TFLOP/s "with
   sparsity" of NVIDIA's H100 SXM specifications (989.5 [arithmetic]); the constant's 989.4, 0.01% lower, is the dense
@@ -691,7 +704,8 @@ Per module and symbol; what §1–§9 state is not repeated.
   `max_new_tokens` 768 (`provider/base.py:13`), stops EOS + `extra_eos_for_direct_completion`
   (`provider/vllm.py:41-42`), `skip_special_tokens` (`provider/hf.py:96`), cut at the first stop, tabs → four spaces
   (`provider/hf.py:104-105`, `vllm.py:76`), `sanitize(prompt + completion, entry point)` (`codegen.py:79-82`). MultiPL-E
-  (`3025a53`): dataset revision `multipl_e/completions.py` `DATASET_REVISION`; `automodel.py` prompt `.strip()`
+  (at the version pinned in `docker/Dockerfile`): dataset revision `multipl_e/completions.py` `DATASET_REVISION`;
+  `automodel.py` prompt `.strip()`
   (`:119`), 1,024-position `max_length` (`completions.py --max-tokens`; `:67`, prompt truncated at `:56`, output past
   the full prompt at `:114`), first special token ends it (`:99-101`), `completions.py:216` `stop_at_stop_token`; judged
   program `prompt + completion + "\n" + tests` (`main.py:34`), g++ -std=c++17 then the binary, 15 s each
@@ -726,7 +740,7 @@ Per module and symbol; what §1–§9 state is not repeated.
   multiprocessing's exit handler joins the workers before concurrent.futures' would stop them, hence the caller's
   `with`. `sanitizer_init` makes EvalPlus's `syntax_check` (which catches SyntaxError and MemoryError) count that
   ValueError as a syntax error, so `code_extract` skips such spans: uncaught, one d16 completion ended a benchmark
-  evaluation at `8be5e90`; handled since `04afb45`.
+  evaluation before this handling.
 - `EVALPLUS_EVALUATE`: `evaluate(..., parallel=timed_workers())` (default half), `os._exit(0)` after the output file:
   `stucking_checker`, a non-daemon thread sleeping 20 s per check. `evalplus` → `{"scores": {"base", "plus"}, "ids",
   "base_status", "plus_status"}` (plus passes when base_status == plus_status == "pass"); pass@1 is `"scores"`' mean
@@ -1086,10 +1100,11 @@ Per module and symbol; what §1–§9 state is not repeated.
 | 2606.21619 | The Alignment Problem in Constrained Code Generation |
 | 2608.18062 | TokEval: A Tokenizer Evaluation Suite; companion post cimeister.github.io/blog/code_tokenizer_ablations |
 
-Repositories and other sources, at the commit or file cited: `evalplus/evalplus` (`26d6d00`), `nuprl/MultiPL-E`
-(`3025a53`; dataset `3a9e8d2`), `openai/human-eval-infilling` (`88062ff`), `zai-org/humaneval-x` (`62c7862`),
-`amazon-science/cceval` (`40c68d2`), `bigcode-project/bigcode-evaluation-harness` (`8fc5bae`, `santacoder_fim.py`),
-`pytorch/torchtitan` (`6f22255`), `NVIDIA/Megatron-LM` (`364eef7`), `python/cpython` 3.12.3 (`Parser/tokenizer.c`,
+Repositories and other sources: `evalplus/evalplus` (pinned in `pyproject.toml`), `nuprl/MultiPL-E` (evaluator pinned
+in `docker/Dockerfile`, dataset in `eval/code_eval.py`), `openai/human-eval-infilling` (`docker/Dockerfile`),
+`zai-org/humaneval-x` (`eval/code_eval.py`); at the files cited: `amazon-science/cceval`,
+`bigcode-project/bigcode-evaluation-harness` (`santacoder_fim.py`), `pytorch/torchtitan`, `NVIDIA/Megatron-LM`,
+`python/cpython` 3.12.3 (`Parser/tokenizer.c`,
 `Grammar/python.gram`; issue #121130), `guidance-ai/llguidance` (issue #107), `vllm-project/vllm` (v0.32.0:
 `vllm/benchmarks/serve.py`, Transformers backend), `huggingface/transformers` (`modeling_qwen3.py`,
 `TikTokenConverter`), NVIDIA's H100 SXM specifications.

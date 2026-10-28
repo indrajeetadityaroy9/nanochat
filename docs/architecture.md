@@ -32,8 +32,8 @@ Names follow Hugging Face's (`ModelConfig`, `num_hidden_layers`, `hidden_size`, 
 h = x + o_proj(Attn(norm(x))), x = h + down(relu(up(norm(h)))²); then the final norm, `lm_head` and the capped cross
 entropy (`CausalLM.forward`).
 The eager code computes x0 = bf16(norm(bf16(E[ids]))) and the mix in bf16; `torch.compile`, which runs training
-(`train/loop.py`) and the bits-per-byte losses (`eval/bpb.py`), computes otherwise (Inductor output read at `ca18db5`,
-d16): Inductor drops the embedding's bf16 cast (`emulate_precision_casts` off), so x0 is the RMS norm of the fp32 row,
+(`train/loop.py`) and the bits-per-byte losses (`eval/bpb.py`), computes otherwise (Inductor output read at d16):
+Inductor drops the embedding's bf16 cast (`emulate_precision_casts` off), so x0 is the RMS norm of the fp32 row,
 kept in fp32 and never rounded; each layer's mix is one fp32 fma(λr_i, x, λ0_i·x0) whose bf16 rounding is the stored
 stream while the layer's norm reads the unrounded value (§3 Embedding; `decode.cu` computes the same).
 
@@ -52,7 +52,8 @@ stream while the layer's norm reads the unrounded value (§3 Embedding; `decode.
 **Shape rule** (`meta_model`): C = 30 × `NUM_HIDDEN_LAYERS` (24) rounded up to whole 128-wide heads; 30 =
 MobileLLM-350M's 960 / 32 (arXiv 2402.14905 Table 9). d24: 720 → 768.
 The code builds d24 only; d8 and d16, the proxies of `docs/experiments.md` §1, are the same rule at 8 and 16 layers
-(built by `meta_model(num_hidden_layers=…)` at `67192ab`, with GEMM tiles and kernel instances for their widths).
+(built by `meta_model(num_hidden_layers=…)` in the earlier multi-depth code, since removed, with GEMM tiles and kernel
+instances for their widths).
 `max_position_embeddings` is the stage's context; `set_stage` recomputes the windows and the rotary tables (computed in
 fp64, rounded once to fp32: `init_buffers`), the weights unchanged.
 
@@ -69,7 +70,7 @@ full, on the assumption that a model with near-lossless local windows (arXiv 250
 full-attention counterpart's hyperparameters [inference]; nominal: `metrics.model_flops_per_token`, 6N + 12·C·
 Σ_layers min(window + 1, context), each layer's most keys a query attends, itself included; defined in
 `docs/evaluation.md` §5). Recomputed on CPU from `model/modeling.py` on the meta device (d8 and d16 by the same shape
-rule through `ModelConfig`; `meta_model(num_hidden_layers=…)` at `67192ab`) [arithmetic]:
+rule through `ModelConfig`; `meta_model(num_hidden_layers=…)` of the earlier multi-depth code) [arithmetic]:
 
 | Model | Layers | C | Heads | VE tables | Non-embedding | Matmul N | All | M at 8K (32K) | Nominal at 8K (32K) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -170,40 +171,41 @@ self-contained file with its C entry points. Each op is a
 | Value-embedding gate and mix | `ve_gate.cu` (`ve_gate.py`): one warp per row, the gate logits in fp32, the mix rounded once; backward in token order (one `torch.sort` of `input_ids` per micro-batch, shared by the layers through CSE), 16 positions per warp, a run of equal tokens summed in registers and added into the table's `.grad` with one 16-byte atomic per 4 fp32 (two per lane and 8-wide chunk; the zeroed table gradient allocated once per step, when `.grad` is None, then accumulated into; no autograd add); the gate weight's gradient one cuBLAS GEMM from bf16 dz; compiled for d24's H = 6 |
 | Cross entropy, training | `cross_entropy.py` `lm_loss`: QuACK's scaled-exp linear cross entropy per `CHUNK` = 8,192 rows: the logits GEMM's epilogue (N tile 128, pingpong) stores bf16 rescaled exponentials with each row's tile maxima, sums and the label's fp32 logit; `lce_glue` forms the loss from the fp32 accumulators; dX (bf16) and dW (fp32, accumulated across chunks) GEMMs rescale on the A-operand load, their N tile over C QuACK's rule at C = 768 (`TILE_N2` = 192). No logits tensor and no softmax pass. The cap in the same pipeline: tanh on the fp32 accumulator, the tile maximum capped likewise (tanh is increasing), 1 − tanh² folded into the stored exponentials, the label's entry fixed by one Triton kernel (`cap_label_fix`) |
 | Cross entropy, evaluation | `lm_losses`: per `CHUNK` rows an fp32-output GEMM and the capped logsumexp in one Inductor-fused kernel (`capped_losses`) |
-| Embedding | `F.embedding` of the token table; Inductor fuses the gather, the bf16 cast and the norm without rounding in between (`torch._inductor.config.emulate_precision_casts` off), so the compiled x0 is the norm of the fp32 rows, as `decode.cu` `k_norm` computes it (d8, 98,304 random ids at `8be5e90`: 114 of 25,165,824 elements differ from eager bf16(norm(E[ids])), 6,312,306 from eager norm(bf16(E[ids]))); the backward, compiled: Inductor decomposes `embedding_dense_backward` into `aten._unsafe_masked_index_put_accumulate` on an fp32 zero table (`torch/_decomp/decompositions.py`, registered in `torch/_inductor/decomposition.py`), lowered to `_unsafe_index_put(..., accumulate=True)`, a scatter with `scatter_mode="atomic_add"` (`torch/_inductor/lowering.py`): rows accumulated with fp32 atomics (§4) |
+| Embedding | `F.embedding` of the token table; Inductor fuses the gather, the bf16 cast and the norm without rounding in between (`torch._inductor.config.emulate_precision_casts` off), so the compiled x0 is the norm of the fp32 rows, as `decode.cu` `k_norm` computes it (d8, 98,304 random ids, compiled against eager outputs: 114 of 25,165,824 elements differ from eager bf16(norm(E[ids])), 6,312,306 from eager norm(bf16(E[ids]))); the backward, compiled: Inductor decomposes `embedding_dense_backward` into `aten._unsafe_masked_index_put_accumulate` on an fp32 zero table (`torch/_decomp/decompositions.py`, registered in `torch/_inductor/decomposition.py`), lowered to `_unsafe_index_put(..., accumulate=True)`, a scatter with `scatter_mode="atomic_add"` (`torch/_inductor/lowering.py`): rows accumulated with fp32 atomics (§4) |
 | Optimizer | Muon's Newton–Schulz batched over same-shape matrices and NorMuon: `docs/training.md` §3 |
 
-**Landed changes** (d24 tok/s as each commit's message records them: an exclusive A/B on the GH200 at 700 W against
-the master tree the change landed on, the base the message names, not always the commit's git parent; the messages
-record the SM clock as locked for `a81410c` and `7ad594f` only, the others do not state it (`docs/training.md` §7);
-mostly 25 timed steps after 8 warm-up at 8K and 12 after 6 at 32K, median, an arm run twice by its mean; `f499be7` 40
-steps, 29 timed; `373b549`'s 8K rate a 200-step run against an earlier base run, not one window). Rates of different
-rows come from different measurement windows and do not chain. Loss checks: 200 steps against the d24 seed spread
+**Landed changes** (d24 tok/s as each change's record states them: an exclusive A/B on the GH200 at 700 W against
+the master tree the change landed on, not always its immediate predecessor; the SM clock is recorded as locked for the
+FA4-segments/batched-Newton–Schulz and value-embedding-gate changes only, the others do not state it
+(`docs/training.md` §7); mostly 25 timed steps after 8 warm-up at 8K and 12 after 6 at 32K, median, an arm run twice
+by its mean; the fp32 `.grad` accumulation 40 steps, 29 timed; the post-attention norm's 8K rate a 200-step run
+against an earlier base run, not one window). Rates of different rows come from different measurement windows and
+do not chain. Loss checks: 200 steps against the d24 seed spread
 (seed 0 vs 1, last-20 mean Δ 0.035), or 10 steps at the earlier recipe's base multiplier ×2.797 against the parent
 tree's run-to-run spread (§4).
 
-| Change | Commit | 8K tok/s | 32K tok/s | Memory, other | Numerics |
-|---|---|---|---|---|---|
-| FA4 on the real segments (the loader had padded `cu_seqlens` to 2,796 segments for ~94 real) + Muon's Newton–Schulz batched by shape | `a81410c` | step 3,709 → 3,511 ms (−5.3%); d16 266 → 239.5 ms (−10%) | | | losses bitwise; gradients within run-to-run spread; momentum bitwise, parameters at bf16 GEMM rounding |
-| Fused value-embedding gate and mix | `7ad594f` | step time −0.5% | | | ~15% of elements one bf16 ulp from the PyTorch expressions (fp32 reduction order) |
-| q/k prologue per position | `62b50c2` | +0.3%; forward 250.3 → 183.6 µs per call | | | 200-step Δ +0.0035 |
-| Post-attention norm in GEMM epilogues | `373b549` | 338,039 → 341,919 (+1.15%) | 274,783 → 276,661 (+0.68%) | peak 64.5 → 61.1 GiB; nsys GPU time 4,355 → 4,296 ms per step | 200-step Δ −0.0071; y vs fp64 2.6e-3 (bf16 path 3.2e-3) |
-| Token-ordered value-embedding backward | `eaf14d0` | 344,768 → 350,185 (+1.57%) | 277,238 → 280,201 (+1.07%) | ve_gate 161.9 → 92.6 ms per step; peak unchanged | 200-step Δ +0.0095 |
-| dW accumulated into the fp32 `.grad` by cuBLAS `addmm` (β = 1) + one bf16 copy per weight per update | `f499be7` | 344,925 → 347,634 (+0.79%) | 275,613 → 277,383 (+0.64%) | peak 61.6 → 62.0 GiB | neutral |
-| FA4 window layers: persistent forward, bf16 dQ | `0e627ff` | 344,967 → 348,218 (+0.94%; forward alone +0.32%) | 276,538 → 278,524 (+0.72%) | | window dQ vs fp32 accumulation norm rel 2.45e-3; 200-step Δ +0.009 |
-| MLP activation saved by the forward | `6299e84` | 356,259 → 361,324 (+1.42%) | 282,256 → 285,118 (+1.01%) | peak 61.8 → 75.3 GiB (32K 61.7 → 75.2) | not bitwise (§4); 200-step at ×2.797 last-100 Δ −0.0027 (same-seed noise 0.005) |
-| Fused q/k/v projection, one attention op | `70025d8` | 356,431 → 359,180 (+0.77%) | 283,357 → 285,776 (+0.85%) | peak +1.7 GiB warm (75.1 → 76.8) | out, dk, dv, k-gain and value-embedding gradients bitwise; dq, q-gain 1e-6–2e-5; 10 steps bitwise through step 3, then max Δ 1.6e-5 (parent against itself 1.3e-5) |
-| Scaled-exp linear cross entropy | `067e60b` | 362,988 → 365,466 (+0.68%) | 286,619 → 287,476 (+0.30%) | peak 76.99 → 71.44 GiB; 26.6–27.1 → 24.2 ms per micro-batch | closer to fp64 (§4); 10 steps within spread (largest 6.4e-4) |
-| FA4's dpsum from o_proj's dX epilogue, `fa4_rows.cu` | `db1e90e` | 363,087 → 364,399 (+0.36%) | 286,588 → 287,097 (+0.18%) | 165.1 + 87.4 → 172.2 + 7.5 µs per call | dpsum vs fp64 4.70e-8 (FA4's 5.17e-8); dv bitwise; 10 steps within 1.8e-5 |
-| Fixed QuACK tiles (`CONFIGS`) | `fb86efc` | 362,972 → 364,278 (+0.36%) | 286,555 → 287,482 (+0.32%) | peak unchanged; cold first step 119 → 35 s | every op output bitwise at C 768 and 512 |
-| Output-logit cap fused into the linear cross entropy | `e24333d` | cost +1.56 ms per micro-batch (25.30 → 26.86 ms), 0.58% of the 8K step | not measured | op peak 0.80 GiB capped or not; 10-step peak 82.67 → 71.11 GiB, a cold start 71.11 | §4; 10 steps within max(spread, 1e-3), largest 8.0e-4 |
+| Change | 8K tok/s | 32K tok/s | Memory, other | Numerics |
+|---|---|---|---|---|
+| FA4 on the real segments (the loader had padded `cu_seqlens` to 2,796 segments for ~94 real) + Muon's Newton–Schulz batched by shape | step 3,709 → 3,511 ms (−5.3%); d16 266 → 239.5 ms (−10%) | | | losses bitwise; gradients within run-to-run spread; momentum bitwise, parameters at bf16 GEMM rounding |
+| Fused value-embedding gate and mix | step time −0.5% | | | ~15% of elements one bf16 ulp from the PyTorch expressions (fp32 reduction order) |
+| q/k prologue per position | +0.3%; forward 250.3 → 183.6 µs per call | | | 200-step Δ +0.0035 |
+| Post-attention norm in GEMM epilogues | 338,039 → 341,919 (+1.15%) | 274,783 → 276,661 (+0.68%) | peak 64.5 → 61.1 GiB; nsys GPU time 4,355 → 4,296 ms per step | 200-step Δ −0.0071; y vs fp64 2.6e-3 (bf16 path 3.2e-3) |
+| Token-ordered value-embedding backward | 344,768 → 350,185 (+1.57%) | 277,238 → 280,201 (+1.07%) | ve_gate 161.9 → 92.6 ms per step; peak unchanged | 200-step Δ +0.0095 |
+| dW accumulated into the fp32 `.grad` by cuBLAS `addmm` (β = 1) + one bf16 copy per weight per update | 344,925 → 347,634 (+0.79%) | 275,613 → 277,383 (+0.64%) | peak 61.6 → 62.0 GiB | neutral |
+| FA4 window layers: persistent forward, bf16 dQ | 344,967 → 348,218 (+0.94%; forward alone +0.32%) | 276,538 → 278,524 (+0.72%) | | window dQ vs fp32 accumulation norm rel 2.45e-3; 200-step Δ +0.009 |
+| MLP activation saved by the forward | 356,259 → 361,324 (+1.42%) | 282,256 → 285,118 (+1.01%) | peak 61.8 → 75.3 GiB (32K 61.7 → 75.2) | not bitwise (§4); 200-step at ×2.797 last-100 Δ −0.0027 (same-seed noise 0.005) |
+| Fused q/k/v projection, one attention op | 356,431 → 359,180 (+0.77%) | 283,357 → 285,776 (+0.85%) | peak +1.7 GiB warm (75.1 → 76.8) | out, dk, dv, k-gain and value-embedding gradients bitwise; dq, q-gain 1e-6–2e-5; 10 steps bitwise through step 3, then max Δ 1.6e-5 (parent against itself 1.3e-5) |
+| Scaled-exp linear cross entropy | 362,988 → 365,466 (+0.68%) | 286,619 → 287,476 (+0.30%) | peak 76.99 → 71.44 GiB; 26.6–27.1 → 24.2 ms per micro-batch | closer to fp64 (§4); 10 steps within spread (largest 6.4e-4) |
+| FA4's dpsum from o_proj's dX epilogue, `fa4_rows.cu` | 363,087 → 364,399 (+0.36%) | 286,588 → 287,097 (+0.18%) | 165.1 + 87.4 → 172.2 + 7.5 µs per call | dpsum vs fp64 4.70e-8 (FA4's 5.17e-8); dv bitwise; 10 steps within 1.8e-5 |
+| Fixed QuACK tiles (`CONFIGS`) | 362,972 → 364,278 (+0.36%) | 286,555 → 287,482 (+0.32%) | peak unchanged; cold first step 119 → 35 s | every op output bitwise at C 768 and 512 |
+| Output-logit cap fused into the linear cross entropy | cost +1.56 ms per micro-batch (25.30 → 26.86 ms), 0.58% of the 8K step | not measured | op peak 0.80 GiB capped or not; 10-step peak 82.67 → 71.11 GiB, a cold start 71.11 | §4; 10 steps within max(spread, 1e-3), largest 8.0e-4 |
 
 Notes on the rows:
 - **Fixed tiles.** QuACK's autotuner (`tuned=True`) timed every candidate at a shape's first call, so the choice was a
   per-process timing result: two cold d24 runs picked different configurations for 2 of 9 GEMM keys, and the shared
   cache's q/k/v forward pick was 6.6% slower than the best. QuACK's `default_config` would cost 1.1% / 5.4% / 26% of
   these GEMMs' time at d24 / d16 / d8; a single benchmark run's winner is up to 2.1% slower than the three-run best,
-  and a cold first d24 step spent ~80 s autotuning (`linear.py` `CONFIGS`, `fb86efc`). With `e24333d` no training
+  and a cold first d24 step spent ~80 s autotuning (`linear.py` `CONFIGS`). With the fused cap no training
   GEMM autotunes, and a cold start peaks at the warm 71.11 GiB.
 - **Norm in epilogues.** The rstd-scaled relu² derivative epilogue costs ~200 µs per layer and micro-batch over QuACK's
   plain `gemm_dact` (~72 ms per step); the Inductor norm and mix kernels that remain (norm before attention, the
@@ -213,8 +215,9 @@ Notes on the rows:
   24.2 ms against 256 without 25.5 (`cross_entropy.py` `CHUNK`, `TILE_N1`); QuACK's own rule for this tile
   (`_pick_tile_n1`: 256 at V = 2^15, no pingpong) times +5.8% at C = 768, +3.7% at 512 and within 0.3% at 256
   against 128 with pingpong (QuACK 0.6.5's `scaled_exp_linear_cross_entropy_fwd`, uncapped, 98,304 rows, median of
-  20 calls). The strip GEMMs' N tile is QuACK's rule (`strip_tile_n` at `67192ab`); on a 98,304-row micro-batch with
-  the cap (GH200, exclusive, median of 5 alternated rounds of 20 calls) the op at C = 512 (d16) takes 19.06 ms with
+  20 calls). The strip GEMMs' N tile is QuACK's rule (`strip_tile_n` of the earlier multi-depth code); on a
+  98,304-row micro-batch with the cap (GH200, exclusive, median of 5 alternated rounds of 20 calls) the op at
+  C = 512 (d16) takes 19.06 ms with
   256 against 23.60 ms with a fixed 192 (−19.2%; 192 leaves 3 N tiles, which the dW GEMM's cluster_N = 2 pads to 4
   [inference]), at C = 256 (d8) 15.71 against 15.05 ms (+4.4%; one 256-wide N tile gives the dX GEMM 64 CTAs per
   8,192-row chunk on 132 SMs, 192 gives 128 [inference]), and at C = 768 (d24) the rule gives 192, the code's
@@ -225,11 +228,11 @@ Notes on the rows:
   of the 8K stage's 74.0 h is ~26 min [arithmetic, `docs/training.md` §7]; the cap's 32K cost is not measured.
 - **dpsum.** QuACK's autotuner does not pin tile_n, so `DPSUM_CONFIG` is fixed: the fastest QuACK SM90 configuration
   with tile_n = 128 on the d24 shape (172.2 µs; cluster (2, 1) 172.8, tile_m 192 212.4 / 218.3, cooperative 256
-  268.5 / 270.4); `fa4_rows` took 7.5 µs at `db1e90e` (256-thread blocks; the current launch is not timed alone).
+  268.5 / 270.4); `fa4_rows` took 7.5 µs when it landed (256-thread blocks; the current launch is not timed alone).
 - **Value-embedding backward.** RUN = 16 positions per warp (isolated backward 222 / 203 / 251 µs at RUN 8 / 16 / 32),
   2 blocks of 256 threads per SM (`ve_gate.cu`).
 - **q/k prologue forward.** Two heads' loads in flight per thread group: `k_forward` 250.3 → 183.6 µs per call at d24
-  8K against one head per group (`qk_prologue.cu`, `62b50c2`).
+  8K against one head per group (`qk_prologue.cu`).
 - **Window layers.** FA4's SM90 forward launches one CTA per (segment m-block, head), and a 512-key window's m-block of
   128 queries covers ~5 key blocks, so each CTA's launch, Q load and output store are exposed; the persistent forward
   amortizes them. Full causal layers keep FA4's launch: their m-blocks' work differs up to T / 128-fold, which a static
@@ -268,7 +271,7 @@ reduction order.
 the token-table backward (compiled: Inductor decomposes `embedding_dense_backward` into an accumulating index_put,
 lowered to an fp32 `atomic_add` scatter; torch 2.14 `torch/_decomp/decompositions.py`, `torch/_inductor/lowering.py`)
 and the value-embedding table's 16-byte atomics accumulate in no fixed order, so gradients are not bitwise across
-runs and step losses differ between processes from step 3 (two of five 4-step runs at `fb86efc`, the GEMM
+runs and step losses differ between processes from step 3 (two of five 4-step d24 runs with the fixed tiles, the GEMM
 configurations identical). Everything else is fixed by construction: GEMM tiles (`CONFIGS`, `DPSUM_CONFIG`,
 `cross_entropy.py`'s explicit tiles, `lm_losses`' fp32-output `torch.mm`), the QK-gain gradient's summation order
 (`qkp_backward_blocks`: half the device's resident blocks, partials summed in block order), the warp sums
@@ -276,13 +279,14 @@ configurations identical). Everything else is fixed by construction: GEMM tiles 
 not change the bits of plain GEMMs (split-K 1, checked across the autotuner's picks); reduce epilogues' partial sums
 follow tile_n. PyTorch's deterministic mode is rejected for its cost (`docs/experiments.md` §5).
 
-**Op checks against fp64.** Each landing since `70025d8` carries an op check (against an fp64 reference, or bitwise
-against its parent's op) and a 10-step d24 8K run at the earlier recipe's ×2.797 compared with two runs of the parent
-tree (`067e60b` and `e24333d`: every step within max(the two parent runs' difference, 1e-3); the landing rule:
-`docs/experiments.md` §1); results in the §3 table. The linear cross entropy and the fused cap against fp64 on real
-captures at step 200 (relative error, previous path → landed; the commits' messages):
+**Op checks against fp64.** Each landing since the fused q/k/v projection carries an op check (against an fp64
+reference, or bitwise against its parent's op) and a 10-step d24 8K run at the earlier recipe's ×2.797 compared with
+two runs of the parent tree (the linear cross entropy and the fused cap: every step within max(the two parent runs'
+difference, 1e-3); the landing rule: `docs/experiments.md` §1); results in the §3 table. The linear cross entropy and
+the fused cap against fp64 on real
+captures at step 200 (relative error, previous path → landed; the changes' records):
 
-| Quantity | `067e60b` uncapped (bf16-logit path → scaled-exp) | `e24333d` capped (removed capped path → fused) |
+| Quantity | Linear cross entropy, uncapped (bf16-logit path → scaled-exp) | Fused cap, capped (removed capped path → fused) |
 |---|---|---|
 | Mean loss | 2.8e-5 → 3.3e-8 | 1.7e-4 → 2.3e-8 |
 | Per-position loss | 3.3e-3 → 5.8e-7 | 4.2e-3 → 9.5e-6 |
@@ -292,11 +296,11 @@ captures at step 200 (relative error, previous path → landed; the commits' mes
 
 The fused cap's largest 10-step difference (8.0e-4 at step 9) exceeds the old capped path's run-to-run ≤ 7e-6; the
 uncapped landing's was 6.4e-4 (step 8; its parents' spread not recorded): the more accurate gradient diverging from
-the less accurate one [inference]; the uncapped path (since removed) was bitwise `067e60b`'s.
+the less accurate one [inference]; the uncapped path (since removed) was bitwise the scaled-exp landing's.
 
 **The model against fp64.** A plain-PyTorch restatement of the model in fp64 (4 layers, C 768, 2 × 2,048 tokens; its
-fp32 run 2e-6 from it; recorded in `fb86efc`'s message): per-parameter gradient relative error median 1.17e-2, max
-1.96e-2 at `70025d8`, against 1.18e-2 / 1.95e-2 at `646a986` (the model code of its parent `cf0aff5`), each tree
+fp32 run 2e-6 from it; recorded with the fixed-tiles change): per-parameter gradient relative error median 1.17e-2,
+max 1.96e-2 with the fused q/k/v projection, against 1.18e-2 / 1.95e-2 for the model code before it, each tree
 bitwise run to run, the two trees a median 3.75e-3 apart: bf16 rounding, not a defect.
 
 ## 5. Implementation reference
@@ -337,7 +341,7 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
   and operand order; the space sets pingpong (tile_m 128 with tile_n up to 208, and 192 × 128) or cooperative (tile_m
   256, and 128 × 224 or 128 × 256) and QuACK's static persistent scheduler (`is_dynamic_persistent=False`; the
   `down_dx` GEMM of `relu2_mlp_bwd` passes `dynamic_scheduler=True`, the default of QuACK's `gemm_dact`).
-  `CONFIGS` holds d24's calls (C = 768) only; the d8 and d16 entries are at `67192ab`.
+  `CONFIGS` holds d24's calls (C = 768) only; the d8 and d16 entries were in the earlier multi-depth code.
   M = `corpus/mixture.py` `MICRO_BATCH_TOKENS`. The benchmark is QuACK's `Autotuner` (`quack/autotuner.py`; the
   epilogue ops reach it through `quack/gemm_runtime/autotune.py`): L2-cold CUDA-graph medians of every eligible
   candidate, exclusive GPU. An explicit config bypasses
@@ -421,7 +425,7 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 - Layout: n, out, dn contiguous (rows, C), C = H·`HEAD_DIM`; v and dout rows `v_stride`/`dout_stride` apart (C, or 3C
   for the fused projection); idx int32; table, dtable (V, C) fp32; gate (rows, H) fp32; dz (rows, H) bf16. A row is
   one warp; lane l holds the `VEC`-wide chunks l, l + `WARP`, …, each inside one head. H = 6 (d24) is a compile-time
-  constant (per-head arrays in registers); the d8 and d16 instances (H = 2, 4) are at `67192ab`.
+  constant (per-head arrays in registers); the d8 and d16 instances (H = 2, 4) were in the earlier multi-depth code.
 - Backward: rows in token order, `RUN` positions per warp; a run of equal tokens reads its table row once, sums its
   dve in registers and adds the sum with one 16-byte `atomicAdd` per 4 fp32 (two per lane and `VEC` = 8 chunk; PTX
   `atom.global.add.v4.f32`, its result unused, assembled to `REDG.E.ADD.F32x4` for sm_90a);
@@ -472,7 +476,7 @@ Per-module detail behind the code's docstrings (paper-facing facts are in §1–
 | 2505.09388 | Qwen3 Technical Report |
 | 2601.22887 | MoVE: Mixture of Value Embeddings -- A New Axis for Scaling Parametric Memory in Autoregressive Models |
 
-Repositories, at the commit or file cited: `Dao-AILab/flash-attention` (FlashAttention-4 4.0.0b36,
+Repositories, at the version or file cited: `Dao-AILab/flash-attention` (FlashAttention-4 4.0.0b36,
 `flash_attn.cute`); `Dao-AILab/quack` 0.6.5; `deepseek-ai/DeepGEMM`, `deepseek-ai/TileKernels` (design sources);
 `NVIDIA/Megatron-LM` (gradient-accumulation fusion); `huggingface/transformers` (`modeling_qwen3.py`). LeCun et al.,
 "Efficient BackProp" (1998) §4.6.

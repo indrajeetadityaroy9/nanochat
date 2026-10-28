@@ -158,7 +158,7 @@ def measure_errors(evaluation: dict) -> dict[str, dict]:
             "pass@1": summary([s[0] == "pass" for p in parse for s in p["base_status"]])}
 
 
-# CrossCodeEval's patterns (amazon-science/cceval 40c68d2 scripts/eval_utils.py remove_comments, string_pattern,
+# CrossCodeEval's patterns (arXiv 2310.11248; its released scripts/eval_utils.py remove_comments, string_pattern,
 # IDENTIFIER_REGEX); keywords as dpu-utils keywordlist.py lists them (keyword.kwlist without True and False)
 COMMENT = re.compile(r"#.*|//.*")
 STRING = re.compile(r'"([^"\\]*(\\.[^"\\]*)*)"|\'([^\'\\]*(\\.[^\'\\]*)*)\'')

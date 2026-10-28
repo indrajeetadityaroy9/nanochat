@@ -29,7 +29,7 @@ from corpus.tokenizer import FIM_TOKENS, get_tokenizer
 from native import corpus_crate
 
 # FIM rate 0.5 (arXiv 2401.14196 §3.1.2); Rand-FIM 0.1, Single-Node 0.5 (arXiv 2506.00204 §5.1, §3.3); line-start
-# 0.5, the one rate tested, against no rule (dc76110, d16 retrain 1671b56; docs/corpus.md §8), a line-start middle also
+# 0.5, the one rate tested, against no rule (a d16 retrain; docs/corpus.md §8), a line-start middle also
 # taking its line break (untested); SPM 0.5 (arXiv 2207.14255 §3.1, App. D variant 2)
 FIM_RATE, RANDOM_SPAN_RATE, SINGLE_NODE_RATE, LINE_START_RATE, SPM_RATE = 0.5, 0.1, 0.5, 0.5, 0.5
 # One pack call per core (the crate releases the GIL)

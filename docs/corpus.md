@@ -19,7 +19,7 @@ numbers were recomputed on CPU from the curated shards and the tokenized and pac
 | `corpus/decontaminate.py`, `corpus/crate/decontaminate.rs` (`Grams`) | 3, 6, 10, 11 |
 | `corpus/publish.py` (`DATASET`, card, push, pull) | 4, 10, 11 |
 | `corpus/tokenizer.py`, `corpus/train_tokenizer.py` (the tokenizer step), `corpus/crate/train.rs` | 5, 10, 11 |
-| `results/tokenizer_split_merge-vocabularies.json` (the tokenizer sample, `5ba5025`) | 5 |
+| `results/tokenizer_split_merge-vocabularies.json` (the tokenizer sample) | 5 |
 | `corpus/tokenize.py`, `corpus/crate/repository.rs` (`topological_sort`) | 3, 6, 10, 11 |
 | `corpus/parallel.py` (`MEMORY`, `ordered`, `SPAWN`) | 3, 6, 10, 11 |
 | `corpus/mixture.py` | 1, 6, 7, 9, 11 |
@@ -60,7 +60,7 @@ group, into `raw/<source>/<Hub path>`. Stack-Edu's Hub files are
 metadata, downloaded whole; each row group's blobs are read from Software Heritage's public S3 bucket by `blob_id`,
 gunzipped and decoded with their `src_encoding` (`prepare.blob_texts`); a blob the bucket lacks or that does not decode
 has no text. `FETCHES` = 4 files at once (Stack-Edu one at a time, `prepare.prepare`): the throughput peak reading one
-column of 8 UltraData-Code L3 files, 8.5, 11.5, 12.4 and 10.5 MB/s at 1, 2, 4 and 8 files in flight (`b0c6bd9`).
+column of 8 UltraData-Code L3 files, 8.5, 11.5, 12.4 and 10.5 MB/s at 1, 2, 4 and 8 files in flight (GH200 host).
 Any other failure (a request failing under obstore's or the Hub client's default retries) stops `prepare`; a rerun
 fetches every file again (`fetch` keeps no partial state).
 
@@ -154,7 +154,7 @@ HumanEval and MBPP C++ prompts (161, 397; they have no reference), and each Huma
 reference middle + suffix (164; the three infilling benchmarks are cut from one program per task). The crate's
 `Grams` (`crate/decontaminate.rs`) hashes each 10-gram of word hashes (FxHash; 53,395 distinct) and compares a hit
 word by word, so no hash collision drops a row. Shards run in parallel, a process per CPU with one matching thread
-(160 GB in 2 min 44 s on the GH200 host's 64 CPUs, `abeb4eb`); a shard with a dropped row is rewritten without it, its
+(160 GB in 2 min 44 s on the GH200 host's 64 CPUs); a shard with a dropped row is rewritten without it, its
 row groups kept (a repository shard's samples stay whole, less the dropped files). Val splits are untouched: they are
 held out, and every bpb record scores the same rows. `CURATED/decontamination.json` (`decontaminate.RECORD`, published
 with the shards, §4) holds `n` = 10, `benchmarks` (the 1,428 text names) and, per source, each dropped row as [shard,
@@ -195,7 +195,7 @@ part (§8).
   `SAMPLE_ROWS` = 65,536 files as curated (the last excepted; decontamination's dropped files leave fewer, §3), so a
   reader of row groups never splits a sample. A row group is a tokenize task; its peak is 1.71 GiB (a 235 MiB group of
   `ultradata_code_l2_python`), 3.14 GiB at 122,880 files, and three published shards re-cut at 122,880 files tokenize
-  identically (`c1a7d7b`).
+  identically (measured on the GH200 host).
 - **Every other source**: its category's columns; validation rows in `val/0.parquet` and train rows over
   `train/0..99.parquet` (`ntile(100)`), each in `id` order (a uniform order, `id` being a hash), so any leading shards
   are a uniform sample.
@@ -207,12 +207,12 @@ part (§8).
 bytes), `decontamination.json` (§3), `tokenizer/tokenizer.{tiktoken,pattern}` (`CORPUS/tokenizer`, §5) and
 `README.md`, the card (`publish.card`: layout, schema, decontamination, per folder its contents, columns, origin and
 rows, the tokenizer; the Hub's viewer off, as its Parquet converter would merge mixed schemas). The curated shards
-were committed at `a4ec1a08` ("nanochat corpus, curated", 2026-10-24); `dc5391b4` added `tokenizer/` (the shipped
-tokenizer, `tokenizer.tiktoken` sha256 `59e8b637…`, §5) on `b091cb47`, which had removed a `manifest.json`; `main` is
-`dbe57a81` ("nanochat corpus, curated and decontaminated", 2026-10-27): the 1,682 shards with a dropped row rewritten
+were first published as the curated release ("nanochat corpus, curated", 2026-10-24); a later revision added
+`tokenizer/` (the shipped tokenizer, §5) after one had removed a `manifest.json`; `main` is the decontaminated release
+("nanochat corpus, curated and decontaminated", 2026-10-27): the 1,682 shards with a dropped row rewritten
 (the document sources' by pyarrow's writer where DuckDB's `COPY` had written them, 1.02–1.16× their size; the
 repository shards' 0.95–1.00×), the other 130 (the 112 untouched train shards and the 18 val shards) byte-identical to
-`dc5391b4`'s, the record added, the card rewritten, the tokenizer unchanged.
+the curated release's, the record added, the card rewritten, the tokenizer unchanged.
 
 | Folder | Columns | Train rows | Val rows | Parquet GB |
 |---|---|---|---|---|
@@ -239,15 +239,15 @@ repository shards' 0.95–1.00×), the other 130 (the 112 untouched train shards
 - **Push** (`publish push`): writes the card, then passes the shards, the tokenizer's two files, the record and the
   card to preupload calls (which upload the LFS files among them; the small regular files travel in the commit), each
   call closed once its files reach `PREUPLOAD` = 4 GiB (an LFS upload URL expires 900 s after its batch call,
-  `X-Amz-Expires=900`, `37cebf7`, so 4 GiB needs at least 4.6 MiB/s [arithmetic]; the Hub skips objects it holds, so
+  `X-Amz-Expires=900`, so 4 GiB needs at least 4.6 MiB/s [arithmetic]; the Hub skips objects it holds, so
   a rerun uploads the rest), then replaces the tree in one commit: the dataset's files the push no longer has (all but
   `.gitattributes`) deleted, the rest added; the history is kept.
 - **Pull** (`publish pull`): `snapshot_download` of `main`'s `<source>/**` and `decontamination.json` into
-  `CORPUS/curated` and of `tokenizer/*` into `CORPUS/tokenizer`. At `dbe57a81` `main` holds 1,817 files: the 1,812
-  shards, the record, the tokenizer's two files, `README.md` and `.gitattributes`.
-- **Provenance.** The SHA-256 of every local shard in `CORPUS/curated` equals the Hub's LFS hash at `dbe57a81`
-  (`HfApi.dataset_info(files_metadata=True)`, `abeb4eb`): 1,812 shards, none missing or extra, each of the Hub's size;
-  the shards whose hash differs from `dc5391b4`'s are exactly the record's shards with a dropped row, and every
+  `CORPUS/curated` and of `tokenizer/*` into `CORPUS/tokenizer`. The decontaminated release holds 1,817 files: the
+  1,812 shards, the record, the tokenizer's two files, `README.md` and `.gitattributes`.
+- **Provenance.** The SHA-256 of every local shard in `CORPUS/curated` equals the Hub's LFS hash in the decontaminated
+  release (`HfApi.dataset_info(files_metadata=True)`): 1,812 shards, none missing or extra, each of the Hub's size;
+  the shards whose hash differs from the curated release's are exactly the record's shards with a dropped row, and every
   folder's rows on the card equal the shards' Parquet footers (computed on master). Training reads only the packs
   derived from these shards (§6–§9); the seeded generators (data order, FIM's ChaCha8) select and transform rows but
   add no data.
@@ -257,22 +257,21 @@ repository shards' 0.95–1.00×), the other 130 (the 112 untouched train shards
 `corpus/tokenizer.py` loads the corpus's tokenizer from `CORPUS/tokenizer` (`tokenizer.tiktoken`, `tokenizer.pattern`),
 encoded by tiktoken (`get_tokenizer`); the dataset ships it (`publish pull`, §4). It is the sa-bpe arm of the tokenizer
 ablation (`docs/experiments.md` §2: the other arms, the intrinsic comparison and why the ablation's training runs were
-not run). Its data key is `054a5beebb0fbcb3e21b5f62f2545e49b79d8620ba75322c1804f5a004283e3a`
-(`results/tokenizer_split_merge-vocabularies.json`, `5ba5025`), under which the whole corpus is tokenized and packed
+not run). Its data key, the SHA-256 of the tokenizer's files (`Tokenizer.data_key`), is recorded in
+`results/tokenizer_split_merge-vocabularies.json`; the whole corpus is tokenized and packed under it
 (§6, §8).
 
 **Method and provenance.** `python -m corpus.train_tokenizer` (`train_tokenizer.main`) is the method: the sample, the
-trainer and the settings below, written to `CORPUS/tokenizer`. The shipped tokenizer (tiktoken file SHA-256
-`59e8b637…`, pattern `47a359ca…`) was trained by the same method (the ablation's `vocabularies` step at `5ba5025`) on
-an earlier build of the curated corpus. On the dataset at `dc5391b4` (§4, before decontamination) the sample has the
+trainer and the settings below, written to `CORPUS/tokenizer`. The shipped tokenizer was trained by the same method
+(the tokenizer ablation's `vocabularies` step) on
+an earlier build of the curated corpus. On the curated release (§4, before decontamination) the sample has the
 record's 3,988,600 documents, but its bytes and units differ per source (stack_edu_python 1,195,186,384 bytes and
 384,926 units against the record's 1,186,614,352 and 384,949; kaggle_notebooks 195,259,329 bytes against
 206,881,801; codexglue_python, stack_edu_cpp, climbmix and both Nemotron sources also differ), and the step writes an
-equivalent tokenizer, not the shipped one: tiktoken file `0f9f7bc0…`, data key
-`3246901b3b651b320713bfd6ee408be0d53ff8098a0a9f0c1d321179105b41a0`, `tokenizer.pattern` identical; byte-identical to
-the sa-bpe arm of `ablations/tokenizer_split_merge.py` at `67192ab` (removed in `cd4edbe`) on the same data (computed
-at `cd4edbe`, no record) [unverified].
-The build (§10) therefore pulls the shipped tokenizer, and tokenize and pack reproduce data key `054a5bee…`.
+equivalent tokenizer, not the shipped one: a different tiktoken file and data key, `tokenizer.pattern` identical;
+byte-identical to the sa-bpe arm of the earlier `ablations/tokenizer_split_merge.py` (since removed) on the same data
+(no record) [unverified].
+The build (§10) therefore pulls the shipped tokenizer, and tokenize and pack reproduce the recorded data key.
 
 - **Vocabulary: 32,768 ids** (`model/config.py` `VOCAB_SIZE` = 2^15): the 256 bytes, 32,508 merges, then
   `SPECIAL_TOKENS`: `<|bos|>` (id 32,764) and the FIM sentinels `<｜fim▁begin｜>`, `<｜fim▁hole｜>`, `<｜fim▁end｜>`
@@ -333,7 +332,7 @@ The build (§10) therefore pulls the shipped tokenizer, and tokenize and pack re
 | ultradata_math_l3_multi_style | 0.106 | 0.0309 | 20,995 | 0.105 | 20,995 |
 | ultradata_math_l3_textbook_exercise | 0.089 | 0.0309 | 31,798 | 0.089 | 31,798 |
 
-- **Intrinsic** (`results/tokenizer_split_merge-intrinsic.json`, `ebd8058`, evaluation text the 18 sources' val splits,
+- **Intrinsic** (`results/tokenizer_split_merge-intrinsic.json`, evaluation text the 18 sources' val splits,
   6.21 GB): sa-bpe holds 3.624 bytes per token over the file stage and 3.442 on Stack-Edu Python, and passed the
   validity checks the record holds (on 200 val documents per source: chunks cover the text, tiktoken equals the merges
   replayed, every text decodes).
@@ -387,20 +386,20 @@ master).
 task order (`pool.map` for row groups, `parallel.ordered` for repository tasks), so the output does not depend on the
 worker count; repository tasks in flight are bounded by `MEMORY` / (`PEAK` × the largest partition's text, val or
 train, summed over the language's three sources; `repository_window`), each encoding on a thread per core;
-`PEAK` = 8.18 is the larger measured peak per text byte (`ru_maxrss` of a spawned worker, corpus tokenizer, `c1a7d7b`,
+`PEAK` = 8.18 is the larger measured peak per text byte (`ru_maxrss` of a spawned worker, corpus tokenizer,
 on each language's largest train partition): 6.52 for Python (partition 41: 3.02 GiB of text, 19.7 GiB at peak), 8.18
 for C++ (partition 71: 2.40 GiB, 19.6 GiB).
-`topological_sort` parses a partition's files in parallel (rayon). Measured on the GH200 (before → after): `b9769a8`
-(a partition per `topological_sort` call, encoding on every core) tokenizing the C++ val partition 386.7 → 16.3 s, the
-Python one 712 → 61 s; `9e40df4` and `a20d12a` (a tokenizer per rayon worker, `PerWorker`) pack 189 → 97.5 → 93
-CPU-s per shard; `737f2e1` (a shard's documents cut longest first) a four-shard FIM pack 14.4 → 11.5 s. The crate's
-release profile (`lto`, one codegen unit, `03d131e`) against cargo's defaults: pack of shard 0 of six splits 36.4 vs
-42.9 s, 8,000 training merges on 252,906 documents 20.6 vs 22.1 s, outputs identical.
+`topological_sort` parses a partition's files in parallel (rayon). Measured on the GH200 (before → after): compiling
+repositories in parallel (a partition per `topological_sort` call, encoding on every core) tokenizing the C++ val
+partition 386.7 → 16.3 s, the Python one 712 → 61 s; one tokenizer per worker, then one value per rayon worker
+(`PerWorker`), pack 189 → 97.5 → 93 CPU-s per shard; a shard's documents cut longest first, a four-shard FIM pack
+14.4 → 11.5 s. The crate's release profile (`lto`, one codegen unit) against cargo's defaults: pack of shard 0 of six
+splits 36.4 vs 42.9 s, 8,000 training merges on 252,906 documents 20.6 vs 22.1 s, outputs identical.
 
 ## 7. Mixture and stages
 
 `corpus/mixture.py`. The stages are sized for `MAX_STEPS` = 69,580 steps of `BATCH_SIZE` = 15 × `MICRO_BATCH_TOKENS`
-= 1,474,560 tokens (the d24 plan at `b065ad7`, `docs/training.md` §2; a micro-batch: 12 rows of 8,192 or 3 of
+= 1,474,560 tokens (the d24 base plan, `docs/training.md` §2; a micro-batch: 12 rows of 8,192 or 3 of
 32,768): 102,599,884,800 tokens [arithmetic]. Its last
 `REPO_LEVEL_SHARE` = 300B / (5.2T + 300B) = 5.45% of steps (`REPO_LEVEL_STEPS` = 3,795), Qwen2.5-Coder's
 repository-level share (arXiv 2409.12186 §3.2.1–3.2.2), are the 32K stage; the contexts are Qwen2.5-Coder's 8,192 and
@@ -456,8 +455,8 @@ on master; no supply corpus overdraws).
   in `weights`, the supply shares of the stage's sizing rows instead (packed rows over `Stage.rows`, the `MAX_STEPS`
   plan's): the base run and the d16 ablation sets (whose supply is packed at the run's draw, `docs/experiments.md` §2)
   read supply whole; a short run on the corpus's packs trains on the weights of the table above. Before this rule
-  (`1dda452`) such runs got negative repository weights and drew no repository rows in the 32K stage (d24 and d8 at 5
-  tokens per parameter, d8 at 200 and 2.7: Codeforces-CoTs ≈ 88% of the stage); the `peak_lr` records (`b7f5be9`)
+  such runs got negative repository weights and drew no repository rows in the 32K stage (d24 and d8 at 5
+  tokens per parameter, d8 at 200 and 2.7: Codeforces-CoTs ≈ 88% of the stage); the d24 `peak_lr` records
   were run under the rule (their 32K `stage` records weigh `codeforces_cots` 0.0554 in `stage.mixture`).
 - **Within a group** sources weigh by their packed rows. `mixture.weights` replays a stage's shares through
   `mixture_rows`; a supply corpus that draws more rows than it holds weighs that many rows less, until none does.
@@ -496,7 +495,7 @@ parallel (rayon), longest first.
 **Worker stack** (`crate/lib.rs` `nanochat_crate`): rayon's global pool takes the process's `RLIMIT_STACK` soft limit
 (64 MiB under `scripts/container.sh`'s `--ulimit stack=67108864:-1`), not std's 2 MiB: a worker waiting in a join runs
 stolen jobs on its own stack, so nesting deepens with the pack calls in flight, and at 2 MiB `pack` overflowed a
-worker's stack (core dump; fixed in `0de5dfb`, the limit taken from the process since `03d131e`).
+worker's stack (core dump; fixed with 64 MiB rayon stacks, since replaced by the process's limit).
 
 **Rows** (`best_fit_decreasing`): pieces longest first, each into the row with the fewest free slots that holds it,
 else a new row (Best-Fit-Decreasing, arXiv 2404.10830 §3.1), so no piece is truncated. Within a row the pieces whose
@@ -509,7 +508,7 @@ an untested choice: synthetic files and functions, though whole programs in a kn
 neither FIM nor statement cuts, both set by one switch (`layout.grammar`). On sa-bpe's packs FIM examples hold
 49.8–50.1% of each such corpus's piece tokens (FIM example tokens over those plus the left-to-right pieces' tokens),
 29.7% of the 8K stage's tokens and 40.8% of the 32K stage's (each corpus's share weighted by the table's stage weights;
-computed on the packs built by `abeb4eb`); StarCoder2's two 50% draws (repository, then chunk) give ≈25% of its source
+computed on the packs of the current build); StarCoder2's two 50% draws (repository, then chunk) give ≈25% of its source
 files (arXiv 2402.19173 §5.1) [arithmetic].
 
 | Parameter | Value | Evidence |
@@ -517,7 +516,7 @@ files (arXiv 2402.19173 §5.1) [arithmetic].
 | Rate, per piece, drawn before its cut (context-level) | 0.5 | [1] |
 | Middle: random character span, else AST | 0.1 | "90% use our AST-FIM, and 10% use Rand-FIM" (arXiv 2506.00204 §5.1) |
 | AST middle: Single-Node (node weighted by its bytes), else Aligned-Span (character IoU) | 0.5 | "an equal mix of two masking methods" (arXiv 2506.00204 §3.3) |
-| AST middle starting its line: the line's indentation in the middle, and its line break when the middle ends at one | 0.5 | the rule: [3]; the value: the one rate tested, against no rule (`dc76110`, d16 retrain `1671b56`: PSM single-line exact match 0.022 → 0.175, SPM 0.367 → 0.356; below); the line break: the reference middles' layout, untested (below) |
+| AST middle starting its line: the line's indentation in the middle, and its line break when the middle ends at one | 0.5 | the rule: [3]; the value: the one rate tested, against no rule (d16 retrain on the repacked set: PSM single-line exact match 0.022 → 0.175, SPM 0.367 → 0.356; below); the line break: the reference middles' layout, untested (below) |
 | SPM, else PSM | 0.5 | [2]; AST-FIM's "50% PSM and 50% SPM", untested there (arXiv 2506.00204 §5.1) |
 
 [1] DeepSeek-Coder chose 0.5 (document level, PSM only), as a 100% rate gave its weakest code completion (arXiv
@@ -536,22 +535,22 @@ single-line and 5,815 multi-line prefixes end in a line break and every referenc
 
 **The line-start rule's basis** (d16 at 20 tokens per parameter; infilling measures `docs/evaluation.md` §4–§5). The
 training format matches the evaluation prompts (sentinel ids, sections encoded separately, the BOS ending the middle).
-Without the rule (before `dc76110`) the model infilled single lines 16× worse in PSM than SPM (line exact match 0.022
-against 0.367, `1671b56`'s baseline; 0.023 against 0.353 at `dc76110`, also on the 982 prompts the 512-key window
+Without the rule the model infilled single lines 16× worse in PSM than SPM (line exact match 0.022
+against 0.367, the d16 baseline; 0.023 against 0.353 on the 982 prompts the 512-key window
 covers whole, so not the window); 95.6% of 3,000 packed PSM middles started with non-whitespace [unverified] while
 every single- and multi-line HumanEval middle starts with indentation after a line break [arithmetic:
 `read_problems`], and the model opened a new definition or file after the end sentinel. AST-FIM's Limitations:
 "Better matching training and testing distributions still result in stronger performance" (arXiv 2506.00204 §7).
-With `LINE_START_RATE` = 0.5 (`dc76110`: 15.6% of PSM examples on train shards have the line-level layout; on
-the packs before `81fb386` 15.1–15.7% for Python and 8.6–12.6% for C++, first 100k FIM examples per corpus),
-the d16 retrained on the repacked data (`1671b56`) infills single lines in PSM at line exact match 0.175 (pass@1
+With `LINE_START_RATE` = 0.5 (15.6% of PSM examples on train shards have the line-level layout; on
+the packs before the corpus-keyed FIM draws 15.1–15.7% for Python and 8.6–12.6% for C++, first 100k FIM examples per
+corpus), the d16 retrained on the repacked data infills single lines in PSM at line exact match 0.175 (pass@1
 0.037 → 0.161; multi-line 0.008 → 0.045), SPM 0.367 → 0.356, code bpb unchanged (8K 0.4392; 32K 0.4210 → 0.4208).
 **The line break.** An AST node also ends before its line break, so without the line break's rule a PSM middle rarely
 carries the final "\n" every single- and multi-line reference middle ends with: 20,000 sampled FIM examples per
 corpus, PSM ones counted, on the packs of the curated build before decontamination had 1.06% of middles ending in
 "\n" in `stack_edu_python`, 0.80% in `ultradata_stack_v3_l2_python` and 0.58% in `repositories_python`. With it (the
 line-start draw also adding the line break when the middle ends at one, `pack.rs` `fim_example`), a uniform sample of
-20,000 FIM examples per corpus of the packs built by `abeb4eb` has 35.2%, 37.2% and 35.9% (26.4% in `stack_edu_cpp`)
+20,000 FIM examples per corpus of the current packs has 35.2%, 37.2% and 35.9% (26.4% in `stack_edu_cpp`)
 of PSM middles ending in "\n", whole lines (prefix empty or ending in "\n") in 34.0–36.3%, while 19.2–22.6% still start
 a line and stop before its line break (the other draws), so both layouts are trained. The rule also fires at column 0,
 where the indentation step changes nothing: its share is that of nodes starting their line, not of indented ones. Its
@@ -564,7 +563,7 @@ effect on infilling is not measured.
   is its target.
 - Every draw comes from ChaCha8 keyed by (document, piece, corpus), so packs do not depend on the order of work, and
   equal (document, piece) in two FIM-packed corpora draw independently; the corpus enters as its name's hash, so every
-  tokenizer arm draws a corpus's examples alike (`81fb386`). Under a (document, piece) key such pairs shared every draw
+  tokenizer arm draws a corpus's examples alike. Under a (document, piece) key such pairs shared every draw
   (agreement 1.0 on 182K–19.0M pairs per corpus pair), yet shared a training step no more often than independent draws
   (22 against 19.7 ± 4.2 over the base plan's first 2,000 steps).
 
@@ -738,7 +737,7 @@ order).
   Aligned-Span takes a `random_span`, its lowest named node, and the run of that node's named children of largest
   character IoU with the span (arXiv 2506.00204 §3.3, "character-level Intersection over Union"; characters counted as
   the bytes that are no UTF-8 continuation byte), the node itself if no child meets it; byte IoU would choose another
-  middle in 204 of 160,000 sampled FIM examples (1.3e-3 of FIM tokens; `81fb386`). For a fixed last child IoU is
+  middle in 204 of 160,000 sampled FIM examples (1.3e-3 of FIM tokens). For a fixed last child IoU is
   largest at the last start ≤ s or the first start ≥ s (moving the start further out grows the union only, further in
   shrinks the intersection only), likewise for the end, so four candidates suffice.
 - `fim_example`: line-start extension applies only when the text between the line start and the node is spaces or

@@ -1,30 +1,30 @@
 # Experiments
 
 Every recipe and implementation idea that was measured and not adopted, adopted on the literature instead of a run, or
-considered and not run: what was tried, why, the measurement (record, commit or branch), the verdict by its rule, and
-what the code does instead. The adopted choices and their basis live in the owning documents, cited per entry. Markers:
-[arithmetic] derived from code or record numbers; [inference] reasoning not measured; [estimate]; [unverified] a figure
-without a record, or a paper value its extracted text lacks.
+considered and not run: what was tried, why, the measurement (its record or branch, and its setting: hardware, A/B
+protocol, checkpoint), the verdict by its rule, and what the code does instead. The adopted choices and their basis
+live in the owning documents, cited per entry. Markers: [arithmetic] derived from code or record numbers; [inference]
+reasoning not measured; [estimate]; [unverified] a figure without a record, or a paper value its extracted text lacks.
 
 ## Code
 
 | Code or record | Section |
 |---|---|
-| `ablations/tokenizer_split_merge.py` at `67192ab`, removed in `cd4edbe` (`ARMS`, `FUSED_PATTERN`, `HYBRID_PATTERN`; steps `vocabularies`, `intrinsic`, `data`, `repack`) | §2, §7 |
+| `ablations/tokenizer_split_merge.py`, cited at its last version (since removed; `ARMS`, `FUSED_PATTERN`, `HYBRID_PATTERN`; steps `vocabularies`, `intrinsic`, `data`, `repack`) | §2, §7 |
 | `results/tokenizer_split_merge-intrinsic.json`, `results/tokenizer_split_merge-data.json` | §2 |
 | `results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.json[l]` | §1, §4 |
-| Branches (on `origin`) `qkv-epi` `0503800`, `mlp-out-mix` `c165408`, `mlp-out-mix-land` `76e32e8`, `mlp-out-mix-v2` `ce30108`, `window-attn` `2bf0e12` | §5 |
-| Branch `scalar-learning-rates` `e6e3837` (on `origin`; the run trained at its child `61e316a`) | §4 |
-| Commit `f05d17c` (removes the D6/D7 experiments, the tokenizer runs, `RunConfig.muon_tau_scale`, `adamw_learning_rate_scale`, `ablations/contrast.py`); commit `5e5f5fc` (removes the `logit_softcap` experiment) | §1, §2, §3, §4 |
-| Commit `7794e2f` (removes the native vLLM model class) | §6 |
-| `eval/rescore.py`, `scripts/standard_eval.sh` and the export's vLLM support (`config.json` `head_dtype`, `_supports_attention_backend`) at `67192ab`, removed in `cd4edbe` | §6 |
+| Branches (on `origin`) `qkv-epi`, `mlp-out-mix`, `mlp-out-mix-land`, `mlp-out-mix-v2`, `window-attn` | §5 |
+| Branch `scalar-learning-rates` (on `origin`; the run trained on it with §4's diagnostics fix applied) | §4 |
+| The removed experiment code: the D6/D7 experiments, the tokenizer runs, `RunConfig.muon_tau_scale`, `adamw_learning_rate_scale`, `ablations/contrast.py`; the `logit_softcap` experiment | §1, §2, §3, §4 |
+| The removed native vLLM model class (`inference/vllm_model.py` and its plugin image) | §6 |
+| `eval/rescore.py`, `scripts/standard_eval.sh` and the export's vLLM support (`config.json` `head_dtype`, `_supports_attention_backend`), since removed | §6 |
 
 ## 1. Protocol and status
 
-**Status.** Every experiment ran as `run.py` `RunConfig` arms trained and evaluated by the base model's code paths of
-its commit; depth, seed and tokenizer were `RunConfig` fields through `67192ab` (removed in `cd4edbe`); the code now
-runs only the base run and the `peak_lr` calibration (`docs/training.md` §5, §6). Names, records and divergence
-handling are `docs/training.md` §6, the measures and their error bars `docs/evaluation.md` §5. The `peak_lr`
+**Status.** Every experiment ran as `run.py` `RunConfig` arms trained and evaluated by the base model's code paths as
+they then stood; depth, seed and tokenizer were `RunConfig` fields in the earlier multi-depth code (since removed);
+the code now runs only the base run and the `peak_lr` calibration (`docs/training.md` §5, §6). Names, records and
+divergence handling are `docs/training.md` §6, the measures and their error bars `docs/evaluation.md` §5. The `peak_lr`
 experiment, whose estimate is every run's default `learning_rate_scale`, is `docs/training.md` §5.
 
 | Experiment | Decides | Setting | Designed runs | Status |
@@ -32,16 +32,16 @@ experiment, whose estimate is every run's default `learning_rate_scale`, is `doc
 | `muon_wd_timescale_20tpp` (D7) | Muon's weight-decay timescale at 20 TPP | d16 at 20, sa-bpe data | 3 × 2 seeds | 3 run, stopped; τ law kept (§4) |
 | `muon_wd_timescale_200tpp` (D7) | Muon's timescale law (with the 20 result) | d8 at 200 | 3 × 2 seeds | not run (§4) |
 | `logit_softcap` (D5) | the output-logit softcap | d16 at 20, sa-bpe data | 2 × 4 seeds | not run; c = 15 adopted on the literature (§3) |
-| `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | `vocabularies`, `intrinsic`, `data`, `repack` done (module at `67192ab`); runs not run; sa-bpe kept (§2) |
+| `tokenizer_split_merge` | split pattern and merge score | d16 at each arm's `max_tokens_per_param` | 4 × 2 seeds | `vocabularies`, `intrinsic`, `data`, `repack` done (the module's last version, since removed); runs not run; sa-bpe kept (§2) |
 | `adamw_group_lr` (D6) | the AdamW groups' lr | d16 at sa-bpe's `max_tokens_per_param` | 3 × 2 seeds | not run (§4) |
 | `scalar_learning_rates` (D6) | per-group lrs of the residual scalars | d16 at 20, sa-bpe data | 1 | run; not adopted (§4) |
 | Optimizer screen | NorMuon, Polar Express, cautious weight decay | d16 at 20 | 1 seed per arm | NorMuon adopted (`docs/training.md` §3); the rest §4 |
 | GQA screen | 2:1 query:KV heads | d16 at 20 | 1 | rejected (§3) |
 
-The removed experiments' yamls, modules and knobs went in `f05d17c` (the softcap's in `5e5f5fc`), the remaining
-ablation fields and steps in `cd4edbe`; the designs below are their record. `results/muon_wd_timescale_20tpp.jsonl`
-and `results/scalar_learning_rates.json[l]` are historical records, their run directories gone (their bits-per-byte
-errors recomputed from the stored row sums and the packs in `dba27e6`; the errors: `docs/evaluation.md` §5).
+The experiments' yamls, modules and knobs, and then the remaining ablation fields and steps, are removed from the code;
+the designs below are their record. `results/muon_wd_timescale_20tpp.jsonl` and `results/scalar_learning_rates.json[l]`
+are historical records, their run directories gone (their bits-per-byte errors recomputed from the stored row sums and
+the packs with the document-clustered stratified estimator; the errors: `docs/evaluation.md` §5).
 
 **Proxy settings.** No affordable run reaches the base model (d24 at 528.12 tokens per non-embedding parameter,
 `docs/training.md` §2). Ranking at a single small size (150M parameters) picks the better of two data recipes at the
@@ -51,7 +51,7 @@ tokens at peak lr 4.667e-3 (law × 2.797, the earlier recipe's multiplier, `docs
 with scale: optimizer speedups over a well-tuned AdamW fall from 1.3–1.4× below 1B to 1.1× at 1.2B (arXiv 2509.02046
 §1 Fig. 1), and vanish under incorrect hyperparameter scaling (arXiv 2512.05620 Abstract).
 
-**Shared tests** (were `ablations/contrast.py`, removed in `f05d17c`). An arm against its baseline over the seeds where
+**Shared tests** (were `ablations/contrast.py`, since removed). An arm against its baseline over the seeds where
 both have an evaluation, α = 0.05:
 - *Parsing* (MBPP+): per problem, the seeds whose healed greedy completion compiles under the arm minus under the
   baseline; the exact sign test (`scipy.stats.binomtest`) over the non-zero problems (McNemar's exact test at one
@@ -67,28 +67,32 @@ both have an evaluation, α = 0.05:
 
 **Kernel landing rule** (§5). A kernel change lands at ≥ +0.3% tok/s at d24 8K in an exclusive A/B (GH200 at 700 W,
 arms alternated, arm means), with an op check against fp64 (or bitwise to master) and a 10-step loss equivalence at
-the base lr (the earlier recipe's × 2.797), every step within max(master's run-to-run spread, 1e-3) (`067e60b`,
-`e24333d`, `db1e90e`). The softcap's adoption bar was its loss cost ≤ 0.3% of the 8K step with a cold peak ≤ 93 GiB.
+the base lr (the earlier recipe's × 2.797), every step within max(master's run-to-run spread, 1e-3), as applied to the
+scaled-exp linear cross entropy, the fused cap and FA4's dpsum epilogue (`docs/architecture.md` §3). The softcap's
+adoption bar was its loss cost ≤ 0.3% of the 8K step with a cold peak ≤ 93 GiB.
 The measured effects of what landed: `docs/architecture.md` §3.
 
-**Cost.** At `c8e97a2`: d8 2.81M / 2.37M tok/s (8K / 32K), d16 0.80M / 0.64M, d24 0.34M / 0.27M; compile 20 s + 16 s;
-parse evaluation d8 ~1.7 min, d16 ~4.5 min; d16 benchmark evaluation 1,064 s (862 s after `4385748`) [unverified: no
-record]. Per run: d16 at 20 tokens per parameter ~33 min, d16 at 31.4 ~50 min, d8 at 200 ~20 min; all designed
-ablations ≈ 20 GPU-h; D7's 200 half on d16 would be 13.4B tokens, ~29 GPU-h [estimate]. Not running the tokenizer runs
-saved ~6.7 GPU-h, D7's remaining runs ~3.7 GPU-h, the softcap design ~9 GPU-h [estimate].
+**Cost.** GH200, the training code with FA4 on the real segments, batched Newton–Schulz and the fused value-embedding
+gate, before the per-position q/k prologue and the later landings of `docs/architecture.md` §3: d8 2.81M / 2.37M tok/s
+(8K / 32K), d16 0.80M / 0.64M, d24 0.34M / 0.27M; compile 20 s + 16 s; parse evaluation d8 ~1.7 min, d16 ~4.5 min;
+d16 benchmark evaluation 1,064 s (862 s after the decoder's rewrite to wgmma GEMMs and an FP8 KV cache,
+`docs/evaluation.md` §6) [unverified: no record]. Per run: d16 at 20 tokens per parameter ~33 min, d16 at 31.4
+~50 min, d8 at 200 ~20 min; all designed ablations ≈ 20 GPU-h; D7's 200 half on d16 would be 13.4B tokens, ~29
+GPU-h [estimate]. Not running the tokenizer runs saved ~6.7 GPU-h, D7's remaining runs ~3.7 GPU-h, the softcap
+design ~9 GPU-h [estimate].
 
 ## 2. Tokenizer
 
 **`tokenizer_split_merge`.** Would decide the split pattern and merge score of the corpus tokenizer; its runs were not
 run, so the corpus tokenizer is the sa-bpe arm (`docs/corpus.md` §5, which holds the vocabulary, trainer, sample,
 authorship units and sa-bpe's own numbers; its build step trains sa-bpe alone, `docs/corpus.md` §10). The ablation's
-code is removed; it is cited at `67192ab` (`python -m ablations.tokenizer_split_merge <step>`):
+code is removed; it is cited at its last version (`python -m ablations.tokenizer_split_merge <step>`):
 
 | Step | Writes | Record |
 |---|---|---|
-| `vocabularies` | each arm's vocabulary; the sample's composition | `results/tokenizer_split_merge-vocabularies.json` (`5ba5025`; `seconds` 737 s for the step: the sample, then the four arms in threads) |
-| `intrinsic` | each arm's tokenized val splits; the measures | `results/tokenizer_split_merge-intrinsic.json` (`ebd8058`) |
-| `data` | each arm's tokenized and packed training set | `results/tokenizer_split_merge-data.json` (`ba01bb5`) |
+| `vocabularies` | each arm's vocabulary; the sample's composition | `results/tokenizer_split_merge-vocabularies.json` (`seconds` 737 s for the step: the sample, then the four arms in threads) |
+| `intrinsic` | each arm's tokenized val splits; the measures | `results/tokenizer_split_merge-intrinsic.json` (written by an earlier version of the step, below) |
+| `data` | each arm's tokenized and packed training set | `results/tokenizer_split_merge-data.json` (written by an earlier version of the step; its `arms` rewritten by `repack`) |
 | `repack` | each arm's packs again after a packer change; the data record's `arms` | same record, `seconds.repacked` 170 s |
 
 **Arms** (`ARMS`; the trainer and its F·ln R score: `docs/corpus.md` §5).
@@ -124,20 +128,20 @@ Not built: tiktoken encodes by merge rank alone, which cannot express PickyBPE's
 Alg. 1–2) or BoundlessBPE's supermerges (arXiv 2504.00178 §3.1–3.2); SuperBPE moved HumanEval and MBPP pass@10 in
 opposite directions at 8B, neither significantly (arXiv 2503.13423 Table 1).
 
-**Intrinsic measures** (`intrinsic` at `67192ab`, on each arm's tokenized val splits):
+**Intrinsic measures** (`intrinsic`'s last version, on each arm's tokenized val splits):
 
 | Measure | Definition | Use |
 |---|---|---|
 | bytes per token | per source: val bytes over val tokens; file stage: Σ w_s / Σ (w_s / b_s) over its byte shares | an arm's tokens at equal bytes; tokenize and pack budgets |
 | extent margin | per group read in part (synthetic, text, math): train tokens under the arm over the group's draw, tokens estimated from bytes | below 1 the corpus's extent is too small for the arm (`mixture.SPREAD`; the tokenized recount: `docs/corpus.md` §1) |
-| validity (asserted) | every arm holds the same bytes per document; on the first row group of each source's val split the chunks cover the text, tiktoken equals the merges replayed (`corpus/train_tokenizer.py` `fidelity` at `67192ab`), every text decodes | a failure stops the step |
+| validity (asserted) | every arm holds the same bytes per document; on the first row group of each source's val split the chunks cover the text, tiktoken equals the merges replayed (`corpus/train_tokenizer.py` `fidelity`, since removed), every text decodes | a failure stops the step |
 | line-break entries | entries holding a line break; fusing punctuation with one (`[^\s\p{L}\p{N}][\r\n]`); ending in a line break and indentation | the post's most stable MBPP measurement (Spearman ρ = −0.719 over 58 tokenizers) |
 | depth invariance | of each program source's first 50,000 indented val lines, the share whose tokens are the indentation's then the statement's at depth 0 | the hybrid's clause (2) |
 | merged reads | merged tokens the val documents read never, < 10, < 100 times | the tie-break (SA-BPE's coverage, arXiv 2604.14053 Table 3, graded) |
 
-**Intrinsic results** (`results/tokenizer_split_merge-intrinsic.json`, `ebd8058`). Every arm passed every validity
-check. The record predates `intrinsic` at `67192ab`: it holds no TokEval measures (arXiv 2608.18062; `67192ab`
-computes none either), its fidelity check covered each source's first 200 val documents (`67192ab`: the first row
+**Intrinsic results** (`results/tokenizer_split_merge-intrinsic.json`). Every arm passed every validity check. The
+record predates `intrinsic`'s last version: it holds no TokEval measures (arXiv 2608.18062; the last version computes
+none either), its fidelity check covered each source's first 200 val documents (the last version: the first row
 group), and its `seconds` keys are `compile`, `measures`, `all`.
 
 | Measure | sa-bpe | sa-bpe-fused | hybrid | bpe |
@@ -245,7 +249,7 @@ the 0.3% bar (basis, and why no z-loss: `docs/architecture.md` §2; implementati
 MHA baselines (§4): last-200 train loss 1.3358 against 1.3244 (s0) / 1.3168 (s1); code bpb 8K / 32K 0.4435 / 0.4254
 against 0.4394 / 0.4212 (s1 0.4380 / 0.4196); all bpb 0.5263 / 0.5132 against 0.5219 / 0.5087; HumanEval+ 0.067 /
 0.061 against 0.067 / 0.055, MBPP+ 0.090 / 0.071 against 0.074 / 0.061 (within noise); peak 28.7 against 32.0 GiB
-[unverified: no record]. Verdict: rejected, loss and bpb worse beyond the seed spread; not committed. All arms ran at
+[unverified: no record]. Verdict: rejected, loss and bpb worse beyond the seed spread; not adopted. All arms ran at
 the law's lr (× 1), not the earlier recipe's base × 2.797 [inference: the screen's baselines; §4]. The code keeps MHA
 with the KV-cache arithmetic of `docs/architecture.md` §2. Other attention levers ranked with it (more local layers,
 attention sinks, gated attention) were not run; tile-aligned short windows would change the architecture [inference]
@@ -279,8 +283,9 @@ adopted iff the lower-code end beat × 1 by the shared tests. Three runs
 τ×½ seed 0 against τ×1 seed 0: code −0.0019 (one-seed margin 0.0094: equal); MBPP+ unparsed 0.333 against 0.037,
 parsing worse (7 problems parse more under it, 119 under the baseline; recomputed from the records' `parse`
 `mbpp_plus` `outcomes`). τ×½ seed 0 trained with autograd kept on the step's statistics in `train/diagnostics.py`
-(fixed in `acb1e5e`, from seed 1 on): its throughput and peak memory are not comparable; that the update was
-unchanged is [inference] (statistics only). Verdict: stopped after 3 of 12 runs; the τ law stays for Muon (basis
+(fixed from seed 1 on: the statistics computed under `torch.no_grad`): its throughput and peak memory are not
+comparable; that the update was unchanged is [inference] (statistics only). Verdict: stopped after 3 of 12 runs; the
+τ law stays for Muon (basis
 `docs/training.md` §3). Specific to this experiment: halving or doubling lr or weight decay from that paper's
 transferred values does equal or worse (arXiv 2512.05620 App. H.3, Fig. 11); doubling Muon's weight decay (0.1 → 0.2)
 costs 0.009–0.020 loss at 130M–520M (arXiv 2509.02046 App. C.9 Tables 82–87), ≈ 0.0035–0.008 bpb [arithmetic at
@@ -296,8 +301,8 @@ d16 on the sa-bpe arm's data at its `max_tokens_per_param`; the 3-point vertex, 
 **Scalar learning rates (`scalar_learning_rates`, D6).** `x0_lambdas` and `resid_lambdas` (1-D, AdamW) at
 the per-group lrs 0.5 and 0.005 × √(B/2^19) (0.375 and 0.00375 at 294,912 tokens per step), every other
 group unchanged: a gap from the shared lr too large to bound from the literature. One run (branch
-`scalar-learning-rates` `e6e3837`; trained at `61e316a`, `e6e3837` plus `acb1e5e`'s diagnostics fix; recorded at
-`60b972d`), d16 at 20, against D7's τ×1 seed 0 (same recipe, trees differing by the field). Rule: adopt iff code
+`scalar-learning-rates`, trained with the diagnostics fix above applied; recorded with the shared tests at one seed),
+d16 at 20, against D7's τ×1 seed 0 (same recipe, trees differing by the field). Rule: adopt iff code
 better by > 0.0094 and MBPP+ parsing not worse. Record
 (`results/scalar_learning_rates.json` `analysis`, `.jsonl`): code 0.42635 against 0.42724 (−0.0009, `code` equal);
 32K code 0.40815 against 0.40966; train loss over the last half −0.0022; MBPP+ parsing worse (9 problems parse more
@@ -322,7 +327,7 @@ lower final loss it reports there did not reproduce in this one-seed screen.
 All measurements at d24 on the GH200 at 700 W, exclusive A/B, arm means, unless stated; the rule is §1's landing
 rule; what landed and its effect is `docs/architecture.md` §3, the step profile `docs/training.md` §7. The d8 and d16
 proxies ran with their own GEMM tiles (`CONFIGS` at C = 256, 512), value-embedding gate instances (H = 2, 4) and
-cross-entropy strip tile (`strip_tile_n`), all at `67192ab`; the code is d24's.
+cross-entropy strip tile (`strip_tile_n`), all in the earlier multi-depth code (since removed); the code is d24's.
 
 **FP8 GEMMs.** (a) FP8 MLP GEMMs, e4m3 rowwise, d16 on real rows, 300 steps: mean loss over steps 250–299 +0.0048
 over bf16 against a bf16 two-run spread of 0.0014, growing. (b) torchao float8: d16 rowwise −28.8%, tensorwise −9.5%;
@@ -347,8 +352,8 @@ batched Newton–Schulz stays), max-autotune +0.05%, deterministic mode −14%, 
 lm_head on QuACK −10 ms/step with a cold-autotune peak of 89.8 GB, a `ve_dw` rewrite −2.6 ms/step; CUDA graphs cannot
 help a GPU-bound step. Verdict: none adopted. [unverified: no record]
 
-**Attention kernels.** Besides the window layers' persistent forward and bf16 dQ that landed (`0e627ff`,
-`docs/architecture.md` §3), every FA4 forward/backward tile and scheduling variant tried is slower than the defaults;
+**Attention kernels.** Besides the window layers' persistent forward and bf16 dQ that landed
+(`docs/architecture.md` §3), every FA4 forward/backward tile and scheduling variant tried is slower than the defaults;
 static persistent schedules lose to the hardware scheduler on the full layers' varlen tiles. Hand CUDA kernels against
 FA4 on real d24 segments, ms per call at 8K (32K): window forward 0.369 (0.364) against FA4 0.413 and persistent FA4
 0.359 (0.355); forward with QK-norm + RoPE fused 0.985 (1.029) against prologue + forward 0.546 (0.556), each K block
@@ -360,7 +365,7 @@ polynomial (`flash_attn/cute/utils.py` `ex2_emulation`) in place of the SFU in t
 Verdict: rejected; FA4 with the persistent window forward and the separate qk prologue
 (`docs/architecture.md` §3). [unverified: no record]
 
-**Window attention (`window-attn` `2bf0e12`).** Real 8K micro-batches: the window forward runs at 332 TFLOP/s true
+**Window attention (branch `window-attn`).** Real 8K micro-batches: the window forward runs at 332 TFLOP/s true
 (446 computed), the backward main kernel at 363 (473), full layers 524–551. A sweep fit puts ~32% of the window forward
 and ~27% of its backward in per-tile fixed cost (per CTA 3,160 cycles of load and 6,600 of epilogue, exit and
 relaunch) and ~15% in masked waste. Tried: a warpgroup whose 64 keys are fully masked skips its S, dP, dV and dK GEMMs
@@ -368,7 +373,7 @@ relaunch) and ~15% in masked waste. Tried: a warpgroup whose 64 keys are fully m
 overlap; +18% / +12% without: one CTA per SM keeps epilogue and next K/V load serial); 64-key edge trimming ≤ 0.2%,
 inside the kernel's run-to-run variation (up to 5%). Verdict: rejected; FA4 as is (`docs/architecture.md` §3).
 
-**QK-norm + RoPE in the fused-QKV GEMM epilogue (`qkv-epi` `0503800`).** Would remove the qk-prologue pass (302 MB
+**QK-norm + RoPE in the fused-QKV GEMM epilogue (branch `qkv-epi`).** Would remove the qk-prologue pass (302 MB
 per layer and micro-batch, ≤ 66 ms/step by byte arithmetic). A QuACK epilogue on QuACK's SM90 mainloop is correct
 (q|k|v bitwise master's; normed q/k vs fp64 as master's, rel 1.661e-3) but takes 2,065 µs per call at 8K (≥ 2,257 at
 32K) against master's GEMM + `k_forward` 801 (816); the bar, +0.3% of a 4,058 ms step over 360 calls, is ≤ 767 µs.
@@ -378,8 +383,8 @@ rejected; the qk prologue stays (`docs/architecture.md` §3). Separately, the qk
 forward / backward (~7% headroom), so TileKernels' RoPE kernel (`tile_kernels/transform/rope_kernel.py`) was not
 ported.
 
-**Residual mix + norm in the down-projection epilogue (`mlp-out-mix` `c165408`, `mlp-out-mix-land` `76e32e8`,
-`mlp-out-mix-v2` `ce30108`).** Ceiling ≤ 58 ms/step (floor 15) by byte arithmetic. Route (a), the row's norm finished
+**Residual mix + norm in the down-projection epilogue (branches `mlp-out-mix`, `mlp-out-mix-land`,
+`mlp-out-mix-v2`).** Ceiling ≤ 58 ms/step (floor 15) by byte arithmetic. Route (a), the row's norm finished
 across CTAs by a last-arriving CTA: deterministic but 969 µs per call against master's `gemm_add` 556 + Inductor's mix
 and norm 170 = 726 (the L2 re-read is latency-bound). Route (b), x = fma(λr, bf16(h + acc), x0·λx) in the epilogue and
 the norm separate: 587 + 85 = 671 µs; fp32 x0 bitwise master's compiled mix (0 of 75.5M elements differ at layers 1,
@@ -424,24 +429,26 @@ below the §1 landing rule: the production config, QuACK's rule (`TILE_N2`, `doc
 **Smaller items not pursued.** A two-rows-per-warp VE-gate forward (199 → 168 µs per call, identical output, ~0.13%
 [estimate]); a fused clip-grad-norm and optimizer pass (~13 ms/step [estimate]); FA4's backward pre/post-processing,
 q/k norm + RoPE in the projection GEMM, RMSNorm in the next GEMM and dW accumulation in the GEMM, each estimated
-≤ 1% at `a81410c` [estimate] — later superseded: RMSNorm in the GEMM landed as `373b549`, dW accumulation as
-`f499be7`, the preprocess half of the FA4 item as `db1e90e` (their gains: `docs/architecture.md` §3), while
-q/k norm + RoPE in the GEMM lost (`qkv-epi`, above); Liger and Cut Cross-Entropy losses (Cut Cross-Entropy, arXiv
+≤ 1% once FA4 ran on the real segments with batched Newton–Schulz [estimate] — later superseded: RMSNorm in the GEMM
+landed as the post-attention norm in GEMM epilogues, dW accumulation as dW accumulated into `.grad` by cuBLAS `addmm`,
+the preprocess half of the FA4 item as `fa4_rows.cu` with the dpsum epilogue (their gains: `docs/architecture.md`
+§3), while q/k norm + RoPE in the GEMM lost (`qkv-epi`, above); Liger and Cut Cross-Entropy losses (Cut
+Cross-Entropy, arXiv
 2411.09009 §5.1 Table 1, Gemma 2 2B's 256K vocabulary, 8,192 tokens, A100: CCE (row 1) takes 145 ms for loss +
 gradient against torch.compile's (row 4) 143 ms, +1.4% [arithmetic] (the §5.1 text says 6%, 2 ms), its gain memory,
 1,164 against 16,000 MB), fused RMSNorm/RoPE libraries, DCP checkpointing. DeepEP does not apply (one GPU, dense model).
 
 ## 6. Evaluation and inference
 
-**Native vLLM model class** (removed in `7794e2f`). d16 served by vLLM 0.32.0 as an out-of-tree model (fused QKV,
+**Native vLLM model class** (since removed). d16 served by vLLM 0.32.0 as an out-of-tree model (fused QKV,
 vLLM's linear layers): logits against the training forward KL 3.0–4.8e-4, top-1 98.0–99.1%; on the d16 request sets
 NativeDecoder 175 s against vLLM's 312 s (vLLM host-bound at 19% GPU); fixed-length decode (2,048 × 512 tokens) d16
-NativeDecoder 66.5K against vLLM 31.0K tok/s, d24 21.8K against 23.1K (commits `3c03023`–`ec1c841`). The
+NativeDecoder 66.5K against vLLM 31.0K tok/s, d24 21.8K against 23.1K (GH200, the serving experiment's runs). The
 Transformers backend ran at the same rate and, in the same execution mode, gave the same logits, so the class and its
 plugin image were removed as a second implementation of the model [unverified: no record of this paragraph's
 figures]. The export and vLLM path that replaced it: `docs/evaluation.md` §8.
 
-**vLLM path and scorer replay** (removed at `cd4edbe`). The export (`inference/export_hf.py`,
+**vLLM path and scorer replay** (since removed). The export (`inference/export_hf.py`,
 `inference/modeling_nanochat.py`; current code, `docs/evaluation.md` §8) also ran under vLLM's Transformers backend,
 `scripts/standard_eval.sh` ran the harnesses' own CLIs on it, `eval/rescore.py` replayed a record's scorers on its
 stored completions; each validated the evaluation (their measurements: `docs/evaluation.md` §1, §8) and none produces
@@ -451,10 +458,10 @@ runs (`docs/evaluation.md` §1, §6).
 **Type-constrained decoding** (arXiv 2504.09246). Not used; Python syntax is constrained and types are checked after
 generation (basis: `docs/evaluation.md` §7).
 
-**Filtered-mode checks removed** (in `bff16d6`; both d16 checkpoints at 5 tokens per parameter, step 1,707: every
-HumanEval+ and MBPP+ task's full 10 candidates as `verify.search` builds them, each scored by EvalPlus and by each
-check; `2d49bb1`; a candidate's tokens do not depend on earlier acceptances, so the pools give each rule set's
-filtered pass@1 exactly).
+**Filtered-mode checks removed** (both d16 checkpoints at 5 tokens per parameter, step 1,707: every HumanEval+ and
+MBPP+ task's full 10 candidates as `verify.search` builds them, each scored by EvalPlus and by each check, a program
+that crashes basedpyright failing its check; a candidate's tokens do not depend on earlier acceptances, so the pools
+give each rule set's filtered pass@1 exactly).
 As the only rejecting check, the kept rules rejected 280 of 3,223 incorrect HumanEval+ candidates and the examples 923
 (MBPP+: 3 and 2,379 of 7,517); no subset of the rules changed any task's outcome. Removed:
 - `reportReturnType`: rejects 3 HumanEval+ reference solutions (/10, /17 fall through after a loop, /20
@@ -466,9 +473,10 @@ As the only rejecting check, the kept rules rejected 280 of 3,223 incorrect Huma
   program fails them. The kept checks and their basis: `docs/evaluation.md` §7.
 
 **bf16 KV cache in `NativeDecoder`** (a measurement variant of `decode.cu`: K and V cached as bf16, scales 1, the
-scores by bf16 MMAs; one of the two d16 checkpoints above, `81fb386`; greedy continuations of the 542 HumanEval+/MBPP+
-prompts, 512 new tokens, against the compiled training forward's). Identical continuations 363 against 216 with the
-FP8 cache (for scale: the uncompiled training forward 340, the export under vLLM 379, `docs/evaluation.md` §8);
+scores by bf16 MMAs; one of the two d16 checkpoints above, with the export's head and cap in fp32; greedy
+continuations of the 542 HumanEval+/MBPP+ prompts, 512 new tokens, against the compiled training forward's).
+Identical continuations 363 against 216 with the FP8 cache (for scale: the uncompiled training forward 340, the
+export under vLLM 379, `docs/evaluation.md` §8);
 divergence before the EvalPlus stop 164 against 299; EvalPlus-scored completions differing from the training
 forward's 25 and 138 (HumanEval+, MBPP+) against 52 and 249; pass@1 HumanEval+ 0.0488 for both, MBPP+ base/plus
 0.0238/0.0212 (equal to the training forward's) against 0.0265/0.0238 with FP8. The cache's bytes per position grow
@@ -481,11 +489,12 @@ measured. The decoder keeps the FP8 cache (`docs/evaluation.md` §6).
 
 ## 7. Implementation reference
 
-**`ablations/tokenizer_split_merge.py` at `67192ab`** (the tokenizer ablation, §2; removed in `cd4edbe`). Each arm's
+**`ablations/tokenizer_split_merge.py`, last version** (the tokenizer ablation, §2; since removed). Each arm's
 vocabulary was trained by the corpus trainer (`corpus/train_tokenizer.py`: one sample, one trainer, `VOCAB_SIZE` ids,
-the crate's score `"sa-bpe"` or `"frequency"`, both at `67192ab`); the corpus tokenizer is sa-bpe (`corpus/tokenizer.py`
-`TOKENIZER`). SA-BPE's F·ln R: F the pair's frequency, R the authorship units holding it in the current segmentation, a
-pair of one unit scoring 0; ln as in pchizhov/sa-bpe 9fff32d `sabpe/scoring.py`.
+the crate's score `"sa-bpe"` or `"frequency"`, both in that version); the corpus tokenizer is sa-bpe
+(`corpus/tokenizer.py` `TOKENIZER`). SA-BPE's F·ln R: F the pair's frequency, R the authorship units holding it in the
+current segmentation, a pair of one unit scoring 0; ln as in SA-BPE's reference implementation (pchizhov/sa-bpe,
+`sabpe/scoring.py`).
 
 - **`FUSED_PATTERN`**: `SPLIT_PATTERN` with cl100k's punctuation clause; the positive control (the companion post of
   arXiv 2608.18062, *Differing one regex clause*).
