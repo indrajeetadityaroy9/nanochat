@@ -295,6 +295,71 @@ Disk for the base run: 88.3 MB and 12.3 MB [arithmetic]. Taking the per-group va
 throughput (351.4K / 351.8K against 349.9K / 349.8K tok/s, GH200, alternated 25-step windows after 8 warm-up steps);
 every 10th step is within the windows' spread (30-step runs 341,290–341,471 tok/s with or without them).
 
+**Run checks** (the base run's `train` records and sidecars through step 20,147, read on the CPU; means over the 500
+steps ending at the step unless stated). Steps 0–20,146 are contiguous in one attempt; `learning_rate` equals §4's
+schedule at every step (largest relative difference 0); `num_input_tokens_seen` = (step + 1) · 1,474,560; no loss or
+gradient norm is non-finite. Every train document is read once (`docs/corpus.md` §8), so a step's loss is on text no
+earlier update saw, an online held-out loss [inference].
+
+| Step | Loss | sd over steps | lr | Gradient norm | QK-norm gain max | logsumexp max |
+|---|---|---|---|---|---|---|
+| 1,000 | 1.3823 | 0.055 | 2.32e-3 | 0.125 | 1.62 | 17.40 |
+| 2,000 | 1.2233 | 0.025 | 2.29e-3 | 0.136 | 1.86 | 18.33 |
+| 5,000 | 1.1266 | 0.021 | 2.19e-3 | 0.192 | 2.46 | 18.75 |
+| 10,000 | 1.0783 | 0.022 | 2.02e-3 | 0.279 | 3.21 | 18.75 |
+| 15,000 | 1.0561 | 0.022 | 1.85e-3 | 0.306 | 3.62 | 18.73 |
+| 20,147 | 1.0402 | 0.021 | 1.68e-3 | 0.324 | 3.84 | 18.69 |
+
+- **Loss.** Each 1,000-step block's mean is below the previous one's; the drop per block shrank from 0.066 (steps
+  2K–3K) to 0.002–0.004 (15K–20K). Every corpus's loss fell between steps 10K and 20,147, from −2.2% (ClimbMix) to
+  −6.9% (UltraData-Math L3 QA); the synthetic code and mathematics sources fastest, Stack-Edu and web text slowest.
+- **Loss curve.** The scaling law with LR annealing, L = L₀ + A·S₁^−α − C·S₂, S₁ the summed lr and S₂ the summed
+  annealing momentum mᵢ = λ·mᵢ₋₁ + (ηᵢ₋₁ − ηᵢ) (arXiv 2408.11029 §1 Eq. 1, §3.2 Eq. 5), fitted to the window means
+  (η in units of the peak; α on a grid, L₀, A and C by least squares). Fitted before step 15,000 at the paper's
+  λ = 0.999 (§3.4), it predicts steps 15,250–19,750 within +0.0007 on average (largest 0.0021), a power law in steps
+  within +0.0052 (0.0081). Fitted to every window, it puts the file-level stage's last step (66,062) at 0.940–0.958
+  for λ = 0.99–0.999 [estimate], the power law in steps at 1.011; moving the fit's last point from step 8K to 20K
+  moved the projection by 0.03–0.09, and S₂ overstates the drop as η nears 0 (§6.3; η at step 66,062 is 5.5% of the
+  peak). The paper fits validation loss, this the online held-out training loss.
+- **Stability.** No step after 100 was clipped (gradient norm at most 0.75 against `MAX_GRAD_NORM` = 1.0); 2 steps
+  exceeded twice the trailing 500 steps' median gradient norm (largest 2.47×, step 16,305) and 3 losses the trailing
+  200 steps' mean by 4 standard deviations, none by 6 (largest 5.7, step 12,257). The logsumexp maximum has stayed at
+  18.6–18.8 since step 3K (logits capped at c = 15), its mean square near 167. The largest QK-norm gain (layer 0's k,
+  3.85; median over the 48 gains 2.22) grows ever slower: +0.117, +0.113 and +0.037 per 1,000 steps over steps
+  2K–3K, 9K–10K and 19,147–20,147. `resid_lambdas` span 0.149–1.884 and `x0_lambdas` −0.404–1.257, the largest change
+  since step 10K 0.50.
+- **Throughput.** 381K tok/s and MFU 0.508 in every window since step 2K; step time median 3.866 s and 99th
+  percentile 3.906 s, the 21 steps above 1.2× the median the checkpoint saves (largest 7.65 s, step 13,975); 671 W,
+  1,398–1,399 MHz, 66–67 °C. `gpu_memory_used_bytes` rose from 75.0 to 80.0 GiB: `nvidia-smi` reported 80,848 MiB
+  used of which the process 75,704, the difference about the 5,135 MiB of page cache in the HBM's NUMA node (node 1's
+  `FilePages`) [inference].
+
+**Optimizer state.** Decoupled weight decay (§3) drives a normalized layer's gradient-to-weight ratio toward
+√(2λ/η_t), so a decaying η raises the gradient norm and lowers the weight norm (arXiv 2506.02285 §3 Eq. 1, §3.1
+Eq. 2); with Muon's fixed-RMS update the same steady state puts a matrix's norm ∝ √η [inference]. Parameter norms
+(L2 over each group's tensors, `diagnostics-update.npy`):
+
+| Group | Step 2,000 | 10,000 | 20,140 | 10K → 20,140 |
+|---|---|---|---|---|
+| `q_proj` | 244.3 | 267.9 | 248.7 | −7.2% |
+| `k_proj` | 241.3 | 260.9 | 241.4 | −7.5% |
+| `v_proj` | 286.1 | 244.1 | 217.6 | −10.9% |
+| `o_proj` | 291.3 | 323.6 | 302.0 | −6.7% |
+| `up_proj` | 521.2 | 622.2 | 596.3 | −4.2% |
+| `down_proj` | 531.4 | 580.2 | 531.4 | −8.4% |
+| `embed_tokens` | 370.7 | 389.1 | 356.1 | −8.5% |
+| `lm_head` | 415.8 | 434.8 | 423.6 | −2.6% |
+| value embeddings | 1,027.1 | 1,418.3 | 1,349.4 | −4.9% |
+| `ve_gate` | 15.7 | 26.3 | 36.5 | +38.9% |
+| q / k QK-norm gains (no weight decay) | 77.2 / 76.6 | 86.7 / 85.5 | 91.9 / 90.0 | +6.0% / +5.3% |
+
+From step 10K to 20,140 η fell to 0.830 of itself, whose square root is −8.9%; the tables and the attention and MLP
+matrices shrank 2.6–10.9%, while `ve_gate` (decayed too, zero at initialization) still grows toward its steady state
+[inference]. Over the 144 attention and MLP matrices, the median of update RMS over parameter norm fell from 6.62e-6 to
+4.92e-6 (×0.74) between steps 2K and 20,140 as η fell ×0.73: Muon's step follows the schedule. Their median
+gradient-to-weight ratio rose 1.82× from step 5K to 20,140, against 1.14× from η's change alone: the gradient norm
+rises faster than the steady state accounts for [inference], and the paper's runs show it steepening as η nears 0.
+
 **Job** (`run.job`): the run is skipped if every checkpoint's evaluation exists or it diverged; else training
 (resuming, below), then the unevaluated checkpoints' evaluations, overlapped (`run.evaluations`,
 `docs/evaluation.md` §1), each phase in a fresh process. Runs are not re-checked against the current recipe.
@@ -480,6 +545,7 @@ point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/p
 | 2308.12950 | Code Llama: Open Foundation Models for Code |
 | 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming -- The Rise of Code Intelligence |
+| 2408.11029 | Scaling Law with Learning Rate Annealing |
 | 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2409.19913 | Scaling Optimal LR Across Token Horizons |
 | 2411.00640 | Adding Error Bars to Evals: A Statistical Approach to Language Model Evaluations |
@@ -488,6 +554,7 @@ point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/p
 | 2502.16982 | Muon is Scalable for LLM Training |
 | 2503.04715 | Predictable Scale: Part I, Step Law – Optimal Hyperparameter Scaling Law in Large Language Model Pre-training |
 | 2505.13738 | Power Lines: Scaling Laws for Weight Decay and Batch Size in LLM Pre-training |
+| 2506.02285 | Why Gradients Rapidly Increase Near the End of Training |
 | 2507.20534 | Kimi K2: Open Agentic Intelligence |
 | 2509.02046 | Fantastic Pretraining Optimizers and Where to Find Them |
 | 2510.05491 | NorMuon: Making Muon more efficient and scalable |
