@@ -279,9 +279,10 @@ step's end and its own, so a process's first step and the stage switch's include
 the save; `tokens_per_second` is the step's row positions (padding included) over that time.
 
 **Diagnostics** (`train/diagnostics.py`). The `train` record's per-corpus loss; the capped logits' logsumexp maximum
-and mean square (PaLM's z-loss quantity, arXiv 2204.02311 §5); the largest QK-norm gain (with the normed q and k it
-bounds the attention logits [inference], whose growth Kimi K2 reports destabilizing Muon training, arXiv 2507.20534
-§2.1); every `UPDATE_STATS_EVERY` = 10th step NVML telemetry, the run's only GPU telemetry, relating `step_seconds`
+and mean square (PaLM's z-loss quantity, arXiv 2204.02311 §5; at most c + ln V = 25.4 under the cap [arithmetic]);
+the largest QK-norm gain (q and k RMS-normed per head, the scores scaled by 1/√d: a head's logits are at most
+√d·‖g_q‖∞·‖g_k‖∞ [arithmetic]; under Muon, Kimi K2's attention logits grew past 1000, arXiv 2507.20534 §2.1 Fig. 2);
+every `UPDATE_STATS_EVERY` = 10th step NVML telemetry, the run's only GPU telemetry, relating `step_seconds`
 to the 700 W cap and the clock lock (§7): `gpu_power_watts` (a 1 s running average on Hopper, NVML API reference),
 `gpu_sm_clock_mhz`, `gpu_temperature_c` (the die), `gpu_memory_used_bytes` (the device's, every process included).
 Per tensor and per layer, a float32 sidecar (`diagnostics.json` names the columns and each tensor's group and layer):
@@ -317,9 +318,10 @@ earlier update saw, an online held-out loss [inference].
   annealing momentum mᵢ = λ·mᵢ₋₁ + (ηᵢ₋₁ − ηᵢ) (arXiv 2408.11029 §1 Eq. 1, §3.2 Eq. 5), the warmup counted at the
   peak lr as the paper counts it (§3.4), fitted to the window means (η in units of the peak; α on a grid, L₀, A and C
   by least squares, where the paper minimizes a Huber loss on the log loss, §3.4 Eq. 6). Fitted before step 15,000,
-  it predicts steps 15,250–19,750 within −0.0020 on average (largest 0.0031), a power law in steps within +0.0052
-  (0.0081); fitted through step 20,147, it predicted the windows of steps 20,147–23,147 within −0.0008 on average
-  (largest 0.0017). It puts the file-level stage's last step (66,062) at 0.940–0.941 for λ = 0.99–0.999 [estimate],
+  it predicts steps 15,250–19,750 with mean error (predicted − observed) −0.0020, every window low (largest 0.0031),
+  a power law in steps +0.0052, every window high (0.0081); fitted through step 20,147, it predicted the windows of
+  steps 20,147–23,147 with mean error −0.0008, mean absolute 0.0011 (largest 0.0017). It puts the file-level stage's
+  last step (66,062) at 0.940–0.941 for λ = 0.99–0.999 [estimate],
   the power law in steps at 1.011. Fits ending earlier projected lower (0.871–0.876 ending at step 8K, 0.924 at 15K)
   and under-predicted their holdouts, so the law's extrapolation has run low [inference]; S₂ also overstates the drop
   as η nears 0 (§6.3; η at step 66,062 is 5.5% of the peak). The paper fits validation loss, this the online held-out
@@ -339,8 +341,8 @@ earlier update saw, an online held-out loss [inference].
 
 **Optimizer state.** Decoupled weight decay (§3) drives a normalized layer's gradient-to-weight ratio toward
 √(2λ/η_t), so a decaying η raises the gradient norm and lowers the weight norm (arXiv 2506.02285 §3 Eq. 1, §3.1
-Eq. 2); with Muon's fixed-RMS update the same steady state puts a matrix's norm ∝ √η [inference]. Parameter norms
-(L2 over each group's tensors, `diagnostics-update.npy`):
+Eq. 2); with Muon's update RMS proportional to η the same steady state puts a matrix's norm ∝ √η [inference].
+Parameter norms (L2 over each group's tensors, `diagnostics-update.npy`):
 
 | Group | Step 2,000 | 10,000 | 20,140 | 10K → 20,140 |
 |---|---|---|---|---|
@@ -357,14 +359,21 @@ Eq. 2); with Muon's fixed-RMS update the same steady state puts a matrix's norm 
 | q / k QK-norm gains (no weight decay) | 77.2 / 76.6 | 86.7 / 85.5 | 91.9 / 90.0 | +6.0% / +5.3% |
 
 From step 10K to 20,140 η fell to 0.830 of itself, whose square root is −8.9%; the tables and the attention and MLP
-matrices shrank 2.6–10.9%, while `ve_gate` (decayed too, zero at initialization) still grows toward its steady state
-[inference]. Over the 144 attention and MLP matrices (medians of 500-step means), update RMS over η stays at
-0.1760–0.1752 from step 5K to 20,147: Muon's step is the schedule's lr times a fixed RMS. Their gradient-to-weight
-ratio rose 1.65× from step 5K to 20,147, against 1.14× from η's change alone: the gradient norm rises faster than the
-steady state accounts for [inference], and the paper's runs show it steepening as η nears 0. The rise is uneven
-across layers: since step 10K the MLP down projections of layers 12 and 14 grew 12× and 6×, to 5.9e-2 and 1.1e-2
-(the 24 down projections' median 3.8e-3), and the down projections' share of the squared global norm went from 3.8%
-to 10.1%; the v projections hold 70–72% of it, largest in value-embedding layers (15, 19, 13, 17).
+matrices shrank 2.6–10.9%. Over the 144 attention and MLP matrices (medians of 500-step means), update RMS (without
+weight decay) over η stays within 0.1752–0.1760 from step 5K to 20,147: the applied step tracks the schedule's lr.
+Per matrix the gradient-to-weight ratio rose by a median 1.26× from step 5K to 20,147 (gradient norm 1.17×, weight
+norm 0.91×), against 1.14× from η's change alone: the gradient norm rises where the steady state holds it level
+[inference], and the paper's runs show it steepening as η nears 0. The rise is uneven across layers: since step 10K
+the MLP down projections of layers 12 and 14 grew 12× and 6×, to 5.9e-2 and 1.1e-2 (the 24 down projections' median
+3.8e-3), and the down projections' share of the squared global norm went from 3.8% to 10.1%; the v projections hold
+70–72% of it, largest in value-embedding layers (15, 19, 13, 17). The value-embedding gates (zero-initialized, so 1
+at the start) saturated open early. On 12 validation documents (the first 4 of ClimbMix, Stack-Edu Python and
+UltraData-Math L3 textbook exercises, at most 1,024 tokens each, `inference/modeling_nanochat.py` in fp32 on the CPU),
+at checkpoint 1,000 the gates of layers 7–23 exceed 1.99 of their 2 at 99.8–100% of positions (layers 1–5 at
+95–99%), the sigmoid's input past ±10 at 98–100%, and their gradient norms fell to 1e-7–1e-13 in layers 11–19 at
+steps 1,000 and 2,000 (the v projections' 1e-2). By checkpoint 20,000 layers 5, 9, 13, 15 and 17 had left
+saturation (input past ±10 at 10–34%), layers 7, 21 and 23 not (at least 96%), and the gated embedding's norm
+reached 0.76–1.41× the value's in layers 13–19 (0.07–0.10× at checkpoint 1,000).
 
 **Job** (`run.job`): the run is skipped if every checkpoint's evaluation exists or it diverged; else training
 (resuming, below), then the unevaluated checkpoints' evaluations, overlapped (`run.evaluations`,
