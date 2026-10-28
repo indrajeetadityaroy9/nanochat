@@ -4,800 +4,458 @@ The ideas this repository took from karpathy/nanochat ("nanochat") and KellerJor
 ("modded-nanogpt"), each with the papers to cite for it. The upstream code bases are provenance only, never evidence.
 Classes: ADOPTED, ADAPTED, PARALLEL (the same idea reached on another route), EVIDENCE (an upstream measurement bears
 on a choice), NOT TAKEN (a choice against it in these docs). "None" marks an idea no paper states. Markers as in the
-other docs.
+other docs. Each entry: the idea, the papers with the decisive fact, and where it lives here.
 
 ## Summary
 
-| Idea | Here | Cite as | Section |
-|---|---|---|---|
-| Pre-norm residual block with a final norm before the head | ADOPTED | 2002.04745, 1809.10853 | §1 |
-| RMS normalization without a learnable gain | ADAPTED | 1910.07467, 2402.00838, 2501.00656 | §1 |
-| RMS-normed token embedding, no positional embedding | ADOPTED | 2211.05100, 2110.02861 | §1 |
-| Bias-free linear layers | ADOPTED | 2204.02311, 2402.00838 | §1 |
-| Untied token embedding and output head | ADOPTED | 1608.05859, 2402.14905 | §1 |
-| Rotary position embedding (RoPE), half-split layout | ADOPTED | 2104.09864 | §1 |
-| RoPE base 10^6 from the first step | ADAPTED | 2405.14591, 2407.21783, 2410.06205 | §1 |
-| QK-norm with learned per-dimension gains, fixed 1/√d scale | ADAPTED | 2302.05442, 2309.14322, 2410.01131 | §1 |
-| Multi-head attention with all KV heads (not GQA/MQA) | ADOPTED | 1706.03762, 1911.02150, 2305.13245 | §1 |
-| Head dimension 128 | ADOPTED | 2002.07028 | §1 |
-| Local–global attention: SSSL, last layer global, 512-key windows | ADAPTED | 2005.14165, 2004.05150, 2503.19786 | §1 |
-| Document masking in packed sequences (varlen attention) | PARALLEL | 2402.13991, 2407.21783, 2410.02660 | §1 |
-| Gated attention (output gate) | NOT TAKEN | 2505.06708 | §1 |
-| Multi-token prediction | NOT TAKEN | 2404.19737 | §1 |
-| ReLU² MLP, hidden 4C, not SwiGLU | ADOPTED | 2109.08668, 2002.05202 | §1 |
-| Per-layer residual scalars and the x0 shortcut | ADAPTED | 2402.02622 | §1 |
-| Gated value embeddings on alternating layers | ADAPTED | 2601.22887 | §1 |
-| Smear, backout, partial key offset | NOT TAKEN | none | §1 |
-| Output-logit soft cap c·tanh(z/c), c = 15 | ADOPTED | 1611.09940, 2408.00118, 2405.09818 | §1 |
-| Uniform fan-in initialization, std C^−½ | ADAPTED | LeCun et al., 1998 | §1 |
-| Zero-initialized residual-branch outputs and output head | ADOPTED | 1901.09321, 2203.03466 | §1 |
-| Shape rule: width = depth × aspect, rounded up to whole 128-wide heads | ADAPTED | 2402.14905, 2001.08361 | §1 |
-| Muon: orthogonalized momentum for hidden matrices | ADAPTED | 2409.20325, 2502.16982, Muon blog (Jordan et al., 2024) | §2 |
-| Newton–Schulz orthogonalization: quintic (3.4445, −4.7750, 2.0315), 5 bf16 steps, Gram form | ADOPTED | 2409.20325, Muon blog (Jordan et al., 2024), Kovarik, 1970, Björck & Bowie, 1971 | §2 |
-| Nesterov momentum 0.95 in EMA ("lerp") form | ADOPTED | 2502.16982, Muon blog (Jordan et al., 2024), Sutskever et al., 2013 | §2 |
-| Muon/AdamW parameter split | ADAPTED | 2409.20325, 2502.16982, Muon blog (Jordan et al., 2024) | §2 |
-| Muon step size per shape, matched to AdamW's update RMS | ADAPTED | 2502.16982 | §2 |
-| NorMuon: neuron-wise second-moment normalization after orthogonalization | ADAPTED | 2510.05491 | §2 |
-| Polar Express coefficients | NOT TAKEN | 2505.16932 | §2 |
-| Cautious weight decay | NOT TAKEN | 2510.12402 | §2 |
-| Decoupled weight decay (AdamW) and weight decay in Muon | ADOPTED | 1711.05101, 1412.6980, 2502.16982 | §2 |
-| Weight decay tied to the training horizon (the EMA timescale) | PARALLEL | 2505.13738, 2405.13698 | §2 |
-| Per-group learning rates (AdamW groups, residual scalars) | NOT TAKEN | 2502.16982 | §2 |
-| Batch size and peak learning rate from compute scaling laws | PARALLEL | 2401.02954 | §2 |
-| Global gradient-norm clipping at 1.0 | ADOPTED | 1211.5063, 2401.02954 | §2 |
-| Linear warmup over 2/(1 − β₂) steps | ADOPTED | 1910.04209 | §2 |
-| Linear decay to zero, not a trapezoid with a floor | ADAPTED | 2502.15938, 2405.18392 | §2 |
-| Each group's lr as its peak times one schedule multiplier | ADAPTED | none | §2 |
-| Hyperparameter transfer from a small reference model | NOT TAKEN | 2203.03466, 2512.22382 | §2 |
-| Training horizon from tokens per parameter | ADAPTED | 2203.15556 | §2 |
-| Scaling-parameter count: decoder layers + lm_head | ADOPTED | 2001.08361, 2406.19146 | §2 |
-| FLOPs per token: 6N plus attention over the attended keys | ADAPTED | 2204.02311, 2401.02954 | §2 |
-| Small-proxy tuning gains shrink with scale | EVIDENCE | 2509.02046, 2512.05620 | §2 |
-| Byte-level BPE | ADOPTED | 1508.07909, Radford et al., 2019 | §3 |
-| SA-BPE merge score in an incremental BPE trainer | ADAPTED | 2604.14053 | §3 |
-| Vocabulary of 2^15 ids, special tokens inside it | ADOPTED | 2402.01035, 2402.19173 | §3 |
-| Pre-tokenization by a split regex, no line break after a punctuation run | ADAPTED | 2608.18062, Radford et al., 2019 | §3 |
-| Digit runs of one or two (`\p{N}{1,2}`) | ADOPTED | 2302.13971, 2402.14903 | §3 |
-| BOS as the only document token: delimiter, end-of-document target, generation stop | ADAPTED | none | §3 |
-| Tokenizer comparison by compression ratio | NOT TAKEN | 2402.18376, Meister, 2026 (post) | §3 |
-| BOS-aligned rows with best-fit-decreasing packing | ADAPTED | 2404.10830 | §3 |
-| ClimbMix as the web-text source | ADOPTED | 2504.13161 | §3 |
-| Bits per byte, zero-byte targets excluded | ADAPTED | 2101.00027 | §3 |
-| Validation budget of 80 × 2^19 tokens | ADAPTED | none | §3 |
-| Execution-based pass@k in a sandbox | PARALLEL | 2107.03374 | §3 |
-| Truncated sampling: nucleus (top-p), not top-k | PARALLEL | 1904.09751 | §3 |
-| FlashAttention kernels for training attention | ADAPTED | 2205.14135, 2407.08608, 2603.05451 | §4 |
-| Sliding windows inside the attention kernel | ADAPTED | 2205.14135, 2412.05496 | §4 |
-| Fixed-size `cu_seqlens`, with only the real segments passed to the kernel | ADAPTED | 2307.08691, PyTorch 2 (Ansel et al., 2024) | §4 |
-| Mixed precision: fp32 master weights, bf16 GEMM operands with fp32 accumulation | ADAPTED | 1710.03740, 1905.12322 | §4 |
-| Normalization statistics and the loss in fp32 | ADAPTED | 1710.03740 | §4 |
-| FP8 training | NOT TAKEN | 2209.05433, 2412.19437 | §4 |
-| Fused linear cross entropy with the logit cap inside | PARALLEL | 2411.09009, 2410.10989 | §4 |
-| Fused linear + ReLU² GEMM; activations stored for the backward | PARALLEL | 2104.04473, PyTorch 2 (Ansel et al., 2024) | §4 |
-| Fused QK-norm + RoPE kernel | PARALLEL | 2410.10989 | §4 |
-| Merged q/k/v projection (one GEMM) | PARALLEL | none | §4 |
-| Newton–Schulz batched over same-shape matrices | PARALLEL | 2608.11612 | §4 |
-| `torch.compile` of the whole model, static shapes, one graph | ADOPTED | PyTorch 2 (Ansel et al., 2024) | §4 |
-| Fused AdamW step | ADOPTED | none | §4 |
-| Meta-device construction, then explicit initialization | ADOPTED | 2304.11277 | §4 |
-| Garbage-collector control | ADAPTED | none | §4 |
-| Gradient accumulation weighted by valid tokens | ADAPTED | 2410.02660 | §4 |
-| Overlapping host work with the device step | ADAPTED | none | §4 |
-| Model FLOPs utilization (MFU) | ADAPTED | 2204.02311 | §4 |
+| Idea | Here | Upstream | Cite as | Section |
+|---|---|---|---|---|
+| Pre-norm residual block with a final norm before the head | ADOPTED | both | 2002.04745, 1809.10853 | §1 |
+| RMS normalization without a learnable gain | ADAPTED | both | 1910.07467, 2402.00838, 2501.00656 | §1 |
+| RMS-normed token embedding, no positional embedding | ADOPTED | both | 2211.05100, 2110.02861 | §1 |
+| Bias-free linear layers | ADOPTED | nanochat | 2204.02311, 2402.00838 | §1 |
+| Untied token embedding and output head | ADOPTED | both | 1608.05859, 2402.14905 | §1 |
+| Rotary position embedding (RoPE), half-split layout | ADOPTED | both | 2104.09864 | §1 |
+| RoPE base 10^6 from the first step | ADAPTED | nanochat | 2405.14591, 2407.21783, 2410.06205 | §1 |
+| QK-norm with learned per-dimension gains, fixed 1/√d scale | ADAPTED | both | 2302.05442, 2309.14322, 2410.01131 | §1 |
+| Multi-head attention with all KV heads (not GQA/MQA) | ADOPTED | nanochat | 1706.03762, 1911.02150, 2305.13245 | §1 |
+| Head dimension 128 | ADOPTED | both | 2002.07028 | §1 |
+| Local–global attention: SSSL, last layer global, 512-key windows | ADAPTED | both | 2005.14165, 2004.05150, 2503.19786 | §1 |
+| Document masking in packed sequences (varlen attention) | PARALLEL | both | 2402.13991, 2407.21783, 2410.02660 | §1 |
+| Gated attention (output gate) | NOT TAKEN | both | 2505.06708 | §1 |
+| Multi-token prediction | NOT TAKEN | both | 2404.19737 | §1 |
+| ReLU² MLP, hidden 4C, not SwiGLU | ADOPTED | both | 2109.08668, 2002.05202 | §1 |
+| Per-layer residual scalars and the x0 shortcut | ADAPTED | both | 2402.02622 | §1 |
+| Gated value embeddings on alternating layers | ADAPTED | both | 2601.22887 | §1 |
+| Smear, backout, partial key offset | NOT TAKEN | both | none | §1 |
+| Output-logit soft cap c·tanh(z/c), c = 15 | ADOPTED | both | 1611.09940, 2408.00118, 2405.09818 | §1 |
+| Uniform fan-in initialization, std C^−½ | ADAPTED | both | LeCun et al., 1998 | §1 |
+| Zero-initialized residual-branch outputs and output head | ADOPTED | both | 1901.09321, 2203.03466 | §1 |
+| Shape rule: width = depth × aspect, rounded up to whole 128-wide heads | ADAPTED | nanochat | 2402.14905, 2001.08361 | §1 |
+| Muon: orthogonalized momentum for hidden matrices | ADAPTED | both | 2409.20325, 2502.16982, Muon blog (Jordan et al., 2024) | §2 |
+| Newton–Schulz orthogonalization: quintic (3.4445, −4.7750, 2.0315), 5 bf16 steps, Gram form | ADOPTED | both | 2409.20325, Muon blog (Jordan et al., 2024), Kovarik, 1970, Björck & Bowie, 1971 | §2 |
+| Nesterov momentum 0.95 in EMA ("lerp") form | ADOPTED | both | 2502.16982, Muon blog (Jordan et al., 2024), Sutskever et al., 2013 | §2 |
+| Muon/AdamW parameter split | ADAPTED | both | 2409.20325, 2502.16982, Muon blog (Jordan et al., 2024) | §2 |
+| Muon step size per shape, matched to AdamW's update RMS | ADAPTED | both | 2502.16982 | §2 |
+| NorMuon: neuron-wise second-moment normalization after orthogonalization | ADAPTED | both | 2510.05491 | §2 |
+| Polar Express coefficients | NOT TAKEN | both | 2505.16932 | §2 |
+| Cautious weight decay | NOT TAKEN | both | 2510.12402 | §2 |
+| Decoupled weight decay (AdamW) and weight decay in Muon | ADOPTED | both | 1711.05101, 1412.6980, 2502.16982 | §2 |
+| Weight decay tied to the training horizon (the EMA timescale) | PARALLEL | nanochat | 2505.13738, 2405.13698 | §2 |
+| Per-group learning rates (AdamW groups, residual scalars) | NOT TAKEN | nanochat | 2502.16982 | §2 |
+| Batch size and peak learning rate from compute scaling laws | PARALLEL | nanochat | 2401.02954 | §2 |
+| Global gradient-norm clipping at 1.0 | ADOPTED | both | 1211.5063, 2401.02954 | §2 |
+| Linear warmup over 2/(1 − β₂) steps | ADOPTED | nanochat | 1910.04209 | §2 |
+| Linear decay to zero, not a trapezoid with a floor | ADAPTED | both | 2502.15938, 2405.18392 | §2 |
+| Each group's lr as its peak times one schedule multiplier | ADAPTED | nanochat | none | §2 |
+| Hyperparameter transfer from a small reference model | NOT TAKEN | nanochat | 2203.03466, 2512.22382 | §2 |
+| Training horizon from tokens per parameter | ADAPTED | nanochat | 2203.15556 | §2 |
+| Scaling-parameter count: decoder layers + lm_head | ADOPTED | nanochat | 2001.08361, 2406.19146 | §2 |
+| FLOPs per token: 6N plus attention over the attended keys | ADAPTED | nanochat | 2204.02311, 2401.02954 | §2 |
+| Small-proxy tuning gains shrink with scale | EVIDENCE | nanochat | 2509.02046, 2512.05620 | §2 |
+| Byte-level BPE | ADOPTED | nanochat | 1508.07909, Radford et al., 2019 | §3 |
+| SA-BPE merge score in an incremental BPE trainer | ADAPTED | nanochat | 2604.14053 | §3 |
+| Vocabulary of 2^15 ids, special tokens inside it | ADOPTED | nanochat | 2402.01035, 2402.19173 | §3 |
+| Pre-tokenization by a split regex, no line break after a punctuation run | ADAPTED | nanochat | 2608.18062, Radford et al., 2019 | §3 |
+| Digit runs of one or two (`\p{N}{1,2}`) | ADOPTED | nanochat | 2302.13971, 2402.14903 | §3 |
+| BOS as the only document token: delimiter, end-of-document target, generation stop | ADAPTED | nanochat | none | §3 |
+| Tokenizer comparison by compression ratio | NOT TAKEN | nanochat | 2402.18376, Meister, 2026 (post) | §3 |
+| BOS-aligned rows with best-fit-decreasing packing | ADAPTED | both | 2404.10830 | §3 |
+| ClimbMix as the web-text source | ADOPTED | nanochat | 2504.13161 | §3 |
+| Bits per byte, zero-byte targets excluded | ADAPTED | nanochat | 2101.00027 | §3 |
+| Validation budget of 80 × 2^19 tokens | ADAPTED | nanochat | none | §3 |
+| Execution-based pass@k in a sandbox | PARALLEL | nanochat | 2107.03374 | §3 |
+| Truncated sampling: nucleus (top-p), not top-k | PARALLEL | nanochat | 1904.09751 | §3 |
+| FlashAttention kernels for training attention | ADAPTED | both | 2205.14135, 2407.08608, 2603.05451 | §4 |
+| Sliding windows inside the attention kernel | ADAPTED | both | 2205.14135, 2412.05496 | §4 |
+| Fixed-size `cu_seqlens`, with only the real segments passed to the kernel | ADAPTED | both | 2307.08691, PyTorch 2 (Ansel et al., 2024) | §4 |
+| Mixed precision: fp32 master weights, bf16 GEMM operands with fp32 accumulation | ADAPTED | both | 1710.03740, 1905.12322 | §4 |
+| Normalization statistics and the loss in fp32 | ADAPTED | nanochat | 1710.03740 | §4 |
+| FP8 training | NOT TAKEN | both | 2209.05433, 2412.19437 | §4 |
+| Fused linear cross entropy with the logit cap inside | PARALLEL | modded-nanogpt | 2411.09009, 2410.10989 | §4 |
+| Fused linear + ReLU² GEMM; activations stored for the backward | PARALLEL | modded-nanogpt | 2104.04473, PyTorch 2 (Ansel et al., 2024) | §4 |
+| Fused QK-norm + RoPE kernel | PARALLEL | modded-nanogpt | 2410.10989 | §4 |
+| Merged q/k/v projection (one GEMM) | PARALLEL | modded-nanogpt | none | §4 |
+| Newton–Schulz batched over same-shape matrices | PARALLEL | both | 2608.11612 | §4 |
+| `torch.compile` of the whole model, static shapes, one graph | ADOPTED | nanochat | PyTorch 2 (Ansel et al., 2024) | §4 |
+| Fused AdamW step | ADOPTED | both | none | §4 |
+| Meta-device construction, then explicit initialization | ADOPTED | nanochat | 2304.11277 | §4 |
+| Garbage-collector control | ADAPTED | nanochat | none | §4 |
+| Gradient accumulation weighted by valid tokens | ADAPTED | nanochat | 2410.02660 | §4 |
+| Overlapping host work with the device step | ADAPTED | nanochat | none | §4 |
+| Model FLOPs utilization (MFU) | ADAPTED | nanochat | 2204.02311 | §4 |
 
 ## 1. Architecture
 
-### Pre-norm residual block with a final norm before the head
-- **Idea.** Normalize each sublayer's input, x + F(norm(x)), and the stream once more before the output layer. With
-  the norm inside the residual branch the gradients at initialization are well scaled, so the warm-up stage that
-  post-norm needs can be removed.
-- **Papers.** arXiv 2002.04745 (Xiong et al., 2020, §3.1 Table 1, §3.3 Theorem 1, §4): the Pre-LN Transformer, with a
-  final layer norm; at initialization Post-LN's last-layer gradient does not shrink with depth, Pre-LN's is scaled
-  down by √L; Pre-LN trains without the warm-up stage; arXiv 1809.10853 (Baevski & Auli, 2018, §4.1): layer norm
-  before the self-attention and FFN blocks "leads to more effective training".
-- **Here.** ADOPTED: `model/modeling.py` `DecoderLayer.forward`, `CausalLM.hidden`; `docs/architecture.md` §1.
-- **Upstream.** nanochat; modded-nanogpt.
+**Pre-norm residual block with a final norm before the head.** x + F(norm(x)) per sublayer, and one more norm before
+the head. *Papers:* arXiv 2002.04745 (Xiong, §3.1 Table 1, §3.3 Thm. 1, §4): at initialization Pre-LN's last-layer
+gradient is scaled down by √L, and Pre-LN trains without the warm-up stage; arXiv 1809.10853 (Baevski, §4.1): norm
+before the blocks "leads to more effective training". *Here* (ADOPTED): `model/modeling.py` `DecoderLayer.forward`,
+`CausalLM.hidden`; `docs/architecture.md` §1.
 
-### RMS normalization without a learnable gain
-- **Idea.** RMSNorm keeps LayerNorm's re-scaling and drops its re-centering, which it hypothesizes is dispensable, at
-  lower cost; the non-parametric form also drops the gain.
-- **Papers.** arXiv 1910.07467 (Zhang & Sennrich, 2019, Abstract, Eq. 4): RMSNorm matches LayerNorm with 7%–64% less
-  running time (its form keeps a gain g); arXiv 2402.00838 (Groeneveld et al., 2024, §2.1): OLMo's non-parametric
-  layer norm, without adaptive gain or bias, "the safest option" and the fastest; arXiv 2501.00656 (OLMo 2, 2024,
-  §3.3.1): ablations "show no difference" between the non-parametric layer norm and RMSNorm.
-- **Here.** ADAPTED: `model/modeling.py` `norm`; `docs/architecture.md` §1; eps FLT_EPSILON with fp32 statistics
-  (upstream: bf16, torch's default eps).
-- **Upstream.** nanochat; modded-nanogpt.
+**RMS normalization without a learnable gain.** Keep LayerNorm's re-scaling, drop re-centering and the gain.
+*Papers:* arXiv 1910.07467 (Zhang, Abstract, Eq. 4): matches LayerNorm with 7%–64% less running time (keeps a gain);
+arXiv 2402.00838 (OLMo, §2.1): non-parametric layer norm, "the safest option" and the fastest; arXiv 2501.00656
+(OLMo 2, §3.3.1): "no difference" between it and RMSNorm. *Here* (ADAPTED): `model/modeling.py` `norm`;
+`docs/architecture.md` §1; eps FLT_EPSILON, fp32 statistics (upstream: bf16, torch's default eps).
 
-### RMS-normed token embedding, no positional embedding
-- **Idea.** x0 = norm(E[ids]): a norm right after the embedding lookup keeps the stream's scale independent of the
-  table's; position enters only through RoPE.
-- **Papers.** arXiv 2211.05100 (BLOOM, 2022, §3.2.3 "Embedding LayerNorm"): a layer norm right after the embedding
-  "significantly improved training stability" at 104B in float16, though it "penalizes zero-shot generalization";
-  arXiv 2110.02861 (Dettmers et al., 2021, §2.3): the stable embedding layer (a layer norm on the embedding) avoids
-  extreme gradient variation from the non-uniform token distribution.
-- **Here.** ADOPTED: `model/modeling.py` `CausalLM.hidden`; `docs/architecture.md` §1; both papers use LayerNorm, here a
-  gain-free RMS norm.
-- **Upstream.** nanochat; modded-nanogpt.
+**RMS-normed token embedding, no positional embedding.** x0 = norm(E[ids]); position enters only through RoPE.
+*Papers:* arXiv 2211.05100 (BLOOM, §3.2.3): embedding LayerNorm "significantly improved training stability" at 104B
+in float16, though it "penalizes zero-shot generalization"; arXiv 2110.02861 (Dettmers, §2.3): the stable embedding
+layer avoids extreme gradient variation. *Here* (ADOPTED): `model/modeling.py` `CausalLM.hidden`;
+`docs/architecture.md` §1; a gain-free RMS norm where both papers use LayerNorm.
 
-### Bias-free linear layers
-- **Idea.** Omit the additive bias in every projection.
-- **Papers.** arXiv 2204.02311 (PaLM, 2022, §2 "No Biases"): "We found this to result in increased training stability
-  for large models"; arXiv 2402.00838 (OLMo, 2024, §2.1): no bias terms, "to improve training stability".
-- **Here.** ADOPTED: `model/modeling.py` `Attention`, `GemmLinear`, `CausalLM.lm_head`; `docs/architecture.md` §1.
-- **Upstream.** nanochat.
+**Bias-free linear layers.** No additive bias in any projection. *Papers:* arXiv 2204.02311 (PaLM, §2 "No Biases"):
+"increased training stability for large models"; arXiv 2402.00838 (OLMo, §2.1): "to improve training stability".
+*Here* (ADOPTED): `model/modeling.py` `Attention`, `GemmLinear`, `CausalLM.lm_head`; `docs/architecture.md` §1.
 
-### Untied token embedding and output head
-- **Idea.** Separate input and output matrices give the head capacity independent of the input table, at the cost of
-  a second V × C matrix.
-- **Papers.** arXiv 1608.05859 (Press & Wolf, 2016, Abstract, §1): tying the input and output embeddings improves the
-  perplexity of several language models (the counter-position); arXiv 2402.14905 (MobileLLM, 2024, §2.2.3, Table 1):
-  at 125M, sharing saves 16M parameters (11.8%) for a 0.2-point drop in average zero-shot accuracy.
-- **Here.** ADOPTED: `model/modeling.py` `CausalLM.embed_tokens`, `CausalLM.lm_head`; `docs/architecture.md` §1; a
-  design choice, the published evidence being mixed.
-- **Upstream.** nanochat; modded-nanogpt.
+**Untied token embedding and output head.** A second V × C matrix gives the head capacity independent of the input
+table. *Papers:* arXiv 1608.05859 (Press, Abstract, §1): tying improves perplexity (the counter-position); arXiv
+2402.14905 (MobileLLM, §2.2.3, Table 1): at 125M sharing saves 16M parameters (11.8%) for a 0.2-point accuracy drop.
+*Here* (ADOPTED): `model/modeling.py` `CausalLM.embed_tokens`, `CausalLM.lm_head`; `docs/architecture.md` §1; a design
+choice on mixed evidence.
 
-### Rotary position embedding (RoPE), half-split layout
-- **Idea.** Rotate each 2-D pair of q and k by t·θ_i with θ_i = base^(−2i/d): the q·k product depends only on the
-  relative position and decays with distance.
-- **Papers.** arXiv 2104.09864 (Su et al., 2021, §3.2.2 Eq. 15, §3.3, §3.4.3): RoPE, its frequencies and long-term
-  decay.
-- **Here.** ADOPTED: `model/kernels/qk_row.cuh` `qk_rotate`, `model/modeling.py` `CausalLM.init_buffers`;
-  `docs/architecture.md` §1; pairs (i, i + d/2) rotated by −θ, a convention.
-- **Upstream.** nanochat; modded-nanogpt.
+**Rotary position embedding (RoPE), half-split layout.** Rotate 2-D pairs of q and k by t·θ_i, θ_i = base^(−2i/d).
+*Papers:* arXiv 2104.09864 (Su, §3.2.2 Eq. 15, §3.3, §3.4.3): RoPE, relative position, long-term decay. *Here*
+(ADOPTED): `model/kernels/qk_row.cuh` `qk_rotate`, `model/modeling.py` `CausalLM.init_buffers`;
+`docs/architecture.md` §1; pairs (i, i + d/2) rotated by −θ, a convention.
 
-### RoPE base 10^6 from the first step
-- **Idea.** A larger base lowers the lowest frequencies, so attention can still discriminate distant tokens; the base
-  needed grows with the context length.
-- **Papers.** arXiv 2405.14591 (Men et al., 2024, §4.3 Table 2): the base's lower bound is 8.4e4 for an 8K context and
-  6.4e5 for 32K; arXiv 2407.21783 (Llama 3, 2024, §3.2): base 500,000 in pre-training; arXiv 2410.06205 (Barbero et al.,
-  2024, §6.1 Table 2): Gemma 2B at 8K, base 10k against 500k, perplexity within 0.33% and of mixed sign.
-- **Here.** ADAPTED: `model/config.py` `ROPE_THETA`; `docs/architecture.md` §2; 10^6 in both stages (upstream 10^5).
-- **Upstream.** nanochat.
+**RoPE base 10^6 from the first step.** A larger base keeps distant tokens distinguishable; the base needed grows with
+context. *Papers:* arXiv 2405.14591 (Men, §4.3 Table 2): lower bound 8.4e4 at 8K, 6.4e5 at 32K; arXiv 2407.21783
+(Llama 3, §3.2): base 500,000; arXiv 2410.06205 (Barbero, §6.1 Table 2): Gemma 2B at 8K, base 10k vs 500k within
+0.33% perplexity, mixed sign. *Here* (ADAPTED): `model/config.py` `ROPE_THETA`; `docs/architecture.md` §2; 10^6 in
+both stages (upstream 10^5).
 
-### QK-norm with learned per-dimension gains, fixed 1/√d scale
-- **Idea.** Normalize q and k per head so attention logits cannot grow with parameter norms (near one-hot attention);
-  a learned gain then sets the logit scale, so the softmax keeps 1/√d and needs no hand-set temperature.
-- **Papers.** arXiv 2302.05442 (ViT-22B, 2023, §2, App. B): at ~8B, attention logits grow "over 50000 in magnitude"
-  and training diverges; softmax[LN(XW_Q)LN(XW_K)ᵀ/√d] fixes it; arXiv 2309.14322 (Wortsman et al., 2023, §3.1.1,
-  §3.2.5, Fig. E.8): the logit growth reproduces at small scale under high learning rates, and per-head qk-layernorm
-  with head-dim parameters beats normalizing across the model dimension; arXiv 2410.01131 (nGPT, 2024, App. A.9
-  Table 5): at 0.5B and 1K context, a fixed s_qk = 1 instead of a learned vector costs +0.11% validation loss.
-- **Here.** ADAPTED: `model/modeling.py` `Attention.q_norm_weight`, `k_norm_weight`, `model/kernels/qk_prologue.cu`,
-  `model/ops/flash_attn.py` `attention` (scale 1/√128); `docs/architecture.md` §1, §2; norm → gain → RoPE (upstream:
-  RoPE → gain-free norm → ×1.2 on q and k).
-- **Upstream.** nanochat; modded-nanogpt.
+**QK-norm with learned per-dimension gains, fixed 1/√d scale.** Normalize q and k per head so attention logits cannot
+grow with parameter norms; a learned gain sets the logit scale. *Papers:* arXiv 2302.05442 (ViT-22B, §2, App. B):
+logits "over 50000 in magnitude" and divergence at ~8B, fixed by LN on q and k; arXiv 2309.14322 (Wortsman, §3.1.1,
+§3.2.5, Fig. E.8): reproduces at small scale under high lr; per-head qk-layernorm beats model-dimension norm; arXiv
+2410.01131 (nGPT, App. A.9 Table 5): fixed s_qk = 1 instead of learned costs +0.11% validation loss. *Here*
+(ADAPTED): `model/modeling.py` `Attention.q_norm_weight`, `k_norm_weight`, `model/kernels/qk_prologue.cu`,
+`model/ops/flash_attn.py` `attention` (scale 1/√128); `docs/architecture.md` §1, §2; norm → gain → RoPE (upstream:
+RoPE → gain-free norm → ×1.2).
 
-### Multi-head attention with all KV heads (not GQA/MQA)
-- **Idea.** One key/value head per query head; MQA and GQA share KV heads to cut decode memory bandwidth and KV-cache
-  size at some quality cost.
-- **Papers.** arXiv 1706.03762 (Vaswani et al., 2017, §3.2.2): multi-head attention; arXiv 1911.02150 (Shazeer, 2019,
-  Abstract): MQA decodes much faster "with only minor quality degradation"; arXiv 2305.13245 (Ainslie et al., 2023,
-  Abstract): uptrained GQA reaches quality close to MHA at speed comparable to MQA.
-- **Here.** ADOPTED: `model/modeling.py` `Attention` (C × C q/k/v); `docs/architecture.md` §2 (KV-cache arithmetic),
-  `docs/experiments.md` §3 (d16 GQA screen, rejected).
-- **Upstream.** nanochat.
+**Multi-head attention with all KV heads (not GQA/MQA).** One KV head per query head; MQA/GQA trade quality for decode
+bandwidth. *Papers:* arXiv 1706.03762 (Vaswani, §3.2.2); arXiv 1911.02150 (Shazeer, Abstract): "only minor quality
+degradation"; arXiv 2305.13245 (Ainslie, Abstract): GQA near MHA quality at MQA speed. *Here* (ADOPTED):
+`model/modeling.py` `Attention`; `docs/architecture.md` §2 (KV-cache arithmetic), `docs/experiments.md` §3 (d16 GQA
+screen, rejected).
 
-### Head dimension 128
-- **Idea.** Each head's attention has rank at most its head size, so the head size should not shrink as heads are
-  added.
-- **Papers.** arXiv 2002.07028 (Bhojanapalli et al., 2020, Abstract, Theorem 1): the coupling of head size to the
-  number of heads causes a low-rank bottleneck; the head size should be set independently of the number of heads.
-- **Here.** ADOPTED: `model/config.py` `HEAD_DIM`; `docs/architecture.md` §2; no paper selects 128, which is also the
-  kernels' compile-time head width.
-- **Upstream.** nanochat; modded-nanogpt.
+**Head dimension 128.** Head rank is at most head size, so it should not shrink as heads are added. *Papers:* arXiv
+2002.07028 (Bhojanapalli, Abstract, Thm. 1): the low-rank bottleneck; set head size independently of head count.
+*Here* (ADOPTED): `model/config.py` `HEAD_DIM`; `docs/architecture.md` §2; no paper selects 128, also the kernels'
+compile-time head width.
 
-### Local–global attention: SSSL, last layer global, 512-key windows
-- **Idea.** Most layers attend a fixed window of recent keys (linear cost, small KV cache); interleaved full-context
-  layers carry long-range information, and stacked windows widen the receptive field.
-- **Papers.** arXiv 2005.14165 (GPT-3, 2020, §2.1): "alternating dense and locally banded sparse attention patterns";
-  arXiv 2004.05150 (Longformer, 2020, §3.1): sliding-window attention, receptive field l × w after l layers; arXiv
-  2503.19786 (Gemma 3, 2025, §2; §5.2 Figs. 3–4): 5 local layers of 1,024 tokens per global one; changing the
-  local:global ratio has "minimal impact on perplexity", and the window "can be reduced significantly without
-  impacting perplexity".
-- **Here.** ADAPTED: `model/modeling.py` `layer_windows`; `docs/architecture.md` §1, §2; the short window a fixed 512
-  keys at 8K and 32K (upstream a quarter of the context, rounded up to 128).
-- **Upstream.** nanochat; modded-nanogpt.
+**Local–global attention: SSSL, last layer global, 512-key windows.** Windowed layers interleaved with full-context
+ones. *Papers:* arXiv 2005.14165 (GPT-3, §2.1): "alternating dense and locally banded sparse attention patterns";
+arXiv 2004.05150 (Longformer, §3.1): receptive field l × w; arXiv 2503.19786 (Gemma 3, §2; §5.2 Figs. 3–4): 5 local
+layers of 1,024 per global; the ratio has "minimal impact on perplexity", and the window "can be reduced
+significantly". *Here* (ADAPTED): `model/modeling.py` `layer_windows`; `docs/architecture.md` §1, §2; fixed 512 keys
+at 8K and 32K (upstream a quarter of the context, rounded up to 128).
 
-### Document masking in packed sequences (varlen attention)
-- **Idea.** In a row packed with several documents, causal attention lets tokens attend to unrelated earlier
-  documents; restricting each token to its own document removes that context, and varlen offsets (`cu_seqlens`) let
-  the kernel skip the masked blocks.
-- **Papers.** arXiv 2402.13991 (Zhao et al., 2024, §3.2 Table 1): 1.3B models on SlimPajama; intra-document causal
-  masking gives average perplexity 8.410 against 9.172 for concatenation at 2K, 8.079 against 9.065 at 8K; arXiv
-  2407.21783 (Llama 3, 2024, §3.2): the document mask had "limited impact" in standard pre-training and mattered in
-  continued pre-training on very long sequences; arXiv 2410.02660 (Gao et al., 2024, ProLong, App. B.2 Table 20):
-  document masks improve both long- and short-context results in continued long-context training.
-- **Here.** PARALLEL: `model/ops/flash_attn.py` `attention`, `corpus/loader.py` `PretrainingBatches`;
-  `docs/architecture.md` §1, `docs/corpus.md` §8–§9; FA4 varlen, one segment per packed piece of a document.
-- **Upstream.** nanochat; modded-nanogpt.
+**Document masking in packed sequences (varlen attention).** Restrict each token to its own document in a packed row.
+*Papers:* arXiv 2402.13991 (Zhao, §3.2 Table 1): 1.3B, perplexity 8.410 vs 9.172 (2K) and 8.079 vs 9.065 (8K) against
+concatenation; arXiv 2407.21783 (Llama 3, §3.2): "limited impact" in standard pre-training; arXiv 2410.02660
+(ProLong, App. B.2 Table 20): helps long and short context in continued training. *Here* (PARALLEL):
+`model/ops/flash_attn.py` `attention`, `corpus/loader.py` `PretrainingBatches`; `docs/architecture.md` §1,
+`docs/corpus.md` §8–§9; one FA4 varlen segment per packed piece.
 
-### Gated attention (output gate)
-- **Idea.** A per-head sigmoid gate on the attention output adds non-linearity and query-dependent sparsity.
-- **Papers.** arXiv 2505.06708 (Qiu et al., 2025, §1, Table 1): a head-specific sigmoid gate after SDPA gives up to
-  0.2 lower perplexity and 2 MMLU points (15B MoE models, 400B tokens) and removes the attention sink.
-- **Here.** NOT TAKEN: `docs/experiments.md` §3 (listed as not run).
-- **Upstream.** nanochat; modded-nanogpt.
+**Gated attention (output gate).** A per-head sigmoid gate on the attention output. *Papers:* arXiv 2505.06708 (Qiu,
+§1, Table 1): up to 0.2 lower perplexity and 2 MMLU points (15B MoE, 400B tokens), no attention sink. *Here* (NOT
+TAKEN): `docs/experiments.md` §3 (not run).
 
-### Multi-token prediction
-- **Idea.** Extra heads predict tokens t+2…t+n as an auxiliary loss.
-- **Papers.** arXiv 2404.19737 (Gloeckle et al., 2024, §3.1 Fig. 3): on code (0.3B–13B; MBPP, HumanEval), n-token
-  models "are worse than the baseline for small model sizes, but outperform the baseline at scale".
-- **Here.** NOT TAKEN: `docs/experiments.md` §3.
-- **Upstream.** nanochat; modded-nanogpt.
+**Multi-token prediction.** Auxiliary heads predict t+2…t+n. *Papers:* arXiv 2404.19737 (Gloeckle, §3.1 Fig. 3): on
+code, "worse than the baseline for small model sizes, but outperform the baseline at scale". *Here* (NOT TAKEN):
+`docs/experiments.md` §3.
 
-### ReLU² MLP, hidden 4C, not SwiGLU
-- **Idea.** relu(x)² keeps ReLU's sparsity with a growing positive side; it equals ReGLU with tied matrices, so it
-  captures much of the GLU gain without a third matrix.
-- **Papers.** arXiv 2109.08668 (So et al., 2021, Primer, §3, Fig. 5): squared ReLU is Primer's most effective
-  modification, better than GELU, Swish and the GLU variants in their T5 C4 runs; arXiv 2002.05202 (Shazeer, 2020,
-  Table 1): at matched parameters and compute, SwiGLU 1.636 against ReLU 1.677 log-perplexity (T5 span filling on C4),
-  the counter-evidence.
-- **Here.** ADOPTED: `model/ops/linear.py` `relu2_mlp`; `docs/architecture.md` §1, §2 (not ablated here).
-- **Upstream.** nanochat; modded-nanogpt.
+**ReLU² MLP, hidden 4C, not SwiGLU.** relu(x)², ReGLU with tied matrices, without a third matrix. *Papers:* arXiv
+2109.08668 (Primer, §3, Fig. 5): Primer's most effective modification, beating GELU, Swish and GLU variants; arXiv
+2002.05202 (Shazeer, Table 1): SwiGLU 1.636 vs ReLU 1.677 log-perplexity at matched compute (counter-evidence).
+*Here* (ADOPTED): `model/ops/linear.py` `relu2_mlp`; `docs/architecture.md` §1, §2 (not ablated here).
 
-### Per-layer residual scalars and the x0 shortcut
-- **Idea.** Before layer i, x ← λr_i·x + λ0_i·x0 with x0 the normed embedding; λr = 1, λ0 = 0 at init, so training
-  starts from the plain residual stack and learns how much token-level information to re-inject at depth.
-- **Papers.** arXiv 2402.02622 (Pagliardini et al., 2024, DenseFormer, Abstract, §3): learned weighted averages over
-  the embedding and all earlier block outputs, initialized to the identity (the plain Transformer), reach the
-  perplexity of much deeper Transformers.
-- **Here.** ADAPTED: `model/modeling.py` `CausalLM.resid_lambdas`, `x0_lambdas`, `hidden`, `init_weights`;
-  `docs/architecture.md` §1; init 1 / 0 (upstream: decaying inits), one shared lr.
-- **Upstream.** nanochat; modded-nanogpt.
+**Per-layer residual scalars and the x0 shortcut.** x ← λr_i·x + λ0_i·x0, init λr = 1, λ0 = 0. *Papers:* arXiv
+2402.02622 (DenseFormer, Abstract, §3): learned identity-initialized averages over earlier outputs reach the perplexity
+of much deeper models. *Here* (ADAPTED): `model/modeling.py` `CausalLM.resid_lambdas`, `x0_lambdas`, `hidden`,
+`init_weights`; `docs/architecture.md` §1; init 1 / 0 (upstream: decaying inits), one shared lr.
 
-### Gated value embeddings on alternating layers
-- **Idea.** Per-layer token-indexed tables added to the attention values, v ← v + 2σ(x W_g)·E_l[ids] per head: many
-  parameters at almost no FLOPs; zero-initialized W_g starts the gate at 1, which it can raise or lower within (0, 2).
-- **Papers.** arXiv 2601.22887 (MoVE, 2026, §3.2 Eq. 3; §4.1 Eq. 6; §4.2 Table 1): LaVE, "adapted from the
-  modded-nanoGPT repository", V + g ⊙ M_t with g = 2σ(x W_g) read from the full hidden width, on half the layers
-  (L−1, L−3, …), the gate 1 at zero logits; LaVE ×1 lowers val bpb by 0.016, 0.010 and 0.010 at D12, D20 and D32.
-- **Here.** ADAPTED: `model/modeling.py` `has_ve`, `CausalLM.value_embeds`, `Attention.ve_gate`,
-  `model/kernels/ve_gate.cu`; `docs/architecture.md` §1, §2; the gate reads the full width (nanochat: 32 channels).
-- **Upstream.** nanochat; modded-nanogpt.
+**Gated value embeddings on alternating layers.** v ← v + 2σ(x W_g)·E_l[ids] per head, W_g zero so the gate starts at
+1. *Papers:* arXiv 2601.22887 (MoVE, §3.2 Eq. 3; §4.1 Eq. 6; §4.2 Table 1): LaVE, "adapted from the modded-nanoGPT
+repository", on layers L−1, L−3, …; val bpb −0.016, −0.010, −0.010 at D12, D20, D32. *Here* (ADAPTED):
+`model/modeling.py` `has_ve`, `CausalLM.value_embeds`, `Attention.ve_gate`, `model/kernels/ve_gate.cu`;
+`docs/architecture.md` §1, §2; the gate reads the full width (nanochat: 32 channels).
 
-### Smear, backout, partial key offset
-- **Idea.** Speedrun stream edits: mix each token's embedding with its predecessor's (smear), subtract a mid-layer
-  residual before the head (backout), shift keys one position on part of the head dimensions (partial key offset).
-- **Papers.** None: speedrun techniques without a paper; the upstream results are unreviewed observations.
-- **Here.** NOT TAKEN: `docs/architecture.md` §2 (smear, backout), `docs/experiments.md` §3 (partial key offset).
-- **Upstream.** nanochat; modded-nanogpt.
+**Smear, backout, partial key offset.** Speedrun stream edits: mix each embedding with its predecessor's, subtract a
+mid-layer residual before the head, shift keys one position on part of the head dims. *Papers:* None; unreviewed
+upstream observations. *Here* (NOT TAKEN): `docs/architecture.md` §2 (smear, backout), `docs/experiments.md` §3
+(partial key offset).
 
-### Output-logit soft cap c·tanh(z/c), c = 15
-- **Idea.** Bound the output logits smoothly to (−c, c) so they cannot drift; QK-norm bounds only the attention logits.
-- **Papers.** arXiv 1611.09940 (Bello et al., 2016, §5.1; App. A.2 Eq. 16): logit clipping softmax(C tanh(u)), C = 10,
-  "helps with exploration"; arXiv 2408.00118 (Gemma 2, 2024, §2): soft_cap·tanh(logits/soft_cap), 50 in attention and
-  30 on the final layer; arXiv 2405.09818 (Chameleon, 2024, §2.3): QK-norm "does not solve the problem of logit shift
-  in the final softmax".
-- **Here.** ADOPTED: `model/modeling.py` `FINAL_LOGIT_SOFTCAPPING`, `model/ops/cross_entropy.py` `lm_loss`,
-  `lm_losses`; `docs/architecture.md` §2, `docs/experiments.md` §3 (designed ablation, not run); c = 15 has no paper.
-- **Upstream.** nanochat; modded-nanogpt.
+**Output-logit soft cap c·tanh(z/c), c = 15.** Bound output logits to (−c, c); QK-norm bounds only attention logits.
+*Papers:* arXiv 1611.09940 (Bello, §5.1; App. A.2 Eq. 16): C tanh(u), C = 10; arXiv 2408.00118 (Gemma 2, §2): 50 in
+attention, 30 on the final layer; arXiv 2405.09818 (Chameleon, §2.3): QK-norm "does not solve the problem of logit
+shift in the final softmax". *Here* (ADOPTED): `model/modeling.py` `FINAL_LOGIT_SOFTCAPPING`,
+`model/ops/cross_entropy.py` `lm_loss`, `lm_losses`; `docs/architecture.md` §2, `docs/experiments.md` §3 (designed
+ablation, not run); c = 15 has no paper.
 
-### Uniform fan-in initialization, std C^−½
-- **Idea.** Draw each weight with mean 0 and standard deviation m^−½ (m the fan-in) so pre-activations keep unit
-  variance; uniform on ±√(3/m) has that standard deviation.
-- **Papers.** LeCun, Bottou, Orr & Müller, "Efficient BackProp" (1998, §4.6, Eqs. 15–16): weights drawn from a
-  distribution (e.g. uniform) with mean zero and standard deviation m^−½.
-- **Here.** ADAPTED: `model/modeling.py` `CausalLM.init_weights`; `docs/architecture.md` §1; upstream's bound for
-  q/k/v and the value tables, applied also to up_proj and the token table (upstream: ×0.4, N(0, 0.8)).
-- **Upstream.** nanochat; modded-nanogpt.
+**Uniform fan-in initialization, std C^−½.** Uniform on ±√(3/m) has std m^−½, keeping unit pre-activation variance.
+*Papers:* LeCun et al., "Efficient BackProp" (1998, §4.6, Eqs. 15–16). *Here* (ADAPTED): `model/modeling.py`
+`CausalLM.init_weights`; `docs/architecture.md` §1; also applied to up_proj and the token table (upstream: ×0.4,
+N(0, 0.8)).
 
-### Zero-initialized residual-branch outputs and output head
-- **Idea.** Zeroing the last layer of each residual branch starts every block as the identity; a zero head starts
-  from uniform predictions.
-- **Papers.** arXiv 1901.09321 (Zhang et al., 2019, Fixup, §3): "Initialize the classification layer and the last
-  layer of each residual branch to 0"; arXiv 2203.03466 (Yang et al., 2022, App. D.2): a zero output layer makes the
-  optimal hyperparameters of small and large widths "match more closely", without harming performance.
-- **Here.** ADOPTED: `model/modeling.py` `CausalLM.init_weights` (zero `o_proj`, `down_proj`, `lm_head`);
-  `docs/architecture.md` §1.
-- **Upstream.** nanochat; modded-nanogpt.
+**Zero-initialized residual-branch outputs and output head.** Every block starts as the identity, the head at
+uniform predictions. *Papers:* arXiv 1901.09321 (Fixup, §3): "Initialize the classification layer and the last layer
+of each residual branch to 0"; arXiv 2203.03466 (Yang, App. D.2): a zero output layer makes small- and large-width
+optima "match more closely". *Here* (ADOPTED): `model/modeling.py` `CausalLM.init_weights` (`o_proj`, `down_proj`,
+`lm_head`); `docs/architecture.md` §1.
 
-### Shape rule: width = depth × aspect, rounded up to whole 128-wide heads
-- **Idea.** Fixing the width-to-depth ratio lets one integer (layers) set the model; sub-billion models do better
-  deep and thin.
-- **Papers.** arXiv 2402.14905 (MobileLLM, 2024, §2.2.2, Fig. 4; Table 9): at ~125M and ~350M "deeper and thinner
-  models outperform their shallower and wider counterparts"; MobileLLM-350M is 32 layers × 960 (ratio 30); arXiv
-  2001.08361 (Kaplan et al., 2020, §3.1, Fig. 5): at fixed non-embedding parameters the aspect ratio can vary by a
-  factor of 40 while only slightly impacting performance.
-- **Here.** ADAPTED: `model/modeling.py` `ASPECT_RATIO`, `meta_model`; `docs/architecture.md` §1, §2; aspect 30
-  (upstream 64), rounding rule unchanged.
-- **Upstream.** nanochat.
+**Shape rule: width = depth × aspect, rounded up to whole 128-wide heads.** One integer sets the model. *Papers:*
+arXiv 2402.14905 (MobileLLM, §2.2.2, Fig. 4; Table 9): "deeper and thinner models outperform" at 125M/350M; 350M is
+32 × 960 (ratio 30); arXiv 2001.08361 (Kaplan, §3.1, Fig. 5): aspect can vary 40× with slight effect. *Here*
+(ADAPTED): `model/modeling.py` `ASPECT_RATIO`, `meta_model`; `docs/architecture.md` §1, §2; aspect 30 (upstream 64).
 
 ## 2. Optimizer, schedule and scaling
 
-### Muon: orthogonalized momentum for hidden matrices
-- **Idea.** Replace the SGD-momentum update of each 2-D hidden matrix by its nearest semi-orthogonal matrix UVᵀ;
-  momentum updates are nearly low-rank, and orthogonalizing them raises the scale of their rare directions.
-- **Papers.** Jordan et al. (2024, "Muon: An optimizer for hidden layers in neural networks", blog, non-archival,
-  §Definition, §"Why is it good to orthogonalize the update?"): the algorithm and the low-rank observation;
-  arXiv 2409.20325 (Bernstein, 2024, Props. 4–5): UVᵀ is the closest semi-orthogonal matrix in Frobenius norm, and the
-  update of steepest descent under the spectral norm; arXiv 2502.16982 (Liu, 2025, §2.2, §3.2): Muon at LLM scale with
-  weight decay and RMS-matched steps.
-- **Here.** ADAPTED: `train/optim.py` `Muon`; `docs/training.md` §3; built on `torch.optim.Muon`, with NorMuon added.
-- **Upstream.** nanochat; modded-nanogpt.
+**Muon: orthogonalized momentum for hidden matrices.** Replace each hidden matrix's momentum update by UVᵀ.
+*Papers:* Jordan et al. (2024, Muon blog, §Definition, §"Why is it good to orthogonalize the update?"): the algorithm
+and the near-low-rank updates; arXiv 2409.20325 (Bernstein, Props. 4–5): UVᵀ is the closest semi-orthogonal matrix
+and steepest descent under the spectral norm; arXiv 2502.16982 (Liu, §2.2, §3.2): Muon at LLM scale. *Here*
+(ADAPTED): `train/optim.py` `Muon`; `docs/training.md` §3; `torch.optim.Muon` with NorMuon added.
 
-### Newton–Schulz orthogonalization: quintic (3.4445, −4.7750, 2.0315), 5 bf16 steps, Gram form
-- **Idea.** Approximate UVᵀ without an SVD by iterating an odd quintic X ← aX + (bA + cA²)X, A = XXᵀ, from X₀ = G/‖G‖_F,
-  with bf16 matrix products only; the coefficients maximize the slope at 0 with the iterates kept in [0.7, 1.3].
-- **Papers.** Jordan et al. (2024, blog, non-archival, §Definition, §"Tuning the coefficients"): the coefficients, the
-  Gram-form code, and "it suffices to run the NS iteration for only 5 steps"; arXiv 2409.20325 (Bernstein, 2024,
-  App. A item 4, Eqs. 36–37): the Newton–Schulz iteration for UVᵀ and its odd-polynomial family, classical for fixed
-  coefficients (Kovarik 1970; Björck & Bowie 1971).
-- **Here.** ADOPTED: `train/optim.py` `Muon.step`; `docs/training.md` §3; PyTorch's defaults (coefficients, 5 steps,
-  eps 1e-7).
-- **Upstream.** nanochat; modded-nanogpt.
+**Newton–Schulz orthogonalization: quintic (3.4445, −4.7750, 2.0315), 5 bf16 steps, Gram form.** X ← aX + (bA +
+cA²)X, A = XXᵀ, from X₀ = G/‖G‖_F. *Papers:* Jordan et al. (2024, blog, §Definition, §"Tuning the coefficients"):
+the coefficients and "only 5 steps"; arXiv 2409.20325 (Bernstein, App. A item 4, Eqs. 36–37): the iteration,
+classical for fixed coefficients (Kovarik 1970; Björck & Bowie 1971). *Here* (ADOPTED): `train/optim.py`
+`Muon.step`; `docs/training.md` §3; PyTorch's defaults (eps 1e-7).
 
-### Nesterov momentum 0.95 in EMA ("lerp") form
-- **Idea.** Orthogonalize the Nesterov look-ahead of the momentum buffer; kept as an EMA, buf ← β·buf + (1 − β)·g, the
-  buffer is classical momentum scaled by (1 − β), which orthogonalization removes.
-- **Papers.** Sutskever et al. (2013, ICML, non-arXiv, §2): Nesterov's accelerated gradient as a momentum method;
-  Jordan et al. (2024, blog, non-archival, §"Empirical considerations"; §"Proving that NS iteration orthogonalizes the
-  update"): Nesterov-style momentum "works a bit better than normal SGD-momentum in every case we have tested", and
-  Ortho(cG) = Ortho(G); arXiv 2502.16982 (Liu, 2025, §2.2 "Other Hyper-parameters"): no consistent gain from tuning
-  momentum, 0.95 used.
-- **Here.** ADOPTED: `train/optim.py` `Muon.step`; `docs/training.md` §3; PyTorch's default 0.95, held constant.
-- **Upstream.** nanochat; modded-nanogpt.
+**Nesterov momentum 0.95 in EMA ("lerp") form.** buf ← β·buf + (1 − β)·g; the (1 − β) scale vanishes under
+orthogonalization. *Papers:* Sutskever et al. (2013, ICML, §2); Jordan et al. (2024, blog, §"Empirical
+considerations"): Nesterov "works a bit better ... in every case we have tested", Ortho(cG) = Ortho(G); arXiv
+2502.16982 (Liu, §2.2): no consistent gain from tuning momentum. *Here* (ADOPTED): `train/optim.py` `Muon.step`;
+`docs/training.md` §3; 0.95 constant.
 
-### Muon/AdamW parameter split
-- **Idea.** Muon only for 2-D hidden matrices; embeddings, the output head and 1-D parameters on AdamW, because these
-  layers call for different norms (linear layers RMS→RMS, embeddings ℓ1→RMS).
-- **Papers.** Jordan et al. (2024, blog, non-archival, §Definition): scalar and vector parameters and the input and
-  output layers "should be optimized by a standard method such as AdamW"; arXiv 2409.20325 (Bernstein, 2024,
-  Epilogue): the RMS→RMS operator norm for linear layers and ℓ1→RMS for embeddings; arXiv 2502.16982 (Liu, 2025,
-  §2.2 "Matching update RMS of AdamW"): AdamW for "RMSNorm, LM head, and embedding parameters".
-- **Here.** ADAPTED: `train/optim.py` `optimizers`; `docs/training.md` §3; value-embedding tables on AdamW, every group
-  at one lr.
-- **Upstream.** nanochat; modded-nanogpt.
+**Muon/AdamW parameter split.** Muon for 2-D hidden matrices; embeddings, head and 1-D parameters on AdamW.
+*Papers:* Jordan et al. (2024, blog, §Definition): these "should be optimized by a standard method such as AdamW";
+arXiv 2409.20325 (Bernstein, Epilogue): RMS→RMS for linear layers, ℓ1→RMS for embeddings; arXiv 2502.16982 (Liu,
+§2.2): AdamW for "RMSNorm, LM head, and embedding parameters". *Here* (ADAPTED): `train/optim.py` `optimizers`;
+`docs/training.md` §3; value tables on AdamW, one lr for every group.
 
-### Muon step size per shape, matched to AdamW's update RMS
-- **Idea.** An orthogonal A×B update has RMS √(1/max(A, B)); scaling it by 0.2·√max(A, B) gives every matrix AdamW's
-  typical update RMS, so Muon and AdamW share one lr and one weight decay.
-- **Papers.** arXiv 2502.16982 (Liu, 2025, §2.2 Lemma 1, Eq. 4): the update RMS and the 0.2·√max(A, B) adjustment,
-  which lets matrix and non-matrix parameters share "learning rate η, weight decay λ".
-- **Here.** ADAPTED: `train/optim.py` `optimizers` (`adjust_lr_fn="match_rms_adamw"`); `docs/training.md` §3;
-  Moonlight's rule replaces upstream's √max(1, rows/cols).
-- **Upstream.** nanochat; modded-nanogpt.
+**Muon step size per shape, matched to AdamW's update RMS.** Scale the orthogonal update by 0.2·√max(A, B).
+*Papers:* arXiv 2502.16982 (Liu, §2.2 Lemma 1, Eq. 4): lets matrix and non-matrix parameters share "learning rate η,
+weight decay λ". *Here* (ADAPTED): `train/optim.py` `optimizers` (`adjust_lr_fn="match_rms_adamw"`);
+`docs/training.md` §3; replaces upstream's √max(1, rows/cols).
 
-### NorMuon: neuron-wise second-moment normalization after orthogonalization
-- **Idea.** Orthogonalized updates have uniform singular values but uneven per-neuron norms; dividing each row of the
-  update by the root of an EMA of its mean square, then restoring the update's norm, adds per-neuron step sizes.
-- **Papers.** arXiv 2510.05491 (Li, 2025, §3.1 Alg. 1; §4.1.1; §4.1.2 Table 1): the method, β₂ = 0.95; Adam's final
-  loss reached in 21.74% / 13.91% fewer steps at 1.1B / 5.4B (Muon 10.43% / 6.08%).
-- **Here.** ADAPTED: `train/optim.py` `Muon.step` (`NORMUON_BETA2`, `NORMUON_EPS`); `docs/training.md` §3; always per
-  row (upstream: along the larger dimension).
-- **Upstream.** nanochat; modded-nanogpt.
+**NorMuon: neuron-wise second-moment normalization after orthogonalization.** Divide each update row by the root of
+an EMA of its mean square, then restore the norm. *Papers:* arXiv 2510.05491 (Li, §3.1 Alg. 1; §4.1.1; §4.1.2
+Table 1): β₂ = 0.95; Adam's final loss in 21.74% / 13.91% fewer steps at 1.1B / 5.4B (Muon 10.43% / 6.08%). *Here*
+(ADAPTED): `train/optim.py` `Muon.step` (`NORMUON_BETA2`, `NORMUON_EPS`); `docs/training.md` §3; always per row
+(upstream: along the larger dimension).
 
-### Polar Express coefficients
-- **Idea.** Replace the fixed quintic by a per-iteration sequence of minimax-optimal odd quintics, each optimal for the
-  current singular-value interval, so the iteration is fast early and still converges.
-- **Papers.** arXiv 2505.16932 (Amsel, 2025, §4.1 Thm. 4.1, Alg. 1; §5.2 Figs. 1, 6): the method; inside Muon on
-  GPT-2 Small and Large (1B FineWeb tokens), lower validation loss than Jordan's and You's coefficients at every lr.
-- **Here.** NOT TAKEN: `train/optim.py` `Muon.step` (PyTorch's fixed coefficients); `docs/experiments.md` §4; dropped
-  after a one-seed d16 screen.
-- **Upstream.** nanochat; modded-nanogpt.
+**Polar Express coefficients.** Per-iteration minimax-optimal quintics. *Papers:* arXiv 2505.16932 (Amsel, §4.1
+Thm. 4.1, Alg. 1; §5.2 Figs. 1, 6): lower GPT-2 validation loss than fixed coefficients at every lr. *Here* (NOT
+TAKEN): `train/optim.py` `Muon.step`; `docs/experiments.md` §4; dropped after a one-seed d16 screen.
 
-### Cautious weight decay
-- **Idea.** Apply decoupled decay only to coordinates where the update and the parameter share a sign; the method then
-  optimizes the unregularized loss and slides toward locally Pareto-optimal magnitudes on the stationary manifold.
-- **Papers.** arXiv 2510.12402 (Chen, 2025, §3.1–3.2; §4 Figs. 1, 4): the analysis; lower final loss for AdamW, Lion
-  and Muon at 338M–2B on C4 at 20 TPP, with the optimal λ essentially unchanged (Fig. 1).
-- **Here.** NOT TAKEN: `train/optim.py` `Muon.step` (decay on every coordinate); `docs/experiments.md` §4; worse at the
-  end of a one-seed d16 screen.
-- **Upstream.** nanochat; modded-nanogpt.
+**Cautious weight decay.** Decay only coordinates where update and parameter share a sign. *Papers:* arXiv
+2510.12402 (Chen, §3.1–3.2; §4 Figs. 1, 4): lower final loss for AdamW, Lion and Muon at 338M–2B, 20 TPP, optimal λ
+unchanged. *Here* (NOT TAKEN): `train/optim.py` `Muon.step`; `docs/experiments.md` §4; worse at the end of a one-seed
+d16 screen.
 
-### Decoupled weight decay (AdamW) and weight decay in Muon
-- **Idea.** Shrink weights by η_t·λ·θ apart from the adaptive step, so the decay is not divided by Adam's second
-  moment; Muon needs the same decay at scale to keep weight and output RMS bounded.
-- **Papers.** arXiv 1711.05101 (Loshchilov, 2017, §2 Alg. 2, Prop. 2): decoupled decay, scaled by the schedule
-  multiplier, differs from L2 regularization for adaptive methods; arXiv 1412.6980 (Kingma, 2014, Alg. 1): Adam;
-  arXiv 2502.16982 (Liu, 2025, §2.2 "Weight Decay", Fig. 2): without decay Muon's weight and output RMS grow past
-  bf16's high-precision range and its early lead fades.
-- **Here.** ADOPTED: `train/optim.py` `optimizers`, `Muon.step`; `docs/training.md` §3; p ← p·(1 − lr·λ) in both
-  optimizers, λ from the τ law.
-- **Upstream.** nanochat; modded-nanogpt.
+**Decoupled weight decay (AdamW) and weight decay in Muon.** p ← p·(1 − lr·λ) apart from the adaptive step.
+*Papers:* arXiv 1711.05101 (Loshchilov, §2 Alg. 2, Prop. 2): decoupled decay differs from L2 for adaptive methods;
+arXiv 1412.6980 (Kingma, Alg. 1): Adam; arXiv 2502.16982 (Liu, §2.2, Fig. 2): without decay Muon's weight and output
+RMS outgrow bf16's precise range and its lead fades. *Here* (ADOPTED): `train/optim.py` `optimizers`, `Muon.step`;
+`docs/training.md` §3; λ from the τ law.
 
-### Weight decay tied to the training horizon (the EMA timescale)
-- **Idea.** With decoupled decay the weights are an EMA of recent updates over τ_iter = 1/(ηλ) steps; choosing λ so
-  that this timescale is a set fraction of the run ties the decay to the training horizon.
-- **Papers.** arXiv 2505.13738 (Bergsma, 2025, Finding 3; App. E.3.1; App. B): in single-epoch pre-training the
-  optimal timescale, as a fraction of the run, falls as a power law in tokens per parameter (c_τ = 1.084,
-  m_τ = −0.527; TPP 20–1280), fit on AdamW, the EMA view applying to other decoupled-decay optimizers;
-  arXiv 2405.13698 (Wang, 2024, §3.1 Eqs. 5–6): AdamW as an EMA with 1/τ_iter = ηλ.
-- **Here.** PARALLEL: `train/optim.py` `tau_weight_decay`; `docs/training.md` §3; one law for AdamW and Muon alike.
-- **Upstream.** nanochat.
+**Weight decay tied to the training horizon (the EMA timescale).** Weights average updates over τ = 1/(ηλ) steps;
+set λ so τ is a fraction of the run. *Papers:* arXiv 2505.13738 (Bergsma, Finding 3; App. E.3.1; App. B): the optimal
+fraction is a power law in TPP (c_τ = 1.084, m_τ = −0.527; TPP 20–1280), fit on AdamW; arXiv 2405.13698 (Wang, §3.1
+Eqs. 5–6): AdamW as an EMA. *Here* (PARALLEL): `train/optim.py` `tau_weight_decay`; `docs/training.md` §3; one law
+for AdamW and Muon.
 
-### Per-group learning rates (AdamW groups, residual scalars)
-- **Idea.** Give each AdamW group (token table, head, value tables, scalars) its own lr, betas, eps and decay, and the
-  residual and x0 scalars their own lrs; the alternative is one lr and one λ for every group.
-- **Papers.** arXiv 2502.16982 (Liu, 2025, §2.2 "Matching update RMS of AdamW"): with RMS-matched Muon, "learning rate
-  η, weight decay λ" are shared among matrix and non-matrix parameters.
-- **Here.** NOT TAKEN: `train/optim.py` `optimizers`; `docs/training.md` §3, `docs/experiments.md` §4; one d16 run of
-  the scalar lrs, not adopted.
-- **Upstream.** nanochat.
+**Per-group learning rates (AdamW groups, residual scalars).** Separate lr, betas, eps and decay per group versus one
+lr and λ. *Papers:* arXiv 2502.16982 (Liu, §2.2): with RMS-matched Muon "learning rate η, weight decay λ" are shared.
+*Here* (NOT TAKEN): `train/optim.py` `optimizers`; `docs/training.md` §3, `docs/experiments.md` §4; one d16 run of
+the scalar lrs, not adopted.
 
-### Batch size and peak learning rate from compute scaling laws
-- **Idea.** The loss-optimal batch grows and the optimal lr falls with training compute; read both off fitted power
-  laws at the run's compute C = M·D.
-- **Papers.** arXiv 2401.02954 (DeepSeek-AI, 2024, §3.1 Eq. 1): η_opt = 0.3118·C^−0.1250, B_opt = 0.2920·C^0.3271,
-  fit on 1e17–2e19 FLOPs under a multi-step schedule.
-- **Here.** PARALLEL: `train/schedule.py` `plan`; `docs/training.md` §2, §5; the law's lr times a multiplier measured at
-  d24.
-- **Upstream.** nanochat.
+**Batch size and peak learning rate from compute scaling laws.** Read both off power laws at C = M·D. *Papers:*
+arXiv 2401.02954 (DeepSeek LLM, §3.1 Eq. 1): η_opt = 0.3118·C^−0.1250, B_opt = 0.2920·C^0.3271 (1e17–2e19 FLOPs,
+multi-step schedule). *Here* (PARALLEL): `train/schedule.py` `plan`; `docs/training.md` §2, §5; the law's lr times a
+multiplier measured at d24.
 
-### Global gradient-norm clipping at 1.0
-- **Idea.** Rescale the whole gradient to norm 1 when it exceeds it, bounding the step on rare exploding-gradient
-  events without changing ordinary steps.
-- **Papers.** arXiv 1211.5063 (Pascanu, 2012, §3.2 Alg. 1): norm clipping against exploding gradients;
-  arXiv 2401.02954 (DeepSeek-AI, 2024, §2.3): gradient clipping set to 1.0.
-- **Here.** ADOPTED: `train/optim.py` `update` (`MAX_GRAD_NORM`); `docs/training.md` §3; kept where both upstreams
-  removed it.
-- **Upstream.** nanochat; modded-nanogpt.
+**Global gradient-norm clipping at 1.0.** *Papers:* arXiv 1211.5063 (Pascanu, §3.2 Alg. 1): norm clipping against
+exploding gradients; arXiv 2401.02954 (DeepSeek LLM, §2.3): clipping at 1.0. *Here* (ADOPTED): `train/optim.py`
+`update` (`MAX_GRAD_NORM`); `docs/training.md` §3; kept where both upstreams removed it.
 
-### Linear warmup over 2/(1 − β₂) steps
-- **Idea.** Ramp the lr linearly at the start, while Adam's second-moment estimate is unreliable; an untuned ramp over
-  2/(1 − β₂) steps (40 at β₂ = 0.95) is interchangeable with a rectified (RAdam) schedule.
-- **Papers.** arXiv 1910.04209 (Ma, 2019, §4.3 Eq. 14, §4.4): "linear warmup over τ = 2·(1−β2)^−1 iterations" as an
-  untuned rule of thumb, more or less interchangeable with RAdam.
-- **Here.** ADOPTED: `train/schedule.py` `WARMUP_STEPS`, `lr_lambda`; `docs/training.md` §4; step s at (s + 1)/40.
-- **Upstream.** nanochat.
+**Linear warmup over 2/(1 − β₂) steps.** 40 steps at β₂ = 0.95. *Papers:* arXiv 1910.04209 (Ma, §4.3 Eq. 14,
+§4.4): "linear warmup over τ = 2·(1−β2)^−1 iterations", untuned, about interchangeable with RAdam. *Here* (ADOPTED):
+`train/schedule.py` `WARMUP_STEPS`, `lr_lambda`; `docs/training.md` §4; step s at (s + 1)/40.
 
-### Linear decay to zero, not a trapezoid with a floor
-- **Idea.** Decay the lr linearly from the peak to zero over the whole run, which averages more updates late in
-  training as tokens per parameter grow; the upstream alternative is a constant phase, a cooldown and a nonzero floor.
-- **Papers.** arXiv 2502.15938 (Bergsma, 2025, §4.2 Figs. 6, 8): linear decay to zero beats 10× decay by a gap that
-  grows with TPP (111M–1.7B) and is "around 0.84% better than the optimal WSD" (610M, 80 TPP); arXiv 2405.18392
-  (Hägele, 2024, Abstract): a constant lr with a cooldown scales "predictably and reliably similar to cosine".
-- **Here.** ADAPTED: `train/schedule.py` `lr_lambda`; `docs/training.md` §4; the last step at 1/(steps − 40) of peak.
-- **Upstream.** nanochat; modded-nanogpt.
+**Linear decay to zero, not a trapezoid with a floor.** *Papers:* arXiv 2502.15938 (Bergsma, §4.2 Figs. 6, 8): beats
+10× decay by a gap growing with TPP and is "around 0.84% better than the optimal WSD" (610M, 80 TPP); arXiv
+2405.18392 (Hägele, Abstract): constant + cooldown scales "similar to cosine". *Here* (ADAPTED): `train/schedule.py`
+`lr_lambda`; `docs/training.md` §4; the last step at 1/(steps − 40) of peak.
 
-### Each group's lr as its peak times one schedule multiplier
-- **Idea.** Store each group's peak lr and multiply it by one function of the step, so every group follows one
-  schedule and keeps its ratio to the others.
-- **Papers.** None: engineering detail.
-- **Here.** ADAPTED: `train/loop.py` `LambdaLR`; `docs/training.md` §4; PyTorch's `LambdaLR` over `lr_lambda`.
-- **Upstream.** nanochat.
+**Each group's lr as its peak times one schedule multiplier.** *Papers:* None. *Here* (ADAPTED): `train/loop.py`
+`LambdaLR`; `docs/training.md` §4.
 
-### Hyperparameter transfer from a small reference model
-- **Idea.** Tune at a small reference size and carry lr, batch and decay to larger models by scaling rules; the optima
-  transfer only under a parameterization that makes them size-independent.
-- **Papers.** arXiv 2203.03466 (Yang, 2022, Fig. 1, Table 3): under μP the optimal lr is stable with width, under
-  standard parameterization it is not; arXiv 2512.22382 (Mlodozeniec, 2025, Abstract): transfer across modules, width,
-  depth, batch and training duration.
-- **Here.** NOT TAKEN: `ablations/peak_lr.py` `lr_multiplier`; `docs/training.md` §5; the lr multiplier measured at
-  d24 itself.
-- **Upstream.** nanochat.
+**Hyperparameter transfer from a small reference model.** *Papers:* arXiv 2203.03466 (Yang, Fig. 1, Table 3): under
+μP the optimal lr is stable with width, under standard parameterization it is not; arXiv 2512.22382 (Mlodozeniec,
+Abstract): transfer across modules, width, depth, batch and duration. *Here* (NOT TAKEN): `ablations/peak_lr.py`
+`lr_multiplier`; `docs/training.md` §5; the multiplier measured at d24 itself.
 
-### Training horizon from tokens per parameter
-- **Idea.** Set the token budget D = r·N for a ratio r and steps = D // B; at the compute-optimal frontier parameters
-  and tokens grow in equal proportion, about 20 tokens per parameter.
-- **Papers.** arXiv 2203.15556 (Hoffmann, 2022, Abstract; §3.4 Table 3): tokens doubled with model size; 1B parameters
-  ↔ 20.2B tokens.
-- **Here.** ADAPTED: `train/schedule.py` `plan`; `docs/training.md` §2; r is data-bound (`train/stages.py`
-  `max_tokens_per_param`, ≈528), not compute-optimal.
-- **Upstream.** nanochat.
+**Training horizon from tokens per parameter.** D = r·N, steps = D // B. *Papers:* arXiv 2203.15556 (Hoffmann,
+Abstract; §3.4 Table 3): 1B parameters ↔ 20.2B tokens. *Here* (ADAPTED): `train/schedule.py` `plan`;
+`docs/training.md` §2; r data-bound (`train/stages.py` `max_tokens_per_param`, ≈528), not compute-optimal.
 
-### Scaling-parameter count: decoder layers + lm_head
-- **Idea.** Count the parameters that scale compute, the decoder layers and the output head; lookup tables (token and
-  value embeddings) cost no matmul FLOPs and are excluded.
-- **Papers.** arXiv 2001.08361 (Kaplan, 2020, §1.3): N excludes "all vocabulary and positional embeddings";
-  arXiv 2406.19146 (Porian, 2024, §3.2): leaving out the head under-counts FLOPs by roughly 10% (large) to 90% (small
-  models), so counting it is "significantly more accurate".
-- **Here.** ADOPTED: `model/modeling.py` `num_non_embedding_params`; `docs/architecture.md` §1, `docs/training.md` §2;
-  the layers' 1-D gains and `ve_gate` counted.
-- **Upstream.** nanochat.
+**Scaling-parameter count: decoder layers + lm_head.** Lookup tables cost no matmul FLOPs and are excluded.
+*Papers:* arXiv 2001.08361 (Kaplan, §1.3): N excludes embeddings; arXiv 2406.19146 (Porian, §3.2): omitting the head
+under-counts FLOPs by ~10% (large) to 90% (small). *Here* (ADOPTED): `model/modeling.py` `num_non_embedding_params`;
+`docs/architecture.md` §1, `docs/training.md` §2; 1-D gains and `ve_gate` counted.
 
-### FLOPs per token: 6N plus attention over the attended keys
-- **Idea.** Training costs 6 FLOPs per matmul weight per token (2 forward, 4 backward) plus attention's QKᵀ and PV,
-  12·L·H·Q·T for context T; a plan read off a fitted law must count FLOPs as the law was fit.
-- **Papers.** arXiv 2204.02311 (Chowdhery, 2022, App. B): 6N + 12LHQT FLOPs per token; arXiv 2401.02954 (DeepSeek-AI,
-  2024, §3.2 Eq. 2): M = 72·n_layer·d_model² + 12·n_layer·d_model·l_seq, attention included, the scale its laws use.
-- **Here.** ADAPTED: `metrics.py` `model_flops_per_token`, `executed_model_flops`; `docs/evaluation.md` §5,
-  `docs/training.md` §2; T = min(window + 1, context) per layer, while the plan uses M.
-- **Upstream.** nanochat.
+**FLOPs per token: 6N plus attention over the attended keys.** A plan read off a law must count FLOPs as the law was
+fit. *Papers:* arXiv 2204.02311 (PaLM, App. B): 6N + 12LHQT; arXiv 2401.02954 (DeepSeek LLM, §3.2 Eq. 2):
+M = 72·n_layer·d_model² + 12·n_layer·d_model·l_seq. *Here* (ADAPTED): `metrics.py` `model_flops_per_token`,
+`executed_model_flops`; `docs/evaluation.md` §5, `docs/training.md` §2; T = min(window + 1, context) per layer, the
+plan uses M.
 
-### Small-proxy tuning gains shrink with scale
-- **Idea.** Gains tuned on a small proxy shrink, or reverse, at larger scale, so small-proxy hyperparameter tuning is
-  distrusted.
-- **Papers.** arXiv 2509.02046 (Wen, 2025, §1 Fig. 1): an under-tuned AdamW baseline inflates speedups, and optimizer
-  speedups fall from 1.3–1.4× below 1B to 1.1× at 1.2B; arXiv 2512.05620 (Qiu, 2025, Abstract): with μP and 1/width
-  weight decay, Muon keeps about 1.4× over AdamW from 190M to 1.4B, and the speedup vanishes under incorrect scaling.
-- **Here.** EVIDENCE: `docs/experiments.md` §1 ("Proxy settings").
-- **Upstream.** nanochat.
+**Small-proxy tuning gains shrink with scale.** *Papers:* arXiv 2509.02046 (Wen, §1 Fig. 1): optimizer speedups fall
+from 1.3–1.4× below 1B to 1.1× at 1.2B; arXiv 2512.05620 (Qiu, Abstract): with μP and 1/width decay Muon keeps ~1.4×
+from 190M to 1.4B, vanishing under incorrect scaling. *Here* (EVIDENCE): `docs/experiments.md` §1 ("Proxy
+settings").
 
 ## 3. Tokenizer, data and evaluation
 
-### Byte-level BPE
-- **Idea.** BPE builds a subword vocabulary by repeatedly merging the most frequent adjacent symbol pair, so any string
-  is encoded without unknown symbols; run on UTF-8 bytes, its base vocabulary is the 256 byte values.
-- **Papers.** arXiv 1508.07909 (Sennrich, 2015, §3.2): BPE for word segmentation, "iteratively count all symbol pairs
-  and replace each occurrence of the most frequent pair"; Radford et al., 2019, "Language Models are Unsupervised
-  Multitask Learners" (OpenAI report, non-archival, §2.2): byte-level BPE needs a base vocabulary of only 256.
-- **Here.** ADOPTED: `corpus/crate/train.rs` `train`, `corpus/tokenizer.py` `Tokenizer`; `docs/corpus.md` §5.
-- **Upstream.** nanochat.
+**Byte-level BPE.** *Papers:* arXiv 1508.07909 (Sennrich, §3.2): iteratively merge the most frequent pair; Radford
+et al. (2019, OpenAI report, §2.2): byte-level base vocabulary of 256. *Here* (ADOPTED): `corpus/crate/train.rs`
+`train`, `corpus/tokenizer.py` `Tokenizer`; `docs/corpus.md` §5.
 
-### SA-BPE merge score in an incremental BPE trainer
-- **Idea.** Merge the pair of highest F·log R (F its frequency, R the number of repositories holding it) instead of
-  highest F, so pairs frequent inside one source do not become rarely seen, under-trained tokens.
-- **Papers.** arXiv 2604.14053 (Chizhov, 2026, §4.1 "Priority criterion"; §5 Table 3): F·log R cuts verified
-  under-trained tokens from 640 to 72 of 646 tested, at compression 3.643 against BPE's 3.623.
-- **Here.** ADAPTED: `corpus/crate/train.rs` `score`, `impl Ord for Job`; `docs/corpus.md` §5; R counts authorship
-  units, and a merge whose bytes are already a token is skipped.
-- **Upstream.** nanochat.
+**SA-BPE merge score in an incremental BPE trainer.** Merge the pair of highest F·log R (R repositories holding it).
+*Papers:* arXiv 2604.14053 (Chizhov, §4.1; §5 Table 3): under-trained tokens 640 → 72 of 646 tested, compression
+3.643 vs BPE's 3.623. *Here* (ADAPTED): `corpus/crate/train.rs` `score`, `impl Ord for Job`; `docs/corpus.md` §5; R
+counts authorship units; a merge whose bytes are already a token is skipped.
 
-### Vocabulary of 2^15 ids, special tokens inside it
-- **Idea.** Fix the vocabulary at 2^15 ids with the special tokens counted inside it; for code, larger vocabularies
-  have shown no gain.
-- **Papers.** arXiv 2402.01035 (Dagan, 2024, §3.2, Table 3): an NL-pretrained 1.5B model given GPT-4-style tokenizers
-  of 32K–256K, vocabulary size vs HumanEval pass@1 Pearson r = −0.13, p = 0.87; arXiv 2402.19173 (StarCoder2, 2024,
-  §6.2): "increasing the vocabulary size to 100K did not improve performance".
-- **Here.** ADOPTED: `model/config.py` `VOCAB_SIZE`, `corpus/train_tokenizer.py` `main` (2^15 − 4 specials − 256
-  merges); `docs/corpus.md` §5.
-- **Upstream.** nanochat.
+**Vocabulary of 2^15 ids, special tokens inside it.** *Papers:* arXiv 2402.01035 (Dagan, §3.2, Table 3): 32K–256K
+vocabulary vs HumanEval pass@1 r = −0.13, p = 0.87; arXiv 2402.19173 (StarCoder2, §6.2): 100K "did not improve
+performance". *Here* (ADOPTED): `model/config.py` `VOCAB_SIZE`, `corpus/train_tokenizer.py` `main`;
+`docs/corpus.md` §5.
 
-### Pre-tokenization by a split regex, no line break after a punctuation run
-- **Idea.** A regex cuts text into chunks (letters, digits, punctuation, whitespace) and merges never cross a chunk,
-  so vocabulary slots are not spent on variants such as "dog." / "dog!"; cl100k's punctuation clause also absorbs
-  following line breaks (tokens like `"):\n"`), which this pattern drops.
-- **Papers.** Radford et al., 2019 (OpenAI report, non-archival, §2.2): BPE is prevented "from merging across
-  character categories"; arXiv 2608.18062 (Meister, 2026, App. F.3, fn. 16): over 18 byte-level math+code models,
-  vocabulary tokens holding a line break vs MBPP pass@1 Spearman ρ = −0.717 (p = 8.1e-4); its companion post
-  "Tokenizer Code Ablations" (blog, non-archival, "Differing one regex clause"): deleting the trailing `[\r\n/]*`
-  from the punctuation clause, same corpus, three seeds, MBPP pass@1 mean 0.086 → 0.230.
-- **Here.** ADAPTED: `corpus/tokenizer.py` `SPLIT_PATTERN`; `docs/corpus.md` §5, `docs/experiments.md` §2;
-  nanochat's pattern without `[\r\n]*` after a punctuation run.
-- **Upstream.** nanochat.
+**Pre-tokenization by a split regex, no line break after a punctuation run.** *Papers:* Radford et al. (2019, §2.2):
+no merges "across character categories"; arXiv 2608.18062 (Meister, App. F.3, fn. 16): over 18 models, line-break
+tokens vs MBPP pass@1 Spearman ρ = −0.717 (p = 8.1e-4); its companion post ("Differing one regex clause"): dropping
+the trailing `[\r\n/]*` lifts MBPP pass@1 0.086 → 0.230 (three seeds). *Here* (ADAPTED): `corpus/tokenizer.py`
+`SPLIT_PATTERN`; `docs/corpus.md` §5, `docs/experiments.md` §2; nanochat's pattern without `[\r\n]*` there.
 
-### Digit runs of one or two (`\p{N}{1,2}`)
-- **Idea.** Numbers are chunked into runs of at most k digits before BPE, giving a fixed, regular set of number
-  tokens; small k makes arithmetic more uniform, larger k compresses more.
-- **Papers.** arXiv 2302.13971 (LLaMA, 2023, §2.1): "we split all numbers into individual digits" (k = 1); arXiv
-  2402.14903 (Singh, 2024, §1, Table 1): PaLM, LLaMA 1–2 and Mistral use single digits, GPT-3.5/4 left-to-right chunks
-  of up to three; right-to-left chunking raises their addition accuracy by up to 20%. Neither tests k = 2.
-- **Here.** ADOPTED: `corpus/tokenizer.py` `SPLIT_PATTERN`; `docs/corpus.md` §5; k = 2 is nanochat's.
-- **Upstream.** nanochat.
+**Digit runs of one or two (`\p{N}{1,2}`).** *Papers:* arXiv 2302.13971 (LLaMA, §2.1): single digits; arXiv
+2402.14903 (Singh, §1, Table 1): right-to-left 3-digit chunking raises addition accuracy up to 20%; neither tests
+k = 2. *Here* (ADOPTED): `corpus/tokenizer.py` `SPLIT_PATTERN`; `docs/corpus.md` §5.
 
-### BOS as the only document token: delimiter, end-of-document target, generation stop
-- **Idea.** One special token starts every document; the token after a document's last token is the next BOS, so
-  the model learns to end documents and a sampled BOS ends a generation. Special ids follow the mergeable ranks.
-- **Papers.** None: a convention.
-- **Here.** ADAPTED: `corpus/tokenizer.py` `SPECIAL_TOKENS`, `corpus/loader.py` `PretrainingBatches.assemble`,
-  `inference/decoder.py` `NativeDecoder`; `docs/corpus.md` §5, §9, `docs/evaluation.md` §6; BOS is a target only
-  after a piece that ends its document or a FIM middle, and three FIM sentinels replace the chat tokens.
-- **Upstream.** nanochat.
+**BOS as the only document token: delimiter, end-of-document target, generation stop.** *Papers:* None. *Here*
+(ADAPTED): `corpus/tokenizer.py` `SPECIAL_TOKENS`, `corpus/loader.py` `PretrainingBatches.assemble`,
+`inference/decoder.py` `NativeDecoder`; `docs/corpus.md` §5, §9, `docs/evaluation.md` §6; BOS is a target only after a
+piece that ends its document or a FIM middle; three FIM sentinels replace the chat tokens.
 
-### Tokenizer comparison by compression ratio
-- **Idea.** Ranking tokenizers by bytes per token assumes fewer tokens means a better model.
-- **Papers.** arXiv 2402.18376 (Schmidt, 2024, §5.3): within a vocabulary-construction method corpus token count
-  varies little while pre-tokenization and segmentation change accuracy; it is not inherently beneficial to use fewer
-  tokens. Meister 2026 companion post (blog, non-archival, "Code bits per byte"): code bits per byte shows no
-  association with MBPP.
-- **Here.** NOT TAKEN: `metrics.py` `parse_outcome`; `docs/experiments.md` §2, `docs/evaluation.md` §3; compression
-  does not rank the tokenizer arms, line-break entries and the parse measure do.
-- **Upstream.** nanochat.
+**Tokenizer comparison by compression ratio.** *Papers:* arXiv 2402.18376 (Schmidt, §5.3): fewer tokens is not
+inherently beneficial; Meister 2026 companion post ("Code bits per byte"): no association with MBPP. *Here* (NOT
+TAKEN): `metrics.py` `parse_outcome`; `docs/experiments.md` §2, `docs/evaluation.md` §3.
 
-### BOS-aligned rows with best-fit-decreasing packing
-- **Idea.** Concatenate-and-chunk packing cuts documents at row boundaries, so targets lose their document's start;
-  packing whole documents (or minimal pieces) into rows by bin packing removes those truncations at almost no
-  padding cost.
-- **Papers.** arXiv 2404.10830 (Ding, 2024, Abstract, §3.1, Table 2): Best-Fit-Decreasing over document chunks of at
-  most the context length adds ≤ 0.01% training sequences over concatenation and improves text and code models.
-- **Here.** ADAPTED: `corpus/crate/pack.rs` `best_fit_decreasing`, `corpus/loader.py` `PretrainingBatches.assemble`;
-  `docs/corpus.md` §8, §9; documents cut at statement or line boundaries, nothing cropped, a BOS before every piece.
-- **Upstream.** nanochat; modded-nanogpt.
+**BOS-aligned rows with best-fit-decreasing packing.** *Papers:* arXiv 2404.10830 (Ding, Abstract, §3.1, Table 2):
+BFD adds ≤ 0.01% sequences over concatenation and improves text and code models. *Here* (ADAPTED):
+`corpus/crate/pack.rs` `best_fit_decreasing`, `corpus/loader.py` `PretrainingBatches.assemble`; `docs/corpus.md` §8,
+§9; cuts at statement or line boundaries, a BOS before every piece.
 
-### ClimbMix as the web-text source
-- **Idea.** Cluster a web corpus in embedding space, prune clusters and search cluster mixture weights with proxy
-  models; the resulting mix trains better models per token than single-filter web datasets.
-- **Papers.** arXiv 2504.13161 (Diao, 2025, §6, Fig. 1): Nemotron-ClimbMix, 400B tokens mixed by CLIMB from
-  Nemotron-CC and smollm-corpus; a 1B model trained on it from scratch outperforms ones trained on Nemotron-CC,
-  SmolLM, DCLM-baseline and FineWeb-Edu at equal token budget.
-- **Here.** ADOPTED: `corpus/sources.py` `SOURCES`, `corpus/mixture.py` `FILE_LEVEL_STAGE`, `REPO_LEVEL_STAGE`;
-  `docs/corpus.md` §1, §7; the 10% text group, read in part.
-- **Upstream.** nanochat.
+**ClimbMix as the web-text source.** *Papers:* arXiv 2504.13161 (Diao, §6, Fig. 1): 400B tokens; a 1B model on it
+beats Nemotron-CC, SmolLM, DCLM-baseline and FineWeb-Edu at equal tokens. *Here* (ADOPTED): `corpus/sources.py`
+`SOURCES`, `corpus/mixture.py` `FILE_LEVEL_STAGE`, `REPO_LEVEL_STAGE`; `docs/corpus.md` §1, §7; the 10% text group.
 
-### Bits per byte, zero-byte targets excluded
-- **Idea.** Report summed nats over ln 2 times summed UTF-8 bytes of the targets, which compares models across
-  tokenizers; targets that are not text (BOS, padding, FIM sentinels; 0 bytes) contribute neither nats nor bytes.
-- **Papers.** arXiv 2101.00027 (The Pile, 2020, §3.1): bpb = (L_T / L_B)·ℓ / ln 2, L_B in UTF-8 bytes, preferred "due
-  to its invariance to different tokenization schemes". The zero-byte exclusion has no paper.
-- **Here.** ADAPTED: `eval/bpb.py` `sums`, `corpus/tokenizer.py` `Tokenizer.token_lengths`, `metrics.py` `bpb`,
-  `mixture_bpb`; `docs/evaluation.md` §2, §5; fp64 sums per context bucket, byte-offset bucket and row.
-- **Upstream.** nanochat.
+**Bits per byte, zero-byte targets excluded.** *Papers:* arXiv 2101.00027 (The Pile, §3.1): bpb, "invariance to
+different tokenization schemes"; the zero-byte exclusion has no paper. *Here* (ADAPTED): `eval/bpb.py` `sums`,
+`corpus/tokenizer.py` `Tokenizer.token_lengths`, `metrics.py` `bpb`, `mixture_bpb`; `docs/evaluation.md` §2, §5.
 
-### Validation budget of 80 × 2^19 tokens
-- **Idea.** A fixed number of validation tokens per evaluation, enough that the estimate's noise is below the
-  differences of interest.
-- **Papers.** None: a size inherited from nanochat.
-- **Here.** ADAPTED: `eval/bpb.py` `VAL_TOKENS`, `sample_rows`; `docs/evaluation.md` §2; per corpus, rounded up to
-  whole micro-batches, rows drawn systematically.
-- **Upstream.** nanochat.
+**Validation budget of 80 × 2^19 tokens.** *Papers:* None (nanochat's size). *Here* (ADAPTED): `eval/bpb.py`
+`VAL_TOKENS`, `sample_rows`; `docs/evaluation.md` §2; per corpus, whole micro-batches, rows drawn systematically.
 
-### Execution-based pass@k in a sandbox
-- **Idea.** Score generated code by running its tests in an isolated process and estimate pass@k without bias from n
-  samples per problem.
-- **Papers.** arXiv 2107.03374 (Chen, 2021, §2.1, §2.3): functional correctness, the unbiased pass@k estimator, a
-  sandbox for executing generated programs.
-- **Here.** PARALLEL: `metrics.py` `pass_at_k`, `eval/code_eval.py` `evalplus`, `multipl_e`; `docs/evaluation.md`
-  §4, §5; the EvalPlus, MultiPL-E and infilling evaluators' own execution.
-- **Upstream.** nanochat.
+**Execution-based pass@k in a sandbox.** *Papers:* arXiv 2107.03374 (Chen, §2.1, §2.3): functional correctness, the
+unbiased estimator, a sandbox. *Here* (PARALLEL): `metrics.py` `pass_at_k`, `eval/code_eval.py` `evalplus`,
+`multipl_e`; `docs/evaluation.md` §4, §5.
 
-### Truncated sampling: nucleus (top-p), not top-k
-- **Idea.** Sample at a temperature from a truncated distribution; the nucleus is the smallest set of tokens holding
-  probability p, which adapts to the distribution's shape where a fixed k does not.
-- **Papers.** arXiv 1904.09751 (Holtzman, 2019, §3.1, §3.2): nucleus sampling and the difficulty of choosing k.
-- **Here.** PARALLEL: `inference/decoder.py` `NativeDecoder`, `model/kernels/decode.cu` `k_nucleus`;
-  `docs/evaluation.md` §4, §6.
-- **Upstream.** nanochat.
+**Truncated sampling: nucleus (top-p), not top-k.** *Papers:* arXiv 1904.09751 (Holtzman, §3.1, §3.2). *Here*
+(PARALLEL): `inference/decoder.py` `NativeDecoder`, `model/kernels/decode.cu` `k_nucleus`; `docs/evaluation.md` §4,
+§6.
 
 ## 4. Systems and numerics
 
-### FlashAttention kernels for training attention
-- **Idea.** Exact attention computed tile by tile in on-chip SRAM with an online softmax, never materializing the N×N
-  score matrix, so HBM traffic, the bottleneck, falls; later versions add Hopper asynchrony (FA3) and Blackwell
-  pipelining (FA4).
-- **Papers.** arXiv 2205.14135 (Dao et al., 2022, Abstract, §3.2 Thm. 2): tiling and recomputation give exact attention
-  with far fewer HBM accesses than standard attention; arXiv 2407.08608 (Shah et al., 2024, Abstract, §3.1): the
-  Hopper algorithm (warp-specialized producers and consumers, pingpong overlap of softmax and GEMMs); arXiv 2603.05451
-  (Zadouri et al., 2026, Abstract, §4): FA4, written in CuTe-DSL.
-- **Here.** ADAPTED: `model/ops/flash_attn.py` `attention`; `docs/architecture.md` §3; FA4's CuTe-DSL SM90 kernels,
-  varlen, in place of upstream's FA3, no SDPA fallback (`docs/experiments.md` §5, "FA3 not pursued").
-- **Upstream.** nanochat; modded-nanogpt.
+**FlashAttention kernels for training attention.** *Papers:* arXiv 2205.14135 (Dao, Abstract, §3.2 Thm. 2): exact
+tiled attention with far fewer HBM accesses; arXiv 2407.08608 (Shah, Abstract, §3.1): Hopper warp specialization and
+pingpong; arXiv 2603.05451 (Zadouri, Abstract, §4): FA4 in CuTe-DSL. *Here* (ADAPTED): `model/ops/flash_attn.py`
+`attention`; `docs/architecture.md` §3; FA4's SM90 varlen kernels instead of FA3, no SDPA fallback
+(`docs/experiments.md` §5).
 
-### Sliding windows inside the attention kernel
-- **Idea.** A local mask leaves most score tiles fully masked; a kernel that skips them cuts IO and compute in
-  proportion to the tiles kept, and applies the mask only on partially masked tiles.
-- **Papers.** arXiv 2205.14135 (Dao et al., 2022, §3.3 Prop. 4): block-sparse FlashAttention's HBM accesses scale with
-  the fraction of nonzero blocks; arXiv 2412.05496 (Dong et al., 2024, §4.2, Fig. 3): a precomputed BlockMask skips
-  fully masked blocks of a sliding-window mask and evaluates the mask only on partial blocks.
-- **Here.** ADAPTED: `model/modeling.py` `layer_windows`, `model/ops/flash_attn.py` `fa4_window_left`;
-  `docs/architecture.md` §1, §3; a token-exact 512-key window in FA4's kernel, not a block-aligned one
-  (`docs/experiments.md` §3).
-- **Upstream.** nanochat; modded-nanogpt.
+**Sliding windows inside the attention kernel.** *Papers:* arXiv 2205.14135 (Dao, §3.3 Prop. 4): block-sparse IO
+scales with nonzero blocks; arXiv 2412.05496 (Dong, §4.2, Fig. 3): BlockMask skips fully masked blocks. *Here*
+(ADAPTED): `model/modeling.py` `layer_windows`, `model/ops/flash_attn.py` `fa4_window_left`; `docs/architecture.md`
+§1, §3; token-exact, not block-aligned (`docs/experiments.md` §3).
 
-### Fixed-size `cu_seqlens`, with only the real segments passed to the kernel
-- **Idea.** A static-shape compiler recompiles for every new input shape, so varlen offsets are padded to a fixed
-  length; the kernel launches work for every listed segment, so passing only the real ones removes the padding's cost.
-- **Papers.** PyTorch 2 (Ansel et al., ASPLOS 2024, not on arXiv, §5): static-shape compilers "must recompile if any
-  input shape changes"; arXiv 2307.08691 (Dao, 2023, §3.2): the forward is parallelized over batch, heads and row
-  blocks, one thread block each, so every listed sequence gets work.
-- **Here.** ADAPTED: `corpus/loader.py` `PretrainingBatches` (fixed `num_segments + 1` offsets),
-  `model/ops/flash_attn.py` `segmented`; `docs/architecture.md` §3; FA4 gets the batch's exact segment count, not a
-  tighter static bound.
-- **Upstream.** nanochat; modded-nanogpt.
+**Fixed-size `cu_seqlens`, with only the real segments passed to the kernel.** *Papers:* PyTorch 2 (Ansel, ASPLOS
+2024, §5): static-shape compilers "must recompile if any input shape changes"; arXiv 2307.08691 (Dao, §3.2): one
+thread block per sequence and row block, so every listed segment gets work. *Here* (ADAPTED): `corpus/loader.py`
+`PretrainingBatches`, `model/ops/flash_attn.py` `segmented`; `docs/architecture.md` §3.
 
-### Mixed precision: fp32 master weights, bf16 GEMM operands with fp32 accumulation
-- **Idea.** Keep fp32 weights for the update and run forward and backward GEMMs on a 16-bit copy with fp32
-  accumulation; bf16 has fp32's exponent range, so it trains without loss scaling.
-- **Papers.** arXiv 1710.03740 (Micikevicius et al., 2017, §3.1): an FP16 copy of FP32 master weights is used in
-  forward and backward; arXiv 1905.12322 (Kalamkar et al., 2019, Abstract, §3): BF16 GEMM inputs, FP32 outputs and an
-  FP32 weight copy match FP32 with no hyperparameter changes and no loss scaling.
-- **Here.** ADAPTED: `model/modeling.py` `GemmLinear.weight_bf16`, `Attention.qkv_bf16`,
-  `CausalLM.refresh_gemm_weights`; `docs/architecture.md` §4; persistent bf16 copies refreshed after each update
-  instead of a cast per forward.
-- **Upstream.** nanochat; modded-nanogpt.
+**Mixed precision: fp32 master weights, bf16 GEMM operands with fp32 accumulation.** *Papers:* arXiv 1710.03740
+(Micikevicius, §3.1): FP32 master weights; arXiv 1905.12322 (Kalamkar, Abstract, §3): BF16 matches FP32 without loss
+scaling. *Here* (ADAPTED): `model/modeling.py` `GemmLinear.weight_bf16`, `Attention.qkv_bf16`,
+`CausalLM.refresh_gemm_weights`; `docs/architecture.md` §4; persistent bf16 copies refreshed after each update.
 
-### Normalization statistics and the loss in fp32
-- **Idea.** Large reductions (norm statistics, softmax normalizers, cross entropy) lose accuracy in 16 bits; doing
-  their arithmetic in fp32 costs nothing in memory-bound layers.
-- **Papers.** arXiv 1710.03740 (Micikevicius et al., 2017, §3.3): large reductions "should be carried out in FP32",
-  without slowing these bandwidth-bound layers.
-- **Here.** ADAPTED: `model/modeling.py` `norm`, `model/ops/cross_entropy.py` `lm_loss`; `docs/architecture.md` §1,
-  §4; norm statistics in fp32 (upstream's norm runs in bf16), the loss from the logits GEMM's fp32 accumulators.
-- **Upstream.** nanochat.
+**Normalization statistics and the loss in fp32.** *Papers:* arXiv 1710.03740 (Micikevicius, §3.3): large
+reductions "should be carried out in FP32". *Here* (ADAPTED): `model/modeling.py` `norm`,
+`model/ops/cross_entropy.py` `lm_loss`; `docs/architecture.md` §1, §4; upstream's norm runs in bf16.
 
-### FP8 training
-- **Idea.** Run GEMMs in 8-bit floating point with scaling factors and fp32 accumulation for up to twice the
-  tensor-core throughput; the casts and transposed copies are extra memory passes.
-- **Papers.** arXiv 2209.05433 (Micikevicius et al., 2022, §3, §4.1 Table 4): E4M3 for weights and activations, E5M2
-  for gradients, per-tensor scaling; GPT models of 126M–175B match 16-bit perplexity within run-to-run noise (175B
-  at 75% of training); arXiv 2412.19437 (DeepSeek-AI, 2024, §3.3, App. B.1, §3.5.2): 1×128 / 128×128 scaling with
-  FP32 accumulation, loss within 0.25% of BF16; the backward re-reads, transposes and re-quantizes activations
-  through HBM.
-- **Here.** NOT TAKEN: bf16 GEMMs (`model/ops/linear.py`); `docs/experiments.md` §5; torchao and Transformer Engine
-  FP8 MLP GEMMs were slower at d24 [unverified: no record].
-- **Upstream.** nanochat; modded-nanogpt.
+**FP8 training.** *Papers:* arXiv 2209.05433 (Micikevicius, §3, §4.1 Table 4): E4M3/E5M2 match 16-bit perplexity at
+126M–175B; arXiv 2412.19437 (DeepSeek-V3, §3.3, App. B.1, §3.5.2): fine-grained scaling, loss within 0.25% of BF16;
+the backward re-quantizes activations through HBM. *Here* (NOT TAKEN): `model/ops/linear.py`;
+`docs/experiments.md` §5; torchao and Transformer Engine FP8 MLP GEMMs slower at d24 [unverified: no record].
 
-### Fused linear cross entropy with the logit cap inside
-- **Idea.** Compute the loss and its gradients from the classifier GEMM without storing the N×V logits, the largest
-  activation of a large-vocabulary model.
-- **Papers.** arXiv 2411.09009 (Wijmans et al., 2024, Abstract, §4): the log-sum-exp computed inside the classifier
-  GEMM in SRAM, making the loss's memory negligible; arXiv 2410.10989 (Hsu et al., 2024, §3.2
-  "FusedLinearCrossEntropy"): the chunked alternative, logits and gradients computed per chunk of rows.
-- **Here.** PARALLEL: `model/ops/cross_entropy.py` `lm_loss`; `docs/architecture.md` §3; QuACK's scaled-exp linear
-  cross entropy per 8,192-row chunk, tanh applied on the fp32 accumulator.
-- **Upstream.** modded-nanogpt.
+**Fused linear cross entropy with the logit cap inside.** *Papers:* arXiv 2411.09009 (Wijmans, Abstract, §4):
+log-sum-exp inside the classifier GEMM; arXiv 2410.10989 (Liger, §3.2): the chunked alternative. *Here* (PARALLEL):
+`model/ops/cross_entropy.py` `lm_loss`; `docs/architecture.md` §3; QuACK per 8,192-row chunk, tanh on the fp32
+accumulator.
 
-### Fused linear + ReLU² GEMM; activations stored for the backward
-- **Idea.** Apply the activation in the GEMM epilogue while the tile is in registers, removing a memory-bound pass;
-  storing the pre-activation spends memory to spare the backward a recomputation.
-- **Papers.** arXiv 2104.04473 (Narayanan et al., 2021, §4.2, §5.8): fusing element-wise kernels (bias + GeLU and
-  others) raises GPT-3 175B throughput by 19%; PyTorch 2 (Ansel et al., ASPLOS 2024, not on arXiv, §6.4 Table 4):
-  matmul templates with pointwise epilogue fusion.
-- **Here.** PARALLEL: `model/ops/linear.py` `relu2_mlp`; `docs/architecture.md` §3; QuACK `gemm_norm_act` with the
-  norm folded in as a row scale, pre-activation and activation both stored (memory spent for speed).
-- **Upstream.** modded-nanogpt.
+**Fused linear + ReLU² GEMM; activations stored for the backward.** *Papers:* arXiv 2104.04473 (Narayanan, §4.2,
+§5.8): element-wise fusion +19% GPT-3 175B throughput; PyTorch 2 (Ansel, §6.4 Table 4): epilogue fusion. *Here*
+(PARALLEL): `model/ops/linear.py` `relu2_mlp`; `docs/architecture.md` §3; QuACK `gemm_norm_act`, norm as a row scale.
 
-### Fused QK-norm + RoPE kernel
-- **Idea.** Compute the per-head RMS norm, gain and rotary embedding of q and k in one memory-bound pass.
-- **Papers.** arXiv 2410.10989 (Hsu et al., 2024, §3.2 "RMSNorm", "RoPE"): normalization and scaling fused into one
-  kernel, the q and k rotation into another.
-- **Here.** PARALLEL: `model/kernels/qk_prologue.cu`, `model/kernels/qk_row.cuh`; `docs/architecture.md` §3; CUDA,
-  fp32 math with one bf16 rounding, the row math shared with the decoder.
-- **Upstream.** modded-nanogpt.
+**Fused QK-norm + RoPE kernel.** *Papers:* arXiv 2410.10989 (Liger, §3.2 "RMSNorm", "RoPE"). *Here* (PARALLEL):
+`model/kernels/qk_prologue.cu`, `model/kernels/qk_row.cuh`; `docs/architecture.md` §3; row math shared with the
+decoder.
 
-### Merged q/k/v projection (one GEMM)
-- **Idea.** Stack W_q, W_k, W_v so the projection is one larger GEMM reading the input once.
-- **Papers.** None: an implementation choice; its value here is this repository's own measurement.
-- **Here.** PARALLEL: `model/ops/linear.py` `qkv_proj`; `docs/architecture.md` §3; separate fp32 parameters, one
-  stacked bf16 copy, dW as three GEMMs.
-- **Upstream.** modded-nanogpt.
+**Merged q/k/v projection (one GEMM).** *Papers:* None; the measurement is this repository's. *Here* (PARALLEL):
+`model/ops/linear.py` `qkv_proj`; `docs/architecture.md` §3.
 
-### Newton–Schulz batched over same-shape matrices
-- **Idea.** Stack Muon's matrices of one shape and run the orthogonalization as one batched GEMM chain with identical
-  math, so a deep model launches a few large kernels instead of many small ones.
-- **Papers.** arXiv 2608.11612 (Amsel et al., 2026, §7): all matrices of one shape orthogonalized as a single batch,
-  which makes the communication rounds O(1) in depth.
-- **Here.** PARALLEL: `train/optim.py` `Muon.step`; `docs/training.md` §3; one GPU, so the gain is kernel efficiency,
-  not communication.
-- **Upstream.** nanochat; modded-nanogpt.
+**Newton–Schulz batched over same-shape matrices.** *Papers:* arXiv 2608.11612 (Amsel, §7): same-shape matrices as
+one batch. *Here* (PARALLEL): `train/optim.py` `Muon.step`; `docs/training.md` §3; on one GPU the gain is kernel
+efficiency, not communication.
 
-### `torch.compile` of the whole model, static shapes, one graph
-- **Idea.** Capture the program into one graph (TorchDynamo) and generate fused kernels (TorchInductor); static
-  shapes avoid dynamic-shape reasoning, and custom ops trace through their meta implementations.
-- **Papers.** PyTorch 2 (Ansel et al., ASPLOS 2024, not on arXiv, Abstract, §5, §5.1): 1.41× training
-  geometric-mean speedup over eager on an A100 across 180+ models; static shapes recompile on any shape change;
-  user-defined meta functions for custom ops.
-- **Here.** ADOPTED: `train/loop.py` `train`; `docs/architecture.md` §3; with `fullgraph=True`, recompiled at the 32K
-  stage, every kernel a custom op with a fake implementation.
-- **Upstream.** nanochat.
+**`torch.compile` of the whole model, static shapes, one graph.** *Papers:* PyTorch 2 (Ansel, Abstract, §5, §5.1):
+1.41× geometric-mean training speedup on A100 over 180+ models; meta functions for custom ops. *Here* (ADOPTED):
+`train/loop.py` `train`; `docs/architecture.md` §3; `fullgraph=True`, recompiled at the 32K stage.
 
-### Fused AdamW step
-- **Idea.** Run the element-wise AdamW update for all tensors in a few kernels instead of one per parameter.
-- **Papers.** None: a PyTorch feature (`torch.optim.AdamW(fused=True)`).
-- **Here.** ADOPTED: `train/optim.py` `optimizers`; `docs/training.md` §3.
-- **Upstream.** nanochat; modded-nanogpt.
+**Fused AdamW step.** *Papers:* None (`torch.optim.AdamW(fused=True)`). *Here* (ADOPTED): `train/optim.py`
+`optimizers`; `docs/training.md` §3.
 
-### Meta-device construction, then explicit initialization
-- **Idea.** Build the module with shape-only tensors so it can be planned and counted before memory is committed, then
-  allocate storage and set every value in one initialization pass.
-- **Papers.** arXiv 2304.11277 (Zhao et al., 2023, §3.1): deferred initialization allocates parameters on a "fake"
-  device, records the initialization operations and replays them on the GPU.
-- **Here.** ADOPTED: `model/modeling.py` `meta_model`, `CausalLM.init_weights`, `train/loop.py` `train`;
-  `docs/architecture.md` §1; an explicit `init_weights` (per-tensor seeded) instead of recorded-op replay.
-- **Upstream.** nanochat.
+**Meta-device construction, then explicit initialization.** *Papers:* arXiv 2304.11277 (FSDP, §3.1): deferred
+initialization on a "fake" device. *Here* (ADOPTED): `model/modeling.py` `meta_model`, `CausalLM.init_weights`,
+`train/loop.py` `train`; `docs/architecture.md` §1; per-tensor seeded `init_weights`, not op replay.
 
-### Garbage-collector control
-- **Idea.** Freeze the long-lived objects and disable automatic collection after the first step, so no collector scan
-  pauses the training loop.
-- **Papers.** None: an engineering detail.
-- **Here.** ADAPTED: `train/loop.py` `train`; `docs/training.md` §8; collection only after each save.
-- **Upstream.** nanochat.
+**Garbage-collector control.** *Papers:* None. *Here* (ADAPTED): `train/loop.py` `train`; `docs/training.md` §8;
+collection only after each save.
 
-### Gradient accumulation weighted by valid tokens
-- **Idea.** A step is several micro-batches whose gradients add up; weighting each by its share of the step's valid
-  labels makes the loss the mean over all valid tokens, not a mean of micro-batch means.
-- **Papers.** arXiv 2410.02660 (Gao et al., 2024, App. A.3 "Token-averaged loss"): averaging over sequences instead of
-  valid tokens "skews the optimization" (SFT, data-parallel); they average over all valid tokens.
-- **Here.** ADAPTED: `model/ops/cross_entropy.py` `step_shares`, `train/loop.py` `train`; `docs/training.md` §6;
-  valid-label shares instead of 1/(accumulation steps).
-- **Upstream.** nanochat.
+**Gradient accumulation weighted by valid tokens.** *Papers:* arXiv 2410.02660 (Gao, App. A.3): averaging over
+sequences "skews the optimization". *Here* (ADAPTED): `model/ops/cross_entropy.py` `step_shares`, `train/loop.py`
+`train`; `docs/training.md` §6; valid-label shares instead of 1/(accumulation steps).
 
-### Overlapping host work with the device step
-- **Idea.** Read the next micro-batches and copy values through pinned memory without blocking while the GPU runs the
-  current step, so the device never waits on the host.
-- **Papers.** None: standard engineering.
-- **Here.** ADAPTED: `train/loop.py` `train`, `corpus/loader.py` `PretrainingBatches`; `docs/training.md` §6; step
-  values also leave through pinned buffers and are logged one step late.
-- **Upstream.** nanochat.
+**Overlapping host work with the device step.** *Papers:* None. *Here* (ADAPTED): `train/loop.py` `train`,
+`corpus/loader.py` `PretrainingBatches`; `docs/training.md` §6; step values logged one step late via pinned buffers.
 
-### Model FLOPs utilization (MFU)
-- **Idea.** Report achieved model FLOPs (tokens per second times an analytic count, excluding rematerialization) over
-  the hardware's peak, so systems compare independent of implementation.
-- **Papers.** arXiv 2204.02311 (Chowdhery et al., 2022, §4.1, App. B): MFU, observed throughput over the theoretical
-  maximum at peak FLOPs, counting forward and backward but not rematerialization.
-- **Here.** ADAPTED: `metrics.py` `mfu`, `executed_model_flops`, `PEAK_FLOPS`; `docs/evaluation.md` §5,
-  `docs/training.md` §7; executed per-segment FLOPs over 989.4 TFLOP/s (H100 SXM / GH200 dense BF16).
-- **Upstream.** nanochat.
+**Model FLOPs utilization (MFU).** *Papers:* arXiv 2204.02311 (PaLM, §4.1, App. B): observed over peak throughput,
+no rematerialization. *Here* (ADAPTED): `metrics.py` `mfu`, `executed_model_flops`, `PEAK_FLOPS`;
+`docs/evaluation.md` §5, `docs/training.md` §7; over 989.4 TFLOP/s (H100 SXM / GH200 dense BF16).
 
 ## References
 

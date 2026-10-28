@@ -21,8 +21,7 @@ struct Syntax {
 
 #[pymethods]
 impl Syntax {
-    /** The lexicon (word, its terminals), Lark's dense LALR tables, the identifier ranges and the mergeable tokens'
-        bytes (ids below BOS's), as inference/syntax_constraint.python_syntax builds them. */
+    /** The syntax from inference/syntax_constraint.python_syntax's lexicon, LALR tables and token bytes. */
     #[new]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (*, keywords, soft, operators, basic, special, terminals, nonterminals, actions, goto, rules,
@@ -40,8 +39,7 @@ impl Syntax {
         Syntax { inner: Arc::new(vocab::Syntax::new(lexicon, tables, token_bytes)) }
     }
 
-    /** The constraint of the tokens generated after prefix (UTF-8 bytes), suffix the text after the generation (b"":
-        none). Raises ValueError when prefix is not a prefix of any module. */
+    /** The constraint after prefix (UTF-8), suffix following the generation; ValueError if prefix is not viable. */
     #[pyo3(signature = (prefix, *, suffix))]
     fn constraint(&self, prefix: &[u8], suffix: &[u8]) -> PyResult<Constraint> {
         let syntax = &self.inner;
@@ -109,7 +107,7 @@ impl Constraint {
     }
 }
 
-/** Whether the grammar ends a module after each text and suffix (necessary for ast.parse), in parallel without the GIL. */
+/** Whether the grammar ends a module after each text and suffix (necessary for ast.parse). */
 #[pyfunction]
 fn grammar_ends(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>) -> PyResult<Vec<bool>> {
     settle(py, &constraints)?;
@@ -123,8 +121,7 @@ fn grammar_ends(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>) -> PyRe
     }).collect()))
 }
 
-/** The next masks into distinct rows of the caller's uint32 buffer at address (row r at address + 4 words rows[r]; bit
-    t % 32 of word t / 32 allows token t), BOS's bit iff a candidate end; whether each row allows some token. */
+/** Writes each next mask into row rows[r] (words uint32 per row) at address; whether each row allows a token. */
 #[pyfunction]
 fn masks(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>, address: usize, rows: Vec<usize>, words: usize)
          -> PyResult<Vec<bool>> {

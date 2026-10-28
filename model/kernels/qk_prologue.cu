@@ -1,7 +1,6 @@
 /*
- * q/k prologue, norm -> gain -> RoPE (transformers modeling_qwen3.py Qwen3Attention.forward, Qwen3RMSNorm; QK-Norm:
- * arXiv 2505.09388 §2), forward and backward in one pass each. Backward from
- * recomputed n: dm1 = dy1 cos - dy2 sin, dm2 = dy1 sin + dy2 cos, dg = sum_rows dm n, dn = dm g,
+ * q/k prologue, norm -> gain -> RoPE (QK-Norm: arXiv 2505.09388 §2), forward and backward in one pass each.
+ * Backward from recomputed n: dm1 = dy1 cos - dy2 sin, dm2 = dy1 sin + dy2 cos, dg = sum_rows dm n, dn = dm g,
  * dx = rstd (dn - n mean(dn n)); dg without atomics: per-block partials summed in block order (k_gain_sum).
  */
 #include "qk_row.cuh"
@@ -32,7 +31,7 @@ __global__ void k_forward(const bf16 *__restrict__ q, const bf16 *__restrict__ k
     }
 }
 
-constexpr int MAX_WARPS = 1024 / WARP;  /* CUDA max threads per block (Programming Guide, Compute Capabilities) */
+constexpr int MAX_WARPS = 1024 / WARP;  /* CUDA's maximum threads per block */
 
 __global__ void k_backward(const bf16 *q, const bf16 *k, const float *gq, const float *gk, const bf16 *dqo,
                            const bf16 *dko, bf16 *dq, bf16 *dk, const float *cos, const float *sin, float *part,

@@ -1,6 +1,6 @@
 """
 Checkpoints, each written to a temp file then renamed (atomic): RUNS/<run_name>/checkpoint-<step>.pt, a run's full
-state (resumed from; evaluated if among run.checkpoint_steps); weights-<step>.pt, its fp32 weights and model config
+state (resumed from; evaluated if among run.py checkpoint_steps); weights-<step>.pt, its fp32 weights and model config
 only (for analysis; never resumed from or evaluated).
 """
 

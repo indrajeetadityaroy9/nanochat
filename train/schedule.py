@@ -44,8 +44,7 @@ def plan(*, model: CausalLM, tokens_per_param: float) -> RunPlan:
 
 
 def lr_lambda(current_step: int, *, num_training_steps: int) -> float:
-    """LambdaLR multiplier at step `current_step`: linear warmup over WARMUP_STEPS steps, then linear decay to 0
-    through the repo-level stage (arXiv 2502.15938 §4.2)."""
+    """LambdaLR multiplier at step `current_step` (module docstring)."""
     if current_step < WARMUP_STEPS:
         return (current_step + 1) / WARMUP_STEPS
     return (num_training_steps - current_step) / (num_training_steps - WARMUP_STEPS)

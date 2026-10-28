@@ -11,7 +11,7 @@
 
 typedef __nv_bfloat16 bf16;
 
-constexpr int WARP = 32;                           /* threads per warp (CUDA C++ Programming Guide, warpSize) */
+constexpr int WARP = 32;
 constexpr int VEC = sizeof(uint4) / sizeof(bf16);  /* bf16 per 16-byte access */
 
 /* VEC bf16 (one 16-byte load) as fp32. */

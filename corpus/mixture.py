@@ -67,8 +67,8 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The d24 base plan as first computed (schedule.plan): 69,580 steps of 15 micro-batches; they size the packs. The last
-# REPO_LEVEL_SHARE of steps at 32K
+# The plan that sizes the packs: d24 at 525.893 tokens per parameter (docs/training.md §2), 69,580 steps of 15
+# micro-batches; its last REPO_LEVEL_SHARE of steps at 32K
 MAX_STEPS, BATCH_SIZE = 69_580, 15 * MICRO_BATCH_TOKENS
 REPO_LEVEL_STEPS = round(REPO_LEVEL_SHARE * MAX_STEPS)
 

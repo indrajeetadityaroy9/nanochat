@@ -90,15 +90,12 @@ def resolved(records: dict) -> dict:
 
 def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Literal["benchmarks", "parse"],
              previous: "Event | None", released: "Event") -> None:
-    """Write evaluation_path(run_name, step) of the checkpoint, loaded onto the GPU; with generate "parse", codegen and
-    fim are null. The process tree keeps to verify.cores()'s decode cores (rayon's pool sized to them), its timed
-    checks to the timed-check cores (verify.timed). After the last GPU phase the model, decoders and compiled graphs are
-    dropped, the allocator's cache emptied, the process tree moved to the timed-check cores and `released` set, while
-    scoring finishes. previous: set once the previous checkpoint's evaluation has ended; the official scoring and the
-    filtered searches' timed checks wait for it, so they never share the CPU with another checkpoint's. Results do not
-    depend on the GPU order except timed checks, which heavy CPU load can fail. The record's "provenance": the source
-    digest (taken at the start, as the code is imported), the environment (eval/cache.py) and the evaluation's start
-    and end times (Unix seconds)."""
+    """Write evaluation_path(run_name, step) of the checkpoint; with generate "parse", codegen and fim are null. The
+    process tree keeps to verify.cores()'s decode cores until the last GPU phase ends, then frees the GPU, moves to the
+    timed-check cores and sets `released` while scoring finishes. previous: set once the previous checkpoint's
+    evaluation has ended; official scoring and timed checks wait for it, so they never share the CPU with another
+    checkpoint's (timed verdicts depend on load). "provenance": source digest (taken at the start), environment
+    (eval/cache.py), start and end times (Unix seconds)."""
     started, source = time.time(), source_digest()
     decode, timed = cores()  # the starting affinity's split, taken before the pin
     os.environ["RAYON_NUM_THREADS"] = str(len(decode))  # rayon sizes its pool once, at first use

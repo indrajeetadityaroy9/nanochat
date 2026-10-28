@@ -294,10 +294,9 @@ def judged(result: dict) -> bool:
 
 
 def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
-    """MultiPL-E's evaluation of each problem's completions: per-completion statuses and scores (pass@k of status "OK",
-    which eval_cpp.py sets only for a program that ran and exited 0, as pass_k.py counts). One main.py --file process
-    per problem with completions not in VerdictCache (keyed by main.py's program), one judge thread each, in a timed
-    slot; its `g++` verify.compiler()'s (first on PATH); no -I (the scripts import siblings)."""
+    """MultiPL-E's evaluation of each problem's completions: per-completion statuses and pass@k of status "OK" (as
+    pass_k.py counts). One main.py --file process per problem with uncached completions, on verify.compiler()'s g++;
+    no -I (the scripts import siblings)."""
     main = Path(os.environ["MULTIPL_E"], "evaluation", "src", "main.py")
     cache = multipl_e_cache()
     programs = [[t.prompt + s + "\n" + t.entry_point for s in task_samples]  # main.py cached_eval_script's

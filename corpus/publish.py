@@ -17,7 +17,7 @@ from paths import CORPUS
 
 DATASET = "iaroy/nanochat-data"
 
-# An LFS upload URL expires 900 s after its batch call (X-Amz-Expires=900): 4 GiB needs at least 4.6 MiB/s
+# Preupload batch bytes: an LFS upload URL expires 900 s after its batch call, so 4 GiB needs at least 4.6 MiB/s
 PREUPLOAD = 4 * 1024**3
 CONTENTS = {
     "stack_edu_python": "GitHub Python files filtered for educational value",

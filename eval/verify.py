@@ -34,20 +34,15 @@ from inference.syntax_constraint import syntax_error
 from metrics import latency
 from paths import PCH
 
-# basedpyright rules kept on (every other rule off, typeCheckingMode "off"): errors that fail at run time
-# (NameError, AttributeError, call TypeErrors) or, for reportCallIssue, unmatched overloads; on d16 filtered-mode pools
-# they rejected 0 of 100 correct candidates (docs/evaluation.md §7). reportReturnType is off: it rejects 3 HumanEval+
-# reference solutions and alone rejected no incorrect HumanEval+ candidate.
+# basedpyright rules kept on (every other rule off): errors that fail at run time (NameError, AttributeError, call
+# TypeErrors and unmatched overloads); the measured basis and the removed rules: docs/experiments.md §6
 PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue")
 # The configuration python_diagnostics writes (pyrightconfig.json), also the basedpyright verdicts' cache identity
 PYRIGHT_CONFIG = {"typeCheckingMode": "off", **dict.fromkeys(PYRIGHT_RULES, "error")}
-# A basedpyright process's limit: one process over the largest normal round (FIM multi-line, 5,815 programs) takes
-# 27.6 s, a group (at most max(PYRIGHT_GROUP, ceil(N / timed_workers())) programs) a few seconds; one generated program
-# held its 400-program batch > 47 min. A stalling program in a group of G costs (ceil(log2 G) + 1) timeouts.
+# A basedpyright process's limit; a stalling program in a group of G costs (ceil(log2 G) + 1) timeouts
 PYRIGHT_TIMEOUT = 60
-# The fewest programs a basedpyright process checks: a process starts in ≈ 0.4 s and then checks ≈ 2.7 ms per program
-# (5,450 programs in 15.3 s), so a group of 100 spends about as long starting as checking; a call of N programs runs
-# ceil(N / max(100, ceil(N / timed_workers()))) processes, one per timed-check core at most
+# The fewest programs a basedpyright process checks: a process starts in ≈ 0.4 s and checks ≈ 2.7 ms per program, so a
+# group of 100 spends about as long starting as checking
 PYRIGHT_GROUP = 100
 # A failure of basedpyright itself in python_diagnostics' output (timeout, internal error, killed without a report):
 # never kept in VerdictCache
@@ -63,10 +58,9 @@ TEMPERATURE = 0.8
 TOP_P = 0.95
 # Candidates per task, the greedy one included: pass@10 (Codex Table 1; EvalPlus, arXiv 2305.01210 Table 3)
 ATTEMPTS = 10
-# Cores of the process's starting affinity that the evaluation process tree keeps to, its timed children excepted
-# (suite.evaluate): the decoder's host thread, its syntax masks (rayon) and the in-process checks of the filtered
-# search, which used 13.0-15.5 cores (30-s means, at most 18.6) of a d24 benchmarks evaluation on the 64-core GH200
-# host; timed checks run on the others (EvalPlus warns against an oversubscribed test bed, its docs/execution.md)
+# Cores of the starting affinity that the evaluation process tree keeps to (decoder host thread, syntax masks,
+# in-process checks; basis: docs/evaluation.md §1); timed checks run on the others, as EvalPlus's docs/execution.md
+# warns against an oversubscribed test bed
 DECODE_CORES = 16
 
 
@@ -190,12 +184,9 @@ def verdict_cache(kind: Literal["basedpyright", "examples", "g++"], timeout: flo
 
 def python_diagnostics(programs: list[str], pool: ThreadPoolExecutor) -> list[list[str]]:
     """Each program's compile error or, if it compiles, basedpyright's PYRIGHT_RULES errors ("line:col: rule: message"),
-    kept in VerdictCache. Each program sits in a directory of its own; basedpyright processes check disjoint groups of
-    them concurrently, on pool (not the caller's). A program basedpyright cannot check fails: an exception inside its
-    checker (e.g. RangeError on deep inference chains) aborts that process without a report, so the rest of its group
-    are checked again without it; a run past PYRIGHT_TIMEOUT, or one killed by a signal without a report (node killed
-    out of memory), is split in halves until the program that fails it is alone; any other exit without a report
-    raises."""
+    kept in VerdictCache. A program basedpyright cannot check (internal error, PYRIGHT_TIMEOUT, killed without a
+    report) gets a PYRIGHT_FAILURE diagnostic, found by rechecking or halving its group; any other exit without a
+    report raises."""
     out = [compile_error(program) for program in programs]
     compiled = [i for i, found in enumerate(out) if not found]
     cache = verdict_cache("basedpyright")
@@ -284,13 +275,9 @@ def solution_diagnostics(solution: str, entry_point: str) -> list[str]:
 @functools.cache
 def compiler() -> Path:
     """The directory of the C++ checks' `g++`: the system g++ with <bits/stdc++.h> forced first (-include) as a
-    precompiled header, built once per compiler, flags and header under PCH/<digest of them> (the C++ verdict caches'
-    compiler identity; a file lock serializes builders; the wrapper, written last, marks a finished build). Every
-    MultiPL-E C++ prompt (558 of 558 at the pinned revision) begins "#include<assert.h>\\n#include<bits/stdc++.h>\\n",
-    so the forced header declares nothing a judged program would not see: assert.h is re-read (it has no include
-    guard) and bits/stdc++.h's headers are guarded. Same
-    verdicts, a compile 4.0x and -fsyntax-only 5.3x faster [measured on 30 programs, 20-core aarch64; GCC manual,
-    "Precompiled Headers": -include works with a precompiled header]."""
+    precompiled header under PCH/<digest of compiler, flags and header> (the C++ verdict caches' compiler identity).
+    Every MultiPL-E C++ prompt begins "#include<assert.h>\\n#include<bits/stdc++.h>\\n", so the forced header declares
+    nothing a judged program would not see (assert.h has no include guard; bits/stdc++.h's headers are guarded)."""
     gxx = shutil.which("g++")
     version = subprocess.run([gxx, "-v"], capture_output=True, text=True, check=True).stderr
     trace = subprocess.run([gxx, *CPP_FLAGS, "-x", "c++", "-fsyntax-only", "-H", "-"],
@@ -413,14 +400,10 @@ class Search:
 
 def search(generator: NativeDecoder, searches: list[Search],
            done: Callable[[int, list[list[Candidate]], dict], None]) -> None:
-    """Every search's candidates from one generate call; done(s, candidates, latency) once search s ends: each task's
-    candidates in attempt order and metrics.latency over its kept candidates (its duration: the sum over rounds of
-    the span from their first start to their last end). Requests come in attempt order (every search's attempt 0, then
-    attempt 1, ...), each built when a decoder slot takes it, unless its task has an accepted candidate by then. Each
-    search's verdicts run round by round on a thread of their own, round a as soon as its candidates of the tasks
-    without an accepted candidate before a are decoded: the programs a serial search checks (a candidate's tokens
-    depend on its request and attempt alone), with decoding as many rounds ahead as the verdicts lag. The searches'
-    checks share one pool of timed_workers() threads."""
+    """Every search's candidates from one generate call; done(s, candidates, latency) once search s ends. Requests come
+    in attempt order, each built when a decoder slot takes it unless its task has an accepted candidate by then; each
+    search's verdicts run round by round on a thread of their own. Candidates equal a serial search's (a candidate's
+    tokens depend on its request and attempt alone); latency's duration sums each round's start-to-end span."""
     accepted_at = [[None] * x.count for x in searches]  # a task's accepted attempt, set by its search's judge
     prepared, generated, timings, issued = {}, {}, {}, []  # (attempt, search, task) -> check future, ids, timing
     lock, failure = threading.Lock(), []

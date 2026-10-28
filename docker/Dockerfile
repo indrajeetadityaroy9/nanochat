@@ -34,9 +34,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # evalplus (pyproject.toml's pin) untrusted_check shares progress, stat and details with the sample's process through
 # lock-guarded multiprocessing objects; a sample killed at its time-out while it holds the lock deadlocks the parent's
-# read (evalplus/eval/__init__.py:274; observed on HumanEval/148). The child is their only writer: they take no lock,
-# and the parent joins the child after terminate/kill, so it reads them only once the writer has exited. Each exact
-# source string must occur once (the build fails otherwise); the file's CRLF endings are kept.
+# read (evalplus/eval/__init__.py:274). The child is their only writer: they take no lock, and the parent joins the
+# child after terminate/kill, so it reads them only once the writer has exited.
 RUN <<'EOF' python
 import compileall, pathlib, sysconfig
 path = pathlib.Path(sysconfig.get_path("purelib")) / "evalplus" / "eval" / "__init__.py"
