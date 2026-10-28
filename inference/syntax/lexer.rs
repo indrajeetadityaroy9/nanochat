@@ -1,21 +1,21 @@
-//! The lexer: CPython 3.12.3's Parser/tokenizer.c as a character-level machine whose states are values, so a prefix
-//! may end anywhere; input as compile() sees it ("\r\n", "\r" read as "\n", a final "\n" implied).
+/*! The lexer: CPython 3.12.3's Parser/tokenizer.c as a character-level machine whose states are values, so a prefix
+    may end anywhere; input as compile() sees it ("\r\n", "\r" read as "\n", a final "\n" implied). */
 
 use rustc_hash::FxHashMap;
 
-/// A lexeme: an index into Lexicon::lexemes, the terminals a token may be (a soft keyword's two: name and keyword).
+/** A lexeme: an index into Lexicon::lexemes, the terminals a token may be (a soft keyword's two: name and keyword). */
 pub type Lexeme = u16;
-/// A set of lexeme sequences a partial token must begin with: an index into Lexicon::terms.
+/** A set of lexeme sequences a partial token must begin with: an index into Lexicon::terms. */
 pub type Terms = u32;
-/// The lexemes of the basic terminals (Lexicon::new's `basic`, in its order)
+/** The lexemes of the basic terminals (Lexicon::new's `basic`, in its order) */
 const NAME: Lexeme = 0;
 const NUMBER: Lexeme = 1;
 const STRING: Lexeme = 2;
 const FSTRING_START: Lexeme = 3;
 const FSTRING_END: Lexeme = 4;
 
-/// What the lexer emits: lexemes, line ends (NL; the parser decides NEWLINE), a backslash continuation (CONT), and
-/// the whitespace at a line's start.
+/** What the lexer emits: lexemes, line ends (NL; the parser decides NEWLINE), a backslash continuation (CONT), and
+    the whitespace at a line's start. */
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ev {
     Lex(Lexeme),
@@ -26,7 +26,7 @@ pub enum Ev {
     FormFeed,
 }
 
-/// A number literal's sub-state: what was read last (tokenizer.c, Number).
+/** A number literal's sub-state: what was read last (tokenizer.c, Number). */
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Num {
     Zero1,
@@ -55,7 +55,7 @@ pub enum Num {
     BD,
 }
 
-/// A string's kind after its prefix: plain, bytes (ASCII only), f-string, raw f-string.
+/** A string's kind after its prefix: plain, bytes (ASCII only), f-string, raw f-string. */
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     S,
@@ -64,7 +64,7 @@ pub enum Kind {
     Fr,
 }
 
-/// What an f-string's literal text waits for after "{", "}", a backslash, "\N", or inside "\N{...}".
+/** What an f-string's literal text waits for after "{", "}", a backslash, "\N", or inside "\N{...}". */
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pend {
     No,
@@ -75,30 +75,30 @@ pub enum Pend {
     U,
 }
 
-/// NONE: a name that spells no keyword, soft keyword or string prefix.
+/** NONE: a name that spells no keyword, soft keyword or string prefix. */
 const NONE: u16 = u16::MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Sub {
-    /// between tokens at a line's start (true: after a backslash continuation)
+    /** between tokens at a line's start (true: after a backslash continuation) */
     Bol(bool),
     Sp,
-    /// a name: its spelled prefix (a node of Lexicon::spelled_next) or NONE
+    /** a name: its spelled prefix (a node of Lexicon::spelled_next) or NONE */
     Name(u16),
     Num(Num),
-    /// operator characters: a prefix of an operator (a node of Lexicon::op_next)
+    /** operator characters: a prefix of an operator (a node of Lexicon::op_next) */
     Op(u16),
-    /// a string's first quote(s): n of them
+    /** a string's first quote(s): n of them */
     Q { kind: Kind, quote: u8, n: u8 },
     S { ascii_only: bool, quote: u8, size: u8, escaped: bool, endq: u8 },
-    /// the innermost f-string's literal text or format spec
+    /** the innermost f-string's literal text or format spec */
     Fl { pend: Pend, endq: u8 },
     Com,
-    /// after a backslash (true: at a line's start)
+    /** after a backslash (true: at a line's start) */
     Bs(bool),
 }
 
-/// An open replacement field: its bracket depth, and whether it is in its format spec.
+/** An open replacement field: its bracket depth, and whether it is in its format spec. */
 pub type Field = (i32, bool);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -109,7 +109,7 @@ pub struct Frame {
     pub fields: Vec<Field>,
 }
 
-/// A lexer state: pending UTF-8 bytes, after "\r", the open f-strings (innermost last), the sub-state.
+/** A lexer state: pending UTF-8 bytes, after "\r", the open f-strings (innermost last), the sub-state. */
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Lex {
     pub pend: [u8; 3],
@@ -129,14 +129,14 @@ type Step = Option<(Vec<Frame>, Sub)>;
 
 const OPEN: &[u8] = b"([{";
 const CLOSE: &[u8] = b")]}";
-/// tokenizer.c tok_get_normal_mode: b, r, u, f with u alone, f and b exclusive, any case
+/** tokenizer.c tok_get_normal_mode: b, r, u, f with u alone, f and b exclusive, any case */
 const STRING_PREFIXES: [&str; 8] = ["r", "u", "b", "br", "rb", "f", "fr", "rf"];
 
-/// The lexical tables: lexemes and terminals, tries of spelled names and operators, partial-token beginnings.
+/** The lexical tables: lexemes and terminals, tries of spelled names and operators, partial-token beginnings. */
 pub struct Lexicon {
-    /// lexeme -> its terminals
+    /** lexeme -> its terminals */
     pub lexemes: Vec<Vec<u16>>,
-    /// lexeme -> bracket depth change
+    /** lexeme -> bracket depth change */
     pub depth_change: Vec<i8>,
     spelled_next: Vec<[u16; 128]>,
     spelled_first: [u16; 128],
@@ -153,14 +153,14 @@ pub struct Lexicon {
     lex_lbrace: Lexeme,
     lex_rbrace: Lexeme,
     lex_dot: Lexeme,
-    /// sets of lexeme sequences, each sorted
+    /** sets of lexeme sequences, each sorted */
     pub terms: Vec<Vec<Vec<Lexeme>>>,
     terms_empty: Terms,
     terms_name: Terms,
     terms_number: Terms,
     terms_string: Terms,
     terms_fstring: Terms,
-    /// non-ASCII code point ranges (inclusive) of str.isidentifier() (a start) and of ("a" + c).isidentifier()
+    /** non-ASCII code point ranges (inclusive) of str.isidentifier() (a start) and of ("a" + c).isidentifier() */
     xid_start: Vec<(u32, u32)>,
     xid_continue: Vec<(u32, u32)>,
 }
@@ -175,7 +175,7 @@ fn intern(terms: &mut Vec<Vec<Vec<Lexeme>>>, index: &mut FxHashMap<Vec<Vec<Lexem
     })
 }
 
-/// The prefixes of words as a trie over ASCII: (prefix strings, next[id][c], first[c]).
+/** The prefixes of words as a trie over ASCII: (prefix strings, next[id][c], first[c]). */
 fn prefix_trie(words: &[String]) -> (Vec<String>, Vec<[u16; 128]>, [u16; 128]) {
     let mut prefixes: Vec<String> = Vec::new();
     let mut id: FxHashMap<String, u16> = FxHashMap::default();
@@ -210,15 +210,15 @@ fn in_ranges(ranges: &[(u32, u32)], c: u32) -> bool {
     i < ranges.len() && ranges[i].0 <= c
 }
 
-/// The first code point of ranges within [lo, hi].
+/** The first code point of ranges within [lo, hi]. */
 fn first_in(ranges: &[(u32, u32)], lo: u32, hi: u32) -> Option<u32> {
     let i = ranges.partition_point(|&(_, h)| h < lo);
     (i < ranges.len() && ranges[i].0 <= hi).then(|| ranges[i].0.max(lo))
 }
 
 impl Lexicon {
-    /// The lexicon from keywords, soft keywords and operators with their terminals, the basic terminals, and the
-    /// identifier classes.
+    /** The lexicon from keywords, soft keywords and operators with their terminals, the basic terminals, and the
+        identifier classes. */
     pub fn new(keywords: Vec<(String, Vec<u16>)>, soft: Vec<(String, Vec<u16>)>, operators: Vec<(String, Vec<u16>)>,
                basic: [u16; 5], xid_start: Vec<(u32, u32)>, xid_continue: Vec<(u32, u32)>) -> Lexicon {
         let mut lexemes: Vec<Vec<u16>> = basic.iter().map(|&t| vec![t]).collect();
@@ -247,7 +247,7 @@ impl Lexicon {
         let terms_string = intern(&mut terms, &mut index, vec![vec![STRING]]);
         let terms_fstring = intern(&mut terms, &mut index, vec![vec![FSTRING_START]]);
 
-        // words whose spelling decides a token: keywords, soft keywords, string prefixes (any case)
+        /* words whose spelling decides a token: keywords, soft keywords, string prefixes (any case) */
         let mut spelled_words: Vec<String> = keywords.iter().chain(&soft).map(|(w, _)| w.clone()).collect();
         for p in STRING_PREFIXES {
             for m in 0..1u32 << p.len() {
@@ -278,7 +278,7 @@ impl Lexicon {
             spelled_terms.push(intern(&mut terms, &mut index, set));
         }
 
-        // operator prefixes, ".." of "..." included
+        /* operator prefixes, ".." of "..." included */
         let (ops, op_next, op_first) = prefix_trie(&op_words);
         let op_extensible: Vec<bool> = ops.iter()
             .map(|p| ops.iter().any(|q| q != p && q.starts_with(p.as_str()))).collect();
@@ -312,7 +312,7 @@ impl Lexicon {
         self.op_lexeme[op as usize].expect("an operator")
     }
 
-    /// The lexer state after character c (events appended to ev), None if no module continues this way.
+    /** The lexer state after character c (events appended to ev), None if no module continues this way. */
     fn char(&self, frames: Vec<Frame>, sub: Sub, c: char, ev: &mut Vec<Ev>) -> Step {
         match sub {
             Sub::Sp => self.start(frames, c, ev, false),
@@ -346,7 +346,7 @@ impl Lexicon {
                 }
                 Some((frames, sub))
             }
-            // after a backslash, only a line end continues (tok_continuation_line)
+            /* after a backslash, only a line end continues (tok_continuation_line) */
             Sub::Bs(bol) => {
                 if c != '\n' {
                     return None;
@@ -360,7 +360,7 @@ impl Lexicon {
         }
     }
 
-    /// Character c between tokens (bol: at the start of a line, where whitespace is indentation).
+    /** Character c between tokens (bol: at the start of a line, where whitespace is indentation). */
     fn start(&self, frames: Vec<Frame>, c: char, ev: &mut Vec<Ev>, bol: bool) -> Step {
         match c {
             ' ' | '\t' | '\x0c' => {
@@ -403,7 +403,7 @@ impl Lexicon {
         None
     }
 
-    /// An operator's first character: brackets and a field's ':' and '}' act at once (tokenizer.c's f-string check).
+    /** An operator's first character: brackets and a field's ':' and '}' act at once (tokenizer.c's f-string check). */
     fn operator_start(&self, mut frames: Vec<Frame>, c: char, ev: &mut Vec<Ev>) -> Step {
         let field = frames.last().and_then(|f| f.fields.last()).map(|f| f.0);
         let op = self.op_first[c as usize];
@@ -418,7 +418,7 @@ impl Lexicon {
             }
             return Some((frames, Sub::Fl { pend: Pend::No, endq: 0 }));
         }
-        // brackets extend no operator
+        /* brackets extend no operator */
         let open = OPEN.contains(&b);
         if let Some(depth) = field
             && (open || CLOSE.contains(&b))
@@ -434,7 +434,7 @@ impl Lexicon {
         Some((frames, Sub::Sp))
     }
 
-    /// Character c after the operator characters text.
+    /** Character c after the operator characters text. */
     fn operator_char(&self, frames: Vec<Frame>, text: u16, c: char, ev: &mut Vec<Ev>) -> Step {
         if text == self.op_dot && c.is_ascii_digit() {
             return Some((frames, Sub::Num(Num::Frac)));
@@ -448,7 +448,7 @@ impl Lexicon {
             return Some((frames, Sub::Sp));
         }
         if text == self.op_dotdot {
-            // two dots: one '.', then '.' again (tokenizer.c backs up)
+            /* two dots: one '.', then '.' again (tokenizer.c backs up) */
             ev.push(Ev::Lex(self.lex_dot));
             return self.operator_char(frames, self.op_dot, c, ev);
         }
@@ -456,11 +456,11 @@ impl Lexicon {
         self.start(frames, c, ev, false)
     }
 
-    /// Character c in a number literal (tokenizer.c, Number): the state names what was read last.
+    /** Character c in a number literal (tokenizer.c, Number): the state names what was read last. */
     fn number_char(&self, frames: Vec<Frame>, state: Num, c: char, ev: &mut Vec<Ev>) -> Step {
         use Num::*;
         let digit = c.is_ascii_digit();
-        // Ok(Some(next)), Ok(None): the number may end here; Err: no module continues
+        /* Ok(Some(next)), Ok(None): the number may end here; Err: no module continues */
         let nxt: Result<Option<Num>, ()> = match state {
             Zero1 | Zero => Ok(if state == Zero1 && "xXoObB".contains(c) {
                 Some(match c.to_ascii_lowercase() {
@@ -478,7 +478,7 @@ impl Lexicon {
                 None
             }),
             ZeroU => if digit { Ok(Some(if c == '0' { Zero } else { ZeroD })) } else { Err(()) },
-            // leading zeros: only a fraction, exponent or imaginary part saves it
+            /* leading zeros: only a fraction, exponent or imaginary part saves it */
             ZeroD => if digit {
                 Ok(Some(ZeroD))
             } else if c == '_' {
@@ -516,7 +516,7 @@ impl Lexicon {
                 if !(c.is_ascii_alphabetic() || c == '_') {
                     return None;
                 }
-                // verify_end_of_number: 'e' may start "else" after a number; the parser judges the name
+                /* verify_end_of_number: 'e' may start "else" after a number; the parser judges the name */
                 ev.push(Ev::Lex(NUMBER));
                 let (frames, sub) = self.start(frames, if state == ExpLower { 'e' } else { 'E' }, ev, false)?;
                 return self.char(frames, sub, c, ev);
@@ -577,7 +577,7 @@ impl Lexicon {
         self.start(frames, c, ev, false)
     }
 
-    /// Character c after a string's first quote(s): one, or two (an empty string or a triple quote's start).
+    /** Character c after a string's first quote(s): one, or two (an empty string or a triple quote's start). */
     fn quote_char(&self, mut frames: Vec<Frame>, kind: Kind, quote: u8, n: u8, c: char, ev: &mut Vec<Ev>) -> Step {
         let fstring = matches!(kind, Kind::F | Kind::Fr);
         let is_quote = c == quote as char;
@@ -593,7 +593,7 @@ impl Lexicon {
             return Some((frames, Sub::S { ascii_only: kind == Kind::B, quote, size: 3, escaped: false, endq: 0 }));
         }
         if n == 2 {
-            // an empty string, then c
+            /* an empty string, then c */
             ev.push(Ev::Lex(if fstring { FSTRING_START } else { STRING }));
             if fstring {
                 ev.push(Ev::Lex(FSTRING_END));
@@ -608,7 +608,7 @@ impl Lexicon {
         string_char(frames, Sub::S { ascii_only: kind == Kind::B, quote, size: 1, escaped: false, endq: 0 }, c, ev)
     }
 
-    /// Character c in an f-string's literal text or format spec (tokenizer.c tok_get_fstring_mode).
+    /** Character c in an f-string's literal text or format spec (tokenizer.c tok_get_fstring_mode). */
     fn literal_char(&self, mut frames: Vec<Frame>, sub: Sub, c: char, ev: &mut Vec<Ev>) -> Step {
         let Sub::Fl { pend, endq } = sub else { unreachable!() };
         let lit = |frames: Vec<Frame>, pend: Pend| Some((frames, Sub::Fl { pend, endq: 0 }));
@@ -616,7 +616,7 @@ impl Lexicon {
         let (quote, size, raw) = (frame.quote as char, frame.size, frame.raw);
         let spec = !frame.fields.is_empty();
         match pend {
-            // "{{" is a brace, "{" anything else opens a replacement field
+            /* "{{" is a brace, "{" anything else opens a replacement field */
             Pend::Lb => {
                 if c == '{' {
                     return lit(frames, Pend::No);
@@ -625,9 +625,9 @@ impl Lexicon {
                 frames.last_mut().unwrap().fields = vec![(0, false)];
                 return self.start(frames, c, ev, false);
             }
-            // "}}" is a brace; a single '}' is an error
+            /* "}}" is a brace; a single '}' is an error */
             Pend::Rb => return if c == '}' { lit(frames, Pend::No) } else { None },
-            // a backslash escapes anything but a brace
+            /* a backslash escapes anything but a brace */
             Pend::Esc => {
                 if c == '{' || c == '}' {
                     return self.literal_char(frames, Sub::Fl { pend: Pend::No, endq: 0 }, c, ev);
@@ -640,7 +640,7 @@ impl Lexicon {
                 }
                 return self.literal_char(frames, Sub::Fl { pend: Pend::No, endq: 0 }, c, ev);
             }
-            // \N{...}: '}' ends the name
+            /* \N{...}: '}' ends the name */
             Pend::U => {
                 if c == '}' {
                     return lit(frames, Pend::No);
@@ -663,7 +663,7 @@ impl Lexicon {
             if !spec {
                 return None;
             }
-            // a format spec ends at a line end; the field continues as an expression
+            /* a format spec ends at a line end; the field continues as an expression */
             *frames.last_mut().unwrap().fields.last_mut().unwrap() = (0, false);
             return self.start(frames, c, ev, false);
         }
@@ -686,8 +686,8 @@ impl Lexicon {
         lit(frames, if c == '\\' { Pend::Esc } else { Pend::No })
     }
 
-    /// The state after byte b of UTF-8 text (events appended to ev); None if no module continues (also invalid UTF-8,
-    /// NUL).
+    /** The state after byte b of UTF-8 text (events appended to ev); None if no module continues (also invalid UTF-8,
+        NUL). */
     pub fn byte(&self, state: &Lex, b: u8, ev: &mut Vec<Ev>) -> Option<Lex> {
         let c = if state.npend == 0 && b < 0x80 {
             b as char
@@ -717,7 +717,7 @@ impl Lexicon {
         Some(Lex { pend: [0; 3], npend: 0, cr: c == '\r', frames, sub })
     }
 
-    /// The most permissive completion of a pending UTF-8 sequence: an identifier start, else continue, else any.
+    /** The most permissive completion of a pending UTF-8 sequence: an identifier start, else continue, else any. */
     fn representative(&self, pend: &[u8]) -> char {
         let size = if pend[0] < 0xE0 { 2 } else if pend[0] < 0xF0 { 3 } else { 4 };
         let mut value = (pend[0] & (0x7F >> size)) as u32;
@@ -732,8 +732,8 @@ impl Lexicon {
         char::from_u32(c).unwrap()
     }
 
-    /// The pending UTF-8 character's events (by its representative) and the lexeme sequences the partial token must
-    /// begin with; None if no character completes it.
+    /** The pending UTF-8 character's events (by its representative) and the lexeme sequences the partial token must
+        begin with; None if no character completes it. */
     pub fn partial(&self, state: &Lex, ev: &mut Vec<Ev>) -> Option<Terms> {
         let sub = if state.npend > 0 {
             let c = self.representative(&state.pend[..state.npend as usize]);
@@ -754,7 +754,7 @@ impl Lexicon {
     }
 }
 
-/// Character c in a string literal's body (tokenizer.c letter_quote); bytes hold ASCII only.
+/** Character c in a string literal's body (tokenizer.c letter_quote); bytes hold ASCII only. */
 fn string_char(frames: Vec<Frame>, sub: Sub, c: char, ev: &mut Vec<Ev>) -> Step {
     let Sub::S { ascii_only, quote, size, escaped, endq } = sub else { unreachable!() };
     if ascii_only && !c.is_ascii() {

@@ -1,6 +1,6 @@
-//! Benchmark decontamination: the test texts a training text shares an n-gram of whitespace-separated words with
-//! (Qwen2.5-Coder's 10-gram word-level overlap, arXiv 2409.12186 §5; DeepSeek-Coder's 10-gram filter, arXiv
-//! 2401.14196 §2.4).
+/*! Benchmark decontamination: the test texts a training text shares an n-gram of whitespace-separated words with
+    (Qwen2.5-Coder's 10-gram word-level overlap, arXiv 2409.12186 §5; DeepSeek-Coder's 10-gram filter, arXiv
+    2401.14196 §2.4). */
 
 use std::hash::Hasher;
 
@@ -23,8 +23,8 @@ fn gram_hash(words: &[u64]) -> u64 {
     hasher.finish()
 }
 
-/// The n-grams of the test texts, each hash with the (test, first word) pairs holding it; a hit is compared word by
-/// word, so a hash collision never matches.
+/** The n-grams of the test texts, each hash with the (test, first word) pairs holding it; a hit is compared word by
+    word, so a hash collision never matches. */
 #[pyclass(frozen)]
 pub(crate) struct Grams {
     n: usize,
@@ -48,12 +48,12 @@ impl Grams {
         Grams { n, tests, grams }
     }
 
-    /// The number of distinct n-gram hashes.
+    /** The number of distinct n-gram hashes. */
     fn __len__(&self) -> usize {
         self.grams.len()
     }
 
-    /// Each text's tests (indices, ascending) that share an n-gram with it.
+    /** Each text's tests (indices, ascending) that share an n-gram with it. */
     fn matches(&self, py: Python<'_>, texts: Vec<PyBackedStr>) -> Vec<Vec<u32>> {
         py.detach(|| texts.par_iter().map(|text| self.matched(text)).collect())
     }

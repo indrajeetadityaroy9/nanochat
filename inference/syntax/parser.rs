@@ -1,12 +1,12 @@
-//! The parser: Lark's LALR(1) tables of python.lark as a viable-prefix recognizer, with CPython tokenizer.c's
-//! INDENT/DEDENT and bracket level; a soft keyword's two terminals fork the LR stacks until one dies.
+/*! The parser: Lark's LALR(1) tables of python.lark as a viable-prefix recognizer, with CPython tokenizer.c's
+    INDENT/DEDENT and bracket level; a soft keyword's two terminals fork the LR stacks until one dies. */
 
 use crate::lexer::{Ev, Lexicon, Terms};
 
-const TAB_SIZE: u32 = 8; // tokenizer.c TABSIZE; ALTTABSIZE is 1: a tab is one alt column, as a space
+const TAB_SIZE: u32 = 8; /* tokenizer.c TABSIZE; ALTTABSIZE is 1: a tab is one alt column, as a space */
 const NO_ACTION: i32 = i32::MIN;
 
-/// Lark's parse table: actions[state * terminals + terminal] a shift state (>= 0), !rule to reduce by, or NO_ACTION.
+/** Lark's parse table: actions[state * terminals + terminal] a shift state (>= 0), !rule to reduce by, or NO_ACTION. */
 pub struct Tables {
     pub terminals: usize,
     pub nonterminals: usize,
@@ -21,7 +21,7 @@ pub struct Tables {
     pub t_dedent: u16,
 }
 
-/// A parser state: LR stacks (bottom first), bracket depth, indentation stack of (column, alt column), line status.
+/** A parser state: LR stacks (bottom first), bracket depth, indentation stack of (column, alt column), line status. */
 #[derive(Clone)]
 pub struct Parse {
     pub stacks: Vec<Vec<u32>>,
@@ -46,7 +46,7 @@ impl Tables {
         Parse { stacks: vec![vec![self.start]], depth: 0, indents: vec![(0, 0)], line: false, col: 0, alt: 0, cont: 0 }
     }
 
-    /// The LR stack after terminal (reductions, then its shift), None on a syntax error.
+    /** The LR stack after terminal (reductions, then its shift), None on a syntax error. */
     pub fn shift(&self, stack: &[u32], terminal: u16) -> Option<Vec<u32>> {
         let mut base = stack.len();
         let mut tail: Vec<u32> = Vec::new();
@@ -72,7 +72,7 @@ impl Tables {
         }
     }
 
-    /// Whether the LR stack is a whole module (lalr_parser_state.ParserState.feed_token at $END).
+    /** Whether the LR stack is a whole module (lalr_parser_state.ParserState.feed_token at $END). */
     pub fn accepts_end(&self, stack: &[u32]) -> bool {
         let mut stack = stack.to_vec();
         loop {
@@ -94,14 +94,14 @@ impl Tables {
         stacks.iter().filter_map(|s| self.shift(s, terminal)).collect()
     }
 
-    /// The parser state after a lexer event, None on a syntax error.
+    /** The parser state after a lexer event, None on a syntax error. */
     pub fn feed(&self, lexicon: &Lexicon, state: &Parse, event: Ev) -> Option<Parse> {
         match event {
             Ev::Lex(lexeme) => {
                 let mut indents_changed = None;
                 let mut stacks_changed: Option<Vec<Vec<u32>>> = None;
                 if !state.line {
-                    // the line's first token outside brackets: tokenizer.c's indentation check
+                    /* the line's first token outside brackets: tokenizer.c's indentation check */
                     let (col, alt) = if state.cont != 0 { (state.cont, state.cont) } else { (state.col, state.alt) };
                     let (top, top_alt) = *state.indents.last().unwrap();
                     if col == top {
@@ -140,7 +140,7 @@ impl Tables {
                         }
                     }
                 }
-                // never negative: the grammar pairs every closer with an opener before it
+                /* never negative: the grammar pairs every closer with an opener before it */
                 let depth = state.depth + lexicon.depth_change[lexeme as usize] as i32;
                 if stacks.is_empty() {
                     return None;
@@ -171,7 +171,7 @@ impl Tables {
         }
     }
 
-    /// Whether the parser state takes one of the partial token's lexeme sequences next (any state if none).
+    /** Whether the parser state takes one of the partial token's lexeme sequences next (any state if none). */
     pub fn viable(&self, lexicon: &Lexicon, state: &Parse, terms: Terms) -> bool {
         let set = &lexicon.terms[terms as usize];
         set.is_empty() || set.iter().any(|sequence| {

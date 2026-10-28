@@ -1,5 +1,5 @@
-//! The Python 3.12 syntax constraint, Python module nanochat_syntax (wrapped by inference/syntax_constraint.py):
-//! lexer.rs, parser.rs and vocab.rs; masks of a batch in parallel (rayon) without the GIL, into the caller's rows.
+/*! The Python 3.12 syntax constraint, Python module nanochat_syntax (wrapped by inference/syntax_constraint.py):
+    lexer.rs, parser.rs and vocab.rs; masks of a batch in parallel (rayon) without the GIL, into the caller's rows. */
 
 mod lexer;
 mod parser;
@@ -13,7 +13,7 @@ use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::PyBytes;
 use rayon::prelude::*;
 
-/// The Python 3.12 syntax of a tokenizer's vocabulary (vocab::Syntax), shared by the constraints it builds.
+/** The Python 3.12 syntax of a tokenizer's vocabulary (vocab::Syntax), shared by the constraints it builds. */
 #[pyclass(frozen)]
 struct Syntax {
     inner: Arc<vocab::Syntax>,
@@ -21,8 +21,8 @@ struct Syntax {
 
 #[pymethods]
 impl Syntax {
-    /// The lexicon (word, its terminals), Lark's dense LALR tables, the identifier ranges and the mergeable tokens'
-    /// bytes (ids below BOS's), as inference/syntax_constraint.python_syntax builds them.
+    /** The lexicon (word, its terminals), Lark's dense LALR tables, the identifier ranges and the mergeable tokens'
+        bytes (ids below BOS's), as inference/syntax_constraint.python_syntax builds them. */
     #[new]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (*, keywords, soft, operators, basic, special, terminals, nonterminals, actions, goto, rules,
@@ -40,8 +40,8 @@ impl Syntax {
         Syntax { inner: Arc::new(vocab::Syntax::new(lexicon, tables, token_bytes)) }
     }
 
-    /// The constraint of the tokens generated after prefix (UTF-8 bytes), suffix the text after the generation (b"":
-    /// none). Raises ValueError when prefix is not a prefix of any module.
+    /** The constraint of the tokens generated after prefix (UTF-8 bytes), suffix the text after the generation (b"":
+        none). Raises ValueError when prefix is not a prefix of any module. */
     #[pyo3(signature = (prefix, *, suffix))]
     fn constraint(&self, prefix: &[u8], suffix: &[u8]) -> PyResult<Constraint> {
         let syntax = &self.inner;
@@ -56,12 +56,12 @@ impl Syntax {
     }
 }
 
-/// The ValueError of a text that stops being a prefix of a Python 3.12 module at byte.
+/** The ValueError of a text that stops being a prefix of a Python 3.12 module at byte. */
 fn stops_at(byte: usize) -> PyErr {
     PyValueError::new_err(format!("the text stops being a prefix of a Python 3.12 module at byte {byte}"))
 }
 
-/// A constraint's text (the prefix, then pushed bytes), its states after the settled bytes, and the suffix.
+/** A constraint's text (the prefix, then pushed bytes), its states after the settled bytes, and the suffix. */
 #[pyclass]
 struct Constraint {
     syntax: Arc<vocab::Syntax>,
@@ -77,7 +77,7 @@ impl Constraint {
     }
 }
 
-/// The states of constraints after their pushed bytes, in parallel without the GIL; ValueError if some text dies.
+/** The states of constraints after their pushed bytes, in parallel without the GIL; ValueError if some text dies. */
 fn settle(py: Python<'_>, constraints: &[Bound<'_, Constraint>]) -> PyResult<()> {
     let jobs: Vec<_> = constraints.iter().enumerate().filter_map(|(i, c)| {
         let c = c.borrow();
@@ -97,19 +97,19 @@ fn settle(py: Python<'_>, constraints: &[Bound<'_, Constraint>]) -> PyResult<()>
 
 #[pymethods]
 impl Constraint {
-    /// Advance by a mergeable token; its states are settled by the next masks or grammar_ends.
+    /** Advance by a mergeable token; its states are settled by the next masks or grammar_ends. */
     fn push(&mut self, token: u32) {
         self.text.extend_from_slice(&self.syntax.token_bytes[token as usize]);
     }
 
-    /// The text so far (prefix and generated tokens), UTF-8 bytes possibly ending mid-character.
+    /** The text so far (prefix and generated tokens), UTF-8 bytes possibly ending mid-character. */
     #[getter]
     fn text<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.text)
     }
 }
 
-/// Whether the grammar ends a module after each text and suffix (necessary for ast.parse), in parallel without the GIL.
+/** Whether the grammar ends a module after each text and suffix (necessary for ast.parse), in parallel without the GIL. */
 #[pyfunction]
 fn grammar_ends(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>) -> PyResult<Vec<bool>> {
     settle(py, &constraints)?;
@@ -123,8 +123,8 @@ fn grammar_ends(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>) -> PyRe
     }).collect()))
 }
 
-/// The next masks into distinct rows of the caller's uint32 buffer at address (row r at address + 4 words rows[r]; bit
-/// t % 32 of word t / 32 allows token t), BOS's bit iff a candidate end; whether each row allows some token.
+/** The next masks into distinct rows of the caller's uint32 buffer at address (row r at address + 4 words rows[r]; bit
+    t % 32 of word t / 32 allows token t), BOS's bit iff a candidate end; whether each row allows some token. */
 #[pyfunction]
 fn masks(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>, address: usize, rows: Vec<usize>, words: usize)
          -> PyResult<Vec<bool>> {
@@ -135,7 +135,7 @@ fn masks(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>, address: usize
     }).collect();
     let bytes = words * 4;
     Ok(py.detach(|| jobs.par_iter().map(|(syntax, state, suffixed, ends_line, row)| {
-        // SAFETY: the caller's buffer holds every row, and the rows are distinct (decoder.step_masks: one per slot)
+        /* SAFETY: the caller's buffer holds every row, and the rows are distinct (decoder.step_masks: one per slot) */
         let bits = unsafe { std::slice::from_raw_parts_mut((address + row * bytes) as *mut u8, bytes) };
         bits.fill(0);
         syntax.allowed(state, bits);

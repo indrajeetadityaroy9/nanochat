@@ -1,7 +1,7 @@
-//! Byte-level BPE training by source-attributed BPE (SA-BPE, arXiv 2604.14053 §4.1): each merge takes the pair of
-//! highest F·ln(R) (ln as in pchizhov/sa-bpe scoring.py; 0 for a pair seen in one source), F the pair's frequency, R
-//! its distinct sources; ties to the higher F, then the smaller pair. Trainer after rustbpe (karpathy/rustbpe), text
-//! split by fancy-regex as tiktoken (openai/tiktoken) does; R is exact at each merge via a lazy heap of upper bounds.
+/*! Byte-level BPE training by source-attributed BPE (SA-BPE, arXiv 2604.14053 §4.1): each merge takes the pair of
+    highest F·ln(R) (ln as in pchizhov/sa-bpe scoring.py; 0 for a pair seen in one source), F the pair's frequency, R
+    its distinct sources; ties to the higher F, then the smaller pair. Trainer after rustbpe (karpathy/rustbpe), text
+    split by fancy-regex as tiktoken (openai/tiktoken) does; R is exact at each merge via a lazy heap of upper bounds. */
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -18,7 +18,7 @@ use crate::PerWorker;
 
 type Pair = (u32, u32);
 
-/// A distinct chunk: its token ids, occurrences and sorted distinct sources.
+/** A distinct chunk: its token ids, occurrences and sorted distinct sources. */
 struct Word {
     ids: Vec<u32>,
     count: i64,
@@ -30,8 +30,8 @@ impl Word {
         self.ids.windows(2).any(|w| (w[0], w[1]) == pair)
     }
 
-    /// Merges every non-overlapping occurrence of pair, left to right, into new_id; returns each pair occurrence's
-    /// change (-1 removed, +1 created; rustbpe's merge_pair).
+    /** Merges every non-overlapping occurrence of pair, left to right, into new_id; returns each pair occurrence's
+        change (-1 removed, +1 created; rustbpe's merge_pair). */
     fn merge_pair(&mut self, pair: Pair, new_id: u32) -> Vec<(Pair, i64)> {
         let (a, b) = pair;
         let n = self.ids.len();
@@ -62,7 +62,7 @@ impl Word {
     }
 }
 
-/// A pair's heap entry: F, R (exact when `exact`, else an upper bound), score, and the words it may occur in.
+/** A pair's heap entry: F, R (exact when `exact`, else an upper bound), score, and the words it may occur in. */
 struct Job {
     pair: Pair,
     freq: i64,
@@ -92,7 +92,7 @@ impl PartialEq for Job {
 
 impl Eq for Job {}
 
-/// The distinct chunks of the documents (document d from source sources[d]) as words of byte ids.
+/** The distinct chunks of the documents (document d from source sources[d]) as words of byte ids. */
 fn count_words<'a>(texts: &'a [PyBackedStr], sources: &[u32], pattern: &PerWorker<Regex>) -> Vec<Word> {
     struct Chunk {
         count: i64,
@@ -146,7 +146,7 @@ fn count_words<'a>(texts: &'a [PyBackedStr], sources: &[u32], pattern: &PerWorke
         .collect()
 }
 
-/// F of every pair of the words and the words each occurs in.
+/** F of every pair of the words and the words each occurs in. */
 fn count_pairs(words: &[Word]) -> FxHashMap<Pair, (i64, Vec<u32>)> {
     words
         .par_iter()
@@ -171,7 +171,7 @@ fn count_pairs(words: &[Word]) -> FxHashMap<Pair, (i64, Vec<u32>)> {
         })
 }
 
-/// The number of distinct sources over the given words (a fixedbitset per task of at least min_len words).
+/** The number of distinct sources over the given words (a fixedbitset per task of at least min_len words). */
 fn count_sources(words: &[Word], of: &[u32], n_sources: usize, min_len: usize) -> u32 {
     of.par_iter()
         .with_min_len(min_len)
@@ -186,12 +186,12 @@ fn count_sources(words: &[Word], of: &[u32], n_sources: usize, min_len: usize) -
         .count_ones(..) as u32
 }
 
-/// SA-BPE's score F·ln(R).
+/** SA-BPE's score F·ln(R). */
 fn score(freq: i64, sources: u32) -> f64 {
     freq as f64 * (sources as f64).ln()
 }
 
-/// The merge loop: pops the lazy heap until its top entry's F and R are exact, then merges that pair.
+/** The merge loop: pops the lazy heap until its top entry's F and R are exact, then merges that pair. */
 fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &PerWorker<Regex>, n_merges: usize) -> Vec<Pair> {
     let n_sources = *sources.iter().max().unwrap() as usize + 1;
     let mut words = count_words(texts, sources, pattern);
@@ -199,12 +199,12 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &PerWorker<Rege
     let min_len = (n_sources.div_ceil(u64::BITS as usize) * words.len()).div_ceil(incidences);
     let mut pair_freqs: FxHashMap<Pair, i64> = FxHashMap::default();
     let mut heap = BinaryHeap::new();
-    let bound = n_sources as u32; // every pair's R is at most the number of sources until counted
+    let bound = n_sources as u32; /* every pair's R is at most the number of sources until counted */
     for (pair, (freq, of)) in count_pairs(&words) {
         pair_freqs.insert(pair, freq);
         heap.push(Job { pair, freq, sources: bound, exact: false, score: score(freq, bound), words: of });
     }
-    let mut tokens: Vec<Vec<u8>> = (0..=u8::MAX).map(|b| vec![b]).collect(); // every token's bytes, its id the index
+    let mut tokens: Vec<Vec<u8>> = (0..=u8::MAX).map(|b| vec![b]).collect(); /* every token's bytes, its id the index */
     let mut known: FxHashSet<Vec<u8>> = tokens.iter().cloned().collect();
     let mut merges = Vec::new();
     while merges.len() < n_merges {
@@ -261,8 +261,8 @@ fn train_merges(texts: &[PyBackedStr], sources: &[u32], pattern: &PerWorker<Rege
     merges
 }
 
-/// Trains n_merges merges on texts[d] from source sources[d] (dense from 0) within the chunks of pattern; merge i
-/// makes token id 256 + i, and a merge whose bytes are already a token is skipped.
+/** Trains n_merges merges on texts[d] from source sources[d] (dense from 0) within the chunks of pattern; merge i
+    makes token id 256 + i, and a merge whose bytes are already a token is skipped. */
 #[pyfunction]
 #[pyo3(signature = (texts, sources, *, pattern, n_merges))]
 pub(crate) fn train(py: Python<'_>, texts: Vec<PyBackedStr>, sources: Vec<u32>, pattern: &str, n_merges: usize) -> Vec<Pair> {

@@ -1,6 +1,6 @@
-//! A repository's files as import-connected training samples in dependency order (DeepSeek-Coder, arXiv 2401.14196
-//! §2.2); Python imports (Python Language Reference §5, §7.11) and C++ includes (C++23 [cpp.include]) are resolved by
-//! path within the repository.
+/*! A repository's files as import-connected training samples in dependency order (DeepSeek-Coder, arXiv 2401.14196
+    §2.2); Python imports (Python Language Reference §5, §7.11) and C++ includes (C++23 [cpp.include]) are resolved by
+    path within the repository. */
 
 use std::path::{Component, Path};
 
@@ -16,13 +16,13 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::Lang;
 
-/// tree-sitter-python import nodes: pattern 0 import, pattern 1 from-import (Python Language Reference §7.11).
+/** tree-sitter-python import nodes: pattern 0 import, pattern 1 from-import (Python Language Reference §7.11). */
 const PYTHON: &str = "(import_statement) @import (import_from_statement) @import";
 
-/// tree-sitter-cpp include paths: pattern 0 quoted, pattern 1 angled (C++23 [cpp.include] 2-3).
+/** tree-sitter-cpp include paths: pattern 0 quoted, pattern 1 angled (C++23 [cpp.include] 2-3). */
 const CPP: &str = "(preproc_include path: (string_literal) @path) (preproc_include path: (system_lib_string) @path)";
 
-/// The files a name matches: suffix s matches path p iff p == s or p ends with "/" + s.
+/** The files a name matches: suffix s matches path p iff p == s or p ends with "/" + s. */
 struct Index<'a> {
     suffix: FxHashMap<&'a str, Vec<usize>>,
     exact: FxHashMap<&'a str, Vec<usize>>,
@@ -53,15 +53,15 @@ impl<'a> Index<'a> {
 
 type Imports = fn(Node, usize, &str, &str, &Index, &mut Vec<usize>);
 
-/// The identifiers of a dotted name `a.b.c` (an aliased import's name).
+/** The identifiers of a dotted name `a.b.c` (an aliased import's name). */
 fn components<'t>(node: Node, text: &'t str) -> Vec<&'t str> {
     let name = if node.kind() == "aliased_import" { node.child_by_field_name("name").unwrap() } else { node };
     let mut cursor = name.walk();
     name.named_children(&mut cursor).filter(|c| c.kind() == "identifier").map(|c| &text[c.byte_range()]).collect()
 }
 
-/// A Python import's files (Python Language Reference §5.2, §5.7, §7.11): absolute modules by suffix, relative imports
-/// of level l at exact paths under the importing file's l-th ancestor.
+/** A Python import's files (Python Language Reference §5.2, §5.7, §7.11): absolute modules by suffix, relative imports
+    of level l at exact paths under the importing file's l-th ancestor. */
 fn python(node: Node, pattern: usize, path: &str, text: &str, index: &Index, targets: &mut Vec<usize>) {
     let mut by_suffix = |module: &str| {
         targets.extend(index.suffix(&format!("{module}.py")));
@@ -101,17 +101,17 @@ fn python(node: Node, pattern: usize, path: &str, text: &str, index: &Index, tar
     }
 }
 
-/// A path lexically cleaned (path-clean: Go's path.Clean); None when it leaves the repository root.
+/** A path lexically cleaned (path-clean: Go's path.Clean); None when it leaves the repository root. */
 fn cleaned(path: &Path) -> Option<String> {
     let path = path.clean();
     (path.components().next() != Some(Component::ParentDir)).then(|| path.to_str().unwrap().to_string())
 }
 
-/// A C++ include's files (C++23 [cpp.include] 2-3; GCC manual "The C Preprocessor" §2.3): quoted first at the exact
-/// path from the including file's directory, else (and angled) by suffix.
+/** A C++ include's files (C++23 [cpp.include] 2-3; GCC manual "The C Preprocessor" §2.3): quoted first at the exact
+    path from the including file's directory, else (and angled) by suffix. */
 fn cpp(node: Node, pattern: usize, path: &str, text: &str, index: &Index, targets: &mut Vec<usize>) {
     let quoted = pattern == 0;
-    // a string literal's quotes are its first and last children
+    /* a string literal's quotes are its first and last children */
     let name = if quoted {
         &text[node.child(0).unwrap().end_byte()..node.child(node.child_count() - 1).unwrap().start_byte()]
     } else {
@@ -129,8 +129,8 @@ fn cpp(node: Node, pattern: usize, path: &str, text: &str, index: &Index, target
     }
 }
 
-/// The samples of one repository from `dependencies[f]` (ascending, g != f): weakly connected components in order of
-/// their smallest index, each file after the files it depends on (kosaraju_scc, iterative: reverse topological order).
+/** The samples of one repository from `dependencies[f]` (ascending, g != f): weakly connected components in order of
+    their smallest index, each file after the files it depends on (kosaraju_scc, iterative: reverse topological order). */
 fn samples(dependencies: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let n = dependencies.len();
     let mut graph = DiGraph::<(), ()>::with_capacity(n, 0);
@@ -161,8 +161,8 @@ fn samples(dependencies: &[Vec<usize>]) -> Vec<Vec<usize>> {
     samples
 }
 
-/// The samples of a partition's repositories (arXiv 2401.14196 §2.2 Algorithm 1): repository r holds files
-/// ends[r - 1]..ends[r] (from 0); each sample as indices into paths, independent of the rayon schedule.
+/** The samples of a partition's repositories (arXiv 2401.14196 §2.2 Algorithm 1): repository r holds files
+    ends[r - 1]..ends[r] (from 0); each sample as indices into paths, independent of the rayon schedule. */
 #[pyfunction]
 #[pyo3(signature = (paths, texts, ends, *, grammar))]
 pub(crate) fn topological_sort(py: Python<'_>, paths: Vec<String>, texts: Vec<PyBackedStr>, ends: Vec<usize>, grammar: Lang) -> Vec<Vec<usize>> {
@@ -181,7 +181,7 @@ pub(crate) fn topological_sort(py: Python<'_>, paths: Vec<String>, texts: Vec<Py
             parser.set_language(&language).unwrap();
             (parser, QueryCursor::new())
         };
-        // each file's dependencies, as indices within its repository
+        /* each file's dependencies, as indices within its repository */
         let dependencies: Vec<Vec<usize>> = (0..paths.len()).into_par_iter().map_init(parser, |(parser, cursor), file| {
             let (r, mut targets) = (repository[file], Vec::new());
             let (a, b) = repositories[r];
