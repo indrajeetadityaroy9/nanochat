@@ -444,15 +444,18 @@ any task's outcome. Removed:
 
 The kept checks and their basis: `docs/evaluation.md` §7.
 
-**bf16 KV cache in `NativeDecoder`** (a variant of `decode.cu`: K and V cached as bf16, scales 1, the scores by bf16
-MMAs; one of the two d16 checkpoints above, the export's head and cap in fp32; greedy continuations of the 542
-HumanEval+/MBPP+ prompts, 512 new tokens, against the compiled training forward's). Identical continuations 363
-against 216 with the FP8 cache (for scale: the uncompiled training forward 340, the export under vLLM 379,
-`docs/evaluation.md` §8); divergence before the EvalPlus stop 164 against 299; EvalPlus-scored completions differing
-from the training forward's 25 and 138 (HumanEval+, MBPP+) against 52 and 249; pass@1 HumanEval+ 0.0488 for both,
-MBPP+ base/plus 0.0238/0.0212 (equal to the training forward's) against 0.0265/0.0238 with FP8. The cache's bytes per
-position grow 1.94× (73,728 against 38,016 at d24 [arithmetic]); its decode speed and the full evaluation's pass@1 are
-not measured. The decoder keeps the FP8 cache (`docs/evaluation.md` §6).
+**e4m3 KV cache in `NativeDecoder`** (replaced by bf16, `docs/evaluation.md` §6: one fp32 scale per position and
+head, amax / 448, the scores by f16 MMAs; 38,016 bytes per position at d24 against bf16's 73,728 [arithmetic]).
+Teacher-forced greedy choice agreeing with the compiled training forward's on 0.9920 of 16,261 tokens, with the
+PyTorch forward's on 0.9916 (121 mismatches, each within 0.57 of the forward's top logit, the first divergences'
+median gap 0.0625). On one of the two d16 checkpoints above (the export's head and cap in fp32; greedy continuations
+of the 542 HumanEval+/MBPP+ prompts, 512 new tokens, against the compiled training forward's), a bf16-cache variant
+(scales 1, the scores by bf16 MMAs) gave 363 identical continuations against e4m3's 216 (for scale: the uncompiled
+training forward 340, the export under vLLM 379, `docs/evaluation.md` §8); divergence before the EvalPlus stop 164
+against 299; EvalPlus-scored completions differing from the training forward's 25 and 138 (HumanEval+, MBPP+) against
+52 and 249; pass@1 HumanEval+ 0.0488 for both, MBPP+ base/plus 0.0238/0.0212 (equal to the training forward's)
+against 0.0265/0.0238. Verdict: replaced; completions come from bf16 K and V, the operands the trained model's
+attention reads.
 
 **Speculative decoding.** Lossless by construction; its gains target large-model serving [inference]. Not used.
 

@@ -1,7 +1,8 @@
 /* Decoding of a nanochat CausalLM (model/modeling.py) in MAX_BATCH slots (inference/decoder.py): a step runs one graph
  * (greedy) or two (body, head) of dependent kernels, advancing each active slot by one greedy, sampled or nucleus token
  * within its allowed set. Batched prefill; an exact-prompt store, never evicted, reuses prompts' K and V. Numerics
- * follow the compiled training forward op by op, except the e4m3 KV cache (a scale per position and head). */
+ * follow the compiled training forward op by op, K and V cached in bf16 as its attention reads them; attention differs
+ * only in summation order and in fp32 probabilities (FA4's PV GEMM reads them as bf16). */
 #include <initializer_list>
 #include <limits.h>
 #include <math.h>
@@ -10,8 +11,6 @@
 #include <utility>
 
 #include <cuda.h>
-#include <cuda_fp16.h>
-#include <cuda_fp8.h>
 #include <curand_kernel.h>
 
 #include "qk_row.cuh"
@@ -431,19 +430,16 @@ __global__ void k_norm(int kind, const bf16 *in, const float *wte, float *x0, co
     }
 }
 
-/* Attention, (head, slot) blocks of HEAD_DIM threads: k_prologue caches the row's k, v as e4m3; k_attn streams the
- * window in ATTN_RUN-key double-buffered runs, f16 MMA scores (exact for e4m3 k and bf16 q), fp32 online softmax. */
+/* Attention, (head, slot) blocks of HEAD_DIM threads: k_prologue caches the row's k, v (bf16); k_attn streams the
+ * window in ATTN_RUN-key double-buffered runs, bf16 MMA scores (fp32 accumulators), fp32 online softmax. */
 
 typedef struct {
     const bf16 *qkv, *h, *ve;  /* [B][3C], [B][C] (the normed input), the layer's value-embedding table or NULL */
     const float *ve_gate;      /* [H][C] fp32: the value-embedding gate's weights */
     const float *q_gain, *k_gain;  /* [HEAD_DIM] fp32, shared by the heads */
     const float *cos, *sin;    /* the rotary table [context][HALF], fp32 */
-    uint8_t *kc, *vc;          /* the layer's FP8 (e4m3) cache of slot 0, [max_len][C]; slot b's at + b kv_slot */
+    bf16 *kc, *vc;             /* the layer's cache of slot 0, [max_len][C]; slot b's at + b kv_slot */
     size_t kv_slot;
-    float *ksc, *vsc;          /* scales of slot 0, [H][max_len] (value: e4m3 x scale); slot b's at + b sc_slot */
-    size_t sc_slot;
-    int max_len;
     bf16 *out;
     const int32_t *tokens, *pos;  /* [B]: each slot's input token and its position */
     const unsigned long long *active;
@@ -481,27 +477,21 @@ static __device__ void attn_prologue(const Attn &a, int b, int head, int p, floa
     __syncthreads();
 }
 
-/* The low two e4m3 bytes of x as an f16x2 (exact). */
-static __device__ __forceinline__ uint32_t fp8x2_f16x2(uint32_t x) {
-    const __half2_raw h = __nv_cvt_fp8x2_to_halfraw2((__nv_fp8x2_storage_t)(x & 0xffffu), __NV_E4M3);
-    return (uint32_t)h.x | (uint32_t)h.y << 16;
-}
-
-/* d += A B by mma.sync m16n8k16 with f16 operands, fp32 accumulators (fragments as mma16816's). */
-static __device__ __forceinline__ void mma16816_f16(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
-                                                    uint32_t b0, uint32_t b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+/* d += A B by mma.sync m16n8k16 with bf16 operands, fp32 accumulators (PTX ISA "Matrix Fragments for mma.m16n8k16"). */
+static __device__ __forceinline__ void mma16816_bf16(float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                                     uint32_t b0, uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                  "{%0,%1,%2,%3};\n"
                  : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
-/* A lane's LANE_DIMS dims of an e4m3 value row in shared memory, as fp32 (unscaled): one 4-byte load. */
-static_assert(LANE_DIMS == 4, "a lane reads its dims of a cached row as one uint32");
-static __device__ __forceinline__ void load_dims(const uint8_t *row, float *x) {
-    const uint32_t u = *reinterpret_cast<const uint32_t *>(row), lo = fp8x2_f16x2(u), hi = fp8x2_f16x2(u >> 16);
-    const float2 a = __half22float2(*reinterpret_cast<const __half2 *>(&lo));
-    const float2 c = __half22float2(*reinterpret_cast<const __half2 *>(&hi));
+/* A lane's LANE_DIMS dims of a cached value row in shared memory, as fp32: one 8-byte load. */
+static_assert(LANE_DIMS == 4, "a lane reads its dims of a cached row as one uint2");
+static __device__ __forceinline__ void load_dims(const bf16 *row, float *x) {
+    const uint2 u = *reinterpret_cast<const uint2 *>(row);
+    const float2 a = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(&u.x));
+    const float2 c = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(&u.y));
     x[0] = a.x; x[1] = a.y; x[2] = c.x; x[3] = c.y;
 }
 
@@ -514,30 +504,24 @@ static __device__ __forceinline__ float key_score(const float *q, const float *k
 
 /* k_attn's keys per cp.async run: one MMA_M tile per warp (tuned at d24) */
 constexpr int ATTN_RUN = ATTN_WARPS * MMA_M;
-constexpr int ROW_VECS = HEAD_DIM / (int)sizeof(uint4);  /* 16-byte vectors per e4m3 key row */
-constexpr float FP8_MAX = 448.f;  /* the largest finite e4m3 */
-/* one run's buffer: its keys and values (e4m3), then their scales */
-constexpr size_t ATTN_BUF = 2 * (size_t)ATTN_RUN * HEAD_DIM + 2 * ATTN_RUN * sizeof(float);
+constexpr int ROW_BYTES = HEAD_DIM * (int)sizeof(bf16);  /* a cached key or value row */
+constexpr int ROW_VECS = ROW_BYTES / (int)sizeof(uint4);  /* its 16-byte vectors */
+/* one run's buffer: its keys, then its values */
+constexpr size_t ATTN_BUF = 2 * (size_t)ATTN_RUN * ROW_BYTES;
 
 constexpr size_t ATTN_SMEM = 2 * ATTN_BUF;
 
-/* 4 bytes global -> shared (cp.async.ca: 4-byte copies take the L1 path). */
-static __device__ __forceinline__ void copy4(void *dst, const void *src) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                 :: "r"((unsigned)__cvta_generic_to_shared(dst)), "l"(src));
-}
-
-static __device__ __forceinline__ uint8_t to_fp8(float x, float inv) {
-    return (uint8_t)__nv_cvt_float_to_fp8(x * inv, __NV_SATFINITE, __NV_E4M3);
-}
+/* Where a key row's 16-byte vector c sits in shared memory: c ^ 4 in odd rows. A quarter warp's QK fragment loads
+ * (lanes (g, t), g of one parity pair, vectors 4 ch + t of rows j0 + g) then cover all 32 banks. */
+static __device__ __forceinline__ int key_vec(int j, int c) { return c ^ ((j & 1) << 2); }
 
 /* exp(m - top); 0 for an empty state (m = top = -inf would give NaN) */
 static __device__ __forceinline__ float rescale(float m, float top) { return m == -INFINITY ? 0.f : expf(m - top); }
 
-/* Before k_attn, per (head, row): q, k, v to qkvf; k, v to the slot's cache as e4m3, a scale amax / FP8_MAX each. */
+/* Before k_attn, per (head, row): q, k, v to qkvf; k, v to the slot's cache (bf16: attn_prologue's rounded values). */
 __global__ void __launch_bounds__(HEAD_DIM) k_prologue(Attn a) {
     pdl_start();
-    __shared__ float q[HEAD_DIM], k[HEAD_DIM], v[HEAD_DIM], scratch[ATTN_WARPS];
+    __shared__ float q[HEAD_DIM], k[HEAD_DIM], v[HEAD_DIM];
     const int head = blockIdx.x, b = blockIdx.y, tid = threadIdx.x;
     if (!live(a.active, b)) return;
     const int p = a.pos[b], cs = a.cache_slot ? a.cache_slot[b] : b;
@@ -546,16 +530,9 @@ __global__ void __launch_bounds__(HEAD_DIM) k_prologue(Attn a) {
     out[0] = q[tid];
     out[a.C] = k[tid];
     out[2 * a.C] = v[tid];
-    const float ka = block_max(fabsf(k[tid]), scratch), va = block_max(fabsf(v[tid]), scratch);
-    const float ks = ka > 0.f ? ka / FP8_MAX : 1.f, vs = va > 0.f ? va / FP8_MAX : 1.f;
     const size_t at = (size_t)cs * a.kv_slot + (size_t)p * a.C + head * HEAD_DIM + tid;
-    a.kc[at] = to_fp8(k[tid], 1.f / ks);
-    a.vc[at] = to_fp8(v[tid], 1.f / vs);
-    if (tid == 0) {
-        const size_t s = (size_t)cs * a.sc_slot + (size_t)head * a.max_len + p;
-        a.ksc[s] = ks;
-        a.vsc[s] = vs;
-    }
+    a.kc[at] = __float2bfloat16_rn(k[tid]);
+    a.vc[at] = __float2bfloat16_rn(v[tid]);
 }
 
 __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
@@ -569,24 +546,17 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
     const int begin = p > a.window ? p - a.window : 0, n = p - begin;
     const int runs = (n + ATTN_RUN - 1) / ATTN_RUN;
     const int cs = a.cache_slot ? a.cache_slot[b] : b;
-    const uint8_t *kc = a.kc + (size_t)cs * a.kv_slot + (size_t)begin * a.C + head * HEAD_DIM;
-    const uint8_t *vc = a.vc + (size_t)cs * a.kv_slot + (size_t)begin * a.C + head * HEAD_DIM;
-    const float *ksc = a.ksc + (size_t)cs * a.sc_slot + (size_t)head * a.max_len + begin;
-    const float *vsc = a.vsc + (size_t)cs * a.sc_slot + (size_t)head * a.max_len + begin;
-    /* run r's keys (16-byte chunks swizzled by the row's low 3 bits, so the QK fragments' loads of 8 rows hit distinct
-     * banks), values and scales to buffer r % 2, one commit group */
+    const bf16 *kc = a.kc + (size_t)cs * a.kv_slot + (size_t)begin * a.C + head * HEAD_DIM;
+    const bf16 *vc = a.vc + (size_t)cs * a.kv_slot + (size_t)begin * a.C + head * HEAD_DIM;
+    /* run r's keys (vectors at key_vec) and values to buffer r % 2, one commit group */
     auto load_run = [&](int r) {
-        uint8_t *ks = attn_buf + (r % 2) * ATTN_BUF, *vs = ks + ATTN_RUN * HEAD_DIM;
-        float *kss = reinterpret_cast<float *>(vs + ATTN_RUN * HEAD_DIM), *vss = kss + ATTN_RUN;
+        unsigned char *ks = attn_buf + (r % 2) * ATTN_BUF, *vs = ks + ATTN_RUN * ROW_BYTES;
         const int j0 = r * ATTN_RUN, m = min(ATTN_RUN, n - j0);
         for (int i = tid; i < m * ROW_VECS; i += HEAD_DIM) {
             const int j = i / ROW_VECS, c = i % ROW_VECS;
-            copy16(ks + j * HEAD_DIM + (c ^ (j & 7)) * (int)sizeof(uint4), kc + (size_t)(j0 + j) * a.C + c * 16);
-            copy16(vs + j * HEAD_DIM + c * (int)sizeof(uint4), vc + (size_t)(j0 + j) * a.C + c * 16);
-        }
-        for (int i = tid; i < m; i += HEAD_DIM) {
-            copy4(kss + i, ksc + j0 + i);
-            copy4(vss + i, vsc + j0 + i);
+            const size_t from = (size_t)(j0 + j) * a.C + c * VEC;
+            copy16(ks + j * ROW_BYTES + key_vec(j, c) * (int)sizeof(uint4), kc + from);
+            copy16(vs + j * ROW_BYTES + c * (int)sizeof(uint4), vc + from);
         }
         copies_commit();
     };
@@ -603,7 +573,7 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
     uint32_t qb[HEAD_DIM / 32][4];
     for (int ch = 0; ch < HEAD_DIM / 32; ch++)
         for (int i = 0; i < 4; i++) {
-            const __half2 h = __floats2half2_rn(q[32 * ch + 8 * t + 2 * i], q[32 * ch + 8 * t + 2 * i + 1]);
+            const __nv_bfloat162 h = __floats2bfloat162_rn(q[32 * ch + 8 * t + 2 * i], q[32 * ch + 8 * t + 2 * i + 1]);
             qb[ch][i] = g == 0 ? *reinterpret_cast<const uint32_t *>(&h) : 0u;
         }
     float acc[LANE_DIMS], m = -INFINITY, l = 0.f;
@@ -617,29 +587,26 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
             copies_wait<0>();
         }
         __syncthreads();  /* run r landed for every thread */
-        const uint8_t *ks = attn_buf + (r % 2) * ATTN_BUF, *vs = ks + ATTN_RUN * HEAD_DIM;
-        const float *kss = reinterpret_cast<const float *>(vs + ATTN_RUN * HEAD_DIM), *vss = kss + ATTN_RUN;
+        const unsigned char *ks = attn_buf + (r % 2) * ATTN_BUF, *vs = ks + ATTN_RUN * ROW_BYTES;
         const int m_run = min(ATTN_RUN, n - r * ATTN_RUN);
         /* the warp's MMA_M keys: scores by MMAs (key rows g, g + 8), then the values on the CUDA cores */
         const int j0 = warp * MMA_M, count = m_run - j0;
         if (count > 0) {
             float c4[ACC] = {0.f, 0.f, 0.f, 0.f};
-            const int j = j0 + g;  /* rows j and j + 8 share the swizzle (j & 7) */
+            const int j = j0 + g;  /* rows j and j + 8 share key_vec's parity */
 #pragma unroll
             for (int ch = 0; ch < HEAD_DIM / 32; ch++) {
-                const int at = ((2 * ch + t / 2) ^ (j & 7)) * (int)sizeof(uint4) + 8 * (t % 2);
-                const uint2 r0 = *reinterpret_cast<const uint2 *>(ks + j * HEAD_DIM + at);
-                const uint2 r1 = *reinterpret_cast<const uint2 *>(ks + (j + MMA_M / 2) * HEAD_DIM + at);
-                mma16816_f16(c4, fp8x2_f16x2(r0.x), fp8x2_f16x2(r1.x), fp8x2_f16x2(r0.x >> 16),
-                             fp8x2_f16x2(r1.x >> 16), qb[ch][0], qb[ch][1]);
-                mma16816_f16(c4, fp8x2_f16x2(r0.y), fp8x2_f16x2(r1.y), fp8x2_f16x2(r0.y >> 16),
-                             fp8x2_f16x2(r1.y >> 16), qb[ch][2], qb[ch][3]);
+                const int at = key_vec(j, 4 * ch + t) * (int)sizeof(uint4);  /* lane (g, t)'s 8 dims, one vector */
+                const uint4 r0 = *reinterpret_cast<const uint4 *>(ks + j * ROW_BYTES + at);
+                const uint4 r1 = *reinterpret_cast<const uint4 *>(ks + (j + MMA_M / 2) * ROW_BYTES + at);
+                mma16816_bf16(c4, r0.x, r1.x, r0.y, r1.y, qb[ch][0], qb[ch][1]);
+                mma16816_bf16(c4, r0.z, r1.z, r0.w, r1.w, qb[ch][2], qb[ch][3]);
             }
             /* column 0 (lanes t = 0) holds the scores of keys j, j + 8; to every lane of the group */
             float s0 = __shfl_sync(0xffffffffu, c4[0], lane & ~(GROUP - 1));
             float s1 = __shfl_sync(0xffffffffu, c4[2], lane & ~(GROUP - 1));
-            s0 = g < count ? s0 * scale * kss[j] : -INFINITY;  /* keys past the run: none */
-            s1 = g + MMA_M / 2 < count ? s1 * scale * kss[j + MMA_M / 2] : -INFINITY;
+            s0 = g < count ? s0 * scale : -INFINITY;  /* keys past the run: none */
+            s1 = g + MMA_M / 2 < count ? s1 * scale : -INFINITY;
             float top = fmaxf(s0, s1);
             for (int o = GROUP; o < WARP; o <<= 1) top = fmaxf(top, __shfl_xor_sync(0xffffffffu, top, o));
             top = fmaxf(top, m);
@@ -650,13 +617,12 @@ __global__ void __launch_bounds__(HEAD_DIM) k_attn(Attn a) {
             float ps = p0 + p1;
             for (int o = GROUP; o < WARP; o <<= 1) ps += __shfl_xor_sync(0xffffffffu, ps, o);
             l = l * c + ps;
-            const float w0 = p0 * vss[j], w1 = p1 * vss[j + MMA_M / 2];
 #pragma unroll
             for (int i = 0; i < MMA_M; i++) {
                 if (i >= count) break;
-                const float w = __shfl_sync(0xffffffffu, i < MMA_M / 2 ? w0 : w1, i % (MMA_M / 2) * GROUP);
+                const float w = __shfl_sync(0xffffffffu, i < MMA_M / 2 ? p0 : p1, i % (MMA_M / 2) * GROUP);
                 float vd[LANE_DIMS];
-                load_dims(vs + (j0 + i) * HEAD_DIM + lane * LANE_DIMS, vd);
+                load_dims(reinterpret_cast<const bf16 *>(vs + (j0 + i) * ROW_BYTES) + lane * LANE_DIMS, vd);
                 for (int e = 0; e < LANE_DIMS; e++) acc[e] = __fmaf_rn(w, vd[e], acc[e]);
             }
         }
@@ -726,11 +692,8 @@ typedef struct {
     bf16 *x, *xm, *h, *hn, *qkv_out, *att, *xo, *u;  /* [B][...]; hn: the normed input of fc and lm_head */
     float *x0;                /* [B][C]: the normed embedding, fp32 (k_norm EMBED) */
     float *qkvf;              /* [B][3][C]: k_prologue's q, k, v */
-    uint8_t *kc, *vc;         /* [B][L][max_len][C] e4m3 */
-    float *ksc, *vsc;         /* [B][L][H][max_len]: their scales */
-    /* the prompt store, one allocation: K and V [L][store][C] e4m3 each, then their scales [L][H][store] */
-    uint8_t *store_k, *store_v;
-    float *store_ksc, *store_vsc;
+    bf16 *kc, *vc;            /* [B][L][max_len][C] */
+    bf16 *store_k, *store_v;  /* the prompt store, one allocation: K, then V, [L][store][C] each */
     cudaStream_t stream;
     /* the whole step, its body (before lm_head), its head: [0] over all slots, [1] over the first SMALL_BATCH */
     cudaGraphExec_t step[2], body[2], head[2];
@@ -742,8 +705,7 @@ typedef struct {
 } Decoder;
 
 template <class F> static void slot_buffers(Decoder *d, F f) {
-    const size_t C = d->C, kv = (size_t)d->L * d->max_len * C;
-    const size_t scales = (size_t)d->L * d->H * d->max_len * sizeof(float);
+    const size_t C = d->C, kv = (size_t)d->L * d->max_len * C * sizeof(bf16);
     f((void **)&d->tokens, sizeof(int32_t));
     f((void **)&d->alt_tokens, sizeof(int32_t));
     f((void **)&d->pos, sizeof(int32_t));
@@ -763,8 +725,6 @@ template <class F> static void slot_buffers(Decoder *d, F f) {
     f((void **)&d->u, d->F * sizeof(bf16));
     f((void **)&d->kc, kv);
     f((void **)&d->vc, kv);
-    f((void **)&d->ksc, scales);
-    f((void **)&d->vsc, scales);
 }
 
 /* f(buffer, bytes per row) for a prefill decoder's buffers; tokens holds [3][rows]: token, position, slot. */
@@ -837,9 +797,8 @@ static void enqueue_body(Decoder *d) {
         launch_gemm<false>(d, gemm(d, ly->qkv, 3 * C, C, d->h, EPI_STORE, d->qkv_out));
         const Attn a = {d->qkv_out, d->h, ly->ve, ly->ve_gate, ly->q_gain, ly->k_gain, d->cos, d->sin,
                         d->kc + (size_t)l * d->max_len * C, d->vc + (size_t)l * d->max_len * C,
-                        (size_t)L * d->max_len * C, d->ksc + (size_t)l * d->H * d->max_len,
-                        d->vsc + (size_t)l * d->H * d->max_len, (size_t)L * d->H * d->max_len, d->max_len,
-                        d->att, d->tokens, d->pos, d->active, C, d->H, ly->window, d->cache_slot, d->qkvf};
+                        (size_t)L * d->max_len * C, d->att, d->tokens, d->pos, d->active, C, d->H, ly->window,
+                        d->cache_slot, d->qkvf};
         /* every row's k, v cached before any row's attention (prefill: a slot's earlier positions may be rows of
          * this launch); prefill's last layer needs nothing more (no row chooses a token) */
         launch(k_prologue, dim3(d->H, B), HEAD_DIM, 0, d->stream, a);
@@ -970,7 +929,7 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     d->prefill = capture(pf, [pf] { enqueue_body(pf); });
     /* the prompt store: at most what is left after slots and graphs, shrunk 2 MiB (Hopper's allocation granularity)
      * at a time until one allocation succeeds (cudaMemGetInfo's free bytes need not fit one allocation) */
-    const size_t position = 2 * (size_t)L * (d->C + d->H * sizeof(float));
+    const size_t position = 2 * (size_t)L * d->C * sizeof(bf16);
     cudaMemGetInfo(&free_bytes, &total_bytes);
     if ((size_t)d->store > free_bytes / position) d->store = (int)(free_bytes / position);
     while (d->store > 0 && cudaMalloc((void **)&d->store_k, position * d->store) != cudaSuccess) {
@@ -979,8 +938,6 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
         d->store = d->store > step ? d->store - step : 0;
     }
     d->store_v = d->store_k + (size_t)L * d->store * d->C;
-    d->store_ksc = reinterpret_cast<float *>(d->store_v + (size_t)L * d->store * d->C);
-    d->store_vsc = d->store_ksc + (size_t)L * d->H * d->store;
     return d;
 }
 
@@ -1012,8 +969,7 @@ extern "C" void dec_prefill(void *handle, int n, const int32_t *rows) {
     cudaGraphLaunch(d->prefill, d->stream);
 }
 
-/* Slot b's K, V and scales at [at, at + n) to the prompt store at store_at (to_store) or back: one 2D copy per cache
- * (L rows) and per scale array (L H rows). */
+/* Slot b's K and V at [at, at + n) to the prompt store at store_at (to_store) or back: a 2D copy per cache (L rows). */
 static void prompt_copy(Decoder *d, int b, int at, int store_at, int n, bool to_store) {
     auto copy = [&](void *cache, size_t cache_pitch, void *store, size_t store_pitch, size_t width, size_t height) {
         if (to_store)
@@ -1023,14 +979,10 @@ static void prompt_copy(Decoder *d, int b, int at, int store_at, int n, bool to_
             cudaMemcpy2DAsync(cache, cache_pitch, store, store_pitch, width, height, cudaMemcpyDeviceToDevice,
                               d->stream);
     };
-    const size_t C = d->C, L = d->L, H = d->H;
+    const size_t C = d->C, L = d->L, row = C * sizeof(bf16);
     const size_t in_slot = ((size_t)b * L * d->max_len + at) * C, in_store = (size_t)store_at * C;
     for (auto [cache, store] : {std::pair{d->kc, d->store_k}, std::pair{d->vc, d->store_v}})
-        copy(cache + in_slot, d->max_len * C, store + in_store, d->store * C, n * C, L);
-    const size_t sc_slot = (size_t)b * L * H * d->max_len + at;
-    for (auto [cache, store] : {std::pair{d->ksc, d->store_ksc}, std::pair{d->vsc, d->store_vsc}})
-        copy(cache + sc_slot, d->max_len * sizeof(float), store + store_at, d->store * sizeof(float),
-             n * sizeof(float), L * H);
+        copy(cache + in_slot, d->max_len * row, store + in_store, d->store * row, n * row, L);
 }
 
 /* Keep slot b's K and V at [at, at + n), written by the launched steps, in the store at store_at. Stream-ordered. */
