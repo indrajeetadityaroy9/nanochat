@@ -44,7 +44,7 @@ numbers were recomputed on CPU from the curated shards and the tokenized and pac
 | `ultradata_math_l3_*` (4 formats) | openbmb/UltraData-Math, L3 | TEXT | `content` | 2602.09003 §2.2.4 |
 | `codeforces_cots` | open-r1/codeforces-cots | CONVERSATION | `prompt` + `generation` | |
 | `kaggle_notebooks` | HuggingFaceTB/issues-kaggle-notebooks | NOTEBOOK | `text` | 2402.19173 §2.4.2 |
-| `climbmix` | karpathy/climbmix-400b-shuffle | TEXT | `text` | |
+| `climbmix` | karpathy/climbmix-400b-shuffle (Nemotron-ClimbMix, shuffled) | TEXT | `text` | 2504.13161 §6 |
 
 The four UltraData-Math formats are `qa`, `conversation`, `multi_style` and `textbook_exercise` (of L3's five; the
 persona-integrated one is not read); Codeforces-CoTs reads `solutions_py_decontaminated` (Python) and
@@ -811,6 +811,7 @@ sources in both stages); `IN_PART` groups read the same fraction of each source 
 | 2409.12186 | Qwen2.5-Coder | 3, 7, 8 |
 | 2411.04905 | OpenCoder | 7 |
 | 2502.02737 | SmolLM2 (Stack-Edu) | 1 |
+| 2504.13161 | Diao et al., Nemotron-CLIMB (Nemotron-ClimbMix) | 1 |
 | 2506.00204 | AST-FIM | 8, 11 |
 | 2510.01631 | Kang et al., Demystifying Synthetic Data in LLM Pre-training | 7 |
 | 2512.20848 | Nemotron 3 Nano (Nemotron-Pretraining-Code-v2) | 1 |
