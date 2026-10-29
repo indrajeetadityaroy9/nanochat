@@ -540,8 +540,8 @@ Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/
 
 ## 10. Post-training
 
-Not implemented: the repository pre-trains and evaluates a base model. The design, its evidence and the fetched data
-(supervised fine-tuning, distillation, GRPO with unit-test rewards): `docs/post-training.md`.
+Not implemented: the repository pre-trains and evaluates a base model. The design, its evidence and its data (SFT,
+off-policy and on-policy distillation, preference tuning, RL with verifiable code rewards): `docs/post-training.md`.
 
 ## References
 
