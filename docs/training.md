@@ -540,13 +540,8 @@ Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/
 
 ## 10. Post-training
 
-Not implemented: the repository pre-trains and evaluates a base model. Supervised fine-tuning on function-completion
-exercises has large published effects at this scale: 180M tokens of exercises took a 1.3B model's HumanEval pass@1
-from 29% to 50.6% (arXiv 2306.11644 §2, Fig. 2.1, Table 1); OpenCoder-1.5B went from HumanEval+ 49.4 to 67.7
-and MBPP+ 58.7 to 61.9 base to instruct (arXiv 2411.04905 Tables 6, 7; not controlled). The format would be
-completion, not chat (no chat tokens, `corpus/tokenizer.py` `SPECIAL_TOKENS`), the loss on the solution and BOS alone;
-candidate data `OpenCoder-LLM/opc-sft-stage2` and `opc-annealing-corpus`; preconditions: decontamination by entry
-point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/pack.py`'s format in the mix.
+Not implemented: the repository pre-trains and evaluates a base model. The design, its evidence and the fetched data
+(supervised fine-tuning, distillation, GRPO with unit-test rewards): `docs/post-training.md`.
 
 ## References
 
@@ -556,7 +551,6 @@ point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/p
 | 1910.04209 | On the adequacy of untuned warmup for adaptive optimization |
 | 2204.02311 | PaLM: Scaling Language Modeling with Pathways |
 | 2304.01373 | Pythia: A Suite for Analyzing Large Language Models Across Training and Scaling |
-| 2306.11644 | Textbooks Are All You Need |
 | 2308.12950 | Code Llama: Open Foundation Models for Code |
 | 2401.02954 | DeepSeek LLM: Scaling Open-Source Language Models with Longtermism |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming -- The Rise of Code Intelligence |
@@ -564,7 +558,6 @@ point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/p
 | 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2409.19913 | Scaling Optimal LR Across Token Horizons |
 | 2411.00640 | Adding Error Bars to Evals: A Statistical Approach to Language Model Evaluations |
-| 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models |
 | 2502.15938 | Straight to Zero: Why Linearly Decaying the Learning Rate to Zero Works Best for LLMs |
 | 2502.16982 | Muon is Scalable for LLM Training |
 | 2503.04715 | Predictable Scale: Part I, Step Law – Optimal Hyperparameter Scaling Law in Large Language Model Pre-training |
@@ -577,5 +570,4 @@ point and 10-gram overlap (arXiv 2411.04905 §4.4) and FIM examples in `corpus/p
 | 2512.22382 | Completed Hyperparameter Transfer across Modules, Width, Depth, Batch & Duration |
 
 Repositories: `zichongli5/NorMuon` (`normuon.py` `normuon_update`); `NVIDIA/Megatron-LM` (PR 5395);
-`openai/human-eval-infilling`, `nuprl/MultiPL-E`, `evalplus/evalplus` (§8's pinned versions);
-`OpenCoder-LLM/opc-sft-stage2`, `OpenCoder-LLM/opc-annealing-corpus` (datasets).
+`openai/human-eval-infilling`, `nuprl/MultiPL-E`, `evalplus/evalplus` (§8's pinned versions).
