@@ -162,9 +162,11 @@ class Filtered(NamedTuple):
     text: Callable[[int, list[int]], str]
 
     def record(self, tried: list[list[Candidate]], timing: dict) -> tuple[list[str], dict]:
-        """Each task's chosen text and the search record of verify.search's candidates and latency."""
+        """Each task's chosen text and the search record of verify.search's candidates (the chosen one's generated
+        tokens among it) and latency."""
         return [self.text(i, chosen(c).ids) for i, c in enumerate(tried)], {
-            "attempts": [len(c) for c in tried], "accepted": [c[-1].accepted for c in tried], "latency": timing}
+            "attempts": [len(c) for c in tried], "accepted": [c[-1].accepted for c in tried],
+            "new_tokens": [len(chosen(c).ids) for c in tried], "latency": timing}
 
 
 def filtered(request: Callable[[int], Request], text: Callable[[int, list[int]], str],
@@ -437,16 +439,20 @@ def codegen_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]],
 
 def codegen_record(tokenizer: Tokenizer, run: CodegenRun, mode: Literal["greedy", "sampled"],
                    generated: list[list[int]], timing: dict) -> dict:
-    """generation's record of a benchmark's greedy or sampled ids: the evaluator's scores, the completions (greedy: one
-    per task; sampled: each task's N_SAMPLE in seed order) and latency."""
+    """generation's record of a benchmark's greedy or sampled ids: the evaluator's scores, the completions and their
+    generated tokens (greedy: one per task; sampled: each task's N_SAMPLE in seed order), each task's token budget and
+    latency."""
     n = 1 if mode == "greedy" else N_SAMPLE
     texts = [completion(tokenizer, run.items[j // n], ids, special=run.special, healed=b"")
              for j, ids in enumerate(generated)]
+    tokens = [len(ids) for ids in generated]
     samples = [texts[n * i:n * (i + 1)] for i in range(len(run.items))]
     scores = run.score(run.items, samples)
+    common = {"max_new_tokens": run.budgets, "latency": timing}
     if mode == "greedy":
-        return scores | {"completions": texts, "latency": timing}
-    return scores | {"n_sample": N_SAMPLE, "completions": samples, "latency": timing}
+        return scores | {"completions": texts, "new_tokens": tokens} | common
+    return scores | {"n_sample": N_SAMPLE, "completions": samples,
+                     "new_tokens": [tokens[n * i:n * (i + 1)] for i in range(len(run.items))]} | common
 
 
 def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
@@ -500,13 +506,14 @@ def vetted(benchmarks: dict[str, list[Task]]) -> dict[str, list[list[tuple[str, 
 def parse_record(pool: ProcessPoolExecutor, tokenizer: Tokenizer, name: str, items: list[Task], dropped: list[bytes],
                  generated: list[list[int]], timing: dict, budget: int) -> dict:
     """parse_generation's record of generated ids: each completion's outcome ("truncated" when cut at the budget, else
-    parse_outcome) and their shares, EvalPlus's scores, outcomes, completions and latency."""
+    parse_outcome) and their shares, EvalPlus's scores, outcomes, completions, generated tokens, budget and latency."""
     completions = [completion(tokenizer, t, ids, special="skip", healed=d)
                    for t, ids, d in zip(items, generated, dropped, strict=True)]
     outcomes = ["truncated" if truncated(tokenizer, t, ids, budget=budget, healed=d) else parse_outcome(t.prompt + c)
                 for t, ids, d, c in zip(items, generated, dropped, completions, strict=True)]
     return (parse_shares(outcomes) | evalplus(pool, name, items, [[c] for c in completions])
-            | {"outcomes": outcomes, "completions": completions, "latency": timing})
+            | {"outcomes": outcomes, "completions": completions, "new_tokens": [len(ids) for ids in generated],
+               "max_new_tokens": budget, "latency": timing})
 
 
 def parse_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
@@ -576,7 +583,9 @@ def fim_generation(model: CausalLM, tokenizer: Tokenizer, *,
         # a FIM sentinel (ids > BOS) ends the middle too, as the first special token ends a MultiPL-E completion
         middles = [tokenizer.enc.decode(list(itertools.takewhile(lambda t: t < tokenizer.bos_token_id, ids)))
                    for ids in generated]
-        record["greedy"] = scorers.submit(infilling, name, run.problems, middles, {"latency": timing})
+        record["greedy"] = scorers.submit(infilling, name, run.problems, middles,
+                                          {"new_tokens": [len(ids) for ids in generated],
+                                           "max_new_tokens": run.max_new_tokens, "latency": timing})
         if run.lines is not None:
             record["greedy_reference_lines"] = scorers.submit(
                 infilling, name, run.problems,

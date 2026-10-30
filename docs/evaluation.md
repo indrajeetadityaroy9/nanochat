@@ -150,9 +150,11 @@ Generation modes (`generation`, `fim_generation`, `filtered_generation`):
 | `sampled` (EvalPlus, MultiPL-E) | `N_SAMPLE` 20 per problem at `TEMPERATURE` 0.2 from the nucleus `TOP_P` 0.95 (arXiv 1904.09751); sample k of problem i seeded N_SAMPLE · i + k | pass@1 (and pass@10) by Codex's unbiased estimator (arXiv 2107.03374 §2.1; T and p from §3.2–3.3), as MultiPL-E (§IV-B) and StarCoder2 (§7.1.2) sample |
 | `filtered` | the greedy candidate, then samples at T = 0.8 (`verify.TEMPERATURE`) from the nucleus `verify.TOP_P` 0.95 (Codex's setting for all its sampling, §3.2), attempt a of task i seeded `ATTEMPTS` · i + a, until one has no post-generation diagnostic and passes those of its prompt's examples that the reference solution passes (`vetted`, §7), at most `verify.ATTEMPTS` = 10; left-to-right prompts healed; Python and FIM middles under the syntax constraint (§7); FIM in SPM only (`FILTERED_MODE`) | filtered pass@1: the evaluator's pass rate of one chosen completion per task, the accepted candidate, else the task's greedy candidate (attempt 0, decoded with this mode's healing and constraint) (Codex §3.5's filtered pass@k: samples filtered by the task statement's examples): a system measurement, not comparable to pass@1 tables |
 
-Each record also holds `"scores"` (`metrics.summary` of the per-problem scores, §5), the completions as scored and
-the decoding's `"latency"` (`metrics.latency`); a filtered record holds the attempts per task and whether one was
-accepted.
+Each record also holds `"scores"` (`metrics.summary` of the per-problem scores, §5), the completions as scored, each
+completion's generated tokens (`"new_tokens"`, BOS not counted; sampled: N_SAMPLE per task), each task's budget
+(`"max_new_tokens"`; `"new_tokens"` equal to it: the completion ran to its budget) and the decoding's `"latency"`
+(`metrics.latency`); a filtered record holds the attempts per task, whether one was accepted and the chosen
+candidate's generated tokens; the parse (§3) and greedy infilling records hold `"new_tokens"` and `"max_new_tokens"`.
 
 - **Infilling.** The middle is scored as generated, up to BOS, another special token or the budget (the package's
   protocol, no post-processing). `greedy_reference_lines` also scores the greedy single- and multi-line middles cut to
