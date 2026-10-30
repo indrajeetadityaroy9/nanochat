@@ -328,6 +328,15 @@ def problem_clusters(record: dict) -> list[str] | None:
     return None
 
 
+def mbpp_clean_cell(record: dict, contamination: dict) -> dict:
+    """pass_cell of an MBPP 3-shot record (codegen.mbpp_3shot.greedy) over its clean subset: the problems whose
+    statement shares no 10-gram with the train corpus (contamination: results/mbpp_3shot_contamination.json, the
+    corpus decontamination rule applied to the original MBPP texts; "statement_rows" 0)."""
+    passed = pass_columns("mbpp_3shot", record)["pass@1"]
+    return pass_cell([p for task, p in zip(record["ids"], passed, strict=True)
+                      if contamination["tasks"][task]["statement_rows"] == 0])
+
+
 # z_{α/2} + z_β at α 0.05 and 80% power (arXiv 2411.00640 Eq. 10)
 DETECTABLE_Z = float(norm.ppf(0.975) + norm.ppf(0.8))
 
