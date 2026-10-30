@@ -1,7 +1,7 @@
 """
 Metrics, torch-free: the run log, bits per byte (arXiv 2101.00027 §3.1), parse outcomes, completion similarity
-(arXiv 2310.11248 §3.2), pass@k (arXiv 2107.03374 §2.1), error bars (arXiv 2411.00640), model FLOPs utilization
-(arXiv 2204.02311 App. B) and decoding latency.
+(arXiv 2310.11248 §3.2), pass@k (arXiv 2107.03374 §2.1), error bars and paired comparisons (arXiv 2411.00640), model
+FLOPs utilization (arXiv 2204.02311 App. B) and decoding latency.
 """
 import difflib
 import json
@@ -17,6 +17,10 @@ import numpy as np
 import statsmodels.api as sm
 from human_eval_infilling.evaluation import estimate_pass_at_k
 from numpy.typing import ArrayLike
+from scipy.stats import norm
+from statsmodels.stats.contingency_tables import mcnemar
+from statsmodels.stats.multitest import multipletests
+from statsmodels.stats.proportion import proportion_confint
 
 from corpus.mixture import REPO_LEVEL_STAGE
 from paths import RUNS
@@ -260,6 +264,123 @@ def summary(scores: ArrayLike, clusters: ArrayLike | None = None) -> dict:
            model.fit(cov_type="cluster", cov_kwds={"groups": groups, "use_correction": False}, use_t=False))
     low, high = fit.conf_int()[0]
     return out | {"se": float(fit.bse[0]), "interval": (float(low), float(high))}
+
+
+def pass_cell(passed: Sequence[Sequence[bool]]) -> dict:
+    """A pass@1 table cell: summary of each problem's mean pass over its samples (arXiv 2411.00640 §3.1: a question's
+    K answers averaged first, the error over the question means by Eq. 1), and, when every problem has one sample,
+    "wilson": the Wilson 95% score interval of the passes (statsmodels proportion_confint), inside [0, 1] and not
+    degenerate at 0 or all passes, where summary's normal interval is."""
+    cell = summary([statistics.fmean(p) for p in passed])
+    if all(len(p) == 1 for p in passed):
+        low, high = proportion_confint(sum(p[0] for p in passed), len(passed), alpha=0.05, method="wilson")
+        cell["wilson"] = (float(low), float(high))
+    return cell
+
+
+def evalplus_passed(record: dict) -> tuple[list[list[bool]], list[list[bool]]]:
+    """An EvalPlus record's base and plus pass outcomes [problem][sample]: base status "pass"; plus, both "pass"."""
+    base = [[s == "pass" for s in ss] for ss in record["base_status"]]
+    plus = [[s == t == "pass" for s, t in zip(ss, ts, strict=True)]
+            for ss, ts in zip(record["base_status"], record["plus_status"], strict=True)]
+    return base, plus
+
+
+def evalplus_average(humaneval: dict, mbpp: dict) -> dict:
+    """Qwen3's EvalPlus score (arXiv 2505.09388 §3.3: the average of HumanEval, MBPP, HumanEval+ and MBPP+) of one
+    mode's humaneval_plus and mbpp_plus records, as a summary cell. With a task's score t = (base + plus) / 2 of its
+    pass@1 (samples averaged first, arXiv 2411.00640 §3.1) the score is ½(mean_HE t + mean_MBPP t): a task's base and
+    plus columns are one cluster, the benchmarks independent, so se² = ¼(se²_HE + se²_MBPP), each by summary over the
+    task scores (Eq. 1); 95% normal interval (Eq. 3). n counts tasks."""
+    cells = []
+    for record in (humaneval, mbpp):
+        base, plus = evalplus_passed(record)
+        scores = [(statistics.fmean(b) + statistics.fmean(p)) / 2 for b, p in zip(base, plus, strict=True)]
+        cells.append(summary(scores))
+    mean = (cells[0]["mean"] + cells[1]["mean"]) / 2
+    se = float(np.hypot(cells[0]["se"], cells[1]["se"]) / 2)
+    half = float(norm.ppf(0.975)) * se
+    return {"n": cells[0]["n"] + cells[1]["n"], "clusters": None, "mean": mean, "se": se,
+            "interval": (mean - half, mean + half)}
+
+
+def pass_columns(benchmark: str, record: dict) -> dict[str, list[list[bool]]]:
+    """A codegen, reasoning or fim record's pass outcomes per score column, [problem][sample]: EvalPlus base and plus
+    (columns humaneval and humaneval_plus, or mbpp and mbpp_plus); else "pass@1" of status "OK" (MultiPL-E), "passed"
+    (lm-eval MBPP) or True (LiveCodeBench), or of result "passed" (human_eval_infilling); or SantaCoder's
+    "exact_match"."""
+    if "base_status" in record:
+        return dict(zip((benchmark.removesuffix("_plus"), benchmark), evalplus_passed(record), strict=True))
+    if "status" in record:
+        return {"pass@1": [[s is True or s in ("OK", "passed") for s in ss] for ss in record["status"]]}
+    if "result" in record:
+        return {"pass@1": [[r == "passed"] for r in record["result"]]}
+    return {"exact_match": [[bool(e)] for e in record["exact_match"]]}
+
+
+def problem_clusters(record: dict) -> list[str] | None:
+    """A fim record's clusters, its rows' HumanEval problems: human_eval_infilling ids "<Benchmark>/HumanEval/<i>/L<j>"
+    as eval/code_eval.py infilling clusters them, SantaCoder ids "<problem>.json-L<line>"; None for one row each."""
+    if "result" in record:
+        return ["/".join(i.split("/")[1:3]) for i in record["ids"]]
+    if "exact_match" in record:
+        return [i.rsplit(".json-L", 1)[0] for i in record["ids"]]
+    return None
+
+
+# z_{α/2} + z_β at α 0.05 and 80% power (arXiv 2411.00640 Eq. 10)
+DETECTABLE_Z = float(norm.ppf(0.975) + norm.ppf(0.8))
+
+
+def compare(a: dict, b: dict) -> dict[str, dict]:
+    """Paired comparison of evaluation records a and b (RUNS/<run>/eval-<step>.json) over the codegen (every mode and
+    column), fim and reasoning sections both hold, mode by mode on identical problems (equal ids, else ValueError).
+    Rows "<section>/<benchmark>/<mode>/<column>" (reasoning's mode "sampled"), each: n, means a and b of the
+    per-problem pass rates (samples averaged first, arXiv 2411.00640 §3.1), diff = b − a with se by summary of the
+    per-problem differences (Eq. 7; Eq. 8 clustered by HumanEval problem for fim rows) and its 95% interval (Eq. 3);
+    corr, the Pearson correlation of the per-problem scores (Table 5; None when either is constant); p: exact McNemar
+    (statsmodels) when every problem has one sample in both (greedy, 1@10, mbpp_3shot, fim; it treats a fim row's
+    lines as independent), else the two-sided normal test of diff / se; p_holm, Holm-adjusted over all rows
+    (statsmodels multipletests); mde, the difference detectable at α 0.05 with 80% power, (z_0.025 + z_0.2) · se
+    (Eq. 10). The per-problem difference of K_A- and K_B-sample means has variance ω² + σ²_A/K_A + σ²_B/K_B (the law
+    of total variance over Eq. 10's terms, the samples of A and B independent given the problem), so its sample
+    variance over n problems, n · se², estimates Eq. 10's bracket without fitting ω², σ²_A and σ²_B apart; for fim
+    rows the clustered se² is App. C's cluster-adjusted bracket over n."""
+    rows = {}
+    for section in ("codegen", "fim", "reasoning"):
+        if not a.get(section) or not b.get(section):
+            continue
+        for benchmark in [k for k in a[section] if k in b[section]]:
+            modes_a, modes_b = (s[section][benchmark] for s in (a, b))
+            if section == "reasoning":
+                modes_a, modes_b = {"sampled": modes_a}, {"sampled": modes_b}
+            for mode in [m for m in modes_a if m in modes_b]:
+                x, y = modes_a[mode], modes_b[mode]
+                if x["ids"] != y["ids"]:
+                    raise ValueError(f"{section}/{benchmark}/{mode}: the two records hold different problems")
+                clusters = problem_clusters(x) if section == "fim" else None
+                columns_b = pass_columns(benchmark, y)
+                for column, passed_a in pass_columns(benchmark, x).items():
+                    passed_b = columns_b[column]
+                    pa, pb = (np.array([statistics.fmean(p) for p in passed]) for passed in (passed_a, passed_b))
+                    diff = summary(pb - pa, clusters)
+                    if all(len(p) == 1 for p in (*passed_a, *passed_b)):
+                        both, only_a, only_b = (int(np.sum(u * v)) for u, v in ((pa, pb), (pa, 1 - pb), (1 - pa, pb)))
+                        table = [[both, only_a], [only_b, pa.size - both - only_a - only_b]]
+                        test, p = "mcnemar", float(mcnemar(table, exact=True).pvalue)
+                    else:
+                        test, se = "normal", diff["se"]
+                        p = 2 * float(norm.sf(abs(diff["mean"]) / se)) if se else float(diff["mean"] == 0)
+                    corr = None if np.ptp(pa) == 0 or np.ptp(pb) == 0 else float(np.corrcoef(pa, pb)[0, 1])
+                    rows[f"{section}/{benchmark}/{mode}/{column}"] = {
+                        "n": int(pa.size), "a": float(pa.mean()), "b": float(pb.mean()), "diff": diff["mean"],
+                        "se": diff["se"], "interval": diff["interval"], "clusters": diff["clusters"], "corr": corr,
+                        "test": test, "p": p, "mde": DETECTABLE_Z * diff["se"]}
+    if rows:
+        for row, adjusted in zip(rows.values(), multipletests([r["p"] for r in rows.values()], method="holm")[1],
+                                 strict=True):
+            row["p_holm"] = float(adjusted)
+    return rows
 
 
 # The GPU's dense BF16 peak: H100 SXM5 / GH200 (half the 1,979 TFLOP/s "with sparsity" of NVIDIA's H100 SXM specs)

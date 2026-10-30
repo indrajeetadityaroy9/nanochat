@@ -81,3 +81,10 @@ ENV HF_HOME=$XDG_CACHE_HOME/huggingface HF_XET_HIGH_PERFORMANCE=1 HF_HUB_DISABLE
 
 # NGC's entrypoint sources entrypoint.d before executing the command: the artifact and cache directories (paths.py)
 RUN echo 'python /workspace/nanochat/paths.py || exit' > /opt/nvidia/entrypoint.d/90-nanochat-paths.sh
+
+# LiveCodeBench/LiveCodeBench's lcb_runner (eval/livecodebench.py): the checkout on sys.path (.pth; its pyproject.toml
+# requires vllm, torch and API clients, which the evaluation path does not import; that path's datasets, numpy, pandas
+# and tqdm are already installed)
+RUN git clone https://github.com/LiveCodeBench/LiveCodeBench /opt/LiveCodeBench && \
+    git -C /opt/LiveCodeBench checkout 28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24 && \
+    echo /opt/LiveCodeBench > "$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/lcb_runner.pth"

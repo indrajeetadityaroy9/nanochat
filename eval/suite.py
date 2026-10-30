@@ -20,6 +20,7 @@ from corpus.tokenizer import Tokenizer
 from eval.bpb import likelihood
 from eval.cache import environment
 from eval.code_eval import (
+    FILTERED,
     filtered_generation,
     fim_generation,
     generation,
@@ -30,6 +31,7 @@ from eval.code_eval import (
     vetted,
 )
 from eval.verify import cores
+from metrics import evalplus_average
 from paths import ROOT, RUNS
 from train.checkpoint import load_model
 
@@ -81,10 +83,11 @@ def write_evaluation(path: Path, evaluation: dict) -> None:
     responses}. NaN and infinities raise."""
     record, completions, samples = dict(evaluation), {}, None
     if evaluation["codegen"] is not None:
-        record["codegen"] = {name: records | {"sampled": {k: v for k, v in records["sampled"].items()
-                                                          if k != "completions"}}
+        sampled = {name: records["sampled"] for name, records in evaluation["codegen"].items() if "sampled" in records}
+        record["codegen"] = {name: records | ({"sampled": {k: v for k, v in sampled[name].items()
+                                                           if k != "completions"}} if name in sampled else {})
                              for name, records in evaluation["codegen"].items()}
-        completions |= {name: records["sampled"]["completions"] for name, records in evaluation["codegen"].items()}
+        completions |= {name: r["completions"] for name, r in sampled.items()}
     if evaluation["reasoning"] is not None:
         record["reasoning"] = {name: {k: v for k, v in r.items() if k != "completions"}
                                for name, r in evaluation["reasoning"].items()}
@@ -104,8 +107,9 @@ def resolved(records: dict) -> dict:
 
 def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Literal["benchmarks", "parse", "reasoning"],
              previous: "Event | None", released: "Event") -> None:
-    """Write evaluation_path(run_name, step) of the checkpoint; with generate "parse", codegen and fim are null;
-    "reasoning" adds to "benchmarks" the reasoning protocol (docs/post-training.md §11.4), null in the other modes.
+    """Write evaluation_path(run_name, step) of the checkpoint; with generate "parse", codegen, fim and
+    evalplus_average are null; "reasoning" adds to "benchmarks" the reasoning protocol (docs/post-training.md §11.4),
+    null in the other modes. "evalplus_average": metrics.evalplus_average of each EvalPlus mode.
     The process tree keeps to verify.cores()'s decode cores until the last GPU phase ends, then frees the GPU, moves
     to the timed-check cores and sets `released` while scoring finishes. previous: set once the previous checkpoint's
     evaluation has ended; official scoring and timed checks wait for it, so they never share the CPU with another
@@ -137,9 +141,9 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
             filtered, fim_filtered = filtered_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers,
                                                          found=found.result())
             for name, record in filtered.items():
-                codegen[name]["filtered"] = record
+                codegen[name][FILTERED] = record
             for key, record in fim_filtered.items():
-                fim[key]["filtered"] = record
+                fim[key][FILTERED] = record
         del model
         torch._dynamo.reset()  # compiled graphs and their guards' references
         gc.collect()  # the decoders' native memory goes with their objects (NativeDecoder's finalizer)
@@ -153,6 +157,9 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
         results |= {"parse": resolved(parse), "codegen": None if codegen is None else resolved(codegen),
                     "fim": None if fim is None else resolved(fim),
                     "reasoning": None if reasoning is None else resolved(reasoning)}
+    results["evalplus_average"] = None if codegen is None else {
+        mode: evalplus_average(results["codegen"]["humaneval_plus"][mode], results["codegen"]["mbpp_plus"][mode])
+        for mode in ("greedy", "sampled", FILTERED)}
     provenance = {"source_sha256": source, "environment": json.loads(environment()), "started": started,
                   "finished": time.time()}
     write_evaluation(evaluation_path(run_name, step),
