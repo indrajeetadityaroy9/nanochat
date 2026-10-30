@@ -132,7 +132,7 @@ def mbpp_text(row: dict) -> str:
 
 def mbpp_shots() -> str:
     """The 3-shot context before a problem's text as lm-evaluation-harness renders it without a chat template
-    (api/task.py:933-1041 fewshot_context, build_qa_turn): each shot's doc_to_text, its doc_to_target (code +
+    (api/task.py:933-1042 fewshot_context, :1044-1107 build_qa_turn): each shot's doc_to_text, its doc_to_target (code +
     "\\n[DONE]", mbpp.yaml:8) with target_delimiter "" (:9), and the fewshot_delimiter "\\n\\n" (config/task.py:113);
     no description or system prompt."""
     rows = {r["task_id"]: r for r in mbpp_rows("prompt")}
@@ -605,7 +605,8 @@ def codegen_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]],
                                 multipl_e)
     items, shots = benchmarks[MBPP_3SHOT], mbpp_shots()
     # BOS first, as in every prompt of this model; lm-evaluation-harness's HF model encodes the context with the
-    # tokenizer's special tokens by default (models/huggingface.py:1043-1057), a BOS for a tokenizer that adds one
+    # tokenizer's special tokens by default (models/huggingface.py:1076-1091 tok_batch_encode), a BOS for a tokenizer
+    # that adds one
     runs[MBPP_3SHOT] = CodegenRun(items, [[bos, *tokenizer.enc.encode_ordinary(shots + t.prompt)] for t in items],
                                   [MBPP_MAX_NEW_TOKENS] * len(items), "skip", None, "python", mbpp)
     return runs
@@ -632,33 +633,38 @@ def codegen_record(tokenizer: Tokenizer, run: CodegenRun, mode: Literal["greedy"
 def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
                pool: ProcessPoolExecutor, scorers: ThreadPoolExecutor) -> dict[str, dict[str, Future[dict]]]:
     """Futures of {benchmark: {"greedy", "sampled"}} records of the EvalPlus and MultiPL-E benchmarks and of
-    {MBPP_3SHOT: {"greedy"}}. One generate call runs every greedy request, then the samples; sample k of problem i has
-    seed N_SAMPLE i + k."""
+    {MBPP_3SHOT: {"greedy"}}. Two decoder passes: the EvalPlus and MultiPL-E requests, every greedy one then the
+    samples (sample k of problem i seeded N_SAMPLE i + k), their prompts in the prompt store; then MBPP 3-shot's, whose
+    longer prompts would otherwise set the first pass's max_length (fewer slots) and each prompt is requested once
+    (no store). A request's tokens depend on neither (§6 of docs/evaluation.md)."""
     runs = codegen_runs(tokenizer, benchmarks, pool)
     keys = [(name, "greedy") for name in runs] + [(name, "sampled") for name in runs if name != MBPP_3SHOT]
-    groups = []
-    for name, mode in keys:
-        run = runs[name]
-        rows = list(zip(run.items, run.prompts, run.budgets, strict=True))
-        if mode == "greedy":
-            groups.append([Request(input_ids=p, max_new_tokens=m,
-                                   stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=b""))
-                           for t, p, m in rows])
-        else:
-            groups.append([Request(input_ids=p, max_new_tokens=m,
-                                   stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=b""),
-                                   temperature=TEMPERATURE, top_p=TOP_P, seed=N_SAMPLE * i + k)
-                           for i, (t, p, m) in enumerate(rows) for k in range(N_SAMPLE)])
-    generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,
-                              max_length=max(len(r.input_ids) + r.max_new_tokens - 1 for g in groups for r in g),
-                              prompt_store=sum(len(p) for run in runs.values() for p in run.prompts))
     results = {name: dict.fromkeys(mode for n, mode in keys if n == name) for name in runs}
+    for part in ([key for key in keys if key[0] != MBPP_3SHOT], [key for key in keys if key[0] == MBPP_3SHOT]):
+        groups = []
+        for name, mode in part:
+            run = runs[name]
+            rows = list(zip(run.items, run.prompts, run.budgets, strict=True))
+            if mode == "greedy":
+                groups.append([Request(input_ids=p, max_new_tokens=m,
+                                       stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=b""))
+                               for t, p, m in rows])
+            else:
+                groups.append([Request(input_ids=p, max_new_tokens=m,
+                                       stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=b""),
+                                       temperature=TEMPERATURE, top_p=TOP_P, seed=N_SAMPLE * i + k)
+                               for i, (t, p, m) in enumerate(rows) for k in range(N_SAMPLE)])
+        sampled = {name for name, mode in part if mode == "sampled"}
+        generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,
+                                  max_length=max(len(r.input_ids) + r.max_new_tokens - 1 for g in groups for r in g),
+                                  prompt_store=sum(len(p) for name in sampled for p in runs[name].prompts))
 
-    def done(g: int, generated: list[list[int]], timing: dict) -> None:
-        name, mode = keys[g]
-        results[name][mode] = scorers.submit(codegen_record, tokenizer, runs[name], mode, generated, timing)
+        def done(g: int, generated: list[list[int]], timing: dict, part: list = part) -> None:
+            name, mode = part[g]
+            results[name][mode] = scorers.submit(codegen_record, tokenizer, runs[name], mode, generated, timing)
 
-    generate_groups(generator, groups, done)
+        generate_groups(generator, groups, done)
+        del generator  # its native memory goes with it (NativeDecoder's finalizer) before the next pass sizes slots
     return results
 
 
@@ -711,12 +717,12 @@ class ReasoningRun(NamedTuple):
     score: Callable[[list, list[list[str]]], dict]
 
 
-def reasoning_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], pool: ProcessPoolExecutor, *,
-                   context: int) -> dict[str, ReasoningRun]:
+def reasoning_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], problems: list, pool: ProcessPoolExecutor,
+                   *, context: int) -> dict[str, ReasoningRun]:
     """The ReasoningRun of each EvalPlus and MultiPL-E benchmark (N_SAMPLE a problem, the last fenced block; Python
-    answers scored by EvalPlus as a chat model's, chat_source, C++ by multipl_e_answers) and of LiveCodeBench
-    (eval/livecodebench.py: its prompt, samples, extraction and scorer) at a model's context (positions of prompt and
-    response, BOS included)."""
+    answers scored by EvalPlus as a chat model's, chat_source, C++ by multipl_e_answers) and of LiveCodeBench's
+    problems (livecodebench.problems(); eval/livecodebench.py: its prompt, samples, extraction and scorer) at a model's
+    context (positions of prompt and response, BOS included)."""
     bos = tokenizer.bos_token_id
 
     def encoded(texts: list[str]) -> list[list[int]]:
@@ -730,7 +736,6 @@ def reasoning_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], pool
         score = (functools.partial(evalplus, pool, name, source=chat_source, ks=(1, N_SAMPLE))
                  if language == "python" else multipl_e_answers)
         runs[name] = ReasoningRun(items, prompts, [context - len(p) for p in prompts], N_SAMPLE, last_block, score)
-    problems = livecodebench.problems()
     prompts = encoded([livecodebench.prompt_text(p) + THINK for p in problems])
     runs[livecodebench.NAME] = ReasoningRun(
         problems, prompts, [context - len(p) for p in prompts], livecodebench.N_SAMPLE, livecodebench.answer,
@@ -763,12 +768,12 @@ def reasoning_record(tokenizer: Tokenizer, run: ReasoningRun, generated: list[li
         "latency": timing}
 
 
-def reasoning_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
+def reasoning_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], problems: list, *,
                          pool: ProcessPoolExecutor, scorers: ThreadPoolExecutor) -> dict[str, Future[dict]]:
-    """Futures of each reasoning benchmark's record (docs/post-training.md §11.4): run.n responses a problem at
-    REASONING_TEMPERATURE from the nucleus REASONING_TOP_P, each until BOS or the model's context (no stop sequence),
-    sample k of problem i seeded run.n i + k; one generate call runs all."""
-    runs = reasoning_runs(tokenizer, benchmarks, pool, context=model.config.max_position_embeddings)
+    """Futures of each reasoning benchmark's record (docs/post-training.md §11.4; problems: LiveCodeBench's): run.n
+    responses a problem at REASONING_TEMPERATURE from the nucleus REASONING_TOP_P, each until BOS or the model's
+    context (no stop sequence), sample k of problem i seeded run.n i + k; one generate call runs all."""
+    runs = reasoning_runs(tokenizer, benchmarks, problems, pool, context=model.config.max_position_embeddings)
     names = list(runs)
     groups = [[Request(input_ids=p, max_new_tokens=m, temperature=REASONING_TEMPERATURE, top_p=REASONING_TOP_P,
                        seed=run.n * i + k)

@@ -17,6 +17,7 @@ import psutil
 import torch
 
 from corpus.tokenizer import Tokenizer
+from eval import livecodebench
 from eval.bpb import likelihood
 from eval.cache import environment
 from eval.code_eval import (
@@ -120,6 +121,9 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
     os.environ["RAYON_NUM_THREADS"] = str(len(decode))  # rayon sizes its pool once, at first use
     pin(decode)
     benchmarks = tasks()
+    # LiveCodeBench's problems (a download and lcb_runner's prompt module, loaded before other threads run) before the
+    # GPU work
+    problems = livecodebench.problems() if generate == "reasoning" else None
     model = load_model(run_name, step, device=torch.device("cuda"))
     full = generate != "parse"
     codegen = fim = reasoning = None
@@ -133,7 +137,7 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
             codegen = generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
             fim = fim_generation(model, tokenizer, scorers=scorers)
         if generate == "reasoning":
-            reasoning = reasoning_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
+            reasoning = reasoning_generation(model, tokenizer, benchmarks, problems, pool=pool, scorers=scorers)
         results = likelihood(model, tokenizer, benchmarks, device=torch.device("cuda"))
         if full:
             if previous is not None:

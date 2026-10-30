@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow==26.0.0",
     "quack-kernels==0.6.5",
     "safetensors==0.8.0",
+    "scipy==1.18.1",
     "statsmodels==0.15.0",
     "tiktoken==0.14.0",
     "tokenizers==0.23.3",
