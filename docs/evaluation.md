@@ -148,7 +148,7 @@ standard error over problems and n, with a Wilson interval for single-completion
 | HumanEval, HumanEval+ | EvalPlus greedy pass@1 on HumanEval+ v0.1.10's 164 tasks: base tests; base and plus tests | EvalPlus leaderboard (greedy, base and plus); StarCoder2 (arXiv 2402.19173 §7.1.1, Table 9) | `codegen.humaneval_plus.greedy.scores`: `humaneval`, `humaneval_plus` |
 | MBPP (EvalPlus base, 378), MBPP+ | the same on MBPP+ v0.2.0's 378 tasks (not comparable with tables on the 399-task v0.1.0) | EvalPlus leaderboard; OpenCoder (arXiv 2411.04905 §5.1) | `codegen.mbpp_plus.greedy.scores`: `mbpp`, `mbpp_plus` |
 | EvalPlus average | the mean of the four columns above (`metrics.evalplus_average`) | Qwen3 (arXiv 2505.09388 §3.3) | `evalplus_average.greedy` |
-| MBPP (3-shot, 500) | lm-evaluation-harness's `mbpp` (v1.0) on the original test split, greedy; reported on all 500 problems and on the clean subset (the 202 whose statement shares no 10-gram with the train corpus, `metrics.mbpp_clean_cell`; Contamination, below) | MBPP (arXiv 2108.07732 §2.1); Qwen2.5-Coder (arXiv 2409.12186 Table 5), Qwen3 (§3.3), MobileLLM-R1 (arXiv 2509.24945 Table 6) | `codegen.mbpp_3shot.greedy` |
+| MBPP (3-shot, 500) | lm-evaluation-harness's `mbpp` (v1.0) on the original test split, greedy, on all 500 problems as published tables report it | MBPP (arXiv 2108.07732 §2.1); Qwen2.5-Coder (arXiv 2409.12186 Table 5), Qwen3 (§3.3), MobileLLM-R1 (arXiv 2509.24945 Table 6) | `codegen.mbpp_3shot.greedy` |
 | HumanEval-C++, MBPP-C++ | MultiPL-E greedy pass@1 and sampled pass@1 (n = 20, T = 0.2) | DeepSeek-Coder (arXiv 2401.14196 §4.1, Table 3: greedy); StarCoder2 §7.1.2 and MultiPL-E §IV-B (sampled) | `codegen.{humaneval,mbpp}_cpp.{greedy,sampled}` |
 | HumanEval, HumanEval+, MBPP, MBPP+ sampled | sampled pass@1 (n = 20, T = 0.2), supplementary: the lower-variance estimate of another quantity, not a substitute for greedy (arXiv 2411.00640 §3.3) | BigCode leaderboard's HumanEval column (arXiv 2402.19173 §7.1.2) | `codegen.*_plus.sampled`, `evalplus_average.sampled` |
 | HumanEval infilling | greedy pass rate, single-line, multi-line, random-span, PSM and SPM (secondary) | arXiv 2207.14255 (its benchmark; it samples) | `fim.<benchmark>/<order>.greedy` |
@@ -228,18 +228,13 @@ them) and LiveCodeBench v6 (arXiv 2403.07974).
   HumanEval+ task and 372 of 378 MBPP+ tasks; before it, `ultradata_stack_v3_l2_python` alone held 6,447 train
   documents with both a HumanEval+ task's signature and its docstring's first line, 161 of the 161 tasks checkable
   that way [unverified: a probe without a record]. Paraphrases that share no 10-gram remain, as under the cited rule.
-  SantaCoder FIM's Python rows are cut from HumanEval programs, covered through HumanEval+ [inference]. MBPP 3-shot
-  is not decontaminated: 224 of its 500 test problems are MBPP+ tasks, matched only through EvalPlus's revised prompt
-  and solution, and the other 276 are not covered. The same rule applied to the original texts over every
-  decontaminated train shard (1,794 shards of 18 sources; `results/mbpp_3shot_contamination.json`, per task, with the
-  rule, the dataset revision and a key of the shards' paths and sizes) [measured]: the statement (`text`) of 298 of
-  the 500 shares a 10-gram with 4,315 train rows (226 of the 276 not in MBPP+), mostly Stack-derived Python and C++
-  (e.g. "a function to check if a binary tree is balanced"); statement, code, asserts and setup code together match
-  429 tasks in 275,479 rows, mostly through common code and literal lists (`1, 2, 3, 4, 5, 6, 7, 8, 9, 10,`). The
-  paper reports MBPP 3-shot on all 500 and on the clean subset, the 202 tasks whose statement matches no row
-  (`metrics.mbpp_clean_cell`: `pass_cell` of the record's per-problem statuses over the tasks with `statement_rows`
-  0); the full score may be inflated relative to the clean one and the EvalPlus columns [inference]. LiveCodeBench's
-  overlap with the pre-training and SFT data is not measured.
+  SantaCoder FIM's Python rows are cut from HumanEval programs, covered through HumanEval+ [inference]. The original
+  MBPP texts are outside the decontamination (224 of MBPP 3-shot's 500 test problems are MBPP+ tasks, matched through
+  EvalPlus's revised prompt and solution); measured with the same rule over every decontaminated train shard (1,794
+  shards of 18 sources; `results/mbpp_3shot_contamination.json`, per task, with the rule, the dataset revision and a
+  key of the shards' paths and sizes), the statement (`text`) of 298 of the 500 shares a 10-gram with 4,315 train
+  rows, and statement, code, asserts and setup code together match 429 tasks in 275,479 rows [measured].
+  LiveCodeBench's overlap with the pre-training and SFT data is not measured.
 - **Evaluator processes.** EvalPlus's `sanitize` parses every line span of a program, hence a sanitize worker per
   CPU. MultiPL-E's `main.py --dir` judges a directory's problems serially and its default worker count oversubscribes
   g++ (a compile past its limit scores "SyntaxError", §9), hence one `--file --max-workers 1` process per problem.
@@ -274,7 +269,6 @@ import it alike.
 | `pass_cell(passed)` | a pass@1 table cell: `summary` of each problem's mean pass over its samples; when every problem has one sample, also `wilson`, the Wilson 95% score interval (inside [0, 1], not degenerate at 0 or at all passes) | Miller, arXiv 2411.00640 §3.1 (average a question's samples first), Eq. 1, 3; statsmodels `proportion_confint(method="wilson")` |
 | `evalplus_average(humaneval, mbpp)` | the EvalPlus score of one mode's `humaneval_plus` and `mbpp_plus` records: the mean of the HumanEval, HumanEval+, MBPP and MBPP+ pass@1, computed as ½(m_HE + m_MBPP) of per-task (base + plus)/2 scores; a task's two columns form one cluster and the benchmarks are independent, so se² = ¼(se²_HE + se²_MBPP), each from `summary`; 95% normal interval; n counts tasks | Qwen3, arXiv 2505.09388 §3.3 (the four-way average); Miller Eq. 1, 3 |
 | `compare(a, b)` | paired comparison of two evaluation records over the `codegen` (every mode and column), `fim` and `reasoning` sections both hold, on identical problems (else ValueError); one row per `<section>/<benchmark>/<mode>/<column>`: n; means a and b of the per-problem pass rates (exact match for SantaCoder FIM); the difference b − a with its paired se and 95% interval (clustered by HumanEval problem for `fim` rows); `corr`, the correlation of the per-problem scores (None when either is constant); p from exact McNemar for single-completion modes (greedy, 1@10, MBPP 3-shot, FIM; it treats a FIM row's lines as independent), else a two-sided normal test of the difference over its se; `p_holm`, Holm-adjusted over all rows; `mde`, the difference detectable at α 0.05 with 80% power, (z₀.₀₂₅ + z₀.₂) · se, where n · se², the variance of the per-problem difference, estimates ω² + σ²_A/K_A + σ²_B/K_B | Miller Eq. 7, 8 (paired se), Eq. 3, Table 5 (correlation), Eq. 10 and App. C (detectable difference); statsmodels `mcnemar(exact=True)`, `multipletests(method="holm")`; scipy `norm` |
-| `mbpp_clean_cell(record, contamination)` | `pass_cell` of an MBPP 3-shot record over its clean subset: the problems whose statement shares no 10-gram with the train corpus (`statement_rows` 0 in `results/mbpp_3shot_contamination.json`) | §4 Contamination |
 | `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends, itself included (`layer_windows`: 512, or the context for full layers); records written before the query's own key was counted (`results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), lower by 12 · C per windowed layer (d16: 73,728; 641,826,816 at 8K, 1,245,806,592 at 32K; d24: 165,888 lower) | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT; torchtitan's count without the causal halving |
 | `attended_keys(lengths, window)` | Σ over segments of Σ_p min(p, window + 1): the keys each query attends causally within its segment, itself included | — |
 | `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B; causal, per-document counting as Megatron-LM `num_floating_point_operations` (which excludes padding) |
