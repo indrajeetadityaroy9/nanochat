@@ -15,7 +15,7 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/suite.py` (`evaluate`, `write_evaluation`, `record`, `evaluation_path`, `pin`, `resolved`) | §1 |
 | `eval/bpb.py` (`likelihood`, `val_bits`, `solution_bits`, `sums`, `sample_rows`, `row_clusters`) | §2 |
 | `eval/trajectory.py` (`main`, `score`, `trajectory`, `rows_by_measure`, `groups`, `summaries`, `likelihoods`, `saved_steps`, `likelihood_path`) | §2 |
-| `eval/code_eval.py` (`tasks`, `parse_generation`, `generation`, `fim_generation`, `filtered_generation`, `vetted`, `codegen_runs`, `codegen_record`, `parse_record`, `truncated`, `fim_runs`, evaluator wrappers) | §1, §3, §4 |
+| `eval/code_eval.py` (`tasks`, `parse_generation`, `generation`, `fim_generation`, `filtered_generation`, `reasoning_generation`, `vetted`, `codegen_runs`, `codegen_record`, `parse_record`, `truncated`, `fim_runs`, `reasoning_runs`, `reasoning_prompt`, `reasoning_answer`, `reasoning_record`, evaluator wrappers) | §1, §3, §4 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function) | §5 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `fim_prompt`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
@@ -28,9 +28,11 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 `eval/suite.py` `evaluate(tokenizer, run_name=, step=, generate=, previous=, released=)` loads the checkpoint onto the
 GPU and writes `RUNS/<run>/eval-<step>.json`: the likelihood metrics (`"8k"`, `"32k"`, `"solution"`, §2), the parse
 measure (`"parse"`, §3) and, with `generate="benchmarks"`, the generation benchmarks (`"codegen"`, `"fim"`, §4); with
-`generate="parse"` both are null; `"provenance"` holds a SHA-256 over the code and configuration files, the Python
-version and installed distributions (the records in `results/` predate it). The sampled mode's completions (20 per
-problem, §4) go to the sidecar `eval-<step>.samples.json.gz`, named with its sha256 in `"samples"`; every other
+`generate="parse"` both are null; `generate="reasoning"` adds to `"benchmarks"` the reasoning protocol of a
+post-trained model (`"reasoning"`, §4), null in the other modes; `"provenance"` holds a SHA-256 over the code and
+configuration files, the Python version and installed distributions (the records in `results/` predate it). The
+sampled mode's completions (20 per problem, §4) go to the sidecar `eval-<step>.samples.json.gz`, named with its
+sha256 in `"samples"`, and so do the reasoning protocol's responses (under `"reasoning/<benchmark>"`); every other
 scored completion is in the record. Base-model checkpoints are evaluated with `"benchmarks"`, ablation runs with
 `"parse"`; `record` gathers a run's non-train log records and evaluations into `results/<experiment>.jsonl` (both:
 `docs/training.md` §6).
@@ -155,6 +157,18 @@ completion's generated tokens (`"new_tokens"`, BOS not counted; sampled: N_SAMPL
 (`"max_new_tokens"`; `"new_tokens"` equal to it: the completion ran to its budget) and the decoding's `"latency"`
 (`metrics.latency`); a filtered record holds the attempts per task, whether one was accepted and the chosen
 candidate's generated tokens; the parse (§3) and greedy infilling records hold `"new_tokens"` and `"max_new_tokens"`.
+
+**Reasoning protocol** (`generate="reasoning"`, `reasoning_generation`): the evaluation of a post-trained model
+(`docs/post-training.md` §11.4) on HumanEval+, MBPP+ and MultiPL-E's HumanEval and MBPP in C++, one record each.
+
+| Step | What the code does |
+|---|---|
+| Prompt (`reasoning_prompt`) | BOS, then one `encode_ordinary` of EvalPlus's instruction for chat models (`evalplus/codegen.py` `instruction_prefix`: "Please provide a self-contained Python script that solves the following problem in a markdown code block:"; "C++" for "Python" in MultiPL-E's), a line break, an opening fence of three backticks and `python` (C++: `cpp`), a line break, the benchmark's prompt stripped, a line break, a closing fence, and the post-training format's `\n\n<think>\n` (`THINK`, `docs/post-training.md` §11.1). EvalPlus's chat prompt fences the problem without a language and passes it through the model's chat template; this model has none |
+| Decoding | `N_SAMPLE` 20 responses per problem at T = 0.6 from the nucleus p = 0.95 (`REASONING_TEMPERATURE`, `REASONING_TOP_P`; Nemotron-Cascade's evaluation setting, arXiv 2512.13607 §2), sample k of problem i seeded 20 i + k; no stop sequence: a response ends at BOS or at its budget, the model's context (`max_position_embeddings`) less the prompt: 32,137–32,714 new tokens at the 32K context [arithmetic: prompts of 54–631 tokens with BOS]. One decoder runs the 22,000 requests [arithmetic: 20 × (164 + 378 + 161 + 397)] at `max_length` 32,767, so a slot's KV cache is 2.42 GB [arithmetic: 73,728 bytes × 32,767, §6] |
+| Outcome and answer (`reasoning_answer`, `REASONING_OUTCOMES`) | of the response's text (special tokens skipped), the first that holds: `budget` (it ran to its budget without BOS), `no_think_end` (no `</think>`), `no_block` (no complete fenced block after the last `</think>`), `answered`: the answer is the code of the last such block. A block (`FENCED_BLOCK`, CommonMark's backtick fences) opens with a line starting with three backticks and an info string, and closes with a line of three backticks alone; an unterminated block is none. Every other outcome's answer is empty and fails |
+| Python score | EvalPlus as for a chat model (`chat_source`): the answer alone (`codegen.py` prefixes the prompt only for direct completion), tabs replaced by four spaces (`provider/hf.py`), `sanitize`d with the entry point, then `evalplus.evaluate` as above: base and plus statuses and pass@k |
+| C++ score | MultiPL-E's `main.py` as above (`multipl_e_answers`) on the program: the prompt's `#include` lines, the answer, "\n" and MultiPL-E's tests without their first line, the "}" that closes the prompt's function in MultiPL-E's completion protocol (all 558 tests start with it [checked on the pinned dataset]); the answer holds the whole function. An answer that defines its own `main` fails to compile [inference] |
+| Record (`reasoning_record`) | the evaluator's per-sample statuses; `"scores"` pass@1 (the mean over the 20) and pass@20 (any of the 20 passes) by Codex's estimator (`REASONING_PASS_K`, §5); per-sample `"outcomes"` and `"outcome_shares"` over all responses; per-sample `"new_tokens"` and `"response_tokens"` (mean, median, 90th percentile and maximum over all responses); `"max_new_tokens"` per task; `"latency"`. The responses go to the sidecar (§1) |
 
 - **Infilling.** The middle is scored as generated, up to BOS, another special token or the budget (the package's
   protocol, no post-processing). `greedy_reference_lines` also scores the greedy single- and multi-line middles cut to

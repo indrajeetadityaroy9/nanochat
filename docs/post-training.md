@@ -433,14 +433,15 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 
 ### 11.4 Evaluation of each stage
 
-- **Reasoning protocol** (to be added to `eval/code_eval.py`): the prompt is EvalPlus's instruction for chat models,
-  "Please provide a self-contained Python script that solves the following problem in a markdown code block:"
-  (`evalplus/codegen.py`), then the benchmark's prompt in a fenced block, then §11.1's `\n\n<think>\n`; MultiPL-E's
-  C++ prompts the same with "C++" for "Python". 20 samples at temperature 0.6 and top-p 0.95, Nemotron-Cascade's
-  evaluation setting (arXiv 2512.13607 §2), up to the context (32,768 tokens with the prompt) in place of its 64K.
-  The answer is the last fenced block after `</think>`, scored by EvalPlus and MultiPL-E as in `docs/evaluation.md`
-  §4. Reported: pass@1 (the mean over the 20) and pass@20, the share of responses with no `</think>` or no block, the
-  response lengths.
+- **Reasoning protocol** (`eval/code_eval.py` `reasoning_generation`, the evaluation's `generate="reasoning"`;
+  `docs/evaluation.md` §4): the prompt is EvalPlus's instruction for chat models, "Please provide a self-contained
+  Python script that solves the following problem in a markdown code block:" (`evalplus/codegen.py`), then the
+  benchmark's prompt in a fenced block, then §11.1's `\n\n<think>\n`; MultiPL-E's C++ prompts the same with "C++" for
+  "Python". 20 samples at temperature 0.6 and top-p 0.95, Nemotron-Cascade's evaluation setting (arXiv 2512.13607
+  §2), each until BOS or the context (32,768 tokens with the prompt) in place of its 64K. The answer is the last
+  fenced block after `</think>`, scored by EvalPlus as a chat model's solution and by MultiPL-E's judge with the
+  prompt's `#include` lines and the tests. Reported: pass@1 (the mean over the 20) and pass@20, the share of responses
+  cut at the budget, with no `</think>` or with no block after it, the response lengths.
 - **The base's records** (likelihood, greedy completion, infilling; `docs/evaluation.md` §1) are taken at every stage
   to measure what it loses, not as a gate.
 - **No selection on the benchmarks**: RL, when run, stops on its held-out problems (§11.3); HumanEval+, MBPP+ and
@@ -463,7 +464,7 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 1. `posttrain/sft_data.py`: download §10's SFT sources, render §11.1's format, tokenize, apply §11.2's cap and
    filters, write rows with the prompt's labels ignored for the base's packer.
 2. An SFT experiment config (`conf/`) that starts from a base checkpoint.
-3. `eval/code_eval.py`: the reasoning protocol (§11.4).
+3. Done: `eval/code_eval.py` `reasoning_generation`, the reasoning protocol (§11.4).
 4. For §11.3 only: the verl image; `inference/export_hf.py` and `inference/modeling_nanochat.py` (fp32 weights, the
    chat template, the head and gate outside autocast); `posttrain/rl_data.py` (problems and tests in verl's format,
    the 8-sample filter sampled by the decoder); `posttrain/reward.py` (§11.3's reward); the run's settings.

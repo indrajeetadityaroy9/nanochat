@@ -1,6 +1,6 @@
 """
-A checkpoint's evaluation (RUNS/<run_name>/eval-<step>.json: likelihoods, the parse measure and the generation
-benchmarks) and a run's record (its non-train log records and evaluations).
+A checkpoint's evaluation (RUNS/<run_name>/eval-<step>.json: likelihoods, the parse measure, the generation
+benchmarks and the reasoning protocol) and a run's record (its non-train log records and evaluations).
 """
 import contextlib
 import gc
@@ -19,7 +19,16 @@ import torch
 from corpus.tokenizer import Tokenizer
 from eval.bpb import likelihood
 from eval.cache import environment
-from eval.code_eval import filtered_generation, fim_generation, generation, parse_generation, sanitizers, tasks, vetted
+from eval.code_eval import (
+    filtered_generation,
+    fim_generation,
+    generation,
+    parse_generation,
+    reasoning_generation,
+    sanitizers,
+    tasks,
+    vetted,
+)
 from eval.verify import cores
 from paths import ROOT, RUNS
 from train.checkpoint import load_model
@@ -67,16 +76,21 @@ def write_atomically(path: Path, data: bytes) -> None:
 
 def write_evaluation(path: Path, evaluation: dict) -> None:
     """Write an evaluation: the record at path with "samples" {"file", "sha256"} (null without generation benchmarks)
-    in place of every sampled record's "completions", which go to eval-<step>.samples.json.gz beside it,
-    gzip-compressed JSON {benchmark: each task's completions}. NaN and infinities raise."""
-    record, samples = dict(evaluation), None
+    in place of every sampled and reasoning record's "completions", which go to eval-<step>.samples.json.gz beside it,
+    gzip-compressed JSON {benchmark: each task's sampled completions} and {"reasoning/<benchmark>": each task's
+    responses}. NaN and infinities raise."""
+    record, completions, samples = dict(evaluation), {}, None
     if evaluation["codegen"] is not None:
         record["codegen"] = {name: records | {"sampled": {k: v for k, v in records["sampled"].items()
                                                           if k != "completions"}}
                              for name, records in evaluation["codegen"].items()}
-        data = gzip.compress(json.dumps({name: records["sampled"]["completions"]
-                                         for name, records in evaluation["codegen"].items()},
-                                        allow_nan=False).encode(), mtime=0)
+        completions |= {name: records["sampled"]["completions"] for name, records in evaluation["codegen"].items()}
+    if evaluation["reasoning"] is not None:
+        record["reasoning"] = {name: {k: v for k, v in r.items() if k != "completions"}
+                               for name, r in evaluation["reasoning"].items()}
+        completions |= {f"reasoning/{name}": r["completions"] for name, r in evaluation["reasoning"].items()}
+    if completions:
+        data = gzip.compress(json.dumps(completions, allow_nan=False).encode(), mtime=0)
         sidecar = path.with_name(f"{path.stem}.samples.json.gz")
         write_atomically(sidecar, data)
         samples = {"file": sidecar.name, "sha256": hashlib.sha256(data).hexdigest()}
@@ -88,11 +102,12 @@ def resolved(records: dict) -> dict:
     return {k: v.result() if isinstance(v, Future) else resolved(v) for k, v in records.items()}
 
 
-def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Literal["benchmarks", "parse"],
+def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Literal["benchmarks", "parse", "reasoning"],
              previous: "Event | None", released: "Event") -> None:
-    """Write evaluation_path(run_name, step) of the checkpoint; with generate "parse", codegen and fim are null. The
-    process tree keeps to verify.cores()'s decode cores until the last GPU phase ends, then frees the GPU, moves to the
-    timed-check cores and sets `released` while scoring finishes. previous: set once the previous checkpoint's
+    """Write evaluation_path(run_name, step) of the checkpoint; with generate "parse", codegen and fim are null;
+    "reasoning" adds to "benchmarks" the reasoning protocol (docs/post-training.md §11.4), null in the other modes.
+    The process tree keeps to verify.cores()'s decode cores until the last GPU phase ends, then frees the GPU, moves
+    to the timed-check cores and sets `released` while scoring finishes. previous: set once the previous checkpoint's
     evaluation has ended; official scoring and timed checks wait for it, so they never share the CPU with another
     checkpoint's (timed verdicts depend on load). "provenance": source digest (taken at the start), environment
     (eval/cache.py), start and end times (Unix seconds)."""
@@ -102,18 +117,21 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
     pin(decode)
     benchmarks = tasks()
     model = load_model(run_name, step, device=torch.device("cuda"))
-    codegen = fim = None
+    full = generate != "parse"
+    codegen = fim = reasoning = None
     with sanitizers() as pool, ThreadPoolExecutor(1) as scorers, ThreadPoolExecutor(1) as background:
         if previous is not None:
             scorers.submit(previous.wait)
         # the filtered searches' vetted examples, CPU work (untimed reference runs) during the GPU phases below
-        found = background.submit(vetted, benchmarks) if generate == "benchmarks" else None
+        found = background.submit(vetted, benchmarks) if full else None
         parse = parse_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
-        if generate == "benchmarks":
+        if full:
             codegen = generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
             fim = fim_generation(model, tokenizer, scorers=scorers)
+        if generate == "reasoning":
+            reasoning = reasoning_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers)
         results = likelihood(model, tokenizer, benchmarks, device=torch.device("cuda"))
-        if generate == "benchmarks":
+        if full:
             if previous is not None:
                 previous.wait()
             filtered, fim_filtered = filtered_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers,
@@ -133,7 +151,8 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
         pin(timed)
         released.set()
         results |= {"parse": resolved(parse), "codegen": None if codegen is None else resolved(codegen),
-                    "fim": None if fim is None else resolved(fim)}
+                    "fim": None if fim is None else resolved(fim),
+                    "reasoning": None if reasoning is None else resolved(reasoning)}
     provenance = {"source_sha256": source, "environment": json.loads(environment()), "started": started,
                   "finished": time.time()}
     write_evaluation(evaluation_path(run_name, step),
