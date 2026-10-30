@@ -252,9 +252,10 @@ seeded by `train/loop.py` `SEED` = 0. The fields' defaults are the base recipe:
 | Field | Default | Meaning |
 |---|---|---|
 | `tokens_per_param` | None | the data's `max_tokens_per_param` (§1) |
-| `learning_rate_scale` | 1.0 | times the law's lr; `conf/run.yaml` sets `${lr_multiplier:}` (§5) |
+| `learning_rate_scale` | 1.0 | times the law's lr; `conf/run.yaml` sets `${lr_multiplier:}` (§5); an SFT run's: times its base run's peak |
 | `num_checkpoints` | 1 | evenly spaced evaluated checkpoints, the last the final model; > 1 adds `repo_level_start` and the analysis checkpoints |
-| `generate` | "parse" | `evaluate`'s mode: "parse" (`peak_lr`) or "benchmarks" (base) |
+| `generate` | "parse" | `evaluate`'s mode: "parse" (`peak_lr`), "benchmarks" (base) or "reasoning" (SFT); "none" trains only (SFT's calibration arms) |
+| `base`, `base_step`, `sft_rows` | None, 69,874, 1.0 | SFT (§10): the base run's name and checkpoint step, the share of the SFT train rows |
 
 The experiments: `python run.py experiment=pretrain` (`num_checkpoints` 10, `generate` "benchmarks") and
 `python run.py experiment=peak_lr_d24` (§5). **Names** (`run_name`): the fields that differ from `RunConfig()`,

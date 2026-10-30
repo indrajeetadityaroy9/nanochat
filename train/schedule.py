@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from corpus.mixture import BATCH_SIZE, FILE_LEVEL_STAGE, MICRO_BATCH_TOKENS, REPO_LEVEL_SHARE, REPO_LEVEL_STAGE, Stage
 from model.modeling import CausalLM, non_embedding_flops_per_token, num_non_embedding_params
-from posttrain.sft_data import SFT_STAGE
+from posttrain.sft import SFT_STAGE
 from train.optim import BETAS
 
 # Linear warmup over 2 / (1 - beta2) steps (arXiv 1910.04209 §4.3 Eq. 14): 40 at beta2 = 0.95
@@ -46,15 +46,15 @@ def plan(*, model: CausalLM, tokens_per_param: float) -> RunPlan:
     )
 
 
-def sft_plan(*, model: CausalLM, rows: int, learning_rate: float, weight_decay: float) -> RunPlan:
+def sft_plan(*, model: CausalLM, rows: int, learning_rate: float) -> RunPlan:
     """SFT's plan (docs/post-training.md §11.2): SFT_STAGE from the first step, the base plan's 15 micro-batches per
-    step (45 rows of 32,768 tokens), whole steps over `rows` packed rows, at peak `learning_rate` and `weight_decay`."""
+    step (45 rows of 32,768 tokens), whole steps over `rows` packed rows, at peak `learning_rate`, no weight decay."""
     gradient_accumulation_steps = BATCH_SIZE // MICRO_BATCH_TOKENS
     max_steps = rows // (gradient_accumulation_steps * SFT_STAGE.micro_batch_size)
     return RunPlan(batch_size=BATCH_SIZE, gradient_accumulation_steps=gradient_accumulation_steps,
                    max_steps=max_steps, repo_level_start=0,
                    tokens_per_param=max_steps * BATCH_SIZE / num_non_embedding_params(model),
-                   learning_rate=learning_rate, weight_decay=weight_decay, last_stage=SFT_STAGE)
+                   learning_rate=learning_rate, weight_decay=0.0, last_stage=SFT_STAGE)
 
 
 def lr_lambda(current_step: int, *, num_training_steps: int) -> float:

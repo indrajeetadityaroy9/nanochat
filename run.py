@@ -44,7 +44,7 @@ class RunConfig:
     # times the law's peak lr (conf/run.yaml sets the measured multiplier); an SFT run's: times its base run's peak lr
     learning_rate_scale: float = 1.0
     num_checkpoints: int = 1
-    generate: str = "parse"
+    generate: str = "parse"  # eval/suite.py evaluate's mode; "none": no evaluation, the run trained only
     base: str | None = None  # SFT: the base run's name; its checkpoint after base_step steps is the start
     base_step: int = 69_874
     sft_rows: float = 1.0  # SFT: the share of the SFT corpus's packed train rows trained, one epoch
@@ -60,21 +60,19 @@ def run_name(config: RunConfig) -> str:
 
 def plan_of(config: RunConfig) -> "RunPlan":
     """The base model's plan (schedule.plan) at the run's tokens_per_param (default max_tokens_per_param), lr
-    scaled; an SFT run's (schedule.sft_plan) over its share of the SFT rows, its base run's peak lr scaled and its
-    base run's weight decay (docs/post-training.md §11.2)."""
+    scaled; an SFT run's (schedule.sft_plan) over its share of the SFT rows, its base run's peak lr scaled."""
     from model.modeling import meta_model
     from train.schedule import plan, sft_plan
     from train.stages import max_tokens_per_param
 
     if config.base is not None:
         from corpus.layout import packed_rows
-        from posttrain.sft_data import NAME, SFT_STAGE
+        from posttrain.sft import NAME, SFT_STAGE
 
         started = next(r for r in metrics.records(config.base) if r["kind"] == "run")
         rows = packed_rows(NAME, "train", get_tokenizer(), SFT_STAGE.seq_len)
         return sft_plan(model=meta_model(), rows=round(config.sft_rows * rows),
-                        learning_rate=config.learning_rate_scale * started["learning_rate"]["muon"][0],
-                        weight_decay=started["weight_decay"]["muon"][0])
+                        learning_rate=config.learning_rate_scale * started["learning_rate"]["muon"][0])
     tokens_per_param = (max_tokens_per_param(get_tokenizer()) if config.tokens_per_param is None
                         else config.tokens_per_param)
     base = plan(model=meta_model(), tokens_per_param=tokens_per_param)
@@ -104,11 +102,12 @@ def analysis_steps(config: RunConfig, run: "RunPlan") -> tuple[frozenset[int], f
 
 
 def validation_steps(config: RunConfig, run: "RunPlan") -> frozenset[int]:
-    """An SFT run's held-out loss: before its first step, every FULL_STATE_EVERY steps and after its last; none for
-    a base run."""
+    """An SFT run's held-out loss: every FULL_STATE_EVERY steps and after its last, and before its first if it trains
+    every row (a calibration arm, on a share of them, starts from the same base); none for a base run."""
     if config.base is None:
         return frozenset()
-    return frozenset({0, *range(FULL_STATE_EVERY, run.max_steps, FULL_STATE_EVERY), run.max_steps})
+    first = {0} if config.sft_rows == 1 else set()
+    return frozenset({*first, *range(FULL_STATE_EVERY, run.max_steps, FULL_STATE_EVERY), run.max_steps})
 
 
 def training(config: RunConfig, run: "RunPlan") -> None:
@@ -168,13 +167,15 @@ def evaluations(log: Path, checkpoints: list[tuple[RunConfig, int]]) -> None:
 
 
 def job(config: RunConfig) -> None:
-    """A run's job: skipped if every checkpoint is evaluated or the run diverged; else training (resuming) in a fresh
-    process, then its unevaluated checkpoints' evaluations (evaluations). Raises ChildProcessError on a failed phase
-    other than a divergence."""
+    """A run's job: skipped if every checkpoint is evaluated (with generate "none": saved) or the run diverged; else
+    training (resuming) in a fresh process, then its unevaluated checkpoints' evaluations (evaluations). Raises
+    ChildProcessError on a failed phase other than a divergence."""
     from eval.suite import evaluation_path
+    from train.checkpoint import checkpoint_path
 
     name, run = run_name(config), plan_of(config)
-    unevaluated = [step for step in sorted(checkpoint_steps(config, run)) if not evaluation_path(name, step).exists()]
+    done = checkpoint_path if config.generate == "none" else evaluation_path
+    unevaluated = [step for step in sorted(checkpoint_steps(config, run)) if not done(name, step).exists()]
     if not unevaluated or metrics.diverged(metrics.records(name)) is not None:
         return
     output = RUNS / name / "run.log"
@@ -186,7 +187,8 @@ def job(config: RunConfig) -> None:
         if metrics.diverged(metrics.records(name)) is not None:
             return
         raise ChildProcessError(f"{name}: training failed ({output})")
-    evaluations(output, [(config, step) for step in unevaluated])
+    if config.generate != "none":
+        evaluations(output, [(config, step) for step in unevaluated])
 
 
 @hydra.main(version_base="1.3", config_path=str(ROOT / "conf"), config_name="run")

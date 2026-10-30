@@ -16,11 +16,12 @@ figure without a record, or a paper value its extracted text lacks. Below 1B the
 
 | File | Section |
 |---|---|
-| `posttrain/sft_data.py` | §11.1 format; §11.2 data, filters, split, packing |
+| `posttrain/sft.py` (`NAME`, `SFT_STAGE`, `THINK`, `END_THINK`) | §11.1 markers; §11.2 the corpus's stage |
+| `posttrain/sft_data.py` | §11.1 format; §11.2 data, filters, split by problem, packing |
 | `corpus/loader.py` (`PackedSplit.contexts`, `PretrainingBatches.assemble`) | §11.1 loss: the context's labels ignored |
-| `run.py` (`RunConfig.base`, `base_step`, `sft_rows`; `plan_of`, `validation_steps`), `conf/experiment/sft.yaml` | §11.2 run |
+| `run.py` (`RunConfig.base`, `base_step`, `sft_rows`, `generate` "none"; `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml` | §11.2 run |
 | `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/stages.py` (`val_batches`), `train/loop.py` (base weights, `validate`) | §11.2 run |
-| `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` | §11.2 peak calibration |
+| `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`) | §11.2 peak calibration |
 
 The data of §10 is in `artifacts/posttrain/<id>`; the SFT corpus in `artifacts/corpus/tokenized/sft-<data key>/`, its
 counts in `stats.json` there.
@@ -85,25 +86,28 @@ What these replaced:
   OpenThoughts, describes an adapter for its own training. GrandCode uses LoRA only for test-time RL on one problem
   (arXiv 2604.02721 §10.3).
 - **Measured on code**: "FFT generally leads to the best downstream performance across all scales" (StarCoder 1B–16B,
-  PEFT on 8-bit models; arXiv 2401.00788 Fig. 1, §2.2); at 1B LoRA trails P-Tuning and (IA)³. Students below 14B
-  train with full parameters, LoRA above (arXiv 2502.12143 §3.1). At 0.5B, SFT with LoRA scored 0.7% on OlympiadBench
-  and 1.2% on MATH500, and SFT plus LoRA plus RL collapsed (arXiv 2506.13404 §4.2–§4.3; its tables are empty in the
-  extracted text [unverified]).
+  PEFT on 8-bit models; arXiv 2401.00788 §1, Fig. 1); at 1B LoRA trails P-Tuning and (IA)³ (§1). Students below 14B
+  train with full parameters, LoRA above (arXiv 2502.12143 §3.1). Distillation plus SFT with LoRA on
+  Qwen2.5-0.5B-Instruct scored 0.7% on OlympiadBench and 1.2% on MATH500, and adding RL collapsed (arXiv 2506.13404
+  §4.2–§4.3; its tables are empty in the extracted text [unverified]).
 - **RL with adapters** (1.5B, already distilled): LoRA rank 32 on every linear layer 42.5 against full parameters'
-  44.9 and DoRA's 46.6, PiSSA 0.2 (arXiv 2512.23165 Table 3); Tina's rank-32 GRPO reached its best checkpoint for $9,
-  at or above published full-parameter models on the same data (arXiv 2504.15777 Table 3).
+  44.9 and DoRA's 46.6, PiSSA 0.2 (arXiv 2512.23165 Table 3); Tina's rank-32 GRPO reached its best checkpoint for $9
+  (arXiv 2504.15777 Table 1), and 4 of its 5 models scored above their full-parameter baselines on the same data
+  (Table 3).
 - **Capacity** (code): in continued pre-training of Llama-2-7B on StarCoder-Python, LoRA at rank 256 peaked at 20B
   tokens with HumanEval 0.224, about full fine-tuning's 0.218 at 4B, and full fine-tuning reached 0.263; in code
   instruction tuning ranks 16 and 64 scored 0.358 and 0.417 at epoch 4 and rank 256 0.498, against full
-  fine-tuning's 0.497 (arXiv 2405.09673 §4.1); full fine-tuning on code "does not learn low-rank perturbations"
-  (§4.6). LoRA matches full fine-tuning on "small-to-medium-sized" SFT sets and falls behind on sets that "exceed LoRA
-  capacity"; in RL it matches "even with ranks as low as 1", at about 10× full fine-tuning's learning rate (Schulman
-  and Thinking Machines Lab, "LoRA Without Regret", 2025).
-- **Compute and memory**: per weight matrix, full fine-tuning costs 3·d_in·d_out multiply-adds per token and LoRA
-  2·d_in·d_out + 3R(d_in + d_out) ("LoRA Without Regret"), so LoRA saves compute only below the rank
-  d_in·d_out / (3(d_in + d_out)): 128 for d24's `o_proj`, 192 for `qkv` and 205 for the MLP's matrices
-  [arithmetic]; it saves nothing on attention, 34.7% of the 32K step's GPU time (`docs/training.md` §7). QLoRA's 4-bit
-  base exists to fit "a 65B parameter model on a single 48GB GPU" (arXiv 2305.14314 Abstract).
+  fine-tuning's 0.497 at epoch 8 (arXiv 2405.09673 §4.1); full fine-tuning on code "does not learn low-rank
+  perturbations" (§4.6). LoRA matches full fine-tuning on "small-to-medium-sized" SFT sets and falls behind on sets
+  that "exceed LoRA capacity"; in RL it matches "even with ranks as low as 1", at about 10× full fine-tuning's
+  learning rate (Schulman and Thinking Machines Lab, "LoRA Without Regret", 2025).
+- **Compute and memory**: per N×N weight matrix, full fine-tuning costs 3N² multiply-adds per token and LoRA
+  2N² + 6NR ("LoRA Without Regret"); for a d_in × d_out matrix, 3·d_in·d_out against 2·d_in·d_out + 3R(d_in + d_out)
+  [arithmetic: the same count], so LoRA saves compute only below the rank d_in·d_out / (3(d_in + d_out)): 128 for
+  each of d24's `q_proj`, `k_proj`, `v_proj` and `o_proj` (separate 768 × 768 matrices, `model/modeling.py`
+  `Attention`; 192 only for one adapter on a fused qkv) and 205 for the MLP's matrices [arithmetic]; it saves nothing
+  on attention, 34.7% of the 32K step's GPU time [unverified] (`docs/training.md` §7). QLoRA's 4-bit base exists to
+  fit "a 65B parameter model on a single 48GB GPU" (arXiv 2305.14314 Abstract).
 - **Here** [inference]: full parameters for the SFT (§11.2): its 2.3–27.5B tokens are the pre-training-like volume
   where LoRA falls behind, and the rank that kept up on code (256) costs more than full fine-tuning at hidden size
   768. Memory gives no reason for adapters: pre-training holds the fp32 weights, gradients and both optimizers' state
@@ -119,46 +123,53 @@ and below:
 | Qwen2.5-Coder-0.5B, base → instruct | tens of millions of synthetic instructions, then millions chosen by rejection sampling; FIM instructions; offline DPO | HumanEval 28.0 → 61.6, HumanEval+ 57.3, LiveCodeBench 2.0 | arXiv 2409.12186 §4, §6.1, Table 16 |
 | DeepSeek-Coder-1.3B, base → instruct | 2B tokens (§3) | HumanEval 34.8 → 65.2 | arXiv 2401.14196 Table 3 |
 | OpenCoder-1.5B, base → instruct | two SFT stages (§10) | HumanEval+ 49.4 → 67.7, MBPP+ 58.7 → 61.9 | arXiv 2411.04905 Tables 6, 7 (not controlled) |
-| Qwen2.5-Coder-1.5B: OpenCodeInstruct against its Instruct | 5M short solutions | HumanEval+ 73.8 against 66.5, MBPP+ 68.3 against 59.4 | arXiv 2504.04030 Table 3 |
+| Qwen2.5-Coder-1.5B: OpenCodeInstruct against its Instruct | 5M instruction–solution pairs, sequences ≤ 2,048 tokens | HumanEval+ 73.8 against 66.5, MBPP+ 68.3 against 59.4 | arXiv 2504.04030 Table 3 |
 | Qwen2.5-Coder-1.5B-Instruct + rStar-Coder | 580K verified long-CoT solutions, 6 epochs | LiveCodeBench 6.5 → 40.1, HumanEval+ 81.7, MBPP+ 60.8 | arXiv 2505.21297 Table 2, §4.2 |
-| MobileLLM-R1-950M, from pre-training | general SFT, then 6.2M reasoning samples (2.2M from OpenCodeReasoning-2) at 32K | LiveCodeBench v6 19.9 (Qwen3-0.6B 14.9) | arXiv 2509.24945 Tables 2, 5, 7 |
+| MobileLLM-R1-950M, after a distillation mid-training stage | general SFT, then 6.2M reasoning samples (2.2M from OpenCodeReasoning-2) at 32K | LiveCodeBench v6 19.9 (Qwen3-0.6B 14.9) | arXiv 2509.24945 Tables 2, 5, 7 |
 | Qwen3-0.6B, distilled (§6) | — | LiveCodeBench v5 12.3 thinking, 3.6 not thinking | arXiv 2505.09388 Tables 19, 20 |
 
-- **Prompts before answers**: in a fit of score against unique prompts and answers per prompt, the prompts'
-  coefficient is 4.831 and the answers' 2.635 (R² 0.989; arXiv 2506.13284 §4.4.2); at a fixed budget 64K prompts × 1
-  beat 16K × 4 and 8K × 8 (arXiv 2601.06953 §3.2); 37.7K problems × 16 solutions scored LiveCodeBench 54.7 against the
-  full set's 57.3 (arXiv 2505.21297 Table 6). OpenThoughts samples 16 answers per question to grow a source (arXiv
-  2506.04178 §4.4).
-- **Epochs**: gains plateau at 5–6 (arXiv 2506.13284 §4.4.3); long traces need 8–10 epochs, short ones 2–3; at 8
-  epochs long traces scored LiveCodeBench v5 60.3 against short ones' 43.1 (7B; arXiv 2601.06953 Table 4).
-- **Long or short traces at small sizes**: with 7.5K MATH prompts, short chains beat long ones below 3B
-  (Qwen2.5-0.5B 19.5 against 14.8) and a small teacher beats a large one (arXiv 2502.12143 Tables 1–2); one long
-  example in five is best at 3B (Table 3). The 950M and 1.5B models above trained on 580K–6.2M long traces
-  [inference: the gap was measured at 7.5K prompts and is untested at that data scale below 1B].
+- **Prompts before answers**: in a fit z = a·log₂x + b·log₂y + c of the score against unique prompts x and answers
+  per prompt y (both standardized; seven runs, each trained until its accuracy plateaus; 7B, math), a = 4.831 and
+  b = 2.635 (R² 0.989; arXiv 2506.13284 §4.4.2); at a fixed budget 64K prompts × 1 beat 16K × 4 and 8K × 8 (arXiv
+  2601.06953 §3.2; the ordering only, its scores are in Fig. 3); 37.7K problems × 16 solutions scored LiveCodeBench
+  54.7 against the full set's 57.3 (7B; arXiv 2505.21297 App. A.1). OpenThoughts samples 16 answers per question to
+  grow a source (arXiv 2506.04178 §4.4).
+- **Epochs**: gains plateau at 5–6, and more answers per prompt "also greatly benefits from multi-epoch training"
+  (arXiv 2506.13284 §4.4.3); long traces need 8–10 epochs, short ones 2–3; at 8 epochs long traces scored
+  LiveCodeBench v5 60.3 against short ones' 43.1 (7B; arXiv 2601.06953 Table 4).
+- **Long or short traces at small sizes**: with 7.5K MATH prompts, short chains beat long ones at 3B and below
+  (Qwen2.5-0.5B 19.5 against 14.8, Qwen2.5-3B 43.4 against 40.3) and a small teacher beats a large one (arXiv
+  2502.12143 Tables 1–2); one long example in five is best at 3B (Table 3); base models show "a more significant
+  learnability gap" than the Instruct students (§3.4). The 950M and 1.5B models above trained on 580K–6.2M long
+  traces [inference: the gap was measured at 7.5K prompts and is untested at that data scale below 1B].
 - **The valley** (7B and 8B students, LiveCodeBench): 1K distilled examples more than halve the baseline, 10K lift it
   about 50%, 30K a further 50–100%; easy and medium problems help more than hard ones (+41% against +7%); correct and
   incorrect R1 traces distill alike (0.185 against 0.182) (arXiv 2510.06101 §4, Fig. 1, Table 2).
-- **Sources and filters** (OpenThoughts, 7B student, 31.6K examples per arm): two sources beat sixteen (41.3 against
-  36.4, Table 4); for code the best question filter is difficulty judged by an LLM (Table 5); QwQ-32B teaches better
-  than DeepSeek-R1 by 1.9 code points though it scores lower itself (Table 8). No answer filter beat none:
-  verification lowered the 7B (41.9 against 45.0) and raised the 32B (64.5 against 62.1) (Table 15), and unit-test
-  filtering scored LiveCodeBench 36.0 against 38.5 (Table 18); cutting traces at 8,192 tokens cost 17.6% (Table 22).
+- **Sources and filters** (OpenThoughts, 7B student; 31.6K examples per arm in Tables 4, 5 and 8): two sources beat
+  sixteen (41.3 against 36.4, Table 4); for code the best question filter is difficulty judged by an LLM (Table 5);
+  QwQ-32B teaches better than DeepSeek-R1 by 1.9 average points on code data (code average 2.3) though it scores
+  lower itself (Table 8). No answer filter beat none: verification lowered the 7B (41.9 against 45.0) and raised the
+  32B (64.5 against 62.1) on OpenThoughts-114K (Table 15), and unit-test filtering scored LiveCodeBench 36.0 against
+  38.5 on 16K examples (Table 18); removing the examples whose traces exceed 8,192 tokens cost 17.6% relative on a
+  12K-instance set (Table 22).
 - **Staging**: general instructions before reasoning data beat one joint stage at 950M on MATH and GSM8K (57.8 and
   68.5 against 56.2 and 53.1), not on LiveCodeBench (13.7 against 14.9); math-only reasoning data scored LiveCodeBench
   0.0, code-only 12.0 (arXiv 2509.24945 Table 8). Phi-4-mini-reasoning packs examples in distillation mid-training and
   not in the last SFT, "where we teach the model to decide where to stop generating" (arXiv 2504.21233 §3.2).
-- **Template**: from a base model, "'simple' prompt templates greatly outperform standard post-trained templates
-  (e.g., <think></think>)" (arXiv 2512.13961 §6). Seed-Coder's warmup starts from the base, not the instruct model,
-  which "frequently collapses into typical SFT training data patterns during RL" (arXiv 2506.03524 §3.2).
-- **Learning rate and forgetting** (1B and 1.5B students): out-of-domain scores move by at most 1.3 points at lr
-  1e-5 and by −11.2 to −14.0 at 5e-5 (arXiv 2609.35259 §4.2).
+- **Template**: in Olmo 3's RL-Zero (RLVR from the base, no SFT), "'simple' prompt templates greatly outperform
+  standard post-trained templates (e.g., <think></think>)" (arXiv 2512.13961 §6); it does not test an SFT template.
+  Seed-Coder's warmup starts from the base, not the instruct model, which "frequently collapses into typical SFT
+  training data patterns during RL" (arXiv 2506.03524 §3.2).
+- **Learning rate and forgetting** (a 1B student, KL distillation of 150 steps): out-of-domain scores move by at
+  most 1.3 points at lr 1e-5 and by −11.2 to −14.0 at 5e-5 (arXiv 2609.35259 §4.2).
 - **Published settings**: rStar-Coder 6 epochs, lr 4e-5, batch 96, 16K (§4.1); MobileLLM-R1's reasoning SFT 4
   epochs, lr 8e-5, 32K (Table 2); OpenThoughts 5 epochs, lr 8e-5, batch 512, packed (App. Table 9); Olmo 3 Think 2
   epochs, lr 5e-5, 1M-token batches of packed 32K rows (App. A.6.1); Nemotron-Cascade lr 5e-5 then 2e-5, batch 256
   (Table 14).
 - **Here** [inference]: reasoning traces only, whole rows up to 32,768 tokens, one packed stage of one epoch
-  (§11.2): Cascade-1's Python code traces, at most 4 per prompt (685,499 of 2,694,422 after the filters), past the
-  valley; CP-v2's Python and C++ traces that fit (187,172) and its Exercism function-stub traces (77,174).
+  (§11.2): Cascade-1's Python code traces, at most 4 per prompt in each group (677,871 of 2,694,422 after the
+  filters), past the valley; CP-v2's Python and C++ traces that fit (183,768) and its Exercism function-stub traces
+  (68,500).
 
 ## 5. Preference tuning
 
@@ -344,13 +355,13 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 | Stage | From | Data | Objective | Lengths | Gate |
 |---|---|---|---|---|---|
 | 0. Base | — | — | — | — | the evaluations of steps 66,063 and 69,874 (`docs/evaluation.md` §1) pick the start |
-| 1. SFT | the base | reasoning traces, at most 4 per prompt: Cascade-1's Python, CP-v2's Python, C++ and Exercism; 940,201 traces of 290,015 prompts, 8.18B tokens, 5,551 steps, ≈7.9 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4) |
+| 1. SFT | the base | reasoning traces, at most 4 per prompt in each group: Cascade-1's Python, CP-v2's Python, C++ and Exercism; 920,350 traces of 279,152 prompts (220,456 problems), 8.03B tokens, 5,453 steps, ≈7.8 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4) |
 | Code RL, deferred | the SFT model | problems with tests, 47,468 before filtering (§11.3) | Nemotron-Cascade's GRPO, one update per batch, sequence-level truncated importance weights; FP16 | responses ≤ 16,384, then ≤ 28,672 | pass@1 up, pass@20 not down beyond its error bar (§11.4) |
 
 ### 11.1 Format
 
 - **Reasoning is the only format**: no non-thinking mode. An example renders as BOS, the prompt, `\n\n<think>\n`, the
-  reasoning, `\n</think>\n\n`, the answer and BOS. The markers are ordinary text (5 and 6 tokens here), so the
+  reasoning, `\n</think>\n\n`, the answer and BOS. The markers are ordinary text (6 and 6 tokens here), so the
   vocabulary stays (§1). Nemotron-Cascade 2 opens a thinking turn with `<think>` and a newline (arXiv 2603.19220
   §3.1.2); §10's code traces are "formatted in the thinking mode" (arXiv 2512.13607 §3.2.3), the reasoning inline
   between the markers (Cascade-1) or in a separate field placed between them (CP-v2).
@@ -369,21 +380,35 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
   these releases. CP-v2's Python and C++ are Codeforces-level problems harder than Cascade-1's, and the only C++.
 - **Filters**, in order, each row counted at the first it fails: no reasoning or no answer; reasoning under 20
   tokens; above 32,768 tokens rendered, dropped, not cut (a cut trace loses its answer; Nemotron-Cascade drops
-  over-length samples, §3.2.2); §1's 10-gram rule on prompt, reasoning and answer (`corpus/decontaminate.py`); exact
-  duplicates of prompt, reasoning and answer (the first kept, groups in the table's order); then at most 4 traces per
-  exact prompt in each group, drawn at random (seed 0). No correctness filter: Nemotron-Cascade states none, and no
-  answer filter beat none in OpenThoughts (§4). 1% of the distinct prompts, drawn with the same seed, is the val
-  split. Measured (`stats.json`; prompts distinct within a group, "All" across groups; tokens include both BOS, the
-  loss tokens are each response and its closing BOS):
+  over-length samples from its math data, arXiv 2512.13607 §3.2.2, and states nothing for code); §1's 10-gram rule on
+  prompt, reasoning and answer (`corpus/decontaminate.py`); exact duplicates of prompt, reasoning and answer (the
+  first kept, groups in the table's order); at most 4 traces per exact prompt in each group, drawn at random (seed
+  0), so a prompt in several groups keeps up to 4 in each (282,138 distinct prompts, 341,740 prompt-group pairs in
+  the corpus); last, train problems near a val problem (below). No correctness filter: Nemotron-Cascade (arXiv
+  2512.13607) states none; Nemotron-Cascade 2 keeps only correct traces where tests exist (arXiv 2603.19220 §3.2.2);
+  at 7–8B unfiltered traces matched or beat filtered ones (arXiv 2506.04178 Tables 15, 18; arXiv 2510.06101 Table 2).
+- **Split by problem** (`posttrain/sft_data.py` `problem`, `OVERLAP_N`): one problem recurs across groups and
+  sources under different wrappers (CP-v2's language header, Nemotron-Cascade's format request or function header)
+  and whitespace, so the unit is the problem: the prompt without those wrappers (`WRAPPERS`), lowercased, its words
+  (runs of letters and digits) joined by single spaces. 1% of the distinct problems (seed 0) is the val split; train
+  then loses every problem sharing a run of 46 words with a val problem (`corpus_crate().Grams`, the matcher of §1's
+  rule). The 46 is measured on this corpus: near-duplicate problems (an exercise's variants, a problem restated, its
+  easy and hard versions) share runs from 40 words up, and the sources' stock phrases (Codeforces' and CodeChef's
+  input conventions, a standard definition) reach 45, one 53-word Codeforces input block excepted. Split by exact
+  prompt, 928 of 2,921 val problems had their statement in train (52.4% of val labels) and 1,199 their first 300
+  normalized characters (65.9%); split by problem without the filter, 0 and 453 (43.8%); with it, 0 and 1 (below
+  0.01%), the first 300 characters after whitespace-only normalization 2 (below 0.01%). Measured (`stats.json`;
+  prompts distinct within a group, "All" across groups; tokens include both BOS, the loss tokens are each response
+  and its closing BOS):
 
-| Group | Rows | No reasoning or answer | Over 32,768 | 10-gram | Duplicate | Over 4 per prompt | Train rows (prompts) | Val rows (prompts) | Train tokens (loss) |
-|---|---|---|---|---|---|---|---|---|---|
-| Cascade-1 Stage-1 | 1,301,591 | 0 | 0 | 60,732 | 22,785 | 829,881 | 384,271 (150,219) | 3,922 (1,523) | 2.62B (2.51B) |
-| Cascade-1 Stage-2 | 1,392,831 | 0 | 7,251 | 51,943 | 0 | 1,036,331 | 294,351 (74,541) | 2,955 (751) | 3.43B (3.33B) |
-| CP-v2 Python | 333,561 | 0 | 176,235 | 3,142 | 0 | 60,727 | 92,484 (24,585) | 973 (255) | 1.01B (0.96B) |
-| CP-v2 C++ | 332,186 | 0 | 175,514 | 287 | 0 | 62,670 | 92,653 (24,477) | 1,062 (283) | 1.03B (0.98B) |
-| CP-v2 Exercism | 79,244 | 336: 170 without prose, 141 without a file, 25 under 20 tokens | 0 | 1,395 | 0 | 339 | 76,442 (75,749) | 732 (722) | 0.083B (0.044B) |
-| All | 3,439,413 | 336 | 359,000 | 117,499 | 22,785 | 1,989,948 | 940,201 (290,015) | 9,644 (2,929) | 8.18B (7.83B) |
+| Group | Rows | No reasoning or answer | Over 32,768 | 10-gram | Duplicate | Over 4 per prompt | Near a val problem | Train rows (prompts) | Val rows (prompts) | Train tokens (loss) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Cascade-1 Stage-1 | 1,301,591 | 0 | 0 | 60,732 | 22,785 | 829,881 | 3,776 | 380,561 (149,153) | 3,856 (1,517) | 2.59B (2.48B) |
+| Cascade-1 Stage-2 | 1,392,831 | 0 | 7,251 | 51,943 | 0 | 1,036,331 | 3,852 | 290,356 (73,536) | 3,098 (783) | 3.37B (3.27B) |
+| CP-v2 Python | 333,561 | 0 | 176,235 | 3,142 | 0 | 60,727 | 1,707 | 90,725 (24,099) | 1,025 (270) | 0.99B (0.94B) |
+| CP-v2 C++ | 332,186 | 0 | 175,514 | 287 | 0 | 62,670 | 1,697 | 90,983 (24,019) | 1,035 (275) | 1.01B (0.96B) |
+| CP-v2 Exercism | 79,244 | 336: 170 without prose, 141 without a file, 25 under 20 tokens | 0 | 1,395 | 0 | 339 | 8,674 | 67,725 (67,317) | 775 (771) | 0.073B (0.039B) |
+| All | 3,439,413 | 336 | 359,000 | 117,499 | 22,785 | 1,989,948 | 19,706 | 920,350 (279,152; 220,456 problems) | 9,789 (2,986; 2,324 problems) | 8.03B (7.70B) |
 
 - **Tokens against time**: the cap trades answers per prompt, worth less than prompts (coefficients 2.635 against
   4.831; at a fixed budget 64K prompts × 1 beat 16K × 4, §4), for time. Before the filters, Cascade-1 alone, one
@@ -398,33 +423,44 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 
 - **Packing**: the documents, in a seeded random order, are packed by the base's packer (`corpus/pack.py`,
   Best-Fit-Decreasing over shards of 4,096 documents, `docs/corpus.md` §8), none cut, one attention segment each:
-  249,827 train and 2,663 val rows of 32,768 tokens, 99.90% and 99.86% of input positions in use. Each document's
+  245,413 train and 2,621 val rows of 32,768 tokens, 99.90% and 99.88% of input positions in use. Each document's
   context length (the prompt and `\n\n<think>\n`) is in `<split>.context`; the loader sets those labels to
-  `IGNORE_INDEX` (`corpus/loader.py` `PretrainingBatches.assemble`), so 7.83B of the corpus's 8.18B train tokens carry
-  loss [arithmetic: 95.7%].
+  `IGNORE_INDEX` (`corpus/loader.py` `PretrainingBatches.assemble`), so 7.70B of the corpus's 8.03B train tokens carry
+  loss [arithmetic: 95.8%].
 - **One stage, one epoch** (`run.py` `RunConfig.base`, `conf/experiment/sft.yaml`, `train/schedule.py` `sft_plan`):
   the base run's weights after `base_step` steps (default 69,874, its last) with fresh optimizer state; 3 rows per
-  micro-batch and 15 micro-batches, 1,474,560 tokens, per step as in the base's 32K stage; 5,551 steps over a seeded
-  permutation of the train rows (32 rows unread), ≈7.9 h [estimate]. Nemotron-Cascade 2 trains one packed stage
-  (arXiv 2603.19220 §3.1.1).
+  micro-batch and 15 micro-batches, 1,474,560 tokens, per step as in the base's 32K stage; 5,453 steps over a seeded
+  permutation of the train rows (28 rows unread), ≈7.8 h [estimate], without the 7 validation passes (≈0.2 h
+  [estimate]). Nemotron-Cascade trains one epoch per stage over 8.3 and 17.6 traces per prompt (arXiv 2512.13607
+  §3.1.1, §3.2.3); Nemotron-Cascade 2's single packed stage peaks after about 1.5 epochs (arXiv 2603.19220 §3.1.1).
+  The other recipes run 2–8 epochs (MobileLLM-R1 4 at 950M, rStar-Coder 6 at 1.5B, AceReason's plateau at 5–6,
+  X-Coder 8–10 for long traces; §4): one epoch over ≈3.3 traces per prompt here is a time choice.
 - **Optimizer**: the base's NorMuon and AdamW with one learning rate, warmup over 40 steps and linear decay to zero
-  (`docs/training.md` §3–§4); the peak is `learning_rate_scale` times the base run's recorded peak, 2.3454e-3. The
-  weight decay is the base run's, λ = 0.15322 (its run record), not the τ law's: the law sets a from-scratch
-  timescale, and at the SFT's 41.96 tokens per parameter it gives λ = 5.08 at 1/10 of the base peak, Σ_t η_t λ ≈ 3.3,
-  which would leave e^−3.3 ≈ 3.7% of the base weights' scale; the base's λ at 1/10 of the base peak gives Σ_t η_t λ =
-  0.0998 (90.5% kept), close to Nemotron-Cascade 2's SFT, AdamW decay 0.1 on a cosine from 5e-5 to 5e-6 over a
-  40,000-step horizon run 33,000 steps (mean lr ≈ 3.2e-5), Σ ≈ 0.106 (arXiv 2603.19220 App. B Table 7) [arithmetic].
-- **Peak calibration** (`conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` `sft_lr_scale`): calibrated, not
-  borrowed, since Nemotron-Cascade's AdamW 5e-5 has no NorMuon counterpart. Three complete schedules at 1/30, 1/10
-  and 1/3 of the base peak, one λ for all, over the same first 2% of the train permutation (111 steps each, 6% of the
-  run's steps together), each scored by the response loss on the whole val split after its last step; the lowest sets
-  `learning_rate_scale` in `conf/experiment/sft.yaml` (as `docs/training.md` §5 calibrates the base's). Each arm's
-  final checkpoint also gets the base's evaluation (`generate` parse, `results/sft_lr.jsonl`). At 1–1.5B, AdamW at
-  5e-5 against 1e-5 cost 11–14 points out of domain (§4).
+  (`docs/training.md` §3–§4); the peak is `learning_rate_scale` times the base run's recorded peak, 2.3454e-3. No
+  weight decay (`sft_plan`): the closest-size recipe, MobileLLM-R1-950M, fine-tunes with none (arXiv 2509.24945 §3.2),
+  as does OpenThoughts (arXiv 2506.04178 App. D.2); Nemotron-Cascade uses 1e-4 (arXiv 2512.13607 App. D Table 14),
+  and Nemotron-Cascade 2's 0.1 (Σ_t η_t λ ≈ 0.106 over its run, arXiv 2603.19220 App. B Table 7 [arithmetic]) is the
+  exception; with λ = 0 the total decay does not depend on which learning rate wins. The τ law (`docs/training.md`
+  §3) sets a from-scratch timescale: at the SFT's 41.21 tokens per parameter it gives λ = 5.1 at 1/10 of the base
+  peak, which would leave about 4% of the base weights' scale [arithmetic].
+- **Peak calibration** (`conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` `sft_lr_fit`): calibrated, not
+  borrowed, since Nemotron-Cascade's AdamW 5e-5 has no NorMuon counterpart. Three complete schedules at 1/10, 1/3
+  and 1 times the base peak over the same first 2% of the train permutation (109 steps each), trained only
+  (`generate` "none": no evaluation, no step-0 validation), each scored by the response loss on the whole val split
+  after its last step. The rule: the vertex of the least-squares parabola of those losses against u = ln(scale)
+  (`metrics.parabola_vertex`, as `docs/training.md` §5 calibrates the base's), which must have positive curvature and
+  lie inside the grid (else the fit raises, and an arm 3× beyond the edge with the lowest loss is added); the full
+  run's scale is the vertex times (5,453 / 109)^−0.30 = 0.309, the step counts from the plans [arithmetic]. Basis
+  [inference]: at a fixed batch the optimum falls with the run's length with exponent 0.30–0.32 (arXiv 2409.19913 §6
+  Eq. 5); the repository's d8 pair, net of its doubled batch by a square-root rule, gives 0.24–0.30 (`docs/training.md`
+  §5) and DeepSeek LLM's law 0.29 at a fixed batch [arithmetic]; the one counter-claim, that the optimum hardly moves
+  under linear decay to zero (arXiv 2502.15938 §4.2), is contradicted by that d8 pair; erring low is the cheaper error,
+  forgetting growing with the learning rate (§4). At 1B, in KL distillation of 150 steps, AdamW at 5e-5 against 1e-5
+  cost 11–14 points out of domain (arXiv 2609.35259 §4.2). Cost: ≈36 min of GPU [estimate].
 - **Validation and checkpoints**: the response loss, mean nats per label (each response and its closing BOS), over
-  the whole val split (2,663 rows, 83.5M labels) before the first step, every 1,000 steps and after the last
-  (`run.py` `validation_steps`, `train/loop.py` `validate`; `val` records); full states every 1,000 steps (resume
-  points) and at the end, the last evaluated by the reasoning protocol (`generate: reasoning`, §11.4).
+  the whole val split (2,621 rows, 82.0M labels) before the full run's first step, every 1,000 steps and after the
+  last (`run.py` `validation_steps`, `train/loop.py` `validate`; `val` records); full states every 1,000 steps (resume
+  points) and at the end, the full run's last evaluated by the reasoning protocol (`generate: reasoning`, §11.4).
 
 ### 11.3 Code RL, deferred
 
@@ -527,9 +563,11 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 | 2405.09673 | LoRA Learns Less and Forgets Less |
 | 2406.11931 | DeepSeek-Coder-V2: Breaking the Barrier of Closed-Source Models in Code Intelligence |
 | 2409.12186 | Qwen2.5-Coder Technical Report |
+| 2409.19913 | Scaling Optimal LR Across Token Horizons |
 | 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models |
 | 2501.12948 | DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning |
 | 2502.12143 | Small Models Struggle to Learn from Strong Reasoners |
+| 2502.15938 | Straight to Zero: Why Linearly Decaying the Learning Rate to Zero Works Best for LLMs |
 | 2503.02951 | KodCode: A Diverse, Challenging, and Verifiable Synthetic Dataset for Coding |
 | 2503.14476 | DAPO: An Open-Source LLM Reinforcement Learning System at Scale |
 | 2503.18892 | SimpleRL-Zoo: Investigating and Taming Zero Reinforcement Learning for Open Base Models in the Wild |

@@ -1,14 +1,16 @@
 # @package _global_
-# SFT peak-lr calibration (ablations/sft_lr.py): complete schedules at 1/30, 1/10 and 1/3 of the base run's peak lr
-# over the same first 2% of the SFT train rows (conf/experiment/sft.yaml's base and order)
+# SFT peak-lr calibration (ablations/sft_lr.py): complete schedules at 1/10, 1/3 and 1 times the base run's peak lr
+# over the same first 2% of the SFT train rows (conf/experiment/sft.yaml's base and order), scored by their held-out
+# val records; trained only, no evaluation
 base: generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10
 sft_rows: 0.02
 learning_rate_scale: 0.1
+generate: none
 
 hydra:
   sweeper:
     params:
-      learning_rate_scale: 0.03333333333333333,0.1,0.3333333333333333
+      learning_rate_scale: 0.1,0.3333333333333333,1.0
   callbacks:
     records:
       _target_: ablations.records.Records

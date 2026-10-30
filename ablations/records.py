@@ -16,7 +16,8 @@ from run import RunConfig, plan_of, run_name
 
 
 def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
-    """A run's line of results/<experiment>.jsonl; its measures from its final checkpoint's evaluation."""
+    """A run's line of results/<experiment>.jsonl; its measures from its final checkpoint's evaluation (none with
+    generate "none": its log's val records hold what it measured)."""
     name, run = run_name(config), plan_of(config)
     stopped = metrics.diverged(log)
     # the first attempt's run record: a resumed attempt's flops_per_token is at its own stage's context
@@ -24,15 +25,14 @@ def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
     peaks = [r for r in log if r["kind"] in ("stage", "end")]
     measured = errors = offset = efficiency = None
     if stopped is None:
-        evaluation = json.loads(suite.evaluation_path(name, run.max_steps).read_text(encoding="utf-8"))
-        # throughput over the file-level stage's steps; an SFT run's (repo_level_start 0) over all its steps
-        measured = metrics.measures(evaluation, metrics.train_steps(log),
-                                    repo_level_start=run.repo_level_start or run.max_steps)
-        errors, offset = metrics.measure_errors(evaluation), evaluation["32k"]["offset_bpb"]["code"]
         efficiency = {"num_parameters": started["num_parameters"], "flops_per_token": started["flops_per_token"],
                       "model_flops_per_token": started["model_flops_per_token"],
                       "peak_memory_bytes": max(r["peak_memory_bytes"] for r in peaks),
                       "peak_reserved_bytes": max(r["peak_reserved_bytes"] for r in peaks)}
+    if stopped is None and config.generate != "none":
+        evaluation = json.loads(suite.evaluation_path(name, run.max_steps).read_text(encoding="utf-8"))
+        measured = metrics.measures(evaluation, metrics.train_steps(log), repo_level_start=run.repo_level_start)
+        errors, offset = metrics.measure_errors(evaluation), evaluation["32k"]["offset_bpb"]["code"]
     return {"experiment": experiment} | suite.record(name, log) | {
         "config": dataclasses.asdict(config), "measures": measured, "errors": errors, "offset_bpb": offset,
         "efficiency": efficiency, "diverged_at": stopped}
