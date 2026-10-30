@@ -17,7 +17,7 @@ from run import EVALUATED, RunConfig, plan_of, run_name
 
 def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
     """A run's line of results/<experiment>.jsonl; its measures from its final checkpoint's evaluation (none with
-    generate in run.TRAINED_ONLY: its log's val records hold what it measured)."""
+    generate "none": its log's val records hold what it measured)."""
     name, run = run_name(config), plan_of(config)
     stopped = metrics.diverged(log)
     # the first attempt's run record: a resumed attempt's flops_per_token is at its own stage's context

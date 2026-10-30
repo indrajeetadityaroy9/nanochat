@@ -118,8 +118,8 @@ def timed_budget() -> threading.Semaphore:
 
 @contextlib.contextmanager
 def timed_slots(n: int = 1) -> Iterator[None]:
-    """n of timed_budget()'s slots, held while the timed children they cover run: the scorer thread's EvalPlus and
-    infilling evaluators (all slots), MultiPL-E's judge runs and the filtered searches' checks (one each) share them,
+    """n of timed_budget()'s slots, held while the timed children they cover run: the scorer thread's EvalPlus
+    evaluators (all slots), MultiPL-E's judge runs and the filtered searches' checks (one each) share them,
     so at most one timed child runs per timed-check core. Taken one at a time: the one caller taking several (the
     scorer thread) waits for single holders to finish, which never wait on slots themselves."""
     budget = timed_budget()

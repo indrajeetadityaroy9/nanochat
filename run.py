@@ -34,9 +34,9 @@ if TYPE_CHECKING:
 FULL_STATE_EVERY = 1000
 EARLY_WEIGHTS_LAST = 512
 AFTER_STAGE_WEIGHTS = (100, 200, 400, 800, 1600)
-# RunConfig.generate: eval/suite.py evaluate's modes; else the run trains only: "none", or "reasoning", the SFT run's
-# (docs/post-training.md §11.4: its checkpoint evaluated by the benchmarks' official tools; the value names the run)
-EVALUATED, TRAINED_ONLY = ("benchmarks", "parse"), ("none", "reasoning")
+# RunConfig.generate: eval/suite.py evaluate's modes, or "none": the run trains only (an SFT run: its checkpoint is
+# evaluated by the benchmarks' official tools, docs/post-training.md §11.4)
+EVALUATED = ("benchmarks", "parse")
 
 
 @dataclass
@@ -47,7 +47,7 @@ class RunConfig:
     # times the law's peak lr (conf/run.yaml sets the measured multiplier); an SFT run's: times its base run's peak lr
     learning_rate_scale: float = 1.0
     num_checkpoints: int = 1
-    generate: str = "parse"  # EVALUATED or TRAINED_ONLY
+    generate: str = "parse"  # one of EVALUATED, or "none"
     base: str | None = None  # SFT: the base run's name; its checkpoint after base_step steps is the start
     base_step: int = 69_874
     sft_epochs: float = 1.0  # SFT: passes over the SFT corpus's packed train rows (a share of one: a calibration arm)
@@ -170,16 +170,16 @@ def evaluations(log: Path, checkpoints: list[tuple[RunConfig, int]]) -> None:
 
 
 def job(config: RunConfig) -> None:
-    """A run's job: skipped if every checkpoint is evaluated (with generate in TRAINED_ONLY: saved) or the run
+    """A run's job: skipped if every checkpoint is evaluated (with generate "none": saved) or the run
     diverged; else training (resuming) in a fresh process, then its unevaluated checkpoints' evaluations
     (evaluations). Raises ChildProcessError on a failed phase other than a divergence."""
     from eval.suite import evaluation_path
     from train.checkpoint import checkpoint_path
 
-    if config.generate not in (*EVALUATED, *TRAINED_ONLY):
-        raise ValueError(f"generate {config.generate!r}: not one of {(*EVALUATED, *TRAINED_ONLY)}")
+    if config.generate not in (*EVALUATED, "none"):
+        raise ValueError(f"generate {config.generate!r}: not one of {(*EVALUATED, 'none')}")
     name, run = run_name(config), plan_of(config)
-    done = checkpoint_path if config.generate in TRAINED_ONLY else evaluation_path
+    done = checkpoint_path if config.generate == "none" else evaluation_path
     unevaluated = [step for step in sorted(checkpoint_steps(config, run)) if not done(name, step).exists()]
     if not unevaluated or metrics.diverged(metrics.records(name)) is not None:
         return

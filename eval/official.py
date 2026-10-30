@@ -1,17 +1,17 @@
 """The official tools' outputs for one checkpoint (scripts/official_eval.sh, RUNS/<run>/official-<step>/) as one record
 in eval/suite.py's codegen and fim layout, so that metrics.compare pairs it with another checkpoint's record or with
-the harness's eval-<step>.json; per-problem pass from each tool's own verdict:
+an earlier harness record; per-problem pass from each tool's own verdict:
 
 | Record | Tool output | Pass |
 | codegen.{humaneval,mbpp}_plus.greedy | evalplus.evaluate's `<samples>.eval_results.json` | base_status, plus_status |
 | codegen.{humaneval,mbpp}_cpp.{greedy,sampled} | MultiPL-E main.py's `<problem>.results.json.gz` | pass_k.py's: "OK", exit 0 |
-| codegen.mbpp_3shot.greedy | lm-evaluation-harness `--log_samples`: `samples_mbpp_*.jsonl` | its `pass_at_1` |
-| fim.santacoder_fim/psm.greedy | bigcode-evaluation-harness generations and references (eval/official_fim.py) | its exact match (`py` rows) |
-| fim.<benchmark>/<order>.{greedy,sampled} | human-eval-infilling's `<samples>_results.jsonl.gz` (eval/official_infilling.py) | its `passed` |
+| codegen.mbpp_3shot.greedy | lm-evaluation-harness `--log_samples` of mbpp_lf (eval/official_lm_eval/) | its `pass_at_1` |
+| fim.<benchmark>/psm.greedy | human-eval-infilling's `<benchmark>-psm.jsonl_results.jsonl` (eval/official_infilling.py) | its `passed` |
 
 Cells as eval/suite.py writes them: metrics.pass_cell (mean, se, Wilson for one sample a problem), the fim records'
-metrics.summary clustered by HumanEval problem (metrics.problem_clusters), evalplus_average of the greedy records.
-Infilling records join the summary once their verdicts exist.
+metrics.summary clustered by HumanEval problem (metrics.problem_clusters), evalplus_average of the greedy records; a
+fim record also counts the middles that ran to the benchmark's budget ("at_budget", their tokens re-encoded by
+encode_ordinary), the others having ended at BOS or another special token.
 
     python -m eval.official <official dir> [<eval-<step>.json to compare against>]
 """
@@ -23,8 +23,8 @@ import sys
 from pathlib import Path
 
 import metrics
-
-FIM = "santacoder_fim/psm"
+from corpus.tokenizer import get_tokenizer
+from eval.official_infilling import BENCHMARKS, budget
 
 
 def evalplus(out: Path, dataset: str) -> dict:
@@ -44,36 +44,20 @@ def multipl_e(directory: Path) -> dict:
 
 
 def mbpp_3shot(out: Path) -> dict:
-    (samples,) = (out / "lm-eval").rglob("samples_mbpp_*.jsonl")
+    (samples,) = (out / "lm-eval").rglob("samples_mbpp_lf_*.jsonl")
     rows = sorted((json.loads(line) for line in samples.read_text().splitlines()), key=lambda r: r["doc"]["task_id"])
     return {"ids": [str(r["doc"]["task_id"]) for r in rows],
             "status": [["passed" if r["pass_at_1"] == 1 else "failed"] for r in rows]}
 
 
-def santacoder(out: Path) -> tuple[dict, dict]:
-    """The Python rows' exact match as the task's process_results counts it, and every language's rate."""
-    from datasets import load_dataset
-    rows = load_dataset("bigcode/santacoder-fim-task", split="train")
-    generations = json.loads((out / "bigcode" / "generations_nanochat_fim.json").read_text())
-    references = json.loads((out / "bigcode" / "references_nanochat_fim.json").read_text())
-    hits = [(row["language"], row["name"], g.strip() == ref.strip())
-            for row, (g,), ref in zip(rows, generations, references, strict=True)]
-    rates = {lang: sum(h for lg, _, h in hits if lg == lang) / sum(lg == lang for lg, _, _ in hits)
-             for lang in sorted({lg for lg, _, _ in hits})}
-    py = [(name, hit) for lang, name, hit in hits if lang == "py"]
-    return {"ids": [n for n, _ in py], "exact_match": [h for _, h in py]}, rates
-
-
-def infilling(path: Path) -> dict:
-    """One judged sample file: greedy {"ids", "result"} (eval/suite.py's layout), sampled {"ids", "status"} with each
-    task's samples' `passed`; tasks in file order."""
-    tasks: dict[str, list[dict]] = {}
-    for line in gzip.decompress(path.read_bytes()).decode().splitlines():
-        sample = json.loads(line)
-        tasks.setdefault(sample["task_id"], []).append(sample)
-    if all(len(s) == 1 for s in tasks.values()):
-        return {"ids": list(tasks), "result": [s[0]["result"] for s in tasks.values()]}
-    return {"ids": list(tasks), "status": [[x["passed"] for x in s] for s in tasks.values()]}
+def infilling(path: Path, limit: int) -> dict:
+    """One judged greedy sample file, eval/suite.py's layout {"ids", "result", "completions"}, tasks in file order, and
+    the number of middles whose re-encoded tokens reach the budget `limit`."""
+    samples = [json.loads(line) for line in path.read_text().splitlines()]
+    enc = get_tokenizer().enc.encode_ordinary
+    return {"ids": [s["task_id"] for s in samples], "result": [s["result"] for s in samples],
+            "completions": [s["completion"] for s in samples],
+            "at_budget": sum(len(enc(s["completion"])) >= limit for s in samples), "max_new_tokens": limit}
 
 
 def record(out: Path) -> dict:
@@ -88,18 +72,12 @@ def record(out: Path) -> dict:
             r["scores"] = ({c: {"pass@1": metrics.pass_cell(p)} for c, p in columns.items()} if "base_status" in r
                            else {"pass@1": metrics.pass_cell(columns["pass@1"])})
     fims = {}
-    if (out / "bigcode" / "evaluation_results.json").exists():
-        fim, rates = santacoder(out)
-        fim["scores"] = {"exact_match": metrics.summary(fim["exact_match"], metrics.problem_clusters(fim))}
-        fim["languages"] = rates
-        fims[FIM] = {"greedy": fim}
-    for mode in ("greedy", "sampled"):
-        for path in sorted((out / "infilling" / mode).glob("*.jsonl_results.jsonl.gz")):
-            name, order = path.name.removesuffix(".jsonl_results.jsonl.gz").rsplit("-", 1)
-            r = fims.setdefault(f"{name}/{order}", {})[mode] = infilling(path)
-            clusters = ["/".join(i.split("/")[1:3]) for i in r["ids"]]  # the HumanEval problem
-            passed = metrics.pass_columns(f"{name}/{order}", r)["pass@1"]
-            r["scores"] = {"pass@1": metrics.summary([sum(p) / len(p) for p in passed], clusters)}
+    for name in BENCHMARKS:
+        path = out / "infilling" / f"{name}-psm.jsonl_results.jsonl"
+        if path.exists():
+            r = fims.setdefault(f"{name}/psm", {})["greedy"] = infilling(path, budget(name))
+            r["scores"] = {"pass@1": metrics.summary([p for (p,) in metrics.pass_columns(name, r)["pass@1"]],
+                                                     metrics.problem_clusters(r))}
     return {"step": int(re.fullmatch(r"official-(\d+)", out.name)[1]), "codegen": codegen, "fim": fims,
             "evalplus_average": {"greedy": metrics.evalplus_average(codegen["humaneval_plus"]["greedy"],
                                                                    codegen["mbpp_plus"]["greedy"])},
@@ -109,14 +87,14 @@ def record(out: Path) -> dict:
 def aligned(a: dict, b: dict) -> dict:
     """b's codegen and fim records in a's problem order, on the problems a's records hold (KeyError if b lacks one)."""
     out = {"codegen": {}, "fim": {}}
-    for section in out:
+    for section, records in out.items():
         for benchmark, modes in b[section].items():
             for mode, r in modes.items():
                 if benchmark not in a.get(section, {}) or mode not in a[section][benchmark]:
                     continue
                 where = {i: k for k, i in enumerate(r["ids"])}
                 order = [where[i] for i in a[section][benchmark][mode]["ids"]]
-                out[section].setdefault(benchmark, {})[mode] = {
+                records.setdefault(benchmark, {})[mode] = {
                     k: [v[j] for j in order] for k, v in r.items() if isinstance(v, list) and len(v) == len(r["ids"])}
     return out
 

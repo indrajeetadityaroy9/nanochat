@@ -73,9 +73,8 @@ def resolved(records: dict) -> dict:
 def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Literal["benchmarks", "parse"],
              previous: "Event | None", released: "Event") -> None:
     """Write evaluation_path(run_name, step) of the checkpoint: the likelihoods and the parse measure; with generate
-    "benchmarks" also the filtered mode's records, codegen/<benchmark>/FILTERED and fim/<benchmark>/<FILTERED_MODE>/
-    FILTERED, and "evalplus_average" {FILTERED: metrics.evalplus_average}, all three null with "parse". NaN and
-    infinities raise.
+    "benchmarks" also the filtered mode's records, codegen/<benchmark>/FILTERED, and "evalplus_average"
+    {FILTERED: metrics.evalplus_average}, both null with "parse". NaN and infinities raise.
     The process tree keeps to verify.cores()'s decode cores until the last GPU phase ends, then frees the GPU, moves
     to the timed-check cores and sets `released` while scoring finishes. previous: set once the previous checkpoint's
     evaluation has ended; official scoring and timed checks wait for it, so they never share the CPU with another
@@ -88,7 +87,7 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
     benchmarks = tasks()
     model = load_model(run_name, step, device=torch.device("cuda"))
     full = generate == "benchmarks"
-    codegen = fim = None
+    codegen = None
     with sanitizers() as pool, ThreadPoolExecutor(1) as scorers, ThreadPoolExecutor(1) as background:
         if previous is not None:
             scorers.submit(previous.wait)
@@ -99,10 +98,9 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
         if full:
             if previous is not None:
                 previous.wait()
-            filtered, fim_filtered = filtered_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers,
-                                                         found=found.result())
+            filtered = filtered_generation(model, tokenizer, benchmarks, pool=pool, scorers=scorers,
+                                           found=found.result())
             codegen = {name: {FILTERED: record} for name, record in filtered.items()}
-            fim = {key: {FILTERED: record} for key, record in fim_filtered.items()}
         del model
         torch._dynamo.reset()  # compiled graphs and their guards' references
         gc.collect()  # the decoders' native memory goes with their objects (NativeDecoder's finalizer)
@@ -113,8 +111,7 @@ def evaluate(tokenizer: Tokenizer, *, run_name: str, step: int, generate: Litera
               f"free {free} of {total} bytes", flush=True)
         pin(timed)
         released.set()
-        results |= {"parse": resolved(parse), "codegen": None if codegen is None else resolved(codegen),
-                    "fim": None if fim is None else resolved(fim)}
+        results |= {"parse": resolved(parse), "codegen": None if codegen is None else resolved(codegen)}
     results["evalplus_average"] = None if codegen is None else {
         FILTERED: evalplus_average(results["codegen"]["humaneval_plus"][FILTERED],
                                    results["codegen"]["mbpp_plus"][FILTERED])}

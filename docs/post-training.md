@@ -22,6 +22,7 @@ figure without a record, or a paper value its extracted text lacks. Below 1B the
 | `run.py` (`RunConfig.base`, `base_step`, `sft_epochs`, `generate` "none"; `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml`, `train/stages.py` (`stage_batches`: epochs past the first) | §11.2 run |
 | `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/stages.py` (`val_batches`), `train/loop.py` (base weights, `validate`) | §11.2 run |
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`) | §11.2 peak calibration |
+| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py` | §11.4 |
 
 The data of §10 is in `artifacts/posttrain/<id>`; the SFT corpus in `artifacts/corpus/tokenized/sft-<data key>/`, its
 counts in `stats.json` there.
@@ -354,8 +355,8 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 
 | Stage | From | Data | Objective | Lengths | Gate |
 |---|---|---|---|---|---|
-| 0. Base | — | — | — | — | the evaluations of steps 66,063 and 69,874 (`docs/evaluation.md` §1) pick the start |
-| 1. SFT | the base | reasoning traces, at most 4 per prompt in each group: Cascade-1's Python, CP-v2's Python, C++ and Exercism; 933,300 traces of 288,554 prompts (205,360 problems), 8.13B tokens, 1.5 epochs: 8,281 steps, 12.21B tokens, peak lr 2.0105e-4, ≈11.8 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4): `conf/experiment/sft.yaml` evaluates its final checkpoint with `generate` "reasoning" in the same job; a run trained with `generate` "none" (its name carries it) is evaluated by `eval/suite.py` `evaluate` with "reasoning" at any saved step |
+| 0. Base | — | — | — | — | the evaluations of steps 66,063 and 69,874 (`docs/evaluation.md` §1, §4) pick the start |
+| 1. SFT | the base | reasoning traces, at most 4 per prompt in each group: Cascade-1's Python, CP-v2's Python, C++ and Exercism; 933,300 traces of 288,554 prompts (205,360 problems), 8.13B tokens, 1.5 epochs: 8,281 steps, 12.21B tokens, peak lr 2.0105e-4, ≈11.8 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4): `conf/experiment/sft.yaml` trains with `generate` "none" (its name carries it), and `scripts/official_reasoning.sh` evaluates a saved checkpoint |
 | Code RL, deferred | the SFT model | problems with tests, 47,468 before filtering (§11.3) | Nemotron-Cascade's GRPO, one update per batch, sequence-level truncated importance weights; FP16 | responses ≤ 16,384, then ≤ 28,672 | pass@1 up, pass@20 not down beyond its error bar (§11.4) |
 
 ### 11.1 Format
@@ -479,7 +480,7 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 - **Validation and checkpoints**: the response loss, mean nats per label (each response and its closing BOS), over
   the whole val split (2,361 rows, 74.0M labels) before the full run's first step, every 1,000 steps and after the
   last (`run.py` `validation_steps`, `train/loop.py` `validate`; `val` records); full states every 1,000 steps (resume
-  points) and at the end, the full run's last evaluated by the reasoning protocol (`generate: reasoning`, §11.4).
+  points) and at the end, the full run's last evaluated by the reasoning protocol (§11.4).
 
 ### 11.3 Code RL, deferred
 
@@ -533,25 +534,29 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 
 ### 11.4 Evaluation of each stage
 
-- **Reasoning protocol** (`eval/code_eval.py` `reasoning_generation`, `eval/livecodebench.py`, the evaluation's
-  `generate="reasoning"`; `docs/evaluation.md` §4): HumanEval+, MBPP+, MultiPL-E's HumanEval and MBPP in C++, and
-  LiveCodeBench v6 (arXiv 2403.07974). The EvalPlus prompt is EvalPlus's chat user turn (`make_raw_chat_prompt`: the
-  instruction for chat models, "Please provide a self-contained Python script that solves the following problem in a
-  markdown code block:", then the benchmark's prompt in a bare fence) stripped, then §11.1's `\n\n<think>\n`;
-  MultiPL-E's C++ prompts the same with "C++" for "Python". LiveCodeBench: the 454 problems of release_v6 with a
-  contest date in [2024-08-01, 2025-05-01), Nemotron-Cascade's "08/24–05/25" (arXiv 2512.13607 Table 1), with
-  lcb_runner's prompt, `extract_code` and `codegen_metrics` (LiveCodeBench at `28fef95`), the prompt followed by
-  `\n\n<think>\n`. Decoding at temperature 0.6 and top-p 0.95 (DeepSeek-R1, arXiv 2501.12948 v1 §3; Nemotron-Cascade's
-  evaluation setting, arXiv 2512.13607 §2), 20 samples per problem (LiveCodeBench 16), each until BOS or the context
-  (32,768 tokens with the prompt) in place of Nemotron-Cascade's 64K. The answer is the last fenced block after
-  `</think>` (LiveCodeBench: `extract_code` of the text after it), scored by EvalPlus as a chat model's solution, by
-  MultiPL-E's judge with the prompt's `#include` lines and the tests, and by lcb_runner. Reported: pass@1 as avg@n
-  (each problem's mean over its n samples, then the mean over problems, R1 §3) and pass@n, the share of responses
-  cut at the budget, with no `</think>` or with no block after it, the response lengths.
-- **The base's records** (likelihood, greedy completion, infilling; `docs/evaluation.md` §1) are taken at every stage
-  to measure what it loses, not as a gate.
-- **No selection on the benchmarks**: RL, when run, stops on its held-out problems (§11.3); HumanEval+, MBPP+,
-  MultiPL-E and LiveCodeBench are read once per stage, at its end.
+- **Reasoning protocol** (`scripts/official_reasoning.sh`; the tools and pins: `docs/evaluation.md` §4): the
+  checkpoint exported with the chat template (`inference/export_hf.py --chat`: BOS, the messages' contents joined by
+  "\n\n" and stripped, then §11.1's `\n\n<think>\n`, the SFT context as `posttrain/sft_data.py` `render` encodes it)
+  and served by `vllm serve` with the `nanochat` reasoning parser (`eval/official_reasoning_parser.py`: the answer is
+  the text after the last `</think>`; a response without it is all reasoning, its answer empty). Before generation,
+  `eval/official_tokenize.py` checks that no message either tool will send holds `"\r"` (`docs/evaluation.md` §4) and,
+  through the server's `/tokenize`, that the first problem's messages render as BOS +
+  `encode_ordinary(prompt.strip() + "\n\n<think>\n")` (step 109 of the 1/3 calibration arm: equal for EvalPlus's 153
+  and LiveCodeBench's 431 ids [measured]). HumanEval+ and MBPP+ by
+  EvalPlus's OpenAI backend (`evalplus.codegen --backend openai`: its chat instruction, "Please provide a
+  self-contained Python script that solves the following problem in a markdown code block:", and the prompt in a
+  python fence; n 20, T 0.6, top-p 0.95 set by its `openai_request.make_request`), scored by `evalplus.evaluate`.
+  LiveCodeBench v6 (arXiv 2403.07974) by lcb_runner (`eval/official_lcb.py`, LiveCodeBench at `28fef95`: the
+  problems of release_v6 with a contest date in [2024-08-01, 2025-05-01), Nemotron-Cascade's "08/24–05/25", arXiv
+  2512.13607 Table 1; its system message and question as two messages, line-ending-normalized, n 16, T 0.6, top-p
+  0.95), scored by its
+  `codegen_metrics`. T 0.6 and top-p 0.95 are DeepSeek-R1's (arXiv 2501.12948 v1 §3) and Nemotron-Cascade's (arXiv
+  2512.13607 §2); every request asks 32,768 new tokens, which vLLM caps at the context less the prompt, in place of
+  Nemotron-Cascade's 64K. Reported: each tool's pass@1 (avg@n).
+- **The base's records** (likelihood, the parse measure, the official benchmarks; `docs/evaluation.md` §1, §4) are
+  taken at every stage to measure what it loses, not as a gate.
+- **No selection on the benchmarks**: RL, when run, stops on its held-out problems (§11.3); HumanEval+, MBPP+ and
+  LiveCodeBench are read once per stage, at its end.
 
 ### 11.5 Not in the pipeline
 
@@ -571,9 +576,9 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
    filters, cap and split, tokenizes and packs, the prompts' labels ignored by the loader.
 2. SFT as a `run.py` run from a base checkpoint (`conf/experiment/sft.yaml`) and its peak calibration
    (`conf/experiment/sft_lr.yaml`).
-3. `eval/code_eval.py` `reasoning_generation`: the reasoning protocol (§11.4).
+3. `scripts/official_reasoning.sh`: the reasoning protocol by the official tools (§11.4).
 4. Not written, for §11.3 only: the verl image; `inference/export_hf.py` and `inference/modeling_nanochat.py` (fp32
-   weights, the chat template, the head and gate outside autocast); `posttrain/rl_data.py` (problems and tests in
+   weights, the head and gate outside autocast); `posttrain/rl_data.py` (problems and tests in
    verl's format, the 8-sample filter sampled by the decoder); `posttrain/reward.py` (§11.3's reward); the run's
    settings.
 

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Evaluation image for the benchmarks' official tools (scripts/official_eval.sh, docs/evaluation.md §8): vLLM 0.32.0
+# Evaluation image for the benchmarks' official tools (scripts/official_eval.sh, docs/evaluation.md §4): vLLM 0.32.0
 # (torch, transformers, g++) with the tools at their pinned commits in a venv over it. The image's inference stack
 # (vLLM, torch, Triton, transformers, tokenizers, safetensors, numpy) constrains every install, so it stays the image's.
 
@@ -14,30 +14,29 @@ RUN python3 -m pip freeze --all | \
 ARG EVALPLUS=26d6d00bb1fd0fa37f39c99d5290da67891d1c5e
 ARG MULTIPL_E=3025a531af7450e7df8b96fe0440e9804480bbad
 ARG LM_EVAL=d6de81643928d653435c431bae19945d41d32520
-ARG BIGCODE=8fc5bae6479c4fbbb28c3f8b644f6a15b3f3b5bd
 ARG LCB=28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24
 ARG HUMAN_EVAL_INFILLING=88062ff9859c875d04db115b698ed4b0f0395170
 RUN fetch() { mkdir -p $2 && curl -sSfL https://github.com/$1/archive/$3.tar.gz | tar xz --strip-components=1 -C $2; } \
     && fetch evalplus/evalplus /opt/evalplus $EVALPLUS && \
     fetch nuprl/MultiPL-E /opt/MultiPL-E $MULTIPL_E && \
     fetch EleutherAI/lm-evaluation-harness /opt/lm-evaluation-harness $LM_EVAL && \
-    fetch bigcode-project/bigcode-evaluation-harness /opt/bigcode-evaluation-harness $BIGCODE && \
     fetch LiveCodeBench/LiveCodeBench /opt/LiveCodeBench $LCB && \
     fetch openai/human-eval-infilling /opt/human-eval-infilling $HUMAN_EVAL_INFILLING
 
-# evalplus (version from setuptools-scm, absent in an archive) and lm-evaluation-harness with their dependencies;
-# bigcode-evaluation-harness without its requirements.txt (pyext 0.7 does not import on Python 3.12; santacoder_fim
-# needs accelerate, datasets and evaluate); human-eval-infilling and MultiPL-E as checkouts on sys.path
-# (human-eval-infilling reads <package>/../data; MultiPL-E's judge is scripts). human-eval-infilling as its README sets
-# it up: execution enabled, and HumanEval-RandomSpan.jsonl.gz, the name data.py:13 reads, linked to the shipped file.
+# evalplus (version from setuptools-scm, absent in an archive) and lm-evaluation-harness with their dependencies
+# (evaluate: lm-eval's mbpp scorer; fire: human-eval-infilling's CLI); human-eval-infilling and MultiPL-E as checkouts
+# on sys.path (human-eval-infilling reads <package>/../data; MultiPL-E's judge is scripts). human-eval-infilling as its
+# README sets it up: execution enabled, and HumanEval-RandomSpan.jsonl.gz, the name data.py:13 reads, linked to the
+# shipped file.
 # lcb_runner in its own venv /opt/lcb (its dataset's loading script needs datasets < 4; pyproject.toml's >= 3.2): its
 # checkout on sys.path with the packages its OpenAI-runner and evaluation paths import (its pyproject.toml's vLLM, torch
-# and other API clients are the image's or unused)
+# and other API clients are the image's or unused); anthropic at its pyproject.toml's lower bound 0.42.0, since
+# lcb_runner/prompts imports HUMAN_PROMPT, which the image's anthropic 2.3.0 no longer has
 RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 uv pip install -c /opt/base-constraints.txt /opt/evalplus \
       /opt/lm-evaluation-harness evaluate fire && \
-    uv pip install --no-deps -c /opt/base-constraints.txt /opt/bigcode-evaluation-harness && \
     uv venv --system-site-packages --python /usr/bin/python3 /opt/lcb && \
-    uv pip install --python /opt/lcb/bin/python -c /opt/base-constraints.txt 'datasets>=3.2,<4' openai pebble && \
+    uv pip install --python /opt/lcb/bin/python -c /opt/base-constraints.txt 'datasets>=3.2,<4' openai pebble \
+      anthropic==0.42.0 && \
     echo /opt/LiveCodeBench > /opt/lcb/lib/python3.12/site-packages/lcb_runner.pth && \
     H=/opt/human-eval-infilling && sed -i 's/^#\( *exec(check_program, exec_globals)\)/\1/' \
       $H/human_eval_infilling/execution.py && \
@@ -45,9 +44,9 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 uv pip install -c /opt/base-constraints
     echo $H > /opt/venv/lib/python3.12/site-packages/human_eval_infilling.pth
 # the record of the tools and the inference stack (eval/official.py copies it into every summary)
 RUN python -c "import json, sys, importlib.metadata as m; json.dump({**dict(a.split('=', 1) for a in sys.argv[1:]), \
-      **{p: m.version(p) for p in ('vllm', 'torch', 'transformers', 'tokenizers', 'accelerate', 'datasets')}, \
+      **{p: m.version(p) for p in ('vllm', 'torch', 'transformers', 'tokenizers', 'datasets')}, \
       'image': 'vllm/vllm-openai:v0.32.0'}, open('/opt/tools.json', 'w'), indent=1)" \
-      evalplus=$EVALPLUS multipl_e=$MULTIPL_E lm_evaluation_harness=$LM_EVAL \
-      bigcode_evaluation_harness=$BIGCODE lcb_runner=$LCB human_eval_infilling=$HUMAN_EVAL_INFILLING
+      evalplus=$EVALPLUS multipl_e=$MULTIPL_E lm_evaluation_harness=$LM_EVAL lcb_runner=$LCB \
+      human_eval_infilling=$HUMAN_EVAL_INFILLING
 ENV MULTIPL_E=/opt/MultiPL-E PYTHONUNBUFFERED=1
 ENTRYPOINT []

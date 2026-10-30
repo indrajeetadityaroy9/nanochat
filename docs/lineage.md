@@ -373,8 +373,8 @@ different tokenization schemes"; the zero-byte exclusion has no paper. *Here* (A
 `VAL_TOKENS`, `sample_rows`; `docs/evaluation.md` §2; per corpus, whole micro-batches, rows drawn systematically.
 
 **Execution-based pass@k in a sandbox.** *Papers:* arXiv 2107.03374 (Chen, §2.1, §2.3): functional correctness, the
-unbiased estimator, a sandbox. *Here* (PARALLEL): `metrics.py` `pass_at_k`, `eval/code_eval.py` `evalplus`,
-`multipl_e`; `docs/evaluation.md` §4, §5.
+unbiased estimator, a sandbox. *Here* (PARALLEL): `metrics.py` `pass_cell`, `eval/code_eval.py` `evalplus`,
+`multipl_e`, the official tools' judges (`scripts/official_eval.sh`); `docs/evaluation.md` §4, §5.
 
 **Truncated sampling: nucleus (top-p), not top-k.** *Papers:* arXiv 1904.09751 (Holtzman, §3.1, §3.2). *Here*
 (PARALLEL): `inference/decoder.py` `NativeDecoder`, `model/kernels/decode.cu` `k_nucleus`; `docs/evaluation.md` §4,

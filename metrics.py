@@ -1,12 +1,9 @@
 """
-Metrics, torch-free: the run log, bits per byte (arXiv 2101.00027 §3.1), parse outcomes, completion similarity
-(arXiv 2310.11248 §3.2), pass@k (arXiv 2107.03374 §2.1), error bars and paired comparisons (arXiv 2411.00640), model
-FLOPs utilization (arXiv 2204.02311 App. B) and decoding latency.
+Metrics, torch-free: the run log, bits per byte (arXiv 2101.00027 §3.1), parse outcomes, pass@k (arXiv 2107.03374
+§2.1), error bars and paired comparisons (arXiv 2411.00640), model FLOPs utilization (arXiv 2204.02311 App. B) and
+decoding latency.
 """
-import difflib
 import json
-import keyword
-import re
 import statistics
 import time
 from collections import Counter
@@ -15,7 +12,6 @@ from typing import Literal
 
 import numpy as np
 import statsmodels.api as sm
-from human_eval_infilling.evaluation import estimate_pass_at_k
 from numpy.typing import ArrayLike
 from scipy.stats import norm
 from statsmodels.stats.contingency_tables import mcnemar
@@ -185,71 +181,6 @@ def measure_errors(evaluation: dict) -> dict[str, dict]:
             "pass@1": summary([s[0] == "pass" for p in parse for s in p["base_status"]])}
 
 
-# CrossCodeEval's patterns (arXiv 2310.11248; its released scripts/eval_utils.py remove_comments, string_pattern,
-# IDENTIFIER_REGEX); keywords as dpu-utils keywordlist.py lists them (keyword.kwlist without True and False)
-COMMENT = re.compile(r"#.*|//.*")
-STRING = re.compile(r'"([^"\\]*(\\.[^"\\]*)*)"|\'([^\'\\]*(\\.[^\'\\]*)*)\'')
-WORD, IDENTIFIER = re.compile(r"\w+", re.UNICODE | re.MULTILINE | re.DOTALL), re.compile(r"[_a-zA-Z][_a-zA-Z0-9]*")
-PYTHON_KEYWORDS = frozenset(keyword.kwlist) - {"True", "False"}
-
-
-def line_exact_match(prediction: str, reference: str) -> bool:
-    """Whether a middle equals the reference up to surrounding whitespace (arXiv 2301.03988 §5.4)."""
-    return prediction.strip() == reference.strip()
-
-
-def code_lines(code: str) -> list[str]:
-    """The stripped non-empty lines of code without its comments (cceval process_examples)."""
-    return [line.strip() for line in COMMENT.sub("", code).split("\n") if line.strip()]
-
-
-def exact_match(prediction: str, reference: str) -> bool:
-    """CrossCodeEval's exact match: equal code_lines."""
-    return code_lines(prediction) == code_lines(reference)
-
-
-def edit_similarity(prediction: str, reference: str) -> int:
-    """CrossCodeEval's edit similarity in [0, 100]: fuzzywuzzy 0.18 fuzz.ratio without python-Levenshtein.
-    That is difflib's SequenceMatcher (autojunk included), rounded by Python's round (fuzzywuzzy utils.intr)."""
-    a, b = COMMENT.sub("", prediction).strip(), COMMENT.sub("", reference).strip()
-    if a == b:
-        return 100
-    if not a or not b:
-        return 0
-    return round(100 * difflib.SequenceMatcher(None, a, b).ratio())
-
-
-def identifiers(code: str) -> list[str]:
-    """The identifiers of comment-stripped Python code in order, repeats kept (cceval extract_identifiers)."""
-    return [w for w in WORD.findall(STRING.sub("", COMMENT.sub("", code)))
-            if IDENTIFIER.match(w) and w not in PYTHON_KEYWORDS]
-
-
-def identifier_match(prediction: str, reference: str) -> tuple[bool, float]:
-    """CrossCodeEval's identifier exact match (equal identifier lists) and F1 (over the sets; 0 when both are empty)."""
-    p, r = identifiers(prediction), identifiers(reference)
-    tp = len(set(p) & set(r))
-    wrong = len(set(p) ^ set(r))
-    return p == r, 2 * tp / (2 * tp + wrong) if tp or wrong else 0.0
-
-
-def completion_scores(predictions: Sequence[str], references: Sequence[str]) -> dict[str, list[float]]:
-    """Per-sample line_em, em, es (0-100), id_em and id_f1 question scores (cceval detailed_results)."""
-    out = {"line_em": [], "em": [], "es": [], "id_em": [], "id_f1": []}
-    for p, r in zip(predictions, references, strict=True):
-        id_em, id_f1 = identifier_match(p, r)
-        scores = (line_exact_match(p, r), exact_match(p, r), edit_similarity(p, r), id_em, id_f1)
-        for k, v in zip(out, scores, strict=True):
-            out[k].append(float(v))
-    return out
-
-
-def pass_at_k(passed: Sequence[Sequence[bool]], k: int) -> np.ndarray:
-    """Each problem's pass@k estimate from its samples' outcomes (at least k samples each)."""
-    n = np.array([len(p) for p in passed])
-    return estimate_pass_at_k(n, np.array([sum(p) for p in passed]), k)
-
-
 def summary(scores: ArrayLike, clusters: ArrayLike | None = None) -> dict:
     """{"mean", "se", "interval", "n", "clusters"} of question scores by OLS on a constant (arXiv 2411.00640).
     Unclustered: Eq. 1; clustered: Liang-Zeger CR0 without small-sample correction; 95% normal interval (Eq. 3)."""
@@ -305,26 +236,21 @@ def evalplus_average(humaneval: dict, mbpp: dict) -> dict:
 
 
 def pass_columns(benchmark: str, record: dict) -> dict[str, list[list[bool]]]:
-    """A codegen, reasoning or fim record's pass outcomes per score column, [problem][sample]: EvalPlus base and plus
-    (columns humaneval and humaneval_plus, or mbpp and mbpp_plus); else "pass@1" of status "OK" (MultiPL-E), "passed"
-    (lm-eval MBPP) or True (LiveCodeBench), or of result "passed" (human_eval_infilling); or SantaCoder's
-    "exact_match"."""
+    """A codegen or fim record's pass outcomes per score column, [problem][sample]: EvalPlus base and plus (columns
+    humaneval and humaneval_plus, or mbpp and mbpp_plus); else "pass@1" of status "OK" (MultiPL-E) or "passed" (lm-eval
+    MBPP), or of result "passed" (human_eval_infilling)."""
     if "base_status" in record:
         return dict(zip((benchmark.removesuffix("_plus"), benchmark), evalplus_passed(record), strict=True))
     if "status" in record:
-        return {"pass@1": [[s is True or s in ("OK", "passed") for s in ss] for ss in record["status"]]}
-    if "result" in record:
-        return {"pass@1": [[r == "passed"] for r in record["result"]]}
-    return {"exact_match": [[bool(e)] for e in record["exact_match"]]}
+        return {"pass@1": [[s in ("OK", "passed") for s in ss] for ss in record["status"]]}
+    return {"pass@1": [[r == "passed"] for r in record["result"]]}
 
 
 def problem_clusters(record: dict) -> list[str] | None:
-    """A fim record's clusters, its rows' HumanEval problems: human_eval_infilling ids "<Benchmark>/HumanEval/<i>/L<j>"
-    as eval/code_eval.py infilling clusters them, SantaCoder ids "<problem>.json-L<line>"; None for one row each."""
+    """A fim record's clusters, its rows' HumanEval problems (human_eval_infilling ids "<Benchmark>/HumanEval/<i>/L<j>"
+    or "/L<j>_L<k>"); None for one row each."""
     if "result" in record:
         return ["/".join(i.split("/")[1:3]) for i in record["ids"]]
-    if "exact_match" in record:
-        return [i.rsplit(".json-L", 1)[0] for i in record["ids"]]
     return None
 
 
@@ -334,8 +260,8 @@ DETECTABLE_Z = float(norm.ppf(0.975) + norm.ppf(0.8))
 
 def compare(a: dict, b: dict) -> dict[str, dict]:
     """Paired comparison of evaluation records a and b (RUNS/<run>/eval-<step>.json) over the codegen (every mode and
-    column), fim and reasoning sections both hold, mode by mode on identical problems (equal ids, else ValueError).
-    Rows "<section>/<benchmark>/<mode>/<column>" (reasoning's mode "sampled"), each: n, means a and b of the
+    column) and fim sections both hold, mode by mode on identical problems (equal ids, else ValueError).
+    Rows "<section>/<benchmark>/<mode>/<column>", each: n, means a and b of the
     per-problem pass rates (samples averaged first, arXiv 2411.00640 §3.1), diff = b − a with se by summary of the
     per-problem differences (Eq. 7; Eq. 8 clustered by HumanEval problem for fim rows) and its 95% interval (Eq. 3);
     corr, the Pearson correlation of the per-problem scores (Table 5; None when either is constant); p: exact McNemar
@@ -348,13 +274,11 @@ def compare(a: dict, b: dict) -> dict[str, dict]:
     then the ones for that design, smaller than with independent seeds; for fim rows the clustered se² is App. C's
     cluster-adjusted bracket over n."""
     rows = {}
-    for section in ("codegen", "fim", "reasoning"):
+    for section in ("codegen", "fim"):
         if not a.get(section) or not b.get(section):
             continue
         for benchmark in [k for k in a[section] if k in b[section]]:
             modes_a, modes_b = (s[section][benchmark] for s in (a, b))
-            if section == "reasoning":
-                modes_a, modes_b = {"sampled": modes_a}, {"sampled": modes_b}
             for mode in [m for m in modes_a if m in modes_b]:
                 x, y = modes_a[mode], modes_b[mode]
                 if x["ids"] != y["ids"]:

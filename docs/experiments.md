@@ -15,7 +15,7 @@ reasoning not measured; [estimate]; [unverified] a figure without a record, or a
 | Branches (on `origin`) `qkv-epi`, `mlp-out-mix`, `mlp-out-mix-land`, `mlp-out-mix-v2`, `window-attn` | §5 |
 | Branch `scalar-learning-rates` (on `origin`) | §4 |
 | Removed experiment code: the D6/D7 experiments, the tokenizer runs, `RunConfig.muon_tau_scale`, `adamw_learning_rate_scale`, `ablations/contrast.py`, the `logit_softcap` experiment | §1–§4 |
-| Removed: the native vLLM model class (`inference/vllm_model.py`), `eval/rescore.py`, `scripts/standard_eval.sh`, the export's vLLM support | §6 |
+| Removed: the native vLLM model class (`inference/vllm_model.py`), `eval/rescore.py`, `scripts/standard_eval.sh`; the harness's standard-benchmark modes (`7b7f26d`: greedy, sampled, MBPP 3-shot, infilling, the reasoning protocol, `eval/livecodebench.py`); SantaCoder FIM, the infilling 1@10 mode and the CrossCodeEval scores (`CODECOMMIT`) | §6 |
 
 ## 1. Protocol and status
 
@@ -425,11 +425,28 @@ tokens) d16 NativeDecoder 66.5K against vLLM 31.0K tok/s, d24 21.8K against 23.1
 ran at the same rate and, in the same execution mode, gave the same logits, so the class was removed as a second
 implementation of the model. The export: `docs/evaluation.md` §8.
 
-**vLLM path and scorer replay** (removed). The export also ran under vLLM's Transformers backend,
-`scripts/standard_eval.sh` ran the harnesses' own CLIs on it, and `eval/rescore.py` replayed a record's scorers on its
-stored completions; each validated the evaluation (`docs/evaluation.md` §8–§9) and none produces a record of the base
-run or the `peak_lr` calibration, so the code keeps `NativeDecoder` and the scorers `evaluate` runs
-(`docs/evaluation.md` §1, §6).
+**vLLM path and scorer replay** (removed). `scripts/standard_eval.sh` ran the harnesses' own CLIs on the export under
+vLLM's Transformers backend, and `eval/rescore.py` replayed a record's scorers on its stored completions; each
+validated the evaluation (`docs/evaluation.md` §8–§9). The vLLM path returned as the benchmarks' official path
+(`scripts/official_eval.sh`, `docs/evaluation.md` §4).
+
+**The harness's standard-benchmark modes** (removed, `7b7f26d`). `evaluate` generated EvalPlus, MultiPL-E, MBPP
+3-shot and infilling with `NativeDecoder` and scored them with each benchmark's evaluator, plus the post-trained
+model's reasoning protocol with LiveCodeBench (`eval/livecodebench.py`). On the base run's step 69,874 the official
+tools, unmodified, on the export served by vLLM give the same per-problem verdicts within decoding noise: no benchmark
+differs after Holm's adjustment, the prompts are token-identical, and every one of the 44 problems whose greedy
+verdicts differ diverges at a near-tie token (the export's fp32 forward picks the official token 25 times, the
+harness's 19; median margin 0.038 nats) (`docs/evaluation.md` §8). The official tools are the published protocols
+(`docs/evaluation.md` §4); `evaluate` keeps the likelihoods, the parse measure and the 1@10 mode, which no tool runs.
+
+**SantaCoder FIM, the infilling 1@10 mode, sampled and SPM infilling** (removed, `CODECOMMIT`). The model is
+pretrained on Python and C++ only, and bigcode-evaluation-harness's `santacoder_fim` task (`8fc5bae`) scores Python,
+JavaScript and Java; its Python split is 1,043 single-line holes cut from 153 HumanEval problems, scored by exact
+match, a duplicate of HumanEval single-line infilling, which is scored by execution [arithmetic: the task's rows].
+One infilling evaluation remains: human-eval-infilling, greedy, PSM (`docs/evaluation.md` §4). Measured before the
+removal (step 69,874): SantaCoder Python exact match 0.2282 with the task's own code through vLLM (2,048 positions)
+against the harness's 0.2407 (128 new tokens). The infilling 1@10 mode's syntax-constrained middles and the
+CrossCodeEval similarity scores (`metrics.completion_scores`) went with it.
 
 **Type-constrained decoding** (arXiv 2504.09246). Not used; Python syntax is constrained and types are checked after
 generation (basis: `docs/evaluation.md` §7).

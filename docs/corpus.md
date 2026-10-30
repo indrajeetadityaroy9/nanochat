@@ -454,7 +454,8 @@ single-line and multi-line infilling mask "different spans of non-empty lines", 
 single-line and 5,815 multi-line prefixes end in a line break and every reference middle ends with one
 [arithmetic: `read_problems`]).
 
-**The line-start rule's basis** (d16 at 20 tokens per parameter; infilling measures `docs/evaluation.md` §4–§5). The
+**The line-start rule's basis** (d16 at 20 tokens per parameter; HumanEval single-line infilling, greedy, by line exact
+match, the stripped middle equal to the reference, and pass@1). The
 training format matches the evaluation prompts (sentinel ids, sections encoded separately, the BOS ending the middle).
 Without the rule the model infilled single lines 16× worse in PSM than SPM (line exact match 0.022
 against 0.367, the d16 baseline; 0.023 against 0.353 on the 982 prompts the 512-key window

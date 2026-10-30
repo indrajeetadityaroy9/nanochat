@@ -1,14 +1,12 @@
 """
 Code generation diagnostics of a base model, scored by each benchmark's official evaluator in a fresh process: the
-parse measure on HumanEval+ and MBPP+ (EvalPlus, arXiv 2305.01210) and the filtered mode on EvalPlus, MultiPL-E C++
-(arXiv 2208.08227) and HumanEval infilling (arXiv 2207.14255); HumanEval-X C++ (arXiv 2303.17568) holds reference
-solutions for the likelihoods (eval/bpb.py). The benchmarks' standard protocols run in their official tools
-(scripts/official_eval.sh).
+parse measure on HumanEval+ and MBPP+ (EvalPlus, arXiv 2305.01210) and the filtered mode on EvalPlus and MultiPL-E C++
+(arXiv 2208.08227); HumanEval-X C++ (arXiv 2303.17568) holds reference solutions for the likelihoods (eval/bpb.py).
+The benchmarks' standard protocols run in their official tools (scripts/official_eval.sh).
 """
 
 import codecs
 import functools
-import hashlib
 import itertools
 import json
 import multiprocessing
@@ -21,15 +19,13 @@ from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal, NamedTuple
 
-import human_eval_infilling
 import pyarrow.parquet as pq
 from evalplus.data import get_human_eval_plus, get_mbpp_plus
 from evalplus.provider.utility import EOS, extra_eos_for_direct_completion
 from evalplus.sanitize import sanitize
 from huggingface_hub import hf_hub_download
-from human_eval_infilling.data import read_problems
 
-from corpus.tokenizer import Tokenizer, fim_prompt
+from corpus.tokenizer import Tokenizer
 from eval.cache import VerdictCache
 from eval.verify import (
     Candidate,
@@ -46,7 +42,7 @@ from eval.verify import (
 )
 from inference.decoder import NativeDecoder, Request, heal_tokens
 from inference.syntax_constraint import SyntaxConstraint
-from metrics import completion_scores, latency, parse_outcome, parse_shares, pass_cell, summary
+from metrics import latency, parse_outcome, parse_shares, pass_cell
 from model.modeling import CausalLM
 
 # HF dataset revisions: MultiPL-E's, its generator's pin (multipl_e/completions.py DATASET_REVISION)
@@ -56,9 +52,8 @@ HUMANEVAL_X = {"repo_id": "zai-org/humaneval-x", "revision": "62c78627f3072a1454
 # plus-test column by the benchmark (humaneval and humaneval_plus, mbpp and mbpp_plus, as the papers name them)
 EVALPLUS = {"humaneval_plus": ("humaneval", get_human_eval_plus), "mbpp_plus": ("mbpp", get_mbpp_plus)}
 MULTIPL_E_BENCHMARKS = ("humaneval_cpp", "mbpp_cpp")
+# HumanEval infilling's benchmarks (arXiv 2207.14255; corpus/decontaminate.py's texts, scripts/official_eval.sh's runs)
 INFILLING = ("single-line", "multi-line", "random-span")
-# The filtered mode's FIM order, one of the two the packer trains (arXiv 2207.14255 §3, App. D)
-FILTERED_MODE = "spm"
 # The filtered mode's record key: AlphaCode's n@k (arXiv 2203.07814 §2.2), one submission chosen from up to
 # verify.ATTEMPTS = 10 candidates by example tests
 FILTERED = "1@10"
@@ -189,18 +184,6 @@ def filtered_completions(tokenizer: Tokenizer, items: list[Task], prompts: list[
 
     return filtered(request, lambda i, ids: completion(tokenizer, items[i], ids, special=special, healed=dropped[i]),
                     lambda i, text: check(items[i], text), found=found, language=language)
-
-
-def filtered_middles(tokenizer: Tokenizer, problems: list[dict], prompts: list[list[int]], *, max_new_tokens: int,
-                     found: list[list[tuple[str, str]]]) -> Filtered:
-    """filtered of FIM prompts under the syntax constraint of prefix and suffix, checked on the prefix's vetted
-    examples (vetted)."""
-    return filtered(lambda i: Request(input_ids=prompts[i], max_new_tokens=max_new_tokens,
-                                      constraint=SyntaxConstraint(tokenizer, problems[i]["prompt"].encode(),
-                                                                  suffix=problems[i]["suffix"].encode())),
-                    lambda i, ids: tokenizer.enc.decode(ids),
-                    lambda i, middle: (problems[i]["prompt"] + middle + problems[i]["suffix"], []),
-                    found=found, language="python")
 
 
 def sanitizer_init() -> None:
@@ -343,65 +326,6 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
     return {"scores": pass_scores(passed), "ids": [t.task_id for t in items], "status": status}
 
 
-# human_eval_infilling check_correctness (3 s) in a fork pool of argv[4] workers, in a fresh isolated process on the
-# timed-check cores. The CLI's modules are imported first: a forked sample's run-time imports depend on the loaded
-# modules (reliability_guard).
-INFILLING_EVALUATE = """
-import json, multiprocessing, os, sys
-from concurrent.futures import ProcessPoolExecutor
-import fire
-import human_eval_infilling.evaluation
-from human_eval_infilling.data import read_problems
-from human_eval_infilling.execution import check_correctness
-problems = read_problems(sys.argv[1])
-with open(sys.argv[2], encoding="utf-8") as f:
-    samples = json.load(f)
-def check(sample):
-    return check_correctness(problems[sample["task_id"]], sample["completion"], 3.0)["result"]
-with ProcessPoolExecutor(int(sys.argv[4]), mp_context=multiprocessing.get_context("fork")) as pool:
-    result = list(pool.map(check, samples))
-with open(sys.argv[3], "w", encoding="utf-8") as f:
-    json.dump(result, f)
-"""
-
-
-@functools.cache
-def infilling_cache() -> VerdictCache:
-    """The VerdictCache of human_eval_infilling's check_correctness as INFILLING_EVALUATE runs it. The package is a
-    checkout on sys.path, not a distribution (cache.environment cannot see it), so its modules and the problem files
-    read_problems reads (<package>/../data) are keyed by their SHA-256."""
-    package = Path(human_eval_infilling.__file__).parent
-    files = sorted([*package.glob("*.py"), *package.parent.glob("data/*.jsonl.gz")])
-    return VerdictCache("infilling", json.dumps([INFILLING_EVALUATE,
-                                                 {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in files}]))
-
-
-def infilling(name: str, problems: list[dict], middles: list[str], record: dict) -> dict:
-    """Official evaluation of one middle per problem (results not "timed out" kept in VerdictCache): per-problem
-    results and scores against the reference middle (pass@1 among them), metrics.summary clustered by HumanEval problem
-    (arXiv 2411.00640); then the given record (latency, search record)."""
-    samples = [{"task_id": p["task_id"], "completion": middle} for p, middle in zip(problems, middles, strict=True)]
-    keys = [json.dumps([name, s["task_id"], s["completion"]]) for s in samples]
-    cache = infilling_cache()
-    result = cache.get(keys)
-    todo = [j for j, r in enumerate(result) if r is None]
-    if todo:
-        with tempfile.TemporaryDirectory() as tmp:
-            path, scored = Path(tmp, "samples.json"), Path(tmp, "results.json")
-            path.write_text(json.dumps([samples[j] for j in todo]), encoding="utf-8")
-            with timed_slots(timed_workers()):
-                run_group(timed([sys.executable, "-I", "-c", INFILLING_EVALUATE, name, path, scored,
-                                 str(timed_workers())]), cwd=tmp).check_returncode()
-            for j, r in zip(todo, json.loads(scored.read_text(encoding="utf-8")), strict=True):
-                result[j] = r
-        cache.put([(keys[j], result[j]) for j in todo if result[j] != "timed out"])
-    passed = [r == "passed" for r in result]
-    clusters = ["/".join(p["task_id"].split("/")[1:3]) for p in problems]
-    scores = completion_scores(middles, [p["canonical_solution"] for p in problems]) | {"pass@1": passed}
-    return {"scores": {k: summary(v, clusters) for k, v in scores.items()},
-            "ids": [s["task_id"] for s in samples], "completions": middles, "result": result} | record
-
-
 class CodegenRun(NamedTuple):
     """An EvalPlus or MultiPL-E benchmark's prompts and evaluator (codegen_runs)."""
     items: list[Task]
@@ -440,13 +364,11 @@ def filtered_record(score: Callable[[list[Task], list[list[str]]], dict], items:
 
 
 def vetted(benchmarks: dict[str, list[Task]]) -> dict[str, list[list[tuple[str, str]]]]:
-    """verify.vetted_examples of each EvalPlus benchmark's tasks (prompt + canonical solution) and each INFILLING
-    benchmark's problems (prefix + reference middle + suffix), in task order; none for the MultiPL-E tasks."""
+    """verify.vetted_examples of each EvalPlus benchmark's tasks (prompt + canonical solution), in task order; none for
+    the MultiPL-E tasks."""
     return ({name: vetted_examples([(t.prompt, evalplus_source(t, t.canonical_solution)) for t in benchmarks[name]])
              for name in EVALPLUS}
-            | {name: [[] for _ in benchmarks[name]] for name in MULTIPL_E_BENCHMARKS}
-            | {name: vetted_examples([(p["prompt"], p["prompt"] + p["canonical_solution"] + p["suffix"])
-                                      for p in read_problems(name).values()]) for name in INFILLING})
+            | {name: [[] for _ in benchmarks[name]] for name in MULTIPL_E_BENCHMARKS})
 
 
 def parse_record(pool: ProcessPoolExecutor, tokenizer: Tokenizer, name: str, items: list[Task], dropped: list[bytes],
@@ -488,55 +410,25 @@ def parse_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str
     return results
 
 
-class FimRun(NamedTuple):
-    """An INFILLING benchmark's problems and FILTERED_MODE prompts (fim_runs)."""
-    problems: list[dict]
-    max_new_tokens: int  # the longest reference middle in tokens
-    prompts: list[list[int]]
-
-
-def fim_runs(tokenizer: Tokenizer) -> dict[str, FimRun]:
-    """The FimRun of each INFILLING benchmark."""
-    runs = {}
-    for name in INFILLING:
-        problems = list(read_problems(name).values())
-        runs[name] = FimRun(problems,
-                            max(len(tokenizer.enc.encode_ordinary(p["canonical_solution"])) for p in problems),
-                            [fim_prompt(tokenizer, p["prompt"], p["suffix"], mode=FILTERED_MODE) for p in problems])
-    return runs
-
-
 def filtered_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
                         pool: ProcessPoolExecutor, scorers: ThreadPoolExecutor,
-                        found: dict[str, list[list[tuple[str, str]]]]
-                        ) -> tuple[dict[str, Future[dict]], dict[str, Future[dict]]]:
-    """Futures of each EvalPlus and MultiPL-E benchmark's 1@10 record (FILTERED) and of {"<benchmark>/<FILTERED_MODE>":
-    infilling record of filtered_middles' middles}: one verify.search over all, each record scored once its search
-    ends. found: vetted's examples."""
+                        found: dict[str, list[list[tuple[str, str]]]]) -> dict[str, Future[dict]]:
+    """Futures of each EvalPlus and MultiPL-E benchmark's 1@10 record (FILTERED): one verify.search over all, each
+    record scored once its search ends. found: vetted's examples."""
     runs = codegen_runs(tokenizer, benchmarks, pool)
-    fims = fim_runs(tokenizer)
-    searches = ({name: filtered_completions(tokenizer, run.items, run.prompts, run.budgets, special=run.special,
-                                            check=run.check, language=run.language, found=found[name])
-                 for name, run in runs.items()}
-                | {f"{name}/{FILTERED_MODE}": filtered_middles(tokenizer, run.problems, run.prompts,
-                                                               max_new_tokens=run.max_new_tokens, found=found[name])
-                   for name, run in fims.items()})
-    # every request fits the decoder's max_length, the longest of either kind (a slot count changes no tokens)
-    lengths = ([(p, m) for run in runs.values() for p, m in zip(run.prompts, run.budgets, strict=True)]
-               + [(p, run.max_new_tokens) for run in fims.values() for p in run.prompts])
+    searches = {name: filtered_completions(tokenizer, run.items, run.prompts, run.budgets, special=run.special,
+                                           check=run.check, language=run.language, found=found[name])
+                for name, run in runs.items()}
+    # every request fits the decoder's max_length, the longest (a slot count changes no tokens)
+    lengths = [(p, m) for run in runs.values() for p, m in zip(run.prompts, run.budgets, strict=True)]
     generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,
                               max_length=max(len(p) + m - 1 for p, m in lengths),
                               prompt_store=sum(len(p) for p, _ in lengths))
     keys, results = list(searches), {}
 
     def done(s: int, tried: list[list[Candidate]], timing: dict) -> None:
-        key = keys[s]
-        texts, record = searches[key].record(tried, timing)
-        if key in runs:
-            results[key] = scorers.submit(filtered_record, runs[key].score, runs[key].items, texts, record)
-        else:
-            name = key.removesuffix(f"/{FILTERED_MODE}")
-            results[key] = scorers.submit(infilling, name, fims[name].problems, texts, record)
+        texts, record = searches[keys[s]].record(tried, timing)
+        results[keys[s]] = scorers.submit(filtered_record, runs[keys[s]].score, runs[keys[s]].items, texts, record)
 
     search(generator, [searches[key].search for key in keys], done)
-    return {key: results[key] for key in runs}, {key: results[key] for key in keys if key not in runs}
+    return results
