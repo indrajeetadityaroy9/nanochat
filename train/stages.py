@@ -1,6 +1,6 @@
 """
 A run's training rows per stage: each corpus's packed rows, drawn by the stage's mixture weights; the most tokens per
-parameter bisection finds that overdraws no corpus.
+parameter bisection finds that overdraws no corpus; an SFT run's held-out rows.
 """
 
 import bisect
@@ -9,7 +9,7 @@ from collections.abc import Iterator
 import numpy as np
 import torch
 
-from corpus.layout import stage_rows
+from corpus.layout import packed_rows, stage_rows
 from corpus.loader import PretrainingBatches
 from corpus.mixture import FILE_LEVEL_STAGE, MICRO_BATCH_TOKENS, REPO_LEVEL_STAGE, Stage, weights
 from corpus.tokenizer import Tokenizer
@@ -19,7 +19,7 @@ from train.schedule import RunPlan, plan
 
 def drawn(stage: Stage, run: RunPlan) -> int:
     """The rows the run draws in the stage: its steps there x micro-batches x rows per micro-batch."""
-    steps = run.max_steps - run.repo_level_start if stage is REPO_LEVEL_STAGE else run.repo_level_start
+    steps = run.max_steps - run.repo_level_start if stage is run.last_stage else run.repo_level_start
     return steps * run.gradient_accumulation_steps * stage.micro_batch_size
 
 
@@ -35,6 +35,16 @@ def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int
     return mixture, iter(PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=stage.seq_len,
                                             micro_batch_size=stage.micro_batch_size, device=device, reading="fim",
                                             start=start))
+
+
+def val_batches(tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> PretrainingBatches:
+    """Every row of the val split of a one-corpus stage (SFT_STAGE's held-out prompts) in order, the last micro-batch
+    filled with blank rows."""
+    (corpus,) = stage.sources
+    rows = packed_rows(corpus, "val", tokenizer, stage.seq_len)
+    order = np.concatenate([np.arange(rows), np.full(-rows % stage.micro_batch_size, -1)])
+    return PretrainingBatches({corpus: 1.0}, "val", tokenizer, {corpus: order}, seq_len=stage.seq_len,
+                              micro_batch_size=stage.micro_batch_size, device=device, reading="left_to_right", start=0)
 
 
 def max_tokens_per_param(tokenizer: Tokenizer) -> float:

@@ -549,8 +549,10 @@ Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/
 
 ## 10. Post-training
 
-Not implemented: the repository pre-trains and evaluates a base model. The design, its evidence and its data (SFT,
-off-policy and on-policy distillation, preference tuning, RL with verifiable code rewards): `docs/post-training.md`.
+SFT from a base checkpoint is a run of `run.py` (`RunConfig.base`, `conf/experiment/sft.yaml`, `train/schedule.py`
+`sft_plan`; `docs/post-training.md` §11.2); the rest of the design, its evidence and its data (off-policy and
+on-policy distillation, preference tuning, RL with verifiable code rewards) is not implemented:
+`docs/post-training.md`.
 
 ## References
 

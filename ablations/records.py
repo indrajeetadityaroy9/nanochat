@@ -25,7 +25,9 @@ def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
     measured = errors = offset = efficiency = None
     if stopped is None:
         evaluation = json.loads(suite.evaluation_path(name, run.max_steps).read_text(encoding="utf-8"))
-        measured = metrics.measures(evaluation, metrics.train_steps(log), repo_level_start=run.repo_level_start)
+        # throughput over the file-level stage's steps; an SFT run's (repo_level_start 0) over all its steps
+        measured = metrics.measures(evaluation, metrics.train_steps(log),
+                                    repo_level_start=run.repo_level_start or run.max_steps)
         errors, offset = metrics.measure_errors(evaluation), evaluation["32k"]["offset_bpb"]["code"]
         efficiency = {"num_parameters": started["num_parameters"], "flops_per_token": started["flops_per_token"],
                       "model_flops_per_token": started["model_flops_per_token"],

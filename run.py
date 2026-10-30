@@ -19,6 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 
 import metrics
 from ablations.peak_lr import lr_multiplier
+from ablations.sft_lr import sft_lr_scale
 from corpus.tokenizer import get_tokenizer
 from paths import ROOT, RUNS
 
@@ -38,11 +39,15 @@ AFTER_STAGE_WEIGHTS = (100, 200, 400, 800, 1600)
 @dataclass
 class RunConfig:
     """A run of the base model (d24): its recipe (the defaults, learning_rate_scale's conf/run.yaml's) except the
-    fields set."""
+    fields set; with `base`, an SFT run of it (docs/post-training.md §11.2)."""
     tokens_per_param: float | None = None  # None: the data's max_tokens_per_param (train/stages.py)
-    learning_rate_scale: float = 1.0  # times the law's peak lr; conf/run.yaml sets the measured multiplier
+    # times the law's peak lr (conf/run.yaml sets the measured multiplier); an SFT run's: times its base run's peak lr
+    learning_rate_scale: float = 1.0
     num_checkpoints: int = 1
     generate: str = "parse"
+    base: str | None = None  # SFT: the base run's name; its checkpoint after base_step steps is the start
+    base_step: int = 69_874
+    sft_rows: float = 1.0  # SFT: the share of the SFT corpus's packed train rows trained, one epoch
 
 
 def run_name(config: RunConfig) -> str:
@@ -55,11 +60,21 @@ def run_name(config: RunConfig) -> str:
 
 def plan_of(config: RunConfig) -> "RunPlan":
     """The base model's plan (schedule.plan) at the run's tokens_per_param (default max_tokens_per_param), lr
-    scaled."""
+    scaled; an SFT run's (schedule.sft_plan) over its share of the SFT rows, its base run's peak lr scaled and its
+    base run's weight decay (docs/post-training.md §11.2)."""
     from model.modeling import meta_model
-    from train.schedule import plan
+    from train.schedule import plan, sft_plan
     from train.stages import max_tokens_per_param
 
+    if config.base is not None:
+        from corpus.layout import packed_rows
+        from posttrain.sft_data import NAME, SFT_STAGE
+
+        started = next(r for r in metrics.records(config.base) if r["kind"] == "run")
+        rows = packed_rows(NAME, "train", get_tokenizer(), SFT_STAGE.seq_len)
+        return sft_plan(model=meta_model(), rows=round(config.sft_rows * rows),
+                        learning_rate=config.learning_rate_scale * started["learning_rate"]["muon"][0],
+                        weight_decay=started["weight_decay"]["muon"][0])
     tokens_per_param = (max_tokens_per_param(get_tokenizer()) if config.tokens_per_param is None
                         else config.tokens_per_param)
     base = plan(model=meta_model(), tokens_per_param=tokens_per_param)
@@ -67,30 +82,45 @@ def plan_of(config: RunConfig) -> "RunPlan":
 
 
 def checkpoint_steps(config: RunConfig, run: "RunPlan") -> frozenset[int]:
-    """num_checkpoints evenly spaced step counts, the final one last; if more than one, plus repo_level_start."""
+    """num_checkpoints evenly spaced step counts, the final one last; if more than one, plus a base run's
+    repo_level_start."""
     n = config.num_checkpoints
     steps = {round(run.max_steps * k / n) for k in range(1, n + 1)}
-    return frozenset(steps | {run.repo_level_start} if n > 1 else steps)
+    return frozenset(steps | {run.repo_level_start} if n > 1 and config.base is None else steps)
 
 
 def analysis_steps(config: RunConfig, run: "RunPlan") -> tuple[frozenset[int], frozenset[int]]:
     """The analysis checkpoints' (full-state, weights-only) step counts below run.max_steps, the weights-only ones
-    disjoint from every full state; none if num_checkpoints is 1."""
+    disjoint from every full state; none if num_checkpoints is 1. An SFT run's: full states only, every
+    FULL_STATE_EVERY steps (resume points)."""
+    full = frozenset(range(FULL_STATE_EVERY, run.max_steps, FULL_STATE_EVERY))
+    if config.base is not None:
+        return full, frozenset()
     if config.num_checkpoints == 1:
         return frozenset(), frozenset()
-    full = frozenset(range(FULL_STATE_EVERY, run.max_steps, FULL_STATE_EVERY))
     weights = ({2**k for k in range(EARLY_WEIGHTS_LAST.bit_length())}
                | {run.repo_level_start + s for s in AFTER_STAGE_WEIGHTS})
     return full, frozenset(s for s in weights if s < run.max_steps) - full - checkpoint_steps(config, run)
 
 
+def validation_steps(config: RunConfig, run: "RunPlan") -> frozenset[int]:
+    """An SFT run's held-out loss: before its first step, every FULL_STATE_EVERY steps and after its last; none for
+    a base run."""
+    if config.base is None:
+        return frozenset()
+    return frozenset({0, *range(FULL_STATE_EVERY, run.max_steps, FULL_STATE_EVERY), run.max_steps})
+
+
 def training(config: RunConfig, run: "RunPlan") -> None:
     from model.modeling import meta_model
+    from train.checkpoint import checkpoint_path
     from train.loop import train
 
     full, weights = analysis_steps(config, run)
     train(model=meta_model(), run=run, checkpoints=checkpoint_steps(config, run) | full, weights=weights,
-          run_name=run_name(config), config=asdict(config))
+          run_name=run_name(config), config=asdict(config),
+          base=None if config.base is None else checkpoint_path(config.base, config.base_step),
+          validations=validation_steps(config, run))
 
 
 def evaluation(config: RunConfig, step: int, previous: "Event | None", released: "Event") -> None:
@@ -171,5 +201,6 @@ if __name__ == "__main__":
     OmegaConf.register_new_resolver(
         "run_name", lambda *, _root_: run_name(RunConfig(**{f.name: _root_[f.name] for f in fields(RunConfig)})))
     OmegaConf.register_new_resolver("lr_multiplier", lr_multiplier, use_cache=True)
+    OmegaConf.register_new_resolver("sft_lr_scale", sft_lr_scale, use_cache=True)
     ConfigStore.instance().store(name="run_schema", node=RunConfig)
     main()

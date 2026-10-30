@@ -1,17 +1,20 @@
 """
 Training loop: next-token loss over the file-level, then the repo-level stage, the packs' FIM pieces read as FIM
-examples (DeepSeek-Coder, arXiv 2401.14196 §3.1); each start resumes from the run's newest full-state checkpoint.
+examples (DeepSeek-Coder, arXiv 2401.14196 §3.1); or SFT from a base checkpoint, the response loss on held-out rows
+at intervals; each start resumes from the run's newest full-state checkpoint.
 """
 
 import gc
 import math
 from dataclasses import asdict
 from functools import partial
+from pathlib import Path
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
 import metrics
+from corpus.loader import IGNORE_INDEX
 from corpus.tokenizer import get_tokenizer
 from model.modeling import CausalLM, accumulated_weights, non_embedding_flops_per_token, num_matmul_params
 from model.ops.cross_entropy import step_shares
@@ -19,18 +22,19 @@ from train.checkpoint import checkpoint_path, save_checkpoint, weights_path
 from train.diagnostics import Diagnostics
 from train.optim import optimizers, tau_weight_decay, update
 from train.schedule import RunPlan, lr_lambda
-from train.stages import stage_batches
+from train.stages import stage_batches, val_batches
 
 # the seed of the weights' initialization and of the data order
 SEED = 0
 
 
 def train(*, model: CausalLM, run: RunPlan, checkpoints: frozenset[int], weights: frozenset[int], run_name: str,
-          config: dict) -> None:
-    """Train (or resume) run `run_name` of `model` (meta-device shapes at the file-level context) by plan `run` on CUDA.
-    Full-state checkpoints after each step count in `checkpoints` (run.max_steps among them; resumed from), fp32
-    weights only after each in `weights` (disjoint, never resumed from); `config` (RunConfig as a dict) and the
-    tokenizer's data key are recorded with the run."""
+          config: dict, base: Path | None, validations: frozenset[int]) -> None:
+    """Train (or resume) run `run_name` of `model` (meta-device shapes at the file-level context) by plan `run` on CUDA,
+    from `base`'s weights (a checkpoint's path; None: from initialization) with fresh optimizer state. Full-state
+    checkpoints after each step count in `checkpoints` (run.max_steps among them; resumed from), fp32 weights only
+    after each in `weights` (disjoint, never resumed from), the last stage's val loss (validate) after each in
+    `validations`; `config` (RunConfig as a dict) and the tokenizer's data key are recorded with the run."""
     device = torch.device("cuda")
     tokenizer = get_tokenizer()
     model.to_empty(device=device)
@@ -41,7 +45,8 @@ def train(*, model: CausalLM, run: RunPlan, checkpoints: frozenset[int], weights
         p.grad = torch.zeros_like(p)
     opts = optimizers(model, lr=run.learning_rate,
                       weight_decay=tau_weight_decay(lr=run.learning_rate, steps=run.max_steps,
-                                                    tokens_per_param=run.tokens_per_param))
+                                                    tokens_per_param=run.tokens_per_param)
+                      if run.weight_decay is None else run.weight_decay)
     saved = [s for s in sorted(checkpoints) if checkpoint_path(run_name, s).exists()]
     start_step = stage_rows = 0
     if saved:  # resume: weights into the optimizers' parameters, then optimizer state
@@ -52,13 +57,15 @@ def train(*, model: CausalLM, run: RunPlan, checkpoints: frozenset[int], weights
             opt.load_state_dict(state)
         stage_rows = checkpoint["stage_rows"]
         del checkpoint
+    elif base is not None:  # its weights only, memory-mapped: its optimizer state is never read
+        model.load_state_dict(torch.load(base, map_location="cpu", mmap=True)["model"])
     # group lr = initial lr x lr_lambda(step); a resumed scheduler restarts at start_step
     schedulers = [LambdaLR(opt, partial(lr_lambda, num_training_steps=run.max_steps), last_epoch=start_step - 1)
                   for opt in opts]
     step = start_step
 
     # A checkpoint holds the context its weights trained in; stage_rows counts that stage's consumed rows
-    stage = run.stage_at(start_step - 1)
+    stage = run.stage_at(max(start_step - 1, 0))
     model.set_stage(stage)
     if start_step == run.max_steps:
         return
@@ -115,11 +122,31 @@ def train(*, model: CausalLM, run: RunPlan, checkpoints: frozenset[int], weights
                                   "model_flops": model_flops, "mfu": metrics.mfu(model_flops, dt)} | diagnosed,
                        attempt=attempt)
 
+    # the last stage's val split, read whole (SFT's held-out prompts)
+    val_losses = torch.compile(model.losses, dynamic=False, fullgraph=True)
+    val_rows = val_batches(tokenizer, stage=run.last_stage, device=device) if validations else None
+
+    @torch.no_grad()
+    def validate(step: int) -> None:
+        """The mean loss over the val split's labels (an SFT split's: each response and its closing BOS), recorded."""
+        total = torch.zeros((), dtype=torch.float64, device=device)
+        labeled = torch.zeros((), dtype=torch.int64, device=device)
+        for input_ids, labels, cu_seqlens, segments, _ in val_rows:
+            total += val_losses(input_ids, labels, cu_seqlens, segments).sum(dtype=torch.float64)
+            labeled += (labels != IGNORE_INDEX).sum()
+        metrics.append(run_name, {"kind": "val", "step": step, "loss": total.item() / labeled.item(),
+                                  "labels": labeled.item()}, attempt=attempt)
+
     while True:
         if pending is not None and (step in checkpoints or step in weights):
             # the last step's values checked finite before a checkpoint (run.max_steps among them) saves its weights
             log(*pending)
             pending = None
+        # a resumed start's validation was recorded before its checkpoint; the next step's time starts after it
+        if step in validations and (step == 0 or step != start_step):
+            validate(step)
+            previous_end = torch.cuda.Event(enable_timing=True)
+            previous_end.record()
         # state after `step` steps at the stage they trained in; the sidecar's rows up to it on disk with a full state
         if step != start_step and step in checkpoints:
             save_checkpoint(checkpoint_path(run_name, step), {"model": model.state_dict(),
