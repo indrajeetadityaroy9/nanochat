@@ -54,7 +54,7 @@ EXAMPLES_TIMEOUT = 3
 # Codex's temperature for samples selected by unit tests (arXiv 2107.03374 §3.3, Figs. 5-6: its 679M model's pass@100
 # optimum)
 TEMPERATURE = 0.8
-# Codex's nucleus for all its sampling (arXiv 2107.03374 §3.2: top p 0.95), the filtered search's and the sampled mode's
+# Codex's nucleus for all its sampling (arXiv 2107.03374 §3.2: top p 0.95), the filtered search's
 TOP_P = 0.95
 # Candidates per task, the greedy one included: pass@10 (Codex Table 1; EvalPlus, arXiv 2305.01210 Table 3)
 ATTEMPTS = 10
@@ -383,7 +383,7 @@ def verdicts(checks: list[tuple[list[tuple[str, str]], str, list[str]]], *, lang
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Candidate:
     """A task's candidates[0] is greedy; candidates[a] for a > 0 of task i a sample at TEMPERATURE from the TOP_P
-    nucleus with seed ATTEMPTS i + a (the sampled mode's scheme: no two attempts of a search share a seed)."""
+    nucleus with seed ATTEMPTS i + a (no two attempts of a search share a seed)."""
     ids: list[int]
     accepted: bool  # verdicts'
 

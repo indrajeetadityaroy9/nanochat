@@ -56,6 +56,15 @@ def eager_attention_forward(module: nn.Module, query: torch.Tensor, key: torch.T
     return torch.matmul(weights, value).transpose(1, 2).contiguous(), weights
 
 
+class Gate(nn.Module):
+    """The value-embedding gate's weight W (H, C), outside nn.Linear so that vLLM's Transformers backend keeps it fp32:
+    its linear layers' weights carry a weight_loader, which _keep_in_fp32_modules_strict skips."""
+
+    def __init__(self, C: int, H: int) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(H, C))
+
+
 class NanochatAttention(nn.Module):
     def __init__(self, config: NanochatConfig, layer_idx: int) -> None:
         super().__init__()
@@ -68,7 +77,7 @@ class NanochatAttention(nn.Module):
         self.o_proj = nn.Linear(H * D, C, bias=False)
         self.q_norm_weight = nn.Parameter(torch.ones(D))
         self.k_norm_weight = nn.Parameter(torch.ones(D))
-        self.ve_gate = nn.Linear(C, H, bias=False) if layer_idx in config.value_embedding_layers else None
+        self.ve_gate = Gate(C, H) if layer_idx in config.value_embedding_layers else None
         self.sliding_window = (config.sliding_window if config.layer_types[layer_idx] == "sliding_attention"
                                else None)
 
@@ -118,6 +127,7 @@ class NanochatPreTrainedModel(PreTrainedModel):
     config_class = NanochatConfig
     base_model_prefix = "model"
     _supports_sdpa = True
+    _supports_attention_backend = True  # vLLM's Transformers backend runs models that declare it
     # the parameters the training forward reads in fp32; export_hf.py writes these fp32, the rest bf16
     _keep_in_fp32_modules_strict: ClassVar[list[str]] = ["resid_lambdas", "x0_lambdas", "q_norm_weight",
                                                          "k_norm_weight", "ve_gate"]

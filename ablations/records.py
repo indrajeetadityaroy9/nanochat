@@ -12,12 +12,12 @@ from omegaconf import DictConfig, OmegaConf
 import metrics
 from eval import suite
 from paths import RESULTS
-from run import RunConfig, plan_of, run_name
+from run import EVALUATED, RunConfig, plan_of, run_name
 
 
 def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
     """A run's line of results/<experiment>.jsonl; its measures from its final checkpoint's evaluation (none with
-    generate "none": its log's val records hold what it measured)."""
+    generate in run.TRAINED_ONLY: its log's val records hold what it measured)."""
     name, run = run_name(config), plan_of(config)
     stopped = metrics.diverged(log)
     # the first attempt's run record: a resumed attempt's flops_per_token is at its own stage's context
@@ -29,7 +29,7 @@ def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
                       "model_flops_per_token": started["model_flops_per_token"],
                       "peak_memory_bytes": max(r["peak_memory_bytes"] for r in peaks),
                       "peak_reserved_bytes": max(r["peak_reserved_bytes"] for r in peaks)}
-    if stopped is None and config.generate != "none":
+    if stopped is None and config.generate in EVALUATED:
         evaluation = json.loads(suite.evaluation_path(name, run.max_steps).read_text(encoding="utf-8"))
         measured = metrics.measures(evaluation, metrics.train_steps(log), repo_level_start=run.repo_level_start)
         errors, offset = metrics.measure_errors(evaluation), evaluation["32k"]["offset_bpb"]["code"]

@@ -343,10 +343,10 @@ def compare(a: dict, b: dict) -> dict[str, dict]:
     lines as independent), else the two-sided normal test of diff / se; p_holm, Holm-adjusted over all rows
     (statsmodels multipletests); mde, the difference detectable at α 0.05 with 80% power, (z_0.025 + z_0.2) · se
     (Eq. 10). The variance of the per-problem difference, estimated by its sample variance over n problems
-    (n · se²), is Eq. 10's bracket ω² + σ²_A/K_A + σ²_B/K_B less twice the covariance of A's and B's sample means:
-    the sampled modes seed sample k of problem i alike in every record (eval/code_eval.py), so A's and B's samples are
-    positively correlated, and this paired se and mde are the ones for that design (common random numbers), smaller
-    than with independent seeds; for fim rows the clustered se² is App. C's cluster-adjusted bracket over n."""
+    (n · se²), is Eq. 10's bracket ω² + σ²_A/K_A + σ²_B/K_B less twice the covariance of A's and B's sample means,
+    positive when the two records seed sample k of problem i alike (common random numbers): this paired se and mde are
+    then the ones for that design, smaller than with independent seeds; for fim rows the clustered se² is App. C's
+    cluster-adjusted bracket over n."""
     rows = {}
     for section in ("codegen", "fim", "reasoning"):
         if not a.get(section) or not b.get(section):

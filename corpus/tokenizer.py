@@ -7,6 +7,7 @@ import base64
 import functools
 import hashlib
 import json
+from typing import Literal
 
 import numpy as np
 import tiktoken
@@ -58,3 +59,17 @@ def get_tokenizer() -> Tokenizer:
         mergeable = [base64.b64decode(line.split()[0]) for line in f]
     with open(TOKENIZER / "tokenizer.pattern", newline="") as f:
         return Tokenizer(mergeable, f.read())
+
+
+def fim_prompt(tokenizer: Tokenizer, prefix: str, suffix: str, *, mode: Literal["psm", "spm"]) -> list[int]:
+    """The token ids of a fill-in-the-middle prompt (arXiv 2207.14255 §3, App. D), prefix and suffix encoded apart:
+    psm: BOS <fim_begin> prefix <fim_hole> suffix <fim_end>; spm: BOS <fim_begin> <fim_hole> suffix <fim_end> prefix.
+    The model continues with the middle and ends it with BOS."""
+    special = tokenizer.special_tokens
+    pre, suf, mid = special[FIM_BEGIN], special[FIM_HOLE], special[FIM_END]
+    p, s = tokenizer.enc.encode_ordinary(prefix), tokenizer.enc.encode_ordinary(suffix)
+    match mode:
+        case "psm":
+            return [tokenizer.bos_token_id, pre, *p, suf, *s, mid]
+        case "spm":
+            return [tokenizer.bos_token_id, pre, suf, *s, mid, *p]

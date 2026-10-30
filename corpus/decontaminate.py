@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
+from huggingface_hub import hf_hub_download
 from human_eval_infilling.data import read_problems
 
 from corpus.parallel import SPAWN
@@ -27,16 +28,30 @@ N = 10
 # The dropped rows, beside the shards (publish.push uploads it with them)
 RECORD = CURATED / "decontamination.json"
 GRAMS = None  # a worker's corpus_crate().Grams of the benchmark texts (worker_init)
+# The original MBPP (arXiv 2108.07732), scored as lm-evaluation-harness's `mbpp` task (scripts/official_eval.sh), at a
+# fixed revision
+MBPP = {"repo_id": "google-research-datasets/mbpp", "revision": "4bb6404fdc6cacfda99d4ac4205087b89d32030c"}
+
+
+def mbpp_texts() -> dict[str, str]:
+    """{mbpp_3shot/<task_id>: text} of the original MBPP's test split (config full): lm-evaluation-harness's prompt
+    (tasks/mbpp/mbpp.yaml:7 doc_to_text: the statement and the first three asserts) and the reference code."""
+    file = "full/test-00000-of-00001.parquet"
+    rows = pq.read_table(hf_hub_download(filename=file, repo_type="dataset", **MBPP)).to_pylist()
+    return {f"mbpp_3shot/{r['task_id']}": "You are an expert Python programmer, and here is your task: "
+            f"{r['text']} Your code should pass these tests:\n\n" + "\n".join(r["test_list"][:3]) + "\n[BEGIN]\n"
+            + r["code"] for r in rows}
 
 
 def benchmark_texts() -> dict[str, str]:
     """{benchmark/task: text} of every scored task: its prompt and reference solution (MultiPL-E's prompt alone, it has
-    none), and each HumanEval infilling program (prompt, reference middle and suffix; its three benchmarks' problems
-    are cut from one program per HumanEval task). Imported here: the shard workers need neither torch nor eval."""
+    none; the original MBPP's, mbpp_texts), and each HumanEval infilling program (prompt, reference middle and suffix;
+    its three benchmarks' problems are cut from one program per HumanEval task). Imported here: the shard workers need
+    neither torch nor eval."""
     from eval.code_eval import INFILLING, tasks
 
     texts = {f"{name}/{t.task_id}": t.prompt + (t.canonical_solution or "") for name, items in tasks().items()
-             for t in items}
+             for t in items} | mbpp_texts()
     for name in INFILLING:
         for p in read_problems(name).values():
             task = "infilling/" + "/".join(p["task_id"].split("/")[1:3])

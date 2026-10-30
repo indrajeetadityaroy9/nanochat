@@ -1,6 +1,6 @@
 # @package _global_
 # Base-model pre-training: the defaults, evaluated checkpoints at each tenth and the repository stage's start (with
-# them run.py's analysis checkpoints, never evaluated), all benchmarks
+# them run.py's analysis checkpoints, never evaluated), with the parse measure and the filtered 1@10 mode
 num_checkpoints: 10
 generate: benchmarks
 
