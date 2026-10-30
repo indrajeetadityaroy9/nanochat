@@ -1,8 +1,10 @@
 /* Decoding of a nanochat CausalLM (model/modeling.py) in MAX_BATCH slots (inference/decoder.py): a step runs one graph
  * (greedy) or two (body, head) of dependent kernels, advancing each active slot by one greedy, sampled or nucleus token
  * within its allowed set. Batched prefill; an exact-prompt store, never evicted, reuses prompts' K and V. Numerics
- * follow the compiled training forward op by op, K and V cached in bf16 as its attention reads them; attention differs
- * only in summation order and in fp32 probabilities (FA4's PV GEMM reads them as bf16). */
+ * follow the compiled forward (CausalLM without autograd, the evaluation's graph) op by op: GEMM epilogues as QuACK's
+ * (one rounding of acc + residual; the MLP on the un-normed stream scaled by its rstd), K and V cached in bf16 as its
+ * attention reads them; summation orders differ, and attention's probabilities stay fp32 (FA4's PV GEMM reads them
+ * as bf16). */
 #include <initializer_list>
 #include <limits.h>
 #include <math.h>
@@ -102,9 +104,9 @@ static __device__ __forceinline__ float gumbel(unsigned long long seed, int i, i
     return (float)-log(-log(ldexp(2.0 * (double)r + 1.0, -DBL_MANT_DIG)));
 }
 
-/* Slot GEMM: out[b][r] = W[r] . x[b], bf16 operands, fp32 accumulators; RELU2 out = bf16(relu(s) s) (QuACK
- * gemm_norm_act relu_sq); ARGMAX: each warp's maximum key per slot, then one atomicMax (an exact maximum, so any
- * order). */
+/* Slot GEMM: out[b][r] = W[r] . x[b], bf16 operands, fp32 accumulators; RESID out = bf16(s + res) (QuACK's C
+ * epilogue, one rounding); RELU2 out = bf16(relu(p) p), p = s rstd[b] (QuACK gemm_norm_act relu_sq on the un-normed
+ * stream); ARGMAX: each warp's maximum key per slot, then one atomicMax (an exact maximum, so any order). */
 
 typedef struct {
     const bf16 *w;               /* [rows][cols] */
@@ -113,6 +115,8 @@ typedef struct {
     int epi;
     bf16 *out;                   /* [B][rows]: STORE/RESID/RELU2 output */
     const bf16 *res;             /* [B][rows]: RESID: residual added */
+    float *xf;                   /* [B][rows] or NULL: RESID: the fp32 sum before rounding (o_proj: k_rstd's input) */
+    const float *rstd;           /* [B]: RELU2: each input row's rstd (k_rstd) */
     unsigned long long *argmax;  /* [B] ARGMAX: packed (ordered score, ~row) maximum */
     const unsigned long long *active;  /* [2][MASK_WORDS]: the active slots' mask, then the masked slots' (CHOICE) */
     int B;
@@ -168,16 +172,19 @@ template <bool CHOICE> static __device__ __forceinline__ void epilogue(const Gem
                                                                       unsigned long long &alt) {
     const size_t at = (size_t)b * a.rows + row;
     if (a.epi == EPI_RELU2) {
-        a.out[at] = __float2bfloat16_rn(__fmul_rn(fmaxf(s, 0.f), s));
+        const float p = __fmul_rn(s, a.rstd[b]);
+        a.out[at] = __float2bfloat16_rn(__fmul_rn(fmaxf(p, 0.f), p));
+        return;
+    }
+    if (a.epi == EPI_RESID) {
+        const float x = __fadd_rn(s, __bfloat162float(a.res[at]));
+        a.out[at] = __float2bfloat16_rn(x);
+        if (a.xf) a.xf[at] = x;
         return;
     }
     const float y = bfr(s);
     if (a.epi == EPI_STORE) {
         a.out[at] = __float2bfloat16_rn(y);
-        return;
-    }
-    if (a.epi == EPI_RESID) {
-        a.out[at] = __float2bfloat16_rn(__bfloat162float(a.res[at]) + y);
         return;
     }
     /* EPI_ARGMAX: largest score, lowest row among exact ties (choice_key): the fp32 logit, or with CHOICE over a masked
@@ -436,6 +443,19 @@ __global__ void k_norm(int kind, const bf16 *in, const float *wte, float *x0, co
     }
 }
 
+/* rstd of each active slot's fp32 post-attention row (o_proj's RESID sum before rounding), a warp per slot: QuACK's
+ * sq_reduce and rms_final_reduce, r = rsqrt(sum x^2 (1 / K) + FLT_EPSILON), relu2_mlp's rstd. */
+__global__ void k_rstd(const float *x, float *rstd, const unsigned long long *active, int B, int K) {
+    pdl_start();
+    const int b = blockIdx.x * NORM_WARPS + threadIdx.x / WARP, lane = threadIdx.x % WARP;
+    if (b >= B || !live(active, b)) return;
+    const float *v = x + (size_t)b * K;
+    float s = 0.f;
+    for (int i = lane; i < K; i += WARP) s = __fmaf_rn(v[i], v[i], s);
+    s = warp_sum(s);
+    if (lane == 0) rstd[b] = rsqrtf(__fmul_rn(s, 1.f / (float)K) + FLT_EPSILON);
+}
+
 /* Attention, (head, slot) blocks of HEAD_DIM threads: k_prologue caches the row's k, v (bf16); k_attn streams the
  * window in ATTN_RUN-key double-buffered runs, bf16 MMA scores (fp32 accumulators), fp32 online softmax. */
 
@@ -463,8 +483,12 @@ static __device__ void attn_prologue(const Attn &a, int b, int head, int p, floa
     if (a.ve) {
         const bf16 *h = a.h + (size_t)b * a.C, *ve = a.ve + (size_t)a.tokens[b] * a.C;
         const float *w = a.ve_gate + (size_t)head * a.C;
-        float d = 0.f;
-        for (int i = lane; i < a.C; i += WARP) d = __fmaf_rn(__bfloat162float(h[i]), w[i], d);
+        float d = 0.f;  /* ve_gate.cu's order: a lane's VEC consecutive elements of each WARP * VEC chunk, FMAs */
+        for (int k = 0; k < a.C / (WARP * VEC); k++)
+            for (int j = 0; j < VEC; j++) {
+                const int i = (k * WARP + lane) * VEC + j;
+                d = __fmaf_rn(__bfloat162float(h[i]), w[i], d);
+            }
         const float g = __fmul_rn(2.f, sigmoidf(warp_sum(d)));
         t = __fadd_rn(t, __fmul_rn(g, __bfloat162float(ve[head * HEAD_DIM + tid])));
     }
@@ -695,8 +719,10 @@ typedef struct {
     unsigned long long *active;  /* device [2][MASK_WORDS]: the active slots' mask, then the masked slots' */
     int32_t *host_tokens;     /* pinned host [2][B]: the last step's tokens, then their alternatives */
     unsigned long long *argmax, *alt;  /* [B]: the choice's key, the alternative's (Choice::alt) */
-    bf16 *x, *xm, *h, *hn, *qkv_out, *att, *xo, *u;  /* [B][...]; hn: the normed input of fc and lm_head */
+    bf16 *x, *xm, *h, *hn, *qkv_out, *att, *xo, *u;  /* [B][...]; hn: the normed input of lm_head */
     float *x0;                /* [B][C]: the normed embedding, fp32 (k_norm EMBED) */
+    float *xf;                /* [B][C]: o_proj's fp32 sum before rounding (k_rstd's input) */
+    float *rstd;              /* [B]: its rstd, the MLP's (EPI_RELU2) */
     float *qkvf;              /* [B][3][C]: k_prologue's q, k, v */
     bf16 *kc, *vc;            /* [B][L][max_len][C] */
     /* the prompt store, one allocation: K, then V; a prompt at store position s, n positions long, is the block
@@ -728,6 +754,8 @@ template <class F> static void slot_buffers(Decoder *d, F f) {
     f((void **)&d->allow, d->vocab / WORD_BITS * sizeof(uint32_t));
     for (bf16 **b : {&d->x, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
     f((void **)&d->x0, C * sizeof(float));
+    f((void **)&d->xf, C * sizeof(float));
+    f((void **)&d->rstd, sizeof(float));
     f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
     f((void **)&d->qkvf, 3 * C * sizeof(float));
     f((void **)&d->u, d->F * sizeof(bf16));
@@ -744,6 +772,8 @@ template <class F> static void row_buffers(Decoder *d, F f) {
     f((void **)&d->tokens, 3 * sizeof(int32_t));
     for (bf16 **b : {&d->x, &d->xm, &d->h, &d->hn, &d->att, &d->xo}) f((void **)b, C * sizeof(bf16));
     f((void **)&d->x0, C * sizeof(float));
+    f((void **)&d->xf, C * sizeof(float));
+    f((void **)&d->rstd, sizeof(float));
     f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
     f((void **)&d->qkvf, 3 * C * sizeof(float));
     f((void **)&d->u, d->F * sizeof(bf16));
@@ -817,9 +847,13 @@ static void enqueue_body(Decoder *d) {
         launch(k_attn, dim3(d->H, B), HEAD_DIM, ATTN_SMEM, d->stream, a);
         Gemm g = gemm(d, ly->o, C, C, d->att, EPI_RESID, d->xo);
         g.res = d->xm;
+        g.xf = d->xf;
         launch_gemm<false>(d, g);
-        launch_norm(d, NORM, d->xo, 0.f, 0.f, NULL, d->hn);
-        launch_gemm<false>(d, gemm(d, ly->fc, F, C, d->hn, EPI_RELU2, d->u));
+        launch(k_rstd, (B + NORM_WARPS - 1) / NORM_WARPS, NORM_WARPS * WARP, 0, d->stream, d->xf, d->rstd, d->active,
+               B, C);
+        g = gemm(d, ly->fc, F, C, d->xo, EPI_RELU2, d->u);
+        g.rstd = d->rstd;
+        launch_gemm<false>(d, g);
         g = gemm(d, ly->proj, C, F, d->u, EPI_RESID, d->x);
         g.res = d->xo;
         launch_gemm<false>(d, g);

@@ -30,10 +30,13 @@ Names follow Hugging Face's (`ModelConfig`, `num_hidden_layers`, `hidden_size`, 
 (arXiv 2505.09388 §2) with learnable per-dimension weights (transformers `modeling_qwen3.py`).
 `CausalLM.hidden`: x0 = norm(E[ids]); before layer i, x ← λr_i·x + λ0_i·x0; `DecoderLayer`:
 h = x + o_proj(Attn(norm(x))), x = h + down(relu(up(norm(h)))²); then the final norm, `lm_head` and the capped cross
-entropy (`CausalLM.forward`). The eager code computes x0 = bf16(norm(bf16(E[ids]))) and the mix in bf16; under
-`torch.compile` (training, `train/loop.py`; bits-per-byte, `eval/bpb.py`; Inductor output read at d16) x0 is the norm
-of the fp32 row, kept in fp32, and each layer's mix is one fp32 fma(λr_i, x, λ0_i·x0) whose bf16 rounding is the
-stored stream while the layer's norm reads the unrounded value (§3 Embedding); `decode.cu` computes the same.
+entropy (`CausalLM.forward`). The eager code computes x0 = bf16(norm(bf16(E[ids]))) and the mix in bf16. The compiled
+forward without autograd (bits-per-byte, `eval/bpb.py`; Inductor output read at d16 and d24) keeps x0 the norm of the
+fp32 row, in fp32, and each layer's mix one fp32 fma(λr_i, x, λ0_i·x0) whose bf16 rounding is the stored stream while
+the layer's norm reads the unrounded value (§3 Embedding); `decode.cu` computes the same. The compiled training graph
+(`train/loop.py`) norms the bf16-rounded embedding row and the bf16-rounded mix: the base run's 32K training graph has
+48 bf16 casts in its Inductor kernels (the row's, and the mix's before each of layers 1–23's norms), its forward-only
+graphs none.
 
 | Component | Definition (code) |
 |---|---|
@@ -45,7 +48,7 @@ stored stream while the layer's norm reads the unrounded value (§3 Embedding); 
 | Value embeddings | `has_ve`: alternating layers, the last included (12 of 24): v ← v + 2σ(n W_g^T)_head · bf16(E_i[ids]), n the normed stream, W_g (H × C) `ve_gate`, E_i a per-layer V × C table |
 | MLP | ReLU², hidden 4C |
 | Output | z = x W^T capped c·tanh(z/c), c = `ModelConfig.final_logit_softcapping` = `FINAL_LOGIT_SOFTCAPPING` = 15 (`meta_model`), in the training loss, the evaluation losses and the decoder's sampling; no z-loss |
-| Precision | fp32 parameters and gradients; bf16 activations (compiled: x0 and the residual mix before its norm in fp32, above) and GEMM operands (bf16 weight copies `weight_bf16`, `qkv_bf16`, refreshed after every update by `refresh_gemm_weights`); fp32 accumulation (§4) |
+| Precision | fp32 parameters and gradients; bf16 activations (compiled without autograd: x0 and the residual mix before its norm in fp32; the training graph rounds both, above) and GEMM operands (bf16 weight copies `weight_bf16`, `qkv_bf16`, refreshed after every update by `refresh_gemm_weights`); fp32 accumulation (§4) |
 
 **Shape rule** (`meta_model`): C = 30 × `NUM_HIDDEN_LAYERS` (24) rounded up to whole 128-wide heads; 30 =
 MobileLLM-350M's 960 / 32 (arXiv 2402.14905 Table 9). d24: 720 → 768. The code builds d24 only; the proxies d8 and
@@ -161,7 +164,7 @@ grids; `qk_row.cuh` the q/k row math (RMS norm, gain, RoPE) shared by `qk_prolog
 | Value-embedding gate and mix | `ve_gate.cu` (`ve_gate.py`): one warp per row, the gate logits in fp32, the mix rounded once; backward in token order (one `torch.sort` of `input_ids` per micro-batch, shared by the layers through CSE), 16 positions per warp, a run of equal tokens summed in registers and added into the table's `.grad` with one 16-byte atomic per 4 fp32 (two per lane and 8-wide chunk; the zeroed table gradient allocated once per step, when `.grad` is None, then accumulated into; no autograd add); the gate weight's gradient one cuBLAS GEMM from bf16 dz; compiled for d24's H = 6 |
 | Cross entropy, training | `cross_entropy.py` `lm_loss`: QuACK's scaled-exp linear cross entropy per `CHUNK` = 8,192 rows: the logits GEMM's epilogue (N tile 128, pingpong) stores bf16 rescaled exponentials with each row's tile maxima, sums and the label's fp32 logit; `lce_glue` forms the loss from the fp32 accumulators; dX (bf16) and dW (fp32, accumulated across chunks) GEMMs rescale on the A-operand load, their N tile over C QuACK's rule at C = 768 (`TILE_N2` = 192). No logits tensor and no softmax pass. The cap in the same pipeline: tanh on the fp32 accumulator, the tile maximum capped likewise (tanh is increasing), 1 − tanh² folded into the stored exponentials, the label's entry fixed by one Triton kernel (`cap_label_fix`) |
 | Cross entropy, evaluation | `lm_losses`: per `CHUNK` rows an fp32-output GEMM and the capped logsumexp in one Inductor-fused kernel (`capped_losses`); QuACK's logsumexp epilogue has no tanh |
-| Embedding | `F.embedding` of the token table; Inductor fuses the gather, the bf16 cast and the norm without rounding in between (`emulate_precision_casts` off), so the compiled x0 is the norm of the fp32 rows, as `decode.cu` `k_norm` computes it (d8, 98,304 random ids, compiled against eager outputs: 114 of 25,165,824 elements differ from eager bf16(norm(E[ids])), 6,312,306 from eager norm(bf16(E[ids]))); the compiled backward is an fp32 `atomic_add` scatter into a zero table (§4) |
+| Embedding | `F.embedding` of the token table; in the forward-only graph Inductor fuses the gather, the bf16 cast and the norm without rounding in between (`emulate_precision_casts` off), so the compiled x0 is the norm of the fp32 rows, as `decode.cu` `k_norm` computes it (d8, 98,304 random ids, compiled against eager outputs: 114 of 25,165,824 elements differ from eager bf16(norm(E[ids])), 6,312,306 from eager norm(bf16(E[ids]))); the training graph keeps the cast (§1); the compiled backward is an fp32 `atomic_add` scatter into a zero table (§4) |
 | Optimizer | Muon's Newton–Schulz batched over same-shape matrices and NorMuon: `docs/training.md` §3 |
 
 **Landed changes** (d24 tok/s as each change's record states them: an exclusive A/B on the GH200 at 700 W against

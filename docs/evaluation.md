@@ -243,14 +243,16 @@ would read 0.644 at 8K and 0.926 at 32K (medians), the latter above the 0.71 the
   KV reads and its GEMMs; a few-slot step by weight reads and kernel launches [inference].
 - **Step.** The model's forward at one position (`docs/architecture.md` §1), GEMMs on wgmma tensor cores fed by TMA,
   attention streaming each slot's window through shared memory with the scores on tensor cores (bf16 q and k, fp32
-  accumulators), softmax and the value sum in fp32. Numerics follow the compiled training forward op by op: bf16
-  copies of the matrices; K and V cached in bf16, the operands the forward's attention reads; fp32 rotary table, q/k
-  norm gains and value-embedding gate; the residual mix as Inductor fuses it (one fma, one bf16 rounding); x0 the norm
-  of the fp32 embedding row, since Inductor drops `CausalLM.hidden`'s bf16 cast (`decode.cu` `k_norm`); ReLU² from
-  the fp32 accumulators as QuACK's `gemm_norm_act`. Attention differs from FA4's in summation order and in the
-  probabilities' precision: FA4's P·V GEMM reads them as bf16 (`flash_fwd_sm90.py`), this sum as fp32. `k_attn`
-  stages two runs of 64 keys' K and V (64 KB of shared memory, the carveout at its maximum): 3 blocks and 96 KB of K
-  and V in flight per SM [arithmetic].
+  accumulators), softmax and the value sum in fp32. Numerics follow the compiled forward without autograd (the
+  evaluation's graph) op by op: bf16 copies of the matrices; K and V cached in bf16, the operands the forward's
+  attention reads; fp32 rotary table, q/k norm gains and value-embedding gate (its dot product in `ve_gate.cu`'s lane
+  order); the residual mix as Inductor fuses it (one fma, one bf16 rounding); x0 the norm of the fp32 embedding row,
+  since that graph drops `CausalLM.hidden`'s bf16 cast (`decode.cu` `k_norm`); the GEMM epilogues as QuACK's: o_proj
+  and down_proj add the residual to the fp32 accumulator and round once, the MLP's rstd comes from o_proj's unrounded
+  sum (`k_rstd`), and the up projection reads the un-normed stream, ReLU² of accumulator × rstd (`gemm_norm_act`).
+  Attention differs from FA4's in summation order and in the probabilities' precision: FA4's P·V GEMM reads them as
+  bf16 (`flash_fwd_sm90.py`), this sum as fp32. `k_attn` stages two runs of 64 keys' K and V (64 KB of shared memory,
+  the carveout at its maximum): 3 blocks and 96 KB of K and V in flight per SM [arithmetic].
 - **Prefill and prompt store.** A new request's prompt but its last token runs as rows of one batched pass through the
   step's body (up to 1,024 rows of any prompts per launch, each row computed as a step would), so its slot starts at
   the prompt's last token. Its K and V are copied to the prompt store, and a later request with the same prompt copies
@@ -371,8 +373,9 @@ Face model directory that `AutoModelForCausalLM.from_pretrained(<dir>, trust_rem
 
 - `model.safetensors`: bf16 the token and value embeddings and every matrix (the precision the training forward reads
   them in); fp32 the q/k gains, `resid_lambdas`, `x0_lambdas` and the value-embedding gates, which a bf16 load keeps
-  fp32 (`_keep_in_fp32_modules_strict`). The compiled training forward's x0 is the norm of the fp32 embedding row
-  (§6), the export's the bf16 row's. d24: 522,190,848 bf16 and 61,488 fp32 values, a 1,044,651,640-byte file.
+  fp32 (`_keep_in_fp32_modules_strict`). The compiled forward-only graph's x0 is the norm of the fp32 embedding row
+  (§6; the training graph rounds the row to bf16 first), the export's the bf16 row's. d24: 522,190,848 bf16 and 61,488
+  fp32 values, a 1,044,651,640-byte file.
 - `config.json`: `model_type` "nanochat" with `auto_map` to `modeling_nanochat.py`; MHA with `head_dim` 128; the
   per-layer windows as Gemma 3's `layer_types` + `sliding_window` = 513 (transformers' window counts the query);
   `value_embedding_layers`, `final_logit_softcapping`, `rms_norm_eps` = FLT_EPSILON; BOS (32,764) as BOS and EOS.
