@@ -551,6 +551,7 @@ the harnesses' own CLIs, unmodified, on it; why the path is not kept: `docs/expe
 | 2504.11393 | DataDecide: How to Predict Best Pretraining Data with Small Experiments |
 | 2505.18789 | From Output to Evaluation: Does Raw Instruction-Tuned Code LLMs Output Suffice for Fill-in-the-Middle Code Generation? |
 | 2508.13144 | Signal and Noise: A Framework for Reducing Uncertainty in Language Model Evaluation |
+| 2512.13607 | Nemotron-Cascade: Scaling Cascaded Reinforcement Learning for General-Purpose Reasoning Models |
 | 2604.07769 | An Empirical Study on Influence-Based Pretraining Data Selection for Code Large Language Models |
 | 2606.21619 | The Alignment Problem in Constrained Code Generation |
 | 2608.18062 | TokEval: A Tokenizer Evaluation Suite; companion post cimeister.github.io/blog/code_tokenizer_ablations |
