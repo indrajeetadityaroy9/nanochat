@@ -1,7 +1,8 @@
 """
 Code generation of a base model, scored by each benchmark's official evaluator in a fresh process: EvalPlus
 (arXiv 2305.01210), MultiPL-E C++ (arXiv 2208.08227), HumanEval-X C++ references (arXiv 2303.17568) and HumanEval
-infilling (arXiv 2207.14255), in greedy, sampled (arXiv 2107.03374 §2.1) and filtered modes.
+infilling (arXiv 2207.14255), in greedy, sampled (arXiv 2107.03374 §2.1) and filtered modes; and the reasoning
+protocol of a post-trained model (docs/post-training.md §11.4) on the EvalPlus and MultiPL-E benchmarks.
 """
 
 import codecs
@@ -11,6 +12,7 @@ import itertools
 import json
 import multiprocessing
 import os
+import re
 import sys
 import tempfile
 import warnings
@@ -20,6 +22,7 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 import human_eval_infilling
+import numpy as np
 import pyarrow.parquet as pq
 from evalplus.data import get_human_eval_plus, get_mbpp_plus
 from evalplus.provider.utility import EOS, extra_eos_for_direct_completion
@@ -60,8 +63,23 @@ FILTERED_MODE = "spm"
 # MultiPL-E's pass@1 (arXiv 2208.08227 §IV-B: T = 0.2; completions.py --top-p 0.95); StarCoder2 (arXiv 2402.19173
 # §7.1.2)
 N_SAMPLE, TEMPERATURE = 20, 0.2
+PASS_K = (1, 10)  # the sampled mode's pass@k (pass@10 needs 10 samples a problem)
 # EvalPlus's most new tokens of a completion (evalplus/provider/base.py:13 max_new_tokens)
 EVALPLUS_MAX_NEW_TOKENS = 768
+# Reasoning protocol (docs/post-training.md §11.4): EvalPlus's instruction for chat models (evalplus/codegen.py
+# instruction_prefix; "C++" for "Python" in MultiPL-E's), the post-training format's opening of the reasoning and
+# its end (§11.1); N_SAMPLE samples a problem at Nemotron-Cascade's evaluation setting (arXiv 2512.13607 §2)
+REASONING_INSTRUCTION = ("Please provide a self-contained {} script that solves the following problem in a markdown "
+                         "code block:")
+THINK, END_THINK = "\n\n<think>\n", "</think>"
+REASONING_TEMPERATURE, REASONING_TOP_P = 0.6, 0.95
+REASONING_PASS_K = (1, N_SAMPLE)
+# A response's outcome, the first that holds: it ran to its budget (no BOS); it has no END_THINK; no complete fenced
+# block follows its last END_THINK; answered (that last block)
+REASONING_OUTCOMES = ("budget", "no_think_end", "no_block", "answered")
+# A fenced code block (CommonMark's backtick fences): an opening line of ``` and an info string, the code, a closing
+# line of ``` alone
+FENCED_BLOCK = re.compile(r"^```[^`\n]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 
 
 class Task(NamedTuple):
@@ -151,9 +169,9 @@ def generate_groups(generator: NativeDecoder, groups: list[list[Request]],
                  latency(starts, firsts, ends, [len(out[k]) for k in span], duration=max(ends) - min(starts)))
 
 
-def pass_scores(passed: list[list[bool]]) -> dict[str, dict]:
-    """metrics.summary of each problem's pass@k estimate, k 1 and 10 when every problem has at least 10 samples."""
-    return {f"pass@{k}": summary(pass_at_k(passed, k)) for k in (1, 10) if min(map(len, passed)) >= k}
+def pass_scores(passed: list[list[bool]], ks: tuple[int, ...]) -> dict[str, dict]:
+    """metrics.summary of each problem's pass@k estimate, each k in ks that every problem has samples for."""
+    return {f"pass@{k}": summary(pass_at_k(passed, k)) for k in ks if min(map(len, passed)) >= k}
 
 
 class Filtered(NamedTuple):
@@ -239,6 +257,12 @@ def evalplus_source(task: Task, text: str) -> str:
     return task.prompt + text.replace("\t", "    ")
 
 
+def chat_source(task: Task, text: str) -> str:
+    """The program EvalPlus sanitizes of a chat model's answer: the answer alone (not prefixed by the prompt), tabs
+    replaced by four spaces (evalplus/codegen.py, provider/hf.py)."""
+    return text.replace("\t", "    ")
+
+
 def evalplus_check(pool: ProcessPoolExecutor, task: Task, text: str) -> tuple[str, list[str]]:
     """(solution, verify.solution_diagnostics) of a completion text (evalplus_source), sanitized by `pool`."""
     solution = pool.submit(sanitize, evalplus_source(task, text), task.entry_point).result()
@@ -261,13 +285,15 @@ os._exit(0)
 """
 
 
-def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: list[list[str]]) -> dict:
-    """EvalPlus's evaluation of each task's completions: per-sample statuses and scores (base and plus pass@k)."""
+def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: list[list[str]], *,
+             source: Callable[[Task, str], str] = evalplus_source, ks: tuple[int, ...] = PASS_K) -> dict:
+    """EvalPlus's evaluation of each task's completions (sanitized source(task, completion)): per-sample statuses and
+    scores (base and plus pass@k, k in ks)."""
     dataset = EVALPLUS[name][0]
     pairs = [(t, s) for t, task_samples in zip(items, samples, strict=True) for s in task_samples]
     with tempfile.TemporaryDirectory() as tmp:
         path, scored = Path(tmp, "samples.jsonl"), Path(tmp, "results.json")
-        solutions = pool.map(sanitize, [evalplus_source(t, s) for t, s in pairs], [t.entry_point for t, _ in pairs])
+        solutions = pool.map(sanitize, [source(t, s) for t, s in pairs], [t.entry_point for t, _ in pairs])
         with path.open("w", encoding="utf-8") as f:
             for (t, _), solution in zip(pairs, solutions, strict=True):
                 f.write(json.dumps({"task_id": t.task_id, "solution": solution}) + "\n")
@@ -281,7 +307,7 @@ def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: l
     base = [[b == "pass" for b in bs] for bs in base_status]  # evalplus/evaluate.py's pass@k outcomes
     plus = [[b == p == "pass" for b, p in zip(bs, ps, strict=True)]
             for bs, ps in zip(base_status, plus_status, strict=True)]
-    return {"scores": {"base": pass_scores(base), "plus": pass_scores(plus)},
+    return {"scores": {"base": pass_scores(base, ks), "plus": pass_scores(plus, ks)},
             "ids": [t.task_id for t in items], "base_status": base_status, "plus_status": plus_status}
 
 
@@ -303,10 +329,10 @@ def judged(result: dict) -> bool:
     return result["status"] != "SyntaxError" or result["exit_code"] == 1
 
 
-def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
-    """MultiPL-E's evaluation of each problem's completions: per-completion statuses and pass@k of status "OK" (as
-    pass_k.py counts). One main.py --file process per problem with uncached completions, on verify.compiler()'s g++;
-    no -I (the scripts import siblings)."""
+def multipl_e(items: list[Task], samples: list[list[str]], *, ks: tuple[int, ...] = PASS_K) -> dict:
+    """MultiPL-E's evaluation of each problem's completions: per-completion statuses and pass@k (k in ks) of status
+    "OK" (as pass_k.py counts). One main.py --file process per problem with uncached completions, on
+    verify.compiler()'s g++; no -I (the scripts import siblings)."""
     main = Path(os.environ["MULTIPL_E"], "evaluation", "src", "main.py")
     cache = multipl_e_cache()
     programs = [[t.prompt + s + "\n" + t.entry_point for s in task_samples]  # main.py cached_eval_script's
@@ -344,7 +370,7 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
         cache.put(new)
     status = [[r["status"] for r in rs] for rs in results]
     passed = [[s == "OK" for s in ss] for ss in status]  # eval_cpp.py: "OK" iff the program ran and exited 0
-    return {"scores": pass_scores(passed), "ids": [t.task_id for t in items], "status": status}
+    return {"scores": pass_scores(passed, ks), "ids": [t.task_id for t in items], "status": status}
 
 
 # human_eval_infilling check_correctness (3 s) in a fork pool of argv[4] workers, in a fresh isolated process on the
@@ -482,6 +508,108 @@ def generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list
     def done(g: int, generated: list[list[int]], timing: dict) -> None:
         name, mode = keys[g]
         results[name][mode] = scorers.submit(codegen_record, tokenizer, runs[name], mode, generated, timing)
+
+    generate_groups(generator, groups, done)
+    return results
+
+
+def reasoning_prompt(task: Task, language: Literal["python", "cpp"]) -> str:
+    """The reasoning protocol's prompt text (BOS not included): REASONING_INSTRUCTION, the benchmark's prompt in a
+    fenced block of the language, then THINK."""
+    instruction = REASONING_INSTRUCTION.format({"python": "Python", "cpp": "C++"}[language])
+    return f"{instruction}\n```{language}\n{task.prompt.strip()}\n```{THINK}"
+
+
+def reasoning_answer(text: str, *, cut: bool) -> tuple[str, str]:
+    """(REASONING_OUTCOMES outcome, answer) of a response's text: the answer is the code of the last fenced block
+    after the last END_THINK, "" unless the outcome is "answered". cut: the response ran to its budget."""
+    if cut:
+        return "budget", ""
+    _, end, after = text.rpartition(END_THINK)
+    if not end:
+        return "no_think_end", ""
+    blocks = FENCED_BLOCK.findall(after)
+    return ("answered", blocks[-1]) if blocks else ("no_block", "")
+
+
+def multipl_e_answers(items: list[Task], answers: list[list[str]]) -> dict:
+    """multipl_e of reasoning answers, each judged as its prompt's #include lines + the answer + "\\n" + MultiPL-E's
+    tests without their first line, the "}" closing the prompt's function: the answer holds the whole function, so
+    neither the prompt's comment and signature nor that "}" are added."""
+    headers = [t._replace(prompt="".join(line for line in t.prompt.splitlines(keepends=True)
+                                         if line.startswith("#include")),
+                          entry_point=t.entry_point.removeprefix("}\n")) for t in items]
+    return multipl_e(headers, answers, ks=REASONING_PASS_K)
+
+
+class ReasoningRun(NamedTuple):
+    """An EvalPlus or MultiPL-E benchmark's reasoning prompts and evaluator (reasoning_runs)."""
+    items: list[Task]
+    prompts: list[list[int]]  # BOS and reasoning_prompt's tokens
+    budgets: list[int]  # max_new_tokens per task: the context less the prompt
+    score: Callable[[list[Task], list[list[str]]], dict]
+
+
+def reasoning_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], pool: ProcessPoolExecutor, *,
+                   context: int) -> dict[str, ReasoningRun]:
+    """The ReasoningRun of each EvalPlus and MultiPL-E benchmark at a model's context (positions of prompt and
+    response, BOS included): Python answers scored by EvalPlus as a chat model's (chat_source), C++ by
+    multipl_e_answers."""
+    bos = tokenizer.bos_token_id
+    runs = {}
+    for name in (*EVALPLUS, *MULTIPL_E_BENCHMARKS):
+        language = "python" if name in EVALPLUS else "cpp"
+        items = benchmarks[name]
+        prompts = [[bos, *tokenizer.enc.encode_ordinary(reasoning_prompt(t, language))] for t in items]
+        score = (functools.partial(evalplus, pool, name, source=chat_source, ks=REASONING_PASS_K)
+                 if language == "python" else multipl_e_answers)
+        runs[name] = ReasoningRun(items, prompts, [context - len(p) for p in prompts], score)
+    return runs
+
+
+def reasoning_record(tokenizer: Tokenizer, run: ReasoningRun, generated: list[list[int]], timing: dict) -> dict:
+    """reasoning_generation's record of a benchmark's ids (each task's N_SAMPLE in seed order): the evaluator's
+    statuses and pass@1 and pass@N_SAMPLE of the answers, each response's outcome and their shares, the responses'
+    generated tokens (BOS not counted) and their mean, median, 90th percentile and maximum, the responses (special
+    tokens skipped), each task's budget and latency."""
+    bos, n = tokenizer.bos_token_id, N_SAMPLE
+    texts = [tokenizer.enc.decode([t for t in ids if t < bos]) for ids in generated]
+    tokens = [len(ids) for ids in generated]
+    graded = [reasoning_answer(text, cut=m == run.budgets[j // n])
+              for j, (text, m) in enumerate(zip(texts, tokens, strict=True))]
+    outcomes = [o for o, _ in graded]
+
+    def per_task(values: list) -> list[list]:
+        return [values[n * i:n * (i + 1)] for i in range(len(run.items))]
+
+    lengths = np.array(tokens)
+    return run.score(run.items, per_task([a for _, a in graded])) | {
+        "n_sample": n, "outcome_shares": {k: outcomes.count(k) / len(outcomes) for k in REASONING_OUTCOMES},
+        "outcomes": per_task(outcomes),
+        "response_tokens": {"mean": float(lengths.mean()), "median": float(np.median(lengths)),
+                            "p90": float(np.percentile(lengths, 90)), "max": int(lengths.max())},
+        "completions": per_task(texts), "new_tokens": per_task(tokens), "max_new_tokens": run.budgets,
+        "latency": timing}
+
+
+def reasoning_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str, list[Task]], *,
+                         pool: ProcessPoolExecutor, scorers: ThreadPoolExecutor) -> dict[str, Future[dict]]:
+    """Futures of each EvalPlus and MultiPL-E benchmark's reasoning record (docs/post-training.md §11.4): N_SAMPLE
+    responses a problem at REASONING_TEMPERATURE from the nucleus REASONING_TOP_P, each until BOS or the model's
+    context (no stop sequence), sample k of problem i seeded N_SAMPLE i + k; one generate call runs all."""
+    runs = reasoning_runs(tokenizer, benchmarks, pool, context=model.config.max_position_embeddings)
+    names = list(runs)
+    groups = [[Request(input_ids=p, max_new_tokens=m, temperature=REASONING_TEMPERATURE, top_p=REASONING_TOP_P,
+                       seed=N_SAMPLE * i + k)
+               for i, (p, m) in enumerate(zip(run.prompts, run.budgets, strict=True)) for k in range(N_SAMPLE)]
+              for run in runs.values()]
+    generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,
+                              max_length=max(len(r.input_ids) + r.max_new_tokens - 1 for g in groups for r in g),
+                              prompt_store=sum(len(p) for run in runs.values() for p in run.prompts))
+    results = dict.fromkeys(names)
+
+    def done(g: int, generated: list[list[int]], timing: dict) -> None:
+        results[names[g]] = scorers.submit(reasoning_record, tokenizer, runs[names[g]], generated, timing)
 
     generate_groups(generator, groups, done)
     return results
