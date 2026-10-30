@@ -2,7 +2,7 @@
 The curated corpus, its decontamination record and the corpus's tokenizer to the Hub (DATASET) and back: push replaces
 the tree in one commit; pull downloads it.
 
-python -m corpus.publish push | pull
+python -m corpus.pretrain.publish push | pull
 """
 
 import argparse
@@ -10,8 +10,8 @@ import argparse
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi, snapshot_download
 
 from corpus.decontaminate import RECORD
-from corpus.schema import REPOSITORY_FILE, SAMPLE_FILE
-from corpus.sources import CURATED, SOURCES, curated_dir, footer_rows
+from corpus.pretrain.schema import REPOSITORY_FILE, SAMPLE_FILE
+from corpus.pretrain.sources import CURATED, SOURCES, curated_dir, footer_rows
 from corpus.tokenizer import TOKENIZER
 from paths import CORPUS
 
@@ -126,7 +126,7 @@ def pull() -> None:
 
 if __name__ == "__main__":
     steps = {"push": push, "pull": pull}
-    parser = argparse.ArgumentParser(prog="python -m corpus.publish",
+    parser = argparse.ArgumentParser(prog="python -m corpus.pretrain.publish",
                                      description="The curated corpus to the Hub and back.")
     parser.add_argument("step", choices=steps)
     steps[parser.parse_args().step]()

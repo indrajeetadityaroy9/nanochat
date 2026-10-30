@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from corpus import mixture
-from corpus.sources import SOURCES
+from corpus.pretrain.sources import SOURCES
 from corpus.tokenizer import Tokenizer
 from paths import CORPUS
 

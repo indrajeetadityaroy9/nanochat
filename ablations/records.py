@@ -1,8 +1,10 @@
 """
-An experiment's records once its sweep has ended (Hydra callback): results/<experiment>.jsonl and -curves.jsonl.
+An experiment's records once its sweep has ended (Hydra callback): <results>/<experiment>.jsonl and -curves.jsonl, in
+results/posttrain/ for runs from a base model's checkpoint (config.base), else in results/pretrain/.
 """
 import dataclasses
 import json
+from pathlib import Path
 from typing import Any
 
 from hydra.core.utils import JobReturn
@@ -11,12 +13,17 @@ from omegaconf import DictConfig, OmegaConf
 
 import metrics
 from eval import suite
-from paths import RESULTS
+from paths import POSTTRAIN_RESULTS, PRETRAIN_RESULTS
 from run import EVALUATED, RunConfig, plan_of, run_name
 
 
+def results_dir(config: RunConfig) -> Path:
+    """The directory of a run's experiment records: post-training (a run from a base checkpoint) or pretraining."""
+    return POSTTRAIN_RESULTS if config.base is not None else PRETRAIN_RESULTS
+
+
 def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
-    """A run's line of results/<experiment>.jsonl; its measures from its final checkpoint's evaluation (none with
+    """A run's line of <results>/<experiment>.jsonl; its measures from its final checkpoint's evaluation (none with
     generate "none": its log's val records hold what it measured)."""
     name, run = run_name(config), plan_of(config)
     stopped = metrics.diverged(log)
@@ -53,9 +60,10 @@ class Records(Callback):
         experiment = config.hydra.runtime.choices.experiment
         logs = [metrics.records(run_name(c)) for c in self.configs]
         lines = [record(c, experiment, log) for c, log in zip(self.configs, logs, strict=True)]
-        (RESULTS / f"{experiment}.jsonl").write_text(
+        (directory,) = {results_dir(c) for c in self.configs}
+        (directory / f"{experiment}.jsonl").write_text(
             "".join(json.dumps(line, allow_nan=False) + "\n" for line in lines), encoding="utf-8")
-        (RESULTS / f"{experiment}-curves.jsonl").write_text(
+        (directory / f"{experiment}-curves.jsonl").write_text(
             "".join(json.dumps({"experiment": experiment, "run_name": run_name(c)} | metrics.curves(log),
                                allow_nan=False) + "\n" for c, log in zip(self.configs, logs, strict=True)),
             encoding="utf-8")

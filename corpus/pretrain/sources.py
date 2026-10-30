@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from corpus.schema import (
+from corpus.pretrain.schema import (
     CONVERSATION,
     EXERCISE,
     FUNCTION,

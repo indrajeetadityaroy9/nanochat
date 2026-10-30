@@ -12,5 +12,5 @@ sudo nvidia-smi -lgc "$MAX_SM_CLOCK,$MAX_SM_CLOCK"
 # the docker group applies at the next login; sg runs this script's docker commands in it
 sudo usermod -aG docker "$USER"
 sg docker -c "docker build -f '$ROOT/docker/Dockerfile' -t nanochat '$ROOT' &&
-  '$ROOT/scripts/container.sh' python -m corpus.publish pull"
+  '$ROOT/scripts/container.sh' python -m corpus.pretrain.publish pull"
 echo "log in again (docker group), then follow docs/training.md §9"

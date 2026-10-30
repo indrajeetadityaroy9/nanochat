@@ -6,8 +6,8 @@ import math
 from dataclasses import dataclass
 
 from corpus.mixture import BATCH_SIZE, FILE_LEVEL_STAGE, MICRO_BATCH_TOKENS, REPO_LEVEL_SHARE, REPO_LEVEL_STAGE, Stage
+from corpus.posttrain.sft import SFT_STAGE
 from model.modeling import CausalLM, non_embedding_flops_per_token, num_non_embedding_params
-from posttrain.sft import SFT_STAGE
 from train.optim import BETAS
 
 # Linear warmup over 2 / (1 - beta2) steps (arXiv 1910.04209 §4.3 Eq. 14): 40 at beta2 = 0.95

@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 from corpus import mixture
 from corpus.layout import TOKEN_DTYPE, shard_bounds, split_path
 from corpus.parallel import MEMORY, SPAWN, ordered
-from corpus.sources import (
+from corpus.pretrain.sources import (
     SOURCES,
     curated_dir,
     curated_documents,

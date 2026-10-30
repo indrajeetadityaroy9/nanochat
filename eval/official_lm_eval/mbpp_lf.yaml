@@ -1,6 +1,7 @@
 # lm-evaluation-harness's mbpp (d6de816 tasks/mbpp/mbpp.yaml) with line endings normalized as the corpus normalizes
-# them (corpus/prepare.py: "\r\n", then "\r", to "\n"): its three few-shot solutions carry MBPP's CRLF code, and the
-# model never trained on "\r" (docs/evaluation.md §4). Every other field is mbpp.yaml's; scored by its pass_at_1.
+# them (corpus/pretrain/prepare.py: "\r\n", then "\r", to "\n"): its three few-shot solutions carry MBPP's CRLF code,
+# and the model never trained on "\r" (docs/evaluation.md §4). Every other field is mbpp.yaml's; scored by its
+# pass_at_1.
 task: mbpp_lf
 dataset_path: google-research-datasets/mbpp
 dataset_name: full

@@ -1,6 +1,6 @@
 """
 The SFT corpus's name, its one training stage and §11.1's markers (docs/post-training.md), torch-free and light for
-every process that plans or trains an SFT run; the corpus itself: posttrain/sft_data.py.
+every process that plans or trains an SFT run; the corpus itself: corpus/posttrain/build.py.
 """
 from corpus.mixture import REPO_LEVEL_STAGE, Group, Stage
 

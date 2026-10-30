@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 
 from corpus import mixture
 from corpus.parallel import SPAWN
-from corpus.sources import curated_shards, text_bytes, texts
+from corpus.pretrain.sources import curated_shards, text_bytes, texts
 from corpus.tokenizer import SPECIAL_TOKENS, SPLIT_PATTERN, TOKENIZER, get_tokenizer, tiktoken_file
 from model.config import VOCAB_SIZE
 from native import corpus_crate

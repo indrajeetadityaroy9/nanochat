@@ -4,8 +4,9 @@
   automodel_vllm.py fixes 0.95, EvalPlus's provider leaves vLLM's 0.92), so the tools fit beside another process on the
   GPU. It sizes the KV cache only.
 - Every vllm.LLM.generate refuses a prompt holding "\\r" (ValueError): the corpus normalizes line endings
-  (corpus/prepare.py), so the model never trained on one; a tool whose prompts carry one gets a normalizing task or
-  hook (docs/evaluation.md §4) instead of a silently corrupted measurement. Token-id prompts are decoded to check.
+  (corpus/pretrain/prepare.py), so the model never trained on one; a tool whose prompts carry one gets a normalizing
+  task or hook (docs/evaluation.md §4) instead of a silently corrupted measurement. Token-id prompts are decoded to
+  check.
 - With NANOCHAT_REASONING_PARSER set, every process registers the "nanochat" reasoning parser
   (eval/official_reasoning_parser.py): `vllm serve --reasoning-parser-plugin` imports it in the API server only, and
   the spawned engine core looks the parser up too.

@@ -23,7 +23,7 @@ from corpus.layout import (
     split_path,
 )
 from corpus.parallel import ordered
-from corpus.sources import curated_shards
+from corpus.pretrain.sources import curated_shards
 from corpus.tokenize import repository_parts, shard_tokens
 from corpus.tokenizer import FIM_TOKENS, get_tokenizer
 from native import corpus_crate

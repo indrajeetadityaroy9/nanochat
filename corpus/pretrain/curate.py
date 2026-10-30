@@ -2,7 +2,7 @@
 Curate every source from its standardized files: Python 3 check with repair, exact deduplication, the val/train split
 by md5_number(group) % SPLIT, and the curated shards; every output is a function of the standardized files.
 
-python -m corpus.curate
+python -m corpus.pretrain.curate
 """
 
 import ast
@@ -24,8 +24,8 @@ import pyarrow.parquet as pq
 from fissix import refactor
 
 from corpus.parallel import MEMORY, SPAWN, ordered
-from corpus.schema import COMPRESSION, REPOSITORY_FILE, SAMPLE_FILE, SPLIT, sha1
-from corpus.sources import (
+from corpus.pretrain.schema import COMPRESSION, REPOSITORY_FILE, SAMPLE_FILE, SPLIT, sha1
+from corpus.pretrain.sources import (
     SOURCES,
     checked_path,
     curated_dir,

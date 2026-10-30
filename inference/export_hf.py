@@ -3,10 +3,11 @@ model directory (weights, config, generation config, the corpus tokenizer), whic
 backend load by trust_remote_code through inference/modeling_nanochat.py.
 
 With --chat (a post-trained checkpoint, docs/post-training.md §11.1): the tokenizer's chat template renders BOS, the
-messages' contents joined by "\\n\\n" and stripped, then THINK, the SFT context's text (posttrain/sft_data.py render:
-the stripped prompt and THINK, encoded as one text); a system message, as lcb_runner's chat styles send one, joins the
-user turn as its no-system-role style writes it (SYSTEM_MESSAGE_GENERIC, "\\n\\n", the question). The generation
-config's sampling defaults are the reasoning protocol's T 0.6, top-p 0.95 (DeepSeek-R1, arXiv 2501.12948 v1 §3).
+messages' contents joined by "\\n\\n" and stripped, then THINK, the SFT context's text (corpus/posttrain/build.py
+render: the stripped prompt and THINK, encoded as one text); a system message, as lcb_runner's chat styles send one,
+joins the user turn as its no-system-role style writes it (SYSTEM_MESSAGE_GENERIC, "\\n\\n", the question). The
+generation config's sampling defaults are the reasoning protocol's T 0.6, top-p 0.95 (DeepSeek-R1, arXiv 2501.12948 v1
+§3).
 
     python -m inference.export_hf <checkpoint.pt> <out dir> [--chat]
 """
@@ -22,12 +23,12 @@ from tokenizers import processors
 from transformers import PreTrainedTokenizerFast
 from transformers.convert_slow_tokenizer import TikTokenConverter
 
+from corpus.posttrain.sft import THINK
 from corpus.tokenizer import BOS, SPECIAL_TOKENS, TOKENIZER, get_tokenizer
 from inference.modeling_nanochat import NanochatPreTrainedModel
 from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.modeling import ModelConfig, has_ve, layer_windows
 from model.ops.linear import EPS
-from posttrain.sft import THINK
 
 # docs/post-training.md §11.1's context; Jinja's trim is Python's str.strip; THINK as a Jinja string literal, since a
 # template's own trailing newline is dropped (Jinja's keep_trailing_newline is off)

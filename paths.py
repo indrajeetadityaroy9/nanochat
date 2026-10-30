@@ -17,7 +17,10 @@ NATIVE = CACHE / "native"
 VERDICTS = CACHE / "verdicts.sqlite"
 # g++ with a precompiled <bits/stdc++.h>, a directory per compiler (eval/verify.py compiler)
 PCH = CACHE / "pch"
-RESULTS = ROOT / "results"       # tracked records (ablations/records.py)
+# tracked records (ablations/records.py): a pretraining experiment's in pretrain/, a post-training one's in posttrain/
+RESULTS = ROOT / "results"
+PRETRAIN_RESULTS = RESULTS / "pretrain"
+POSTTRAIN_RESULTS = RESULTS / "posttrain"
 # the compiler, kernel and library caches docker/Dockerfile places under CACHE
 CACHE_VARIABLES = ("XDG_CACHE_HOME", "HF_HOME", "TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR", "QUACK_CACHE_DIR",
                    "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR", "CARGO_HOME")

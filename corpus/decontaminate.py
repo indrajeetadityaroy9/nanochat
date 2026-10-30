@@ -20,8 +20,8 @@ from huggingface_hub import hf_hub_download
 from human_eval_infilling.data import read_problems
 
 from corpus.parallel import SPAWN
-from corpus.schema import COMPRESSION
-from corpus.sources import CURATED, SOURCES, curated_shards
+from corpus.pretrain.schema import COMPRESSION
+from corpus.pretrain.sources import CURATED, SOURCES, curated_shards
 from native import corpus_crate
 
 N = 10

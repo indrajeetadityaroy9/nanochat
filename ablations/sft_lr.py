@@ -2,13 +2,13 @@
 SFT peak-lr calibration (docs/post-training.md §11.2): complete schedules at 1/10, 1/3 and 1 times the base run's peak
 lr over the same first 2% of the SFT train rows, each scored by the response loss on the held-out problems after its
 last step; the full run's scale is the fitted optimum moved to the full run's steps (its epochs of the train rows). The
-runs: conf/experiment/sft_lr.yaml; their records: results/sft_lr.jsonl (ablations/records.py).
+runs: conf/experiment/sft_lr.yaml; their records: results/posttrain/sft_lr.jsonl (ablations/records.py).
 """
 import json
 import math
 
 import metrics
-from paths import RESULTS
+from paths import POSTTRAIN_RESULTS
 
 # The optimum lr falls with the run's steps at a fixed batch as steps^-STEPS_EXPONENT: 0.32 in arXiv 2409.19913 §6
 # Eq. 5, 0.30 in its §4.1 (Llama-1), 0.24-0.30 from the repository's d8 pair (docs/training.md §5) [inference:
@@ -23,12 +23,13 @@ def sft_lr_fit(epochs: float) -> dict:
     Raises ValueError unless every arm has a val record (a diverged arm has none) and the curvature is positive and the
     vertex inside the grid (then an arm 3x beyond the edge with the lowest loss is added to the grid)."""
     from corpus.layout import packed_rows
+    from corpus.posttrain.sft import NAME, SFT_STAGE
     from corpus.tokenizer import get_tokenizer
     from model.modeling import meta_model
-    from posttrain.sft import NAME, SFT_STAGE
     from train.schedule import sft_plan
 
-    lines = [json.loads(line) for line in (RESULTS / "sft_lr.jsonl").read_text(encoding="utf-8").splitlines()]
+    lines = [json.loads(line)
+             for line in (POSTTRAIN_RESULTS / "sft_lr.jsonl").read_text(encoding="utf-8").splitlines()]
     scales = [line["config"]["learning_rate_scale"] for line in lines]
     losses = []
     for line in lines:

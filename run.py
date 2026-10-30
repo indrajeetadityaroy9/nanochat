@@ -70,7 +70,7 @@ def plan_of(config: RunConfig) -> "RunPlan":
 
     if config.base is not None:
         from corpus.layout import packed_rows
-        from posttrain.sft import NAME, SFT_STAGE
+        from corpus.posttrain.sft import NAME, SFT_STAGE
 
         started = next(r for r in metrics.records(config.base) if r["kind"] == "run")
         rows = packed_rows(NAME, "train", get_tokenizer(), SFT_STAGE.seq_len)

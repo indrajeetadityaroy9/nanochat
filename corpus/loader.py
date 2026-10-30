@@ -20,7 +20,7 @@ IGNORE_INDEX = -1
 class PackedSplit(NamedTuple):
     """A packed split, memory-mapped; fim is None when the split has no FIM examples (an empty file cannot be
     memory-mapped); contexts, each document's leading tokens whose labels are ignored (the SFT corpus's prompts,
-    posttrain/sft_data.py), None when the split has none."""
+    corpus/posttrain/build.py), None when the split has none."""
     tokens: np.memmap
     offsets: np.memmap
     pieces: np.memmap

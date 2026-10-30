@@ -2,7 +2,7 @@
 Prepare every source: fetch the Hub files of its extent (only the standardizer's columns; Stack-Edu's blobs from
 Software Heritage's public S3 bucket, The Stack v2 dataset card), then standardize each into its category's schema.
 
-python -m corpus.prepare
+python -m corpus.pretrain.prepare
 """
 
 import asyncio
@@ -26,8 +26,8 @@ from obstore.store import S3Store
 
 from corpus import mixture
 from corpus.parallel import SPAWN
-from corpus.schema import COMPRESSION, CONVERSATION, FUNCTION, REPOSITORY_FILE, SPLIT, sha1
-from corpus.sources import (
+from corpus.pretrain.schema import COMPRESSION, CONVERSATION, FUNCTION, REPOSITORY_FILE, SPLIT, sha1
+from corpus.pretrain.sources import (
     EDU,
     SOURCES,
     Source,

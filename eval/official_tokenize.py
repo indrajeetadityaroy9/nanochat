@@ -2,7 +2,7 @@
 "\\r" (the corpus normalizes line endings, eval/line_endings.py, so the model never trained on one; docs/evaluation.md
 §4), and vLLM's POST /tokenize renders the first problem's messages through the --chat export's template
 (inference/export_hf.py CHAT_TEMPLATE) as BOS + encode_ordinary(prompt.strip() + THINK), prompt being the text the SFT
-renderer saw (posttrain/sft_data.py render; docs/post-training.md §11.1):
+renderer saw (corpus/posttrain/build.py render; docs/post-training.md §11.1):
 
 - evalplus: EvalPlus's OpenAI backend's one user message per HumanEval+ and MBPP+ task (evalplus/provider/openai.py
   codegen: the instruction prefix of codegen.py:222, then the task prompt stripped in a python fence); prompt = that
@@ -58,8 +58,8 @@ def served(url: str, messages: list[dict]) -> list[int]:
 
 
 def check(paths: list[str]) -> bool:
+    from corpus.posttrain.sft import THINK
     from corpus.tokenizer import get_tokenizer
-    from posttrain.sft import THINK
 
     tok = get_tokenizer()
     ok = True

@@ -1,6 +1,6 @@
 # @package _global_
 # SFT of the base model (docs/post-training.md §11.2): from the pre-training run's checkpoint after base_step steps,
-# 2 epochs over the SFT corpus (posttrain/sft_data.py) at the calibrated share of its peak lr for that many steps
+# 2 epochs over the SFT corpus (corpus/posttrain/build.py) at the calibrated share of its peak lr for that many steps
 # (ablations/sft_lr.py), full states every 1,000 steps; trained only (generate "none"), the final checkpoint
 # evaluated by the benchmarks' official tools (§11.4)
 base: generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10

@@ -6,7 +6,7 @@ into train and val, tokenized and packed whole into 32,768-token rows by the bas
 attention segment per trace. Each document's context (the prompt and THINK) is written as <split>.context, whose
 labels the loader ignores (corpus/loader.py).
 
-python -m posttrain.sft_data
+python -m corpus.posttrain.build
 """
 
 import hashlib
@@ -23,11 +23,11 @@ import pyarrow.parquet as pq
 from corpus import decontaminate, pack
 from corpus.layout import TOKEN_DTYPE, split_path
 from corpus.parallel import SPAWN
+from corpus.posttrain.sft import END_THINK, NAME, SFT_STAGE, THINK
 from corpus.tokenize import tokenize_split
 from corpus.tokenizer import get_tokenizer
 from native import corpus_crate
 from paths import ARTIFACTS
-from posttrain.sft import END_THINK, NAME, SFT_STAGE, THINK
 
 SOURCE = ARTIFACTS / "posttrain"
 # Each group's files (globs under SOURCE) and row format, in the order duplicates are resolved (the first kept).
