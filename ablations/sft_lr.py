@@ -10,8 +10,9 @@ import math
 import metrics
 from paths import RESULTS
 
-# The optimum lr falls with the run's steps at a fixed batch as steps^-STEPS_EXPONENT: 0.30-0.32 in arXiv 2409.19913
-# §6, 0.24-0.30 from the repository's d8 pair (docs/training.md §5) [inference: transferred to SFT]
+# The optimum lr falls with the run's steps at a fixed batch as steps^-STEPS_EXPONENT: 0.32 in arXiv 2409.19913 §6
+# Eq. 5, 0.30 in its §4.1 (Llama-1), 0.24-0.30 from the repository's d8 pair (docs/training.md §5) [inference:
+# transferred to SFT]
 STEPS_EXPONENT = 0.30
 
 
@@ -19,8 +20,8 @@ def sft_lr_fit() -> dict:
     """The arms' final held-out losses against u = ln(scale), fitted by a parabola (metrics.parabola_vertex, as
     ablations/peak_lr.py lr_multiplier); its vertex times (run steps / arm steps)^-STEPS_EXPONENT, the steps from the
     arms' plans (their run records) and the full run's (train/schedule.py sft_plan over every train row). Raises
-    ValueError unless the curvature is positive and the vertex inside the grid (then an arm 3x beyond the edge with
-    the lowest loss is added to the grid)."""
+    ValueError unless every arm has a val record (a diverged arm has none) and the curvature is positive and the vertex
+    inside the grid (then an arm 3x beyond the edge with the lowest loss is added to the grid)."""
     from corpus.layout import packed_rows
     from corpus.tokenizer import get_tokenizer
     from model.modeling import meta_model
@@ -29,8 +30,13 @@ def sft_lr_fit() -> dict:
 
     lines = [json.loads(line) for line in (RESULTS / "sft_lr.jsonl").read_text(encoding="utf-8").splitlines()]
     scales = [line["config"]["learning_rate_scale"] for line in lines]
-    losses = [max((r for r in line["records"] if r["kind"] == "val"), key=lambda r: r["step"])["loss"]
-              for line in lines]
+    losses = []
+    for line in lines:
+        validated = [r for r in line["records"] if r["kind"] == "val"]
+        if not validated:
+            raise ValueError(f"SFT lr: arm x{line['config']['learning_rate_scale']} ({line['run_name']}) has no val "
+                             f"record (diverged at step {line['diverged_at']})")
+        losses.append(max(validated, key=lambda r: r["step"])["loss"])
     u = [math.log(scale) for scale in scales]
     curvature, vertex = metrics.parabola_vertex(u, losses)
     if not (curvature > 0 and min(u) < vertex < max(u)):

@@ -1,10 +1,9 @@
 """
 The SFT corpus (docs/post-training.md §11.2): the reasoning traces of Nemotron-Cascade's SFT stages 1 and 2 (code)
 and of Nemotron-SFT-Competitive-Programming-v2 (Python, C++, Exercism), rendered in §11.1's format (render), filtered,
-at most CAP traces per prompt in each group, split by problem (problem) into train and val, train less the problems
-near a val one, tokenized and packed whole into 32,768-token rows by the base's packer (corpus/pack.py), one attention
-segment per trace. Each document's context (the prompt and THINK) is written as <split>.context, whose labels the
-loader ignores (corpus/loader.py).
+at most CAP traces per prompt in each group, split by problem (problem) into train and val, tokenized and packed whole
+into 32,768-token rows by the base's packer (corpus/pack.py), one attention segment per trace. Each document's context
+(the prompt and THINK) is written as <split>.context, whose labels the loader ignores (corpus/loader.py).
 
 python -m posttrain.sft_data
 """
@@ -39,21 +38,18 @@ GROUPS = {
 CAP = 4                 # traces per prompt in each group, drawn at random
 VAL_SHARE = 0.01        # problems held out
 MIN_REASONING = 20      # reasoning tokens
-# A train problem sharing a run of OVERLAP_N words with a held-out problem is dropped: one past the longest common
-# stock phrases measured (input conventions of Codeforces and CodeChef statements, standard definitions: 45 words);
-# near-duplicate problems share runs from 40 words up (docs/post-training.md §11.2)
-OVERLAP_N = 46
 SEED = 0
 CHUNK_BYTES = 2**28     # a worker task: one byte range of a source file
 SHARD_DOCUMENTS = 4096  # documents per packed shard (one crate pack call)
 # Drop reasons, in the order a row is tested
 DROPS = ("malformed", "placeholder", "no_reasoning", "no_answer", "short_reasoning", "over_length", "contaminated",
-         "duplicate", "capped", "val_overlap")
+         "duplicate", "capped")
 # Aider's file listing (CP-v2 Exercism): a filename line, then a fenced block
 LISTING = re.compile(r"^(\S+\.\w+)\n```[^\n]*\n(.*?)\n```", re.S | re.M)
 # Aider's editing instructions after an Exercism problem statement
 AIDER_REQUEST = "\n####\n\nUse the above instructions to modify the supplied files:"
-# The sources' stock instructions around a problem: CP-v2's header, Nemotron-Cascade's language and format requests
+# The sources' stock instructions around a problem: CP-v2's header, Nemotron-Cascade's language and format requests and
+# its fenced function header (a problem recurs under `def f(x):` and under `class Solution:` with `def f(self, x):`)
 WRAPPERS = re.compile("|".join((
     r"You are a helpful and harmless assistant\. You should think step-by-step before responding to the instruction "
     r"below\.",
@@ -61,7 +57,7 @@ WRAPPERS = re.compile("|".join((
     r"You must use ```\w+ for just the final solution code block with the following format:\s*```\w+\s*\S+ Your code "
     r"here\s*```",
     r"Write (?:Python|C\+\+) code to solve the problem\.",
-    r"Solve the problem starting with the provided function header\.\s*Function header:",
+    r"Solve the problem starting with the provided function header\.\s*Function header:\s*```[\s\S]*?```",
     r"Please place the solution code in the following format:\s*```\w+\s*# Your solution code here\s*```")))
 
 Parsed = tuple[str, str, str] | str  # (prompt, reasoning, answer) or a drop reason
@@ -138,13 +134,13 @@ def problem(prompt: str) -> str:
     return " ".join(re.findall(r"[^\W_]+", WRAPPERS.sub(" ", prompt).lower()))
 
 
-def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict:
+def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
     """The rows starting in bytes [start, end) of a source file: each row's drop reason ("reasons", an index into
     DROPS, -1 for a candidate); per candidate the digests of its prompt, its problem and its text, its context and
-    document tokens; {problem digest: problem} ("texts"); the candidates' tokens appended to `part`. Runs in a
-    decontaminate.worker_init worker (decontaminate.GRAMS)."""
+    document tokens; the candidates' tokens appended to `part`. Runs in a decontaminate.worker_init worker
+    (decontaminate.GRAMS)."""
     kind, path, start, end, part = task
-    reasons, prompts, problems, keys, contexts, lengths, texts = [], [], [], [], [], [], {}
+    reasons, prompts, problems, keys, contexts, lengths = [], [], [], [], [], []
     with open(path, "rb") as f, open(part, "wb") as out:
         f.seek(max(start - 1, 0))
         if start > 0 and f.read(1) != b"\n":  # a row starting before `start` is the previous task's
@@ -165,17 +161,15 @@ def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict:
                 reasons.append(DROPS.index("contaminated"))
             else:
                 reasons.append(-1)
-                text = problem(prompt)
-                texts[digest(text)] = text
                 prompts.append(digest(prompt))
-                problems.append(digest(text))
+                problems.append(digest(problem(prompt)))
                 keys.append(digest(prompt + THINK + reasoning + END_THINK + answer))
                 contexts.append(len(context))
                 lengths.append(length)
                 out.write(np.concatenate([context, thought, rest]))
     return {"reasons": np.array(reasons, np.int64), "prompts": np.array(prompts, np.uint64),
             "problems": np.array(problems, np.uint64), "keys": np.array(keys, np.uint64),
-            "contexts": np.array(contexts, np.int64), "lengths": np.array(lengths, np.int64), "texts": texts}
+            "contexts": np.array(contexts, np.int64), "lengths": np.array(lengths, np.int64)}
 
 
 def ranks(values: np.ndarray) -> np.ndarray:
@@ -215,7 +209,6 @@ def main() -> None:
     # the candidates, in task order: their group, part file and offset in it
     columns = {k: np.concatenate([c[k] for c in chunks])
                for k in ("prompts", "problems", "keys", "contexts", "lengths")}
-    texts = {k: t for c in chunks for k, t in c["texts"].items()}
     counts = [len(c["lengths"]) for c in chunks]
     group = np.repeat(owners, counts)
     part = np.repeat(np.arange(len(chunks)), counts)
@@ -231,16 +224,11 @@ def main() -> None:
         capped[drawn[rank >= CAP]] = True
         kept.append(drawn[rank < CAP])
     kept = np.concatenate(kept)
-    # val: VAL_SHARE of the problems; train: the rest, less every problem sharing OVERLAP_N words with a val one
+    # val: VAL_SHARE of the problems; train: every other row
     distinct = np.unique(problems[kept])
     held = rng.choice(distinct, size=round(VAL_SHARE * len(distinct)), replace=False)
     val = np.isin(problems[kept], held)
-    grams = corpus_crate().Grams([texts[k] for k in held.tolist()], n=OVERLAP_N)
-    candidates = np.unique(problems[kept[~val]])
-    near = candidates[[bool(m) for m in grams.matches([texts[k] for k in candidates.tolist()])]]
-    overlap = np.zeros(len(lengths), bool)
-    overlap[kept[~val & np.isin(problems[kept], near)]] = True
-    splits = {"train": rng.permutation(kept[~val & ~overlap[kept]]), "val": rng.permutation(kept[val])}
+    splits = {"train": rng.permutation(kept[~val]), "val": rng.permutation(kept[val])}
 
     parts = {i: np.memmap(task[4], dtype=TOKEN_DTYPE, mode="r") for i, task in enumerate(tasks)
              if task[4].stat().st_size}
@@ -258,14 +246,12 @@ def main() -> None:
         reasons = np.concatenate([c["reasons"] for c, owner in zip(chunks, owners, strict=True) if owner == g])
         mine = group == g
         dropped = dict(zip(DROPS, np.bincount(reasons[reasons >= 0], minlength=len(DROPS)).tolist(), strict=True))
-        dropped |= {"duplicate": int((mine & duplicate).sum()), "capped": int((mine & capped).sum()),
-                    "val_overlap": int((mine & overlap).sum())}
+        dropped |= {"duplicate": int((mine & duplicate).sum()), "capped": int((mine & capped).sum())}
         stats[name] = {"read": len(reasons), "dropped": dropped} | {
             split: split_stats(lengths[r], contexts[r], prompts[r], problems[r]) for split, rows in splits.items()
             for r in [rows[group[rows] == g]]}
     stats["all"] = {split: split_stats(lengths[rows], contexts[rows], prompts[rows], problems[rows])
                     for split, rows in splits.items()}
-    stats["all"]["overlap_n"] = OVERLAP_N
     for split in splits:
         packed = pack.write(NAME, split, pack.packed_shards(NAME, split, range(pack.shard_count(NAME, split)),
                                                             SFT_STAGE.seq_len), SFT_STAGE.seq_len)
