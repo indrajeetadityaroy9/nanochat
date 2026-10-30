@@ -27,11 +27,14 @@ def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int
                   ) -> tuple[dict[str, float], Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
                                                           np.ndarray]]]:
     """({corpus: weight} of the run's draw in the stage, the stage's micro-batches from run row `start` on), each
-    corpus's rows permuted once by `seed` (RandomState: stream frozen across numpy versions, so a resume sees the same
-    order)."""
+    corpus's rows permuted by `seed` (RandomState: stream frozen across numpy versions, so a resume sees the same
+    order); a corpus drawn beyond its rows (an SFT run of more than one epoch) is read on through further epochs,
+    epoch e a fresh permutation by seed + e, so no row repeats within an epoch."""
     rows = stage_rows(tokenizer, stage)
-    mixture = weights(stage, rows, drawn(stage, run))[0]
-    orders = {corpus: np.random.RandomState(seed).permutation(rows[corpus]) for corpus in mixture}
+    mixture, draws, _ = weights(stage, rows, drawn(stage, run))
+    orders = {corpus: np.concatenate([np.random.RandomState(seed + e).permutation(rows[corpus])
+                                      for e in range(max(1, -(-draws[corpus] // rows[corpus])))])
+              for corpus in mixture}
     return mixture, iter(PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=stage.seq_len,
                                             micro_batch_size=stage.micro_batch_size, device=device, reading="fim",
                                             start=start))

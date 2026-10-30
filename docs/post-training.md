@@ -19,7 +19,7 @@ figure without a record, or a paper value its extracted text lacks. Below 1B the
 | `posttrain/sft.py` (`NAME`, `SFT_STAGE`, `THINK`, `END_THINK`) | §11.1 markers; §11.2 the corpus's stage |
 | `posttrain/sft_data.py` | §11.1 format; §11.2 data, filters, split by problem, packing |
 | `corpus/loader.py` (`PackedSplit.contexts`, `PretrainingBatches.assemble`) | §11.1 loss: the context's labels ignored |
-| `run.py` (`RunConfig.base`, `base_step`, `sft_rows`, `generate` "none"; `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml` | §11.2 run |
+| `run.py` (`RunConfig.base`, `base_step`, `sft_epochs`, `generate` "none"; `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml`, `train/stages.py` (`stage_batches`: epochs past the first) | §11.2 run |
 | `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/stages.py` (`val_batches`), `train/loop.py` (base weights, `validate`) | §11.2 run |
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`) | §11.2 peak calibration |
 
@@ -166,10 +166,10 @@ and below:
   epochs, lr 8e-5, 32K (Table 2); OpenThoughts 5 epochs, lr 8e-5, batch 512, packed (App. Table 9); Olmo 3 Think 2
   epochs, lr 5e-5, 1M-token batches of packed 32K rows (App. A.6.1); Nemotron-Cascade lr 5e-5 then 2e-5, batch 256
   (Table 14).
-- **Here** [inference]: reasoning traces only, whole rows up to 32,768 tokens, one packed stage of one epoch
-  (§11.2): Cascade-1's Python code traces, at most 4 per prompt in each group (678,756 of 2,694,422 after the
-  filters), past the valley; CP-v2's Python and C++ traces that fit (186,753) and its Exercism function-stub traces
-  (76,833).
+- **Here** [inference]: reasoning traces only, whole rows up to 32,768 tokens, one packed stage of 1.5 epochs
+  (§11.2): Cascade-1's Python code traces, at most 4 per prompt in each group (678,756 of the 2,521,627 left after
+  the filters, of 2,694,422 rows read), past the valley; CP-v2's Python and C++ traces that fit (186,753) and its
+  Exercism function-stub traces (76,833).
 
 ## 5. Preference tuning
 
@@ -355,7 +355,7 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 | Stage | From | Data | Objective | Lengths | Gate |
 |---|---|---|---|---|---|
 | 0. Base | — | — | — | — | the evaluations of steps 66,063 and 69,874 (`docs/evaluation.md` §1) pick the start |
-| 1. SFT | the base | reasoning traces, at most 4 per prompt in each group: Cascade-1's Python, CP-v2's Python, C++ and Exercism; 933,300 traces of 288,554 prompts (205,360 problems), 8.13B tokens, 5,521 steps, ≈7.9 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4): `conf/experiment/sft.yaml` evaluates its final checkpoint with `generate` "reasoning" in the same job; a run trained with `generate` "none" (its name carries it) is evaluated by `eval/suite.py` `evaluate` with "reasoning" at any saved step |
+| 1. SFT | the base | reasoning traces, at most 4 per prompt in each group: Cascade-1's Python, CP-v2's Python, C++ and Exercism; 933,300 traces of 288,554 prompts (205,360 problems), 8.13B tokens, 1.5 epochs: 8,281 steps, 12.21B tokens, peak lr 2.0105e-4, ≈11.8 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4): `conf/experiment/sft.yaml` evaluates its final checkpoint with `generate` "reasoning" in the same job; a run trained with `generate` "none" (its name carries it) is evaluated by `eval/suite.py` `evaluate` with "reasoning" at any saved step |
 | Code RL, deferred | the SFT model | problems with tests, 47,468 before filtering (§11.3) | Nemotron-Cascade's GRPO, one update per batch, sequence-level truncated importance weights; FP16 | responses ≤ 16,384, then ≤ 28,672 | pass@1 up, pass@20 not down beyond its error bar (§11.4) |
 
 ### 11.1 Format
@@ -375,18 +375,23 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
   Python, C++ and Exercism traces. A Cascade-1 row's reasoning is its reply between the leading `<think>` and
   `</think>`, its answer the rest; a CP-v2 row's are its `reasoning_content` and `content` (no prompt is a `-`
   placeholder). An Exercism row is Aider's 9-message protocol: the prompt is the stub's file listing and the problem
-  statement without Aider's editing instructions, the reasoning the reply's prose before its file, the answer that
-  file's code in a Python block; these are the only function-stub prompts (HumanEval's shape) with short reasoning in
-  these releases. CP-v2's Python and C++ are Codeforces-level problems harder than Cascade-1's, and the only C++.
+  statement without Aider's editing instructions, the reasoning the reply's prose before its file less the markdown
+  heading that closes it ("### Solution Code"), the answer that file's code in a Python block; these are the only
+  function-stub prompts (HumanEval's shape) with short reasoning in these releases. CP-v2's Python and C++ are
+  Codeforces-level problems harder than Cascade-1's, and the only C++.
 - **Filters**, in order, each row counted at the first it fails: no reasoning or no answer; reasoning under 20
   tokens; above 32,768 tokens rendered, dropped, not cut (a cut trace loses its answer; Nemotron-Cascade drops
   over-length samples from its math data, arXiv 2512.13607 §3.2.2, and states nothing for code); §1's 10-gram rule on
   prompt, reasoning and answer against every task the evaluation scores (`corpus/decontaminate.py`
   `benchmark_texts`: EvalPlus, MultiPL-E, MBPP's 500 original test problems, HumanEval-X C++ and the infilling
-  programs; LiveCodeBench is not among them, its overlap unmeasured, `docs/evaluation.md` §4); exact duplicates of
-  prompt, reasoning and answer (the first kept, groups in the table's order); at most 4 traces per exact prompt in
-  each group, drawn at random (seed 0), so a prompt in several groups keeps up to 4 in each (291,398 distinct
-  prompts, 350,944 prompt-group pairs in the corpus). No correctness filter: Nemotron-Cascade (arXiv 2512.13607)
+  programs), which removes every trace of 5.5% of Stage-1's distinct prompts (8,773 of 159,304) and 5.2% of Stage-2's
+  (4,105 of 78,852, over-length drops included) [measured]; exact duplicates of prompt, reasoning and answer (the
+  first kept, groups in the table's order); at most 4 traces per exact prompt in each group, drawn at random (seed
+  0), so a prompt in several groups keeps up to 4 in each (291,398 distinct prompts, 350,944 prompt-group pairs in
+  the corpus). LiveCodeBench is not among the rule's tasks; against its 454 v6-window problems (§11.4) the rule's
+  hits on the corpus's prompts are boilerplate ("given from Standard Input in the following format", runs of sample
+  digits), and none of the 454 shares 30% or more of its distinctive 8-word sequences (those in no other window
+  problem) with any SFT prompt, the most 18.6% [measured]. No correctness filter: Nemotron-Cascade (arXiv 2512.13607)
   states none; Nemotron-Cascade 2 keeps only correct traces where tests exist (arXiv 2603.19220 §3.2.2); at 7–8B
   unfiltered traces matched or beat filtered ones (arXiv 2506.04178 Tables 15, 18; arXiv 2510.06101 Table 2).
 - **Split by problem** (`posttrain/sft_data.py` `problem`): one problem recurs across groups and sources under
@@ -424,47 +429,53 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 
 - **Packing**: the documents, in a seeded random order, are packed by the base's packer (`corpus/pack.py`,
   Best-Fit-Decreasing over shards of 4,096 documents, `docs/corpus.md` §8), none cut, one attention segment each:
-  248,458 train and 2,361 val rows of 32,768 tokens, 99.90% and 99.91% of input positions in use. Each document's
+  248,444 train and 2,361 val rows of 32,768 tokens, 99.90% of input positions in use in both. Each document's
   context length (the prompt and `\n\n<think>\n`) is in `<split>.context`; the loader sets those labels to
   `IGNORE_INDEX` (`corpus/loader.py` `PretrainingBatches.assemble`), so 7.78B of the corpus's 8.13B train tokens carry
   loss [arithmetic: 95.7%].
-- **One stage, one epoch** (`run.py` `RunConfig.base`, `conf/experiment/sft.yaml`, `train/schedule.py` `sft_plan`):
-  the base run's weights after `base_step` steps (default 69,874, its last) with fresh optimizer state; 3 rows per
-  micro-batch and 15 micro-batches, 1,474,560 tokens, per step as in the base's 32K stage; 5,521 steps over a seeded
-  permutation of the train rows (13 rows unread), ≈7.9 h at the base's exclusive 287K tok/s [estimate], without the
-  7 validation passes (≈0.2 h [estimate]). Nemotron-Cascade trains one epoch per stage over 8.3 and 17.6 traces per
-  prompt (arXiv 2512.13607 §3.1.1, §3.2.3); Nemotron-Cascade 2's single packed stage peaks after about 1.5 epochs
-  (arXiv 2603.19220 §3.1.1). The other recipes run 2–8 epochs (MobileLLM-R1 4 at 950M, rStar-Coder 6 at 1.5B,
-  AceReason's plateau at 5–6, X-Coder 8–10 for long traces; §4): one epoch over ≈3.2 traces per prompt here is a
-  time choice.
+- **One stage, 1.5 epochs** (`run.py` `RunConfig.base`, `sft_epochs`; `conf/experiment/sft.yaml`;
+  `train/schedule.py` `sft_plan`; `train/stages.py` `stage_batches`): the base run's weights after `base_step` steps
+  (default 69,874, its last) with fresh optimizer state; 3 rows per micro-batch and 15 micro-batches, 1,474,560
+  tokens, per step as in the base's 32K stage; ⌊1.5 × 248,444 / 45⌋ = 8,281 steps, 12.21B tokens (62.59 per
+  parameter). The first epoch reads every train row in the seeded permutation; the second is a fresh permutation
+  (seed + 1) read for its first 124,201 rows, so no row repeats within an epoch and 124,201 rows are read twice; a
+  resume continues at its row across the boundary. ≈11.8 h at the base's exclusive 287K tok/s [estimate], without
+  the 10 validation passes (≈0.25 h [estimate]). Basis: Nemotron-Cascade 2's single packed stage "reaches optimal
+  performance after approximately 1.5 epochs" (arXiv 2603.19220 §3.1.1). It departs from Nemotron-Cascade's one
+  epoch per stage over 8.3 and 17.6 traces per prompt (arXiv 2512.13607 §3.1.1, §3.2.3): here ≈3.2 traces per prompt
+  over 1.5 epochs give ≈4.8 trace passes per prompt [arithmetic]. The other recipes run 2–8 epochs (MobileLLM-R1 4 at
+  950M, rStar-Coder 6 at 1.5B, AceReason's plateau at 5–6, X-Coder 8–10 for long traces; §4); 1.5 is the time
+  choice.
 - **Optimizer**: the base's NorMuon and AdamW with one learning rate, warmup over 40 steps and linear decay to zero
   (`docs/training.md` §3–§4); the peak is `learning_rate_scale` times the base run's recorded peak, 2.3454e-3. No
   weight decay (`sft_plan`): the closest-size recipe, MobileLLM-R1-950M, fine-tunes with none (arXiv 2509.24945 §3.2),
   as does OpenThoughts (arXiv 2506.04178 App. D.2); Nemotron-Cascade uses 1e-4 (arXiv 2512.13607 App. D Table 14),
   and Nemotron-Cascade 2's 0.1 (Σ_t η_t λ ≈ 0.106 over its run, arXiv 2603.19220 App. B Table 7 [arithmetic]) is the
   exception; with λ = 0 the total decay does not depend on which learning rate wins. The τ law (`docs/training.md`
-  §3) sets a from-scratch timescale: at the SFT's 41.73 tokens per parameter it gives λ = 5.1 at 1/10 of the base
-  peak, which would leave about 4% of the base weights' scale [arithmetic].
+  §3) sets a from-scratch timescale: at the SFT's 62.59 tokens per parameter it gives λ = 4.2 at 1/10 of the base
+  peak, which would leave about 2% of the base weights' scale [arithmetic].
 - **Peak calibration** (`conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` `sft_lr_fit`): calibrated, not
   borrowed, since Nemotron-Cascade's AdamW 5e-5 has no NorMuon counterpart. Three complete schedules at 1/10, 1/3
-  and 1 times the base peak over the same first 2% of the train permutation, trained only (`generate` "none": no
-  evaluation, no step-0 validation), each scored by the response loss on the whole val split after its last step;
-  an arm without a val record (a diverged one) stops the fit with its name. The rule: the vertex of the
-  least-squares parabola of those losses against u = ln(scale) (`metrics.parabola_vertex`, as `docs/training.md` §5
-  calibrates the base's), which must have positive curvature and lie inside the grid (else the fit raises, and an
-  arm 3× beyond the edge with the lowest loss is added); the full run's scale is the vertex times (run steps / arm
-  steps)^−0.30, the step counts from the plans: (5,521 / 109)^−0.30 = 0.308 [arithmetic]. The arms ran on the
-  corpus before the function-header wrapper and with the near-duplicate filter since removed: 109 steps over its first
-  4,905 train rows, which held 56 of the 1,850 header-twin documents (1.1%), scored on a val split that held their 237
-  twin problems; the learning-rate estimate does not depend on the exact rows [inference]. Basis [inference]: at a
-  fixed batch the optimum falls with the run's length with exponent 0.32 (arXiv 2409.19913 §6 Eq. 5; 0.30 in its
-  §4.1, Llama-1); the repository's d8 pair, net of its doubled batch by a square-root rule, gives 0.24–0.30
-  (`docs/training.md` §5) and DeepSeek LLM's law 0.29 at a fixed batch [arithmetic]; the one counter-claim, that the
-  optimum hardly moves under linear decay to zero (arXiv 2502.15938 §4.2), is contradicted by that d8 pair; erring
-  low is the cheaper error, forgetting growing with the learning rate (§4). A caveat on the transfer: the 40 warmup
-  steps are 37% of an arm and 0.7% of the full run, outside the regime of those fits. At 1B, in KL distillation of
-  150 steps, AdamW at 5e-5 against 1e-5 cost 11–14 points out of domain (arXiv 2609.35259 §4.2). Cost: ≈36 min of
-  GPU [estimate].
+  and 1 times the base peak over the same first 2% of the first epoch's order (`sft_epochs` 0.02), trained only
+  (`generate` "none": no evaluation, no step-0 validation), each scored by the response loss on the whole val split
+  after its last step; an arm without a val record (a diverged one) stops the fit with its name. The rule: the vertex
+  of the least-squares parabola of those losses against u = ln(scale) (`metrics.parabola_vertex`, as
+  `docs/training.md` §5 calibrates the base's), which must have positive curvature and lie inside the grid (else the
+  fit raises, and an arm 3× beyond the edge with the lowest loss is added); the full run's scale is the vertex times
+  (run steps / arm steps)^−0.30, the steps from the plans (`conf/experiment/sft.yaml` passes its `sft_epochs` to the
+  resolver). Measured (`results/sft_lr.jsonl`): final losses 0.96998, 0.93985 and 0.97064 at 1/10, 1/3 and 1, vertex
+  ×0.3143 (curvature 0.0230); times (8,281 / 109)^−0.30 = 0.2728 the scale is 0.0857, a peak of 2.0105e-4
+  [arithmetic]. The arms ran on an earlier build of the corpus (before the function-header wrapper and the Exercism
+  heading's removal, with the near-duplicate filter since removed): 109 steps over its first 4,905 train rows, which
+  held 56 of the 1,850 header-twin documents (1.1%), scored on a val split that held their 237 twin problems; the
+  learning-rate estimate does not depend on the exact rows [inference]. Basis [inference]: at a fixed batch the
+  optimum falls with the run's length with exponent 0.32 (arXiv 2409.19913 §6 Eq. 5; 0.30 in its §4.1, Llama-1); the
+  repository's d8 pair, net of its doubled batch by a square-root rule, gives 0.24–0.30 (`docs/training.md` §5) and
+  DeepSeek LLM's law 0.29 at a fixed batch [arithmetic]; the one counter-claim, that the optimum hardly moves under
+  linear decay to zero (arXiv 2502.15938 §4.2), is contradicted by that d8 pair; erring low is the cheaper error,
+  forgetting growing with the learning rate (§4). A caveat on the transfer: the 40 warmup steps are 37% of an arm and
+  0.5% of the full run, outside the regime of those fits. At 1B, in KL distillation of 150 steps, AdamW at 5e-5
+  against 1e-5 cost 11–14 points out of domain (arXiv 2609.35259 §4.2). Cost: ≈36 min of GPU [estimate].
 - **Validation and checkpoints**: the response loss, mean nats per label (each response and its closing BOS), over
   the whole val split (2,361 rows, 74.0M labels) before the full run's first step, every 1,000 steps and after the
   last (`run.py` `validation_steps`, `train/loop.py` `validate`; `val` records); full states every 1,000 steps (resume

@@ -47,7 +47,7 @@ class RunConfig:
     generate: str = "parse"  # eval/suite.py evaluate's mode; "none": no evaluation, the run trained only
     base: str | None = None  # SFT: the base run's name; its checkpoint after base_step steps is the start
     base_step: int = 69_874
-    sft_rows: float = 1.0  # SFT: the share of the SFT corpus's packed train rows trained, one epoch
+    sft_epochs: float = 1.0  # SFT: passes over the SFT corpus's packed train rows (a share of one: a calibration arm)
 
 
 def run_name(config: RunConfig) -> str:
@@ -60,7 +60,7 @@ def run_name(config: RunConfig) -> str:
 
 def plan_of(config: RunConfig) -> "RunPlan":
     """The base model's plan (schedule.plan) at the run's tokens_per_param (default max_tokens_per_param), lr
-    scaled; an SFT run's (schedule.sft_plan) over its share of the SFT rows, its base run's peak lr scaled."""
+    scaled; an SFT run's (schedule.sft_plan) over its epochs of the SFT rows, its base run's peak lr scaled."""
     from model.modeling import meta_model
     from train.schedule import plan, sft_plan
     from train.stages import max_tokens_per_param
@@ -71,7 +71,7 @@ def plan_of(config: RunConfig) -> "RunPlan":
 
         started = next(r for r in metrics.records(config.base) if r["kind"] == "run")
         rows = packed_rows(NAME, "train", get_tokenizer(), SFT_STAGE.seq_len)
-        return sft_plan(model=meta_model(), rows=round(config.sft_rows * rows),
+        return sft_plan(model=meta_model(), rows=rows, epochs=config.sft_epochs,
                         learning_rate=config.learning_rate_scale * started["learning_rate"]["muon"][0])
     tokens_per_param = (max_tokens_per_param(get_tokenizer()) if config.tokens_per_param is None
                         else config.tokens_per_param)
@@ -102,11 +102,11 @@ def analysis_steps(config: RunConfig, run: "RunPlan") -> tuple[frozenset[int], f
 
 
 def validation_steps(config: RunConfig, run: "RunPlan") -> frozenset[int]:
-    """An SFT run's held-out loss: every FULL_STATE_EVERY steps and after its last, and before its first if it trains
-    every row (a calibration arm, on a share of them, starts from the same base); none for a base run."""
+    """An SFT run's held-out loss: every FULL_STATE_EVERY steps and after its last, and before its first unless it
+    trains less than an epoch (a calibration arm, starting from the same base); none for a base run."""
     if config.base is None:
         return frozenset()
-    first = {0} if config.sft_rows == 1 else set()
+    first = {0} if config.sft_epochs >= 1 else set()
     return frozenset({*first, *range(FULL_STATE_EVERY, run.max_steps, FULL_STATE_EVERY), run.max_steps})
 
 

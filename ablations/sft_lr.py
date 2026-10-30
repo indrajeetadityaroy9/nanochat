@@ -1,8 +1,8 @@
 """
 SFT peak-lr calibration (docs/post-training.md §11.2): complete schedules at 1/10, 1/3 and 1 times the base run's peak
 lr over the same first 2% of the SFT train rows, each scored by the response loss on the held-out problems after its
-last step; the full run's scale is the fitted optimum moved to the full run's steps. The runs:
-conf/experiment/sft_lr.yaml; their records: results/sft_lr.jsonl (ablations/records.py).
+last step; the full run's scale is the fitted optimum moved to the full run's steps (its epochs of the train rows). The
+runs: conf/experiment/sft_lr.yaml; their records: results/sft_lr.jsonl (ablations/records.py).
 """
 import json
 import math
@@ -16,12 +16,12 @@ from paths import RESULTS
 STEPS_EXPONENT = 0.30
 
 
-def sft_lr_fit() -> dict:
+def sft_lr_fit(epochs: float) -> dict:
     """The arms' final held-out losses against u = ln(scale), fitted by a parabola (metrics.parabola_vertex, as
     ablations/peak_lr.py lr_multiplier); its vertex times (run steps / arm steps)^-STEPS_EXPONENT, the steps from the
-    arms' plans (their run records) and the full run's (train/schedule.py sft_plan over every train row). Raises
-    ValueError unless every arm has a val record (a diverged arm has none) and the curvature is positive and the vertex
-    inside the grid (then an arm 3x beyond the edge with the lowest loss is added to the grid)."""
+    arms' plans (their run records) and the full run's (train/schedule.py sft_plan over `epochs` of the train rows).
+    Raises ValueError unless every arm has a val record (a diverged arm has none) and the curvature is positive and the
+    vertex inside the grid (then an arm 3x beyond the edge with the lowest loss is added to the grid)."""
     from corpus.layout import packed_rows
     from corpus.tokenizer import get_tokenizer
     from model.modeling import meta_model
@@ -44,14 +44,14 @@ def sft_lr_fit() -> dict:
                          f"final val loss by scale {dict(zip(scales, losses, strict=True))}")
     (arm_steps,) = {next(r for r in line["records"] if r["kind"] == "run")["plan"]["max_steps"] for line in lines}
     rows = packed_rows(NAME, "train", get_tokenizer(), SFT_STAGE.seq_len)
-    run_steps = sft_plan(model=meta_model(), rows=rows, learning_rate=1.0).max_steps
+    run_steps = sft_plan(model=meta_model(), rows=rows, epochs=epochs, learning_rate=1.0).max_steps
     factor = (run_steps / arm_steps) ** -STEPS_EXPONENT
     return {"losses": dict(zip(scales, losses, strict=True)), "curvature": curvature, "vertex": math.exp(vertex),
             "arm_steps": arm_steps, "run_steps": run_steps, "factor": factor, "scale": math.exp(vertex) * factor}
 
 
-def sft_lr_scale() -> float:
-    """The full SFT run's learning_rate_scale (sft_lr_fit), its fit printed."""
-    fit = sft_lr_fit()
+def sft_lr_scale(epochs: float) -> float:
+    """The learning_rate_scale of a full SFT run of `epochs` (sft_lr_fit), its fit printed."""
+    fit = sft_lr_fit(epochs)
     print(f"SFT lr calibration: {json.dumps(fit)}", flush=True)
     return fit["scale"]

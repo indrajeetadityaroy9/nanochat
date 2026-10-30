@@ -255,7 +255,7 @@ seeded by `train/loop.py` `SEED` = 0. The fields' defaults are the base recipe:
 | `learning_rate_scale` | 1.0 | times the law's lr; `conf/run.yaml` sets `${lr_multiplier:}` (§5); an SFT run's: times its base run's peak |
 | `num_checkpoints` | 1 | evenly spaced evaluated checkpoints, the last the final model; > 1 adds `repo_level_start` and the analysis checkpoints |
 | `generate` | "parse" | `evaluate`'s mode: "parse" (`peak_lr`), "benchmarks" (base) or "reasoning" (SFT); "none" trains only (SFT's calibration arms) |
-| `base`, `base_step`, `sft_rows` | None, 69,874, 1.0 | SFT (§10): the base run's name and checkpoint step, the share of the SFT train rows |
+| `base`, `base_step`, `sft_epochs` | None, 69,874, 1.0 | SFT (§10): the base run's name and checkpoint step, the passes over the SFT train rows (a share of one: a calibration arm) |
 
 The experiments: `python run.py experiment=pretrain` (`num_checkpoints` 10, `generate` "benchmarks") and
 `python run.py experiment=peak_lr_d24` (§5). **Names** (`run_name`): the fields that differ from `RunConfig()`,
@@ -491,7 +491,8 @@ another evalplus revision. `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0` keeps fp32 matmu
 `OMP_NUM_THREADS=1` (parallelism is by process); compiler and kernel caches live in `artifacts/cache`.
 
 **Data order.** Each corpus's packed rows are permuted once by `train/loop.py` `SEED` = 0 (NumPy `RandomState`, whose
-stream is frozen across NumPy versions; `stage_batches`), which also seeds the initialization; rows go to corpora by
+stream is frozen across NumPy versions; `stage_batches`), which also seeds the initialization; a corpus drawn past its
+rows (an SFT run of more than one epoch) is read on in epoch e's fresh permutation by `SEED` + e. Rows go to corpora by
 the loader's Weyl sequence (`mixture.mixture_rows`; `docs/corpus.md` §9). The order does not depend on the CPU
 [inference].
 

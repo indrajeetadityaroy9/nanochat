@@ -48,6 +48,8 @@ DROPS = ("malformed", "placeholder", "no_reasoning", "no_answer", "short_reasoni
 LISTING = re.compile(r"^(\S+\.\w+)\n```[^\n]*\n(.*?)\n```", re.S | re.M)
 # Aider's editing instructions after an Exercism problem statement
 AIDER_REQUEST = "\n####\n\nUse the above instructions to modify the supplied files:"
+# A markdown heading closing a text (an Exercism reply's "### Solution Code" before its file listing)
+TRAILING_HEADING = re.compile(r"\n#{1,6} [^\n]*\s*$")
 # The sources' stock instructions around a problem: CP-v2's header, Nemotron-Cascade's language and format requests and
 # its fenced function header (a problem recurs under `def f(x):` and under `class Solution:` with `def f(self, x):`)
 WRAPPERS = re.compile("|".join((
@@ -85,7 +87,8 @@ def competitive(row: dict) -> Parsed:
 def exercism(row: dict) -> Parsed:
     """CP-v2 Exercism, Aider's 9 messages (system prompt and an example edit first): the stub's file listings
     (message 5 without Aider's preamble) and the problem statement (message 7 without AIDER_REQUEST's instructions);
-    the reply's prose before its first listing, then that listing's code as a Python block."""
+    the reply's prose before its first listing, less the markdown heading that introduces the code ("### Solution
+    Code"), then that listing's code as a Python block."""
     messages = row["messages"]
     if len(messages) != 9 or (stub := LISTING.search(messages[5]["content"])) is None:
         return "malformed"
@@ -93,8 +96,8 @@ def exercism(row: dict) -> Parsed:
     if (listing := LISTING.search(reply)) is None:
         return "no_answer"
     statement = messages[7]["content"].partition(AIDER_REQUEST)[0]
-    return (messages[5]["content"][stub.start():].strip() + "\n\n" + statement.strip(), reply[:listing.start()],
-            f"```python\n{listing.group(2)}\n```")
+    return (messages[5]["content"][stub.start():].strip() + "\n\n" + statement.strip(),
+            TRAILING_HEADING.sub("", reply[:listing.start()].rstrip()), f"```python\n{listing.group(2)}\n```")
 
 
 FORMATS = {"cascade": cascade, "competitive": competitive, "exercism": exercism}
