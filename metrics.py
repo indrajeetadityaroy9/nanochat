@@ -21,7 +21,8 @@ from numpy.typing import ArrayLike
 from corpus.mixture import REPO_LEVEL_STAGE
 from paths import RUNS
 
-PARSE_OUTCOMES = ("parses", "indentation", "syntax")
+# eval/code_eval.py truncated (cut at the token budget, not compiled), else parse_outcome's
+PARSE_OUTCOMES = ("parses", "indentation", "syntax", "truncated")
 
 
 def append(run_name: str, record: dict, *, attempt: int) -> None:
@@ -99,6 +100,20 @@ def mixture_bpb_summary(corpora: dict, weights: dict[str, float]) -> dict:
             "rows": sum(corpora[c]["rows"] for c in weights), "clusters": clusters}
 
 
+def paired_rows(a: dict, b: dict) -> dict:
+    """{stratum: b's rows with each row's bits minus a's}, for two scorings of identical rows (equal row_bytes and
+    row_clusters, else ValueError): mixture_bpb_summary of them is the paired change b − a in bits per byte with its
+    clustered standard error (arXiv 2411.00640 §4.2 Eq. 8, within each stratum)."""
+    out = {}
+    for c, x in a.items():
+        y = b[c]
+        if list(x["row_bytes"]) != list(y["row_bytes"]) or list(x["row_clusters"]) != list(y["row_clusters"]):
+            raise ValueError(f"{c}: the two scorings hold different rows")
+        out[c] = {"row_bits": np.subtract(y["row_bits"], x["row_bits"]), "row_bytes": x["row_bytes"],
+                  "row_clusters": x["row_clusters"], "rows": x["rows"]}
+    return out
+
+
 def parse_outcome(source: str) -> Literal["parses", "indentation", "syntax"]:
     """How a program compiles: "indentation" (IndentationError, checked first), "syntax" or "parses".
     TokEval companion post's classification (linked from arXiv 2608.18062 App. F.3, fn. 15); parser overflow counts as
@@ -131,30 +146,38 @@ def measures(evaluation: dict, steps: dict[int, dict], *, repo_level_start: int)
                 {c: w for c, w in evaluation["32k"]["weights"].items() if c in REPO_LEVEL_STAGE.code},
                 buckets=slice(-1, None)),
             "text": evaluation["8k"]["bpb"]["text"], "math": evaluation["8k"]["bpb"]["math"],
-            "unparsed": 1 - shares["parses"], "indentation": shares["indentation"], "syntax": shares["syntax"],
+            "unparsed": shares["indentation"] + shares["syntax"], "indentation": shares["indentation"],
+            "syntax": shares["syntax"], "truncated": shares["truncated"],
             "pass@1": statistics.fmean(s[0] == "pass" for p in parse for s in p["base_status"]),
             "tokens_per_second": statistics.median(r["tokens_per_second"] for r in file_level),
             "mfu": statistics.median(r["mfu"] for r in file_level)}
 
 
+def solution_strata(solution: dict) -> dict:
+    """An evaluation's "solution" rows as two strata: HumanEval (HumanEval+ and HumanEval-X C++ hold its problems in
+    one order, HumanEval/i and CPP/i, a cluster each) and MBPP+ (a cluster per problem); mixture_bpb_summary at weights
+    {stratum: rows} is their pooled bpb."""
+    plus, cpp, mbpp = (solution[name] for name in ("humaneval_plus", "humaneval_x_cpp", "mbpp_plus"))
+    problems = len(plus["row_bits"])
+    return {"humaneval": {k: [*plus[k], *cpp[k]] for k in ("row_bits", "row_bytes")}
+            | {"row_clusters": [*range(problems)] * 2, "rows": 2 * problems},
+            "mbpp": {"row_bits": mbpp["row_bits"], "row_bytes": mbpp["row_bytes"],
+                     "row_clusters": range(len(mbpp["row_bits"])), "rows": len(mbpp["row_bits"])}}
+
+
 def measure_errors(evaluation: dict) -> dict[str, dict]:
-    """Error bars of measures' evaluation measures (arXiv 2411.00640): bpb by mixture_bpb_summary, shares by problem.
-    solutions: two strata, HumanEval (HumanEval+ and HumanEval-X C++ hold its problems in one order, HumanEval/i and
-    CPP/i, a cluster each) and MBPP+, at their solution counts (the pooled bpb)."""
+    """Error bars of measures' evaluation measures (arXiv 2411.00640): bpb by mixture_bpb_summary, shares by problem;
+    solutions over solution_strata at their solution counts (the pooled bpb)."""
     parse = evaluation["parse"].values()
     outcomes = [o for p in parse for o in p["outcomes"]]
-    plus, cpp, mbpp = (evaluation["solution"][name] for name in ("humaneval_plus", "humaneval_x_cpp", "mbpp_plus"))
-    problems = len(plus["row_bits"])
-    strata = {"humaneval": {k: plus[k] + cpp[k] for k in ("row_bits", "row_bytes")}
-              | {"row_clusters": [*range(problems)] * 2, "rows": 2 * problems},
-              "mbpp": {"row_bits": mbpp["row_bits"], "row_bytes": mbpp["row_bytes"],
-                       "row_clusters": range(len(mbpp["row_bits"])), "rows": len(mbpp["row_bits"])}}
+    strata = solution_strata(evaluation["solution"])
     return {"code": evaluation["8k"]["errors"]["code"], "text": evaluation["8k"]["errors"]["text"],
             "math": evaluation["8k"]["errors"]["math"], "repo_32k": evaluation["32k"]["errors"]["code"],
             "solutions": mixture_bpb_summary(strata, {name: s["rows"] for name, s in strata.items()}),
-            "unparsed": summary([o != "parses" for o in outcomes]),
+            "unparsed": summary([o in ("indentation", "syntax") for o in outcomes]),
             "indentation": summary([o == "indentation" for o in outcomes]),
             "syntax": summary([o == "syntax" for o in outcomes]),
+            "truncated": summary([o == "truncated" for o in outcomes]),
             "pass@1": summary([s[0] == "pass" for p in parse for s in p["base_status"]])}
 
 

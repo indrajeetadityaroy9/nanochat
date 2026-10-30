@@ -1,7 +1,7 @@
 """
 Checkpoints, each written to a temp file then renamed (atomic): RUNS/<run_name>/checkpoint-<step>.pt, a run's full
 state (resumed from; evaluated if among run.py checkpoint_steps); weights-<step>.pt, its fp32 weights and model config
-only (for analysis; never resumed from or evaluated).
+only (for analysis, eval/trajectory.py's likelihoods among it; never resumed from or evaluated).
 """
 
 from pathlib import Path
@@ -27,8 +27,10 @@ def save_checkpoint(path: Path, checkpoint: dict) -> None:
 
 
 def load_model(run_name: str, step: int, *, device: torch.device) -> CausalLM:
-    """A checkpoint's model at the context and ModelConfig (output-logit cap included) its weights trained in."""
-    checkpoint = torch.load(checkpoint_path(run_name, step), map_location=device)
+    """A saved model (the full state, else the weights-only file of the step) at the context and ModelConfig
+    (output-logit cap included) its weights trained in."""
+    path = checkpoint_path(run_name, step)
+    checkpoint = torch.load(path if path.exists() else weights_path(run_name, step), map_location=device)
     with torch.device("meta"):
         model = CausalLM(ModelConfig(**checkpoint["config"]))
     model.load_state_dict(checkpoint["model"], assign=True)

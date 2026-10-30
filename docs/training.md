@@ -199,8 +199,9 @@ fit's curvature its × 4.78 would cost 0.0027 code bpb [arithmetic]. The parse m
 greedy): HumanEval+ base pass@1 0.067 / 0.104 / 0.110 (standard error 0.020–0.025), MBPP+ 0.114 / 0.132 / 0.127
 (0.016–0.017), × 2's paired differences at most 2.1 standard errors (HumanEval+ against × 1, exact sign test p = 0.07);
 MBPP+ parse rate 0.825 / 0.894 / 0.775 (× 2 parses 70 problems × 4 does not, × 4 25 that × 2 does not; p = 4e-6),
-while two seeds of one D7 arm differ more (pooled unparsed 0.293 and 0.133, `docs/experiments.md` §1). The rule reads
-none of them.
+nearly every failure a completion cut at the token budget (65, 39 and 84 of 66, 40 and 85; `docs/evaluation.md` §3)
+[measured: completions re-encoded, ≥ 753 tokens], while two seeds of one D7 arm differ more (pooled unparsed 0.293 and
+0.133, `docs/experiments.md` §1). The rule reads none of them.
 
 **Dynamics** (`results/peak_lr_d24-curves.jsonl`, the arms' `train` records; × 1 / × 2 / × 4):
 - training loss (trailing 50-step means): × 4 leads until step 468, then trails × 2 (+0.011 at step 1,000, +0.002 at
@@ -381,7 +382,8 @@ reached 0.76–1.41× the value's in layers 13–19 (0.07–0.10× at checkpoint
 
 **Checkpoints.** Full state (`checkpoint-<step>.pt`: model, optimizers, model config, stage rows) is saved at
 `run.checkpoint_steps`, `round(steps·k/n)` for k = 1…n plus `repo_level_start` when n > 1, the only checkpoints
-evaluated. A run with n > 1 also keeps `run.analysis_steps`' checkpoints, never evaluated:
+evaluated. A run with n > 1 also keeps `run.analysis_steps`' checkpoints, never evaluated with the benchmarks (their
+likelihoods: `docs/evaluation.md` §2, the trajectory):
 
 | Set | Steps (base run) | Content | Count × size | Basis |
 |---|---|---|---|---|
@@ -411,6 +413,9 @@ has `diverged_at` set and `measures`, `errors`, `offset_bpb` and `efficiency` nu
 |---|---|
 | `results/<experiment>.jsonl` | per run: `experiment`, `eval/suite.py` `record` (`run_name`, the run log's non-train records, the checkpoints' evaluations), `config`, `measures` and `errors` (`docs/evaluation.md` §5), `offset_bpb` (32K code bits per byte by byte offset), `efficiency` (the first `run` record's `num_parameters`, `flops_per_token` and `model_flops_per_token`; the peak allocated and reserved bytes over the `stage` and `end` records), `diverged_at` |
 | `results/<experiment>-curves.jsonl` | per run: `experiment`, `run_name` and its train records as columns (`metrics.curves`) |
+
+`results/pretrain-trajectory.json` is the base run's likelihood trajectory (`docs/evaluation.md` §2) from step 62,887
+against step 66,063, written by §9 step 4.
 
 The ablation records and their status: `docs/experiments.md` §1. `results/peak_lr_d24.jsonl`'s `run` records carry
 the earlier multi-depth code's `RunConfig` fields (`num_hidden_layers` 24, `seed` 0, `tokenizer` "corpus"), all at
@@ -521,8 +526,12 @@ whose entrypoint creates `artifacts/` (`paths.py`).
    11 evaluated checkpoints (each tenth of the 69,874 steps and step 66,063, the repository stage's start) and the
    84 analysis checkpoints (§6), evaluates the 11 with every benchmark and writes `results/pretrain.jsonl` and
    `results/pretrain-curves.jsonl`. Expected time: §7.
-4. **Release**: `HF_TOKEN=<write token> scripts/release.sh <run_name> <repo>` uploads the run's checkpoints,
-   `metrics.jsonl`, the diagnostics sidecar, evaluations, `.hydra/`, the corpus tokenizer
+4. **Trajectory**: `scripts/container.sh python -m eval.trajectory <run_name> 66063 62887
+   results/pretrain-trajectory.json` scores the 12 analysis checkpoints from step 62,887 (the grid's 63,000–69,000
+   and the five weights-only files after the stage switch) by `likelihood` and writes the trajectory against step
+   66,063, the last file-level model (`docs/evaluation.md` §2).
+5. **Release**: `HF_TOKEN=<write token> scripts/release.sh <run_name> <repo>` uploads the run's checkpoints,
+   `metrics.jsonl`, the diagnostics sidecar, evaluations, likelihood records, `.hydra/`, the corpus tokenizer
    (`artifacts/corpus/tokenizer/`) and `results/` to a Hugging Face model repository; the first command below restores
    them where `load_model` and a resumed run read them. A checkpoint as a transformers model (`docs/evaluation.md` §8)
    goes to its own model repository (the export and upload below).

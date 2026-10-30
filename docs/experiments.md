@@ -54,7 +54,9 @@ evaluation, α = 0.05:
   seed, as TokEval's companion post App. D). Better or worse at p < 0.05, else equal. MBPP+ alone: its prompts leave
   the function header to the model, and "an evaluation that uses HumanEval alone does not expose this type of defect"
   (the post, *HumanEval*). The test treats problems as independent within one trained model; between-seed variance is
-  not in it: two seeds of one D7 arm give pooled unparsed shares 0.293 and 0.133 (§4).
+  not in it: two seeds of one D7 arm give pooled unparsed shares 0.293 and 0.133 (§4). These records' unparsed counts
+  completions cut at the token budget (`docs/evaluation.md` §3): 155 of 159 and 60 of 72 non-parsing completions were
+  cut, the stopped and non-parsing ones 0.0074 and 0.0221 of the 542 [measured: completions re-encoded, ≥ 753 tokens].
 - *Code bits per byte*: the arms' seed means differ beyond z·σ·√(2/n), z = 1.96, n seeds per arm, else equal; σ =
   0.0034, the pooled seed standard deviation of six d8 runs at 20 tokens per parameter on the reference tokenizer's
   data [unverified: those runs' records are not in `results/`], assumed to carry to other depths and data. Margins
@@ -261,7 +263,9 @@ adopted iff the lower-code end beat × 1 by the shared tests. Three runs (`resul
 
 τ×½ seed 0 against τ×1 seed 0: code −0.0019 (one-seed margin 0.0094: equal); MBPP+ unparsed 0.333 against 0.037,
 parsing worse (7 problems parse more under it, 119 under the baseline; from the records' `parse` `mbpp_plus`
-`outcomes`). τ×½ seed 0 trained with autograd kept on the step's statistics in `train/diagnostics.py` (the later runs
+`outcomes`), though 122 of its 126 non-parsing MBPP+ completions and 11 of the baseline's 14 were cut at the token
+budget (§1), so the difference lies in completions that never stopped, not in syntax.
+τ×½ seed 0 trained with autograd kept on the step's statistics in `train/diagnostics.py` (the later runs
 compute them under `torch.no_grad`), so its throughput and peak memory are not comparable; that its update was
 unchanged is [inference] (statistics only). Verdict: stopped after 3 of 12 runs; the τ law stays for Muon (basis:
 `docs/training.md` §3). Halving or doubling lr or weight decay from transferred values does equal or worse (arXiv
@@ -283,7 +287,9 @@ under `torch.no_grad`), d16 at 20, against D7's τ×1 seed 0 (trees differing by
 by > 0.0094 and MBPP+ parsing not worse. Record (`results/scalar_learning_rates.json` `analysis`, `.jsonl`): code
 0.42635 against 0.42724 (−0.0009, equal); 32K code 0.40815 against 0.40966; train loss over the last half −0.0022;
 MBPP+ parsing worse (9 problems parse more under it, 35 under the baseline, p = 1.1e-4); pooled unparsed 0.120 against
-0.054. Verdict: not adopted; given the between-seed spread (§1), "worse" is weak evidence, and the rule keeps one lr
+0.054 (cut at the token budget: 31 of its 40 non-parsing MBPP+ completions, 11 of the baseline's 14; stopped and
+non-parsing, pooled 0.0166 against 0.0074 [measured: completions re-encoded, ≥ 753 tokens]). Verdict: not adopted;
+given the between-seed spread (§1), "worse" is weak evidence, and the rule keeps one lr
 (`docs/training.md` §3).
 
 **Polar Express** (arXiv 2505.16932) [unverified: no record]. In the d16 optimizer screen at × 1 (setup, baselines and

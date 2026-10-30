@@ -126,6 +126,14 @@ def completion(tokenizer: Tokenizer, task: Task, ids: list[int], *, special: Lit
     return text[:min([j for j in (text.find(s) for s in task.stopwords) if j >= 0], default=len(text))]
 
 
+def truncated(tokenizer: Tokenizer, task: Task, ids: list[int], *, budget: int, healed: bytes) -> bool:
+    """Whether generation ended at its token budget with no stop sequence in its text (the decoder returns no BOS and
+    checks the budget before the stop sequences): a completion cut off mid-program, failing by length, not syntax."""
+    data = tokenizer.enc.decode_bytes([t for t in ids if t < tokenizer.bos_token_id])[len(healed):]
+    text = data.decode("utf-8", "replace")
+    return len(ids) == budget and not any(s in text for s in task.stopwords)
+
+
 def generate_groups(generator: NativeDecoder, groups: list[list[Request]],
                     done: Callable[[int, list[list[int]], dict], None]) -> None:
     """One generator.generate call over every group's independent requests; done(g, ids, latency) once group g ends."""
@@ -490,12 +498,13 @@ def vetted(benchmarks: dict[str, list[Task]]) -> dict[str, list[list[tuple[str, 
 
 
 def parse_record(pool: ProcessPoolExecutor, tokenizer: Tokenizer, name: str, items: list[Task], dropped: list[bytes],
-                 generated: list[list[int]], timing: dict) -> dict:
-    """parse_generation's record of generated ids: parse_outcome shares, EvalPlus's scores, outcomes, completions and
-    latency."""
+                 generated: list[list[int]], timing: dict, budget: int) -> dict:
+    """parse_generation's record of generated ids: each completion's outcome ("truncated" when cut at the budget, else
+    parse_outcome) and their shares, EvalPlus's scores, outcomes, completions and latency."""
     completions = [completion(tokenizer, t, ids, special="skip", healed=d)
                    for t, ids, d in zip(items, generated, dropped, strict=True)]
-    outcomes = [parse_outcome(t.prompt + c) for t, c in zip(items, completions, strict=True)]
+    outcomes = ["truncated" if truncated(tokenizer, t, ids, budget=budget, healed=d) else parse_outcome(t.prompt + c)
+                for t, ids, d, c in zip(items, generated, dropped, completions, strict=True)]
     return (parse_shares(outcomes) | evalplus(pool, name, items, [[c] for c in completions])
             | {"outcomes": outcomes, "completions": completions, "latency": timing})
 
@@ -517,7 +526,7 @@ def parse_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[str
     def done(g: int, generated: list[list[int]], timing: dict) -> None:
         name = names[g]
         results[name] = scorers.submit(parse_record, pool, tokenizer, name, benchmarks[name],
-                                       [d for _, _, d in healed[name]], generated, timing)
+                                       [d for _, _, d in healed[name]], generated, timing, budget)
 
     generate_groups(generator, [[Request(input_ids=h, max_new_tokens=budget, constraint=c,
                                          stopping_criteria=KeywordsStoppingCriteria(tokenizer, t.stopwords, healed=d))

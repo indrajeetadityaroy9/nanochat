@@ -14,7 +14,8 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 |---|---|
 | `eval/suite.py` (`evaluate`, `write_evaluation`, `record`, `evaluation_path`, `pin`, `resolved`) | §1 |
 | `eval/bpb.py` (`likelihood`, `val_bits`, `solution_bits`, `sums`, `sample_rows`, `row_clusters`) | §2 |
-| `eval/code_eval.py` (`tasks`, `parse_generation`, `generation`, `fim_generation`, `filtered_generation`, `vetted`, `codegen_runs`, `codegen_record`, `parse_record`, `fim_runs`, evaluator wrappers) | §1, §3, §4 |
+| `eval/trajectory.py` (`main`, `score`, `trajectory`, `rows_by_measure`, `groups`, `summaries`, `likelihoods`, `saved_steps`, `likelihood_path`) | §2 |
+| `eval/code_eval.py` (`tasks`, `parse_generation`, `generation`, `fim_generation`, `filtered_generation`, `vetted`, `codegen_runs`, `codegen_record`, `parse_record`, `truncated`, `fim_runs`, evaluator wrappers) | §1, §3, §4 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function) | §5 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `fim_prompt`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
@@ -100,20 +101,35 @@ atomics).
   prompt: EvalPlus's solutions begin with them and a tokenizer joins them to the prompt's last line break, so the
   prompt would otherwise end inside a token and tokenizers would score different bytes. Scoring starts at the token
   that starts at the prompt's end (`decode_with_offsets`).
+- **Trajectory** (`eval/trajectory.py`, `python -m eval.trajectory <run_name> <reference step> <first step>
+  <out.json>`): `likelihood` of every saved model from a step on. Evaluated checkpoints contribute their evaluations;
+  the analysis checkpoints (`docs/training.md` §6; `train/checkpoint.py` `load_model` reads a weights-only file where
+  a step has no full state) are scored into `RUNS/<run>/likelihood-<step>.json` (`"8k"`, `"32k"`, `"solution"` and
+  `"provenance"`, as in an evaluation). The models of a run score identical rows and solutions, so a change between
+  two is a paired difference: `metrics.mixture_bpb_summary` of the per-row bit differences (`metrics.paired_rows`),
+  whose standard error drops the covariance of the two models' row scores (arXiv 2411.00640 §4.2 Eq. 8, within each
+  stratum). Per step and measure (`8k` and `32k` by the stage's groups, `code` and `all`; `solution` per benchmark
+  and pooled over `metrics.solution_strata`): the bits per byte with its standard error and the paired change from
+  the reference step (for `32k`, from the first step at 32K where the reference is at 8K); per interval between
+  consecutive steps, the paired change and the summed learning rate of the updates between them (checkpoint s holds
+  the model after steps 0 … s − 1).
 
 ## 3. Parse measure
 
 `code_eval.parse_generation`: one greedy, unconstrained completion of each HumanEval+ (164) and MBPP+ (378) prompt,
 BOS first, the prompt healed at its boundary (`decoder.heal_tokens`, §6), as arXiv 2608.18062 generates (§4.3;
 App. C.1), with EvalPlus's prompt, 768 + 1 new tokens (`EVALPLUS_MAX_NEW_TOKENS` and the healed token) and stop
-strings; the completion is cut at its first stop, special tokens skipped. Each `prompt + completion` is classified by
-`metrics.parse_outcome` (§5) into parses, IndentationError (TabError included) or another SyntaxError, the
-classification of TokEval's companion post; the record holds each outcome's share and the completions' EvalPlus base
-and plus pass@1. The measure shows the failures a vocabulary's line-break tokens cause (SyntaxError when punctuation
-fuses with a line break, IndentationError when a line break fuses with the indentation after it, in the companion
-post's models) where pass@1 is near zero. It departs from TokEval's protocol in its prompts (EvalPlus's 0-shot base
-prompts; TokEval: lm-evaluation-harness, MBPP 3-shot, App. C.1), its budget and stops (the post: 256 tokens) and in
-compiling the unsanitized completion.
+strings; the completion is cut at its first stop, special tokens skipped. A completion that used its whole budget with
+no stop sequence (`code_eval.truncated`) is "truncated", not compiled: cut off mid-program, it fails by length, not
+syntax; in the d24 peak-lr records (`docs/training.md` §5) 96–99% of the non-parsing completions were cut so [measured:
+completions re-encoded, ≥ 753 tokens], and records written before this outcome count them as syntax or indentation
+failures. Every other `prompt + completion` is classified by `metrics.parse_outcome` (§5) into parses,
+IndentationError (TabError included) or another SyntaxError, the classification of TokEval's companion post; the
+record holds each outcome's share and the completions' EvalPlus base and plus pass@1. The measure shows the failures a
+vocabulary's line-break tokens cause (SyntaxError when punctuation fuses with a line break, IndentationError when a
+line break fuses with the indentation after it, in the companion post's models) where pass@1 is near zero. It departs
+from TokEval's protocol in its prompts (EvalPlus's 0-shot base prompts; TokEval: lm-evaluation-harness, MBPP 3-shot,
+App. C.1), its budget and stops (the post: 256 tokens) and in compiling the unsanitized completion.
 
 ## 4. Code benchmarks
 
@@ -184,10 +200,12 @@ import it alike.
 | `mixture_bpb(corpora, weights, buckets=)` | Σ_c w_c · bits_c / rows_c over Σ_c w_c · bytes_c / rows_c (rows_c the corpus's scored rows): the bits per byte of val rows drawn with row weights w | The Pile's whole-set figure aggregates its components' sums, weighted by size (arXiv 2101.00027 App. E.2); here by w |
 | `offset_bpb` | `mixture_bpb` per byte-offset bucket (None where no target is); a bucket pools the documents long enough to reach it, so the curve mixes context use with document composition | §2 |
 | `mixture_bpb_summary(corpora, weights)` | `mixture_bpb` of the rows, R = Σ_c a_c · bits_c / Σ_c a_c · bytes_c (a_c = w_c / rows_c), with its standard error as a stratified cluster sample: the corpora are strata at fixed weights, each corpus's clusters of rows (§2) its independent units; by the delta method se² = Σ_c a_c² · m_c · s_c² / (Σ_c a_c · bytes_c)², s_c² the sample variance (ddof 1) of the m_c cluster sums of bits − R · bytes; 95% normal interval. For one corpus of one-row clusters it is the HC1 error of the WLS fit of row bpb on a constant weighted by bytes (statsmodels; equal to 1e-15 on real records) | Miller, arXiv 2411.00640 Eq. 1, 4 within each stratum, Eq. 3 for the interval (the strata and the ratio's delta method are not Miller's); numpy |
+| `paired_rows(a, b)` | b's rows with each row's bits minus a's, for two scorings of identical rows (equal `row_bytes` and `row_clusters`, else ValueError); `mixture_bpb_summary` of them is the paired change b − a with its clustered standard error (§2, trajectory) | Miller §4.2 Eq. 8 within each stratum |
+| `solution_strata(solution)` | an evaluation's reference-solution rows as two strata: HumanEval (HumanEval+ and HumanEval-X C++ solutions of problem i one cluster) and MBPP+ (a cluster per problem); `mixture_bpb_summary` at weights {stratum: rows} is their pooled bpb | Miller Eq. 4 |
 | `parse_outcome(source)` | one `compile()` → "parses", "indentation" (IndentationError, TabError; checked first) or "syntax" (other SyntaxError; also the parser's MemoryError and RecursionError, and the ValueError CPython 3.12.3 raises for an f-string debug expression in a format spec, `f"{x:{y=}}"`, python/cpython#121130) | TokEval's companion post, section "How the failing generations fail" (linked from arXiv 2608.18062 App. F.3, fn. 15) |
-| `parse_shares` | each outcome's share of a benchmark's completions | — |
+| `parse_shares` | each outcome's share of a benchmark's completions (`PARSE_OUTCOMES`: parses, indentation, syntax, truncated) | — |
 | `measures(evaluation, steps, repo_level_start=)` | a run's compared measures (table below) | — |
-| `measure_errors(evaluation)` | their error bars: `code`, `text`, `math`, `repo_32k` from the evaluation's `errors` (`mixture_bpb_summary`); `solutions` by `mixture_bpb_summary` over two strata at their solution counts: HumanEval (HumanEval+ and HumanEval-X C++ solutions of problem i one cluster) and MBPP+; the parse shares and `pass@1` by `summary` over problems; none for `repo_beyond_8k`, `tokens_per_second`, `mfu` | Miller Eq. 1, 4 |
+| `measure_errors(evaluation)` | their error bars: `code`, `text`, `math`, `repo_32k` from the evaluation's `errors` (`mixture_bpb_summary`); `solutions` by `mixture_bpb_summary` over `solution_strata` at their solution counts; `unparsed`, `indentation`, `syntax`, `truncated` and `pass@1` by `summary` over problems; none for `repo_beyond_8k`, `tokens_per_second`, `mfu` | Miller Eq. 1, 4 |
 | `line_exact_match` | `prediction.strip() == reference.strip()` | SantaCoder's single-line exact match (arXiv 2301.03988 §5.4; the strip: bigcode-evaluation-harness `santacoder_fim.py`) |
 | `code_lines`, `exact_match` | comment-stripped (`#`, `//` to the line end), stripped non-empty lines; equal lines | CrossCodeEval (arXiv 2310.11248 §3.2; its repository amazon-science/cceval) |
 | `edit_similarity` | 100 when equal, 0 when either is empty, else round(100 × difflib `SequenceMatcher` ratio) of the comment-stripped strings | cceval's fuzzywuzzy 0.18 installed without python-Levenshtein, whose `fuzz.ratio` is difflib's |
@@ -210,7 +228,8 @@ import it alike.
 | `solutions` | HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their prompts, pooled (`bpb`) |
 | `repo_32k`, `repo_beyond_8k` | 32K validation of the code group; the same over targets beyond 8,192 positions (the last context bucket), at the 32K evaluation's code-corpus weights restricted to `REPO_LEVEL_STAGE.code` |
 | `text`, `math` | 8K validation of each group |
-| `unparsed`, `indentation`, `syntax` | shares of the 542 HumanEval+ and MBPP+ problems [arithmetic: 164 + 378], pooled, whose healed greedy completion does not compile; by IndentationError; by another SyntaxError (§3) |
+| `unparsed`, `indentation`, `syntax` | shares of the 542 HumanEval+ and MBPP+ problems [arithmetic: 164 + 378], pooled, whose healed greedy completion stopped within its budget and does not compile; by IndentationError; by another SyntaxError (§3). Records written before `truncated` have `unparsed` = 1 − parses, truncated completions included |
+| `truncated` | share of the 542 whose completion used its whole budget without a stop sequence (§3) |
 | `pass@1` | greedy base pass@1 of the parse measure's completions, pooled |
 | `tokens_per_second`, `mfu` | medians over the file-level stage's steps (before `repo_level_start`) of the train records' tokens per second and executed MFU |
 
