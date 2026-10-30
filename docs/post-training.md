@@ -3,8 +3,8 @@
 What would turn the base model into a code model that answers a prompt and reasons before it answers: the pipelines
 published in 2025–2026 (§2), how they update the weights (§3), supervised fine-tuning and off-policy distillation
 (§4), preference tuning (§5), on-policy distillation (§6), reinforcement learning with verifiable rewards (§7) and its
-code rewards (§8), the GRPO variants (§9), the data (§10) and a plan (§11). Nothing here is implemented: the
-repository pre-trains (`docs/training.md`) and evaluates (`docs/evaluation.md`) a base model.
+code rewards (§8), the GRPO variants (§9), the data (§10) and the pipeline chosen from them (§11). Nothing here is
+implemented: the repository pre-trains (`docs/training.md`) and evaluates (`docs/evaluation.md`) a base model.
 
 Markers: [arithmetic] derived from code numbers; [inference] reasoning, not measured; [estimate]; [unverified] a
 figure without a record, or a paper value its extracted text lacks. Below 1B the cited evidence is MobileLLM-R1
@@ -19,17 +19,16 @@ No code. The data of §10 is in `artifacts/posttrain/<id>`.
 
 - **The model**: d24, 522,252,336 parameters (`docs/architecture.md` §1), 103.03B tokens (`docs/training.md` §2),
   a completion model: the tokenizer's special tokens are BOS and the three FIM sentinels (`corpus/tokenizer.py`
-  `SPECIAL_TOKENS`), so there is no chat template. An example is a prompt (a signature and docstring, as EvalPlus
-  prompts a base model, `docs/evaluation.md` §4) and a completion; the loss falls on the completion and its closing
-  BOS. The cited recipes train chat or `<think>` formats; their prompts become docstrings here [inference].
+  `SPECIAL_TOKENS`), so there is no chat template. An example is a prompt and a response, the reasoning between
+  plain-text `<think>` markers and then the answer (§11.1); the loss falls on the response and its closing BOS.
 - **The vocabulary**: 32,768 ids of the repository's own tokenizer (`docs/corpus.md` §5); no published model shares
   it, which decides how teachers can be used (§6).
 - **The measures** (`docs/evaluation.md` §3–§4): greedy pass@1, pass@k from the sampled mode's 20 completions per
   problem, and the parse failures. At 5 tokens per parameter the d24 runs scored HumanEval+ 0.067–0.110, MBPP+
   0.114–0.132 and parsed 0.775–0.894 of MBPP+ (`docs/training.md` §5); the base model's own values come from its
-  evaluation after training.
-- **What to keep**: infilling (FIM examples in the packer's format, `docs/corpus.md` §8, in every SFT mix) and the
-  32K context [inference].
+  evaluation after training. A post-trained model is measured in its reasoning format (§11.4).
+- **What to keep**: the 32K context. Infilling stays the base model's: no source of §10 holds FIM examples, and the
+  post-trained model answers in one format (§11.1).
 - **Contamination**: every source passes the pretraining rule before use, a 10-gram of words shared with a scored
   benchmark's prompt or reference drops the example (`docs/corpus.md` §3); OpenCoder removes HumanEval/MBPP entry
   points and 10-gram overlaps (arXiv 2411.04905 §4.4).
@@ -45,6 +44,7 @@ No code. The data of §10 is in `artifacts/posttrain/<id>`.
 | Qwen3-Coder-Next (80B, 3B active) | mid-training; SFT; experts (web development, user experience, single-turn RL on unit tests, multi-turn software-engineering RL) distilled into the SFT model | arXiv 2603.00729 §3–§4 |
 | Olmo 3 Think (7B, 32B) | SFT; DPO on delta pairs (§5); RL with verifiable rewards | arXiv 2512.13961 §4 |
 | Nemotron-Cascade (8B, 14B) | two SFT stages; RL by domain in turn: RLHF, instruction following, math, code, software engineering | arXiv 2512.13607 §3–§4 |
+| Nemotron-Cascade 2 (30B MoE, 3B active) | one packed SFT stage; RL in turn: instruction following, multi-domain, multi-domain on-policy distillation, RLHF, long context, code, software engineering | arXiv 2603.19220 §3–§4 |
 | Seed-Coder-8B reasoning | long-CoT warmup on thousands of examples, from the base model; GRPO | arXiv 2506.03524 §3.2 |
 | Qwen3 0.6B–14B | off-policy distillation, then on-policy distillation from Qwen3-32B or Qwen3-235B-A22B; no RL | arXiv 2505.09388 §4.5 |
 | Phi-4-mini-reasoning (3.8B) | distillation as mid-training; distillation SFT; DPO on rejected teacher rollouts; RL | arXiv 2504.21233 §3 |
@@ -82,9 +82,22 @@ What these replaced:
 - **RL with adapters** (1.5B, already distilled): LoRA rank 32 on every linear layer 42.5 against full parameters'
   44.9 and DoRA's 46.6, PiSSA 0.2 (arXiv 2512.23165 Table 3); Tina's rank-32 GRPO reached its best checkpoint for $9,
   at or above published full-parameter models on the same data (arXiv 2504.15777 Table 3).
-- **Here**: full parameters in every stage. Pre-training already holds the fp32 weights, gradients and both
-  optimizers' state of all 522,252,336 parameters in 7.47 GiB (`docs/training.md` §7), so memory gives no reason for
-  adapters [inference].
+- **Capacity** (code): in continued pre-training of Llama-2-7B on StarCoder-Python, LoRA at rank 256 peaked at 20B
+  tokens with HumanEval 0.224, about full fine-tuning's 0.218 at 4B, and full fine-tuning reached 0.263; in code
+  instruction tuning ranks 16 and 64 scored 0.358 and 0.417 at epoch 4 and rank 256 0.498, against full
+  fine-tuning's 0.497 (arXiv 2405.09673 §4.1); full fine-tuning on code "does not learn low-rank perturbations"
+  (§4.6). LoRA matches full fine-tuning on "small-to-medium-sized" SFT sets and falls behind on sets that "exceed LoRA
+  capacity"; in RL it matches "even with ranks as low as 1", at about 10× full fine-tuning's learning rate (Schulman
+  and Thinking Machines Lab, "LoRA Without Regret", 2025).
+- **Compute and memory**: per weight matrix, full fine-tuning costs 3·d_in·d_out multiply-adds per token and LoRA
+  2·d_in·d_out + 3R(d_in + d_out) ("LoRA Without Regret"), so LoRA saves compute only below the rank
+  d_in·d_out / (3(d_in + d_out)): 128 for d24's `o_proj`, 192 for `qkv` and 205 for the MLP's matrices
+  [arithmetic]; it saves nothing on attention, 34.7% of the 32K step's GPU time (`docs/training.md` §7). QLoRA's 4-bit
+  base exists to fit "a 65B parameter model on a single 48GB GPU" (arXiv 2305.14314 Abstract).
+- **Here** [inference]: full parameters for the SFT (§11.2): its 2.3–27.5B tokens are the pre-training-like volume
+  where LoRA falls behind, and the rank that kept up on code (256) costs more than full fine-tuning at hidden size
+  768. Memory gives no reason for adapters: pre-training holds the fp32 weights, gradients and both optimizers' state
+  of all 522,252,336 parameters in 7.47 GiB (`docs/training.md` §7). LoRA fits RL (§11.3).
 
 ## 4. Supervised fine-tuning and off-policy distillation
 
@@ -133,8 +146,9 @@ and below:
   epochs, lr 8e-5, 32K (Table 2); OpenThoughts 5 epochs, lr 8e-5, batch 512, packed (App. Table 9); Olmo 3 Think 2
   epochs, lr 5e-5, 1M-token batches of packed 32K rows (App. A.6.1); Nemotron-Cascade lr 5e-5 then 2e-5, batch 256
   (Table 14).
-- **Here** [inference]: short solutions with FIM first, then long traces behind a plain-text delimiter (no new
-  tokens); at least 100K long traces, past the valley; arms long, short and one long example in five.
+- **Here** [inference]: reasoning traces only, whole rows up to 32,768 tokens, one packed stage of one epoch
+  (§11.2): Cascade-1's Python code traces, at most 4 per prompt (≈884K of 2,694,422), of up to 244,245 prompts, past
+  the valley, and CP-v2's Python and C++ traces that fit.
 
 ## 5. Preference tuning
 
@@ -147,7 +161,7 @@ and below:
   Length-normalized DPO, β = 5, lr 8e-8, 150K pairs, one epoch (Table 48).
 - **Rollout pairs**: DPO on Phi-4-mini-reasoning's rejected R1 rollouts took AIME 43.3 → 50.0 (arXiv 2504.21233
   Table 3); Seed-Coder samples about 20K pairs on-policy and labels them by sandbox tests (arXiv 2506.03524 §3.1).
-- **Here** [inference]: delta pairs are two teachers' text, so any vocabulary works; one arm between SFT and RL.
+- **Here** [inference]: not used; Nemotron-Cascade goes from SFT to RL (§11.5).
 
 ## 6. On-policy distillation
 
@@ -186,7 +200,7 @@ final performance" (arXiv 2607.24653 §4.1.3, Eq. 15).
   MiMo-V2-Flash's teacher "can be a specialized RL-derived model with strong capabilities, a different SFT model, or
   even the student model itself" (arXiv 2601.02780 §4.1).
 - **Here** [inference]: the vocabulary (§1) rules out every published teacher for OPD; external teachers enter as text
-  (§4–§5); OPD consolidates the model's own RL-trained specialists (§11).
+  (§4–§5); with one RL domain there are no specialists to consolidate (§11.5).
 
 ## 7. Reinforcement learning with verifiable rewards
 
@@ -201,7 +215,7 @@ rest:
 | Aggregation | over the batch's tokens | DAPO (§9), OlmoRL, AceReason; prompt-level in ScaleRL; token-level "best suited for base models" (arXiv 2508.08221 §4.3) |
 | Update | one gradient step per batch, so the ratio is 1 (REINFORCE with group-normalized rewards); truncated importance weights once rollouts lag (CISPO, §9) | 2 or 4 updates per batch "led to rapid entropy collapse around 100 steps" (arXiv 2505.16400 §3.2); Nemotron-Cascade likewise (§4.1) |
 | Clipping, where a PPO-form loss stays | ε_low 0.2, ε_high 0.28 or 0.272 | GLM-5 §3.2; Seed-Coder §3.2; OlmoRL App. Table 49 (§9, DAPO) |
-| Sampler–trainer mismatch | truncated importance weights; fp32 logits | OlmoRL caps the weight at 2; GLM-5 masks tokens outside [1/2, 2] (§3.2); fp32 logits raised ScaleRL's asymptote 0.52 → 0.61 (§3.2); in a dense model the displacement is "concentrated near zero and bounded, consistent with bf16 rounding error" (arXiv 2609.32444 §3.1) |
+| Sampler–trainer mismatch | FP16 in sampler and trainer; truncated importance weights; fp32 logits | FP16's sequence-level mismatch is "approximately 24× smaller" than BF16's (arXiv 2510.26788 §3.5); in BF16 GRPO collapsed after peaking (73% VeRL, 84% Oat training accuracy) and only sequence-level MIS stayed stable, which FP16 beat (§4.2); OlmoRL caps the weight at 2; GLM-5 masks tokens outside [1/2, 2] (§3.2); fp32 logits raised ScaleRL's asymptote 0.52 → 0.61 (§3.2); in a dense model the displacement is "concentrated near zero and bounded, consistent with bf16 rounding error" (arXiv 2609.32444 §3.1) |
 | Prompts | drop groups whose rewards are all equal and refill the batch; drop prompts solved ≥ 90% | OlmoRL active sampling; ScaleRL's No-Positive-Resampling (§3.2); Nemotron-Cascade drops problems solved 8/8, or 0/8 by a strong model (§4.6); 2.2K hard prompts beat the full 49K, AIME24 65.9 against 63.3 (arXiv 2505.16400 Table 3) |
 | Rollouts | 8–16 per prompt | OlmoRL 8, AceReason 8–16, ScaleRL 16; more as compute grows, fewer on hard sets (arXiv 2603.12151 §4) |
 | Temperature | entropy about 0.3 | "setting the training temperature such that the temperature-adjusted entropy remains around 0.3 typically leads to effective RL training" (arXiv 2506.13284 §4.5.2); code RL is "sensitive to the temperature" (arXiv 2512.13607 §4.6) |
@@ -220,10 +234,12 @@ rest:
 - **Coverage**: base models catch up with RL-trained ones at large k (arXiv 2504.13837 §3.2), and RL left Qwen3-8B's
   pass@64 unchanged (§6); AceReason's RL raised LiveCodeBench pass@k up to k = 64 by about 10 points (§4.3), and ProRL
   solves tasks where the base never succeeds (§4); delta DPO raised Olmo 3's pass@k (§4.5).
-- **Here** [inference]: rollouts come from the decoder, whose KV cache is e4m3 while the trainer attends in bf16
-  (`docs/evaluation.md` §6); with an FP8 sampler plain policy gradient stayed stable at 30B, an FP4 KV cache
-  collapsed it (arXiv 2609.20807 §5.4). The per-token log-probability gap between decoder and trainer is measured
-  before choosing one step per batch alone or with truncated weights.
+- **Here** [inference]: sampler and trainer both in FP16 (§11.3), the remaining mismatch under sequence-level truncated
+  weights. On the final checkpoint (CPU, three code files of 1,024 tokens [measured]) the largest activations are 145
+  (residual stream), 241 (ReLU²), 46.8 (attention score) and 29.5 (logit before the cap), and the weights bound the
+  last three by 11,195, 68.2 and 75, all below fp16's 65,504; with activations rounded to fp16 the mean KL to fp32 is
+  1.5e-5, to bf16 1.0e-3. 77–99.9% of the residual stream's gradient values lie below fp16's smallest normal
+  (6.1e-5), so the loss is scaled.
 
 ## 8. Code rewards
 
@@ -250,23 +266,39 @@ rest:
   where one model writing both scored 55.88 (arXiv 2603.15611 §4.2); CURE at 4B–14B (arXiv 2506.03136 §4.2).
 - **Multi-turn**: RL over execution feedback matches single-turn GRPO when evaluated in one turn and adds up to 8
   points over three (Qwen3-1.7B and 4B; arXiv 2511.07833 App. D).
-- **Here** [inference]: binary on tests verified against a reference solution; the pass fraction the one alternative
-  arm; no neural reward.
+- **Here** [inference]: binary, on the last code block after `</think>` and every test of the problem (§11.3); no
+  pass-fraction arm, no neural reward.
 
 ## 9. GRPO variants
 
 | Variant | Change to GRPO | Problem addressed | Evidence (setting) | Here [inference] |
 |---|---|---|---|---|
-| Dr. GRPO (arXiv 2503.20783 §3) | drops the 1/\|o_i\| length normalization and the std division (optionally a constant normalizer); the advantage becomes RLOO's up to G/(G−1) (App. A) | length bias (favors short correct and long wrong answers) and a question-difficulty bias | math; its whole 1.5B recipe 33.1 → 42.1 over the base (Oat-Zero-1.5B, Table 4); either removal alone beats GRPO (App. C); OlmoRL and DeepSeek-V3.2 drop the std (§7) | adopt |
-| DAPO (arXiv 2503.14476 §3–§4) | clip [1 − 0.2, 1 + 0.28] (Clip-Higher); dynamic sampling keeps groups with 0 < correct < G; token-level loss over the group; overlong filtering and a soft length penalty; no KL | entropy collapse, zero-advantage groups, length effects | math, Qwen2.5-32B: AIME24 30 → 50 over the additions (Table 1); its three core pieces are in OlmoRL, GLM-5 and Seed-Coder (§7); clip-higher "gradually becomes unstable" (arXiv 2505.22617 §4.3); under DAPO Phi-4-mini-reasoning's AIME consensus "consistently degrades" (arXiv 2504.21233 §5.5) | adopt dynamic sampling and the token-level loss; Clip-Higher with a PPO-form loss; §7's length curriculum in place of length shaping |
-| CISPO (arXiv 2506.13585 §3.1) | clips the stop-gradient importance weight instead of the update, so every token keeps its gradient; token-level normalization; no KL | PPO clipping drops rare reflective tokens after the first off-policy update | Qwen2.5-32B zero-RL: DAPO's AIME in half the steps (Fig. 2); ScaleRL, 8B dense and a MoE: "the best balance of stability and robustness to hyperparameters" (arXiv 2510.13786 App. A.17) | the loss once rollouts lag the policy |
+| Dr. GRPO (arXiv 2503.20783 §3) | drops the 1/\|o_i\| length normalization and the std division (optionally a constant normalizer); the advantage becomes RLOO's up to G/(G−1) (App. A) | length bias (favors short correct and long wrong answers) and a question-difficulty bias | math; its whole 1.5B recipe 33.1 → 42.1 over the base (Oat-Zero-1.5B, Table 4); either removal alone beats GRPO (App. C); OlmoRL and DeepSeek-V3.2 drop the std (§7) | not adopted: Nemotron-Cascade's std stays (§11.3); after the 0/8–8/8 filter, 1/std of a group of 8 binary rewards varies by at most 1.51× [arithmetic] |
+| DAPO (arXiv 2503.14476 §3–§4) | clip [1 − 0.2, 1 + 0.28] (Clip-Higher); dynamic sampling keeps groups with 0 < correct < G; token-level loss over the group; overlong filtering and a soft length penalty; no KL | entropy collapse, zero-advantage groups, length effects | math, Qwen2.5-32B: AIME24 30 → 50 over the additions (Table 1); its three core pieces are in OlmoRL, GLM-5 and Seed-Coder (§7); clip-higher "gradually becomes unstable" (arXiv 2505.22617 §4.3); under DAPO Phi-4-mini-reasoning's AIME consensus "consistently degrades" (arXiv 2504.21233 §5.5) | the token-level loss; dynamic sampling as §11.3's static filter; no Clip-Higher (no PPO-form loss); §7's length curriculum in place of length shaping |
+| CISPO (arXiv 2506.13585 §3.1) | clips the stop-gradient importance weight instead of the update, so every token keeps its gradient; token-level normalization; no KL | PPO clipping drops rare reflective tokens after the first off-policy update | Qwen2.5-32B zero-RL: DAPO's AIME in half the steps (Fig. 2); ScaleRL, 8B dense and a MoE: "the best balance of stability and robustness to hyperparameters" (arXiv 2510.13786 App. A.17) | not used: one update per batch (§11.3) |
 | GSPO (arXiv 2507.18071 §4–§5) | sequence-level ratio (π/π_old)^{1/\|y\|}, clipped per sequence at [1 − 3e-4, 1 + 4e-4] | token-ratio noise and collapse; MoE routing drift (no Routing Replay); tolerates training/inference precision mismatch (§5.4) | Qwen3-30B-A3B MoE; math and code curves (Fig. 1); in ScaleRL its runs "diverged mid-training" (App. A.17) | not first |
 | P-GRPO (arXiv 2508.05170 §2.4) | reward R^f + R^o + R^o·R^t: a reward model's reasoning score R^t counts only when the code passes all tests (R^o = 1) | outcome rewards ignore the reasoning; all-correct groups get no advantage | code, Qwen2.5-Coder-7B-Instruct: MBPP+ 76.2 against GRPO's 75.1, HumanEval+ 81.1 both (Table 1); math 7B 51.5 against 48.0 (Table 3) | not first: needs a reward model and a reasoning format |
 | DGPO (arXiv 2601.20614 §3–§4) | advantage over the mean absolute deviation, so each question's total update is G; softmax difficulty weights (T = 2); loss over valid questions | GRPO's total update per question, 2G·√(p(1 − p)), peaks at pass rate p = 0.5 and shrinks toward 0 and 1 (Thm. 1) | math only (1.5B–7B): average 39.79 against 37.61 | no code evidence |
 
 ## 10. Data
 
-Rows are counted from the files.
+§11's sources: rows from the dataset cards and the Hub's file listings; tokens in this tokenizer from ranged reads of
+30–300 rows per file [estimate]:
+
+| Dataset | Stage | Rows | Tokens (ours) | Content |
+|---|---|---|---|---|
+| `nvidia/Nemotron-Cascade-SFT-Stage-1` `code` | SFT | 1,301,591 of 165,393 prompts | ≈9.9B; per row p50 6,658, max 18,273 | Python; DeepSeek-R1 traces; OpenCodeReasoning 763,495, opc-sft-stage2 323,163, leetcode 126,878, TACO 56,694, Magicoder 27,625, APPS 3,736 |
+| `nvidia/Nemotron-Cascade-SFT-Stage-2` `code` | SFT | 1,392,831 of 78,852 prompts | ≈17.6B; per row p50 11,775, 0.2% above 32,768 | Python; DeepSeek-R1-0528 traces; OpenCodeReasoning 1,143,266, opc-sft-stage2 188,063, TACO 58,273, synthetic 1,654, APPS 1,575 |
+| `nvidia/Nemotron-SFT-Competitive-Programming-v2` `competitive_programming_{python,cpp}` | SFT, rows ≤ 32,768 tokens | 336,568 and 332,559 of 34,799 prompts; ≈87.5K and ≈44.9K fit | per row p50 56,573 and 59,871 (all rows) | stdin problems, Codeforces ratings up to 3,500; the only C++ traces |
+| `allenai/Dolci-Think-RL-7B` `code`, `code_stdio` | RL | 12,121 and 9,264 (counted from the files) | — | assert tests; input/output tests |
+| `KodCode/KodCode-Light-RL-10K` | RL | 10,000 (counted from the files) | — | function form; KodCode's tests (below) |
+| `nvidia/Nemotron-RL-coding-competitive_coding` | RL | 16,083 | prompt p50 640 | Python stdin problems, tests inline: a median 55.5 per problem in its 25K file |
+
+- **Not used**: `nvidia/Nemotron-Cascade-2-SFT-Data` (24,824,269 rows in 8 configurations, ≈171B tokens here
+  [estimate]) has no code-reasoning configuration, only math, science, chat, instruction following, safety, agents
+  and software engineering; Nemotron-Cascade 2's code traces (1.9M Python, 1.0M C++, 1.3M with tool calls; arXiv
+  2603.19220 §3.2.2) and the code-RL problems of both Cascade models are not released.
+- **Fetched, not in §11** (rows counted from the files):
 
 | Dataset | Role | Rows | Tests |
 |---|---|---|---|
@@ -279,41 +311,172 @@ Rows are counted from the files.
 | `open-thoughts/OpenThoughts3-1.2M` | long-trace SFT | 1,200,000: math 850,000, code 250,000 (OpenCodeReasoning questions 125,840, StackExchange code golf 124,160), science 100,000 | none (QwQ-32B answers, unfiltered, §4) |
 | `nvidia/OpenCodeReasoning` | long-trace SFT | 735,255 (two splits, 567,850 and 167,405) | none |
 | `KodCode/KodCode-V1-SFT-R1` | long-trace SFT | 483,437 | R1 solutions with their test results |
-| `allenai/Dolci-Think-RL-7B` | RL | 102,014: code 12,121 (assert tests), code_stdio 9,264 (input/output tests), math 30,180, instruction following 29,813, general 20,636; each with the pass rate of Olmo 3's starting checkpoint | yes |
-| `KodCode/KodCode-Light-RL-10K` | RL | 10,000 | yes |
 | `agentica-org/DeepCoder-Preview-Dataset` | RL | 24,287 train (PrimeIntellect 16,252, TACO 7,436, LiveCodeBench v5 599); 687 test (LiveCodeBench v5 279, Codeforces 408) | yes; weak enough for false-positive rewards (§8) |
 
-- **Decontamination as published**: KodCode flags 94 of 447K questions above cosine 0.95 to HumanEval, MBPP,
-  BigCodeBench or LiveCodeBench v5 (§3.2), and its files carry `benchmark_similarity` and `benchmark_task_id` per row;
-  rStar-Coder removes 16-gram overlaps with HumanEval(+), MBPP(+), LiveCodeBench and USACO 2025 (§3.3);
-  OpenCodeReasoning's 90 flagged pairs were judged not duplicates, none removed (§2.1); OpenCodeInstruct's procedure
-  is [unverified] (§2.2.1 empty in the extracted text). None of these is the pretraining rule (§1), which every source
-  still needs.
+- **Decontamination as published**: Nemotron-Cascade drops SFT samples sharing a 9-gram with coding benchmarks
+  (arXiv 2512.13607 §3.2.3); KodCode flags 94 of 447K questions above cosine 0.95 to HumanEval, MBPP, BigCodeBench or
+  LiveCodeBench v5 (§3.2), and its files carry `benchmark_similarity` and `benchmark_task_id` per row; rStar-Coder
+  removes 16-gram overlaps with HumanEval(+), MBPP(+), LiveCodeBench and USACO 2025 (§3.3); OpenCodeReasoning's 90
+  flagged pairs were judged not duplicates, none removed (§2.1); OpenCodeInstruct's procedure is [unverified]
+  (§2.2.1 empty in the extracted text). None of these is the pretraining rule (§1), which every source still needs.
 
-## 11. Plan [inference]
+## 11. Pipeline [inference]
 
-1. **Base evaluation**: the final checkpoint's benchmarks-mode record (`docs/evaluation.md` §1): greedy pass@1,
-   pass@k from 20 samples, parse failures. A wide pass@1–pass@k gap is the room RL can use (§7).
-2. **SFT**, full parameters (§3), two stages (§4): short solutions with FIM (OpenCodeInstruct's score-5 samples,
-   OpenCoder stage 2, KodCode-V1); then long traces behind a plain-text delimiter (rStar-Coder, OpenCodeReasoning-2's
-   Python, OpenThoughts3's code), at least 100K examples, several epochs at 32K; arms long, short and one long example
-   in five. All decontaminated (§1).
-3. **DPO** on delta pairs from a strong and a weak teacher (§5), against none.
-4. **RL** with §7's components and a binary reward on verified tests (§8): Dolci-Think-RL's code, KodCode-Light-RL-10K,
-   DeepCoder-Preview's train problems the policy solves sometimes; 8K responses first. Arms: the pass fraction; math RL
-   before code RL.
-5. **Consolidation**: if separate RL runs (code, math) each win where the other loses, on-policy distillation from
-   them into one model (§6).
-6. **Each stage's gate**: pass@1 up on HumanEval+ and MBPP+, pass@k at k = 20 not down beyond its error bar, no parse
-   regression, infilling not worse (`docs/evaluation.md` §4).
+SFT only: Nemotron-Cascade's SFT (arXiv 2512.13607 §3) cut to the one domain the model is for (code) and one format
+(reasoning, then the answer), with full parameters (§3). Below 1B the published pipelines end at SFT or
+distillation: MobileLLM-R1 (140M–950M) has no RL, "additional RL does not observe a significant performance
+improvement" (arXiv 2509.24945 §7.4), and RL "yields suboptimal results for smaller models compared to distillation"
+(arXiv 2505.00949 §5). Nemotron-Cascade's code RL added 2.4–4.1 LiveCodeBench v6 points at 8B–14B (Table 7); here
+it is deferred (§11.3): it needs an image, an export and a reward the repository lacks, and its step time on this
+model is unmeasured. Each choice is [inference] from the cited evidence; none is measured on this model.
+
+| Stage | From | Data | Objective | Lengths | Gate |
+|---|---|---|---|---|---|
+| 0. Base | — | — | — | — | the evaluations of steps 66,063 and 69,874 (`docs/evaluation.md` §1) pick the start |
+| 1. SFT | the base | reasoning traces, at most 4 per prompt: Cascade-1's Python of up to 244,245 prompts, CP-v2's Python and C++; ≤ 12.8B tokens, ≤ 12.3 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4) |
+| Code RL, deferred | the SFT model | problems with tests, 47,468 before filtering (§11.3) | Nemotron-Cascade's GRPO, one update per batch, sequence-level truncated importance weights; FP16 | responses ≤ 16,384, then ≤ 28,672 | pass@1 up, pass@20 not down beyond its error bar (§11.4) |
+
+### 11.1 Format
+
+- **Reasoning is the only format**: no non-thinking mode. An example renders as BOS, the prompt, `\n\n<think>\n`, the
+  reasoning, `\n</think>\n\n`, the answer and BOS. The markers are ordinary text (5 and 6 tokens here), so the
+  vocabulary stays (§1). Nemotron-Cascade 2 opens a thinking turn with `<think>` and a newline (arXiv 2603.19220
+  §3.1.2); §10's code traces are "formatted in the thinking mode" (arXiv 2512.13607 §3.2.3), the reasoning inline
+  between the markers (Cascade-1) or in a separate field placed between them (CP-v2).
+- **Loss**: on the response, from the reasoning through the closing BOS; the prompt and its `\n\n<think>\n` are
+  context, their labels ignored as the packer ignores a continued piece's (`docs/corpus.md` §8). Every prompt ends
+  with `\n\n<think>\n` in SFT, RL and evaluation alike.
+
+### 11.2 SFT
+
+- **Data** (§10): Cascade-1's Stage-1 and Stage-2 code, at most 4 traces per prompt in each stage, drawn at random
+  with a fixed seed: ≈568K and ≈315K of 2,694,422 traces, of up to 244,245 prompts (the stages' overlap unmeasured),
+  ≈8.4B tokens [estimate: the stages' mean rows, 7,735 and 12,801 tokens]; and CP-v2's Python and C++ traces that fit
+  32,768 tokens, at most 4 per prompt and language: at most ≈87.5K and ≈44.9K rows and 4.3B tokens [arithmetic],
+  Codeforces-level problems harder than Cascade-1's, and the only C++.
+- **Tokens against time** (Cascade-1 alone, one epoch at the 32K stage's 287K tok/s, `docs/training.md` §7; CP-v2
+  adds at most 4.2 h) [estimate]. The prompts are fixed, so the cap trades answers per prompt, worth less than prompts
+  (coefficients 2.635 against 4.831; at a fixed budget 64K prompts × 1 beat 16K × 4, §4), for time:
+
+| Traces per prompt | Cascade-1 rows | Tokens | Steps | Hours |
+|---|---|---|---|---|
+| 1 | 244,245 | 2.3B | 1,553 | 2.2 |
+| 2 | 460,865 | 4.4B | 2,957 | 4.2 |
+| 4 (chosen) | 883,895 | 8.4B | 5,717 | 8.1 |
+| all | 2,694,422 | 27.5B | 18,650 | 26.6 |
+
+- **Filters**: a row above 32,768 tokens rendered is dropped, not cut (a cut trace loses its answer; Nemotron-Cascade
+  drops over-length samples, §3.2.2); §1's 10-gram rule on prompt and response (2.4–3.4% of Cascade-1's code rows and
+  3% of CP-v2's Python rows in samples, none of 200 C++ rows; every prompt hit a stock phrase or a list of literals
+  [estimate]); exact duplicates. No correctness filter: Nemotron-Cascade states none, and no answer filter beat none
+  in OpenThoughts (§4).
+- **One stage, one epoch, packed**: Nemotron-Cascade 2 trains one packed stage (arXiv 2603.19220 §3.1.1). Rows are
+  shuffled and packed whole into 32,768-token sequences by the base's packer, one attention segment per row
+  (`docs/corpus.md` §8); 45 sequences, 1,474,560 tokens, per step as in the base's 32K stage: at most 8,660 steps and
+  12.3 h with CP-v2 [estimate].
+- **Optimizer**: the base's NorMuon and AdamW with one learning rate, the τ law's weight decay at the SFT's own tokens
+  and steps (`docs/training.md` §3), warmup over 40 steps and linear decay to zero (§4). The peak is calibrated, not
+  borrowed, since Nemotron-Cascade's AdamW 5e-5 has no NorMuon counterpart: three complete schedules at 1/30, 1/10
+  and 1/3 of the base's peak (2.3454e-3) on the same 2% of the rows, scored by the response loss on 1% of held-out
+  rows; the lowest sets the peak (as `docs/training.md` §5 calibrates the base's), at 6% of the run's tokens. At
+  1–1.5B, AdamW at 5e-5 against 1e-5 cost 11–14 points out of domain (§4).
+
+### 11.3 Code RL, deferred
+
+- **When**: after §11.2's model passes its gate, if time allows; the recipe below is fixed so that it starts from
+  settled choices. LoRA fits this stage: RL matched full fine-tuning at rank 1 ("LoRA Without Regret", §3), and FP16
+  kept LoRA RL stable where "BF16-based LoRA training collapses after roughly 600 steps" (arXiv 2510.26788 §5.2).
+- **Framework**: upstream verl (main of 2026-10-30) in its own image, built from its `docker/Dockerfile.uv.cu130` for
+  arm64 (torch 2.13, vLLM 0.32.0, transformers 5.16.1); FP16 training and sampling are part of it (verl #4036). The
+  Precision-RL fork (verl 0.4.1.dev of 2025-07-16) does not run here: it pins vLLM ≤ 0.8.5, whose
+  `vllm.worker.worker_base` its sampler imports and vLLM 0.12.0 removed, and transformers 4, against the model
+  file's 5.
+- **Model**: the SFT checkpoint through `inference/export_hf.py` with fp32 weights (bf16 today; fp16 from the fp32
+  master rounds 8× less, relative error 2.1e-4 against 1.7e-3 [measured]) and a chat template that renders BOS, the
+  prompt and `\n\n<think>\n` (verl applies a template to every prompt). The LM head with its cap and the gate of the
+  value embeddings run with autocast off: autocast casts their fp32 `F.linear` inputs to fp16
+  (`inference/modeling_nanochat.py`).
+- **Precision** (arXiv 2510.26788): the trainer computes in fp16 on fp32 master weights and fp32 AdamW state,
+  reducing gradients in fp32, under a dynamic loss scale (a step with a non-finite gradient is skipped and the scale
+  halved; it doubles after 400 clean steps); the sampler, vLLM, runs in fp16. The model's ranges in fp16: §7.
+- **Objective**: Nemotron-Cascade's GRPO (arXiv 2512.13607 §4.1.2, Eq. 1): 8 rollouts per prompt, the advantage
+  (r − mean)/std over the group, one gradient update per batch, the loss averaged over the batch's tokens, no KL and
+  no entropy term. One update per batch leaves only the sampler–trainer ratio, which Nemotron-Cascade takes as 1;
+  here each sequence's gradient is weighted by min(ρ, 3), ρ the product over its tokens of π_train/π_sampler
+  (PG-Seq-TIS, arXiv 2510.26788 Eq. 6, C = 3 as in §4.1).
+- **verl settings**: `algorithm.adv_estimator` grpo, `norm_adv_by_std_in_grpo` true, `algorithm.rollout_correction`
+  {`rollout_is` sequence, `rollout_is_threshold` 3.0, `bypass_mode` true, `loss_type` reinforce} (bypass mode skips
+  the old-policy forward), `ppo_epochs` 1 with the mini-batch the whole batch, `loss_agg_mode` token-mean,
+  `use_kl_loss` false, `entropy_coeff` 0; the actor engine's `dtype` float16 with `model_dtype` fp32, the rollout's
+  `dtype` float16 and `calculate_log_probs` true; SDPA attention, no padding removal, no gradient checkpointing (the
+  model file has none), FSDP wrapping by `NanochatDecoderLayer`.
+- **Reward**: 1 if the last fenced code block after `</think>` passes every test of the problem, else 0 (no
+  `</think>`, no block, a cut response, an error or a time-out included), as Nemotron-Cascade (§4.6.1); run by the
+  repository's checks (`eval/verify.py`) as verl's custom reward function.
+- **Problems** (§10): Dolci-Think-RL's code (12,121) and code_stdio (9,264), KodCode-Light-RL-10K (10,000) and
+  Nemotron-RL-coding-competitive_coding (16,083): 47,468 [arithmetic]. Dropped: a problem whose reference solution
+  fails its own tests; §1's 10-gram rule; a problem the SFT model solves 8 or 0 times of 8 at the rollout settings
+  (Nemotron-Cascade drops those a 7B solves 8/8 and those R1-0528 solves 0/8, §4.6.1; here the policy decides both).
+  DeepCoder-Preview is left out for its weak tests (§8). All Python: C++ comes from the SFT stage only.
+- **Sampling**: temperature 1.0 and top-p 1.0, so that the sampler's distribution is the policy's, as the FP16
+  analysis samples to compare them (arXiv 2510.26788 §3.5); Nemotron-Cascade 2 samples so in its other RL stages and
+  at top-p 0.95 in code RL (arXiv 2603.19220 App. B).
+- **Batch and lengths**: 128 prompts × 8 rollouts per update (arXiv 2512.13607 App. D Table 19); prompts ≤ 4,096
+  tokens; responses ≤ 16,384, raised to 28,672 (32,768 − 4,096) once more than 10% are cut (§7, Length); a cut
+  response scores 0 and stays in the batch (Nemotron-Cascade's code RL filters no overlong response, §4.6.2).
+- **Optimizer**: AdamW at a constant 2e-6 [estimate: between Precision-RL's 1e-6 at 1.5B–30B (arXiv 2510.26788
+  App. A) and Nemotron-Cascade's 3e-6–4e-6 at 8B–30B], β (0.9, 0.95), no weight decay, gradient norm clipped at 1.0.
+- **Stopping and watches**: every 10 steps, pass@1 on 5% of the filtered problems held out; stop when it stops
+  rising. Nemotron-Cascade's code RL ran 22 to 90 steps (arXiv 2603.19220 App. B; arXiv 2512.13607 App. D Table 19).
+  Watched: the entropy (temperature 1.0 → 0.8 if it climbs, as Nemotron-Cascade's unified 8B run, Table 19), steps
+  skipped by the loss scale, the sampler–trainer log-probability gap, the share of cut responses.
+
+### 11.4 Evaluation of each stage
+
+- **Reasoning protocol** (to be added to `eval/code_eval.py`): the prompt is EvalPlus's instruction for chat models,
+  "Please provide a self-contained Python script that solves the following problem in a markdown code block:"
+  (`evalplus/codegen.py`), then the benchmark's prompt in a fenced block, then §11.1's `\n\n<think>\n`; MultiPL-E's
+  C++ prompts the same with "C++" for "Python". 20 samples at temperature 0.6 and top-p 0.95, Nemotron-Cascade's
+  evaluation setting (arXiv 2512.13607 §2), up to the context (32,768 tokens with the prompt) in place of its 64K.
+  The answer is the last fenced block after `</think>`, scored by EvalPlus and MultiPL-E as in `docs/evaluation.md`
+  §4. Reported: pass@1 (the mean over the 20) and pass@20, the share of responses with no `</think>` or no block, the
+  response lengths.
+- **The base's records** (likelihood, greedy completion, infilling; `docs/evaluation.md` §1) are taken at every stage
+  to measure what it loses, not as a gate.
+- **No selection on the benchmarks**: RL, when run, stops on its held-out problems (§11.3); HumanEval+, MBPP+ and
+  MultiPL-E are read once per stage, at its end.
+
+### 11.5 Not in the pipeline
+
+| Stage | Why not |
+|---|---|
+| A non-thinking mode | reasoning is the default and only format (§11.1) |
+| LoRA, QLoRA | at hidden size 768 LoRA saves compute only below rank 128–205, where it lags full fine-tuning on code; QLoRA saves memory the run does not need (§3) |
+| DPO (§5) | Nemotron-Cascade goes from SFT to RL without it |
+| Math RL | the SFT data holds no math; Nemotron-Cascade's math RL moved LiveCodeBench v6 by −0.3 to +2.2 (arXiv 2512.13607 §4.5) |
+| RLHF, instruction-following, multi-domain and long-context RL | chat, judges or tools the model is not trained for; reward models of 72B–235B (arXiv 2512.13607 §4.2–§4.4; arXiv 2603.19220 §4.2–§4.6) |
+| Software-engineering RL | a 72B or 120B judge, or agentic execution over 256K tokens (arXiv 2512.13607 §4.7; arXiv 2603.19220 §4.8) |
+| On-policy distillation (§6) | one RL domain leaves no specialists to merge; Nemotron-Cascade 2's teachers are its own per-domain checkpoints (arXiv 2603.19220 §4.4) |
+
+### 11.6 Code to write
+
+1. `posttrain/sft_data.py`: download §10's SFT sources, render §11.1's format, tokenize, apply §11.2's cap and
+   filters, write rows with the prompt's labels ignored for the base's packer.
+2. An SFT experiment config (`conf/`) that starts from a base checkpoint.
+3. `eval/code_eval.py`: the reasoning protocol (§11.4).
+4. For §11.3 only: the verl image; `inference/export_hf.py` and `inference/modeling_nanochat.py` (fp32 weights, the
+   chat template, the head and gate outside autocast); `posttrain/rl_data.py` (problems and tests in verl's format,
+   the 8-sample filter sampled by the decoder); `posttrain/reward.py` (§11.3's reward); the run's settings.
 
 ## References
 
 | arXiv | Title |
 |---|---|
+| 2305.14314 | QLoRA: Efficient Finetuning of Quantized LLMs |
 | 2401.00788 | Astraios: Parameter-Efficient Instruction Tuning Code Large Language Models |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming - The Rise of Code Intelligence |
 | 2402.03300 | DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models |
+| 2405.09673 | LoRA Learns Less and Forgets Less |
 | 2406.11931 | DeepSeek-Coder-V2: Breaking the Barrier of Closed-Source Models in Code Intelligence |
 | 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models |
@@ -345,6 +508,7 @@ Rows are counted from the files.
 | 2509.24945 | MobileLLM-R1: Exploring the Limits of Sub-Billion Language Model Reasoners with Open Training Recipes |
 | 2510.06101 | The Valley of Code Reasoning: Scaling Knowledge Distillation of Large Language Models |
 | 2510.13786 | The Art of Scaling Reinforcement Learning Compute for LLMs |
+| 2510.26788 | Defeating the Training-Inference Mismatch via FP16 |
 | 2511.07833 | Murphy: Multi-Turn GRPO for Self-Correcting Code Generation |
 | 2512.02556 | DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models |
 | 2512.13607 | Nemotron-Cascade: Scaling Cascaded Reinforcement Learning for General-Purpose Reasoning Models |
@@ -358,6 +522,7 @@ Rows are counted from the files.
 | 2603.00729 | Qwen3-Coder-Next Technical Report |
 | 2603.12151 | IsoCompute Playbook: Optimally Scaling Sampling Compute for LLM RL |
 | 2603.15611 | Code-A1: Adversarial Evolving of Code LLM and Test LLM via Reinforcement Learning |
+| 2603.19220 | Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation |
 | 2604.00626 | A Survey of On-Policy Distillation for Large Language Models |
 | 2604.02721 | GrandCode: Achieving Grandmaster Level in Competitive Programming via Agentic Reinforcement Learning |
 | 2604.13010 | Lightning OPD: Efficient Post-Training for Large Reasoning Models with Offline On-Policy Distillation |
