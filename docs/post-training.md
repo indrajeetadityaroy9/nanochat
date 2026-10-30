@@ -355,7 +355,7 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 | Stage | From | Data | Objective | Lengths | Gate |
 |---|---|---|---|---|---|
 | 0. Base | — | — | — | — | the evaluations of steps 66,063 and 69,874 (`docs/evaluation.md` §1) pick the start |
-| 1. SFT | the base | reasoning traces, at most 4 per prompt in each group: Cascade-1's Python, CP-v2's Python, C++ and Exercism; 920,350 traces of 279,152 prompts (220,456 problems), 8.03B tokens, 5,453 steps, ≈7.8 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4) |
+| 1. SFT | the base | reasoning traces, at most 4 per prompt in each group: Cascade-1's Python, CP-v2's Python, C++ and Exercism; 920,350 traces of 279,152 prompts (220,456 problems), 8.03B tokens, 5,453 steps, ≈7.8 h (§11.2) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§11.4): `conf/experiment/sft.yaml` evaluates its final checkpoint with `generate` "reasoning" in the same job; a run trained with `generate` "none" (its name carries it) is evaluated by `eval/suite.py` `evaluate` with "reasoning" at any saved step |
 | Code RL, deferred | the SFT model | problems with tests, 47,468 before filtering (§11.3) | Nemotron-Cascade's GRPO, one update per batch, sequence-level truncated importance weights; FP16 | responses ≤ 16,384, then ≤ 28,672 | pass@1 up, pass@20 not down beyond its error bar (§11.4) |
 
 ### 11.1 Format
@@ -514,19 +514,25 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 
 ### 11.4 Evaluation of each stage
 
-- **Reasoning protocol** (`eval/code_eval.py` `reasoning_generation`, the evaluation's `generate="reasoning"`;
-  `docs/evaluation.md` §4): the prompt is EvalPlus's instruction for chat models, "Please provide a self-contained
-  Python script that solves the following problem in a markdown code block:" (`evalplus/codegen.py`), then the
-  benchmark's prompt in a fenced block, then §11.1's `\n\n<think>\n`; MultiPL-E's C++ prompts the same with "C++" for
-  "Python". 20 samples at temperature 0.6 and top-p 0.95, Nemotron-Cascade's evaluation setting (arXiv 2512.13607
-  §2), each until BOS or the context (32,768 tokens with the prompt) in place of its 64K. The answer is the last
-  fenced block after `</think>`, scored by EvalPlus as a chat model's solution and by MultiPL-E's judge with the
-  prompt's `#include` lines and the tests. Reported: pass@1 (the mean over the 20) and pass@20, the share of responses
+- **Reasoning protocol** (`eval/code_eval.py` `reasoning_generation`, `eval/livecodebench.py`, the evaluation's
+  `generate="reasoning"`; `docs/evaluation.md` §4): HumanEval+, MBPP+, MultiPL-E's HumanEval and MBPP in C++, and
+  LiveCodeBench v6 (arXiv 2403.07974). The EvalPlus prompt is EvalPlus's chat user turn (`make_raw_chat_prompt`: the
+  instruction for chat models, "Please provide a self-contained Python script that solves the following problem in a
+  markdown code block:", then the benchmark's prompt in a bare fence) stripped, then §11.1's `\n\n<think>\n`;
+  MultiPL-E's C++ prompts the same with "C++" for "Python". LiveCodeBench: the 454 problems of release_v6 with a
+  contest date in [2024-08-01, 2025-05-01), Nemotron-Cascade's "08/24–05/25" (arXiv 2512.13607 Table 1), with
+  lcb_runner's prompt, `extract_code` and `codegen_metrics` (LiveCodeBench at `28fef95`), the prompt followed by
+  `\n\n<think>\n`. Decoding at temperature 0.6 and top-p 0.95 (DeepSeek-R1, arXiv 2501.12948 v1 §3; Nemotron-Cascade's
+  evaluation setting, arXiv 2512.13607 §2), 20 samples per problem (LiveCodeBench 16), each until BOS or the context
+  (32,768 tokens with the prompt) in place of Nemotron-Cascade's 64K. The answer is the last fenced block after
+  `</think>` (LiveCodeBench: `extract_code` of the text after it), scored by EvalPlus as a chat model's solution, by
+  MultiPL-E's judge with the prompt's `#include` lines and the tests, and by lcb_runner. Reported: pass@1 as avg@n
+  (each problem's mean over its n samples, then the mean over problems, R1 §3) and pass@n, the share of responses
   cut at the budget, with no `</think>` or with no block after it, the response lengths.
 - **The base's records** (likelihood, greedy completion, infilling; `docs/evaluation.md` §1) are taken at every stage
   to measure what it loses, not as a gate.
-- **No selection on the benchmarks**: RL, when run, stops on its held-out problems (§11.3); HumanEval+, MBPP+ and
-  MultiPL-E are read once per stage, at its end.
+- **No selection on the benchmarks**: RL, when run, stops on its held-out problems (§11.3); HumanEval+, MBPP+,
+  MultiPL-E and LiveCodeBench are read once per stage, at its end.
 
 ### 11.5 Not in the pipeline
 
@@ -560,6 +566,7 @@ model is unmeasured. Each choice is [inference] from the cited evidence; none is
 | 2401.00788 | Astraios: Parameter-Efficient Instruction Tuning Code Large Language Models |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming - The Rise of Code Intelligence |
 | 2402.03300 | DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models |
+| 2403.07974 | LiveCodeBench: Holistic and Contamination Free Evaluation of Large Language Models for Code |
 | 2405.09673 | LoRA Learns Less and Forgets Less |
 | 2406.11931 | DeepSeek-Coder-V2: Breaking the Barrier of Closed-Source Models in Code Intelligence |
 | 2409.12186 | Qwen2.5-Coder Technical Report |
