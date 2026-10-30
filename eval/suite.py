@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from multiprocessing.synchronize import Event
 
 # The checkout's code and configuration trees (beside its top-level .py, .toml and .lock files)
-SOURCE_TREES = ("ablations", "conf", "corpus", "docker", "eval", "inference", "model", "scripts", "train")
+SOURCE_TREES = ("ablations", "conf", "corpus", "docker", "eval", "inference", "model", "posttrain", "scripts", "train")
 
 
 def pin(cpus: frozenset[int]) -> None:

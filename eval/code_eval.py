@@ -533,12 +533,13 @@ def reasoning_answer(text: str, *, cut: bool) -> tuple[str, str]:
 
 
 def multipl_e_answers(items: list[Task], answers: list[list[str]]) -> dict:
-    """multipl_e of reasoning answers, each judged as its prompt's #include lines + the answer + "\\n" + MultiPL-E's
-    tests without their first line, the "}" closing the prompt's function: the answer holds the whole function, so
-    neither the prompt's comment and signature nor that "}" are added."""
+    """multipl_e of reasoning answers, each judged as its prompt's #include lines, "#define main reasoning_main", the
+    answer, "\\n", "#undef main" and MultiPL-E's tests without their first line, the "}" closing the prompt's function:
+    the answer holds the whole function, so neither the prompt's comment and signature nor that "}" are added, and a
+    main of its own (a self-contained program) becomes an uncalled function, the tests' main the program's."""
     headers = [t._replace(prompt="".join(line for line in t.prompt.splitlines(keepends=True)
-                                         if line.startswith("#include")),
-                          entry_point=t.entry_point.removeprefix("}\n")) for t in items]
+                                         if line.startswith("#include")) + "#define main reasoning_main\n",
+                          entry_point="#undef main\n" + t.entry_point.removeprefix("}\n")) for t in items]
     return multipl_e(headers, answers, ks=REASONING_PASS_K)
 
 
