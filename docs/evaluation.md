@@ -234,7 +234,9 @@ them) and LiveCodeBench v6 (arXiv 2403.07974).
   shards of 18 sources; `results/mbpp_3shot_contamination.json`, per task, with the rule, the dataset revision and a
   key of the shards' paths and sizes), the statement (`text`) of 298 of the 500 shares a 10-gram with 4,315 train
   rows, and statement, code, asserts and setup code together match 429 tasks in 275,479 rows [measured].
-  LiveCodeBench's overlap with the pre-training and SFT data is not measured.
+  LiveCodeBench v6's 454 problems are not in the SFT prompts: no prompt holds ≥ 30% of a problem's distinctive
+  8-word sequences, and the 10-word rule's hits are boilerplate [measured]; the overlap with the pre-training data is
+  not measured.
 - **Evaluator processes.** EvalPlus's `sanitize` parses every line span of a program, hence a sanitize worker per
   CPU. MultiPL-E's `main.py --dir` judges a directory's problems serially and its default worker count oversubscribes
   g++ (a compile past its limit scores "SyntaxError", §9), hence one `--file --max-workers 1` process per problem.
