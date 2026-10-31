@@ -4,14 +4,16 @@ when it closed its reasoning, ended with BOS and its answer passed the prompt's 
 verdicts.jsonl); a loop when it never closed and its tail repeats (onpolicy/rollouts.py `loop`).
 
 - FTPO rows (ftpo.jsonl; Antidoom's unit, final-token preference of arXiv 2510.15061 §5): one per loop with an exact
-  cycle (onpolicy/rollouts.py `cycle`: onset o, period p), at the first token of the cycle's first repeat, o + p
-  (Antidoom's target: the cycle's start slid left as far as tokens equal the ones p later, plus one period,
-  github.com/Liquid4All/antidoom src/antidoom/generate.py:246-248): prefix_ids the prompt's ids and the response's
-  ids[:o + p], rejected_id ids[o + p] (= ids[o]). The chosen tokens are not chosen here: the trainer takes them from
-  the reference model's distribution at that position (onpolicy/train.py). No success is required (a loop of a prompt
-  never solved yields a row). Rows with an identical prefix are kept once (the first in prompt and sample order);
-  rows whose prefix and rejected token exceed --max-length are dropped (counted). The rows are then rebalanced on
-  their rejected token as Antidoom's trainer does (`rebalance`).
+  cycle (onpolicy/rollouts.py `cycle`: onset o, period p), at Antidoom's target (`target`): the first token of the
+  cycle's first repeat, o + p (the cycle's start slid left as far as tokens equal the ones p later, plus one period,
+  github.com/Liquid4All/antidoom src/antidoom/generate.py:246-248), moved past punctuation and whitespace and past a
+  sentence end before a restart word as Antidoom does (generate.py:252-288): prefix_ids the prompt's ids and the
+  response's ids[:target], rejected_id ids[target], `target` its offset from o + p. The chosen tokens are not chosen
+  here: the trainer takes them from the reference model's distribution at that position (onpolicy/train.py). No
+  success is required (a loop of a prompt never solved yields a row). Loops with no target before the response's end
+  are counted and dropped; rows with an identical prefix are kept once (the first in prompt and sample order); rows
+  whose prefix and rejected token exceed --max-length are dropped (counted). The rows are then rebalanced on their
+  rejected token as Antidoom's trainer does (`rebalance`).
 - selection.json: per temperature and pooled, the outcomes, pass@1 and pass@n (unbiased, arXiv 2107.03374 Eq. 1),
   loop rates per response and per prompt, the share of prompts with a success and with mixed outcomes (a success and
   a loop), the length statistics of successes, of loop onsets and periods; per style; and the rows: loops with an
@@ -22,7 +24,9 @@ verdicts.jsonl); a loop when it never closed and its tail repeats (onpolicy/roll
 """
 import argparse
 import json
+import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from math import comb
 from pathlib import Path
 
@@ -37,6 +41,11 @@ MAX_LENGTH = 32768
 # actual number of preference rows"; its seed (default.yaml:86)
 STRENGTH, MAX_ROWS, KEEP, SEED = 0.3, 12000, 0.7, 3407
 OUTCOMES = ("closed_ended", "closed_limit", "unclosed_limit", "unclosed_loop_stopped", "unclosed_ended")
+# Antidoom's target adjustment (src/antidoom/generate.py @ bd6a126): its _RESTART_WORDS (:37-65)
+RESTART_WORDS = frozenset({
+    "actually", "after", "also", "alternatively", "because", "but", "finally", "first", "given", "hmm", "however", "in",
+    "let", "looking", "maybe", "now", "okay", "perhaps", "second", "since", "so", "the", "then", "therefore", "this",
+    "thus", "wait"})
 
 
 def load(directory: Path) -> tuple[dict[str, dict], list[dict]]:
@@ -130,15 +139,71 @@ def rebalance(rows: list[dict], target: int, strength: float, seed: int) -> list
     return selected
 
 
-def ftpo_rows(prompts: dict[str, dict], rows: list[dict], max_length: int) -> tuple[list[dict], dict]:
-    """One row per loop with an exact cycle, duplicates and over-long rows removed (in prompt and sample order)."""
+def boundary_only(text: str) -> bool:
+    """Antidoom's `_is_boundary_only` (generate.py:185-186): non-empty, no letter, digit or underscore."""
+    return bool(text) and not any(ch.isalnum() or ch == "_" for ch in text)
+
+
+def skip_boundary(text: Callable[[int], str], n: int, i: int, max_tokens: int = 4, max_chars: int = 12) -> int:
+    """Antidoom's `_skip_boundary_only_tokens` (generate.py:189-204): past at most max_tokens boundary-only tokens
+    whose texts total at most max_chars characters."""
+    start, chars = i, 0
+    while i < n and i - start < max_tokens:
+        chars += len(text(i))
+        if chars > max_chars or not boundary_only(text(i)):
+            break
+        i += 1
+    return i
+
+
+def normalised_word(text: str) -> str:
+    """Antidoom's `_normalised_word` (generate.py:207-208)."""
+    return re.sub(r"^[^\w_]+|[^\w_]+$", "", text.strip().lower())
+
+
+def target(text: Callable[[int], str], ids: list[int], onset: int, period: int) -> int | None:
+    """Antidoom's rejected index (`select_rejected_token_index_token_aware`, generate.py:248-288) from the cycle's onset
+    (its slid seed index) and period, `text(i)` the text of token i: o + p; past boundary-only tokens (at most 4, 12
+    characters); when that token is a word followed by at most 3 boundary-only tokens (8 characters) holding a
+    sentence end ".!?" and then a restart word, and the tokens before the cycle and before its repeat differ, the
+    restart word; then the first token that is not whitespace. None past the response's end."""
+    n = len(ids)
+    i = skip_boundary(text, n, onset + period)
+    if i >= n:
+        return None
+    word = normalised_word(text(i))
+    if word and any(ch.isalnum() or ch == "_" for ch in word):
+        punct_start = i + 1
+        punct_end = skip_boundary(text, n, punct_start, max_tokens=3, max_chars=8)
+        punct = "".join(text(j) for j in range(punct_start, punct_end))
+        next_word = normalised_word(text(punct_end)) if punct_end < n else ""
+        seed_prev, repeat_prev = onset - 1, onset + period - 1
+        if (punct_end > punct_start and any(ch in punct for ch in ".!?") and seed_prev >= 0 and repeat_prev >= 0
+                and repeat_prev < n and ids[seed_prev] != ids[repeat_prev] and next_word in RESTART_WORDS):
+            i = punct_end
+    while i < n:
+        if text(i).strip():
+            return i
+        i += 1
+    return None
+
+
+def ftpo_rows(prompts: dict[str, dict], rows: list[dict], max_length: int,
+              decode: Callable[[list[int]], str]) -> tuple[list[dict], dict]:
+    """One row per loop with an exact cycle at its `target`, duplicates and over-long rows removed (in prompt and
+    sample order); `decode` gives a token's text."""
     out, seen, counts = [], set(), Counter()
     for r in sorted(rows, key=lambda r: (r["prompt_id"], r["sample"])):
         if not r["loop"] or r["loop_period"] is None:
             continue
         counts["loops_exact_cycle"] += 1
-        position = r["loop_onset"] + r["loop_period"]
-        prefix = prompts[r["prompt_id"]]["ids"] + r["ids"][:position]
+        ids, onset, period = r["ids"], r["loop_onset"], r["loop_period"]
+        position = target(lambda i: decode([ids[i]]), ids, onset, period)
+        if position is None:
+            counts["no_target"] += 1
+            continue
+        assert all(ids[i] == ids[i - period] for i in range(onset + period, position + 1)), "target left the repeat"
+        prefix = prompts[r["prompt_id"]]["ids"] + ids[:position]
         if tuple(prefix) in seen:
             counts["duplicates"] += 1
             continue
@@ -147,15 +212,15 @@ def ftpo_rows(prompts: dict[str, dict], rows: list[dict], max_length: int) -> tu
             counts["dropped_too_long"] += 1
             continue
         out.append({"prompt_id": r["prompt_id"], "sample": r["sample"], "temperature": r["temperature"],
-                    "onset": r["loop_onset"], "period": r["loop_period"], "prefix_ids": prefix,
-                    "rejected_id": r["ids"][position]})
+                    "onset": onset, "period": period, "target": position - onset - period, "prefix_ids": prefix,
+                    "rejected_id": ids[position]})
     return out, dict(counts)
 
 
 def select(directory: Path, max_length: int) -> dict:
     prompts, rows = load(directory)
     decode = get_tokenizer().enc.decode
-    candidates, counts = ftpo_rows(prompts, rows, max_length)
+    candidates, counts = ftpo_rows(prompts, rows, max_length, decode)
     for c in candidates:
         c["rejected"] = decode([c["rejected_id"]])  # Antidoom balances on the decoded token (`rejected_decoded`)
     kept = rebalance(candidates, min(MAX_ROWS, int(KEEP * len(candidates))), STRENGTH, SEED)
@@ -174,7 +239,8 @@ def select(directory: Path, max_length: int) -> dict:
             "rows_by_temperature": {str(t): sum(c["temperature"] == t for c in kept) for t in temperatures},
             "rejected_top20_before": Counter(c["rejected"] for c in candidates).most_common(20),
             "rejected_top20": Counter(c["rejected"] for c in kept).most_common(20),
-            "position_tokens": quantiles([c["onset"] + c["period"] for c in kept]),
+            "position_tokens": quantiles([c["onset"] + c["period"] + c["target"] for c in kept]),
+            "rows_target_moved": sum(c["target"] > 0 for c in kept),
             "onset_tokens": quantiles([c["onset"] for c in kept]),
             "period_tokens": quantiles([c["period"] for c in kept]),
             "prefix_tokens": quantiles([len(c["prefix_ids"]) for c in kept])}}

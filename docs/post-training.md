@@ -634,25 +634,31 @@ from the SFT model (§8.5); the termination probe and KodCode val pass@1 before 
 
 ### 8.4 Selection
 
-- **FTPO rows** (`onpolicy/selection.py` `ftpo_rows`, `ftpo.jsonl`): one per loop with an exact cycle (onset o,
-  period p), at the first token of the cycle's first repeat, o + p: `prefix_ids` the prompt's ids and the response's
-  `ids[:o + p]` (all inside the reasoning: loops never close), `rejected_id` = `ids[o + p]` = `ids[o]`. This is
-  Antidoom's target: its seed index slid left while tokens equal the ones a period later, plus one period
-  (github.com/Liquid4All/antidoom `src/antidoom/generate.py:246-248`); Antidoom then also steps over up to 4
-  whitespace- or punctuation-only tokens, and past a sentence end before a restart word ("Wait", "So", …,
-  `generate.py:252-287`), which is not done here: in the step-3000 smoke, 21 of 50 rejected tokens are "." or ","
-  [measured]. The chosen tokens come from the reference model at that position at training time (§8.5). No success
-  is required: 18 of the smoke's 35 rows are from prompts never solved [measured], as DeLoop's miner reads no reward.
-  Rows with an identical prefix are kept once; rows whose prefix and rejected token exceed `--max-length` are
-  dropped.
+- **FTPO rows** (`onpolicy/selection.py` `ftpo_rows`, `target`, `ftpo.jsonl`): one per loop with an exact cycle
+  (onset o, period p), at Antidoom's rejected index (github.com/Liquid4All/antidoom @ bd6a126,
+  `src/antidoom/generate.py:246-288`, ported with its constants): from the first token of the cycle's first repeat,
+  o + p (its seed slid left while tokens equal the ones a period later, plus one period), past up to 4 punctuation or
+  whitespace tokens of at most 12 characters; when that token is a word followed by up to 3 such tokens (8
+  characters) holding a sentence end (".!?") and then a restart word ("wait", "so", "perhaps", … 27 words,
+  `generate.py:37-65`), past them to the restart word; then to the first token that is not whitespace. The target
+  stays inside the repeat (`ids[i] == ids[i - p]`, asserted). `prefix_ids` is the prompt's ids and the response's
+  ids before the target (all inside the reasoning: loops never close), `rejected_id` the token at it, `target` its
+  offset from o + p. Over 18,779 synthetic token sequences the port returns Antidoom's own function's index
+  [measured]. In the step-3000 smoke the target moves in 21 of the 35 kept rows: at o + p the most frequent rejected
+  tokens are "." (11 of 50) and "," (10), after the move "Wait" (8), " perhaps" (7), " the" (6), and none of the 20
+  most frequent is punctuation [measured]. Loops with no target before the response's end are dropped. The chosen
+  tokens come from the reference model at that position at training time (§8.5). No success is required: 18 of the
+  smoke's 35 rows are from prompts never solved [measured], as DeLoop's miner reads no reward. Rows with an identical
+  prefix are kept once; rows whose prefix and rejected token exceed `--max-length` are dropped.
 - **Rebalancing** (`rebalance`, `ratios`): Antidoom's rejected-token normalisation (`src/antidoom/ftpo_data.py:105-114`,
   `:141-214`; one source): a rejected token's target share is its count weighted by (median / count)^0.3 when above
   the median count (strength 0.3, `configs/default.yaml:91`), rows are drawn greedily from the token furthest below
   its share up to round(share × target), then without that cap; target = min(12,000, 70% of the rows)
   (`default.yaml:87`; the README's "set max_train_examples to at most 70% of the actual number of preference rows").
-  The smoke's 50 rows (no duplicates) give 35; "." falls from 11 to 5, "," from 10 to 5 [measured]. At 8,000 prompts
-  and the smoke's 43 exact-cycle loops per 160 T 0.6 responses, about 8,600 rows before and 6,000 after rebalancing
-  [estimate], against Antidoom's 15K–20K generated and 12K trained (README) and DeLoop's level-off at 8K pairs.
+  On 30 random pools the port selects the rows Antidoom's function selects [measured]. The smoke's 50 rows (no
+  duplicates) give 35; "Wait" falls from 8 to 4, " perhaps" from 7 to 4 [measured]. At 8,000 prompts and the smoke's
+  43 exact-cycle loops per 160 T 0.6 responses, about 8,600 rows before and 6,000 after rebalancing [estimate],
+  against Antidoom's 15K–20K generated and 12K trained (README) and DeLoop's level-off at 8K pairs.
 - **Statistics** (`selection.json`): per temperature and pooled, the outcomes, pass@1 and pass@n (unbiased, arXiv
   2107.03374), loop rates per response and per prompt, the share of prompts solved and with mixed outcomes (a success
   and a loop), success, onset and period lengths; the rows: loops with an exact cycle, duplicates, rows before and
