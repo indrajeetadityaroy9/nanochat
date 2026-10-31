@@ -91,7 +91,7 @@ nominal; `train/loop.py`).
   2309.14322's default, slightly better than across the model dimension (§3.2.5, Fig. E.8). In nGPT, a normalized
   Transformer (0.5B parameters, 1K context, ~52B tokens), a fixed s_qk = 1 costs +0.11% validation loss (arXiv
   2410.01131 App. A.9, Table 5). At the d16 proxy's code bits per byte (0.42724, τ×1 seed 0 of
-  `results/muon_wd_timescale_20tpp.jsonl`) +0.11% is ≈ 0.0005, which the shared test's margin z·σ·√(2/n)
+  `results/pretrain/muon_wd_timescale_20tpp.jsonl`) +0.11% is ≈ 0.0005, which the shared test's margin z·σ·√(2/n)
   (`docs/experiments.md` §1) reaches at n ≈ 400 seeds per arm [estimate]. The gains train under AdamW without
   decay (`docs/training.md` §3).
 - **Output-logit cap c = 15, adopted on the literature:** QK norm bounds the attention logits, not these: it "does not

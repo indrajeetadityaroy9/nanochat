@@ -35,14 +35,14 @@ FULL_STATE_EVERY = 1000
 EARLY_WEIGHTS_LAST = 512
 AFTER_STAGE_WEIGHTS = (100, 200, 400, 800, 1600)
 # RunConfig.generate: eval/suite.py evaluate's modes, or "none": the run trains only (an SFT run: its checkpoint is
-# evaluated by the benchmarks' official tools, docs/post-training.md §11.4)
+# evaluated by the benchmarks' official tools, docs/post-training.md §5)
 EVALUATED = ("benchmarks", "parse")
 
 
 @dataclass
 class RunConfig:
     """A run of the base model (d24): its recipe (the defaults, learning_rate_scale's conf/run.yaml's) except the
-    fields set; with `base`, an SFT run of it (docs/post-training.md §11.2)."""
+    fields set; with `base`, an SFT run of it (docs/post-training.md §4)."""
     tokens_per_param: float | None = None  # None: the data's max_tokens_per_param (train/stages.py)
     # times the law's peak lr (conf/run.yaml sets the measured multiplier); an SFT run's: times its base run's peak lr
     learning_rate_scale: float = 1.0

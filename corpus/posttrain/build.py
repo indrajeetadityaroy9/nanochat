@@ -1,10 +1,10 @@
 """
-The SFT corpus (docs/post-training.md §11.2): the reasoning traces of Nemotron-Cascade's SFT stages 1 and 2 (code),
-of Nemotron-SFT-Competitive-Programming-v2 (Python, C++, Exercism) and of KodCode-V1-SFT-R1 (its R1-verified rows),
-rendered in §11.1's format (render), filtered, at most CAPS traces per prompt in each group, split by problem (problem)
-into train and val, tokenized and packed whole into 32,768-token rows by the base's packer (corpus/pack.py), one
-attention segment per trace. Each document's context (the prompt and THINK) is written as <split>.context, whose
-labels the loader ignores (corpus/loader.py).
+The SFT corpus (docs/corpus.md §10): the reasoning traces of Nemotron-Cascade's SFT stages 1 and 2 (code), of
+Nemotron-SFT-Competitive-Programming-v2 (Python, C++, Exercism) and of KodCode-V1-SFT-R1 (its R1-verified rows),
+rendered in the post-training format (render; docs/post-training.md §3), filtered, at most CAPS traces per prompt in
+each group, split by problem (problem) into train and val, tokenized and packed whole into 32,768-token rows by the
+base's packer (corpus/pack.py), one attention segment per trace. Each document's context (the prompt and THINK) is
+written as <split>.context, whose labels the loader ignores (corpus/loader.py).
 
 python -m corpus.posttrain.build
 """
@@ -45,8 +45,8 @@ GROUPS = {
     "kodcode": ("KodCode/KodCode-V1-SFT-R1/data/train-*.parquet", "kodcode"),
 }
 # Traces per prompt in each group, drawn at random; None: every trace. The long-trace groups (many traces per prompt):
-# the largest cap in {2, 1} at which 2 epochs of the packed train rows stay within 12.5B tokens (docs/post-training.md
-# §11.2); Exercism and KodCode as their data gives (about one trace per problem)
+# the largest cap in {2, 1} at which 2 epochs of the packed train rows stay within 12.5B tokens (docs/corpus.md
+# §10); Exercism and KodCode as their data gives (about one trace per problem)
 CAPS = {"cascade_stage1": 2, "cascade_stage2": 2, "cp_python": 2, "cp_cpp": 2, "cp_exercism": None, "kodcode": None}
 VAL_SHARE = 0.01        # problems held out
 MIN_REASONING = 20      # reasoning tokens
@@ -128,7 +128,8 @@ FORMATS = {"cascade": cascade, "competitive": competitive, "exercism": exercism,
 
 
 def lines(text: str) -> str:
-    """text with CR LF and a lone CR as LF, as the pre-training corpus's standardization (corpus/prepare.py lines)."""
+    """text with CR LF and a lone CR as LF, as the pre-training corpus's standardization (corpus/pretrain/prepare.py
+    lines)."""
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -150,8 +151,8 @@ def parse(row: dict, kind: str) -> tuple[str, str, str, bool] | str:
 
 
 def render(prompt: str, reasoning: str, answer: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """§11.1's document without its BOS tokens: (context, reasoning, the rest) tokens, each encoded alone as ordinary
-    text (the context as inference encodes a prompt)."""
+    """The post-training format's document (docs/post-training.md §3) without its BOS tokens: (context, reasoning, the
+    rest) tokens, each encoded alone as ordinary text (the context as inference encodes a prompt)."""
     enc = get_tokenizer().enc
     return tuple(enc.encode_to_numpy(text, disallowed_special=()).astype(TOKEN_DTYPE)
                  for text in (prompt + THINK, reasoning, END_THINK + answer))

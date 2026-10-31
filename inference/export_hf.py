@@ -2,7 +2,7 @@
 model directory (weights, config, generation config, the corpus tokenizer), which transformers and vLLM's Transformers
 backend load by trust_remote_code through inference/modeling_nanochat.py.
 
-With --chat (a post-trained checkpoint, docs/post-training.md §11.1): the tokenizer's chat template renders BOS, the
+With --chat (a post-trained checkpoint, docs/post-training.md §3): the tokenizer's chat template renders BOS, the
 messages' contents joined by "\\n\\n" and stripped, then THINK, the SFT context's text (corpus/posttrain/build.py
 render: the stripped prompt and THINK, encoded as one text); a system message, as lcb_runner's chat styles send one,
 joins the user turn as its no-system-role style writes it (SYSTEM_MESSAGE_GENERIC, "\\n\\n", the question). The
@@ -30,7 +30,7 @@ from model.config import HEAD_DIM, ROPE_THETA, VOCAB_SIZE
 from model.modeling import ModelConfig, has_ve, layer_windows
 from model.ops.linear import EPS
 
-# docs/post-training.md §11.1's context; Jinja's trim is Python's str.strip; THINK as a Jinja string literal, since a
+# docs/post-training.md §3's context; Jinja's trim is Python's str.strip; THINK as a Jinja string literal, since a
 # template's own trailing newline is dropped (Jinja's keep_trailing_newline is off)
 CHAT_TEMPLATE = ("{{ bos_token }}{{ messages | map(attribute='content') | join('\\n\\n') | trim }}"
                  f"{{{{ {json.dumps(THINK)} }}}}")

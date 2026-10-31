@@ -18,9 +18,9 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/trajectory.py` (`main`, `score`, `trajectory`, `rows_by_measure`, `groups`, `summaries`, `likelihoods`, `saved_steps`, `likelihood_path`) | §2 |
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `parse_record`, `truncated`, `filtered_generation`, `filtered_completions`, `codegen_runs`, `vetted`, evaluator wrappers: `evalplus`, `multipl_e`) | §1, §3, §7 |
 | `scripts/official_eval.sh`, `docker/Dockerfile.eval`, `eval/official.py`, `eval/official_infilling.py`, `eval/official_site/sitecustomize.py` | §4, §8 |
-| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py` | the post-trained model's protocol, `docs/post-training.md` §11.4 |
+| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py` | the post-trained model's protocol, `docs/post-training.md` §5 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
-| `metrics.py` (every function); `results/mbpp_3shot_contamination.json` (MBPP 3-shot's overlap with the train corpus) | §5; §4 |
+| `metrics.py` (every function); `results/pretrain/mbpp_3shot_contamination.json` (MBPP 3-shot's overlap with the train corpus) | §5; §4 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
 | `inference/syntax_constraint.py`; `inference/syntax/` (`lib.rs`, `lexer.rs`, `parser.rs`, `vocab.rs`, `python.lark`, `Cargo.toml`, `Cargo.lock`) | §7 |
 | `inference/export_hf.py` (`export`), `inference/modeling_nanochat.py` (`NanochatForCausalLM`, `NanochatModel`, `NanochatConfig`) | §8 |
@@ -34,7 +34,7 @@ measure (`"parse"`, §3) and, with `generate="benchmarks"`, the 1@10 mode (`"cod
 `"evalplus_average"` `"1@10"`, §4, §7), null with `generate="parse"`; `"provenance"` holds a SHA-256 over the code and
 configuration files (`source_digest`), the Python version and installed distributions (the records in `results/`
 predate it). Base-model checkpoints are evaluated with `"benchmarks"`, ablation runs with `"parse"`, SFT runs not at
-all (`generate="none"`, `docs/post-training.md` §11.4); `record` gathers a run's non-train log records and
+all (`generate="none"`, `docs/post-training.md` §5); `record` gathers a run's non-train log records and
 evaluations into `results/<experiment>.jsonl` (both: `docs/training.md` §6). The code benchmarks' standard protocols
 run outside `evaluate`, in their official tools on the exported checkpoint (`scripts/official_eval.sh`, §4). Earlier
 records also hold the harness's removed generation modes (greedy, sampled, MBPP 3-shot, infilling, SantaCoder FIM;
@@ -73,8 +73,8 @@ atomics).
   against 0.0544) [arithmetic: the packs' train rows; the base run's 66,063 and 3,811 steps]. Every record, the
   peak-lr calibration's included, uses these weights computed from the packs at its evaluation; the records in
   `results/` and `artifacts/runs/` differ from the current packs' weights by at most 3.2e-4 at 8K and 4.9e-4 at 32K.
-  Under the base run's mixture the × 2 arm's 8K code bpb (`results/peak_lr_d24.jsonl`) is 0.00062 higher (0.40607
-  against 0.40544, 0.29 of its standard error), `all` 0.00054, text and math unchanged, 32K code +0.00161 (0.10
+  Under the base run's mixture the × 2 arm's 8K code bpb (`results/pretrain/peak_lr_d24.jsonl`) is 0.00062 higher
+  (0.40607 against 0.40544, 0.29 of its standard error), `all` 0.00054, text and math unchanged, 32K code +0.00161 (0.10
   standard errors) [arithmetic, from the record's per-corpus sums].
 - **Sample** (`sample_rows`, `VAL_TOKENS = 80 × 2^19`): per corpus, n = min(rows, ⌈VAL_TOKENS / (micro-batch ×
   seq_len)⌉ × micro-batch) rows, row ⌊j · rows / n⌋ for j < n: systematic, because the packer orders each shard's rows
@@ -86,9 +86,9 @@ atomics).
   components of the row–document graph), the sample's independent unit. At 8K the 49,765 code rows form 44,829
   clusters (up to 135 rows); at 32K the 2,667 code rows form 2,255, and one `repositories_python` document of 58.8M
   tokens spans 93 of that corpus's 1,281 sampled rows: 7.7% of its bytes at 0.10 bits per byte against the corpus's
-  0.39 and 93% of the 32K code variance (the × 2 arm of `results/peak_lr_d24.jsonl`) [arithmetic, from the packs].
-  The benchmarks-mode d24 records `eval-3307.json`, `eval-1102.json`, `eval-2205.json` predate `row_clusters`; their
-  `"errors"` treat rows as independent (the × 2 checkpoint's 8K code se 0.00080 there against 0.00217 in its
+  0.39 and 93% of the 32K code variance (the × 2 arm of `results/pretrain/peak_lr_d24.jsonl`) [arithmetic, from the
+  packs]. The benchmarks-mode d24 records `eval-3307.json`, `eval-1102.json`, `eval-2205.json` predate `row_clusters`;
+  their `"errors"` treat rows as independent (the × 2 checkpoint's 8K code se 0.00080 there against 0.00217 in its
   parse-mode record).
 - **Reference solutions** (`solution_bits`, `SOLUTION_BENCHMARKS`): the bits of HumanEval+'s and MBPP+'s canonical
   solutions (EvalPlus) and HumanEval-X C++'s (arXiv 2303.17568; MultiPL-E has none) given their prompts, one example
@@ -160,13 +160,13 @@ memory). `VLLM_GPU_MEMORY_UTILIZATION` sets every `vllm.LLM`'s `gpu_memory_utili
 | HumanEval infilling single-line, multi-line, random-span (1,033, 5,815, 1,640; arXiv 2207.14255) | human-eval-infilling `88062ff` | `evaluate_functional_correctness` (3 s a sample) on the samples of `eval/official_infilling.py` (the package has no generator): `corpus.tokenizer.fim_prompt`'s PSM ids (BOS, the sentinels, prefix and suffix encoded apart: the packer's layout, `docs/corpus.md` §8), greedy, the middle until BOS (the paper's EOT) or another special token | the paper samples 100 (single- and multi-line) or 200 (random-span) middles a task at T 0.2 in SPM (Fig. 6, Tables 1, 4) and names no budget: here one greedy middle in PSM, as every benchmark here is greedy [inference: one order measures the trained format; the packer trains both], at most the benchmark's longest reference middle (44, 263, 169 tokens, `official_infilling.budget`) |
 
 The post-trained model's protocol (EvalPlus's chat prompt and LiveCodeBench, `scripts/official_reasoning.sh`):
-`docs/post-training.md` §11.4. Benchmarks and modes no longer run: `docs/experiments.md` §6.
+`docs/post-training.md` §5. Benchmarks and modes no longer run: `docs/experiments.md` §6.
 
 Results of the base run's final checkpoint (step 69,874), their comparison with published models and their failure
 analysis: `docs/results.md` §1–§3.
 
-- **Line endings.** The corpus normalizes `"\r\n"`, then `"\r"`, to `"\n"` (`corpus/prepare.py`), so the model never
-  trained on `"\r"`. lm-evaluation-harness's three MBPP shots carry MBPP's CRLF code (`tasks/mbpp/utils.py`
+- **Line endings.** The corpus normalizes `"\r\n"`, then `"\r"`, to `"\n"` (`corpus/pretrain/prepare.py`), so the model
+  never trained on `"\r"`. lm-evaluation-harness's three MBPP shots carry MBPP's CRLF code (`tasks/mbpp/utils.py`
   `list_fewshot_samples`): every one of the 500 prompts holds 11 carriage returns (their effect on the score:
   `docs/results.md` §1). The task `mbpp_lf` is `mbpp.yaml` with the prompt's fields (statement, code, asserts)
   normalized (`utils.py` `process_docs`, `list_fewshot_samples`); scoring is unchanged, since MBPP is judged by its
@@ -201,12 +201,12 @@ analysis: `docs/results.md` §1–§3.
   that way [unverified: a probe without a record]. Paraphrases that share no 10-gram remain, as under the cited rule.
   The original MBPP texts are outside the decontamination (224 of MBPP 3-shot's 500 test problems are MBPP+ tasks,
   matched through EvalPlus's revised prompt and solution); measured with the same rule over every decontaminated train
-  shard (1,794 shards of 18 sources; `results/mbpp_3shot_contamination.json`, per task, with the rule, the dataset
-  revision and a key of the shards' paths and sizes), the statement (`text`) of 298 of the 500 shares a 10-gram with
-  4,315 train rows, and statement, code, asserts and setup code together match 429 tasks in 275,479 rows [measured].
-  LiveCodeBench v6's 454 problems are not in the SFT prompts: no prompt holds ≥ 30% of a problem's distinctive
-  8-word sequences, and the 10-word rule's hits are boilerplate [measured]; the overlap with the pre-training data is
-  not measured.
+  shard (1,794 shards of 18 sources; `results/pretrain/mbpp_3shot_contamination.json`, per task, with the rule, the
+  dataset revision and a key of the shards' paths and sizes), the statement (`text`) of 298 of the 500 shares a 10-gram
+  with 4,315 train rows, and statement, code, asserts and setup code together match 429 tasks in 275,479 rows
+  [measured]. LiveCodeBench v6's 454 problems are not in the SFT prompts: no prompt holds ≥ 30% of a problem's
+  distinctive 8-word sequences, and the 10-word rule's hits are boilerplate [measured]; the overlap with the
+  pre-training data is not measured.
 - **Evaluator processes.** EvalPlus's `sanitize` parses every line span of a program, hence a sanitize worker per
   CPU in `evaluate` (`code_eval.sanitizers`). MultiPL-E's `main.py --dir` judges a directory's problems serially and
   its default worker count oversubscribes g++ (a compile past its limit scores "SyntaxError", §9), hence one
@@ -235,7 +235,7 @@ import it alike.
 | `pass_cell(passed)` | a pass@1 table cell: `summary` of each problem's mean pass over its samples; when every problem has one sample, also `wilson`, the Wilson 95% score interval (inside [0, 1], not degenerate at 0 or at all passes) | Miller, arXiv 2411.00640 §3.1 (average a question's samples first), Eq. 1, 3; statsmodels `proportion_confint(method="wilson")` |
 | `evalplus_average(humaneval, mbpp)` | the EvalPlus score of one mode's `humaneval_plus` and `mbpp_plus` records: the mean of the HumanEval, HumanEval+, MBPP and MBPP+ pass@1, computed as ½(m_HE + m_MBPP) of per-task (base + plus)/2 scores; a task's two columns form one cluster and the benchmarks are independent, so se² = ¼(se²_HE + se²_MBPP), each from `summary`; 95% normal interval; n counts tasks | Qwen3, arXiv 2505.09388 §3.3 (the four-way average); Miller Eq. 1, 3 |
 | `compare(a, b)` | paired comparison of two evaluation records (an `evaluate` record or `eval/official.py`'s summary) over the `codegen` (every mode and column) and `fim` sections both hold, on identical problems (else ValueError); one row per `<section>/<benchmark>/<mode>/<column>`: n; means a and b of the per-problem pass rates; the difference b − a with its paired se and 95% interval (clustered by HumanEval problem for `fim` rows); `corr`, the correlation of the per-problem scores (None when either is constant); p from exact McNemar for single-completion modes (greedy, 1@10, MBPP 3-shot, infilling; it treats an infilling problem's lines as independent), else a two-sided normal test of the difference over its se; `p_holm`, Holm-adjusted over all rows; `mde`, the difference detectable at α 0.05 with 80% power, (z₀.₀₂₅ + z₀.₂) · se. n · se², the variance of the per-problem difference, is Eq. 10's ω² + σ²_A/K_A + σ²_B/K_B less twice the covariance of A's and B's sample means: sample k of problem i has the same seed in every record, so the two records' samples are positively correlated [inference] and this paired se and mde are those of that design (common random numbers) | Miller Eq. 7, 8 (paired se), Eq. 3, Table 5 (correlation), Eq. 10 and App. C (detectable difference); statsmodels `mcnemar(exact=True)`, `multipletests(method="holm")`; scipy `norm` |
-| `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends, itself included (`layer_windows`: 512, or the context for full layers); records written before the query's own key was counted (`results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), lower by 12 · C per windowed layer (d16: 73,728; 641,826,816 at 8K, 1,245,806,592 at 32K; d24: 165,888 lower) | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT; torchtitan's count without the causal halving |
+| `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends, itself included (`layer_windows`: 512, or the context for full layers); records written before the query's own key was counted (`results/pretrain/muon_wd_timescale_20tpp.jsonl`, `results/pretrain/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), lower by 12 · C per windowed layer (d16: 73,728; 641,826,816 at 8K, 1,245,806,592 at 32K; d24: 165,888 lower) | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT; torchtitan's count without the causal halving |
 | `attended_keys(lengths, window)` | Σ over segments of Σ_p min(p, window + 1): the keys each query attends causally within its segment, itself included | — |
 | `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B; causal, per-document counting as Megatron-LM `num_floating_point_operations` (which excludes padding) |
 | `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12, the H100 SXM5 / GH200 dense BF16 peak; half NVIDIA's 1,979 TFLOP/s "with sparsity" is 989.5 [arithmetic]) | PaLM §4.1 |
@@ -474,7 +474,7 @@ every step, and a bf16 load generates the same tokens.
 `_supports_attention_backend`; `config.json`'s `head_dtype` "float32" runs vLLM's head in fp32
 (`LogitsProcessor._apply_head`; transformers ignores the field); the value-embedding gate is a `Gate` module outside
 `nn.Linear`, since the backend's linear layers carry a weight loader that skips `_keep_in_fp32_modules_strict`. With
-`--chat` the tokenizer carries the SFT chat template (`CHAT_TEMPLATE`, `docs/post-training.md` §11.4).
+`--chat` the tokenizer carries the SFT chat template (`CHAT_TEMPLATE`, `docs/post-training.md` §5).
 
 - Logit agreement (a d16 checkpoint at 5 tokens per parameter, step 1,707; 16 val rows of 8K from 8 corpora, 130,911
   scored tokens; greedy continuations of the 542 HumanEval+/MBPP+ prompts; GH200): the bf16 head was the main

@@ -1,5 +1,5 @@
 """
-SFT peak-lr calibration (docs/post-training.md §11.2): complete schedules at 1/10, 1/3 and 1 times the base run's peak
+SFT peak-lr calibration (docs/post-training.md §4): complete schedules at 1/10, 1/3 and 1 times the base run's peak
 lr over the same first 2% of the SFT train rows, each scored by the response loss on the held-out problems after its
 last step; the full run's scale is the fitted optimum moved to the full run's steps (its epochs of the train rows). The
 runs: conf/experiment/sft_lr.yaml; their records: results/posttrain/sft_lr.jsonl (ablations/records.py).

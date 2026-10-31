@@ -16,6 +16,7 @@ measured; [unverified] a figure without a record. Paper values are the papers' o
 |`…/official-69874/lm-eval-crlf/`|MBPP 3-shot on lm-evaluation-harness's unmodified CRLF prompts (task `mbpp`)|
 |`…/official-69874/compare-eval-69874.json`|per-problem agreement of the official tools with the in-repository harness|
 |`artifacts/runs/<base run>/likelihood-<step>.json`|bits per byte per domain at 8K and 32K context, per saved step from 62,887|
+|`results/pretrain/trajectory.json`|those steps' bits per byte with standard errors, and each step's paired change from step 66,063 (8K, solutions) or 66,163 (32K) and from the step before (`eval/trajectory.py`)|
 
 `<base run>` is `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10`.
 
@@ -44,8 +45,8 @@ middle in tokens.
 
 lm-evaluation-harness's unmodified MBPP prompt keeps the original dataset's CRLF line endings in its three few-shot
 solutions: 11 carriage returns per prompt, in all 500 prompts [measured]. Corpus standardization maps every "\r\n" and
-"\r" to "\n" (`corpus/prepare.py`), so the model has never trained on a carriage return. The row above is the task
-`mbpp_lf`, the same prompt with its fields' line endings normalized as the corpus normalizes them
+"\r" to "\n" (`corpus/pretrain/prepare.py`), so the model has never trained on a carriage return. The row above is the
+task `mbpp_lf`, the same prompt with its fields' line endings normalized as the corpus normalizes them
 (`eval/official_lm_eval/`, docs/evaluation.md §4); scoring is unaffected, as MBPP judges a response by its tests, not
 by the reference code. Same model, settings and 500 problems [measured]:
 
@@ -85,8 +86,8 @@ variance on top of this model's own ±6.8-point interval on HumanEval (§1).
   Qwen2.5-Coder-0.5B's 28.0 / 23.8) at 1/53 of Qwen2.5-Coder's continued-pretraining tokens and 1/19 of
   DeepSeek-Coder's [arithmetic]; all four EvalPlus scores exceed StarCoderBase-3B's.
 - **MBPP lags.** MBPP and MBPP+ are 8.5 and 10.6 points below Qwen2.5-Coder-0.5B, where HumanEval is level. MBPP
-  states each task in prose; the corpus is code-heavy, and the model's held-out text is its weakest domain (0.85 bits
-  per byte at 8K against 0.29 for code, §4) [inference].
+  states each task in prose; the corpus is code-heavy, and the model's held-out text is its weakest domain (0.84 bits
+  per byte at 8K against 0.29 for code, §4) [measured; the cause: inference].
 - **C++ follows Python.** HumanEval-C++ is 0.81 of HumanEval and MBPP-C++ 0.83 of MBPP (greedy) [arithmetic].
 
 ## 3. Failure analysis
@@ -129,22 +130,43 @@ statuses [measured].
 ## 4. Likelihood at the end of pretraining
 
 Held-out bits per byte (lower is better) of each saved model from step 62,887, per domain; 8K is the file-level stage's
-context, 32K the repository stage's, whose first saved model is step 66,163 [measured].
+context, 32K the repository stage's, whose first saved model is step 66,163 (`results/pretrain/trajectory.json`
+`bpb`) [measured].
 
-|Step|8K all|8K code|8K text|8K math|32K all|32K code|
-|---|---|---|---|---|---|---|
-|62,887|0.3637|0.2964|0.8614|0.3430|—|—|
-|64,000|0.3619|0.2946|0.8584|0.3402|—|—|
-|66,063|0.3584|0.2916|0.8522|0.3349|—|—|
-|66,163|0.3600|0.2934|0.8524|0.3365|0.3612|0.2924|
-|66,463|0.3606|0.2943|0.8513|0.3354|0.3588|0.2897|
-|66,863|0.3607|0.2947|0.8501|0.3339|0.3572|0.2880|
+|Step|8K all|8K code|8K text|8K math|32K all|32K code|32K text|32K math|
+|---|---|---|---|---|---|---|---|---|
+|62,887|0.3637|0.2964|0.8614|0.3430|—|—|—|—|
+|64,000|0.3619|0.2946|0.8584|0.3402|—|—|—|—|
+|66,063|0.3584|0.2916|0.8522|0.3349|—|—|—|—|
+|66,163|0.3600|0.2934|0.8524|0.3365|0.3612|0.2924|0.8531|0.3363|
+|66,463|0.3606|0.2943|0.8513|0.3354|0.3588|0.2897|0.8519|0.3351|
+|66,863|0.3607|0.2947|0.8501|0.3339|0.3572|0.2880|0.8507|0.3336|
+|67,000|0.3608|0.2948|0.8496|0.3337|0.3568|0.2876|0.8502|0.3334|
+|68,000|0.3602|0.2946|0.8466|0.3305|0.3543|0.2852|0.8472|0.3302|
+|69,000|0.3592|0.2938|0.8439|0.3280|0.3525|0.2836|0.8445|0.3277|
+|69,874|0.3584|0.2932|0.8424|0.3266|0.3515|0.2827|0.8430|0.3263|
+
+Paired change at step 69,874 from step 66,063, the last file-level model, over identical rows (`change`; ± one
+standard error) [measured]:
+
+|8K all|8K code|8K repositories|8K synthetic|8K notebooks|8K functions|8K text|8K math|
+|---|---|---|---|---|---|---|---|
+|+0.00003 ± 0.00003|+0.00162 ± 0.00004|−0.00413 ± 0.00004|+0.01340 ± 0.00004|+0.00248 ± 0.00012|+0.00293 ± 0.00108|−0.00978 ± 0.00003|−0.00829 ± 0.00004|
 
 - **The file-level stage's decay improves every domain** to step 66,063.
-- **The repository stage costs file-level code at 8K for a while**: +1.1% bits per byte on 8K code by step 66,863 while
-  8K text and math keep falling and 32K falls fast. The repository stage's data mix is the likely cause [inference].
-- **The model was not saturated**: every domain at the stage's own context was still falling at the last steps
-  [measured to 66,863]; more tokens would likely keep helping [inference]. The steps to 69,874 complete this table.
+- **The repository stage costs 8K code, and recovers it only in part.** 8K code rises 0.0032 (+1.1%) by step 67,000
+  while 8K text and math keep falling and 32K falls fast; it then falls again but ends at 0.2932 against step
+  66,063's 0.2916 (paired change +0.0016, +0.6%). The 8K average is back to step 66,063's 0.3584 (paired change
+  +0.00003 ± 0.00003) because text (−0.0098) and math (−0.0083) gained what code lost. Within 8K code the repository
+  group improved (−0.0041) and the groups only the file-level stage trains worsened: synthetic code +0.0134,
+  notebooks +0.0025, functions +0.0029 [measured]. The repository stage's mixture holds none of those three groups
+  (`docs/corpus.md` §7), the likely cause [inference].
+- **The benchmark solutions improve through the repository stage**: per-byte bits of the reference solutions fall
+  from step 66,063 to 69,874 by 0.0104 ± 0.0014 (HumanEval+) and 0.0250 ± 0.0016 (MBPP+); HumanEval-X C++ is
+  unchanged (−0.0007 ± 0.0007) [measured].
+- **The model was not saturated**: at 32K every domain was still falling at the last steps (all 0.3525 → 0.3515 from
+  step 69,000 to 69,874, at learning rates below 1.3% of the peak [arithmetic]); more tokens would likely keep helping
+  [inference].
 
 ## 5. Expectations for post-training
 

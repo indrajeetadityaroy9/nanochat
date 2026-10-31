@@ -1,31 +1,36 @@
-# Pretraining corpus
+# Corpora
 
-`corpus/` builds the pretraining data of a Python and C++ code model from 18 Hugging Face sources: acquisition,
-standardization, curation and publication (text, independent of any tokenizer), then the tokenizer, tokenization,
-the two-stage mixture, packing with fill-in-the-middle, and loading. The training side of the stages is
-`docs/training.md` §1. Markers: [arithmetic] derived from code numbers; [inference] reasoning not measured;
-[estimate]; [unverified] a figure without a record, or a claim its cited source's text lacks. "Computed on master"
-numbers were recomputed on CPU from the curated shards and the tokenized and packed data under the corpus's tokenizer.
+`corpus/` builds the training data of a Python and C++ code model. The pretraining corpus (`corpus/pretrain/` and the
+shared modules): 18 Hugging Face sources through acquisition, standardization, curation and publication (text,
+independent of any tokenizer), then the tokenizer, tokenization, the two-stage mixture, packing with
+fill-in-the-middle, and loading (§1–§9). The post-training (SFT) corpus (`corpus/posttrain/`): reasoning traces,
+filtered, split by problem and packed by the same tokenizer and packer (§10). §11 lists both builds' commands. The
+training side of the stages is `docs/training.md` §1; the SFT method `docs/post-training.md`. Markers: [measured] from
+a record or a run; [arithmetic] derived from code numbers; [inference] reasoning not measured; [estimate];
+[unverified] a figure without a record, or a claim its cited source's text lacks. "Computed on master" numbers were
+recomputed on CPU from the curated shards and the tokenized and packed data under the corpus's tokenizer.
 
 ## Code
 
 | File | § |
 |---|---|
-| `corpus/__init__.py` (run order; `CORPUS` = `paths.CORPUS` = `artifacts/corpus`) | 10 |
-| `corpus/sources.py` (`SOURCES`, paths, `texts`, `curated_documents`, `repository_samples`) | 1, 3, 5, 6 |
-| `corpus/prepare.py` (fetch, extent, standardize) | 1, 2, 10 |
-| `corpus/schema.py` (categories, `SPLIT`, `SAMPLE_FILE`) | 2, 3 |
-| `corpus/curate.py` (check, dedup, split, shards) | 3, 10 |
-| `corpus/decontaminate.py`, `corpus/crate/decontaminate.rs` (`Grams`) | 3, 10 |
-| `corpus/publish.py` (`DATASET`, card, push, pull) | 4, 10 |
-| `corpus/tokenizer.py`, `corpus/train_tokenizer.py` (the tokenizer step), `corpus/crate/train.rs` | 5, 10 |
-| `results/tokenizer_split_merge-vocabularies.json` (the tokenizer sample) | 5 |
-| `corpus/tokenize.py`, `corpus/crate/repository.rs` (`topological_sort`) | 6, 10 |
+| `corpus/__init__.py` (run order; `CORPUS` = `paths.CORPUS` = `artifacts/corpus`), `corpus/pretrain/__init__.py` | 11 |
+| `corpus/pretrain/sources.py` (`SOURCES`, paths, `texts`, `curated_documents`, `repository_samples`) | 1, 3, 5, 6 |
+| `corpus/pretrain/prepare.py` (fetch, extent, standardize) | 1, 2, 11 |
+| `corpus/pretrain/schema.py` (categories, `SPLIT`, `SAMPLE_FILE`) | 2, 3 |
+| `corpus/pretrain/curate.py` (check, dedup, split, shards) | 3, 11 |
+| `corpus/decontaminate.py`, `corpus/crate/decontaminate.rs` (`Grams`) | 3, 10, 11 |
+| `corpus/pretrain/publish.py` (`DATASET`, card, push, pull) | 4, 11 |
+| `corpus/tokenizer.py`, `corpus/train_tokenizer.py` (the tokenizer step), `corpus/crate/train.rs` | 5, 11 |
+| `results/pretrain/tokenizer_split_merge-vocabularies.json` (the tokenizer sample) | 5 |
+| `corpus/tokenize.py`, `corpus/crate/repository.rs` (`topological_sort`) | 6, 10, 11 |
 | `corpus/parallel.py` (`MEMORY`, `ordered`, `SPAWN`) | 3, 6 |
 | `corpus/mixture.py` | 1, 6, 7, 9 |
-| `corpus/pack.py`, `corpus/crate/pack.rs`, `corpus/layout.py` | 8, 10 |
+| `corpus/pack.py`, `corpus/crate/pack.rs`, `corpus/layout.py` | 8, 10, 11 |
 | `corpus/crate/lib.rs` (module, rayon pool), `corpus/crate/Cargo.toml`, `corpus/crate/Cargo.lock` | 6 |
-| `corpus/loader.py` | 9 |
+| `corpus/loader.py` (`contexts`: the SFT prompts' ignored labels) | 9, 10 |
+| `corpus/posttrain/__init__.py`, `corpus/posttrain/sft.py` (`NAME`, `SFT_STAGE`, `THINK`, `END_THINK`) | 10 |
+| `corpus/posttrain/build.py` (`SOURCE`, `GROUPS`, `render`, `problem`, `WRAPPERS`, `CAP`) | 10, 11 |
 
 ## 1. Sources and acquisition
 
@@ -72,10 +77,11 @@ source and language; SA-BPE within `SPLIT_PATTERN`, trained before this corpus; 
 compressing a source better than the reference [inference]. Across tokenizer training mixes NSL "only varies by 5 to
 6 percentage points" (arXiv 2402.01035 §2.3); as a relative spread of token counts that is 6.9% for code (NSL
 75.54–80.78) and 6.4% for English (84.86–90.28), Fig. 2 [arithmetic]. It held for every arm: the intrinsic record's
-`train_tokens_over_draw` is ≥ 1.017 (sa-bpe-fused, synthetic 1.0173; `results/tokenizer_split_merge-intrinsic.json`).
-Under the corpus's tokenizer the train splits hold 1.092 (synthetic, draw 25.32B), 1.071 (text, 10.26B) and 1.166
-(math, 3.08B) × their group's draw (computed on master; the intrinsic record's 1.169 for math estimates tokens from
-bytes, `docs/experiments.md` §2). A source whose packed shards fall short of its draw stops `pack` (`pack.fit`, §8).
+`train_tokens_over_draw` is ≥ 1.017 (sa-bpe-fused, synthetic 1.0173;
+`results/pretrain/tokenizer_split_merge-intrinsic.json`). Under the corpus's tokenizer the train splits hold 1.092
+(synthetic, draw 25.32B), 1.071 (text, 10.26B) and 1.166 (math, 3.08B) × their group's draw (computed on master; the
+intrinsic record's 1.169 for math estimates tokens from bytes, `docs/experiments.md` §2). A source whose packed shards
+fall short of its draw stops `pack` (`pack.fit`, §8).
 
 ## 2. Standardization and schema
 
@@ -101,8 +107,8 @@ extent's order), in the category's schema (`schema.py`; every column a non-null 
 
 ## 3. Curation
 
-`python -m corpus.curate`; every output's rows and order are a function of the standardized files. DuckDB runs in
-`parallel.MEMORY`: half the lower of the machine's memory and the cgroup's `memory.max`, as DuckDB's guide
+`python -m corpus.pretrain.curate`; every output's rows and order are a function of the standardized files. DuckDB runs
+in `parallel.MEMORY`: half the lower of the machine's memory and the cgroup's `memory.max`, as DuckDB's guide
 ("Out-of-Memory Issues") advises a `memory_limit` of 50–60% because some operations bypass its buffer manager.
 
 **Python 3 check, with repair.** Every file of a Python source whose category is `code` (Stack-Edu,
@@ -169,11 +175,11 @@ part (§8).
 
 ## 4. Published dataset and provenance
 
-`corpus/publish.py`, `DATASET` = `iaroy/nanochat-data` (private on the Hub). `push` replaces the dataset's tree in one
-commit (history kept) with `<source>/<split>/<k>.parquet` (`curated/`'s: 1,812 shards, 6 × 100 repository, 12 × 101
-others; 166,229,888,890 bytes), `decontamination.json` (§3), `tokenizer/tokenizer.{tiktoken,pattern}` (§5) and the card
-`README.md` (`publish.card`). `pull` downloads `main`'s shards and record into `CORPUS/curated` and the tokenizer into
-`CORPUS/tokenizer`. The curated shards were first published as the curated release ("nanochat corpus, curated",
+`corpus/pretrain/publish.py`, `DATASET` = `iaroy/nanochat-data` (private on the Hub). `push` replaces the dataset's tree
+in one commit (history kept) with `<source>/<split>/<k>.parquet` (`curated/`'s: 1,812 shards, 6 × 100 repository, 12 ×
+101 others; 166,229,888,890 bytes), `decontamination.json` (§3), `tokenizer/tokenizer.{tiktoken,pattern}` (§5) and the
+card `README.md` (`publish.card`). `pull` downloads `main`'s shards and record into `CORPUS/curated` and the tokenizer
+into `CORPUS/tokenizer`. The curated shards were first published as the curated release ("nanochat corpus, curated",
 2026-10-24); a later revision added `tokenizer/` (the shipped tokenizer, §5); `main` is the decontaminated release
 ("nanochat corpus, curated and decontaminated", 2026-10-27): the 1,682 shards with a dropped row rewritten, the other
 130 (the 112 untouched train shards and the 18 val shards) byte-identical to the curated release's, the record added,
@@ -213,7 +219,7 @@ generators (data order, FIM's ChaCha8) select and transform rows but add no data
 shipped with the dataset, §4), encoded by tiktoken. It is the sa-bpe arm of the tokenizer ablation
 (`docs/experiments.md` §2: the other arms, the intrinsic comparison and why the ablation's training runs were not run).
 Its data key (`Tokenizer.data_key`: SHA-256 of [pattern, {BOS: id}, tiktoken file]) is recorded in
-`results/tokenizer_split_merge-vocabularies.json`; the whole corpus is tokenized and packed under it, in
+`results/pretrain/tokenizer_split_merge-vocabularies.json`; the whole corpus is tokenized and packed under it, in
 `CORPUS/tokenized/<corpus>-<data key>/` (§6, §8).
 
 **Method and provenance.** `python -m corpus.train_tokenizer` is the method: the sample, trainer and settings below.
@@ -221,7 +227,7 @@ The shipped tokenizer was trained by the same method (the tokenizer ablation's `
 build of the curated corpus. On the curated release (§4) the sample has the record's 3,988,600 documents but different
 bytes and units per source (stack_edu_python 1,195,186,384 bytes and 384,926 units against the record's 1,186,614,352
 and 384,949; kaggle_notebooks 195,259,329 bytes against 206,881,801), so the step writes an equivalent tokenizer, not
-the shipped one (a different tiktoken file and data key, `tokenizer.pattern` identical); the build (§10) pulls the
+the shipped one (a different tiktoken file and data key, `tokenizer.pattern` identical); the build (§11) pulls the
 shipped one.
 
 - **Vocabulary: 32,768 ids** (`model/config.py` `VOCAB_SIZE` = 2^15): the 256 bytes, 32,508 merges, then
@@ -259,7 +265,7 @@ shipped one.
 - **Authorship units** (SA-BPE's R): the lowercased repository for repository files and functions (SA-BPE's unit; one
   unit across the sources holding it); every other document its own unit (arXiv 2604.14053 §6 suggests "documents,
   books, or document collections" for natural language, untested there).
-- **The draw** (`results/tokenizer_split_merge-vocabularies.json`): 3,988,600 documents, 13,444,424,046 bytes,
+- **The draw** (`results/pretrain/tokenizer_split_merge-vocabularies.json`): 3,988,600 documents, 13,444,424,046 bytes,
   3,429,396 units; code 85.6% of its bytes; drawn bytes 0.99–1.05 of the targets, as the draw takes a fraction of rows
   against footer byte targets and each repository file carries a path comment the footers omit (`sources.texts`, §6).
 
@@ -283,7 +289,7 @@ shipped one.
 | ultradata_math_l3_multi_style | 0.106 | 0.0309 | 20,995 | 0.105 | 20,995 |
 | ultradata_math_l3_textbook_exercise | 0.089 | 0.0309 | 31,798 | 0.089 | 31,798 |
 
-- **Intrinsic** (`results/tokenizer_split_merge-intrinsic.json`, evaluation text the 18 sources' val splits,
+- **Intrinsic** (`results/pretrain/tokenizer_split_merge-intrinsic.json`, evaluation text the 18 sources' val splits,
   6.21 GB): sa-bpe holds 3.624 bytes per token over the file stage and 3.442 on Stack-Edu Python, and passed the
   validity checks the record holds (on 200 val documents per source: chunks cover the text, tiktoken equals the merges
   replayed, every text decodes).
@@ -502,7 +508,140 @@ start position consumed.
   `metrics.executed_model_flops` (`docs/evaluation.md` §5).
 - Iteration stops when a corpus's rows run out, without the partial micro-batch.
 
-## 10. Building the corpus
+## 10. Post-training corpus
+
+`corpus/posttrain/build.py` builds the SFT corpus (`corpus/posttrain/sft.py` `NAME` "sft") from released reasoning
+traces: each row rendered in the post-training format (`docs/post-training.md` §3; `render`), filtered, capped per
+prompt, split by problem, tokenized by the corpus tokenizer (`tokenize.tokenize_split`) and packed whole into
+32,768-token rows by the pretraining packer (§8) for its one stage (`SFT_STAGE`: 3 rows per micro-batch, as the 32K
+stage). It reads the source files under `artifacts/posttrain/` (`SOURCE`; `GROUPS` gives each group's globs) and
+writes `CORPUS/tokenized/sft-<data key>/` with the counts in `stats.json` there.
+
+**Sources.** Rows from the dataset cards and the Hub's file listings; tokens in this tokenizer from ranged reads of
+30–300 rows per file [estimate]:
+
+| Dataset | Rows | Tokens (ours) | Content |
+|---|---|---|---|
+| `nvidia/Nemotron-Cascade-SFT-Stage-1` `code` | 1,301,591 of 165,393 prompts | ≈9.9B; per row p50 6,658, max 18,273 | Python; DeepSeek-R1 traces; OpenCodeReasoning 763,495, opc-sft-stage2 323,163, leetcode 126,878, TACO 56,694, Magicoder 27,625, APPS 3,736 |
+| `nvidia/Nemotron-Cascade-SFT-Stage-2` `code` | 1,392,831 of 78,852 prompts | ≈17.6B; per row p50 11,775, 0.2% above 32,768 | Python; DeepSeek-R1-0528 traces; OpenCodeReasoning 1,143,266, opc-sft-stage2 188,063, TACO 58,273, synthetic 1,654, APPS 1,575 |
+| `nvidia/Nemotron-SFT-Competitive-Programming-v2` `competitive_programming_{python,cpp}` | 333,561 and 332,186 (counted from the files) of 34,799 prompts; 157,326 and 156,672 fit in 32,768 tokens | per row p50 56,573 and 59,871 (all rows) | stdin problems, Codeforces ratings up to 3,500; the only C++ traces |
+| `nvidia/Nemotron-SFT-Competitive-Programming-v2` `exercism` | 79,244 (counted from the file), 79,103 with one Python file listing, 78,156 prompts | reasoning (the answer's prose before its file) p50 302, code p50 180 | function stubs from Aider's Exercism protocol |
+| `KodCode/KodCode-V1-SFT-R1` `train` split | 268,211 (counted from the files), every row's R1 solution passing its tests (`r1_correctness` true) | after the filters 1.19B; reasoning per row p50 3,039 [measured] | Python functions (KodCode's complete and instruct styles) and stdin programs (online-judge style); R1 traces |
+
+- **Selection basis** (literature: `docs/post-training.md` §2.3) [inference]: reasoning traces only, from one
+  teacher family (two sources beat sixteen, arXiv 2506.04178 Table 4), past the distillation valley's size (arXiv
+  2510.06101 §4); Cascade-1 for Python at volume, CP-v2 for harder problems and the only C++ traces, Exercism and
+  KodCode for function-form prompts (HumanEval's and MBPP's shape) with short reasoning. KodCode's `train` split holds
+  only the rows whose R1 solution passed its tests (the failed ones are its `incorrect` split); the other groups have
+  no correctness filter: Nemotron-Cascade (arXiv 2512.13607) states none; Nemotron-Cascade 2 keeps only correct traces
+  where tests exist (arXiv 2603.19220 §3.2.2); at 7–8B unfiltered traces matched or beat filtered ones (arXiv
+  2506.04178 Tables 15, 18; arXiv 2510.06101 Table 2).
+- **Not used**: `nvidia/Nemotron-Cascade-2-SFT-Data` (24,824,269 rows in 8 configurations, ≈171B tokens here
+  [estimate]) has no code-reasoning configuration, only math, science, chat, instruction following, safety, agents
+  and software engineering; Nemotron-Cascade 2's code traces (1.9M Python, 1.0M C++, 1.3M with tool calls; arXiv
+  2603.19220 §3.2.2) are not released. Fetched and not used (rows counted from the files):
+
+| Dataset | Role | Rows | Tests |
+|---|---|---|---|
+| `OpenCoder-LLM/opc-sft-stage1` | short-solution SFT, stage 1 | 4,216,321 | — |
+| `OpenCoder-LLM/opc-sft-stage2` | short-solution SFT, stage 2 | 436,347: educational 118,278, evol 111,183, McEval 35,943, package 170,943 | educational subset only |
+| `nvidia/OpenCodeInstruct` | short-solution SFT | 5,000,000 | 10 per sample with execution status, an LLM judge's score (arXiv 2504.04030 §2.3–§2.5) |
+| `KodCode/KodCode-V1` | short-solution SFT, RL problems | 487,432 | GPT-4o solutions and tests kept only when they pass with 100% branch coverage, 7.52 tests per question (arXiv 2503.02951 §2.2, §3.2) |
+| `microsoft/rStar-Coder` (`seed_sft`, `synthetic_sft`, `synthetic_rl`) | long-trace SFT; RL problems | seed_sft 591,660 (281,361 with tests, 125,521 of those passing); synthetic_sft 398,183; synthetic_rl 398,107 problems | not present (separate test-case subsets) |
+| `nvidia/OpenCodeReasoning-2` (`train/python`) | long-trace SFT | 1,398,166: R1 solutions with QwQ-32B critiques, judged right 1,027,261 and wrong 370,905 | a pass rate per row |
+| `open-thoughts/OpenThoughts3-1.2M` | long-trace SFT | 1,200,000: math 850,000, code 250,000, science 100,000 | none (QwQ-32B answers, unfiltered) |
+| `nvidia/OpenCodeReasoning` | long-trace SFT | 735,255 (two splits, 567,850 and 167,405) | none |
+| `KodCode/KodCode-V1-SFT-R1` `incorrect`, `use_with_caution` | long-trace SFT | R1 solutions that failed their tests; the questions KodCode flags as benchmark-similar | R1 solutions with their test results |
+| `agentica-org/DeepCoder-Preview-Dataset` | RL | 24,287 train; 687 test | yes; weak enough for false-positive rewards (`docs/post-training.md` §2.7) |
+
+- **Decontamination as published**: Nemotron-Cascade drops SFT samples sharing a 9-gram with coding benchmarks
+  (arXiv 2512.13607 §3.2.3); KodCode puts the questions above cosine similarity 0.95 to HumanEval, MBPP, BigCodeBench
+  or LiveCodeBench v5 (94 of 447K, §3.2) in its `use_with_caution` split, which the KodCode group leaves out. Its
+  SFT-R1 rows carry no similarity field; joined to KodCode-V1 by question id, none of the 261,579 joinable `train`
+  rows exceeds 0.95 and 6,632 have no score [measured]. rStar-Coder removes 16-gram overlaps with HumanEval(+),
+  MBPP(+), LiveCodeBench and USACO 2025 (arXiv 2505.21297 §3.3); OpenCodeReasoning's 90 flagged pairs were judged not
+  duplicates, none removed; OpenCodeInstruct's procedure is [unverified]. None of these is the pretraining rule (§3),
+  which every group still passes here.
+
+**Groups and rendering** (`GROUPS`, `parse`): six groups, Cascade-1's Stage-1 and Stage-2 code, CP-v2's Python, C++
+and Exercism traces, and KodCode. A Cascade-1 row's reasoning is its reply between the leading `<think>` and
+`</think>`, its answer the rest, and a KodCode row's likewise from its R1 turn; a CP-v2 row's are its
+`reasoning_content` and `content` (no prompt is a `-` placeholder). An Exercism row is Aider's 9-message protocol: the
+prompt is the stub's file listing and the problem statement without Aider's editing instructions (`AIDER_REQUEST`),
+the reasoning the reply's prose before its file less the markdown heading that closes it ("### Solution Code",
+`TRAILING_HEADING`), the answer that file's code in a Python block. Every field's line endings are normalized as the
+pretraining corpus's (`lines`: CR LF, then a lone CR, to LF; §2), so no document holds a carriage return; the rows
+normalized are in the table below (`normalized`).
+
+**Filters** (`DROPS`, in order, each row counted at the first it fails): no reasoning or no answer; reasoning under
+20 tokens (`MIN_REASONING`); above 32,768 tokens rendered, dropped, not cut (a cut trace loses its answer;
+Nemotron-Cascade drops over-length samples from its math data, arXiv 2512.13607 §3.2.2, and states nothing for code);
+§3's 10-gram rule on prompt, reasoning and answer against every task the evaluation scores (`decontaminate`
+`benchmark_texts`: EvalPlus, MultiPL-E, MBPP's 500 original test problems, HumanEval-X C++ and the infilling
+programs), which removes every trace of 5.5% of Stage-1's distinct prompts (8,773 of 159,304) and 5.2% of Stage-2's
+(4,105 of 78,852, over-length drops included), and 15,015 of KodCode's 268,211 rows (5.6%) [measured]; exact
+duplicates of prompt, reasoning and answer (the first kept, groups in `GROUPS` order); then `CAPS` traces per exact
+prompt in each group, drawn at random (`SEED` 0): 2 in the four long-trace groups (Cascade-1 Stage-1 and Stage-2, CP-v2
+Python and C++), every trace in Exercism and KodCode, whose prompts hold about one trace each (76,375 train rows of
+75,341 prompts and 250,649 of 250,646). The long-trace cap is the largest in {2, 1} at which 2 epochs of the packed
+train rows stay within 12.5B tokens: at 2, 2 × 172,726 rows of 32,768 tokens are 11.32B [arithmetic]; the 12.5B
+budget is a time limit (≈12.1 h at 287,476 tok/s, `docs/training.md` §7 [arithmetic]), not a measured optimum.
+
+**LiveCodeBench overlap.** LiveCodeBench is not among the rule's tasks. Against its 454 v6-window problems
+(`docs/post-training.md` §5), on the corpus built before the KodCode group and the caps of 2, the rule's hits on the
+corpus's prompts are boilerplate ("given from Standard Input in the following format", runs of sample digits), and
+none of the 454 shares 30% or more of its distinctive 8-word sequences (those in no other window problem) with any
+SFT prompt, the most 18.6% [measured]; KodCode's prompts are not measured against them [unverified].
+
+**Split by problem** (`problem`): one problem recurs across groups and sources under different wrappers (CP-v2's
+language header; Nemotron-Cascade's format request and its fenced function header, under which one problem appears as
+`def f(x):` and as `class Solution:` with `def f(self, x):`) and whitespace, so the unit is the problem: the prompt
+without those wrappers (`WRAPPERS`), lowercased, its words (runs of letters and digits) joined by single spaces. 1% of
+the distinct problems (`VAL_SHARE`, seed 0) is the val split and every other row trains; near-duplicate problems
+under different keys (an exercise's variants, a problem restated, its easy and hard versions) are not filtered, since
+the val split monitors training and scores the calibration while the benchmarks are decontaminated separately
+(above). On the corpus built before the KodCode group and the caps of 2 [measured]: split by exact prompt, 928 of
+2,921 val problems had their statement in train (52.4% of val labels); split by problem, no val problem's key or
+Nemotron-Cascade statement was in train, and 240 of the 2,074 val problems (26.1% of val labels) shared their first
+300 normalized characters with a train problem, near duplicates.
+
+**Statistics** (`stats.json`; prompts distinct within a group, "All" across groups; tokens include both BOS, the loss
+tokens are each response and its closing BOS) [measured]:
+
+| Group | Rows read | Line endings normalized | No reasoning or answer | Over 32,768 | 10-gram | Duplicate | Over the cap | Train rows (prompts) | Val rows (prompts) | Train tokens (loss) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Cascade-1 Stage-1 | 1,301,591 | 16,179 | 0 | 0 | 72,849 | 22,547 | 976,384 | 227,585 (149,076) | 2,226 (1,445) | 1.55B (1.48B) |
+| Cascade-1 Stage-2 | 1,392,831 | 773 | 0 | 7,250 | 70,148 | 0 | 1,166,637 | 147,317 (74,005) | 1,479 (742) | 1.72B (1.67B) |
+| CP-v2 Python | 333,561 | 21 | 0 | 176,235 | 4,071 | 0 | 104,763 | 48,007 (24,540) | 485 (250) | 0.55B (0.53B) |
+| CP-v2 C++ | 332,186 | 21 | 0 | 175,514 | 403 | 0 | 107,773 | 48,017 (24,500) | 479 (246) | 0.56B (0.53B) |
+| CP-v2 Exercism | 79,244 | 0 | 336: 170 without prose, 141 without a file, 25 under 20 tokens | 0 | 1,736 | 0 | — (no cap) | 76,375 (75,341) | 797 (789) | 0.083B (0.044B) |
+| KodCode | 268,211 | 26 | 0 | 0 | 15,015 | 0 | — (no cap) | 250,649 (250,646) | 2,547 (2,547) | 1.19B (1.12B) |
+| All | 3,707,624 | 17,020 | 336 | 359,000 | 164,222 | 22,547 | 2,355,557 | 797,950 (539,127; 455,953 problems) | 8,013 (5,443; 4,606 problems) | 5.65B (5.37B) |
+
+**Composition** (train split): reasoning per document p10/p50/p90/max 389 / 4,022 / 14,930 / 32,273 tokens
+(`stats.json` `reasoning_p10_p50_p90_max`); 208,797 documents with more than 8,192 reasoning tokens against 589,153
+shorter ones (1 : 2.82), the long ones 60.3% of the tokens; function-level answers 50.5% of the tokens and stdin
+programs 47.6% [measured: by a heuristic classifier of the answers' code that is not in the repository].
+
+**The cap against time.** The cap trades answers per prompt, worth less than prompts (coefficients 2.635 against
+4.831; at a fixed budget 64K prompts × 1 beat 16K × 4; `docs/post-training.md` §2.3), for training time. Before the
+filters, Cascade-1 alone, one epoch at the 32K stage's 287K tok/s (`docs/training.md` §7) [estimate]:
+
+| Traces per prompt | Cascade-1 rows | Tokens | Steps | Hours |
+|---|---|---|---|---|
+| 1 | 244,245 | 2.3B | 1,553 | 2.2 |
+| 2 (chosen) | 460,865 | 4.4B | 2,957 | 4.2 |
+| 4 | 883,895 | 8.4B | 5,717 | 8.1 |
+| all | 2,694,422 | 27.5B | 18,650 | 26.6 |
+
+**Packing.** The documents, in a seeded random order, are packed by the pretraining packer (`pack.py`,
+Best-Fit-Decreasing over shards of `SHARD_DOCUMENTS` = 4,096 documents, §8), none cut, one attention segment each:
+172,726 train and 1,720 val rows of 32,768 tokens, 99.89% and 99.87% of input positions in use (`fill`) [measured].
+Each document's context length (the prompt and `\n\n<think>\n`) is in `<split>.context`; the loader sets those labels
+to `IGNORE_INDEX` (§9, `PretrainingBatches.assemble`), so 5.37B of the corpus's 5.65B train tokens carry loss
+[arithmetic: 95.1%].
+
+## 11. Building the corpus
 
 Every command runs in the `nanochat` image from the repository's root (`docs/training.md` §9 builds it and runs
 `scripts/setup.sh`, which pulls the dataset), through `scripts/container.sh` on the GH200 or, for the text stages
@@ -510,21 +649,26 @@ Every command runs in the `nanochat` image from the repository's root (`docs/tra
 $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/workspace/nanochat -w /workspace/nanochat -v $PWD:/workspace/nanochat
 nanochat python -m corpus.<step>` (with `-e HF_TOKEN=<token>` for the steps that read the Hub).
 
-Once, to build the published dataset:
-1. **Prepare**: `python -m corpus.prepare` fetches and standardizes every source's extent (§1–§2).
-2. **Curate**: `python -m corpus.curate` (§3).
+The pretraining corpus, once, to build the published dataset:
+1. **Prepare**: `python -m corpus.pretrain.prepare` fetches and standardizes every source's extent (§1–§2).
+2. **Curate**: `python -m corpus.pretrain.curate` (§3).
 3. **Decontaminate**: `python -m corpus.decontaminate` drops the curated train rows sharing a 10-gram with a scored
    benchmark and writes `curated/decontamination.json` (§3).
 4. **Tokenizer**: `python -m corpus.train_tokenizer` trains sa-bpe on the sample into `CORPUS/tokenizer`
    (`tokenizer.TOKENIZER`, §5); it does not reproduce the shipped tokenizer (§5).
-5. **Publish**: `python -m corpus.publish push` uploads the curated shards, their decontamination record and the
-   tokenizer (§4).
+5. **Publish**: `python -m corpus.pretrain.publish push` uploads the curated shards, their decontamination record and
+   the tokenizer (§4).
 
-From a pull of the dataset (`python -m corpus.publish pull`, run by `scripts/setup.sh`: the curated shards, their
-decontamination record and the shipped tokenizer):
+From a pull of the dataset (`python -m corpus.pretrain.publish pull`, run by `scripts/setup.sh`: the curated shards,
+their decontamination record and the shipped tokenizer):
 6. **Tokenize**: `python -m corpus.tokenize` (§6), ending with the 32K stage's repository partitions.
 7. **Pack**: `python -m corpus.pack` (§7–§8); it fails (`pack.fit`) when a corpus holds fewer packed rows than its
    draw: a corpus read in part runs out of shards, or a corpus packed whole is overdrawn.
+
+The post-training corpus, with the shipped tokenizer in place (the pull above) and the source datasets' files
+downloaded under `artifacts/posttrain/<owner>/<dataset>/` (§10, `GROUPS`):
+8. **SFT corpus**: `python -m corpus.posttrain.build` renders, filters, caps, splits, tokenizes and packs the SFT
+   corpus into `CORPUS/tokenized/sft-<data key>/` (§10).
 
 ## References
 
@@ -543,11 +687,18 @@ decontamination record and the shipped tokenizer):
 | 2409.12186 | Qwen2.5-Coder | 3, 7, 8 |
 | 2411.04905 | OpenCoder | 7 |
 | 2502.02737 | SmolLM2 (Stack-Edu) | 1 |
+| 2503.02951 | KodCode | 10 |
+| 2504.04030 | OpenCodeInstruct | 10 |
 | 2504.13161 | Diao et al., Nemotron-CLIMB (Nemotron-ClimbMix) | 1 |
+| 2505.21297 | rStar-Coder | 10 |
 | 2506.00204 | AST-FIM | 8 |
+| 2506.04178 | OpenThoughts: Data Recipes for Reasoning Models | 10 |
 | 2510.01631 | Kang et al., Demystifying Synthetic Data in LLM Pre-training | 7 |
+| 2510.06101 | The Valley of Code Reasoning: Scaling Knowledge Distillation of Large Language Models | 10 |
+| 2512.13607 | Nemotron-Cascade | 10 |
 | 2512.20848 | Nemotron 3 Nano (Nemotron-Pretraining-Code-v2) | 1 |
 | 2602.09003 | Data Science and Technology Towards AGI Part I: Tiered Data Management (UltraData-Math) | 1 |
+| 2603.19220 | Nemotron-Cascade 2 | 10 |
 | 2604.14053 | Chizhov et al., From Where Words Come (SA-BPE) | 5 |
 | 2606.10087 | CodeAlchemy | 7 |
 | 2608.18062 | Meister, TokEval: A Tokenizer Evaluation Suite | 5 |

@@ -1,6 +1,6 @@
 """
-The SFT corpus's name, its one training stage and §11.1's markers (docs/post-training.md), torch-free and light for
-every process that plans or trains an SFT run; the corpus itself: corpus/posttrain/build.py.
+The SFT corpus's name, its one training stage and the post-training format's markers (docs/post-training.md §3),
+torch-free and light for every process that plans or trains an SFT run; the corpus itself: corpus/posttrain/build.py.
 """
 from corpus.mixture import REPO_LEVEL_STAGE, Group, Stage
 
@@ -8,5 +8,5 @@ from corpus.mixture import REPO_LEVEL_STAGE, Group, Stage
 # stage; tokens 0, since no plan sizes its packs (mixture.Stage.rows)
 NAME = "sft"
 SFT_STAGE = Stage(REPO_LEVEL_STAGE.seq_len, 0, {NAME: Group(1.0, (NAME,))})
-# §11.1's markers: the context ends with THINK; END_THINK separates the reasoning from the answer
+# The format's markers: the context ends with THINK; END_THINK separates the reasoning from the answer
 THINK, END_THINK = "\n\n<think>\n", "\n</think>\n\n"

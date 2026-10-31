@@ -10,8 +10,8 @@ reasoning not measured; [estimate]; [unverified] a figure without a record, or a
 | Code or record | Section |
 |---|---|
 | `ablations/tokenizer_split_merge.py` (removed; `ARMS`, `FUSED_PATTERN`, `HYBRID_PATTERN`; steps `vocabularies`, `intrinsic`, `data`, `repack`) | §2 |
-| `results/tokenizer_split_merge-intrinsic.json`, `results/tokenizer_split_merge-data.json` | §2 |
-| `results/muon_wd_timescale_20tpp.jsonl`, `results/scalar_learning_rates.json[l]` | §1, §4 |
+| `results/pretrain/tokenizer_split_merge-intrinsic.json`, `results/pretrain/tokenizer_split_merge-data.json` | §2 |
+| `results/pretrain/muon_wd_timescale_20tpp.jsonl`, `results/pretrain/scalar_learning_rates.json[l]` | §1, §4 |
 | Branches (on `origin`) `qkv-epi`, `mlp-out-mix`, `mlp-out-mix-land`, `mlp-out-mix-v2`, `window-attn` | §5 |
 | Branch `scalar-learning-rates` (on `origin`) | §4 |
 | Removed experiment code: the D6/D7 experiments, the tokenizer runs, `RunConfig.muon_tau_scale`, `adamw_learning_rate_scale`, `ablations/contrast.py`, the `logit_softcap` experiment | §1–§4 |
@@ -35,9 +35,9 @@ measures and error bars: `docs/evaluation.md` §5.
 | Optimizer screen | NorMuon, Polar Express, cautious weight decay | d16 at 20 | 1 seed per arm | NorMuon adopted (`docs/training.md` §3); the rest §4 |
 | GQA screen | 2:1 query:KV heads | d16 at 20 | 1 | rejected (§3) |
 
-`results/muon_wd_timescale_20tpp.jsonl` and `results/scalar_learning_rates.json[l]` were written by that earlier code,
-without the output-logit cap; their bits-per-byte errors are recomputed from the stored row sums and the packs with
-the document-clustered stratified estimator (`docs/evaluation.md` §5).
+`results/pretrain/muon_wd_timescale_20tpp.jsonl` and `results/pretrain/scalar_learning_rates.json[l]` were written by
+that earlier code, without the output-logit cap; their bits-per-byte errors are recomputed from the stored row sums and
+the packs with the document-clustered stratified estimator (`docs/evaluation.md` §5).
 
 **Proxy settings.** No affordable run reaches the base model (d24 at 528.12 tokens per non-embedding parameter,
 `docs/training.md` §2). Ranking at a single small size (150M parameters) picks the better of two data recipes at the
@@ -81,10 +81,11 @@ D7's remaining runs ~3.7 GPU-h, the softcap design ~9 GPU-h.
 
 **`tokenizer_split_merge`.** Would decide the split pattern and merge score of the corpus tokenizer. Its steps:
 `vocabularies` (each arm's vocabulary on one draw of the sample, 737 s for all four;
-`results/tokenizer_split_merge-vocabularies.json`), `intrinsic` (each arm's tokenized val splits and the measures;
-`results/tokenizer_split_merge-intrinsic.json`), `data` and `repack` (each arm's tokenized and packed training set;
-`results/tokenizer_split_merge-data.json`). The runs were not run; the corpus tokenizer is the sa-bpe arm
-(`docs/corpus.md` §5: vocabulary, trainer and its F·ln R score, sample, authorship units, sa-bpe's own numbers).
+`results/pretrain/tokenizer_split_merge-vocabularies.json`), `intrinsic` (each arm's tokenized val splits and the
+measures; `results/pretrain/tokenizer_split_merge-intrinsic.json`), `data` and `repack` (each arm's tokenized and packed
+training set; `results/pretrain/tokenizer_split_merge-data.json`). The runs were not run; the corpus tokenizer is the
+sa-bpe arm (`docs/corpus.md` §5: vocabulary, trainer and its F·ln R score, sample, authorship units, sa-bpe's own
+numbers).
 
 | Arm | Split pattern | Merge score | Role |
 |---|---|---|---|
@@ -128,8 +129,8 @@ opposite directions at 8B, neither significantly (arXiv 2503.13423 Table 1).
 | depth invariance | of each program source's first 50,000 indented val lines, the share whose tokens are the indentation's then the statement's at depth 0 | the hybrid's clause (2) |
 | merged reads | merged tokens the val documents read never, < 10, < 100 times | the tie-break (SA-BPE's coverage, arXiv 2604.14053 Table 3, graded) |
 
-**Intrinsic results** (`results/tokenizer_split_merge-intrinsic.json`; no TokEval measures, arXiv 2608.18062). Every
-arm passed every validity check.
+**Intrinsic results** (`results/pretrain/tokenizer_split_merge-intrinsic.json`; no TokEval measures, arXiv 2608.18062).
+Every arm passed every validity check.
 
 | Measure | sa-bpe | sa-bpe-fused | hybrid | bpe |
 |---|---|---|---|---|
@@ -195,8 +196,8 @@ sa-bpe-fused compresses best and is expected to parse worst; the post finds code
 with MBPP at any level" (*Code bits per byte*), so compression does not rank the arms. bpe leaves more rarely-read
 merged tokens than sa-bpe (84 against 54 under 100).
 
-**Data** (`results/tokenizer_split_merge-data.json`). The same document set tokenized and packed under every arm,
-sized for the §1 d16 proxy under sa-bpe (`TOKENS_PER_PARAM` = 20, arXiv 2203.15556 Table 3; repository stage from
+**Data** (`results/pretrain/tokenizer_split_merge-data.json`). The same document set tokenized and packed under every
+arm, sized for the §1 d16 proxy under sa-bpe (`TOKENS_PER_PARAM` = 20, arXiv 2203.15556 Table 3; repository stage from
 4,304), each source at its share of the base model's stage: each code source the fewest leading train shards holding
 its file-stage draw, so code binds every arm; notebooks, functions and traces their draw, read once; text, math and
 the repository corpora `MARGIN` = 1.5 times their draws, so they never bind. Whole shards hold more than the draw:
@@ -253,7 +254,8 @@ HumanEval (code models of 0.3B–13B; arXiv 2404.19737 §3.1 Fig. 3, Table S7); 
 decay × 2 and × ½) under the τ law, AdamW's untouched: Power Lines fits the law with AdamW (arXiv 2505.13738 §2.2) and
 its App. B states that the EMA view "applies directly" to other decoupled-decay optimizers, without a Muon fit. Design:
 {½, 1, 2} × seeds 0, 1 on the §1 d16 proxy and at d8 at 200; per setting the scale's 3-point vertex in ln(scale),
-adopted iff the lower-code end beat × 1 by the shared tests. Three runs (`results/muon_wd_timescale_20tpp.jsonl`):
+adopted iff the lower-code end beat × 1 by the shared tests. Three runs
+(`results/pretrain/muon_wd_timescale_20tpp.jsonl`):
 
 | Run | Code | 32K code | Pooled unparsed | pass@1 | tokens/s | Peak allocated |
 |---|---|---|---|---|---|---|
@@ -284,8 +286,8 @@ Verdict: not run; one lr for every group (basis: `docs/training.md` §3).
 per-group lrs 0.5 and 0.005 × √(B/2^19) (0.375 and 0.00375 at 294,912 tokens per step), every other group unchanged:
 a gap from the shared lr too large to bound from the literature. One run (branch `scalar-learning-rates`, statistics
 under `torch.no_grad`), d16 at 20, against D7's τ×1 seed 0 (trees differing by the field). Rule: adopt iff code better
-by > 0.0094 and MBPP+ parsing not worse. Record (`results/scalar_learning_rates.json` `analysis`, `.jsonl`): code
-0.42635 against 0.42724 (−0.0009, equal); 32K code 0.40815 against 0.40966; train loss over the last half −0.0022;
+by > 0.0094 and MBPP+ parsing not worse. Record (`results/pretrain/scalar_learning_rates.json` `analysis`, `.jsonl`):
+code 0.42635 against 0.42724 (−0.0009, equal); 32K code 0.40815 against 0.40966; train loss over the last half −0.0022;
 MBPP+ parsing worse (9 problems parse more under it, 35 under the baseline, p = 1.1e-4); pooled unparsed 0.120 against
 0.054 (cut at the token budget: 31 of its 40 non-parsing MBPP+ completions, 11 of the baseline's 14; stopped and
 non-parsing, pooled 0.0166 against 0.0074 [measured: completions re-encoded, ≥ 753 tokens]). Verdict: not adopted;

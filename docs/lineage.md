@@ -362,7 +362,7 @@ BFD adds ≤ 0.01% sequences over concatenation and improves text and code model
 §9; cuts at statement or line boundaries, a BOS before every piece.
 
 **ClimbMix as the web-text source.** *Papers:* arXiv 2504.13161 (Diao, §6, Fig. 1): 400B tokens; a 1B model on it
-beats Nemotron-CC, SmolLM, DCLM-baseline and FineWeb-Edu at equal tokens. *Here* (ADOPTED): `corpus/sources.py`
+beats Nemotron-CC, SmolLM, DCLM-baseline and FineWeb-Edu at equal tokens. *Here* (ADOPTED): `corpus/pretrain/sources.py`
 `SOURCES`, `corpus/mixture.py` `FILE_LEVEL_STAGE`, `REPO_LEVEL_STAGE`; `docs/corpus.md` §1, §7; the 10% text group.
 
 **Bits per byte, zero-byte targets excluded.** *Papers:* arXiv 2101.00027 (The Pile, §3.1): bpb, "invariance to

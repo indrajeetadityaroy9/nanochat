@@ -1,5 +1,5 @@
 """vLLM reasoning parser "nanochat" (`vllm serve --reasoning-parser nanochat`, registered in the server's processes by
-eval/official_site/sitecustomize.py) for the post-trained model's format (docs/post-training.md §11.1): the prompt
+eval/official_site/sitecustomize.py) for the post-trained model's format (docs/post-training.md §3): the prompt
 ends with THINK, the model writes its reasoning, END_THINK and the answer. The markers are ordinary text (several
 tokens each), so vLLM's token-based parsers (deepseek_r1 and the like look "<think>" up as one vocabulary entry)
 cannot split them; this one splits the text at the last "</think>": the reasoning before it, the answer after it,

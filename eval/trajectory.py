@@ -6,6 +6,8 @@ between consecutive steps over identical rows and solutions (metrics.paired_rows
 updates between consecutive steps.
 
     python -m eval.trajectory <run_name> <reference step> <first step> <out.json>
+
+The base run's: `<run_name> 66063 62887 results/pretrain/trajectory.json` (docs/training.md §9, docs/results.md §4).
 """
 import gc
 import json

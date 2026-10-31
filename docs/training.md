@@ -1,7 +1,8 @@
 # Training
 
 How the base model (d24) is trained on one GH200: stages, plan, optimizers, schedule, the peak learning-rate
-calibration, the run app and its records, hardware and throughput, reproducibility and the commands.
+calibration, the run app and its records, hardware and throughput, reproducibility and the commands. The same loop
+runs the SFT (§10; its method `docs/post-training.md`).
 The code is the specification. Markers: [arithmetic] derived from code numbers; [inference] reasoning not measured;
 [estimate]; [unverified] a figure without a record. Measurements give their setting (GH200 at 700 W, exclusive A/B).
 
@@ -15,8 +16,8 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 |`train/stages.py` (`stage_batches`, `max_tokens_per_param`)|§1, §8|
 |`train/optim.py` (`optimizers`, `Muon`, `tau_weight_decay`, `update`, `MAX_GRAD_NORM`)|§3|
 |`train/loop.py` (`train`, `SEED`), `train/diagnostics.py` (`Diagnostics`, `sidecar`), `train/checkpoint.py`|§6, §8|
-|`ablations/peak_lr.py` (`lr_multiplier`); `conf/experiment/peak_lr_d24.yaml`; `results/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
-|`ablations/records.py` (`Records`, `record`)|§6|
+|`ablations/peak_lr.py` (`lr_multiplier`); `conf/experiment/peak_lr_d24.yaml`; `results/pretrain/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
+|`ablations/records.py` (`Records`, `record`, `results_dir`); `results/pretrain/trajectory.json`|§6|
 |`scripts/setup.sh`, `scripts/container.sh`, `scripts/release.sh`, `paths.py`|§7, §9|
 |`docker/Dockerfile`, `pyproject.toml`, `uv.lock`|§8|
 
@@ -33,7 +34,8 @@ switches to the 32K context and recompiles the model.
 weights (`mixture.weights`). `max_tokens_per_param` is the tokens per non-embedding parameter of the most whole
 micro-batches bisection finds at which no stage overdraws a corpus (not necessarily the largest such count: overdraw
 is not monotone, since the batch steps up with the count). A run's `tokens_per_param` defaults to it, so no document
-is read twice; the `peak_lr` arms at 5 tokens per parameter trained all 3,307 steps (`results/peak_lr_d24.jsonl`).
+is read twice; the `peak_lr` arms at 5 tokens per parameter trained all 3,307 steps
+(`results/pretrain/peak_lr_d24.jsonl`).
 
 | | The base model | Reference code models |
 |---|---|---|
@@ -52,8 +54,8 @@ file-level context (`non_embedding_flops_per_token`, Eq. 2, arXiv 2401.02954 §3
 - the law's peak lr η = 0.3118·C^−0.1250 (§3.1 Eq. 1), times `learning_rate_scale` (`run.py` `plan_of`; §5).
 
 The base run takes the d24 plan at `max_tokens_per_param`, the `peak_lr` arms at 5. Recomputed on the CPU from master,
-the corpus's packs and `results/peak_lr_d24.jsonl` (peak lr at the base multiplier 2.7192600, §5; weight decay by §3's
-law); the d16 and d8 rows, the ablations' settings (`docs/experiments.md` §1), by the earlier multi-depth code:
+the corpus's packs and `results/pretrain/peak_lr_d24.jsonl` (peak lr at the base multiplier 2.7192600, §5; weight decay
+by §3's law); the d16 and d8 rows, the ablations' settings (`docs/experiments.md` §1), by the earlier multi-depth code:
 
 | Run | Tokens/param | Micro-batches | Steps | Repo start | Tokens | Law lr | Peak lr | Weight decay |
 |---|---|---|---|---|---|---|---|---|
@@ -158,18 +160,18 @@ compute-optimal allocations, while here the model is fixed and its tokens grow 1
 recipe's d8 (below): the optimal multiplier changed ×0.9105 over 40× the tokens (the optimum ×0.574, the law ×0.6306).
 
 **Arms.** × 1, 2, 4 at d24 at 5; seed 0; 3 runs under the current recipe (corpus tokenizer and mixture, cap,
-`generate` "parse"): `conf/experiment/peak_lr_d24.yaml`, records `results/peak_lr_d24.jsonl` and its `-curves.jsonl`
-(§6). At 5 tokens per parameter a stage draws too few rows to read its supply corpora whole, so their shares are the
-base run's (`corpus/mixture.py` `weights`; each arm's `run` and `stage` records hold the drawn mixture): Kaggle
-notebooks 0.0156 and CodeXGLUE Python 0.0006 at 8K, Codeforces CoTs 0.0554 at 32K.
+`generate` "parse"): `conf/experiment/peak_lr_d24.yaml`, records `results/pretrain/peak_lr_d24.jsonl` and its
+`-curves.jsonl` (§6). At 5 tokens per parameter a stage draws too few rows to read its supply corpora whole, so their
+shares are the base run's (`corpus/mixture.py` `weights`; each arm's `run` and `stage` records hold the drawn mixture):
+Kaggle notebooks 0.0156 and CodeXGLUE Python 0.0006 at 8K, Codeforces CoTs 0.0554 at 32K.
 
 **Rule** (`ablations/peak_lr.py` `lr_multiplier`): the base multiplier is the vertex of the parabola through the three
 runs' code bits per byte against u = ln(multiplier) (`metrics.parabola_vertex`, `docs/evaluation.md` §5; arXiv
 2409.19913 §3.1 fits quadratics in log lr); the base lr is it times the law's lr on the base plan. The recorded
 minimum is interior (× 2), the curvature positive and no run diverged, so the vertex lies inside the grid.
 
-**Result** (`results/peak_lr_d24.jsonl`; 3,307 steps of 294,912 tokens; bits per byte; no run diverged). On 8K code
-the vertex is × 2.7193 (curvature 0.0086): the base multiplier 2.7192600, 2.8% below the earlier recipe's 2.7970369
+**Result** (`results/pretrain/peak_lr_d24.jsonl`; 3,307 steps of 294,912 tokens; bits per byte; no run diverged). On 8K
+code the vertex is × 2.7193 (curvature 0.0086): the base multiplier 2.7192600, 2.8% below the earlier recipe's 2.7970369
 [arithmetic], peak lr 2.3454e-3 and weight decay 0.15322 on the base plan (§2). The best arm (× 2) beats the law (× 1)
 by 0.0078; × 4 is 0.0005 behind. The same fit on the other likelihood measures (`metrics.measures`; the evaluations'
 `8k`/`32k` `bpb` groups, `docs/evaluation.md` §2):
@@ -191,8 +193,8 @@ clustered by document, corpora as strata; the × 2 arm): 8K code 0.0022 (49,765 
 identical rows, so their differences are paired (arXiv 2411.00640 §4.2; `metrics.mixture_bpb_summary` of the per-row
 bit differences [arithmetic]): 8K code × 1 − × 2 = +0.00778 (standard error 0.00003), × 4 − × 2 = +0.00047 (0.00002).
 The val sample resolves every arm; it does not measure training noise (one seed per arm): two seeds of one d16 arm
-differ by 0.0019 code bpb (`results/muon_wd_timescale_20tpp.jsonl`, τ × ½), four times the × 2–× 4 gap. The measure
-brackets a flat optimum over × 2–× 4; × 2.7193 is a point estimate without an interval. The mixture measures'
+differ by 0.0019 code bpb (`results/pretrain/muon_wd_timescale_20tpp.jsonl`, τ × ½), four times the × 2–× 4 gap. The
+measure brackets a flat optimum over × 2–× 4; × 2.7193 is a point estimate without an interval. The mixture measures'
 vertices span × 2.53–2.91: −7% to +7% of the base lr, ≤ 0.00005 bpb at the fitted curvature [arithmetic]. Only the
 solutions measure falls through × 4, but its × 2–× 4 gap (0.0021) is 1.5 paired standard errors (0.0014); at the code
 fit's curvature its × 4.78 would cost 0.0027 code bpb [arithmetic]. The parse measure's generations (single seed,
@@ -203,7 +205,7 @@ nearly every failure a completion cut at the token budget (65, 39 and 84 of 66, 
 [measured: completions re-encoded, ≥ 753 tokens], while two seeds of one D7 arm differ more (pooled unparsed 0.293 and
 0.133, `docs/experiments.md` §1). The rule reads none of them.
 
-**Dynamics** (`results/peak_lr_d24-curves.jsonl`, the arms' `train` records; × 1 / × 2 / × 4):
+**Dynamics** (`results/pretrain/peak_lr_d24-curves.jsonl`, the arms' `train` records; × 1 / × 2 / × 4):
 - training loss (trailing 50-step means): × 4 leads until step 468, then trails × 2 (+0.011 at step 1,000, +0.002 at
   the end); × 2 − × 1 stays within −0.020 to −0.024 from step 1,500; final 1.230 / 1.208 / 1.210;
 - clipping: 41 / 35 / 25 steps above `MAX_GRAD_NORM`, the last at steps 45 / 40 / 26; median gradient norm after
@@ -252,10 +254,10 @@ seeded by `train/loop.py` `SEED` = 0. The fields' defaults are the base recipe:
 | Field | Default | Meaning |
 |---|---|---|
 | `tokens_per_param` | None | the data's `max_tokens_per_param` (§1) |
-| `learning_rate_scale` | 1.0 | times the law's lr; `conf/run.yaml` sets `${lr_multiplier:}` (§5); an SFT run's: times its base run's peak |
+| `learning_rate_scale` | 1.0 | times the law's lr; `conf/run.yaml` sets `${lr_multiplier:}` (§5); an SFT run's: times its base run's peak (`docs/post-training.md` §4) |
 | `num_checkpoints` | 1 | evenly spaced evaluated checkpoints, the last the final model; > 1 adds `repo_level_start` and the analysis checkpoints |
-| `generate` | "parse" | `evaluate`'s mode: "parse" (`peak_lr`) or "benchmarks" (base: adds the 1@10 mode; the benchmarks themselves run in their official tools, `docs/evaluation.md` §4); "none" trains only (SFT, evaluated by `scripts/official_reasoning.sh`, `docs/post-training.md` §11.4) |
-| `base`, `base_step`, `sft_epochs` | None, 69,874, 1.0 | SFT (§10): the base run's name and checkpoint step, the passes over the SFT train rows (a share of one: a calibration arm) |
+| `generate` | "parse" | `evaluate`'s mode: "parse" (`peak_lr`) or "benchmarks" (base: adds the 1@10 mode; the benchmarks themselves run in their official tools, `docs/evaluation.md` §4); "none" trains only (SFT, evaluated by `scripts/official_reasoning.sh`, `docs/post-training.md` §5) |
+| `base`, `base_step`, `sft_epochs` | None, 69,874, 1.0 | SFT (`docs/post-training.md` §4): the base run's name and checkpoint step, the passes over the SFT train rows (a share of one: a calibration arm) |
 
 The experiments: `python run.py experiment=pretrain` (`num_checkpoints` 10, `generate` "benchmarks") and
 `python run.py experiment=peak_lr_d24` (§5). **Names** (`run_name`): the fields that differ from `RunConfig()`,
@@ -408,20 +410,23 @@ earlier ones for the steps it repeats (`metrics.train_steps`). A non-finite loss
 record and ends training; the sweep continues, a rerun skips the run (`metrics.diverged`), and its experiment record
 has `diverged_at` set and `measures`, `errors`, `offset_bpb` and `efficiency` null.
 
-**Experiment records** (`ablations/records.py` `Records`, an experiment's Hydra callback, when the sweep ends):
+**Experiment records** (`ablations/records.py` `Records`, an experiment's Hydra callback, when the sweep ends), in
+`results/pretrain/`, or in `results/posttrain/` for a sweep of runs from a base checkpoint (`results_dir`:
+`RunConfig.base` set):
 
 | File | Content |
 |---|---|
-| `results/<experiment>.jsonl` | per run: `experiment`, `eval/suite.py` `record` (`run_name`, the run log's non-train records, the checkpoints' evaluations), `config`, `measures` and `errors` (`docs/evaluation.md` §5), `offset_bpb` (32K code bits per byte by byte offset), `efficiency` (the first `run` record's `num_parameters`, `flops_per_token` and `model_flops_per_token`; the peak allocated and reserved bytes over the `stage` and `end` records), `diverged_at` |
-| `results/<experiment>-curves.jsonl` | per run: `experiment`, `run_name` and its train records as columns (`metrics.curves`) |
+| `<experiment>.jsonl` | per run: `experiment`, `eval/suite.py` `record` (`run_name`, the run log's non-train records, the checkpoints' evaluations), `config`, `measures` and `errors` (`docs/evaluation.md` §5), `offset_bpb` (32K code bits per byte by byte offset), `efficiency` (the first `run` record's `num_parameters`, `flops_per_token` and `model_flops_per_token`; the peak allocated and reserved bytes over the `stage` and `end` records), `diverged_at` |
+| `<experiment>-curves.jsonl` | per run: `experiment`, `run_name` and its train records as columns (`metrics.curves`) |
 
-`results/pretrain-trajectory.json` is the base run's likelihood trajectory (`docs/evaluation.md` §2) from step 62,887
-against step 66,063, written by §9 step 4.
+`results/pretrain/trajectory.json` is the base run's likelihood trajectory (`docs/evaluation.md` §2) from step
+62,887 against step 66,063, written by §9 step 4; its values are `docs/results.md` §4.
 
-The ablation records and their status: `docs/experiments.md` §1. `results/peak_lr_d24.jsonl`'s `run` records carry
-the earlier multi-depth code's `RunConfig` fields (`num_hidden_layers` 24, `seed` 0, `tokenizer` "corpus"), all at
-their defaults. `results/muon_wd_timescale_20tpp.jsonl` and `results/scalar_learning_rates.json[l]` were written by
-earlier code, without the output-logit cap (`model.final_logit_softcapping` null).
+The ablation records and their status: `docs/experiments.md` §1. `results/pretrain/peak_lr_d24.jsonl`'s `run`
+records carry the earlier multi-depth code's `RunConfig` fields (`num_hidden_layers` 24, `seed` 0, `tokenizer`
+"corpus"), all at their defaults. `results/pretrain/muon_wd_timescale_20tpp.jsonl` and
+`results/pretrain/scalar_learning_rates.json[l]` were written by earlier code, without the output-logit cap
+(`model.final_logit_softcapping` null).
 
 ## 7. Hardware and throughput
 
@@ -465,10 +470,11 @@ cap (fused-softcap A/B) adds 1.56 ms per micro-batch, 0.58% of the 8K step (its 
 GiB (97,871 MiB). A micro-batch holds whole rows of both contexts, so its size is a multiple of 32,768 tokens;
 `MICRO_BATCH_TOKENS` is 3 of them, the most that fits: the step's persistent state (fp32 weights and gradients of the
 522,252,336 parameters, AdamW's two moments of the 352,327,728 outside Muon, Muon's momentum and bf16 GEMM copies of
-its 169,924,608) is 7.47 GiB [arithmetic]. The allocator's peak reserve is 73.14 GiB (`results/peak_lr_d24.jsonl`
-`peak_reserved_bytes`, 2.04 GiB above the allocated peak); 4 rows of 32K would scale its 65.67 GiB above the state by
-4/3, to ≈ 95.0 GiB in all [estimate: activation memory proportional to tokens], 0.5 GiB below the device before the
-CUDA context, which the allocator does not count. The micro-batch also quantizes every run's batch (§2).
+its 169,924,608) is 7.47 GiB [arithmetic]. The allocator's peak reserve is 73.14 GiB
+(`results/pretrain/peak_lr_d24.jsonl` `peak_reserved_bytes`, 2.04 GiB above the allocated peak); 4 rows of 32K would
+scale its 65.67 GiB above the state by 4/3, to ≈ 95.0 GiB in all [estimate: activation memory proportional to tokens],
+0.5 GiB below the device before the CUDA context, which the allocator does not count. The micro-batch also quantizes
+every run's batch (§2).
 
 **Time estimate** [estimate]: 97.41B tokens at 365,466 tok/s and 5.62B at 287,476 are 74.0 + 5.4 h; with the cap's
 0.58% at 8K, 79.9 h; across the arms' span ≈ 80 h of training, plus ≈ 190 s of checkpoint saves (§6) and the 11
@@ -515,21 +521,21 @@ HF_TOKEN=<read token> scripts/setup.sh
 
 `scripts/setup.sh` writes the CDI spec, locks the SM clock (§7; re-run it after a reboot), joins the docker group,
 builds the `nanochat` image (`docker build -f docker/Dockerfile -t nanochat .`) and pulls the dataset
-(`python -m corpus.publish pull`: the curated shards, their decontamination record and the shipped tokenizer). After
-logging in again, every command runs in the image through `scripts/container.sh` (the checkout mounted at
+(`python -m corpus.pretrain.publish pull`: the curated shards, their decontamination record and the shipped tokenizer).
+After logging in again, every command runs in the image through `scripts/container.sh` (the checkout mounted at
 `/workspace/nanochat`, NGC's documented run flags, an unlimited stack hard limit for evalplus's `reliability_guard`),
 whose entrypoint creates `artifacts/` (`paths.py`).
 
 1. **Corpus**: `scripts/container.sh python -m corpus.tokenize`, then `scripts/container.sh python -m corpus.pack`
-   (`docs/corpus.md` §10 steps 6–7; the tokenizer is the pulled one, not retrained).
+   (`docs/corpus.md` §11 steps 6–7; the tokenizer is the pulled one, not retrained).
 2. **Peak lr**: `scripts/container.sh python run.py experiment=peak_lr_d24` (§5; the 3 runs and their evaluations),
    writing the records `lr_multiplier` reads.
 3. **Train**: `tmux new -d -s run 'scripts/container.sh python run.py experiment=pretrain'` trains both stages with
    11 evaluated checkpoints (each tenth of the 69,874 steps and step 66,063, the repository stage's start) and the
-   84 analysis checkpoints (§6), evaluates the 11 with every benchmark and writes `results/pretrain.jsonl` and
-   `results/pretrain-curves.jsonl`. Expected time: §7.
+   84 analysis checkpoints (§6), evaluates the 11 with every benchmark and writes `results/pretrain/pretrain.jsonl` and
+   `results/pretrain/pretrain-curves.jsonl`. Expected time: §7.
 4. **Trajectory**: `scripts/container.sh python -m eval.trajectory <run_name> 66063 62887
-   results/pretrain-trajectory.json` scores the 12 analysis checkpoints from step 62,887 (the grid's 63,000–69,000
+   results/pretrain/trajectory.json` scores the 12 analysis checkpoints from step 62,887 (the grid's 63,000–69,000
    and the five weights-only files after the stage switch) by `likelihood` and writes the trajectory against step
    66,063, the last file-level model (`docs/evaluation.md` §2).
 5. **Release**: `HF_TOKEN=<write token> scripts/release.sh <run_name> <repo>` uploads the run's checkpoints,
@@ -547,14 +553,14 @@ HF_TOKEN=<write token> scripts/container.sh hf upload <model repo> \
 ```
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored) holds `corpus/`,
-`runs/<run_name>/` and `cache/`; `results/` (tracked) holds the records the paper's tables are drawn from.
+`runs/<run_name>/` and `cache/`; `results/` (tracked) holds the records the paper's tables are drawn from, in
+`pretrain/` and `posttrain/`.
 
 ## 10. Post-training
 
-SFT from a base checkpoint is a run of `run.py` (`RunConfig.base`, `conf/experiment/sft.yaml`, `train/schedule.py`
-`sft_plan`; `docs/post-training.md` §11.2); the rest of the design, its evidence and its data (off-policy and
-on-policy distillation, preference tuning, RL with verifiable code rewards) is not implemented:
-`docs/post-training.md`.
+SFT from a base checkpoint runs through this loop as a `run.py` run (`RunConfig.base`, `conf/experiment/sft.yaml`,
+`train/schedule.py` `sft_plan`); its recipe, calibration and evaluation are `docs/post-training.md` §4–§5, its corpus
+`docs/corpus.md` §10.
 
 ## References
 
