@@ -1,18 +1,11 @@
 # syntax=docker/dockerfile:1
 # The on-policy post-SFT stage's image (onpolicy/, scripts/onpolicy.sh, docs/post-training.md §8): the evaluation image
-# (docker/Dockerfile.eval: vLLM 0.32.0, torch, transformers, EvalPlus) with TRL for RSFT and DPO. TRL without its
-# dependencies: its torch requirement does not resolve against the image's local torch 2.13.0+cu130, and every other
-# one (accelerate >= 1.11, datasets >= 4.7, transformers >= 4.56.2, pandas, pyarrow, psutil, pyyaml, jinja2) is the
-# image's, checked below. matplotlib for the KodCode tests that import it (onpolicy/verify.py), under the image's
-# constraints.
+# (docker/Dockerfile.eval: vLLM 0.32.0, torch, transformers and accelerate for onpolicy/train.py's Trainer, EvalPlus)
+# with matplotlib for the KodCode tests that import it (onpolicy/verify.py), under the image's constraints.
 FROM nanochat-eval
-ARG TRL=1.17.1 MATPLOTLIB=3.11.2
-RUN uv pip install --no-deps trl==$TRL && \
-    uv pip install -c /opt/base-constraints.txt matplotlib==$MATPLOTLIB && \
-    python -c "import importlib.metadata as m, json; from packaging.requirements import Requirement; \
-      bad = [r for r in map(Requirement, m.requires('trl')) if r.marker is None and r.name != 'torch' \
-             and m.version(r.name) not in r.specifier]; \
-      assert not bad, bad; import trl.trainer.dpo_trainer, trl.trainer.sft_trainer; \
+ARG MATPLOTLIB=3.11.2
+RUN uv pip install -c /opt/base-constraints.txt matplotlib==$MATPLOTLIB && \
+    python -c "import importlib.metadata as m, json; import transformers.trainer; \
       d = json.load(open('/opt/tools.json')); \
-      d.update({p: m.version(p) for p in ('trl', 'accelerate', 'datasets', 'pytest', 'matplotlib')}); \
+      d.update({p: m.version(p) for p in ('transformers', 'accelerate', 'pytest', 'matplotlib')}); \
       json.dump(d, open('/opt/tools.json', 'w'), indent=1)"

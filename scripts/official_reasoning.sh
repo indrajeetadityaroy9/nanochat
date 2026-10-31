@@ -22,7 +22,8 @@
 # (generated, then scored in a CPU container).
 # With MODEL and TAG, a model directory in the export's format (onpolicy/train.py's) is evaluated in place of the
 # step's export, its outputs in RUNS/<run>/official-<step>-<TAG>/ with no termination probe (scripts/onpolicy.sh
-# evaluates it). VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as scripts/official_eval.sh.
+# evaluates it). VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as scripts/official_eval.sh; CPU_SET (docker --cpuset-cpus,
+# default all) confines the containers other than the server (the clients and both tools' scoring).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2 LIMIT=${3:-} MODEL=${MODEL:-} TAG=${TAG:-}
@@ -48,7 +49,7 @@ docker build -q -f "$ROOT/docker/Dockerfile.eval" -t nanochat-eval "$ROOT/docker
 DOCKER=(docker run --rm --ipc=host --init --network host --ulimit memlock=-1 --ulimit stack=67108864:-1 --ulimit core=0
         --user "$(id -u):$(id -g)" -e HOME=/tmp -e XDG_CACHE_HOME=$W/artifacts/cache
         -e HF_HOME=$W/artifacts/cache/huggingface -e PYTHONPATH=$W
-        -v "$ROOT":$W -v "$(realpath "$ROOT/artifacts")":$W/artifacts -w $W)
+        -v "$ROOT":$W -v "$(realpath "$ROOT/artifacts")":$W/artifacts -w $W ${CPU_SET:+--cpuset-cpus "$CPU_SET"})
 CPU=("${DOCKER[@]}" --cpuset-mems="${CPU_NODE:-0}" -e OPENBLAS_NUM_THREADS=1 -e OMP_NUM_THREADS=1 -e MKL_NUM_THREADS=1)
 step() {  # <name> <command...>: run, and append the wall time to timings.tsv
   local start=$SECONDS; "${@:2}"; printf '%s\t%d\n' "$1" $((SECONDS - start)) >> "$OUT/timings.tsv"

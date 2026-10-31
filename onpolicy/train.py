@@ -1,69 +1,176 @@
 """
-RSFT and DPO of a --chat export with TRL (docs/post-training.md §8.5), full parameters: the model loaded in fp32 (master
-weights and AdamW state), bf16 autocast, the LM head and its cap in fp32 as the evaluation computes them
-(inference/modeling_nanochat.py; TRL's fused head with cast_lm_head_to_fp32), SDPA attention, each decoder layer
-recomputed in the backward pass (`load`); one epoch, no dropout
-(the model has none), seed 0. The sets are onpolicy/selection.py's token ids, used as sampled (TRL's tokenization is
-skipped: it would append an eos to the rejected side).
+Final-token preference optimization (FTPO, arXiv 2510.15061 §5, App. J) of a --chat export against its own loops, as
+Antidoom applies it to reasoning loops (github.com/Liquid4All/antidoom, commit bd6a126; docs/post-training.md §8.5).
 
-- rsft: SFTTrainer on rsft.jsonl, the loss on the completion (completion_only_loss): its tokens' mean over a batch of
-  RSFT_BATCH sequences; AdamW at RSFT_LR, warmup RSFT_WARMUP of the steps, cosine decay. Phi-4-mini-reasoning's
-  distillation stages: batch 128, lr 1e-5, warmup ratio 0.1 (arXiv 2504.21233 §5.3).
-- dpo: DPOTrainer on pairs.jsonl, the sigmoid loss (DPO, arXiv 2305.18290) only: no likelihood term on the chosen
-  side (DeLoop's NLL anchor raised loops 6.1% -> 27.0%, arXiv 2610.19376 App. G.13), against the starting model as
-  the frozen reference; beta DPO_BETA (DeLoop's, chosen from {0.02, 0.05, 0.1, 0.2, 0.5} on a screening set, App.
-  G.1, the lowest loop rate of those values, App. G.6); AdamW at DPO_LR (Phi-4-mini-reasoning's rollout DPO with full
-  parameters, one epoch at 16K, §5.3; DeLoop's LoRA lr 8e-6 is 16x that, against LoRA's optimum of about 10x the
-  full-parameter lr, docs/post-training.md §2.2); batch DPO_BATCH pairs (DeLoop's 16), warmup DPO_WARMUP, linear
-  decay.
+A row (onpolicy/selection.py ftpo.jsonl) is a loop's prefix through its first repeat's first token's position
+(prefix_ids, BOS first) and that token (rejected_id). Its chosen tokens are the frozen reference's (the starting
+model's) alternatives at the final position, picked as Antidoom picks them from the rollout's top log-probabilities
+(src/antidoom/sampling.py:19-66 with configs/default.yaml): the TOP_LOGPROBS most likely tokens, less the rejected
+token and any token whose decoded text equals the rejected token's in lower case, less those whose probability at the
+rollout's temperature is below MIN_P of the most likely remaining one, less those whose decoded text is shorter than
+MIN_DECODED_CHARS once stripped, at most CHOSEN_MAX. Over the set, chosen tokens are deduplicated per row by their
+normalized word and the over-represented ones pruned (`regularise`, src/antidoom/ftpo_data.py:99-102, 256-357:
+counts above max(CHOSEN_MIN_REF, their CHOSEN_REF_PERCENTILE-th percentile) cut to count (ref / count)^CHOSEN_STRENGTH,
+first from rows holding other chosen tokens, then by dropping single-token rows); rows left with none are dropped.
+
+The loss at the final position, on the model's capped logits y in fp32 (the head and cap outside autocast, as vLLM
+computes them), against the reference's y_ref (`ftpo_loss`, App. J): with Delta_c = y[c] - y[r] and
+w_c = clamp((MARGIN - Delta_c) / MARGIN, 0, 1), L_pref = sum_c w_c softplus(MARGIN - Delta_c) / sum_c w_c (0 when every
+w_c is 0); L_target = mean over T = C + {r} of max(|y - y_ref| - TAU_TARGET, 0)^2; L_nontarget = mean over the rest
+of the vocabulary of (y - y_ref)^2; L = L_pref + LAMBDA_TARGET L_target + LAMBDA_NONTARGET L_nontarget. MARGIN,
+LAMBDA_TARGET, TAU_TARGET, LAMBDA_NONTARGET: configs/default.yaml (clip_epsilon_logits, lambda_mse_target,
+tau_mse_target, lambda_mse).
+
+Training (transformers' Trainer): full parameters loaded in fp32 (master weights and AdamW state), bf16 autocast,
+each decoder layer recomputed in the backward pass (`load`), SDPA attention, one epoch at most, seed 0; batch BATCH
+rows (Antidoom's 4 x 4 accumulation, as 1 x 16), AdamW (betas the library's), weight decay WEIGHT_DECAY, linear decay
+after a WARMUP share of the steps, gradient norm clipped at MAX_GRAD_NORM (src/antidoom/ftpo_train.py:119-141); the
+reference logits computed once, before the first update, by the same model. LR is Antidoom's LoRA lr (rank 256,
+configs/default.yaml) over LORA_OVER_FULL, LoRA's optimum relative to full fine-tuning's (docs/post-training.md
+§2.2). Training stops once chosen_win, the share of a row's chosen tokens whose logit beats the rejected one averaged
+over LOG_STEPS steps, reaches CHOSEN_WIN_STOP.
 
 The result is written as the export is (inference/export_hf.py: fp32 the parameters the forward reads in fp32, bf16
 the rest; config, generation config, tokenizer and model file copied), so vLLM serves it as it serves the export. The
 bf16 tensors are rounded stochastically (`bf16`: E[rounded] = the fp32 value, a value on the bf16 grid unchanged): an
-update smaller than half an element's bf16 spacing, which most of DPO's are, survives in expectation, where rounding
-to nearest erases it. train-log.json holds TRL's log history, `retention`: the share of the fp32 update (final -
-start) the written weights keep along its direction, and the peak GPU memory allocated.
+update smaller than half an element's bf16 spacing survives in expectation, where rounding to nearest erases it.
+train-log.json holds the chosen sets' statistics, the log history (loss, its three terms, chosen_win, margin_win,
+Delta), `retention` (the share of the fp32 update the written weights keep along its direction) and the peak GPU
+memory allocated.
 
-    python -m onpolicy.train rsft|dpo <model dir> <set jsonl> <out dir> [--max-steps N] [--batch N] [--cpu]
+    python -m onpolicy.train ftpo <model dir> <ftpo.jsonl> <out dir> [--max-steps N] [--batch N] [--cpu]
 """
 import argparse
 import functools
 import json
+import math
+import re
 import shutil
+from collections import Counter, defaultdict
 from pathlib import Path
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-RSFT_LR, RSFT_BATCH, RSFT_WARMUP = 1e-5, 128, 0.1
-DPO_LR, DPO_BATCH, DPO_WARMUP, DPO_BETA = 5e-7, 16, 0.1, 0.05
+# chosen tokens: configs/default.yaml generation.top_logprobs, chosen_max_tokens, min_p (chosen_min_p null),
+# chosen_min_decoded_chars; train.chosen_regularisation_strength; src/antidoom/ftpo_data.py:71-72
+TOP_LOGPROBS, CHOSEN_MAX, MIN_P, MIN_DECODED_CHARS = 20, 20, 0.01, 1
+CHOSEN_STRENGTH, CHOSEN_MIN_REF, CHOSEN_REF_PERCENTILE = 0.5, 50, 95
+# the loss: configs/default.yaml train.clip_epsilon_logits, lambda_mse_target, tau_mse_target, lambda_mse
+MARGIN, LAMBDA_TARGET, TAU_TARGET, LAMBDA_NONTARGET = 2.0, 0.05, 0.5, 0.4
+# training: configs/default.yaml train.learning_rate, batch_size x gradient_accumulation_steps, warmup_ratio,
+# weight_decay, early_stopping_chosen_win (Antidoom's 0.35 run setting); src/antidoom/ftpo_train.py:126,140
+LORA_LR, LORA_OVER_FULL = 1.5e-5, 10
+LR, BATCH, WARMUP, WEIGHT_DECAY, CHOSEN_WIN_STOP = LORA_LR / LORA_OVER_FULL, 16, 0.1, 0.01, 0.35
+LOG_STEPS, MAX_GRAD_NORM = 5, 2.5
 
 
 def load(model_dir: Path, train: bool = True):
     """The model in fp32; to train, each decoder layer recomputed in the backward pass (torch's non-reentrant
     checkpoint, autocast state kept): 0.68 MB of saved activations per token instead of 2.04, with identical gradients
-    (a 4,096-token sequence, CPU, bf16 autocast); on the GPU 0.235 MB per token of each sequence of a DPO pair
-    (scripts/onpolicy.sh `pair_tokens`). The export's model file declares no gradient checkpointing for transformers
-    to enable."""
+    (a 4,096-token sequence, CPU, bf16 autocast). The export's model file declares no gradient checkpointing for
+    transformers to enable."""
     from torch.utils.checkpoint import checkpoint
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM
 
     model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True, dtype=torch.float32,
                                                  attn_implementation="sdpa")
     if train:
         for layer in model.model.layers:
             layer.forward = functools.partial(checkpoint, layer.forward, use_reentrant=False)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    tokenizer.pad_token = tokenizer.eos_token  # padding is masked out of attention and loss
-    return model, tokenizer
+    return model
 
 
-def fp32_heads() -> None:
-    """TRL's fused LM head with the projection and the cap in fp32, in both trainers."""
-    from trl.trainer import dpo_trainer, sft_trainer, utils
+def last_logits(model, ids: torch.Tensor) -> torch.Tensor:
+    """The capped logits (V,) at the last position of ids (1, L): the backbone under the caller's autocast, the head
+    and the cap in fp32 outside it (inference/modeling_nanochat.py NanochatForCausalLM.forward)."""
+    h = model.model(input_ids=ids, use_cache=False).last_hidden_state[0, -1]
+    with torch.autocast(h.device.type, enabled=False):
+        y = F.linear(h.float(), model.lm_head.weight.float())
+    c = model.config.final_logit_softcapping
+    return c * torch.tanh(y / c)
 
-    for module in (dpo_trainer, sft_trainer):
-        module.add_fused_lm_head = functools.partial(utils.add_fused_lm_head, cast_lm_head_to_fp32=True)
+
+def ftpo_loss(y: torch.Tensor, ref: torch.Tensor, chosen: torch.Tensor, rejected: int) -> tuple[torch.Tensor, dict]:
+    """App. J's loss for one row (y, ref: (V,) fp32; chosen: (k,) ids) and its terms and statistics."""
+    delta = y[chosen] - y[rejected]
+    w = ((MARGIN - delta) / MARGIN).clamp(0, 1)
+    pref = (w * F.softplus(MARGIN - delta)).sum() / w.sum() if bool(w.sum() > 0) else y.new_zeros(())
+    targets = torch.zeros_like(y, dtype=torch.bool)
+    targets[chosen] = True
+    targets[rejected] = True
+    d = y - ref
+    target = ((d[targets].abs() - TAU_TARGET).clamp(min=0) ** 2).mean()
+    nontarget = (d[~targets] ** 2).mean()
+    loss = pref + LAMBDA_TARGET * target + LAMBDA_NONTARGET * nontarget
+    with torch.no_grad():
+        stats = {"pref": pref, "target": target, "nontarget": nontarget, "chosen_win": (delta > 0).float().mean(),
+                 "margin_win": (delta >= MARGIN).float().mean(), "delta": delta.mean(), "active_weight": w.mean()}
+    return loss, {k: float(v.detach()) for k, v in stats.items()}
+
+
+def candidates(ref: torch.Tensor, rejected: int, temperature: float, decode) -> list[int]:
+    """The chosen tokens of a row from its reference logits (src/antidoom/sampling.py:19-66): the TOP_LOGPROBS most
+    likely, less the rejected token and its lower-case surface; p^(1/T) >= MIN_P max p^(1/T), i.e. a logit within
+    T ln(1/MIN_P) of the best remaining; a stripped surface of MIN_DECODED_CHARS; at most CHOSEN_MAX, least likely
+    first as the repository orders them."""
+    surface = decode(rejected).lower()
+    top = [int(i) for i in torch.topk(ref, TOP_LOGPROBS).indices]
+    kept = [i for i in top if i != rejected and decode(i).lower() != surface]
+    if not kept:
+        return []
+    floor = float(ref[kept[0]]) + max(temperature, 1e-6) * math.log(MIN_P)
+    kept = [i for i in kept if float(ref[i]) >= floor]
+    return [i for i in reversed(kept) if len(decode(i).strip()) >= MIN_DECODED_CHARS][:CHOSEN_MAX]
+
+
+def key(text: str) -> str:
+    """src/antidoom/ftpo_data.py:99-102 normalise_chosen_key."""
+    stripped = text.strip().lower()
+    return re.sub(r"^[^\w]+|[^\w]+$", "", stripped, flags=re.UNICODE) or stripped or text
+
+
+def regularise(chosen: list[list[int]], decode) -> list[list[int]]:
+    """src/antidoom/ftpo_data.py:256-357 _regularise_chosen_examples at CHOSEN_STRENGTH: each row's chosen tokens
+    deduplicated by `key`; a key whose count exceeds ref = max(CHOSEN_MIN_REF, the CHOSEN_REF_PERCENTILE-th percentile
+    count) is cut to round(count (ref / count)^CHOSEN_STRENGTH), first from the rows with the most chosen tokens
+    (more than one), then by emptying rows holding only it (lowest index first). Returns the rows' chosen ids."""
+    rows = []
+    for ids in chosen:
+        seen, row = set(), []
+        for i in ids:
+            if (k := key(decode(i))) not in seen:
+                seen.add(k)
+                row.append((i, k))
+        rows.append(row)
+    counts = Counter(k for row in rows for _, k in row)
+    values = sorted(counts.values())
+    ref = max(CHOSEN_MIN_REF, max(1, values[int((len(values) - 1) * CHOSEN_REF_PERCENTILE / 100)]) if values else 1)
+    target = {k: max(1, round(c * (ref / c) ** CHOSEN_STRENGTH)) if CHOSEN_STRENGTH > 0 and c > ref else c
+              for k, c in counts.items()}
+    holders = defaultdict(set)
+    for n, row in enumerate(rows):
+        for _, k in row:
+            holders[k].add(n)
+    order = sorted(target, key=lambda k: counts[k] - target[k], reverse=True)
+    for k in order:
+        while counts[k] > target[k]:
+            options = [n for n in holders[k] if any(x == k for _, x in rows[n]) and len(rows[n]) > 1]
+            if not options:
+                break
+            n = max(options, key=lambda n: (len(rows[n]), -n))
+            rows[n] = [(i, x) for i, x in rows[n] if x != k]
+            counts[k] -= 1
+    for k in sorted(target, key=lambda k: counts[k] - target[k], reverse=True):
+        while counts[k] > target[k]:
+            options = [n for n in holders[k] if [x for _, x in rows[n]] == [k]]
+            if not options:
+                break
+            rows[min(options)] = []
+            counts[k] -= 1
+    return [[i for i, _ in row] for row in rows]
 
 
 def bf16(v: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
@@ -97,78 +204,90 @@ def retention(start: dict[str, torch.Tensor], model, saved: dict[str, torch.Tens
     return {"retained": num / den if den else None, "elements_changed": changed / total}
 
 
-def write(trainer, source: Path, out: Path) -> dict:
+def write(model, source: Path, out: Path) -> dict:
     """The trained model in the export's format beside the export's other files; its retention."""
-    saved = served(trainer.model)
-    kept = retention(load_file(source / "model.safetensors"), trainer.model, saved)
+    saved = served(model)
+    kept = retention(load_file(source / "model.safetensors"), model, saved)
     out.mkdir(parents=True, exist_ok=True)
     save_file(saved, out / "model.safetensors", metadata={"format": "pt"})
     for f in source.iterdir():
         if f.is_file() and f.name != "model.safetensors":
             shutil.copy(f, out / f.name)
-    return {"retention": kept, "max_memory_allocated": torch.cuda.max_memory_allocated() if torch.cuda.is_available()
-            else None, "log_history": trainer.state.log_history}
+    return kept
 
 
-def common(out: Path, batch: int, lr: float, warmup: float, max_steps: int, cpu: bool) -> dict:
-    return {"output_dir": str(out / "trainer"), "per_device_train_batch_size": 1, "gradient_accumulation_steps": batch,
-            "learning_rate": lr, "warmup_steps": warmup, "num_train_epochs": 1, "max_steps": max_steps,
-            "adam_beta1": 0.9, "adam_beta2": 0.95, "weight_decay": 0.0, "max_grad_norm": 1.0, "bf16": True,
-            "use_cpu": cpu, "logging_steps": 1, "save_strategy": "no", "report_to": "none", "seed": 0,
-            "data_seed": 0, "dataloader_num_workers": 0, "remove_unused_columns": False,
-            "gradient_checkpointing": False}
+def quantiles(values: list[float]) -> dict | None:
+    return {"n": len(values), "p10_p50_p90": np.percentile(values, [10, 50, 90]).tolist()} if values else None
 
 
-def rsft(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | None, cpu: bool) -> dict:
-    from datasets import Dataset
-    from trl import SFTConfig, SFTTrainer
+def ftpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | None, cpu: bool) -> dict:
+    from transformers import Trainer, TrainerCallback, TrainingArguments
 
-    fp32_heads()
+    from corpus.tokenizer import get_tokenizer
+
+    decode = functools.lru_cache(maxsize=None)(lambda i: get_tokenizer().enc.decode([i]))
     rows = [json.loads(line) for line in data.read_text().splitlines()]
-    dataset = Dataset.from_list([{"input_ids": r["prompt_ids"] + r["completion_ids"],
-                                  "completion_mask": [0] * len(r["prompt_ids"]) + [1] * len(r["completion_ids"])}
-                                 for r in rows])
-    model, tokenizer = load(model_dir)
-    args = SFTConfig(**common(out, batch or RSFT_BATCH, RSFT_LR, RSFT_WARMUP, max_steps, cpu),
-                     lr_scheduler_type="cosine", completion_only_loss=True, max_length=None, packing=False)
-    trainer = SFTTrainer(model=model, args=args, train_dataset=dataset, processing_class=tokenizer)
+    device = torch.device("cpu" if cpu or not torch.cuda.is_available() else "cuda")
+    model = load(model_dir).to(device).eval()
+    refs = []
+    with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
+        for r in rows:
+            refs.append(last_logits(model, torch.tensor([r["prefix_ids"]], device=device)).cpu())
+    picked = [candidates(ref, r["rejected_id"], r["temperature"], decode) for r, ref in zip(rows, refs, strict=True)]
+    chosen = regularise(picked, decode)
+    examples = [{"input_ids": torch.tensor([r["prefix_ids"]]), "rejected": r["rejected_id"],
+                 "chosen": torch.tensor(c), "ref": ref} for r, c, ref in zip(rows, chosen, refs, strict=True) if c]
+    sets = {"rows": len(rows), "no_candidates": sum(not c for c in picked), "kept": len(examples),
+            "candidates": quantiles([len(c) for c in picked if c]), "chosen": quantiles([len(c) for c in chosen if c]),
+            "pruned_by_regularisation": sum(map(len, picked)) - sum(map(len, chosen))}
+
+    class FTPOTrainer(Trainer):
+        stored = defaultdict(list)
+
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            loss, stats = ftpo_loss(last_logits(model, inputs["input_ids"]), inputs["ref"], inputs["chosen"],
+                                    int(inputs["rejected"]))
+            for k, v in stats.items():
+                self.stored[k].append(v)
+            return loss
+
+        def log(self, logs, *args, **kwargs):
+            logs = logs | {k: sum(v) / len(v) for k, v in self.stored.items() if v}
+            self.stored.clear()
+            return super().log(logs, *args, **kwargs)
+
+    class Stop(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if (logs or {}).get("chosen_win", 0) >= CHOSEN_WIN_STOP:
+                control.should_training_stop = True
+
+    args = TrainingArguments(
+        output_dir=str(out / "trainer"), per_device_train_batch_size=1, gradient_accumulation_steps=batch or BATCH,
+        learning_rate=LR, warmup_steps=WARMUP, lr_scheduler_type="linear", weight_decay=WEIGHT_DECAY,
+        max_grad_norm=MAX_GRAD_NORM, num_train_epochs=1, max_steps=max_steps, bf16=True, use_cpu=device.type == "cpu",
+        logging_steps=LOG_STEPS, save_strategy="no", report_to="none", seed=0, data_seed=0,
+        dataloader_num_workers=0, remove_unused_columns=False, gradient_checkpointing=False)
+    model.train()
+    trainer = FTPOTrainer(model=model, args=args, train_dataset=examples, data_collator=lambda features: features[0],
+                          callbacks=[Stop()])
+    trainer.loss_is_scaled_for_ga = False  # a row's loss is a mean: the step averages its rows
     trainer.train()
-    return write(trainer, model_dir, out)
-
-
-def dpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | None, cpu: bool) -> dict:
-    from datasets import Dataset
-    from trl import DPOConfig, DPOTrainer
-
-    class TokenizedDPOTrainer(DPOTrainer):
-        def _prepare_dataset(self, dataset, *args, **kwargs):
-            return dataset  # pairs.jsonl's ids as sampled
-
-    fp32_heads()
-    rows = [json.loads(line) for line in data.read_text().splitlines()]
-    dataset = Dataset.from_list([{k: r[k] for k in ("prompt_ids", "chosen_ids", "rejected_ids")} for r in rows])
-    model, tokenizer = load(model_dir)
-    reference, _ = load(model_dir, train=False)
-    args = DPOConfig(**common(out, batch or DPO_BATCH, DPO_LR, DPO_WARMUP, max_steps, cpu),
-                     lr_scheduler_type="linear", beta=DPO_BETA, loss_type=["sigmoid"], max_length=None,
-                     precompute_ref_log_probs=False)
-    trainer = TokenizedDPOTrainer(model=model, ref_model=reference, args=args, train_dataset=dataset,
-                                  processing_class=tokenizer)
-    trainer.train()
-    return write(trainer, model_dir, out)
+    return {"sets": sets, "lr": LR, "steps": trainer.state.global_step, "max_steps": trainer.state.max_steps,
+            "retention": write(trainer.model, model_dir, out),
+            "max_memory_allocated": torch.cuda.max_memory_allocated() if device.type == "cuda" else None,
+            "log_history": trainer.state.log_history}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=("rsft", "dpo"))
+    parser.add_argument("stage", choices=("ftpo",))
     parser.add_argument("model", type=Path)
     parser.add_argument("data", type=Path)
     parser.add_argument("out", type=Path)
     parser.add_argument("--max-steps", type=int, default=-1)
-    parser.add_argument("--batch", type=int, help="sequences (rsft) or pairs (dpo) per step; a smoke's")
+    parser.add_argument("--batch", type=int, help="rows per step; a smoke's")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
-    record = {"rsft": rsft, "dpo": dpo}[args.stage](args.model, args.data, args.out, args.max_steps, args.batch,
-                                                    args.cpu)
+    record = ftpo(args.model, args.data, args.out, args.max_steps, args.batch, args.cpu)
     (args.out / "train-log.json").write_text(json.dumps(record, indent=1) + "\n")
-    print(json.dumps({k: record[k] for k in ("retention", "max_memory_allocated")}), flush=True)
+    print(json.dumps({k: record[k] for k in ("sets", "steps", "retention", "max_memory_allocated")}), flush=True)

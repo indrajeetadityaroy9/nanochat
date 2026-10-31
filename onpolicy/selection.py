@@ -1,7 +1,9 @@
 """
-The rollouts' outcomes and the FTPO rows drawn from their loops (docs/post-training.md §8). A response is a success
-when it closed its reasoning, ended with BOS and its answer passed the prompt's tests (onpolicy/verify.py
-verdicts.jsonl); a loop when it never closed and its tail repeats (onpolicy/rollouts.py `loop`).
+The rollouts' outcomes and the FTPO rows drawn from their loops (docs/post-training.md §8), over one or several
+rollout directories (the waves of scripts/onpolicy.sh), written to <out dir>. A response is a success when it closed
+its reasoning, ended with BOS and its answer passed the prompt's tests (onpolicy/verify.py verdicts.jsonl, where a
+directory has one: rows need no verdicts); a loop when it never closed and its tail repeats (onpolicy/rollouts.py
+`loop`).
 
 - FTPO rows (ftpo.jsonl; Antidoom's unit, final-token preference of arXiv 2510.15061 §5): one per loop with an exact
   cycle (onpolicy/rollouts.py `cycle`: onset o, period p), at Antidoom's target (`target`): the first token of the
@@ -14,13 +16,14 @@ verdicts.jsonl); a loop when it never closed and its tail repeats (onpolicy/roll
   are counted and dropped; rows with an identical prefix are kept once (the first in prompt and sample order); rows
   whose prefix and rejected token exceed --max-length are dropped (counted). The rows are then rebalanced on their
   rejected token as Antidoom's trainer does (`rebalance`).
-- selection.json: per temperature and pooled, the outcomes, pass@1 and pass@n (unbiased, arXiv 2107.03374 Eq. 1),
-  loop rates per response and per prompt, the share of prompts with a success and with mixed outcomes (a success and
-  a loop), the length statistics of successes, of loop onsets and periods; per style; and the rows: loops with an
-  exact cycle, duplicates, rows before and after rebalancing, the 20 most frequent rejected tokens (decoded) before
-  and after, the rows of prompts never solved, and position, onset and period statistics.
+- selection.json: per temperature and pooled, the outcomes, loop rates per response and per prompt, loop onsets and
+  periods, and over the prompts whose responses are verified pass@1 and pass@n (unbiased, arXiv 2107.03374 Eq. 1),
+  the share of prompts with a success and with mixed outcomes (a success and a loop) and the successes' lengths; per
+  style; and the rows: loops with an exact cycle, duplicates, rows before and after rebalancing, the 20 most frequent
+  rejected tokens (decoded) before and after, the rows of verified prompts never solved, and position, onset and
+  period statistics.
 
-    python -m onpolicy.selection <rollouts dir> [--max-length 32768]
+    python -m onpolicy.selection <out dir> [<rollouts dir> ...] [--max-length 32768]
 """
 import argparse
 import json
@@ -48,15 +51,20 @@ RESTART_WORDS = frozenset({
     "thus", "wait"})
 
 
-def load(directory: Path) -> tuple[dict[str, dict], list[dict]]:
-    """The sampled prompts by id and the rollouts with their verdicts and `success`."""
-    prompts = {r["id"]: r for r in map(json.loads, (directory / "prompts.jsonl").read_text().splitlines())}
-    rows = pq.read_table(directory / "rollouts.parquet").to_pylist()
-    verdicts = {(v["prompt_id"], v["sample"]): v["verdict"]
-                for v in map(json.loads, (directory / "verdicts.jsonl").read_text().splitlines())}
-    for r in rows:
-        r["verdict"] = verdicts[r["prompt_id"], r["sample"]]
-        r["success"] = r["closed"] and r["ended"] and r["verdict"] == "pass"
+def load(directories: list[Path]) -> tuple[dict[str, dict], list[dict]]:
+    """The sampled prompts by id and the rollouts of every directory; a directory's verdicts (verdicts.jsonl, when
+    written) give its responses' `verdict` and `success`, else both are None."""
+    prompts, rows = {}, []
+    for directory in directories:
+        prompts |= {r["id"]: r for r in map(json.loads, (directory / "prompts.jsonl").read_text().splitlines())}
+        part = pq.read_table(directory / "rollouts.parquet").to_pylist()
+        path = directory / "verdicts.jsonl"
+        lines = path.read_text().splitlines() if path.exists() else []
+        verdicts = {(v["prompt_id"], v["sample"]): v["verdict"] for v in map(json.loads, lines)}
+        for r in part:
+            r["verdict"] = verdicts.get((r["prompt_id"], r["sample"]))
+            r["success"] = None if r["verdict"] is None else r["closed"] and r["ended"] and r["verdict"] == "pass"
+        rows += part
     return prompts, rows
 
 
@@ -70,31 +78,37 @@ def quantiles(values: list[float]) -> dict | None:
 
 
 def summary(rows: list[dict]) -> dict:
-    """Outcomes and rates over `rows` (one temperature, or pooled)."""
+    """Outcomes and rates over `rows` (one temperature, or pooled); the verdicts' statistics over its verified rows."""
     by_prompt = defaultdict(list)
     for r in rows:
         by_prompt[r["prompt_id"]].append(r)
-    sizes = {len(rs) for rs in by_prompt.values()}
-    n = min(sizes)
-    successes = [r for r in rows if r["success"]]
     loops = [r for r in rows if r["loop"]]
     exact = [r for r in loops if r["loop_period"] is not None]
-    return {
-        "responses": len(rows), "prompts": len(by_prompt), "samples_per_prompt": sorted(sizes),
+    out = {
+        "responses": len(rows), "prompts": len(by_prompt), "samples_per_prompt": sorted({len(rs) for rs in
+                                                                                          by_prompt.values()}),
         "outcomes": {o: sum(r["outcome"] == o for r in rows) for o in OUTCOMES},
-        "verdicts_closed_ended": {v: sum(r["verdict"] == v for r in rows if r["closed"] and r["ended"])
-                                  for v in ("pass", "pass_trivial", "fail", "timeout", "no_code")},
-        "pass@1": len(successes) / len(rows),
-        f"pass@{n}": float(np.mean([pass_at(len(rs), sum(r["success"] for r in rs), n) for rs in by_prompt.values()])),
         "loop_rate_responses": len(loops) / len(rows),
         "loop_rate_prompts": sum(any(r["loop"] for r in rs) for rs in by_prompt.values()) / len(by_prompt),
-        "prompts_solved": sum(any(r["success"] for r in rs) for rs in by_prompt.values()) / len(by_prompt),
-        "prompts_mixed": sum(any(r["success"] for r in rs) and any(r["loop"] for r in rs)
-                             for rs in by_prompt.values()) / len(by_prompt),
-        "success_tokens": quantiles([r["tokens"] for r in successes]),
         "loops_exact_cycle": len(exact),
         "loop_onset_tokens": quantiles([r["loop_onset"] for r in exact]),
         "loop_period_tokens": quantiles([r["loop_period"] for r in exact])}
+    verified = {p: rs for p, rs in by_prompt.items() if all(r["verdict"] is not None for r in rs)}
+    if not verified:
+        return out
+    vrows = [r for rs in verified.values() for r in rs]
+    n = min(len(rs) for rs in verified.values())
+    successes = [r for r in vrows if r["success"]]
+    return out | {
+        "verified_responses": len(vrows),
+        "verdicts_closed_ended": {v: sum(r["verdict"] == v for r in vrows if r["closed"] and r["ended"])
+                                  for v in ("pass", "pass_trivial", "fail", "timeout", "no_code")},
+        "pass@1": len(successes) / len(vrows),
+        f"pass@{n}": float(np.mean([pass_at(len(rs), sum(r["success"] for r in rs), n) for rs in verified.values()])),
+        "prompts_solved": sum(any(r["success"] for r in rs) for rs in verified.values()) / len(verified),
+        "prompts_mixed": sum(any(r["success"] for r in rs) and any(r["loop"] for r in rs)
+                             for rs in verified.values()) / len(verified),
+        "success_tokens": quantiles([r["tokens"] for r in successes])}
 
 
 def ratios(counts: Counter, strength: float) -> dict[str, float]:
@@ -217,15 +231,16 @@ def ftpo_rows(prompts: dict[str, dict], rows: list[dict], max_length: int,
     return out, dict(counts)
 
 
-def select(directory: Path, max_length: int) -> dict:
-    prompts, rows = load(directory)
+def select(out: Path, directories: list[Path], max_length: int) -> dict:
+    prompts, rows = load(directories)
     decode = get_tokenizer().enc.decode
     candidates, counts = ftpo_rows(prompts, rows, max_length, decode)
     for c in candidates:
         c["rejected"] = decode([c["rejected_id"]])  # Antidoom balances on the decoded token (`rejected_decoded`)
     kept = rebalance(candidates, min(MAX_ROWS, int(KEEP * len(candidates))), STRENGTH, SEED)
-    with open(directory / "ftpo.jsonl", "w") as f:
+    with open(out / "ftpo.jsonl", "w") as f:
         f.writelines(json.dumps({k: v for k, v in c.items() if k != "rejected"}) + "\n" for c in kept)
+    verified = {r["prompt_id"] for r in rows if r["verdict"] is not None}
     solved = {r["prompt_id"] for r in rows if r["success"]}
     temperatures = sorted({r["temperature"] for r in rows})
     styles = sorted({p["style"] for p in prompts.values()})
@@ -235,7 +250,7 @@ def select(directory: Path, max_length: int) -> dict:
         "by_style": {s: summary([r for r in rows if prompts[r["prompt_id"]]["style"] == s]) for s in styles},
         "ftpo": counts | {
             "max_length": max_length, "strength": STRENGTH, "rows_before_rebalance": len(candidates),
-            "rows": len(kept), "rows_unsolved_prompts": sum(c["prompt_id"] not in solved for c in kept),
+            "rows": len(kept), "rows_unsolved_prompts": sum(c["prompt_id"] in verified - solved for c in kept),
             "rows_by_temperature": {str(t): sum(c["temperature"] == t for c in kept) for t in temperatures},
             "rejected_top20_before": Counter(c["rejected"] for c in candidates).most_common(20),
             "rejected_top20": Counter(c["rejected"] for c in kept).most_common(20),
@@ -244,13 +259,14 @@ def select(directory: Path, max_length: int) -> dict:
             "onset_tokens": quantiles([c["onset"] for c in kept]),
             "period_tokens": quantiles([c["period"] for c in kept]),
             "prefix_tokens": quantiles([len(c["prefix_ids"]) for c in kept])}}
-    (directory / "selection.json").write_text(json.dumps(report, indent=1) + "\n")
+    (out / "selection.json").write_text(json.dumps(report, indent=1) + "\n")
     return report
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("rollouts", type=Path)
+    parser.add_argument("out", type=Path, help="where ftpo.jsonl and selection.json go")
+    parser.add_argument("rollouts", type=Path, nargs="*", help="rollout directories (default: out)")
     parser.add_argument("--max-length", type=int, default=MAX_LENGTH)
     args = parser.parse_args()
-    print(json.dumps(select(args.rollouts, args.max_length), indent=1))
+    print(json.dumps(select(args.out, args.rollouts or [args.out], args.max_length), indent=1))

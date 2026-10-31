@@ -1,6 +1,7 @@
 """
 On-policy rollouts (docs/post-training.md §8): --prompts prompts of a pool (onpolicy/prompts.py `sample`, seeded by
---seed; for the val split only its rows held out from the train pool, prompts.py `held_out`), each sampled under every
+--seed; for the val split only its rows held out from the train pool, prompts.py `held_out`; without the prompts of
+each --exclude directory's prompts.jsonl, an earlier wave's; at most the usable rows left), each sampled under every
 (temperature, count) of --samples at top-p TOP_P, by vLLM offline from a --chat export (inference/export_hf.py; bf16,
 the head in fp32, eos = BOS) through eval/official_termination.py `generate`:
 CHUNK-token rounds with prefix caching, a response stopped once its last REPEAT_TAIL tokens have repetition >= LOOP
@@ -16,7 +17,7 @@ beside a training job its tokens/s during generation, eval/official_termination.
 VLLM_GPU_MEMORY_UTILIZATION applies through eval/official_site/sitecustomize.py.
 
     python -m onpolicy.rollouts <model dir> <out dir> [--split train] [--prompts N] [--samples 0.6:4]
-        [--seed S] [--max-tokens 16384] [<metrics.jsonl> <since, unix seconds>]
+        [--seed S] [--max-tokens 16384] [--exclude <dir> ...] [<metrics.jsonl> <since, unix seconds>]
 """
 import argparse
 import json
@@ -27,7 +28,7 @@ import numpy as np
 
 from corpus.tokenizer import get_tokenizer
 from eval.official_termination import CHUNK, LOOP, generate, job_cost, response
-from onpolicy.prompts import context_ids, held_out, read_pool, sample
+from onpolicy.prompts import context_ids, held_out, read_pool, sample, usable
 
 TOP_P = 0.95  # the reasoning protocol's (eval/official_termination.py SAMPLING)
 # Rollout length: closed reasoning reached 11,757 tokens at most in the step-2000 probe (128 responses), and the
@@ -60,7 +61,7 @@ def parse_samples(text: str) -> list[tuple[float, int]]:
 
 
 def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, int]], seed: int, max_tokens: int,
-         metrics: Path | None, since: float | None) -> None:
+         exclude: list[Path], metrics: Path | None, since: float | None) -> None:
     from vllm import LLM
 
     start = time.time()
@@ -69,7 +70,9 @@ def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, 
     pool, held = read_pool(split), None
     if split == "val":
         pool, held = held_out(pool, read_pool("train"))
-    rows = sample(pool, n, seed)
+    seen = {json.loads(line)["id"] for d in exclude for line in (d / "prompts.jsonl").read_text().splitlines()}
+    pool = [row for row in pool if row["id"] not in seen]
+    rows = sample(pool, min(n, sum(map(usable, pool))), seed)
     for row in rows:
         row["ids"] = context_ids(row)
     with open(out / "prompts.jsonl", "w") as f:
@@ -98,7 +101,8 @@ def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, 
 
     pq.write_table(pa.Table.from_pylist(records), out / "rollouts.parquet")
     generated = sum(len(r["ids"]) for r in records)
-    meta = {"model": str(model), "split": split, "held_out": held, "prompts": len(rows), "samples": samples,
+    meta = {"model": str(model), "split": split, "held_out": held, "excluded": len(seen), "prompts": len(rows),
+            "samples": samples,
             "top_p": TOP_P, "max_tokens": max_tokens, "seed": seed, "chunk": CHUNK, "loop_stop": LOOP,
             "responses": len(records),
             "generated_tokens": generated, "generation_seconds": round(end - generating),
@@ -120,6 +124,7 @@ if __name__ == "__main__":
     parser.add_argument("--samples", type=parse_samples, default=parse_samples(SAMPLES))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
+    parser.add_argument("--exclude", type=Path, nargs="*", default=[])
     args = parser.parse_args()
-    main(args.model, args.out, args.split, args.prompts, args.samples, args.seed, args.max_tokens, args.metrics,
-         args.since)
+    main(args.model, args.out, args.split, args.prompts, args.samples, args.seed, args.max_tokens, args.exclude,
+         args.metrics, args.since)
