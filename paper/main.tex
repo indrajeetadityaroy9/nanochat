@@ -1,4 +1,6 @@
 \documentclass[sigconf,nonacm]{acmart}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,calc,fit,positioning}
 
 \settopmatter{printfolios=true}
 \setlength{\emergencystretch}{1em}
@@ -464,9 +466,84 @@ The model is a GPT-style decoder-only transformer trained from scratch (Table~\r
 layers with RMSNorm without a learned scale, a final RMSNorm before the output layer, linear layers without biases, and
 separate input and output embeddings; pre-norm, unlike post-norm, trains without a learning-rate warm-up
 stage~\cite{xiong2020prenorm}. Unlike a standard transformer, the layers are not all identical: 6 of the 24 layers use
-global attention and the other 18 local attention, and 12 of the 24 layers add value embeddings. Each paragraph below
-covers one component that differs from the standard design: the choice, its reason, its scope, then its configuration
-and evidence.
+global attention and the other 18 local attention, and 12 of the 24 layers add value embeddings.
+Figure~\ref{fig:model} shows this layer pattern (a) and the structure of one layer (b). Each paragraph below covers one
+component that differs from the standard design: the choice, its reason, its scope, then its configuration and
+evidence.
+
+\begin{figure*}
+  \centering
+  \begin{tikzpicture}[
+      font=\footnotesize,
+      >={Latex[length=1.6mm]},
+      box/.style={draw, rounded corners=1.5pt, align=center, inner sep=2.5pt, minimum height=9mm},
+      sum/.style={draw, circle, inner sep=0pt, minimum size=3.6mm},
+      cell/.style={draw, minimum size=4.6mm, inner sep=0pt},
+    ]
+    \node[anchor=west, font=\footnotesize\bfseries] at (-0.25, 0.85) {(a) The 24 layers};
+    \foreach \i in {1,...,24} {
+      \pgfmathtruncatemacro{\isglobal}{mod(\i,4) == 0}
+      \pgfmathtruncatemacro{\hasve}{mod(\i,2) == 0}
+      \ifnum\isglobal=1
+        \node[cell, fill=black!25] (L\i) at ({(\i-1)*0.66}, 0.3) {};
+      \else
+        \node[cell] (L\i) at ({(\i-1)*0.66}, 0.3) {};
+      \fi
+      \ifnum\hasve=1
+        \fill (L\i.center) circle (1.1pt);
+      \fi
+      \node[font=\scriptsize, below=0.3mm of L\i] {\i};
+    }
+    \node[cell] (k1) at (0, -0.55) {};
+    \node[anchor=west] (t1) at ($(k1.east)+(1mm,0)$) {local attention, 512-token window};
+    \node[cell, fill=black!25, right=6mm of t1] (k2) {};
+    \node[anchor=west] (t2) at ($(k2.east)+(1mm,0)$) {global attention, whole context};
+    \node[cell, right=6mm of t2] (k3) {};
+    \fill (k3.center) circle (1.1pt);
+    \node[anchor=west] at ($(k3.east)+(1mm,0)$) {value embedding};
+
+    \node[box] (mix) at (1.75, -2.75) {mix with $x_0$\\$x \leftarrow \lambda_r x + \lambda_0 x_0$};
+    \node[box, right=3mm of mix] (n1) {RMSNorm};
+    \node[box, right=3mm of n1] (att) {attention: QK-norm, RoPE;\\local or global (a)};
+    \node[sum, right=3mm of att] (s1) {$+$};
+    \node[box, right=3mm of s1] (n2) {RMSNorm};
+    \node[box, right=3mm of n2] (mlp) {MLP, ReLU$^2$};
+    \node[sum, right=3mm of mlp] (s2) {$+$};
+    \node[right=3mm of s2, align=left] (next) {to layer\\$l + 1$};
+    \node[box, below=5mm of att] (ve) {value embedding, even layers (a):\\$v \leftarrow v + g \odot E_l[t]$,
+      $g = 2\sigma(\mathrm{RMSNorm}(x)\, W_g)$};
+    \draw[->] ($(mix.west)+(-6mm,0)$) node[left, align=right] {$x$ from layer $l - 1$\\($x_0$ for $l = 1$)}
+      -- (mix.west);
+    \draw[->] (mix) -- (n1);
+    \draw[->] (n1) -- (att);
+    \draw[->] (att) -- (s1);
+    \draw[->] (s1) -- (n2);
+    \draw[->] (n2) -- (mlp);
+    \draw[->] (mlp) -- (s2);
+    \draw[->] (s2) -- (next);
+    \draw[->] (ve) -- (att);
+    \coordinate (r1) at ($(mix.east)!0.5!(n1.west)$);
+    \coordinate (r2) at ($(s1.east)!0.5!(n2.west)$);
+    \coordinate (rtop) at ($(r1)+(0,10mm)$);
+    \draw[->] (r1) -- ++(0, 8.5mm) -| node[pos=0.25, above] {residual} (s1.north);
+    \draw[->] (r2) -- ++(0, 8.5mm) -| node[pos=0.25, above] {residual} (s2.north);
+    \node[draw, dashed, rounded corners=2pt, inner sep=2mm,
+      fit=(mix) (n1) (att) (s1) (n2) (mlp) (s2) (ve) (rtop)] (layer) {};
+    \node[anchor=south west, font=\footnotesize\bfseries] at (layer.north west) {(b) Layer $l$, for
+      $l = 1, \ldots, 24$};
+    \node[box, fill=black!5, anchor=north] (x0) at ($(layer.south -| mix)+(0,-5mm)$)
+      {$x_0 = \mathrm{RMSNorm}(E[t])$, computed once};
+    \draw[->] (x0) -- (mix);
+    \node[anchor=north east, align=right] at ($(layer.south east)+(0,-5mm)$) {after layer 24: RMSNorm,
+      output layer, logits capped as $15 \tanh(z / 15)$};
+  \end{tikzpicture}
+  \caption{Model architecture. (a) Every fourth layer uses global attention over the whole context and the other
+  layers use local attention over the previous 512 tokens; every second layer adds a value embedding. (b) One
+  pre-norm layer: the residual stream $x$ is mixed with the normalized token embedding $x_0$, then passes through
+  attention and the MLP, each with a residual connection. $t$ is the input token and $E_l$ the layer's
+  value-embedding table.}
+  \label{fig:model}
+\end{figure*}
 
 \begin{table}
   \caption{Model configuration. Non-embedding parameters are those of the transformer layers and the output layer;
@@ -511,7 +588,8 @@ cache at inference. Attention is masked within each document (Section~\ref{sec:s
 
 \paragraph{Local and global attention layers.} Three of every four layers use local (sliding-window)
 attention~\cite{beltagy2020longformer}, in which each token attends only to the previous 512 tokens; every fourth layer
-uses global attention over the whole context. Local attention costs time and memory in proportion to the window
+uses global attention over the whole context (Figure~\ref{fig:model}a). Local attention costs time and memory in
+proportion to the window
 rather than to the context length, which matters at a 32,768-token context, while the global layers still pass
 information across the whole context. The global layers are layers 4, 8, \ldots, 24, so the last layer is global; the
 other 18 layers are local. In Gemma 3, the ratio of local to global layers had minimal effect on perplexity, even at
@@ -519,22 +597,24 @@ other 18 layers are local. In Gemma 3, the ratio of local to global layers had m
 and the 512-token window are not ablated here.
 
 \paragraph{Value embeddings.} Every second layer adds a value embedding: a learned token embedding, one per layer,
-added to the attention values~\cite{li2026move}. A value embedding gives the layer token-specific parameters that cost
+added to the attention values (Figure~\ref{fig:model})~\cite{li2026move}. A value embedding gives the layer
+token-specific parameters that cost
 a table lookup instead of a matrix multiplication, so it adds capacity at almost no compute. In the MoVE experiments,
 value embeddings in half of the layers lowered validation bits per byte by 0.010--0.016 at three model
 depths~\cite{li2026move}. The 12 layers with value embeddings are layers 2, 4, \ldots, 24, including the last. Using
 every second layer rather than every layer halves the added parameters: in the same experiments, at depth 12, value
 embeddings in half of the layers gave a gain of 0.016 against 0.020 in every layer, with 302M instead of 604M added
-parameters~\cite{li2026move}. In layer $l$, for each head, $v \leftarrow v + 2\sigma(x W_g)\, E_l[t]$, where $t$ is
-the input token, $E_l$ the layer's embedding table and $W_g$ a learned gate on the layer's normalized input $x$,
-initialized so that the gate is 1. The 12 tables hold 302M of the model's 522M parameters, so the model has 195M
+parameters~\cite{li2026move}. In layer $l$, $v \leftarrow v + g \odot E_l[t]$, where $t$ is the input token, $E_l$ the
+layer's embedding table and $g = 2\sigma(\mathrm{RMSNorm}(x)\, W_g)$ a learned gate with one value per head, computed
+from the layer's normalized input and initialized to 1. The 12 tables hold 302M of the model's 522M parameters, so the
+model has 195M
 non-embedding parameters (Table~\ref{tab:model}). The placement and the gate are not ablated here.
 
-\paragraph{Residual stream.} Before each layer, the residual stream $x$ is mixed with the normalized input embedding
-$x_0$ through two learned scalars per layer: $x \leftarrow \lambda_r x + \lambda_0 x_0$. This gives every layer direct
-access to the input embedding, a simplified form of DenseFormer's weighted average over earlier
-layers~\cite{pagliardini2024denseformer}. The scalars start at $\lambda_r = 1$ and $\lambda_0 = 0$, the plain residual
-stream.
+\paragraph{Residual stream.} Before each layer, the residual stream $x$ is mixed with the normalized token embedding
+$x_0 = \mathrm{RMSNorm}(E[t])$, which is also the first layer's input, through two learned scalars per layer:
+$x \leftarrow \lambda_r x + \lambda_0 x_0$ (Figure~\ref{fig:model}b). This gives every layer direct access to the input
+embedding, a simplified form of DenseFormer's weighted average over earlier layers~\cite{pagliardini2024denseformer}.
+The scalars start at $\lambda_r = 1$ and $\lambda_0 = 0$, the plain residual stream.
 
 \paragraph{MLP\@.} The MLP uses the squared ReLU activation with hidden size 3,072 ($4 \times 768$). Primer found
 squared ReLU the most effective of its modifications~\cite{so2021primer}. Gated units such as SwiGLU outperform ReLU at
