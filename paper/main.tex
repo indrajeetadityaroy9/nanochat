@@ -78,13 +78,191 @@ The paper makes three contributions:
 \begin{itemize}
   \item A 522M-parameter, GPT-style decoder-only LLM for Python and C++ code generation, pretrained from scratch on
   one NVIDIA GH200 GPU: 103B tokens (528 tokens per non-embedding parameter) in 76.3 hours, from a corpus of code, web
-  text and math curated from 18 Hugging Face datasets, with a file-level stage at a context length of 8,192 tokens, a
-  repository-level stage at 32,768 tokens and fused GPU kernels.
+  text and math curated from 18 sources in 9 Hugging Face datasets, with a file-level stage at a context length of
+  8,192 tokens, a repository-level stage at 32,768 tokens and fused GPU kernels.
   \item Post-training on the same GPU: SFT on reasoning traces, which teaches the model to reason before it answers,
   followed by RL with rewards from unit tests.
   \item An evaluation of every stage with each benchmark's official tool, in Python and C++, against the published
   scores of sub-billion-parameter models, with 95\% confidence intervals.
 \end{itemize}
+
+\section{Data}
+\label{sec:data}
+
+The model is trained on three datasets, one per stage: a pretraining corpus of code, web text and mathematics,
+reasoning traces for supervised fine-tuning, and programming problems with unit tests for reinforcement learning. This
+section describes each in the order it is used: where its text comes from, how it is cleaned, decontaminated and
+split, and, for pretraining, how its sources are mixed. Tokenization, packing and fill-in-the-middle, which turn this
+text into training sequences, are described separately.
+
+\subsection{Pretraining corpus}
+\label{sec:data-pretrain}
+
+\paragraph{Sources.} The corpus combines 18 sources from 9 Hugging Face datasets (Table~\ref{tab:sources}). Its code
+is Python and C++ only, the two languages the model targets. Repository files come from Stack-Edu, StarCoder2's data
+filtered for educational, well-documented code~\cite{benallal2025smollm2}, and from UltraData's classifier-selected
+(L2) subsets of The Stack v3 and of its own code collection~\cite{tu2026ultradatacode}. Synthetic code adds the
+exercises UltraData writes from its algorithmic L2 files (L3)~\cite{tu2026ultradatacode}, and Nemotron's Python files
+rewritten by Qwen3-32B and Python files transpiled into C++~\cite{nvidia2025nemotron3nano}. Smaller sources contribute
+functions from open-source projects (CodeXGLUE~\cite{lu2021codexglue}), Kaggle notebooks~\cite{lozhkov2024starcoder2}
+and DeepSeek-R1 solutions to Codeforces problems (Codeforces-CoTs, finished solutions only). Natural language comes
+from the web text of Nemotron-ClimbMix~\cite{diao2025climb} and the synthetic mathematics of UltraData-Math L3 in four
+formats~\cite{wang2026ultradatamath}. The sources the mixture draws only in part (synthetic code, web text and
+mathematics) are downloaded only as far as the mixture needs them; the others are used whole.
+
+\begin{table*}
+  \caption{Pretraining sources after cleaning and decontamination.}
+  \label{tab:sources}
+  \small
+  \begin{tabular}{lllr}
+    \toprule
+    Group & Dataset and content & Language & Train documents \\
+    \midrule
+    Repository files & Stack-Edu: StarCoder2 data filtered for educational code & Python, C++ & 24.5M, 16.1M \\
+     & UltraData-Stack-v3-L2: The Stack v3 files selected by classifiers & Python, C++ & 17.4M, 12.4M \\
+     & UltraData-Code L2: code files selected by quality classifiers & Python, C++ & 42.0M, 13.1M \\
+    Synthetic code & UltraData-Code L3: exercises written from algorithmic files & Python, C++ & 3.8M, 4.3M \\
+     & Nemotron-Pretraining-Code-v2: files rewritten; Python transpiled into C++ & Python, C++ & 18.0M, 5.1M \\
+    Functions & CodeXGLUE code-to-text: functions from open-source projects & Python & 0.25M \\
+    Notebooks & Kaggle notebooks as text & Python & 0.57M \\
+    Reasoning traces & Codeforces-CoTs: DeepSeek-R1 solutions to Codeforces problems & Python, C++ & 0.02M \\
+    Web text & Nemotron-ClimbMix & -- & 15.6M \\
+    Mathematics & UltraData-Math L3: synthetic mathematics in four formats & -- & 3.4M \\
+    \midrule
+    Total & & & 176.6M \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\paragraph{Standardization and cleaning.} Every document is normalized as a compiler reads a source file: line
+endings become LF and a leading byte-order mark is removed; the text is otherwise kept as published. Each Python file
+of a code source must parse as Python~3.12. A file that does not is repaired by the smallest combination of three
+fixes that makes it parse (The Stack v3's anonymization placeholders replaced by bare words, tab indentation expanded,
+Python~2 syntax converted by 2to3) and dropped if none does. Exact duplicates are removed across all sources, keeping
+the first copy in the order of Table~\ref{tab:sources}.
+
+\paragraph{Decontamination.} A training document is removed when it shares a 10-gram of whitespace-separated words
+with a benchmark text, the rule of Qwen2.5-Coder and DeepSeek-Coder~\cite{hui2024qwen25coder,guo2024deepseekcoder}.
+The benchmark texts are the prompts and reference solutions of every task the evaluation scores, 1,428 in all:
+HumanEval+ and MBPP+~\cite{liu2023evalplus}, HumanEval-X C++, the C++ prompts of MultiPL-E~\cite{cassano2023multiple}
+and the HumanEval infilling programs~\cite{bavarian2022fim}. The filter removes 491,203 training documents (0.28\%),
+matching every HumanEval+ task, 372 of the 378 MBPP+ tasks and 157 of the 164 HumanEval-X C++ references. It also
+removes common code: 8,539 documents of one source share a 10-gram with the reference solution of a primality test
+(HumanEval/31). Validation documents are not filtered, so likelihood measurements keep one fixed set.
+
+\paragraph{Split and repository samples.} 1\% of the corpus is held out for validation by a hash of the unit a document
+belongs to: its repository for repository files, so that no repository straddles the split, its problem for Codeforces
+solutions, and the document itself otherwise. The files of each repository are grouped into samples connected by
+imports and ordered so that every file follows the files it imports; the repository-level stage trains on these
+samples. The curated corpus holds 176.6M training and 1.8M validation documents.
+
+\paragraph{Mixture.} Pretraining runs in two stages with the mixtures of Table~\ref{tab:mixture}. Code makes up 87\% of
+each stage, DeepSeek-Coder's share of source code~\cite{guo2024deepseekcoder}; its 13\% of natural language is taken
+here as web text (10\%) and mathematics (3\%). The mixture keeps natural language although code alone scores higher on
+code: in Qwen2.5-Coder's comparison, code only reached 49.8 and 40.3 on two code benchmarks against 48.3 and 38.3 for
+70\% code, 20\% text and 10\% mathematics, which led on mathematics and general benchmarks~\cite{hui2024qwen25coder}.
+Every problem the model solves is stated in natural language, and after post-training it reasons in natural language;
+the mixture therefore keeps a natural-language share near DeepSeek-Coder's, rather than none. Synthetic code is 30\% of
+the code, the share at which good mixtures of rephrased synthetic web text converge~\cite{kang2025synthetic}; that
+study does not cover code, and the share is not ablated here. The notebooks, functions and Codeforces solutions are
+read exactly once, each weighted by its size, since repeating a small part of the data many times degrades a
+model~\cite{hernandez2022repeated}; within a group, sources are weighted by their sizes. The file-level stage trains on
+single documents at a context of 8,192 tokens; the repository-level stage trains on repository samples at 32,768
+tokens for the last 5.45\% of the steps, Qwen2.5-Coder's two contexts and its repository-level share (300B of 5.5T
+tokens)~\cite{hui2024qwen25coder}. The repository-level stage keeps the shares of web text and mathematics, as
+OpenCoder's annealing keeps most of its original data distribution to avoid forgetting~\cite{huang2024opencoder}.
+
+\begin{table}
+  \caption{The pretraining mixture: each group's share of a stage and its tokens.}
+  \label{tab:mixture}
+  \small
+  \begin{tabular}{lrr}
+    \toprule
+    Group & Share & Tokens \\
+    \midrule
+    \multicolumn{3}{l}{\emph{File-level stage, context 8,192}} \\
+    Repository files & 59.3\% & 57.8B \\
+    Synthetic code & 26.1\% & 25.4B \\
+    Notebooks & 1.6\% & 1.5B \\
+    Functions & $<$0.1\% & 0.05B \\
+    Web text & 10.0\% & 9.7B \\
+    Mathematics & 3.0\% & 2.9B \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Repository-level stage, context 32,768}} \\
+    Repository samples & 81.5\% & 4.6B \\
+    Codeforces solutions & 5.5\% & 0.3B \\
+    Web text & 10.0\% & 0.6B \\
+    Mathematics & 3.0\% & 0.2B \\
+    \midrule
+    Total & & 103.0B \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Supervised fine-tuning data}
+\label{sec:data-sft}
+
+\paragraph{Sources.} SFT teaches the model to reason before it answers, on released reasoning traces
+(Table~\ref{tab:sft}). Python traces at volume come from the code data of Nemotron-Cascade's two SFT stages, solutions
+by DeepSeek-R1 and DeepSeek-R1-0528~\cite{wang2025nemotroncascade}. Harder competitive-programming problems with
+standard input and output, and the only C++ traces, come from Nemotron's competitive-programming SFT set. Prompts in
+the form of HumanEval and MBPP, a function to complete, with short reasoning come from that set's Exercism exercises and
+from KodCode, whose DeepSeek-R1 solutions all pass their problem's tests~\cite{xu2025kodcode}. KodCode's questions
+flagged as similar to benchmarks (cosine similarity above 0.95 to HumanEval, MBPP, BigCodeBench or LiveCodeBench) are
+left out.
+
+\paragraph{Filtering.} Each trace is split into its problem statement, its reasoning and its final answer. A trace is
+dropped when it lacks reasoning or an answer, when its reasoning is under 20 tokens, or when the whole document exceeds
+the 32,768-token context; it is dropped rather than cut, since a cut trace loses its answer, which removes about half of
+the competitive-programming traces. The pretraining decontamination rule is applied to statement, reasoning and answer
+against the same benchmark texts and MBPP's 500 original test problems; it removes every trace of 5.5\% and 5.2\% of
+the problems of Nemotron-Cascade's two stages and 5.6\% of KodCode's rows. Exact duplicates are removed, and a problem
+keeps at most two traces in the four long-trace groups, a cap set by the training time (two epochs within 12.5B
+tokens); the Exercism and KodCode problems have about one trace each.
+
+\paragraph{Split.} The validation split holds out 1\% of the problems rather than of the prompts. One problem recurs
+across sources under different wrappers, such as a language header or a function header written in two forms, so a
+problem is identified by its statement with these wrappers removed, lowercased and reduced to its words. In a build
+without KodCode, a split by exact prompt left 928 of 2,921 validation problems with their statement in the training
+split; a split by problem left none.
+Outside KodCode, no SFT prompt shares more than 18.6\% of the distinctive 8-word sequences of any of the 454
+LiveCodeBench problems the evaluation uses~\cite{jain2024livecodebench}.
+
+\begin{table}
+  \caption{SFT data after filtering: training documents (distinct prompts) and tokens. All traces are Python except
+  the C++ competitive-programming ones.}
+  \label{tab:sft}
+  \small
+  \begin{tabular}{lrr}
+    \toprule
+    Group & Documents (prompts) & Tokens \\
+    \midrule
+    Nemotron-Cascade 1 & 227,585 (149,076) & 1.55B \\
+    Nemotron-Cascade 2 & 147,317 (74,005) & 1.72B \\
+    Competitive, Python & 48,007 (24,540) & 0.55B \\
+    Competitive, C++ & 48,017 (24,500) & 0.56B \\
+    Exercism & 76,375 (75,341) & 0.08B \\
+    KodCode & 250,649 (250,646) & 1.19B \\
+    \midrule
+    Total & 797,950 (539,127) & 5.65B \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Reinforcement learning data}
+\label{sec:data-rl}
+
+RL needs problems whose tests decide correctness. Its problems are the KodCode rows of the SFT training split, 250,646
+distinct prompts, each with KodCode's tests: a pytest file for a function to complete, or standard-input cases for a
+program~\cite{xu2025kodcode}. A test rewards a correct answer only if it calls what the prompt asks for, so two kinds of
+rows are left out: prompts that do not name every function their tests import, where a correct answer under another
+name fails, and problems that test library APIs, whose library versions differ from KodCode's (45 of 171 of their
+reference solutions fail here). This leaves 180,911 problems: 107,244 functions to complete, 52,740 functions described
+in prose and 20,927 standard-input programs. The test harness passes 2,995 of 3,000 sampled reference solutions, and a
+deliberately wrong program passes the tests of 3 of them; a pass on such a problem is not counted. RL is evaluated on
+the KodCode rows of the SFT validation split, held out from the training problems by question and by test file, since
+the SFT split separates prompts and one question can appear in several styles: 1,115 of 2,547 rows remain, 785 of them
+usable, from which 512 problems are drawn, stratified by style and difficulty.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
