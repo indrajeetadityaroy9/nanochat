@@ -333,7 +333,7 @@ tokens being 301,057,488 (computed on master).
 **Parallelism.** Row groups (sources) and (language, partition) tasks (repositories) are the units of work, written in
 task order, so the output does not depend on the worker count; repository tasks in flight are bounded by `MEMORY` /
 (`PEAK` × the largest partition's text) (`repository_window`; `PEAK` = 8.18, the measured peak memory per text byte
-on C++'s largest train partition, 6.52 on Python's).
+on C++'s largest train partition, 6.52 on Python's [unverified: no record]).
 
 ## 7. Mixture and stages
 
@@ -461,7 +461,8 @@ single-line and 5,815 multi-line prefixes end in a line break and every referenc
 [arithmetic: `read_problems`]).
 
 **The line-start rule's basis** (d16 at 20 tokens per parameter; HumanEval single-line infilling, greedy, by line exact
-match, the stripped middle equal to the reference, and pass@1). The
+match, the stripped middle equal to the reference, and pass@1; the d16 runs and pack counts of this paragraph have no
+record [unverified]). The
 training format matches the evaluation prompts (sentinel ids, sections encoded separately, the BOS ending the middle).
 Without the rule the model infilled single lines 16× worse in PSM than SPM (line exact match 0.022
 against 0.367, the d16 baseline; 0.023 against 0.353 on the 982 prompts the 512-key window
@@ -477,16 +478,17 @@ data infills single lines in PSM at line exact match 0.175 (pass@1 0.037 → 0.1
 **The line break.** An AST node also ends before its line break, so without the line break's rule a PSM middle rarely
 carries the final "\n" every reference middle ends with: on the packs of the curated build before decontamination,
 1.06%, 0.80% and 0.58% of PSM middles ended in "\n" in `stack_edu_python`, `ultradata_stack_v3_l2_python` and
-`repositories_python` (20,000 FIM examples per corpus). With it (`pack.rs` `fim_example`), 20,000 FIM examples per
-corpus of the current packs have 35.2%, 37.2% and 35.9% (26.4% in `stack_edu_cpp`), whole lines (prefix empty or
-ending in "\n") in 34.0–36.3%, while 19.2–22.6% still start a line and stop before its line break, so both layouts
-are trained. The rule also fires at column 0, so its share is that of nodes starting their line. Its effect on
-infilling is not measured.
+`repositories_python` (20,000 FIM examples per corpus) [unverified]. With it (`pack.rs` `fim_example`), the PSM
+middles of each corpus's first 20,000 FIM examples in the shipped packs end in "\n" in 37.2%, 36.6% and 36.8% (23.3%
+in `stack_edu_cpp`), are whole lines (prefix empty or ending in "\n", middle ending in "\n") in 36.5%, 35.9% and
+36.4% (22.0%), while 21.6%, 22.4% and 25.4% (19.5%) start a line and stop before its line break, so both layouts are
+trained (computed on master). The rule also fires at column 0, so its share is that of nodes starting their line. Its
+effect on infilling is not measured.
 
 - A FIM piece is decoded to text; its middle is a random span with probability 0.1, else an AST-FIM span on its
   tree-sitter parse, or a random span when the piece does not parse or has no node below the root. Aligned-Span's IoU
   counts characters (arXiv 2506.00204 §3.3, "character-level Intersection over Union"); byte IoU would choose another
-  middle in 204 of 160,000 sampled FIM examples (1.3e-3 of FIM tokens).
+  middle in 204 of 160,000 sampled FIM examples (1.3e-3 of FIM tokens) [unverified].
 - Prefix, suffix and middle are encoded separately (arXiv 2207.14255 §3): PSM `<｜fim▁begin｜> P <｜fim▁hole｜> S
   <｜fim▁end｜> M`, SPM `<｜fim▁begin｜> <｜fim▁hole｜> S <｜fim▁end｜> P M` (App. D, variant 2); the BOS after the middle
   is its target.
@@ -500,9 +502,11 @@ infilling is not measured.
 on the packed rows, called from `train/stages.py`) and assigns run rows to corpora by `mixture_rows`; each corpus's
 rows are read in the order the caller gives (a seeded permutation, `docs/training.md` §8), resuming after the rows a
 start position consumed.
-- A row (`assemble`): a BOS before every piece, the piece's tokens (reading "fim": its FIM example, if it has one),
-  padding (BOS as input, ignored label `IGNORE_INDEX` = −1). The BOS after a piece that ends its document, or
-  (reading "fim") after a FIM middle, is a target; after a piece its document continues, its label is ignored.
+- A row (`assemble`): a BOS before every piece, the piece's tokens (a piece drawn as a FIM example, which only
+  FIM-packed train splits hold, §8: the example), padding (BOS as input, ignored label `IGNORE_INDEX` = −1). The BOS
+  after a piece that ends its document, or after a FIM middle, is a target; after a piece its document continues, its
+  label is ignored. A row index −1 in an order is a row of padding (the val readers' last micro-batch); a split with
+  `<split>.context` (the SFT corpus, §10) has the labels of each document's first `context` tokens ignored.
 - `cu_seqlens`: one attention segment per piece, and one for a row's padding (FA4's varlen layout), padded to a fixed
   count per loader so a compiled model sees one shape; `lengths` gives the attention work for
   `metrics.executed_model_flops` (`docs/evaluation.md` §5).

@@ -82,6 +82,7 @@ def write(corpus: str, split: str, shards: Iterable[Shard], seq_len: int) -> int
 
 
 def shard_count(corpus: str, split: str) -> int:
+    """The curated shards of a tokenized split."""
     return len(shard_bounds(corpus, split, get_tokenizer())) - 1
 
 

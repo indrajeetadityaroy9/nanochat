@@ -53,4 +53,5 @@ def packed_rows(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> 
 
 
 def stage_rows(tokenizer: Tokenizer, stage: mixture.Stage) -> dict[str, int]:
+    """Each of a stage's corpora's packed train rows at the stage's seq_len."""
     return {corpus: packed_rows(corpus, "train", tokenizer, stage.seq_len) for corpus in stage.sources}

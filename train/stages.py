@@ -36,8 +36,7 @@ def stage_batches(tokenizer: Tokenizer, *, stage: Stage, run: RunPlan, seed: int
                                       for e in range(max(1, -(-draws[corpus] // rows[corpus])))])
               for corpus in mixture}
     return mixture, iter(PretrainingBatches(mixture, "train", tokenizer, orders, seq_len=stage.seq_len,
-                                            micro_batch_size=stage.micro_batch_size, device=device, reading="fim",
-                                            start=start))
+                                            micro_batch_size=stage.micro_batch_size, device=device, start=start))
 
 
 def val_batches(tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> PretrainingBatches:
@@ -47,7 +46,7 @@ def val_batches(tokenizer: Tokenizer, *, stage: Stage, device: torch.device) -> 
     rows = packed_rows(corpus, "val", tokenizer, stage.seq_len)
     order = np.concatenate([np.arange(rows), np.full(-rows % stage.micro_batch_size, -1)])
     return PretrainingBatches({corpus: 1.0}, "val", tokenizer, {corpus: order}, seq_len=stage.seq_len,
-                              micro_batch_size=stage.micro_batch_size, device=device, reading="left_to_right", start=0)
+                              micro_batch_size=stage.micro_batch_size, device=device, start=0)
 
 
 def max_tokens_per_param(tokenizer: Tokenizer) -> float:

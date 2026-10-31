@@ -97,8 +97,7 @@ def val_bits(losses: Callable, tokenizer: Tokenizer, *, stage: Stage, device: to
         samples[name] = np.concatenate([np.arange(n, dtype=np.int64) * num_rows // n,
                                         np.full(-n % stage.micro_batch_size, -1, dtype=np.int64)])
     loaders = {name: PretrainingBatches({name: 1.0}, "val", tokenizer, {name: rows}, seq_len=stage.seq_len,
-                                        micro_batch_size=stage.micro_batch_size, device=device,
-                                        reading="left_to_right", start=0)
+                                        micro_batch_size=stage.micro_batch_size, device=device, start=0)
                for name, rows in samples.items()}
     num_segments = max(loader.num_segments for loader in loaders.values())
     corpora = {}

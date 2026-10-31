@@ -4,7 +4,7 @@ Training's reader of the packed data: a run's mixture of packed corpora assemble
 
 import itertools
 from collections.abc import Iterator
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -18,9 +18,9 @@ IGNORE_INDEX = -1
 
 
 class PackedSplit(NamedTuple):
-    """A packed split, memory-mapped; fim is None when the split has no FIM examples (an empty file cannot be
-    memory-mapped); contexts, each document's leading tokens whose labels are ignored (the SFT corpus's prompts,
-    corpus/posttrain/build.py), None when the split has none."""
+    """A packed split, memory-mapped; fim is None when the split is packed without FIM examples (layout.fim_packed;
+    an empty file cannot be memory-mapped); contexts, each document's leading tokens whose labels are ignored (the SFT
+    corpus's prompts, corpus/posttrain/build.py), None when the split has none."""
     tokens: np.memmap
     offsets: np.memmap
     pieces: np.memmap
@@ -44,18 +44,17 @@ def packed(corpus: str, split: str, tokenizer: Tokenizer, seq_len: int) -> Packe
 
 class PretrainingBatches:
     """Re-iterable micro-batches (input_ids int32, labels int64, cu_seqlens int32 on the device; segments 0-dim int32
-    and lengths int64 on the host) of a mixture {corpus: weight}; cu_seqlens has a fixed num_segments + 1 entries,
-    unused ones repeating the last offset. Stops when a corpus's order is exhausted, without the partial micro-batch."""
+    and lengths int64 on the host) of a mixture {corpus: weight}; a piece drawn as a FIM example (a FIM-packed train
+    split's) is read as its example. cu_seqlens has a fixed num_segments + 1 entries, unused ones repeating the last
+    offset. Stops when a corpus's order is exhausted, without the partial micro-batch."""
 
     def __init__(self, mixture: dict[str, float], split: str, tokenizer: Tokenizer, orders: dict[str, np.ndarray], *,
-                 seq_len: int, micro_batch_size: int, device: torch.device | str,
-                 reading: Literal["fim", "left_to_right"], start: int) -> None:
+                 seq_len: int, micro_batch_size: int, device: torch.device | str, start: int) -> None:
         self.names, self.weights = list(mixture), np.array(list(mixture.values()))
         self.packed = {name: packed(name, split, tokenizer, seq_len) for name in self.names}
         self.orders = [orders[name] for name in self.names]
         self.seq_len, self.micro_batch_size, self.device = seq_len, micro_batch_size, device
         self.bos = tokenizer.bos_token_id
-        self.fim = reading == "fim"
         self.start = start
         # micro_batch_size x (the most pieces in a row + 1 for the padding)
         self.num_segments = micro_batch_size * (
@@ -68,7 +67,7 @@ class PretrainingBatches:
         each piece's start in the row, then the pieces' end."""
         tokens, offsets, pieces, rows, fim, contexts = self.packed[name]
         row_pieces = pieces[rows[row]:rows[row + 1]]
-        examples = (row_pieces[:, 3] > row_pieces[:, 2]) & self.fim
+        examples = row_pieces[:, 3] > row_pieces[:, 2]
         # a piece ending where a document ends (offsets) has its BOS as target, as has every FIM example
         targeted = (examples | (offsets[np.searchsorted(offsets, row_pieces[:, 1])] == row_pieces[:, 1])).tolist()
         examples = examples.tolist()
