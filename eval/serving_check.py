@@ -12,8 +12,8 @@ probe's engine: bf16, the head in fp32, max_model_len the context, seed 0) again
   by vLLM (T 0, at most DECODE_TOKENS, its logprob of each chosen token), then the training model's teacher-forced
   forward on prompt + generation (`forward_logprobs`: model.hidden, then the head as model.losses computes it). Per
   bucket of the generated token's index (DECODE_BUCKETS): the share of tokens equal to the training model's argmax; at
-  disagreements the training model's log-prob margin of its argmax over vLLM's token (mean, max, share above
-  NEAR_TIE); the mean log-prob of the chosen tokens by vLLM and by the training model.
+  disagreements the training model's log-prob margin of its argmax over vLLM's token (mean, max); the mean log-prob of
+  the chosen tokens by vLLM and by the training model.
 
 The export's 18 sliding-window layers (513) and 6 full ones are honoured only if the differences stay flat past 512.
 
@@ -31,7 +31,7 @@ import numpy as np
 
 TARGETS = (1024, 2048, 4096, 8192, 12288, 16384, 24576, 32768)
 BUCKETS = (0, 512, 2048, 8192, 16384, 32768)
-DECODE, DECODE_TOKENS, NEAR_TIE = 4, 8192, 0.05
+DECODE, DECODE_TOKENS = 4, 8192
 DECODE_BUCKETS = (0, 512, 2048, 4096, 8192)
 
 
@@ -168,7 +168,6 @@ def decode_stats(position: np.ndarray, agree: np.ndarray, margin: np.ndarray, se
             out[f"{lo}-{hi}"] = {"tokens": int(m.sum()), "argmax_agreement": float(agree[m].mean()),
                                  "disagreements": len(off), "margin_mean": float(off.mean()) if len(off) else None,
                                  "margin_max": float(off.max()) if len(off) else None,
-                                 "margin_above_near_tie": int((off > NEAR_TIE).sum()),
                                  "vllm_logprob_mean": float(served[m].mean()),
                                  "train_logprob_mean": float(trained[m].mean()),
                                  "logprob_max_abs_difference": float(np.abs(served[m] - trained[m]).max())}

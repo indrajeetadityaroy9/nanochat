@@ -138,6 +138,17 @@ def generate_groups(generator: NativeDecoder, groups: list[list[Request]],
                  latency(starts, firsts, ends, [len(out[k]) for k in span], duration=max(ends) - min(starts)))
 
 
+class CodegenRun(NamedTuple):
+    """An EvalPlus or MultiPL-E benchmark's prompts and evaluator (codegen_runs)."""
+    items: list[Task]
+    prompts: list[list[int]]  # BOS and the prompt's tokens
+    budgets: list[int]  # max_new_tokens per task
+    special: Literal["skip", "stop"]
+    check: Callable[[Task, str], tuple[str, list[str]]]
+    language: Literal["python", "cpp"]
+    score: Callable[[list[Task], list[list[str]]], dict]
+
+
 class Filtered(NamedTuple):
     """A filtered-mode benchmark (filtered_completions): its verify.Search and the text of a candidate's ids."""
     search: Search
@@ -151,26 +162,25 @@ class Filtered(NamedTuple):
             "new_tokens": [len(chosen(c).ids) for c in tried], "latency": timing}
 
 
-def filtered_completions(tokenizer: Tokenizer, items: list[Task], prompts: list[list[int]], budgets: list[int], *,
-                         special: Literal["skip", "stop"], check: Callable[[Task, str], tuple[str, list[str]]],
-                         found: list[list[tuple[str, str]]], language: Literal["python", "cpp"]) -> Filtered:
-    """The filtered mode of tasks 0..len(items)-1 from left-to-right prompts, healed (one more token of budget; Python
-    under the syntax constraint). check(task, text) returns the checked program and its known diagnostics; found[i]:
-    task i's vetted examples (vetted)."""
+def filtered_completions(tokenizer: Tokenizer, run: CodegenRun, *, found: list[list[tuple[str, str]]]) -> Filtered:
+    """The filtered mode of a benchmark's tasks from left-to-right prompts, healed (one more token of budget; Python
+    under the syntax constraint). run.check(task, text) returns the checked program and its known diagnostics;
+    found[i]: task i's vetted examples (vetted)."""
+    items, prompts = run.items, run.prompts
     dropped = [heal_tokens(tokenizer, p)[2] for p in prompts]
 
     def request(i: int) -> Request:
         input_ids, constraint, _ = heal_tokens(tokenizer, prompts[i])  # a fresh constraint per candidate
-        if language == "python":
+        if run.language == "python":
             constraint = SyntaxConstraint(tokenizer, tokenizer.enc.decode_bytes(input_ids[1:]), healing=constraint)
-        return Request(input_ids=input_ids, max_new_tokens=budgets[i] + 1, constraint=constraint,
+        return Request(input_ids=input_ids, max_new_tokens=run.budgets[i] + 1, constraint=constraint,
                        stopping_criteria=KeywordsStoppingCriteria(tokenizer, items[i].stopwords, healed=dropped[i]))
 
     def text(i: int, ids: list[int]) -> str:
-        return completion(tokenizer, items[i], ids, special=special, healed=dropped[i])
+        return completion(tokenizer, items[i], ids, special=run.special, healed=dropped[i])
 
-    return Filtered(Search(request=request, check=lambda i, ids: (found[i], *check(items[i], text(i, ids))),
-                           language=language, count=len(items)), text)
+    return Filtered(Search(request=request, check=lambda i, ids: (found[i], *run.check(items[i], text(i, ids))),
+                           language=run.language, count=len(items)), text)
 
 
 def sanitizer_init() -> None:
@@ -310,17 +320,6 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
     return {"scores": {"pass@1": pass_cell(passed)}, "ids": [t.task_id for t in items], "status": status}
 
 
-class CodegenRun(NamedTuple):
-    """An EvalPlus or MultiPL-E benchmark's prompts and evaluator (codegen_runs)."""
-    items: list[Task]
-    prompts: list[list[int]]  # BOS and the prompt's tokens
-    budgets: list[int]  # max_new_tokens per task
-    special: Literal["skip", "stop"]
-    check: Callable[[Task, str], tuple[str, list[str]]]
-    language: Literal["python", "cpp"]
-    score: Callable[[list[Task], list[list[str]]], dict]
-
-
 def codegen_runs(tokenizer: Tokenizer, benchmarks: dict[str, list[Task]],
                  pool: ProcessPoolExecutor) -> dict[str, CodegenRun]:
     """The CodegenRun of each EvalPlus and MultiPL-E benchmark."""
@@ -400,9 +399,7 @@ def filtered_generation(model: CausalLM, tokenizer: Tokenizer, benchmarks: dict[
     """Futures of each EvalPlus and MultiPL-E benchmark's 1@10 record (FILTERED): one verify.search over all, each
     record scored once its search ends. found: vetted's examples."""
     runs = codegen_runs(tokenizer, benchmarks, pool)
-    searches = {name: filtered_completions(tokenizer, run.items, run.prompts, run.budgets, special=run.special,
-                                           check=run.check, language=run.language, found=found[name])
-                for name, run in runs.items()}
+    searches = {name: filtered_completions(tokenizer, run, found=found[name]) for name, run in runs.items()}
     # every request fits the decoder's max_length, the longest (a slot count changes no tokens)
     lengths = [(p, m) for run in runs.values() for p, m in zip(run.prompts, run.budgets, strict=True)]
     generator = NativeDecoder(model, bos_token_id=tokenizer.bos_token_id,

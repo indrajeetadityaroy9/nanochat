@@ -34,13 +34,11 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 GPU and writes `RUNS/<run>/eval-<step>.json`: the likelihood metrics (`"8k"`, `"32k"`, `"solution"`, §2), the parse
 measure (`"parse"`, §3) and, with `generate="benchmarks"`, the 1@10 mode (`"codegen"` `<benchmark>."1@10"` and
 `"evalplus_average"` `"1@10"`, §4, §7), null with `generate="parse"`; `"provenance"` holds a SHA-256 over the code and
-configuration files (`source_digest`), the Python version and installed distributions (the records in `results/`
-predate it). Base-model checkpoints are evaluated with `"benchmarks"`, ablation runs with `"parse"`, SFT runs not at
+configuration files (`source_digest`), the Python version and installed distributions (none in the records in
+`results/`). Base-model checkpoints are evaluated with `"benchmarks"`, ablation runs with `"parse"`, SFT runs not at
 all (`generate="none"`, `docs/post-training.md` §5); `record` gathers a run's non-train log records and
 evaluations into `results/<experiment>.jsonl` (both: `docs/training.md` §6). The code benchmarks' standard protocols
-run outside `evaluate`, in their official tools on the exported checkpoint (`scripts/official_eval.sh`, §4). Earlier
-records also hold the harness's removed generation modes (greedy, sampled, MBPP 3-shot, infilling, SantaCoder FIM;
-`docs/experiments.md` §6) and a `"samples"` sidecar of the sampled completions.
+run outside `evaluate`, in their official tools on the exported checkpoint (`scripts/official_eval.sh`, §4).
 
 **Pipelined scoring.** `evaluate` runs the parse decode, the likelihood pass, then the filtered searches (§7); each
 benchmark's official evaluator (CPU, a fresh process) runs on a scorer thread as soon as its completions exist. The
@@ -89,8 +87,8 @@ atomics).
   clusters (up to 135 rows); at 32K the 2,667 code rows form 2,255, and one `repositories_python` document of 58.8M
   tokens spans 93 of that corpus's 1,281 sampled rows: 7.7% of its bytes at 0.10 bits per byte against the corpus's
   0.39 and 93% of the 32K code variance (the × 2 arm of `results/pretrain/peak_lr_d24.jsonl`) [arithmetic, from the
-  packs]. The benchmarks-mode d24 records `eval-3307.json`, `eval-1102.json`, `eval-2205.json` predate `row_clusters`;
-  their `"errors"` treat rows as independent (the × 2 checkpoint's 8K code se 0.00080 there against 0.00217 in its
+  packs]. The `"errors"` of the benchmarks-mode d24 records `eval-3307.json`, `eval-1102.json`, `eval-2205.json` have
+  no clusters and treat rows as independent (the × 2 checkpoint's 8K code se 0.00080 there against 0.00217 in its
   parse-mode record).
 - **Reference solutions** (`solution_bits`, `SOLUTION_BENCHMARKS`): the bits of HumanEval+'s and MBPP+'s canonical
   solutions (EvalPlus) and HumanEval-X C++'s (arXiv 2303.17568; MultiPL-E has none) given their prompts, one example
@@ -123,7 +121,7 @@ App. C.1), with EvalPlus's prompt, 768 + 1 new tokens (`EVALPLUS_MAX_NEW_TOKENS`
 strings; the completion is cut at its first stop, special tokens skipped. A completion that used its whole budget with
 no stop sequence (`code_eval.truncated`) is "truncated", not compiled: cut off mid-program, it fails by length, not
 syntax; in the d24 peak-lr records (`docs/training.md` §5) 96–99% of the non-parsing completions were cut so [measured:
-completions re-encoded, ≥ 753 tokens], and records written before this outcome count them as syntax or indentation
+completions re-encoded, ≥ 753 tokens], and records without a `truncated` share count them as syntax or indentation
 failures. Every other `prompt + completion` is classified by `metrics.parse_outcome` (§5) into parses,
 IndentationError (TabError included) or another SyntaxError, the classification of TokEval's companion post; the
 record holds each outcome's share and the completions' EvalPlus base and plus pass@1. The measure shows the failures a
@@ -162,7 +160,7 @@ to NUMA node `CPU_NODE` (default 0; on GH200 node 1 is the GPU's memory). `VLLM_
 | HumanEval infilling single-line, multi-line, random-span (1,033, 5,815, 1,640; arXiv 2207.14255) | human-eval-infilling `88062ff` | `evaluate_functional_correctness` (3 s a sample) on the samples of `eval/official_infilling.py` (the package has no generator): `corpus.tokenizer.fim_prompt`'s PSM ids (BOS, the sentinels, prefix and suffix encoded apart: the packer's layout, `docs/corpus.md` §8), greedy, the middle until BOS (the paper's EOT) or another special token | the paper samples 100 (single- and multi-line) or 200 (random-span) middles a task at T 0.2 in SPM (Fig. 6, Tables 1, 4) and names no budget: here one greedy middle in PSM, as every benchmark here is greedy [inference: one order measures the trained format; the packer trains both], at most the benchmark's longest reference middle (44, 263, 169 tokens, `official_infilling.budget`) |
 
 The post-trained model's protocol (EvalPlus's chat prompt and LiveCodeBench, `scripts/official_reasoning.sh`):
-`docs/post-training.md` §5. Benchmarks and modes no longer run: `docs/experiments.md` §6.
+`docs/post-training.md` §5. Benchmarks and modes not run: `docs/experiments.md` §6.
 
 Results of the base run's final checkpoint (step 69,874), their comparison with published models and their failure
 analysis: `docs/results.md` §1–§3.
@@ -181,10 +179,9 @@ analysis: `docs/results.md` §1–§3.
 - **Comparability.** MultiPL-E's sampled mode draws 20 samples a problem where Codex (arXiv 2107.03374 §2.1) and
   MultiPL-E drew 200 and the BigCode leaderboard 50 (arXiv 2402.19173 §7.1.2): the same estimate with more variance
   per problem [inference] (MultiPL-E notes its pass@1 rates stabilize around 20 samples, arXiv 2208.08227 §IV-B,
-  footnote 6). evalplus is pinned by commit (`26d6d00`): PyPI 0.3.1 has a 1 s minimum time limit, 4 s from `af49138`,
-  and fails every HumanEval/32 solution, fixed in `6eb1e19` [unverified: read from the repository's history, not
-  run]. `char` is unsigned on ARM64 and signed on x86, so a MultiPL-E C++ program that depends on it can score
-  differently [inference].
+  footnote 6). evalplus is pinned by commit (`26d6d00`): PyPI 0.3.1 has a 1 s minimum time limit (4 s at the pin)
+  and fails every HumanEval/32 solution [unverified: read from the evalplus source, not run]. `char` is unsigned on
+  ARM64 and signed on x86, so a MultiPL-E C++ program that depends on it can score differently [inference].
 - **The 1@10 mode** (`evaluate` with `"benchmarks"`, `filtered_generation`; `"codegen"` `<benchmark>."1@10"`, EvalPlus
   and MultiPL-E): the greedy candidate, then samples at T = 0.8 (`verify.TEMPERATURE`, Codex's pass@100 optimum for a
   679M model, §3.3) from the nucleus `verify.TOP_P` 0.95, attempt a of task i seeded `ATTEMPTS` · i + a, until one has
@@ -237,7 +234,7 @@ import it alike.
 | `pass_cell(passed)` | a pass@1 table cell: `summary` of each problem's mean pass over its samples; when every problem has one sample, also `wilson`, the Wilson 95% score interval (inside [0, 1], not degenerate at 0 or at all passes) | Miller, arXiv 2411.00640 §3.1 (average a question's samples first), Eq. 1, 3; statsmodels `proportion_confint(method="wilson")` |
 | `evalplus_average(humaneval, mbpp)` | the EvalPlus score of one mode's `humaneval_plus` and `mbpp_plus` records: the mean of the HumanEval, HumanEval+, MBPP and MBPP+ pass@1, computed as ½(m_HE + m_MBPP) of per-task (base + plus)/2 scores; a task's two columns form one cluster and the benchmarks are independent, so se² = ¼(se²_HE + se²_MBPP), each from `summary`; 95% normal interval; n counts tasks | Qwen3, arXiv 2505.09388 §3.3 (the four-way average); Miller Eq. 1, 3 |
 | `compare(a, b)` | paired comparison of two evaluation records (an `evaluate` record or `eval/official.py`'s summary) over the `codegen` (every mode and column) and `fim` sections both hold, on identical problems (else ValueError); one row per `<section>/<benchmark>/<mode>/<column>`: n; means a and b of the per-problem pass rates; the difference b − a with its paired se and 95% interval (clustered by HumanEval problem for `fim` rows); `corr`, the correlation of the per-problem scores (None when either is constant); p from exact McNemar for single-completion modes (greedy, 1@10, MBPP 3-shot, infilling; it treats an infilling problem's lines as independent), else a two-sided normal test of the difference over its se; `p_holm`, Holm-adjusted over all rows; `mde`, the difference detectable at α 0.05 with 80% power, (z₀.₀₂₅ + z₀.₂) · se. n · se², the variance of the per-problem difference, is Eq. 10's ω² + σ²_A/K_A + σ²_B/K_B less twice the covariance of A's and B's sample means: sample k of problem i has the same seed in every record, so the two records' samples are positively correlated [inference] and this paired se and mde are those of that design (common random numbers) | Miller Eq. 7, 8 (paired se), Eq. 3, Table 5 (correlation), Eq. 10 and App. C (detectable difference); statsmodels `mcnemar(exact=True)`, `multipletests(method="holm")`; scipy `norm` |
-| `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends, itself included (`layer_windows`: 512, or the context for full layers); records written before the query's own key was counted (`results/pretrain/muon_wd_timescale_20tpp.jsonl`, `results/pretrain/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), lower by 12 · C per windowed layer (d16: 73,728; 641,826,816 at 8K, 1,245,806,592 at 32K; d24: 165,888 lower) | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT; torchtitan's count without the causal halving |
+| `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends, itself included (`layer_windows`: 512, or the context for full layers); the d16 records (`results/pretrain/muon_wd_timescale_20tpp.jsonl`, `results/pretrain/scalar_learning_rates.jsonl`) hold 6N + 12 · C · Σ min(window_l, context), without the query's own key: lower by 12 · C per windowed layer (d16: 73,728; 641,826,816 at 8K, 1,245,806,592 at 32K; at d24 the difference would be 165,888) | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT; torchtitan's count without the causal halving |
 | `attended_keys(lengths, window)` | Σ over segments of Σ_p min(p, window + 1): the keys each query attends causally within its segment, itself included | — |
 | `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B; causal, per-document counting as Megatron-LM `num_floating_point_operations` (which excludes padding) |
 | `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12: NVIDIA's dense BF16 peak of the H100 SXM5, 1,978.9 TFLOP/s with sparsity, H100 Tensor Core GPU Architecture whitepaper; 132 SMs × 4,096 FLOPs per clock × 1.83 GHz [arithmetic]; the GH200's GPU has the same 132 SMs) | PaLM §4.1 |
@@ -252,7 +249,7 @@ import it alike.
 | `solutions` | HumanEval+, MBPP+ and HumanEval-X C++ reference solutions given their prompts, pooled (`bpb`) |
 | `repo_32k`, `repo_beyond_8k` | 32K validation of the code group; the same over targets beyond 8,192 positions (the last context bucket), at the 32K evaluation's code-corpus weights restricted to `REPO_LEVEL_STAGE.code` |
 | `text`, `math` | 8K validation of each group |
-| `unparsed`, `indentation`, `syntax` | shares of the 542 HumanEval+ and MBPP+ problems [arithmetic: 164 + 378], pooled, whose healed greedy completion stopped within its budget and does not compile; by IndentationError; by another SyntaxError (§3). Records written before `truncated` have `unparsed` = 1 − parses, truncated completions included |
+| `unparsed`, `indentation`, `syntax` | shares of the 542 HumanEval+ and MBPP+ problems [arithmetic: 164 + 378], pooled, whose healed greedy completion stopped within its budget and does not compile; by IndentationError; by another SyntaxError (§3). Records without `truncated` have `unparsed` = 1 − parses, truncated completions included |
 | `truncated` | share of the 542 whose completion used its whole budget without a stop sequence (§3) |
 | `pass@1` | greedy base pass@1 of the parse measure's completions, pooled |
 | `tokens_per_second`, `mfu` | medians over the file-level stage's steps (before `repo_level_start`) of the train records' tokens per second and executed MFU |
@@ -373,7 +370,7 @@ true token in 1,475 of 3,199 steps, hence the caller's tokenizer. Mask time per 
 - Python (`python_diagnostics`, on the program the scorer runs, EvalPlus's sanitized solution): the program compiles
   (`compile_error`: one `compile()`, which also rejects SyntaxErrors that `ast.parse` and the syntax constraint
   accept, such as `'return' outside function` or a duplicate argument: on a d16 checkpoint 5, 60 and 6 accepted
-  single-line, multi-line and random-span middles of the removed infilling 1@10 mode did not compile), then
+  syntax-constrained single-line, multi-line and random-span infilling middles did not compile), then
   basedpyright 1.40.2 with every rule off but `reportUndefinedVariable`, `reportAttributeAccessIssue` and
   `reportCallIssue`, in concurrent processes over groups of at least `PYRIGHT_GROUP` = 100 programs, a group halved if
   it exceeds
@@ -528,10 +525,10 @@ outputs, per-problem verdicts and pass@1/5/10 equal one unsharded run's (only th
   threads oversubscribed g++, and a compile past its wall-clock limit is scored "SyntaxError"; with `--max-workers 1`
   per file, a d16 checkpoint's stored sampled completions gave HumanEval C++ "OK" 70 → 175 of 3,220 and pass@1
   0.022 → 0.054, MBPP C++ "OK" 307 → 712 of 7,940 and 0.039 → 0.090, greedy and filtered statuses unchanged.
-- **Record replay** (`eval/rescore.py`, not on master; an empty verdict cache): every scorer and checker (EvalPlus
-  base and plus, MultiPL-E's judge, the infilling checks, parse outcomes, the filtered mode's verdicts) rerun on a d24
-  `eval-3307.json`'s stored completions, with 22,000 sampled completions synthesized from the stored ones, and compared
-  field by field: 0 fields differed and the sidecars' sha256 matched.
+- **Record replay** [unverified: the replay script is not in the repository] (an empty verdict cache): every scorer
+  and checker (EvalPlus base and plus, MultiPL-E's judge, the infilling checks, parse outcomes, the filtered mode's
+  verdicts) rerun on a d24 `eval-3307.json`'s stored completions, with 22,000 sampled completions synthesized from the
+  stored ones, and compared field by field: 0 fields differed and the sidecars' sha256 matched.
 - **Scorer replay** (an empty verdict cache): the official evaluators on every stored completion of the d24 benchmarks
   record `generate=benchmarks,learning_rate_scale=2.0,tokens_per_param=5.0` `eval-3307.json` (every mode) gave the
   stored verdict for 63,899 of 63,902 samples; the other 3, MBPP C++ sampled completions stored "Timeout", ran
@@ -544,7 +541,7 @@ outputs, per-problem verdicts and pass@1/5/10 equal one unsharded run's (only th
 - **Reference model** [unverified: no record]: deepseek-coder-1.3b-base through DeepSeek's harness gave HumanEval
   0.305 (paper 0.348, arXiv 2401.14196 Table 3; transformers 5 drops its BOS) and MBPP 0.466 (paper 0.462); this
   suite's EvalPlus scorer agreed on 163 of 164 problems.
-- **d16 reference** [unverified: no record; which d16 checkpoint and harness revision produced it is not recorded]: at
+- **d16 reference** [unverified: no record; the checkpoint and harness that produced it are not recorded]: at
   20 tokens per parameter, code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050. The suite's greedy MBPP+ on the
   step-4,552 checkpoint was 0.045/0.037, so the two are not the same evaluation [inference].
 

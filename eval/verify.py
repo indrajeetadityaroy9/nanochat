@@ -35,7 +35,7 @@ from metrics import latency
 from paths import PCH
 
 # basedpyright rules kept on (every other rule off): errors that fail at run time (NameError, AttributeError, call
-# TypeErrors and unmatched overloads); the measured basis and the removed rules: docs/experiments.md §6
+# TypeErrors and unmatched overloads); the measured basis and the rules not kept: docs/experiments.md §6
 PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue")
 # The configuration python_diagnostics writes (pyrightconfig.json), also the basedpyright verdicts' cache identity
 PYRIGHT_CONFIG = {"typeCheckingMode": "off", **dict.fromkeys(PYRIGHT_RULES, "error")}
