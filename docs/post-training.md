@@ -22,7 +22,7 @@ to the 522M base model is [inference].
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`, `results_dir`), `results/posttrain/sft_lr.jsonl` and its `-curves.jsonl` | §4 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_lcb_shards.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_loop_stop.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
 | `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/serving_check.py`, `scripts/serving_check.sh` | §5.1 (the method: `docs/evaluation.md` §10) |
-| `onpolicy/prompts.py`, `onpolicy/verify.py`, `onpolicy/rollouts.py`, `onpolicy/selection.py`, `onpolicy/train.py`, `scripts/onpolicy.sh`, `docker/Dockerfile.onpolicy` | §8 |
+| `onpolicy/prompts.py`, `onpolicy/verify.py`, `onpolicy/rollouts.py`, `onpolicy/selection.py`, `onpolicy/train.py`, `onpolicy/test_train.py`, `onpolicy/pick.py`, `onpolicy/test_pick.py`, `scripts/onpolicy.sh`, `docker/Dockerfile.onpolicy` | §8 |
 | `scripts/post_sft_queue.sh` | §8.7 |
 
 ## 1. Starting point
@@ -574,13 +574,15 @@ What each source contributes:
 | Source | Taken | Not taken |
 |---|---|---|
 | DeLoop (arXiv 2610.19376) | self-mined rows from the model's own failed rollouts, no task label (§4.1, App. G.1); contrast at the loop rather than imitation of a way out (SFT on the chosen action 37.7% loops against 6.1%, Table 15); preference training last (App. G.12 Table 20); no likelihood anchor (6.1% → 27.0% loops with one, App. G.13) | its sequence-level chosen side: this model's own continuations re-enter the loop (above) |
-| Antidoom / FTPO (blog; arXiv 2510.15061 §5, App. J) | the unit: one rejected token at the first repeat, the prefix before it; chosen tokens from the model's own next-token distribution; logit tethers to the reference; early stopping on chosen_win; rebalancing of frequent rejected tokens (§8.4) | LoRA (full parameters here, §8.5) |
+| Antidoom / FTPO (blog; arXiv 2510.15061 §5, App. J) | the unit: one rejected token at the first repeat, the prefix before it; chosen tokens from the model's own next-token distribution; logit tethers to the reference; chosen_win as the stopping signal; rebalancing of frequent rejected tokens (§8.4); one completion per prompt | LoRA (full parameters here, §8.5); the stop on training batches (a held-out monitor writes candidates, §8.5) |
 | DITTO (arXiv 2206.02369 §2.2) | the mechanism: sentence-level repetition is self-reinforcing, so the loop is cut at its first repeat, before it reinforces | its pseudo-repetition training data |
 | Why reasoning models loop (arXiv 2512.12895 §2, §3) | loops as learning errors that temperature hides without fixing ("temperature reduces looping, but it does not remove the underlying learning errors", §3), so loops are mined at the evaluation temperature, T 0.6 (§8.2) | — |
 
-**Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on KodCode train prompts at T 0.6, in waves until
-Antidoom's 20,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its first repeat (§8.4); FTPO from the SFT model
-(§8.5); the termination probe and KodCode val pass@1 (verified by KodCode's tests, §8.3) before and after (§8.6).
+**Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on SFT train prompts of every source at T 0.6, one
+per prompt, in waves until Antidoom's 20,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its first repeat
+(§8.4); FTPO from the SFT model with a held-out monitor that writes candidates at chosen_win 0.15, 0.25 and 0.35
+(§8.5); every candidate and the SFT model evaluated on the same probe prompts, KodCode val problems and NLL set, and
+one candidate kept by a rule fixed in advance (§8.6); FTPO runs only if the SFT model loops (§8.7).
 
 ### 8.1 Prompts
 
@@ -600,7 +602,22 @@ Antidoom's 20,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its firs
   no Docs subset, whose tests depend on library versions (pandas, torch, the standard library's) other than
   KodCode's: 45 of their 171 R1 answers fail here. 180,911 train and 1,870 val rows are usable [measured].
 - **Sampling** (`sample`): stratified by KodCode style (instruct, complete, online_judge) and difficulty
-  (easy, medium, hard), proportional allocation, seeded.
+  (easy, medium, hard), proportional allocation, seeded. The KodCode pools serve the val evaluation (§8.6).
+- **Mining pool** (`build_mix`, `onpolicy-mix.parquet`; FTPO rows need no tests, §8.4): every distinct document
+  context of the SFT train split, from every source group, found by parsing each source row as
+  `corpus/posttrain/build.py` parses it and matching its context's tokens, so a prompt is rendered exactly as SFT
+  trained on it: 539,127 contexts, each train document's (BOS + context) equal to its row's rendering in 400 random
+  documents checked [measured]. A context present in several groups is the first group's (`build.py` `GROUPS` order),
+  so most Nemotron-Cascade stage-2 prompts count as stage 1 (cascade_stage1 149,481, cascade_stage2 14,619, cp_python
+  24,540, cp_cpp 24,500, cp_exercism 75,341, KodCode 250,646) [measured]. `sample_mix` draws a context with
+  probability proportional to its train documents, so each source's share is its train document share, the
+  distribution the probe's val set is drawn from (uniform over val documents, `docs/evaluation.md` §10): of 24,000
+  drawn, 46% Cascade, 32% KodCode, 22% competitive programming and Exercism [measured]. Why every source: the
+  step-3000 probe's val loops came 22 of 30 from outside KodCode (Cascade 18 of 33 responses, competitive programming
+  4 of 11, KodCode 8 of 20) [measured], and preference pairs from another domain transfer poorly: DeLoop's
+  cross-domain-only pairs left 55.3% loops where in-domain pairs left 6.1% (arXiv 2610.19376 App. G.4 Table 12).
+  Prompts whose context and 16,384 new tokens exceed the 32,768-token context are skipped (none in the pool
+  [measured]).
 
 ### 8.2 Rollouts
 
@@ -608,11 +625,13 @@ Antidoom's 20,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its firs
   (`eval/official_termination.py` `generate`: 2,048-token rounds with prefix caching; a response with no `</think>`
   whose last 4,096 tokens have repetition ≥ 0.99 is stopped as a loop after its round), top-p 0.95, at most 16,384
   new tokens (the longest closed reasoning in the step-2000 probe was 11,757), request k seeded base + k.
-- **Temperature** (`SAMPLES`): 4 samples per prompt at T 0.6, the evaluation protocol's, where the loops are: at step
-  2000, on the probe's 128 prompts with a 16K cap, T 0.6 left 54 responses in loops and T 1.0 7
+- **Temperature and samples** (`SAMPLES`): one sample per prompt at T 0.6, the evaluation protocol's, where the
+  loops are: at step 2000, on the probe's 128 prompts with a 16K cap, T 0.6 left 54 responses in loops and T 1.0 7
   (`termination-budget-2000.json`); on the step-3000 export, 40 KodCode train prompts × 4, 47 of 160 responses looped
   at T 0.6 and 7 of 160 at T 1.0, with pass@1 0.400 and 0.419 [measured]. Temperature hides loops without removing
-  their cause (arXiv 2512.12895 §3), so they are mined where the model is evaluated.
+  their cause (arXiv 2512.12895 §3), so they are mined where the model is evaluated. One completion per prompt is
+  Antidoom's (one job per prompt and temperature, `src/antidoom/generate.py:85-86`): the rows of one prompt's
+  samples often share a cycle, so more prompts give more distinct loop contexts per row [inference].
 - **Loops**: a never-closed response with repetition ≥ 0.99 is a loop; when its last 1,024 tokens repeat exactly at
   a period p ≤ 2,048 (`cycle`), its onset is the first index from which every token equals the one p later.
 
@@ -656,15 +675,17 @@ Antidoom's 20,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its firs
   its share up to round(share × target), then without that cap; target = min(12,000, 70% of the rows)
   (`default.yaml:87`; the README's "set max_train_examples to at most 70% of the actual number of preference rows").
   On 30 random pools the port selects the rows Antidoom's function selects [measured]. The smoke's 50 rows (no
-  duplicates) give 35; "Wait" falls from 8 to 4, " perhaps" from 7 to 4 [measured]. At 8,000 prompts and the smoke's
-  43 exact-cycle loops per 160 T 0.6 responses, about 8,600 rows before and 6,000 after rebalancing [estimate],
-  against Antidoom's 15K–20K generated and 12K trained (README) and DeLoop's level-off at 8K pairs.
-- **Statistics** (`selection.json`): per temperature and pooled, the outcomes, loop rates per response and per prompt,
-  onset and period lengths, and over verified prompts (the val evaluation's; the train waves are not verified, §8.7)
-  pass@1 and pass@n (unbiased, arXiv 2107.03374), the share of prompts solved and with mixed outcomes (a success and a
-  loop) and success lengths; the rows: loops with an exact cycle, duplicates, rows before and after rebalancing, the
-  20 most frequent rejected tokens before and after, rows of verified prompts never solved, and position, onset,
-  period and prefix lengths.
+  duplicates) give 35; "Wait" falls from 8 to 4, " perhaps" from 7 to 4 [measured]. At 24,000 prompts a wave, one
+  sample each, and a loop share of 0.3–0.5 per response (the smoke's 47 of 160 KodCode responses, 30 of 64 of the
+  step-3000 probe's val set), about 7,000–11,000 exact-cycle rows a wave before rebalancing at the smoke's 43 exact
+  cycles per 47 loops [estimate], against Antidoom's 15K–20K generated and 12K trained (README) and DeLoop's level-off
+  at 8K pairs.
+- **Statistics** (`selection.json`): per temperature, per source and pooled, the outcomes, loop rates per response
+  and per prompt, onset and period lengths, and over verified prompts (the val evaluation's; the train waves are not
+  verified, §8.7) pass@1 and pass@n (unbiased, arXiv 2107.03374), the share of prompts solved and with mixed outcomes
+  (a success and a loop) and success lengths; the rows: loops with an exact cycle, duplicates, rows before and after
+  rebalancing (and per source), the 20 most frequent rejected tokens before and after, rows of verified prompts never
+  solved, and position, onset, period and prefix lengths.
 
 ### 8.5 Training
 
@@ -676,7 +697,8 @@ Antidoom's 20,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its firs
   the rest), so vLLM serves it in bf16 as it serves the SFT model. Antidoom's own trainer
   (`src/antidoom/reference_ftpo_trainer.py`, Apache-2.0) subclasses TRL's `DPOTrainer` around a peft LoRA model and
   its package requires vllm, peft and bitsandbytes; its loss and constants are ported instead (`onpolicy/test_train.py`
-  checks the loss, the chosen-token rule and the rounding against hand-computed values).
+  checks the loss against hand-computed values and the official trainer's batched lines, the monitor split, the
+  chosen-token rule and the rounding).
 - **Chosen tokens** (`candidates`, `regularise`): the reference's (the export's) logits at the row's final position,
   computed once before the first update by the same model; Antidoom's rule for the rollout's top log-probabilities
   (`src/antidoom/sampling.py:19-66` with `configs/default.yaml`): the 20 most likely tokens, less the rejected token
@@ -685,72 +707,115 @@ Antidoom's 20,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its firs
   20; then the set's chosen tokens deduplicated per row by their normalized word and the over-represented ones pruned
   (count above max(50, the 95th-percentile count) cut to count (ref / count)^0.5; `src/antidoom/ftpo_data.py:99-102`,
   `:256-357`); rows left with none are dropped.
-- **Loss** (`ftpo_loss`; App. J): at the final position, Δ_c = y[c] − y[r] on the capped logits; L_pref = Σ w_c
-  softplus(m − Δ_c) / Σ w_c with w_c = clamp((m − Δ_c)/m, 0, 1); L_target = mean over the chosen and rejected tokens of
-  max(|y − y_ref| − τ, 0)²; L_nontarget = mean over the rest of the vocabulary of (y − y_ref)²; L = L_pref +
-  λ_target L_target + λ_nontarget L_nontarget, with m 2, λ_target 0.05, τ 0.5, λ_nontarget 0.4
-  (`configs/default.yaml`: clip_epsilon_logits, lambda_mse_target, tau_mse_target, lambda_mse). The repository divides
-  L_pref by the number of chosen tokens instead of Σ w_c (`reference_ftpo_trainer.py:282-283`); App. J's form is used.
+- **Loss** (`ftpo_loss`; App. J with the repository's normalization): at the final position, Δ_c = y[c] − y[r] on the
+  capped logits; L_pref = Σ w_c softplus(m − Δ_c) / k over the row's k chosen tokens, with w_c = clamp((m − Δ_c)/m,
+  0, 1); L_target = mean over the chosen and rejected tokens of max(|y − y_ref| − τ, 0)²; L_nontarget = mean over the
+  rest of the vocabulary of (y − y_ref)²; L = L_pref + λ_target L_target + λ_nontarget L_nontarget, with m 2, λ_target
+  0.05, τ 0.5, λ_nontarget 0.4 (`configs/default.yaml`: clip_epsilon_logits, lambda_mse_target, tau_mse_target,
+  lambda_mse). App. J divides L_pref by Σ w_c; the official trainer, which produced every published Antidoom result,
+  divides by the number of chosen tokens (`reference_ftpo_trainer.py:282-283`), and that form is used. The two agree
+  while every chosen token trails the rejected one (all w_c = 1); past that, k keeps less pressure on the tokens still
+  inside the margin [arithmetic].
 - **Optimization** (Antidoom's `configs/default.yaml` and `src/antidoom/ftpo_train.py:119-141`): batch 16 rows (its
   4 × 4 accumulation, as 1 × 16), AdamW with the library's betas, weight decay 0.01, warmup 10% then linear decay,
-  gradient norm clipped at 2.5, one epoch at most, stopped once chosen_win (the share of a row's chosen tokens whose
-  logit beats the rejected one, averaged over the 5 steps between logs) reaches 0.35, Antidoom's setting [blog]; its
-  README reports a strong reduction at 0.15–0.3 and possible overtraining past 0.5. lr 1.5e-6: Antidoom's LoRA lr
-  1.5e-5 (rank 256; its README's range 1e-5–2e-5 at about 12K rows) over LoRA's optimum of about 10× full
-  fine-tuning's (§2.2) [inference]. Full parameters instead of LoRA: at hidden size 768 a rank-128 adapter already
-  costs as much compute as full fine-tuning of the attention projections (§2.2) [arithmetic].
+  gradient norm clipped at 2.5, one epoch at most. Full parameters instead of LoRA: at hidden size 768 a rank-128
+  adapter already costs as much compute as full fine-tuning of the attention projections (§2.2) [arithmetic].
+- **Learning rate 5e-7**, the most selective of three measured (step-3000 export, CPU: 20 rows of 12 smoke prompts
+  trained 5 steps of 4 rows at constant lr, 17 rows of other prompts held out; collateral the NLL of 8 of the export's
+  own passing responses to untrained prompts, 17,180 positions): held-out mean Δ from −5.63 to −4.53 / −3.07 / −0.60,
+  NLL +3.7% / +11% / +59%, i.e. 0.012 / 0.016 / 0.042 NLL per logit of held-out Δ gained, at 5e-7 / 1.5e-6 / 6e-6
+  [measured; small n]. The rejected tokens (" the", "Wait", " perhaps") are lowered in every context, not only at
+  loop onsets: the rise concentrated on positions holding a train row's rejected token (+13% / +41% / ×3.0)
+  [measured]. The gradient norm (300–380) exceeded the clip at every step [measured], so AdamW moves each element by
+  about lr per step and the speed is set by lr × steps more than by the data [inference]. Antidoom's LoRA lr 1.5e-5
+  over LoRA's 10× (§2.2) maps to 1.5e-6, the middle arm; at 6e-6 the held-out chosen_win reached 0.40 in 5 steps
+  [measured].
+- **Held-out monitor and candidates** (`monitor_split`, `monitor`): before training, 512 rows of whole prompts (a
+  seeded permutation of the prompt ids) leave the training set; at step 0, every 10 optimizer steps and at the last
+  step they are scored without gradient: per row chosen_win (the share of its chosen tokens whose logit beats the
+  rejected one), margin_win (ahead by m), mean Δ and L_nontarget, averaged over rows. The first monitor point at
+  which chosen_win reaches 0.15, 0.25 and 0.35 writes `ftpo-0.15/`, `ftpo-0.25/`, `ftpo-0.35/`; training stops after
+  the last; an epoch that ends below 0.35 writes `ftpo-final/`. Antidoom stops on the training batches' chosen_win
+  over 5-step logs; in one epoch each batch is unseen, but the held-out rows measure generalization to prompts never
+  trained on and do not move with the batch's composition [inference]. The thresholds span Antidoom's README band
+  ("Around 0.15-0.3 [chosen_win] you should usually see a strong reduction"; "Training past 0.5 may be
+  overtraining"); chosen_win here is a share over larger chosen sets than Antidoom's (T 0.6 against its 0.1 widens
+  the floor from 0.46 to 2.76 logits), so the same value need not mean the same point, and the candidate is chosen
+  by evaluation (§8.6), not by the threshold [inference]. Training without a stop is the failure to avoid: the
+  independent FTPO replication on Qwen3.5-4B lost GSM8K .882 → .154 and ARC-E .996 → .644 over a full epoch, against
+  .898 and .994 when early-stopped (arXiv 2606.13705 App. I.2 Table 14).
+- **Freezing** (`frozen`, `--freeze` or `FREEZE`): `head` excludes the output head, the token embedding and every
+  value embedding from training, the per-token parameters through which a rejected token can be lowered in every
+  context; `none` (the default) trains every parameter.
 - **Memory**: one row per micro-step, its prefix up to the 32,768-token context (`onpolicy/selection.py`
   `--max-length` default). Recomputing each decoder layer saves 0.68 MB of activations per token instead of 2.04, with
   identical gradients (a 4,096-token sequence, CPU, bf16 autocast) [measured]; on the GPU a DPO pair cost 0.235 MB per
   token of each sequence (peaks 11.49 / 11.97 GB at 1,024 / 2,048-token pairs) [measured], so a 32,768-token row
-  needs about 7.7 GB beside 8.4 GB of fp32 weights, gradients and AdamW state [estimate], within the 0.7 of the GPU
-  left beside the queue's server (§8.7).
-- **Stochastic rounding to bf16** (`bf16`): one AdamW step moves an element by at most about lr, so a run at 1.5e-6
+  needs about 7.7 GB beside 8.4 GB of fp32 weights, gradients and AdamW state [estimate]; FTPO has the GPU alone
+  (§8.7).
+- **Stochastic rounding to bf16** (`bf16`): one AdamW step moves an element by at most about lr, so a run at 5e-7
   over a few hundred steps moves most elements less than half their bf16 spacing (median |w| 0.0243 of the decoder's
   matmul weights: spacing 2⁻¹³ = 1.22e-4 [measured: export of step 3000]), and rounding to nearest at the write erases
   such updates: in a 3-step CPU DPO at lr 5e-7 the written weights kept 0.007 of the fp32 update along its direction
   [measured]. The bf16 tensors are rounded stochastically (uniform noise below the 16 dropped bits, then truncation:
   unbiased, a value on the bf16 grid unchanged; a shift of 1e-5 survives as 0.9998 of itself on average against 0.103
-  by nearest rounding [measured]). `train-log.json` records `retention`: ⟨written − start, final − start⟩ /
-  |final − start|² and the share of elements changed, beside the chosen sets' statistics, the log (loss, its three
-  terms, chosen_win, margin_win, mean Δ) and the peak GPU memory.
+  by nearest rounding [measured]). `train-log.json` records per candidate its step and `retention`: ⟨written −
+  start, final − start⟩ / |final − start|² and the share of elements changed; beside them the chosen sets'
+  statistics, the monitor points ({step, chosen_win, margin_win, delta, nontarget} and the candidates each wrote),
+  the training batches' log (loss, its three terms, chosen_win, margin_win, mean Δ, every 5 steps) and the peak GPU
+  memory.
 - **Smoke** [measured]: on the 35 rows of the step-3000 smoke's 160 T 0.6 rollouts (§8.4), the export's chosen sets
   hold 1 / 3 / 10.6 tokens (p10 / p50 / p90; regularisation pruned 1); 3 steps of 4 rows on the GPU: loss 10.29 =
-  L_pref 10.25 + 0.05 × 0.326 + 0.4 × 0.061, chosen_win 0, margin_win 0, mean Δ −8.25 (the loop's next token leads
-  its alternatives by about 8 logits), retention 1.001 (1.1% of elements changed), peak 11.88 GB. With the learning
-  rate still 0 (one warmup step, CPU) L_nontarget is 0.0012, the bf16 difference between the reference pass and the
-  training pass.
+  L_pref 10.25 + 0.05 × 0.326 + 0.4 × 0.061 (every w_c = 1, where both normalizations agree), chosen_win 0,
+  margin_win 0, mean Δ −8.25 (the loop's next token leads its alternatives by about 8 logits), retention 1.001 (1.1%
+  of elements changed), peak 11.88 GB. With the learning rate still 0 (one warmup step, CPU) L_nontarget is 0.0012,
+  the bf16 difference between the reference pass and the training pass.
 
 ### 8.6 Evaluation
 
-- **Before and after** (`scripts/onpolicy.sh` `evaluate`, for the export and the FTPO model): the termination probe
-  (§5.1; the same 128 prompts, seeds and chunked generation, so outcomes compare one to one), and KodCode val pass@1:
-  256 of the 785 usable held-out val prompts (§8.1) × 4 samples at T 0.6, verified (as many workers as the on-policy
-  CPU set has cores, §8.7) and summarized as the rollouts are. Then the reasoning protocol on the SFT and FTPO models
-  (§5; `scripts/official_reasoning.sh`, `MODEL`/`TAG` for a trained directory), both served in bf16.
+- **Paired evaluation** (`scripts/onpolicy.sh` `evaluate`, for the export and every candidate, `eval-<name>/`): the
+  termination probe (§5.1) on 128 prompts per set, HumanEval+ and SFT val (the same prompts, seeds and chunked
+  generation for every model, so outcomes pair one to one; the export's is the queue's probe of the step, §8.7);
+  KodCode val pass@1 on 512 of the 785 usable held-out val prompts (§8.1) × 4 samples at T 0.6 (the same prompts and
+  seeds), verified (as many workers as the CPU set has cores) and summarized as the rollouts are; and the NLL
+  (`onpolicy/train.py` `nll`: capped logits at T 1, the model's own forward) of a fixed response set, the export's
+  passing val responses given their prompts (at most 256, a seeded draw), the collateral measure of §8.5. A loop
+  share of 0.4 over 256 probe responses has a binomial standard error of 0.031 [arithmetic]; pairing removes the
+  between-prompt variance from the differences.
+- **The pick** (`onpolicy/pick.py`, `pick.json`; `onpolicy/test_pick.py`), fixed before any candidate is evaluated:
+  per candidate against the export, closure (a response's `closed`) and loop share per probe set and over both, each
+  as the paired difference with the exact McNemar p; val pass@1's difference with a paired bootstrap 95% interval
+  over prompts (10,000 resamples); NLL drift, the candidate's NLL over the export's minus 1. A candidate is eligible
+  if its pass@1 interval's upper bound is ≥ 0 and its NLL drift ≤ 10% (the measured collateral was +3.7% to +59%,
+  §8.5); of the eligible, the one with the highest closure over both sets is kept, a tie going to the lower threshold
+  (less training). None eligible: none is kept. Closure, not the loop share, ranks: in the Qwen3.5-4B replication
+  FTPO removed the detector's loops in all 181 but 113 of them still ran to the length limit (arXiv 2606.13705 §6.2).
+- **Reasoning protocol** (§5; `scripts/official_reasoning.sh`, `MODEL`/`TAG` for a trained directory): the SFT model
+  and the kept candidate, both served in bf16.
 
 ### 8.7 The post-SFT queue
 
-`scripts/post_sft_queue.sh <run>` waits for the SFT run's end record and its container's exit, then runs two branches
-at once on the free GPU: (A) at 0.3 of the GPU's memory, the reasoning protocol of the final step, which first runs
-its termination probe, then the export's KodCode val pass@1; (B) at 0.6, the on-policy stage: rollout waves, FTPO
-(beside A's server), the FTPO model's probe and val pass@1, and its reasoning protocol (on its own port). Then, alone
-at 0.85, the final step's probe if A did not write it and the DRY comparison unless the FTPO model loops in fewer
-than 5% of its probe's responses.
+`scripts/post_sft_queue.sh <run>` waits for the SFT run's end record and its container's exit, then runs, in order:
+(1) alone at 0.85 of the GPU's memory, the final step's termination probe on 128 prompts per set, then the export
+and its KodCode val evaluation (§8.6); (2) the gate: FTPO only if that probe loops in at least 5% of its responses,
+else straight to (4); (3) alone at 0.85, the on-policy stage: rollout waves, FTPO and its candidates, their
+evaluation and the pick (§8.5–§8.6); (4) the reasoning protocol of the SFT model and of the kept candidate at once,
+each at 0.45 on its own port (8000, 8001); (5) alone at 0.85, the DRY comparison unless the kept candidate (else the
+SFT model) loops in fewer than 5% of its probe's responses. A failed item is logged and the queue goes on.
 
-- **Waves** (`scripts/onpolicy.sh` `waves`): 8,000 distinct train-pool prompts per wave × 4 samples at T 0.6, each
-  wave excluding the earlier waves' prompts (`onpolicy/rollouts.py --exclude`), the selection over all waves after
-  each; waves stop once the rows before rebalancing reach 20,000, Antidoom's collection target (its generation "stops
-  after collecting 20k pairs" [blog]), or the 180,911 usable prompts run out. At the smoke's rate, about 8,600 rows a
-  wave [estimate, §8.4], so three waves, 12,000 rows after rebalancing. The train rollouts are not verified: the rows
-  need no verdicts, and verification would contend for the CPU with A's timed official tests.
-- **GPU shares**: the KV cache costs 2 × 24 layers × 6 heads × 128 × 2 bytes = 72 KiB per token, so of 94.5 GiB, 0.3
-  holds EvalPlus's 20 samples of about 18K tokens after the weights, and 0.6 about 47 rollouts at the 16,384-token
-  cap; training has the 0.7 left beside A [arithmetic].
+- **Waves** (`scripts/onpolicy.sh` `waves`): 24,000 distinct mining-pool prompts per wave (§8.1) × 1 sample at T 0.6,
+  each wave excluding the earlier waves' prompts (`onpolicy/rollouts.py --exclude`) and seeded by its index, the
+  selection over all waves after each; waves stop once the rows before rebalancing reach 20,000, Antidoom's
+  collection target (its generation "stops after collecting 20k pairs" [blog]), or the pool runs out: about two to
+  three waves [estimate, §8.4], 12,000 rows after rebalancing. The train rollouts are not verified: the rows need no
+  verdicts.
+- **GPU shares**: the KV cache costs 2 × 24 layers × 6 heads × 128 × 2 bytes = 72 KiB per token, so of 94.5 GiB, 0.45
+  holds EvalPlus's 20 samples of about 28K tokens after the weights, and 0.85 about 70 rollouts at the 16,384-token
+  cap [arithmetic].
 - **CPU sets**: official scoring runs EvalPlus's evaluate with its default cpu_count // 2 workers and lcb_runner with
-  32 (`--num_process_evaluate`), so `scripts/official_reasoning.sh` gets the first max(nproc / 2, 32) cores (0–31 of
-  64) and every on-policy CPU container the rest (32–63), so no timed test shares a core with the other branch's
-  work (`CPU_SET`).
+  32 (`--num_process_evaluate`), so the SFT model's `scripts/official_reasoning.sh` gets the first max(nproc / 2, 32)
+  cores (0–31 of 64) and the kept candidate's the rest (32–63), so no timed test shares a core with the other
+  server's (`CPU_SET`).
 
 ## References
 
@@ -820,6 +885,7 @@ than 5% of its probe's responses.
 | 2604.00626 | A Survey of On-Policy Distillation for Large Language Models |
 | 2604.02721 | GrandCode: Achieving Grandmaster Level in Competitive Programming via Agentic Reinforcement Learning |
 | 2604.13010 | Lightning OPD: Efficient Post-Training for Large Reasoning Models with Offline On-Policy Distillation |
+| 2606.13705 | When Can One Neuron Fix Repetition Loops in LLMs? |
 | 2607.15161 | On-Policy Delta Distillation |
 | 2607.24653 | Kimi K3: Open Frontier Intelligence |
 | 2608.24135 | Robust Code RL via Faulty-Code-Driven Test case Synthesis and Dense Reward Shaping |

@@ -13,7 +13,18 @@ library's), whose versions here differ from KodCode's, so 45 of 171 of their R1 
 (`python -m onpolicy.verify --known-good train 2000`). Written beside the SFT corpus as onpolicy-<split>.parquet;
 `sample` draws prompts from a pool stratified by KodCode style and difficulty.
 
-    python -m onpolicy.prompts
+The mining pool (`--mix`, onpolicy-mix.parquet; FTPO rows need no tests): every distinct document context of the SFT
+train split, from every source group (build.py GROUPS), found by parsing each source row as build.py does and keying
+its context the same way; a context found in several groups is the first group's (GROUPS order, build.py's duplicate
+order). Each row: `id` (the group and the context key), `source` (the group, KodCode's with its style, as the probe's
+val set labels it, eval/official_termination.py val_prompts), `prompt`, `context_tokens` and `documents` (the train
+documents with that context: up to CAPS traces per prompt). `sample_mix` draws rows with probability proportional to
+`documents`, so the sources' shares are the train split's document shares, the distribution the probe's val set is
+drawn from (uniform over val documents). The loops of the step-3000 probe's val set came 22 of 30 from the
+non-KodCode sources (cascade 18/33 responses, competitive programming 4/11, KodCode 8/20), and loop pairs from
+another domain transfer poorly (arXiv 2610.19376 Table 12: 55.3% loops left against 6.1% in-domain).
+
+    python -m onpolicy.prompts [--mix]
 """
 import ast
 import hashlib
@@ -29,13 +40,14 @@ import pyarrow.parquet as pq
 
 from corpus.layout import TOKEN_DTYPE, split_path
 from corpus.parallel import SPAWN
-from corpus.posttrain.build import GROUPS, SOURCE, parse
+from corpus.posttrain.build import GROUPS, SOURCE, parse, source_rows, source_tasks
 from corpus.posttrain.sft import NAME, THINK
 from corpus.tokenizer import get_tokenizer
 
 SPLITS = ("train", "val")
 COLUMNS = ("question_id", "style", "subset", "gpt_difficulty", "test", "test_info", "conversations")
 NAMED = r"(?<![\w.]){name}\s*\(|`{name}`"
+TRAIN: set[bytes] = set()  # a read_mix worker's train context keys (init_mix)
 
 
 def names(test: str, info: list[dict] | None) -> list[str]:
@@ -159,5 +171,58 @@ def context_ids(row: dict) -> list[int]:
     return [tok.bos_token_id, *tok.enc.encode_ordinary(row["prompt"] + THINK)]
 
 
+def init_mix(keys: set[bytes]) -> None:
+    global TRAIN
+    TRAIN = keys
+
+
+def read_mix(task: tuple[int, str, Path, int, int]) -> list[tuple[bytes, str, str, int]]:
+    """(context key, source, prompt, context tokens) of a source task's parsed rows (build.py source_tasks, parse)
+    whose context is a train document context (TRAIN)."""
+    g, kind, path, start, end = task
+    group, enc = list(GROUPS)[g], get_tokenizer().enc
+    out, seen = [], set()
+    for row in source_rows(path, start, end, ("conversations", "style")):
+        parsed = parse(row, kind)
+        if isinstance(parsed, str):
+            continue
+        context = enc.encode_ordinary(parsed[0] + THINK)
+        if (k := key(context)) in TRAIN and k not in seen:
+            seen.add(k)
+            out.append((k, group + (f"/{row['style']}" if kind == "kodcode" else ""), parsed[0], len(context)))
+    return out
+
+
+def build_mix() -> None:
+    path = split_path(NAME, "train", get_tokenizer())
+    tokens = np.memmap(path.with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r")
+    offsets = np.fromfile(path.with_suffix(".idx"), np.int64)
+    contexts = np.fromfile(path.with_suffix(".context"), np.int64)
+    documents = Counter(key(tokens[a:a + c]) for a, c in zip(offsets[:-1].tolist(), contexts.tolist(), strict=True))
+    tasks = source_tasks()
+    with ProcessPoolExecutor(mp_context=SPAWN, initializer=init_mix, initargs=(set(documents),)) as pool:
+        found = list(pool.map(read_mix, tasks))
+    rows = {}
+    for k, source, prompt, n in (item for chunk in found for item in chunk):
+        if k not in rows:
+            rows[k] = {"id": f"{source.split('/')[0]}/{k.hex()}", "source": source, "prompt": prompt,
+                       "context_tokens": n, "documents": documents[k]}
+    if missing := len(documents) - len(rows):
+        raise ValueError(f"{missing} train contexts match no source row")
+    pq.write_table(pa.Table.from_pylist(sorted(rows.values(), key=lambda r: r["id"])), pool_path("mix"))
+    print("mix", len(rows), json.dumps(sorted(Counter(r["source"] for r in rows.values()).items())), flush=True)
+
+
+def sample_mix(pool: list[dict], n: int, seed: int) -> list[dict]:
+    """n of `pool`'s rows without replacement, each drawn with probability proportional to its `documents`, by
+    default_rng(seed) over the rows in id order; in id order."""
+    pool = sorted(pool, key=lambda r: r["id"])
+    weights = np.array([r["documents"] for r in pool], float)
+    picked = np.random.default_rng(seed).choice(len(pool), size=n, replace=False, p=weights / weights.sum())
+    return [pool[i] for i in sorted(picked.tolist())]
+
+
 if __name__ == "__main__":
-    build()
+    import sys
+
+    build_mix() if sys.argv[1:] == ["--mix"] else build()

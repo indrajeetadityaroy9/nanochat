@@ -19,7 +19,8 @@ directory has one: rows need no verdicts); a loop when it never closed and its t
 - selection.json: per temperature and pooled, the outcomes, loop rates per response and per prompt, loop onsets and
   periods, and over the prompts whose responses are verified pass@1 and pass@n (unbiased, arXiv 2107.03374 Eq. 1),
   the share of prompts with a success and with mixed outcomes (a success and a loop) and the successes' lengths; per
-  style; and the rows: loops with an exact cycle, duplicates, rows before and after rebalancing, the 20 most frequent
+  source (the prompt's `source`, onpolicy/rollouts.py; a KodCode row without one: kodcode/<style>); and the rows:
+  loops with an exact cycle, duplicates, rows before and after rebalancing (and per source), the 20 most frequent
   rejected tokens (decoded) before and after, the rows of verified prompts never solved, and position, onset and
   period statistics.
 
@@ -243,16 +244,19 @@ def select(out: Path, directories: list[Path], max_length: int) -> dict:
     verified = {r["prompt_id"] for r in rows if r["verdict"] is not None}
     solved = {r["prompt_id"] for r in rows if r["success"]}
     temperatures = sorted({r["temperature"] for r in rows})
-    styles = sorted({p["style"] for p in prompts.values()})
+    source = {i: p.get("source") or f"kodcode/{p['style']}" for i, p in prompts.items()}
+    sources = sorted(set(source.values()))
     report = {
         "all": summary(rows),
         "by_temperature": {str(t): summary([r for r in rows if r["temperature"] == t]) for t in temperatures},
-        "by_style": {s: summary([r for r in rows if prompts[r["prompt_id"]]["style"] == s]) for s in styles},
+        "by_source": {s: summary([r for r in rows if source[r["prompt_id"]] == s]) for s in sources},
         "ftpo": counts | {
             "max_length": max_length, "strength": STRENGTH, "rows_before_rebalance": len(candidates),
             "rows": len(kept),
             "rows_unsolved_prompts": sum(c["prompt_id"] in verified - solved for c in kept) if verified else None,
             "rows_by_temperature": {str(t): sum(c["temperature"] == t for c in kept) for t in temperatures},
+            "rows_before_rebalance_by_source": dict(Counter(source[c["prompt_id"]] for c in candidates)),
+            "rows_by_source": dict(Counter(source[c["prompt_id"]] for c in kept)),
             "rejected_top20_before": Counter(c["rejected"] for c in candidates).most_common(20),
             "rejected_top20": Counter(c["rejected"] for c in kept).most_common(20),
             "position_tokens": quantiles([c["onset"] + c["period"] + c["target"] for c in kept]),
