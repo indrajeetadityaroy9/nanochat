@@ -303,7 +303,8 @@ parse measure, §3, and the 1@10 mode, §4); the official tools generate with vL
   them back (K and V depend on the prompt alone); a prompt is stored once per decoder and never evicted. The store is
   host memory bound to the calling CPU's NUMA node (the GH200's LPDDR5X; `mbind`, which a container needs
   `CAP_SYS_NICE` for, `scripts/container.sh`) and registered for the copy engines over NVLink-C2C, so the slots keep
-  the device memory: the positions requested, at most half of what that node can give.
+  the device memory: exactly the positions requested (a failed `getcpu`, `mmap`, `mbind` or `cudaHostRegister` aborts,
+  naming the call).
 - **Request** (`Request`): `input_ids`, `max_new_tokens`, `stopping_criteria`, `constraint` (both required),
   `temperature` (0: argmax, ties to the lowest id; > 0: Gumbel-max sampling of softmax(z / T), the noise a
   Philox4x32-10 function of (seed, generated position, token) alone, arXiv 1411.0030 §2), `top_p` (< 1: the fewest

@@ -1,5 +1,5 @@
-/* Decoding of a nanochat CausalLM (model/modeling.py) in MAX_BATCH slots (inference/decoder.py): a step runs one graph
- * (greedy) or two (body, head) of dependent kernels, advancing each active slot by one greedy, sampled or nucleus token
+/* Decoding of a nanochat CausalLM (model/modeling.py) in MAX_BATCH slots (inference/decoder.py): a step runs two graphs
+ * (body, head) of dependent kernels, advancing each active slot by one greedy, sampled or nucleus token
  * within its allowed set. Batched prefill; an exact-prompt store, never evicted, reuses prompts' K and V. Numerics
  * follow the compiled forward (CausalLM without autograd, the evaluation's graph) op by op: GEMM epilogues as QuACK's
  * (one rounding of acc + residual; the MLP on the un-normed stream scaled by its rstd), K and V cached in bf16 as its
@@ -729,8 +729,8 @@ typedef struct {
      * [L][n][C] at s L C of each */
     bf16 *store_k, *store_v;
     cudaStream_t stream;
-    /* the whole step, its body (before lm_head), its head: [0] over all slots, [1] over the first SMALL_BATCH */
-    cudaGraphExec_t step[2], body[2], head[2];
+    /* the step's body (before lm_head) and its head: [0] over all slots, [1] over the first SMALL_BATCH */
+    cudaGraphExec_t body[2], head[2];
     bool narrow;
     /* prefill: a MAX_BATCH-row Decoder sharing weights and caches, row b at slot cache_slot[b] (NULL in a decoder) */
     int32_t *cache_slot;
@@ -777,6 +777,23 @@ template <class F> static void row_buffers(Decoder *d, F f) {
     f((void **)&d->qkv_out, 3 * C * sizeof(bf16));
     f((void **)&d->qkvf, 3 * C * sizeof(float));
     f((void **)&d->u, d->F * sizeof(bf16));
+}
+
+/* A buffer's bytes per slot or row rounded up to cudaMalloc's 256-byte alignment (CUDA C++ Programming Guide, "Device
+ * Memory Accesses"), so the buffers carved in order from one allocation stay aligned for any count. */
+static size_t padded(size_t bytes) { return (bytes + 255) / 256 * 256; }
+
+/* The buffers that `buffers` enumerates (slot_buffers, row_buffers) pointed into block in order, n padded rows each:
+ * the first at block, the allocation dec_destroy frees. */
+template <class Buffers> static void carve(unsigned char *block, size_t n, Buffers buffers) {
+    buffers([&](void **p, size_t bytes) { *p = block; block += n * padded(bytes); });
+}
+
+static unsigned char *zeroed(size_t bytes) {
+    unsigned char *p;
+    CUDA_CHECK(cudaMalloc((void **)&p, bytes));
+    CUDA_CHECK(cudaMemset(p, 0, bytes));
+    return p;
 }
 
 static Gemm gemm(const Decoder *d, const bf16 *w, int rows, int cols, const bf16 *in, int epi, bf16 *out) {
@@ -861,13 +878,12 @@ static void enqueue_body(Decoder *d) {
 }
 
 /* The step's head: the final norm, the choice (lm_head's epilogue or k_nucleus), the commit, the tokens to the host. */
-template <bool CHOICE> static void enqueue_head(Decoder *d) {
+static void enqueue_head(Decoder *d) {
     launch_norm(d, NORM, d->x, 0.f, 0.f, NULL, d->hn);
     Gemm g = gemm(d, d->lm_head, d->vocab, d->C, d->hn, EPI_ARGMAX, NULL);
     g.argmax = d->argmax;
-    launch_gemm<CHOICE>(d, g);
-    if constexpr (CHOICE)
-        launch(k_nucleus, d->B, NUCLEUS_THREADS, 0, d->stream, choice(d), d->active, d->argmax, d->vocab);
+    launch_gemm<true>(d, g);
+    launch(k_nucleus, d->B, NUCLEUS_THREADS, 0, d->stream, choice(d), d->active, d->argmax, d->vocab);
     launch(k_commit, 1, MAX_BATCH, 0, d->stream, d->tokens, d->alt_tokens, d->pos, d->active, d->argmax, d->alt, d->B);
     cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)d->capacity * sizeof(int32_t), cudaMemcpyDeviceToHost,
                     d->stream);
@@ -890,13 +906,13 @@ extern "C" void dec_destroy(void *handle) {
     Decoder *d = (Decoder *)handle;
     Decoder *pf = (Decoder *)d->prefill_rows;
     cudaGraphExecDestroy(d->prefill);
-    row_buffers(pf, [](void **p, size_t) { cudaFree(*p); });
+    cudaFree(pf->tokens);  /* the rows' allocation (carve) */
     cudaFree(pf->active);
     free(pf);
     for (int narrow = 0; narrow < 2; narrow++)
-        for (cudaGraphExec_t exec : {d->step[narrow], d->body[narrow], d->head[narrow]})
+        for (cudaGraphExec_t exec : {d->body[narrow], d->head[narrow]})
             cudaGraphExecDestroy(exec);
-    slot_buffers(d, [](void **p, size_t) { cudaFree(*p); });
+    cudaFree(d->tokens);  /* the slots' allocation (carve) */
     cudaFree(d->active);
     if (d->store_k) {
         cudaHostUnregister(d->store_k);
@@ -908,44 +924,26 @@ extern "C" void dec_destroy(void *handle) {
     free(d);
 }
 
-/* Bytes NUMA node n can still give: MemFree and the page cache it reclaims for them, FilePages less Shmem
- * (/sys/devices/system/node/node<n>/meminfo); 0 if unknown. */
-static size_t node_available(unsigned n) {
-    char path[64], line[128];
-    snprintf(path, sizeof path, "/sys/devices/system/node/node%u/meminfo", n);
-    size_t kib = 0, value;
-    if (FILE *f = fopen(path, "r")) {
-        while (fgets(line, sizeof line, f)) {
-            if (sscanf(line, "Node %*u MemFree: %zu kB", &value) == 1) kib += value;
-            if (sscanf(line, "Node %*u FilePages: %zu kB", &value) == 1) kib += value;
-            if (sscanf(line, "Node %*u Shmem: %zu kB", &value) == 1) kib -= value < kib ? value : kib;
-        }
-        fclose(f);
-    }
-    return kib * 1024;
+/* A failed host call aborts, naming it: never a decoder without the store it was asked for. */
+static void host_check(bool ok, const char *call) {
+    if (ok) return;
+    fprintf(stderr, "decode.cu: %s failed\n", call);
+    abort();
 }
 
-/* bytes bound to NUMA node n (the GH200's LPDDR5X, never the GPU's HBM node, which the kernel also lists) and
- * kept from fork's copies and registered, so the copy engines reach them over NVLink-C2C; NULL if they cannot be had,
- * *failed naming the call that failed */
-static bf16 *host_store(size_t bytes, unsigned n, const char **failed) {
+/* bytes bound to the calling thread's NUMA node (the GH200's LPDDR5X, never the GPU's HBM node, which the kernel also
+ * lists), kept from fork's copies and registered, so the copy engines reach them over NVLink-C2C */
+static bf16 *host_store(size_t bytes) {
+    unsigned cpu, n;
+    host_check(getcpu(&cpu, &n) == 0, "getcpu");
     void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) {
-        *failed = "mmap";
-        return NULL;
-    }
+    host_check(p != MAP_FAILED, "mmap");
     const unsigned long node = 1ul << n;
     madvise(p, bytes, MADV_DONTFORK);
-    if (syscall(SYS_mbind, p, bytes, MPOL_BIND, &node, sizeof node * CHAR_BIT + 1, 0) != 0) {
-        *failed = "mbind (in a container: CAP_SYS_NICE, scripts/container.sh)";
-    } else if (cudaHostRegister(p, bytes, cudaHostRegisterDefault) != cudaSuccess) {
-        cudaGetLastError();  /* clear the failed registration's error */
-        *failed = "cudaHostRegister";
-    } else {
-        return (bf16 *)p;
-    }
-    munmap(p, bytes);
-    return NULL;
+    host_check(syscall(SYS_mbind, p, bytes, MPOL_BIND, &node, sizeof node * CHAR_BIT + 1, 0) == 0,
+               "mbind (in a container: CAP_SYS_NICE, scripts/container.sh)");
+    CUDA_CHECK(cudaHostRegister(p, bytes, cudaHostRegisterDefault));
+    return (bf16 *)p;
 }
 
 extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
@@ -955,6 +953,9 @@ extern "C" int dec_batch(void *handle) { return ((Decoder *)handle)->B; }
  * q norm, k norm. scal: per layer resid, x0 lambda; then the logit cap. window: per layer, keys before a query.
  * stream: the caller's (not the legacy default stream: it is captured), alive past dec_destroy. */
 constexpr int GLOBAL_PTRS = 4, LAYER_PTRS = 8;
+/* cudaMalloc's rounding of a large allocation: the next multiple of 2 MiB (measured on the GH200: a 2,576,351,232-byte
+ * block took 2,577,399,808 bytes of free memory; capturing and instantiating the graphs took none) */
+constexpr size_t ALLOC_GRANULE = 2 << 20;
 
 extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *scal, const int *window, void *stream) {
     Decoder *d = (Decoder *)calloc(1, sizeof(Decoder));
@@ -978,20 +979,21 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
     /* the largest shared-memory carveout (228 KB on the GH200), so three k_attn blocks fit an SM */
     CUDA_CHECK(cudaFuncSetAttribute(k_attn, cudaFuncAttributePreferredSharedMemoryCarveout,
                                     cudaSharedmemCarveoutMaxShared));
-    /* B: the most slots (<= MAX_BATCH) that fit in free memory after the prefill's MAX_BATCH rows */
+    /* the prefill decoder's MAX_BATCH rows and both active masks first, so that the only device allocation after the
+     * measurement is the slots' block: B, the most slots (<= MAX_BATCH) whose block, rounded up, fits */
     size_t slot = 0, row = 0, free_bytes, total_bytes;
-    slot_buffers(d, [&](void **, size_t bytes) { slot += bytes; });
-    row_buffers(d, [&](void **, size_t bytes) { row += bytes; });
-    cudaMemGetInfo(&free_bytes, &total_bytes);
-    free_bytes -= MAX_BATCH * row < free_bytes ? MAX_BATCH * row : free_bytes;
+    slot_buffers(d, [&](void **, size_t bytes) { slot += padded(bytes); });
+    row_buffers(d, [&](void **, size_t bytes) { row += padded(bytes); });
+    unsigned char *rows = zeroed(MAX_BATCH * row);
+    const size_t masks = 2 * MASK_WORDS * sizeof(unsigned long long);
+    d->active = (unsigned long long *)zeroed(masks);
+    unsigned long long *rows_active = (unsigned long long *)zeroed(masks);
+    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    free_bytes = free_bytes / ALLOC_GRANULE * ALLOC_GRANULE;
     d->B = (int)(free_bytes / slot < (size_t)MAX_BATCH ? free_bytes / slot : MAX_BATCH);
+    host_check(d->B > 0, "a slot in free device memory");
     d->capacity = d->B;
-    slot_buffers(d, [&](void **p, size_t bytes) {
-        CUDA_CHECK(cudaMalloc(p, d->B * bytes));
-        CUDA_CHECK(cudaMemset(*p, 0, d->B * bytes));
-    });
-    CUDA_CHECK(cudaMalloc((void **)&d->active, 2 * MASK_WORDS * sizeof(unsigned long long)));
-    CUDA_CHECK(cudaMemset(d->active, 0, 2 * MASK_WORDS * sizeof(unsigned long long)));
+    carve(zeroed(d->B * slot), d->B, [&](auto f) { slot_buffers(d, f); });
     CUDA_CHECK(cudaHostAlloc((void **)&d->host_tokens, 2 * d->B * sizeof(int32_t), cudaHostAllocDefault));
     CUDA_CHECK(cudaHostAlloc((void **)&d->host_allow, (size_t)d->B * (d->vocab / WORD_BITS) * sizeof(uint32_t),
                              cudaHostAllocDefault));
@@ -1000,34 +1002,24 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
         Decoder view = *d;
         if (narrow) view.B = d->B < SMALL_BATCH ? d->B : SMALL_BATCH;
         Decoder *v = &view;
-        d->step[narrow] = capture(v, [v] { enqueue_body(v); enqueue_head<false>(v); });
         d->body[narrow] = capture(v, [v] { enqueue_body(v); });
-        d->head[narrow] = capture(v, [v] { enqueue_head<true>(v); });
+        d->head[narrow] = capture(v, [v] { enqueue_head(v); });
     }
     Decoder *pf = (Decoder *)malloc(sizeof(Decoder));
     *pf = *d;
     pf->B = MAX_BATCH;
     pf->prefill_rows = NULL;
-    row_buffers(pf, [&](void **p, size_t bytes) {
-        CUDA_CHECK(cudaMalloc(p, MAX_BATCH * bytes));
-        CUDA_CHECK(cudaMemset(*p, 0, MAX_BATCH * bytes));
-    });
+    pf->active = rows_active;
+    carve(rows, MAX_BATCH, [&](auto f) { row_buffers(pf, f); });
     pf->pos = pf->tokens + MAX_BATCH;
     pf->cache_slot = pf->tokens + 2 * MAX_BATCH;
-    CUDA_CHECK(cudaMalloc((void **)&pf->active, 2 * MASK_WORDS * sizeof(unsigned long long)));
-    CUDA_CHECK(cudaMemset(pf->active, 0, 2 * MASK_WORDS * sizeof(unsigned long long)));
     d->prefill_rows = pf;
     d->prefill = capture(pf, [pf] { enqueue_body(pf); });
-    /* the prompt store in host memory (host_store), so the slots keep the device memory: the positions requested, at
-     * most half of what the calling thread's node can give, halved until the allocation succeeds */
-    unsigned cpu = 0, node = 0;
-    const size_t host = getcpu(&cpu, &node) == 0 ? node_available(node) / 2 : 0;
-    const char *failed = "getcpu or node_available";
-    if ((size_t)d->store > host / store_position(d)) d->store = (int)(host / store_position(d));
-    while (d->store > 0 && !(d->store_k = host_store(store_position(d) * d->store, node, &failed))) d->store /= 2;
-    d->store_v = d->store_k + (size_t)L * d->store * d->C;
-    if (d->store == 0 && cfg[5] > 0)
-        fprintf(stderr, "decode.cu: no prompt store for %d requested positions: %s failed\n", cfg[5], failed);
+    /* the prompt store in host memory (host_store), so the slots keep the device memory: the positions requested */
+    if (d->store > 0) {
+        d->store_k = host_store(store_position(d) * d->store);
+        d->store_v = d->store_k + (size_t)L * d->store * d->C;
+    }
     return d;
 }
 
@@ -1115,11 +1107,6 @@ extern "C" void dec_set_active(void *handle, const unsigned long long *slots) {
     }
 }
 
-extern "C" void dec_launch(void *handle) {
-    Decoder *d = (Decoder *)handle;
-    cudaGraphLaunch(d->step[d->narrow], d->stream);
-}
-
 extern "C" void dec_launch_body(void *handle) {
     Decoder *d = (Decoder *)handle;
     cudaGraphLaunch(d->body[d->narrow], d->stream);
@@ -1132,7 +1119,7 @@ extern "C" void dec_launch_head(void *handle) {
 }
 
 /* Wait for the launched step; out[b]: the token slot b took, out[B + b]: its alternative, the choice but the lazy row
- * (Choice::lazy; -1 if none: a greedy whole step, a nucleus-sampled slot) (stale for inactive slots). */
+ * (Choice::lazy; -1 if none: a nucleus-sampled slot) (stale for inactive slots). */
 extern "C" void dec_tokens(void *handle, int32_t *out) {
     Decoder *d = (Decoder *)handle;
     CUDA_CHECK(cudaStreamSynchronize(d->stream));
