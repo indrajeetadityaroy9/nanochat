@@ -444,7 +444,10 @@ step 4; its values are `docs/results.md` §4.
 allocated 71.11 GiB in the file-level stage and 71.12 GiB in the repository stage (`stage`, `end` records), reserved
 73.17 GiB; 76.29 h from the first step's record to the last's. Median over each stage's train records from step 100:
 381,146 tok/s, MFU 0.5076 in the file-level stage (65,963 steps) and 299,281 tok/s, MFU 0.515 in the repository stage
-(3,811 steps) [measured: `results/pretrain/pretrain-curves.jsonl`]. Every step's values:
+(3,811 steps) [measured: `results/pretrain/pretrain-curves.jsonl`]. After the last step, `resid_lambdas` span
+0.157–2.599, 0.16–0.61 on the 12 value-embedding layers (indices 1, 3, …, 23) and 0.59–2.60 on the others, and
+`x0_lambdas` −0.234–0.135, within ±0.08 after the first two layers [measured: `diagnostics-step.npy`, last row].
+Every step's values:
 `results/pretrain/pretrain-curves.jsonl`; the likelihood trajectory to the last step: `results/pretrain/trajectory.json`
 (`docs/results.md` §4).
 
