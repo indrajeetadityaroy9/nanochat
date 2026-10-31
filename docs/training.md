@@ -555,18 +555,24 @@ whose entrypoint creates `artifacts/` (`paths.py`).
    and the five weights-only files after the stage switch) by `likelihood` and writes the trajectory against step
    66,063, the last file-level model (`docs/evaluation.md` §2).
 5. **Release**: `HF_TOKEN=<write token> scripts/release.sh <run_name> <repo>` uploads the run's checkpoints,
-   `metrics.jsonl`, the diagnostics sidecar, evaluations, likelihood records, `.hydra/`, the corpus tokenizer
-   (`artifacts/corpus/tokenizer/`) and `results/` to a Hugging Face model repository; the first command below restores
-   them where `load_model` and a resumed run read them. A checkpoint as a transformers model (`docs/evaluation.md` §8)
-   goes to its own model repository (the export and upload below).
+   `metrics.jsonl`, the diagnostics sidecar, evaluations, the official tools' records (`official-<step>/` without its
+   export), termination records, likelihood records, `.hydra/`, the corpus tokenizer (`artifacts/corpus/tokenizer/`)
+   and `results/` to a Hugging Face model repository; the first command below restores them where `load_model` and a
+   resumed run read them. A checkpoint as a transformers model (`docs/evaluation.md` §8) goes to its own model
+   repository (the export and upload below), with `inference/model_card_base.md` as the base model's card.
 
 ```bash
 scripts/container.sh hf download <repo> --local-dir /workspace/nanochat
 scripts/container.sh python -m inference.export_hf \
   artifacts/runs/<run_name>/checkpoint-<step>.pt artifacts/export/<run_name>-<step>
+cp inference/model_card_base.md artifacts/export/<run_name>-<step>/README.md
 HF_TOKEN=<write token> scripts/container.sh hf upload <model repo> \
   /workspace/nanochat/artifacts/export/<run_name>-<step> . --repo-type model
 ```
+
+For the base model the run directory holds 80 full-state checkpoints (447.06 GB), 15 weights-only files (31.34 GB) and
+0.29 GB of records and tokenizer: 2,385 files, 478.68 GB, the largest 5.59 GB (`huggingface_hub`'s filter over the
+checkout with `release.sh`'s patterns) [measured]; the export is 1.05 GB.
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored) holds `corpus/`,
 `runs/<run_name>/` and `cache/`; `results/` (tracked) holds the records the paper's tables are drawn from, in
