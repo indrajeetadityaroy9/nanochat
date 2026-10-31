@@ -588,14 +588,17 @@ leading-U+FEFF drop), so no document holds a carriage return; the rows normalize
 (`normalized`).
 
 **Filters** (`DROPS`, in order, each row counted at the first it fails): no reasoning or no answer; reasoning under
-20 tokens (`MIN_REASONING`); a document whose tokens with its two BOS exceed 32,768 (`SFT_STAGE.seq_len`), dropped,
-not cut (a cut trace loses its answer; Nemotron-Cascade drops over-length samples from its math data, arXiv 2512.13607
-§3.2.2, and states nothing for code; the packer's rows of 32,769 tokens would hold one token more, the 19 rows of
-exactly 32,767 rendered tokens before the later filters, 11 Cascade-1 Stage-2, 3 CP-v2 Python, 5 C++ [measured]);
-§3's 10-gram rule on prompt, reasoning and answer against every task the evaluation scores (`decontaminate`
-`benchmark_texts` and `mbpp_texts`: EvalPlus, MultiPL-E, HumanEval-X C++, the infilling programs and MBPP's 500
-original test problems), which removes every trace of 5.5% of Stage-1's distinct prompts (8,773 of 159,304) and
-5.2% of Stage-2's (4,105 of 78,852, over-length drops included), and 15,015 of KodCode's 268,211 rows (5.6%)
+20 tokens (`MIN_REASONING`: the 25 such rows, all Exercism, are one lead-in sentence of 12–18 tokens such as "Here's
+the refactored solution with a change log:", and Exercism's next shortest reasoning has 28 [measured]); a document
+whose tokens with its two BOS exceed 32,768 (`SFT_STAGE.seq_len`), dropped, not cut (a cut trace loses its answer;
+Nemotron-Cascade filters out math samples above its maximum context length, arXiv 2512.13607 §3.2.2, and sets its
+code's at 32,768 "similar to the Stage-2 math SFT dataset", §3.2.3; the packer's rows of 32,769 tokens would hold one
+token more, the 19 rows of exactly 32,767 rendered tokens before the later filters, 11 Cascade-1 Stage-2, 3 CP-v2
+Python, 5 C++ [measured]); §3's 10-gram rule on prompt, reasoning and answer against every task the evaluation scores
+(`decontaminate` `benchmark_texts` and `mbpp_texts`: EvalPlus, MultiPL-E, HumanEval-X C++, the infilling programs and
+MBPP's 500 original test problems), which removes every trace of 5.5% of Stage-1's distinct parsed prompts (8,772 of
+159,293) and 5.2% of Stage-2's (4,098 of 78,852: every trace dropped by the rule or over length, at least one by the
+rule), and 15,015 of KodCode's 268,211 rows (5.6%)
 [measured]; exact duplicates of prompt, reasoning and answer (the first kept, groups in `GROUPS` order); then `CAPS`
 traces per exact prompt in each group, drawn at random (`SEED` 0): 2 in the four long-trace groups (Cascade-1 Stage-1
 and Stage-2, CP-v2 Python and C++), every trace in Exercism and KodCode, whose prompts hold about one trace each
@@ -641,17 +644,15 @@ tokens are each response and its closing BOS; the built corpus's `dropped` also 
 shorter ones (1 : 2.82), the long ones 60.3% of the tokens; function-level answers 50.5% of the tokens and stdin
 programs 47.6% [measured: by a heuristic classifier of the answers' code that is not in the repository].
 
-**Val labels** (`val_labels`, the build's last step; `python -m corpus.posttrain.build --val-labels` recomputes them
-from a built corpus and its sources without a rebuild): `val-labels.jsonl` beside `stats.json`, one JSON line per val
-document in document order: `group` (a `GROUPS` key), `style` (KodCode's own `style` column: `complete`, `instruct` or
-`online_judge`; null elsewhere) and its place in the packed val rows, `row`, `start`, `end` and `context`: its labels
-are positions [`start`, `end`) of the row's labels (the first predicts its first token, the last its closing BOS), the
-first `context` ignored, so [`start` + `context`, `end`) are its scored labels (`val_spans`). A document's source is
-the first source row, in the build's task order, whose text digest (the duplicate key) equals that of its decoded
-tokens, the row the build kept; every val document matches one, and the per-group rows and loss tokens equal
-`stats.json`'s. KodCode's 2,547 val rows: 1,248 complete, 1,090 instruct, 209 online_judge [measured]. On all 1,720
-packed val rows the spans equal the loader's (`corpus/loader.py` `assemble`): each span's tokens are its document's
-followed by BOS, the context exactly its masked labels, the spans' union exactly the row's scored labels [measured].
+**Val labels** (`val_labels`, the build's last step): `val-labels.jsonl` beside `stats.json`, one JSON line per val
+document in document order: `group` (a `GROUPS` key) and `style` (KodCode's own `style` column: `complete`,
+`instruct` or `online_judge`; null elsewhere) of the source row the build kept, and its place in the packed val rows,
+`row`, `start`, `end` and `context`: its labels are positions [`start`, `end`) of the row's labels (the first predicts
+its first token, the last its closing BOS), the first `context` ignored, so [`start` + `context`, `end`) are its
+scored labels (`val_spans`). KodCode's 2,547 val rows: 1,248 complete, 1,090 instruct, 209 online_judge [measured].
+On all 1,720 packed val rows the spans equal the loader's (`corpus/loader.py` `assemble`): each span's tokens are its
+document's followed by BOS, the context exactly its masked labels, the spans' union exactly the row's scored labels
+[measured].
 
 **The cap against time.** The cap trades answers per prompt, worth less than prompts (coefficients 2.635 against
 4.831; at a fixed budget 64K prompts × 1 beat 16K × 4; `docs/post-training.md` §2.3), for training time. Before the
@@ -665,8 +666,9 @@ filters, Cascade-1 alone, one epoch at the 32K stage's 287K tok/s (`docs/trainin
 | all | 2,694,422 | 27.5B | 18,650 | 26.6 |
 
 **Packing.** The documents, in a seeded random order, are packed by the pretraining packer (`pack.py`,
-Best-Fit-Decreasing over shards of `SHARD_DOCUMENTS` = 4,096 documents, §8), none cut, one attention segment each:
-172,726 train and 1,720 val rows of 32,768 tokens, 99.89% and 99.87% of input positions in use (`fill`) [measured].
+Best-Fit-Decreasing over shards of `SHARD_DOCUMENTS` = 4,096 documents, §8), none cut, one attention segment each,
+no FIM example (`layout.fim_packed` holds for repository code only; the `.fim` files are empty): 172,726 train and
+1,720 val rows of 32,768 tokens, 99.89% and 99.87% of input positions in use (`fill`) [measured].
 Each document's context length (the prompt and `\n\n<think>\n`) is in `<split>.context`; the loader sets those labels
 to `IGNORE_INDEX` (§9, `PretrainingBatches.assemble`), so 5.37B of the corpus's 5.65B train tokens carry loss
 [arithmetic: 95.1%].

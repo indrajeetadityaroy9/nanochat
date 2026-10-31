@@ -5,12 +5,11 @@ rendered in the post-training format (render; docs/post-training.md §3), filter
 each group, split by problem (problem) into train and val, tokenized and packed whole into 32,768-token rows by the
 base's packer (corpus/pack.py), one attention segment per trace. Each document's context (the prompt and THINK) is
 written as <split>.context, whose labels the loader ignores (corpus/loader.py). Each val document's source and place
-in the packed rows: val-labels.jsonl (val_labels), recomputable from the built corpus with --val-labels.
+in the packed rows: val-labels.jsonl (val_labels).
 
-python -m corpus.posttrain.build [--val-labels]
+python -m corpus.posttrain.build
 """
 
-import argparse
 import hashlib
 import json
 import re
@@ -52,11 +51,10 @@ GROUPS = {
 # §10); Exercism and KodCode as their data gives (about one trace per problem)
 CAPS = {"cascade_stage1": 2, "cascade_stage2": 2, "cp_python": 2, "cp_cpp": 2, "cp_exercism": None, "kodcode": None}
 VAL_SHARE = 0.01        # problems held out
-MIN_REASONING = 20      # reasoning tokens
+MIN_REASONING = 20      # reasoning tokens: below, a one-sentence lead-in to the code (docs/corpus.md §10)
 SEED = 0
-CHUNK_BYTES = 2**28     # a worker task: one byte range of a source file
+CHUNK_BYTES = 2**28     # a worker task: one byte range of a source file (the outputs do not depend on it)
 SHARD_DOCUMENTS = 4096  # documents per packed shard (one crate pack call)
-WANTED: set[int] = set()  # a label_chunk worker's val document digests (init_labels)
 # Drop reasons, in the order a row is tested
 DROPS = ("no_reasoning", "no_answer", "short_reasoning", "over_length", "contaminated", "duplicate", "capped")
 # Aider's file listing (CP-v2 Exercism): a filename line, then a fenced block
@@ -166,12 +164,12 @@ def problem(prompt: str) -> str:
     return " ".join(re.findall(r"[^\W_]+", WRAPPERS.sub(" ", prompt).lower()))
 
 
-def source_rows(path: Path, start: int, end: int, columns: tuple[str, ...] = ("conversations",)) -> Iterator[dict]:
+def source_rows(path: Path, start: int, end: int) -> Iterator[dict]:
     """A source file's rows starting in bytes [start, end) of a JSON-lines file, or in row groups [start, end) of a
-    Parquet file (its `columns` only)."""
+    Parquet file (KodCode's: its conversations and style)."""
     if path.suffix == ".parquet":
         source = pq.ParquetFile(path)
-        for batch in source.iter_batches(row_groups=range(start, end), columns=list(columns)):
+        for batch in source.iter_batches(row_groups=range(start, end), columns=["conversations", "style"]):
             yield from batch.to_pylist()
         return
     with open(path, "rb") as f:
@@ -185,10 +183,11 @@ def source_rows(path: Path, start: int, end: int, columns: tuple[str, ...] = ("c
 def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
     """The rows of a task's range of a source file (source_rows): each row's drop reason ("reasons", an index into
     DROPS, -1 for a candidate) and whether its line endings were normalized ("carriages"); per candidate the digests
-    of its prompt, its problem and its text, its context, reasoning and document tokens; the candidates' tokens
-    appended to `part`. Runs in a decontaminate.worker_init worker (decontaminate.GRAMS)."""
+    of its prompt, its problem and its text, its context, reasoning and document tokens and KodCode's style (None
+    elsewhere); the candidates' tokens appended to `part`. Runs in a decontaminate.worker_init worker
+    (decontaminate.GRAMS)."""
     kind, path, start, end, part = task
-    reasons, carriages, prompts, problems, keys, contexts, reasonings, lengths = [], [], [], [], [], [], [], []
+    reasons, carriages, prompts, problems, keys, contexts, reasonings, lengths, styles = ([] for _ in range(9))
     with open(part, "wb") as out:
         for row in source_rows(path, start, end):
             parsed = parse(row, kind)
@@ -202,7 +201,7 @@ def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
             length = len(context) + len(thought) + len(rest)
             if len(thought) < MIN_REASONING:
                 reasons.append(DROPS.index("short_reasoning"))
-            elif length + 2 > SFT_STAGE.seq_len:  # BOS, the document and BOS
+            elif length + 2 > SFT_STAGE.seq_len:  # BOS, the document and BOS (one more fits the packer's rows)
                 reasons.append(DROPS.index("over_length"))
             elif decontaminate.GRAMS.matches([f"{prompt}\n{reasoning}\n{answer}"])[0]:
                 reasons.append(DROPS.index("contaminated"))
@@ -214,12 +213,13 @@ def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
                 contexts.append(len(context))
                 reasonings.append(len(thought))
                 lengths.append(length)
+                styles.append(row["style"] if kind == "kodcode" else None)
                 out.write(np.concatenate([context, thought, rest]))
     return {"reasons": np.array(reasons, np.int64), "carriages": np.array(carriages, bool),
             "prompts": np.array(prompts, np.uint64),
             "problems": np.array(problems, np.uint64), "keys": np.array(keys, np.uint64),
             "contexts": np.array(contexts, np.int64), "reasonings": np.array(reasonings, np.int64),
-            "lengths": np.array(lengths, np.int64)}
+            "lengths": np.array(lengths, np.int64), "styles": np.array(styles, object)}
 
 
 def ranks(values: np.ndarray) -> np.ndarray:
@@ -285,54 +285,12 @@ def val_spans() -> list[tuple[int, int, int, int]]:
     return spans
 
 
-def init_labels(wanted: set[int]) -> None:
-    global WANTED
-    WANTED = wanted
-
-
-def label_chunk(task: tuple[int, str, Path, int, int]) -> list[tuple[int, str | None]]:
-    """(text digest, KodCode's style or None) of a task's parsed rows whose digest (read_chunk's keys) is WANTED."""
-    _, kind, path, start, end = task
-    found = []
-    for row in source_rows(path, start, end, ("conversations", "style")):
-        parsed = parse(row, kind)
-        if not isinstance(parsed, str):
-            prompt, reasoning, answer, _ = parsed
-            if (key := digest(prompt + THINK + reasoning + END_THINK + answer)) in WANTED:
-                found.append((key, row["style"] if kind == "kodcode" else None))
-    return found
-
-
-def val_labels() -> None:
+def val_labels(groups: list[str], styles: list[str | None]) -> None:
     """Each val document's source and place as labels_path's JSON lines, in document order: `group` (GROUPS), `style`
-    (KodCode's complete, instruct or online_judge; None elsewhere) and val_spans' `row`, `start`, `end`, `context`.
-    A document's source is the first source row in task order with its text (the decoded tokens; its digest the
-    duplicate key, so the row main kept); the per-group counts are checked against stats.json. Recomputes from the
-    built corpus and the sources (no rebuild)."""
-    tokenizer = get_tokenizer()
-    split = split_path(NAME, "val", tokenizer)
-    tokens = np.memmap(split.with_suffix(".bin"), TOKEN_DTYPE, mode="r")
-    offsets = np.fromfile(split.with_suffix(".idx"), np.int64)
-    keys = [digest(tokenizer.enc.decode_bytes(tokens[a:b].tolist()).decode())
-            for a, b in zip(offsets[:-1].tolist(), offsets[1:].tolist(), strict=True)]
-    tasks = source_tasks()
-    with ProcessPoolExecutor(mp_context=SPAWN, initializer=init_labels, initargs=(set(keys),)) as pool:
-        found = list(pool.map(label_chunk, tasks))
-    sources = {}
-    for task, chunk in zip(tasks, found, strict=True):
-        for key, style in chunk:
-            sources.setdefault(key, (list(GROUPS)[task[0]], style))
-    if missing := sum(key not in sources for key in keys):
-        raise ValueError(f"{missing} val documents match no source row")
-    labels = [{"group": sources[key][0], "style": sources[key][1], "row": row, "start": start, "end": end,
-               "context": context} for key, (row, start, end, context) in zip(keys, val_spans(), strict=True)]
-    stats = json.loads((split.parent / "stats.json").read_text())
-    for group in GROUPS:
-        mine = [label for label in labels if label["group"] == group]
-        counted = {"rows": len(mine), "loss_tokens": sum(lab["end"] - lab["start"] - lab["context"] for lab in mine)}
-        if counted != {k: stats[group]["val"][k] for k in counted}:
-            raise ValueError(f"{group}: {counted} against stats.json's {stats[group]['val']}")
-    labels_path().write_text("".join(json.dumps(label) + "\n" for label in labels))
+    (KodCode's complete, instruct or online_judge; None elsewhere) and val_spans' `row`, `start`, `end`, `context`."""
+    labels_path().write_text("".join(
+        json.dumps({"group": group, "style": style, "row": row, "start": start, "end": end, "context": context}) + "\n"
+        for group, style, (row, start, end, context) in zip(groups, styles, val_spans(), strict=True)))
 
 
 def main() -> None:
@@ -352,7 +310,7 @@ def main() -> None:
 
     # the candidates, in task order: their group, part file and offset in it
     columns = {k: np.concatenate([c[k] for c in chunks])
-               for k in ("prompts", "problems", "keys", "contexts", "reasonings", "lengths")}
+               for k in ("prompts", "problems", "keys", "contexts", "reasonings", "lengths", "styles")}
     counts = [len(c["lengths"]) for c in chunks]
     group = np.repeat(owners, counts)
     part = np.repeat(np.arange(len(chunks)), counts)
@@ -408,10 +366,9 @@ def main() -> None:
                                 "fill": int((lengths[splits[split]] + 1).sum()) / (packed * SFT_STAGE.seq_len)}
     (directory / "stats.json").write_text(json.dumps(stats, indent=1))
     print(json.dumps(stats, indent=1), flush=True)
-    val_labels()
+    names = list(GROUPS)
+    val_labels([names[g] for g in group[splits["val"]]], columns["styles"][splits["val"]].tolist())
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--val-labels", action="store_true", help="only (re)write the built corpus's val labels")
-    val_labels() if parser.parse_args().val_labels else main()
+    main()

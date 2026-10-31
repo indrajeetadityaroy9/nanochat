@@ -182,7 +182,7 @@ def read_mix(task: tuple[int, str, Path, int, int]) -> list[tuple[bytes, str, st
     g, kind, path, start, end = task
     group, enc = list(GROUPS)[g], get_tokenizer().enc
     out, seen = [], set()
-    for row in source_rows(path, start, end, ("conversations", "style")):
+    for row in source_rows(path, start, end):
         parsed = parse(row, kind)
         if isinstance(parsed, str):
             continue

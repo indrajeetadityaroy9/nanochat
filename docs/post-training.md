@@ -83,9 +83,8 @@ What these replaced:
   (arXiv 2604.02721 §10.3).
 - **Measured on code**: "FFT generally leads to the best downstream performance across all scales" (StarCoder
   1B–16B, PEFT on 8-bit models; arXiv 2401.00788 §1, Fig. 1). Students below 14B train with full parameters, LoRA
-  above (arXiv 2502.12143 §3.1). Distillation plus SFT with LoRA on Qwen2.5-0.5B-Instruct scored 0.7% on
-  OlympiadBench and 1.2% on MATH500, and adding RL collapsed (arXiv 2506.13404 §4.2–§4.3; its tables are empty in the
-  extracted text [unverified]).
+  above (arXiv 2502.12143 §3.1). Distillation, SFT and LoRA together on Qwen2.5-0.5B-Instruct scored 0.7% on
+  OlympiadBench and 1.2% on MATH500 (arXiv 2506.13404 §4.2), and SFT with LoRA plus RL collapsed in training (§4.3).
 - **RL with adapters** (1.5B, already distilled): LoRA rank 32 on every linear layer 42.5 against full parameters'
   44.9 and DoRA's 46.6, PiSSA 0.2 (arXiv 2512.23165 Table 3); Tina's rank-32 GRPO reached its best checkpoint for $9
   (arXiv 2504.15777 Table 1), and 4 of its 5 models scored above their full-parameter baselines (Table 3).
@@ -202,9 +201,9 @@ final performance" (arXiv 2607.24653 §4.1.3, Eq. 15).
   §5.2); off-policy checkpoints gave the strongest RL afterwards (§5.3).
 - **Constraints**: one vocabulary: "Teachers and students are taken from the same model family to ensure a shared
   tokenizer and vocabulary" (arXiv 2609.35259 §4.1); "Most OPD objectives assume that teacher and student share the
-  same vocabulary" (arXiv 2604.00626 §8). A different SFT teacher costs 2–6.8 AIME24 points (arXiv 2604.13010
-  Tables 3–4). Teachers may be the model's own earlier stages (GLM-5 §3.5) or "even the student model itself" (arXiv
-  2601.02780 §4.1).
+  same vocabulary" (arXiv 2604.00626 §8). At a fixed OPD teacher a different SFT teacher costs 0.4–4.2 AIME24 points
+  in standard OPD and 0.6–8.8 in Lightning OPD (arXiv 2604.13010 Tables 3–4). Teachers may be the model's own earlier
+  stages (GLM-5 §3.5) or "even the student model itself" (arXiv 2601.02780 §4.1).
 - **Here** [inference]: the vocabulary (§1) rules out every published teacher for OPD; external teachers enter as text
   (§2.3); with one RL domain there are no specialists to consolidate (§7).
 
@@ -224,7 +223,7 @@ PPO's value model, "another model of comparable size". Current recipes keep the 
 | Prompts | drop groups whose rewards are all equal and refill the batch; drop prompts solved ≥ 90% | OlmoRL active sampling; ScaleRL's No-Positive-Resampling (§3.2); Nemotron-Cascade drops problems solved 8/8, or 0/8 by a strong model (§4.6); 2.2K hard prompts beat the full 49K, AIME24 65.9 against 63.3 (arXiv 2505.16400 Table 3) |
 | Rollouts | 8–16 per prompt | OlmoRL 8, AceReason 8–16, ScaleRL 16; more as compute grows, fewer on hard sets (arXiv 2603.12151 §4) |
 | Temperature | entropy about 0.3 | "setting the training temperature such that the temperature-adjusted entropy remains around 0.3 typically leads to effective RL training" (arXiv 2506.13284 §4.5.2); code RL is "sensitive to the temperature" (arXiv 2512.13607 §4.6) |
-| Length | short first, then longer | 8K → 16K → 24K → 32K beat starting at 16K or 24K (arXiv 2505.16400 §4.3); an 8K stage first, AIME25 56.7 against 51.8 (arXiv 2506.13284 §4.5.4); masking truncated outputs helps at 8K–16K and hurts at 32K (Table 2); 10–15% truncated outputs destabilize (arXiv 2510.13786 App. A.15) |
+| Length | short first, then longer | 8K → 16K → 24K → 32K beat starting at 16K or 24K (arXiv 2505.16400 §4.3); an 8K stage first, AIME25 56.7 against 51.8 (arXiv 2506.13284 §4.5.4); masking truncated outputs helps at 8K–16K and hurts at 32K (§4.5.3, Fig. 9); 10–15% truncated outputs destabilize (arXiv 2510.13786 App. A.15) |
 | Entropy | a candidate: covariance-targeted KL-Cov or Clip-Cov | 32B average 52.2 against clip-higher's 47.2 and GRPO's 45.8 (arXiv 2505.22617 Table 2) |
 
 - **Small models**: MobileLLM-R1-950M after RL from the base scored GSM8K 57.0 against SFT's 74.0; "For
@@ -252,15 +251,17 @@ PPO's value model, "another model of comparable size". Current recipes keep the 
   (arXiv 2505.16400 §3.3); Nemotron-Cascade (§4.6), KodCode (arXiv 2503.02951 §4.1) and Seed-Coder alike. The tests
   decide the result: false negatives leave RL at "a sub-optimal point"; false positives (weak tests, DeepCoder's set
   among them) bring "a sudden drop on testing set accuracy midway" (arXiv 2505.16400 §4.3); AceReason drops
-  special-judge, interactive, untested and weak-test problems (App. A.4).
-- **Pass fraction**: at 32B, rewarding the fraction of tests passed beat the binary reward by 0.55–1.19 LiveCodeBench
-  points, most with unvalidated tests (arXiv 2608.24135 Table 3); X-Coder's fraction reward drew late reward hacking
-  that exploits "edge cases for partial rewards" (arXiv 2601.06953 §3.3); Nanbeige4.1-3B rewards the pass rate and adds
-  an efficiency term only once every test passes (arXiv 2602.13367 §2.3).
+  special-judge and interactive problems, those with incorrect tests or no golden solution, and those with weak tests
+  (App. A.4).
+- **Dense rewards**: at 32B, a reward of 1.1 when every test passes, −0.1 when none does and 0.1 times the pass
+  fraction otherwise beat the binary reward by 0.55–1.19 LiveCodeBench points, the most with unvalidated tests (arXiv
+  2608.24135 §3.3, Table 3); X-Coder's fraction reward drew late reward hacking that exploits "edge cases for partial
+  rewards" (arXiv 2601.06953 §5); Nanbeige4.1-3B rewards the pass rate and adds an efficiency term only once every
+  test passes (arXiv 2602.13367 §2.3).
 - **Making tests**: majority agreement among 16 sampled solutions labels outputs with 96.8% accuracy against GPT-4o's
   12.7% (arXiv 2505.21297 Table 5); Qwen3-Coder-Next keeps the tests "that achieve the highest consensus under
-  majority voting" (§4.2); tests aimed at near-correct faulty programs add 2.4 points at a fixed budget of about 40
-  tests (arXiv 2608.24135 Table 2).
+  majority voting" (§4.2); at a fixed budget of about 40 tests, tests synthesized against near-correct faulty programs
+  and then selected for diversity add 2.4 LiveCodeBench points, the synthesis alone 1.0 (arXiv 2608.24135 Table 2).
 - **Learned rewards**: DeepSeek-Coder-V2 trained a reward model on compiler outcomes, the raw 0–1 signal "noisy and
   sub-optimal" with sparse tests (arXiv 2406.11931 §3.5); later code recipes execute tests directly. A reasoning reward
   model gated on all tests passing raised P-GRPO's average 54.9 → 57.4; gated on the pass rate, the policy
@@ -268,9 +269,10 @@ PPO's value model, "another model of comparable size". Current recipes keep the 
 - **Tests by the model**: a separate test writer trained adversarially beat human tests at 1.5B, 56.95 against 56.23,
   where one model writing both scored 55.88 (arXiv 2603.15611 §4.2); CURE at 4B–14B (arXiv 2506.03136 §4.2).
 - **Multi-turn**: RL over execution feedback matches single-turn GRPO when evaluated in one turn and adds up to 8
-  points over three (Qwen3-1.7B and 4B; arXiv 2511.07833 App. D).
+  points over compute-matched GRPO in three iterations (Qwen3-1.7B, Qwen3-4B and OLMo-2-7B; arXiv 2511.07833 §5.1,
+  Table 1).
 - **Here** [inference]: binary, on the last code block after `</think>` and every test of the problem (§6); no
-  pass-fraction arm, no neural reward.
+  dense or pass-fraction arm, no neural reward.
 
 ### 2.8 GRPO variants
 
@@ -453,7 +455,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 - **Framework**: upstream verl in its own image, built from its `docker/Dockerfile.uv.cu130` for arm64 (torch 2.13,
   vLLM 0.32.0, transformers 5.16.1); FP16 training and sampling are part of it (verl #4036). The Precision-RL fork
   (verl 0.4.1.dev) does not run here: it pins vLLM ≤ 0.8.5, whose `vllm.worker.worker_base` its sampler imports and
-  vLLM 0.12.0 removed, and transformers 4, against the model file's 5.
+  vLLM 0.12.0 removed, and transformers 4, against the model file's 5 [unverified: the projects' repositories].
 - **Model**: the SFT checkpoint through `inference/export_hf.py` with fp32 weights (bf16 today; fp16 from the fp32
   master rounds 8× less, relative error 2.1e-4 against 1.7e-3 [measured]) and a chat template that renders BOS, the
   prompt and `\n\n<think>\n`. The LM head with its cap and the gate of the value embeddings run with autocast off:
@@ -473,24 +475,25 @@ unmeasured. Each choice is [inference] from the cited evidence.
   `dtype` float16 and `calculate_log_probs` true; SDPA attention, no padding removal, no gradient checkpointing (the
   model file has none), FSDP wrapping by `NanochatDecoderLayer`.
 - **Reward**: 1 if the last fenced code block after `</think>` passes every test of the problem, else 0 (no
-  `</think>`, no block, a cut response, an error or a time-out included), as Nemotron-Cascade (§4.6.1); run by the
+  `</think>`, no block, a cut response, an error or a time-out included), as Nemotron-Cascade (§4.6.2); run by the
   repository's checks (`eval/verify.py`) as verl's custom reward function.
 - **Problems** (rows counted from the files): `allenai/Dolci-Think-RL-7B` `code` (12,121, assert tests) and
   `code_stdio` (9,264, input/output tests), `KodCode/KodCode-Light-RL-10K` (10,000, function form with KodCode's
   tests) and `nvidia/Nemotron-RL-coding-competitive_coding` (16,083 per its card; Python stdin problems with tests
-  inline, a median 55.5 per problem in its 25K file, prompt p50 640 tokens): 47,468 [arithmetic]. Dropped: a problem
-  whose reference solution fails its own tests; the pretraining 10-gram rule (`docs/corpus.md` §3); a problem the SFT
-  model solves 8 or 0 times of 8 at the rollout settings (Nemotron-Cascade drops those a 7B solves 8/8 and those
-  R1-0528 solves 0/8, §4.6.1; here the policy decides both). DeepCoder-Preview is left out for its weak tests (§2.7).
-  All Python: C++ comes from the SFT stage only.
+  inline, a median 55.5 per problem in its 25K file, prompt p50 640 tokens [unverified]): 47,468 [arithmetic].
+  Dropped: a problem whose reference solution fails its own tests; the pretraining 10-gram rule (`docs/corpus.md` §3);
+  a problem the SFT model solves 8 or 0 times of 8 at the rollout settings (Nemotron-Cascade drops those a 7B solves
+  8/8 and those R1-0528 solves 0/8, §4.6.1; here the policy decides both). DeepCoder-Preview is left out for its weak
+  tests (§2.7). All Python: C++ comes from the SFT stage only.
 - **Sampling**: temperature 1.0 and top-p 1.0, so that the sampler's distribution is the policy's, as the FP16
   analysis samples to compare them (arXiv 2510.26788 §3.5); Nemotron-Cascade 2 samples so in its other RL stages and
   at top-p 0.95 in code RL (arXiv 2603.19220 App. B).
 - **Batch and lengths**: 128 prompts × 8 rollouts per update (arXiv 2512.13607 App. D Table 19); prompts ≤ 4,096
   tokens; responses ≤ 16,384, raised to 28,672 (32,768 − 4,096) once more than 10% are cut (§2.6, Length); a cut
   response scores 0 and stays in the batch (Nemotron-Cascade's code RL filters no overlong response, §4.6.2).
-- **Optimizer**: AdamW at a constant 2e-6 [estimate: between Precision-RL's 1e-6 at 1.5B–30B (arXiv 2510.26788
-  App. A) and Nemotron-Cascade's 3e-6–4e-6 at 8B–30B], β (0.9, 0.95), no weight decay, gradient norm clipped at 1.0.
+- **Optimizer**: AdamW at a constant 2e-6 [estimate: between Precision-RL's 1e-6 for its 14B dense and 30B MoE runs
+  (arXiv 2510.26788 App. A) and Nemotron-Cascade's 3e-6–4e-6 at 8B–30B], β (0.9, 0.95), no weight decay, gradient norm
+  clipped at 1.0.
 - **Stopping and watches**: every 10 steps, pass@1 on 5% of the filtered problems held out; stop when it stops
   rising. Nemotron-Cascade's code RL ran 22 to 90 steps (arXiv 2603.19220 App. B; arXiv 2512.13607 App. D Table 19).
   Watched: the entropy (temperature 1.0 → 0.8 if it climbs, as Nemotron-Cascade's unified 8B run, Table 19), steps
