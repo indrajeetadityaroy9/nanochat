@@ -635,7 +635,10 @@ last].
 - **Generation** (`onpolicy/rollouts.py`): vLLM offline on the `--chat` export, the termination probe's generation
   (`eval/official_termination.py` `generate`: 2,048-token rounds with prefix caching; a response with no `</think>`
   whose last 4,096 tokens have repetition ≥ 0.99 is stopped as a loop after its round), top-p 0.95, at most 16,384
-  new tokens (the longest closed reasoning in the step-2000 probe was 11,757), request k seeded base + k.
+  new tokens (the longest closed reasoning in the step-2000 probe was 11,757), request k seeded base + k. Mining and
+  DPO rollouts (splits mix and train) are also stopped as loops after a round once `cycle` finds an exact cycle
+  (`generate`'s `looped`), since their rows need a loop only through its first repeat: on the step-7676 val rollouts
+  that saves 18.6% of the generated tokens [measured]; val rollouts keep the protocol's rule alone.
 - **Temperature and samples** (`SAMPLES`): one sample per prompt at T 0.6, the evaluation protocol's, where the
   loops are: at step 2000, on the probe's 128 prompts with a 16K cap, T 0.6 left 54 responses in loops and T 1.0 7
   (`termination-budget-2000.json`); on the step-3000 export, 40 KodCode train prompts × 4, 47 of 160 responses looped
@@ -697,21 +700,21 @@ last].
   160 KodCode responses, 30 of 64 of the step-3000 probe's val set), about 7,000–11,000 exact-cycle rows a wave before
   rebalancing at the smoke's 43 exact cycles per 47 loops [estimate], against Antidoom's 15K–20K generated and 12K
   trained (README) and DeLoop's level-off at 8K pairs.
-- **DPO pairs** (`dpo_pairs`, `exact`, `rejected_side`, `dpo.jsonl`): rollout preference learning, correct against
-  incorrect rollouts of the same prompt (Phi-4-mini-reasoning, arXiv 2504.21233 §3.3), with DeLoop's loop unit for
-  loops: per verified prompt with a success and a failure, up to 2 pairs: chosen the prompt's shortest success (fewest
-  tokens) through its closing BOS; rejected its failures, exact-cycle loops first, then the other failures (each in
-  sample order). A loop's rejected side ends at its first repeat, `ids[:o + p + min(p, 256)]`, with no BOS, so the
-  pair lowers re-entering the cycle and not stopping (DeLoop's rejected action is the first repeat of an earlier
-  action, arXiv 2610.19376 §4.1); another failure's rejected side is its whole response. Both follow the prompt's ids.
-  Unverified rollouts (the mining waves) give no pairs. DeLoop's chosen side is the loop-breaking action later in the
-  same rollout; this model's continuations from a loop re-enter it (§8), so the chosen side is a separate sample of
-  the same prompt, selected by its tests, as DeLoop's gold-label baseline uses task outcomes (22.3% loops against
-  DeLoop's 6.1%, Table 1) [inference: these pairs sit between the two]. After FTPO the loops are rarer, so loop-only
-  pairs would dry up; the other failures keep the pairs on what the benchmarks score [inference]. Pairs whose prompt
-  and longer side exceed 32,768 tokens are dropped. On the step-7676 export's 512 × 4 KodCode val rollouts the rule
-  gives 369 pairs from 214 prompts (227 against loops, 142 against other failures; loops only: 227 from 154), none
-  dropped, pair lengths 1,878 / 3,970 / 7,588 tokens (p10 / p50 / p90) [measured].
+- **DPO pairs** (`dpo_pairs`, `exact`, `rejected_side`, `dpo.jsonl`): outcome pairs, correct against incorrect
+  rollouts of the same prompt (Phi-4-mini-reasoning's rollout preference learning, arXiv 2504.21233 §3.3, without its
+  filter for incorrect responses with minor differences): per verified prompt with a success and a failure, up to 2
+  pairs: chosen the prompt's shortest success (fewest tokens) through its closing BOS; rejected its failures,
+  exact-cycle loops first, then the other failures (each in sample order). A loop's rejected side ends at its first
+  repeat, `ids[:o + p + min(p, 256)]`, with no BOS; another failure's rejected side is its whole response. Both follow
+  the prompt's ids; unverified rollouts (the mining waves) give no pairs. These are not DeLoop's pairs: its chosen
+  side is the loop-breaking action later in the same rollout, both sides conditioned on the same history (arXiv
+  2610.19376 §4.1), whereas here the two sides are separate samples with no shared history, and on a loop's rejected
+  side 99.2% of the gradient lands on the pre-cycle prefix, the repeat's tokens (probability 0.95–0.998) taking about
+  0.3% [measured]. DPO here therefore targets correctness; suppressing loop entry rests on FTPO, DeLoop's
+  shared-history contrast at the token level (§8.5). Pairs whose prompt and longer side exceed 32,768 tokens are
+  dropped. On the step-7676 export's 512 × 4 KodCode val rollouts the rule gives 369 pairs from 214 prompts (227
+  against exact loops, 118 against closed failures, 19 against loops without an exact cycle, 5 against length-cut
+  responses), none dropped, pair lengths 1,878 / 3,970 / 7,588 tokens (p10 / p50 / p90) [measured].
 - **Statistics** (`selection.json`): per temperature, per source and pooled, the outcomes, loop rates per response
   and per prompt, onset and period lengths, and over verified prompts (the val evaluation's and the DPO waves'; the
   mining waves are not verified, §8.7) pass@1 and pass@n (unbiased, arXiv 2107.03374), the share of prompts solved
@@ -832,7 +835,10 @@ last].
   seeds), verified (as many workers as the CPU set has cores) and summarized as the rollouts are. A loop share of
   0.4 over 256 probe responses has a binomial standard error of 0.031 [arithmetic]; pairing removes the
   between-prompt variance from the differences. No rule chooses among the models: the final model is `dpo/` (else
-  `ftpo/`), each stage trained once to its source's stopping point (§8).
+  `ftpo/`), each stage trained once to its source's stopping point (§8). Two risks of the DPO stage to read in its
+  results: a brevity bias (the chosen side is the shortest success, and the rejected side is longer in 72% of the
+  val pairs [measured]) and a falling chosen log-probability (`logp_chosen` in `dpo/train-log.json`), DPO's known
+  failure mode that the absent likelihood term leaves unchecked [inference].
 - **Reasoning protocol** (§5; `scripts/official_reasoning.sh`, `MODEL`/`TAG` for a trained directory): the SFT model
   and the final model, both served in bf16.
 

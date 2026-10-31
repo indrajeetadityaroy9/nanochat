@@ -17,16 +17,18 @@ closed and its tail repeats (onpolicy/rollouts.py `loop`).
   and dropped; rows with an identical prefix are kept once (the first in prompt and sample order); rows whose prefix
   and rejected token exceed --max-length are dropped (counted). The rows are then rebalanced on their rejected token
   and source as Antidoom's trainer does (`rebalance`).
-- DPO pairs (dpo.jsonl, `dpo_pairs`; rollout DPO, correct against incorrect rollouts of the same prompt, as
-  Phi-4-mini-reasoning's rollout preference learning, arXiv 2504.21233, with DeLoop's loop unit, arXiv 2610.19376
-  §4.1, for loops): per verified prompt with a success and a failure, up to PAIRS_PER_PROMPT pairs: chosen the
-  prompt's shortest success (fewest tokens; the lower sample index on a tie) through its closing BOS; rejected its
-  failures, exact-cycle loops first (in sample order), then the other failures (in sample order). A loop's rejected
-  side ends at its first repeat, ids[:onset + period + min(period, WINDOW_CAP)], with no BOS, so the pair moves
-  probability away from re-entering the cycle and not from a stop (DeLoop's rejected action is the first repeat of an
-  earlier action); WINDOW_CAP bounds a long period's share of the rejected tokens. Another failure's rejected side is
-  its whole response. Only verified prompts have successes, so unverified rollouts (the mix waves) yield no pairs.
-  Pairs whose prompt and longer side exceed --max-length are dropped (counted).
+- DPO pairs (dpo.jsonl, `dpo_pairs`): outcome pairs, correct against incorrect rollouts of the same prompt
+  (Phi-4-mini-reasoning's rollout preference learning, arXiv 2504.21233 §3.3, without its filter for incorrect
+  responses with minor differences); chosen and rejected are separate samples with no shared history, so the pairs
+  target correctness, while loop entry is FTPO's (DeLoop's shared-history contrast, arXiv 2610.19376 §4.1, at token
+  level). Per verified prompt with a success and a failure, up to PAIRS_PER_PROMPT pairs: chosen the prompt's
+  shortest success (fewest tokens; the lower sample index on a tie) through its closing BOS; rejected its failures,
+  exact-cycle loops first (in sample order), then the other failures (in sample order). A loop's rejected side ends
+  at its first repeat, ids[:onset + period + min(period, WINDOW_CAP)], with no BOS (WINDOW_CAP bounds a long period's
+  share of its tokens), so it is not a stop that the pair lowers; its gradient falls almost entirely on the pre-cycle
+  prefix, the repeat's tokens being near-certain. Another failure's rejected side is its whole response. Only
+  verified prompts have successes, so unverified rollouts (the mix waves) yield no pairs. Pairs whose prompt and
+  longer side exceed --max-length are dropped (counted).
 - selection.json: per temperature and pooled, the outcomes, loop rates per response and per prompt, loop onsets and
   periods, and over the prompts whose responses are verified pass@1 and pass@n (unbiased, arXiv 2107.03374 Eq. 1),
   the share of prompts with a success and with mixed outcomes (a success and a loop) and the successes' lengths; per

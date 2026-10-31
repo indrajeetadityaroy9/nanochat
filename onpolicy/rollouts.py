@@ -7,11 +7,15 @@ exceed the model's context; at most the usable rows left), each sampled under ev
 (temperature, count) of --samples at top-p TOP_P, by vLLM offline from a --chat export (inference/export_hf.py; bf16,
 the head in fp32, eos = BOS) through eval/official_termination.py `generate`:
 CHUNK-token rounds with prefix caching, a response stopped once its last REPEAT_TAIL tokens have repetition >= LOOP
-with no "</think>" (finish "loop"), else at BOS ("stop") or at min(--max-tokens, context - prompt) ("length"). Request
+with no "</think>" (finish "loop"), else at BOS ("stop") or at min(--max-tokens, context - prompt) ("length"). Mining
+rollouts (splits mix and train) are also stopped as loops after a round once `cycle` finds an exact cycle: their rows
+need a loop only through its first repeat, and the protocol's rule runs a loop ≈4,100 tokens past four repeats (29% of
+the step-7676 val rollouts' tokens); val rollouts keep the protocol's rule alone, comparable across models. Request
 k (prompts in id order, each prompt's samples in --samples order) is seeded --seed + k. Each response's ending is
 eval/official_termination.py `response`'s (closure, the reasoning through the last "</think>", the answer after it);
-a never-closed response with repetition >= LOOP is a loop, and `cycle` gives its onset and period when its tail is
-exactly periodic (the loops seen so far are: per-token log-probability ≈ -0.001 once established).
+a never-closed response stopped as a loop or with repetition >= LOOP is a loop, and `cycle` gives its onset and
+period when its tail is exactly periodic (the loops seen so far are: per-token log-probability ≈ -0.001 once
+established).
 
 Writes <out dir>/prompts.jsonl (the sampled pool rows with their ids and `source`), rollouts.parquet (one row per
 response, its generated ids included) and meta.json (settings, the prompts per source, the val split's held-out
@@ -53,10 +57,14 @@ SAMPLES = "0.6:1"
 def cycle(ids: list[int]) -> tuple[int, int] | None:
     """(onset, period) of a response ending in an exact cycle: the smallest period p <= MAX_PERIOD at which its last
     CYCLE_TAIL tokens repeat (ids[i] == ids[i - p]), and the first index from which every token equals the one p
-    later (the cycle's first copy starts there; its first repeat at onset + p). None if no period fits."""
+    later (the cycle's first copy starts there; its first repeat at onset + p). None if no period fits. Only the
+    periods at which the last token recurs can fit, so only those are tried, in increasing order."""
     a = np.asarray(ids)
     n = len(a)
-    for p in range(1, MAX_PERIOD + 1):
+    if n < CYCLE_TAIL + 1:
+        return None
+    lo = max(n - 1 - MAX_PERIOD, 0)
+    for p in (n - 1 - lo - np.flatnonzero(a[lo:n - 1] == a[n - 1]))[::-1].tolist():
         if n < CYCLE_TAIL + p:
             return None
         if np.array_equal(a[n - CYCLE_TAIL:], a[n - CYCLE_TAIL - p:n - p]):
@@ -96,12 +104,13 @@ def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, 
     outputs = generate(llm, [row["ids"] for row, _, _ in requests],
                        [{"temperature": t, "top_p": TOP_P} for _, _, t in requests],
                        [seed + k for k in range(len(requests))],
-                       [min(max_tokens, context - len(row["ids"])) for row, _, _ in requests])
+                       [min(max_tokens, context - len(row["ids"])) for row, _, _ in requests],
+                       looped=None if split == "val" else (lambda ids: cycle(ids) is not None))
     end = time.time()
     records = []
     for k, ((row, j, t), (ids, text, finish)) in enumerate(zip(requests, outputs, strict=True)):
         r = response(ids, text, finish, tok.bos_token_id, tok.enc.decode)
-        loop = not r["closed"] and r["repetition"] >= LOOP
+        loop = not r["closed"] and (finish == "loop" or r["repetition"] >= LOOP)
         onset, period = (cycle(ids) if loop else None) or (None, None)
         records.append({"prompt_id": row["id"], "sample": j, "temperature": t, "seed": seed + k, "ids": list(ids),
                         "loop": loop, "loop_onset": onset, "loop_period": period}
@@ -111,8 +120,8 @@ def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, 
     generated = sum(len(r["ids"]) for r in records)
     meta = {"model": str(model), "split": split, "held_out": held, "excluded": len(seen), "prompts": len(rows),
             "sources": dict(sorted(Counter(row["source"] for row in rows).items())), "samples": samples,
-            "top_p": TOP_P, "max_tokens": max_tokens, "seed": seed, "chunk": CHUNK, "loop_stop": LOOP,
-            "responses": len(records),
+            "top_p": TOP_P, "max_tokens": max_tokens, "seed": seed, "chunk": CHUNK,
+            "loop_stop": LOOP if split == "val" else f"{LOOP} or cycle", "responses": len(records),
             "generated_tokens": generated, "generation_seconds": round(end - generating),
             "generated_tokens_per_second": generated / (end - generating), "seconds": round(time.time() - start)}
     if metrics is not None:
