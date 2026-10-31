@@ -18,11 +18,7 @@ Code large language models (LLMs) with fewer than one billion parameters are typ
 tokens. This paper presents a generative LLM for Python and C++ code generation: a GPT-style decoder-only transformer
 pretrained from scratch on a single GPU. The model has 522M parameters and is trained on 103B tokens of Python and C++
 code, web text and math, first with a context length of 8,192 tokens at the file level and then with 32,768 tokens at
-the repository level. Pretraining takes 76.3 hours on one NVIDIA GH200 GPU. Using each benchmark's official evaluation
-tool, the model achieves greedy pass@1 of 26.8 on HumanEval, 22.0 on HumanEval+, 44.4 on MBPP and 36.5 on MBPP+, 21.7
-and 36.8 on the C++ versions of HumanEval and MBPP, and 55.3 on single-line infilling. On HumanEval and HumanEval+, the
-reported scores of Qwen2.5-Coder-0.5B fall within the 95\% confidence intervals of this model, although Qwen2.5-Coder
-used 53 times more tokens for its code pretraining alone. On MBPP, this model is 8.5 points lower.
+the repository level. Pretraining takes 76.3 hours on one NVIDIA GH200 GPU.
 \end{abstract}
 
 \keywords{code language models, pretraining, small language models, training efficiency, code generation}
@@ -59,16 +55,14 @@ tokens: StarCoder2-3B is trained on 3.1T tokens, about 1,000 tokens per paramete
 Qwen2.5-Coder models, including the 0.5B model, on over 5.5T tokens~\cite{hui2024qwen25coder}. All Qwen3 models,
 including the 0.6B model, are pretrained on 36T tokens~\cite{yang2025qwen3}.
 
-Training budgets of this size are not feasible on a single GPU. The 0.5B-parameter model in this work trains at 0.38M
+Training budgets of this size are not feasible on a single GPU. The 522M-parameter model in this work trains at 0.38M
 tokens per second on one GPU; at this training throughput, the 5.5T tokens of Qwen2.5-Coder would take more than five
 months. This paper studies whether a code LLM pretrained on a single GPU with far fewer tokens can reach code
 generation performance comparable to the smallest existing code LLMs. It presents a 522M-parameter, GPT-style
 decoder-only LLM for Python and C++ code generation, pretrained from scratch on 103B tokens (528 tokens per
 non-embedding parameter) in 76.3 hours on a single NVIDIA GH200 GPU. Code generation is measured by functional
 correctness: with greedy decoding, pass@1 is the fraction of problems whose generated program passes all unit
-tests~\cite{chen2021codex}. On HumanEval and HumanEval+~\cite{chen2021codex,liu2023evalplus}, the reported pass@1 of
-Qwen2.5-Coder-0.5B falls within the 95\% confidence intervals of this model, although Qwen2.5-Coder used 53 times more
-tokens for its code pretraining alone~\cite{hui2024qwen25coder}.
+tests~\cite{chen2021codex}.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
