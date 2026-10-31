@@ -644,7 +644,7 @@ inference a local layer keeps the keys and values of only the last 512 tokens. T
 information across the whole context, every fourth layer. The global layers are layers 4, 8, \ldots, 24, so the last
 layer is global; the other 18 layers are local. In Gemma 3, the ratio of local to global layers had minimal effect on
 perplexity, even at 7:1, and the window could be reduced significantly without affecting
-perplexity~\cite{gemma2025gemma3}. The 3:1 ratio and the 512-token window are not ablated here.
+perplexity~\cite{gemma2025gemma3}.
 
 \paragraph{Value embeddings.} Every second layer adds a value embedding to its attention values
 (Figure~\ref{fig:model})~\cite{li2026move}. In standard attention, head $h$ computes the value of the token at position
@@ -668,7 +668,7 @@ layers with value embeddings are layers 2, 4, \ldots, 24, including the last. Us
 every layer halves the added parameters: in the same experiments, at depth 12, value embeddings in half of the layers
 gave a gain of 0.016 against 0.020 in every layer, with 302M instead of 604M added parameters~\cite{li2026move}. The
 12 tables hold 302M of the model's 522M parameters, so the model has 195M non-embedding parameters
-(Table~\ref{tab:model}). The placement and the gate are not ablated here.
+(Table~\ref{tab:model}).
 
 \paragraph{Residual stream.} In a standard pre-norm transformer, layer $l$ adds its attention and MLP outputs to the
 residual stream, which passes from layer to layer unchanged otherwise:
@@ -688,11 +688,11 @@ the earlier layers' contributions. The scalars start at $\lambda_r = 1$ and $\la
 standard pre-norm transformer. At the end of training, $\lambda_r$ ranges from 0.16 to 2.60: from 0.16 to 0.61 in the
 even layers, the layers with value embeddings, and from 0.59 to 2.60 in the odd layers. $\lambda_0$ is near zero
 ($|\lambda_0| < 0.08$) except in the first two layers ($-0.23$ and $0.14$). The model thus uses the rescaling but adds
-back little of the token embedding. The mixing is not ablated here.
+back little of the token embedding.
 
 \paragraph{MLP\@.} The MLP computes $\mathrm{ReLU}(\bar{x} W_1)^2 W_2$, the squared ReLU, with hidden size 3,072
 ($4d$). Primer found the squared ReLU the most effective of its modifications~\cite{so2021primer}. Gated units such as
-SwiGLU outperform ReLU at matched parameters~\cite{shazeer2020glu}; squared ReLU against SwiGLU is not ablated here.
+SwiGLU outperform ReLU at matched parameters~\cite{shazeer2020glu}.
 
 \paragraph{Output logit cap.} In a standard LLM, the output logits $z = h W_{\mathrm{out}}$ are unbounded and the
 next-token probabilities are $\mathrm{softmax}(z)$. Here every logit is capped before the softmax, in training,
@@ -707,7 +707,7 @@ divergence, the logits drifting to very negative values, is a separate training
 instability~\cite{wortsman2023smallscale,chameleon2024}, which the cap prevents by bounding the logits on both sides.
 The cap does not limit useful confidence: with all logits in $(-15, 15)$, one token can still receive probability up
 to $e^{15} / (e^{15} + (V - 1)\, e^{-15}) \approx 1 - 3 \times 10^{-9}$. Gemma 2 uses the same cap with
-$c = 30$~\cite{gemma2024gemma2}; the value 15 is not ablated here.
+$c = 30$~\cite{gemma2024gemma2}.
 
 \paragraph{Precision.} Parameters, gradients and optimizer states are kept in FP32. Activations and matrix
 multiplication inputs are BF16, with FP32 accumulation.
