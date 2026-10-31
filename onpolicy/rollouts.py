@@ -85,7 +85,7 @@ def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, 
         rows = sample(pool, min(n, sum(map(usable, pool))), seed)
     for row in rows:
         row["ids"] = context_ids(row)
-        row.setdefault("source", f"kodcode/{row['style']}")
+        row["source"] = row.get("source") or f"kodcode/{row['style']}"
     with open(out / "prompts.jsonl", "w") as f:
         f.writelines(json.dumps({k: v for k, v in row.items() if k != "r1_answer"}) + "\n" for row in rows)
     llm = LLM(str(model), trust_remote_code=True, dtype="bfloat16", max_model_len=context, seed=seed,
