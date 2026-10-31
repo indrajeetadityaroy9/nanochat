@@ -20,6 +20,7 @@ to the 522M base model is [inference].
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`, `results_dir`), `results/posttrain/sft_lr.jsonl` and its `-curves.jsonl` | §4 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
 | `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh` | §5.1 |
+| `eval/serving_check.py`, `scripts/serving_check.sh` | §5.1 serving faithfulness |
 
 ## 1. Starting point
 
@@ -440,16 +441,44 @@ unmeasured. Each choice is [inference] from the cited evidence.
   full-state checkpoint of the run, with the same prompts and seeds at every step (`scripts/official_termination.sh`
   per checkpoint, `scripts/official_termination_watch.sh` over a run as its checkpoints appear;
   `scripts/official_reasoning.sh` runs the probe on its export). Beside the training job the probe takes 0.12 of the
-  GPU's memory and is skipped if less than 15 GB is free at its start.
-- **Metrics** (per set and pooled; `RUNS/<run>/termination-<step>.json`): four exclusive outcomes, closed and ended
-  (BOS), closed with the answer at the limit, never closed at the limit, never closed and ended; the closing-time curve
+  GPU's memory and is skipped if less than 15 GB is free at its start. Generation runs in rounds of 2,048 new tokens
+  with prefix caching, and a response with no `</think>` whose last 4,096 tokens have repetition ≥ 0.99 after a round
+  is stopped there (outcome "unclosed, loop-stopped"; with "unclosed at the limit" it compares with a one-shot probe's
+  "unclosed at the limit"): loops take most of a one-shot probe's tokens, and none has been seen to close. Each round
+  restarts a request's seeded generator (seed + round × 1,000,003), so only the first 2,048 tokens equal a one-shot
+  generation's.
+- **Metrics** (per set and pooled; `RUNS/<run>/termination-<step>.json`): five exclusive outcomes, closed and ended
+  (BOS), closed with the answer at the limit, never closed at the limit, never closed and loop-stopped, never closed
+  and ended; the closing-time curve
   P(closed with reasoning ≤ B) for B = 1K, 2K, 4K, 8K, 16K, 32K tokens; reasoning tokens p50/p90/p95 (an unclosed
   response all reasoning) and answer tokens p50 given closure; the shares of closed answers with a fenced code block
   and with the closing BOS; the HumanEval+ responses' pass on the base and the plus tests (EvalPlus's own sanitizer
   and `check_correctness`, single-threaded BLAS), overall and given closure; outcomes per source group and style and
   per teacher-length bucket (< 2K, 2–4K, 4–8K, 8–16K, ≥ 16K) with the rank correlation of teacher length and
   closure; for never-closed responses the share of their last 4,096 tokens inside a repeated 32-token window, and every
-  response's last 2,000 characters, to test whether they run away in loops.
+  response's last 2,000 characters, to test whether they run away in loops. Each response keeps its full answer (an
+  evalplus one also its full reasoning); scoring runs after generation in a CPU container of its own with
+  single-threaded BLAS (`--score`), never in a process forked from vLLM's: there EvalPlus's 4 GiB address-space guard
+  fails tests that allocate much (HumanEval/15's plus tests failed so at steps 1000 and 2000, whose
+  `termination-<step>.json` plus counts are therefore low by at least one [measured: the stored tails re-scored]).
+- **Budget forcing and sampling sensitivity** (`--budget`, `RUNS/<run>/termination-budget-<step>.json`): both sets
+  under four samplings (the protocol's; T 0.8 and T 1.0 at top-p 0.95; Qwen3's top-k 20 with presence penalty 1.0),
+  reasoning stopped at `END_THINK` or 16,384 tokens; closure, the closing-time curve and loops (repetition ≥ 0.99) per
+  sampling; the HumanEval+ answers after the reasoning cut at B = 4K, 8K, 16K tokens (s1's budget forcing, arXiv
+  2501.19393 §3.1: `END_THINK` appended to the first B tokens of a response not closed by B) under the protocol's
+  sampling, and at 16K under the others, scored as above, split into naturally closed and forced. `--dry`: the same
+  under the protocol's sampling with and without DRY on the reasoning (`eval/dry.py`, a vLLM logits processor;
+  arXiv 2608.22761 App. A Eq. 1 with its Table 8 setting: multiplier 0.8, base 1.75, allowed length 2, range 1,024;
+  breakers the tokens holding a newline, colon, quote or asterisk; off once `</think>` is emitted).
+- **Serving faithfulness** (`scripts/serving_check.sh`, `RUNS/<run>/serving-check-<step>.json`): the export in vLLM
+  against the training model on SFT val documents. Prefill: per-token NLL of 8 documents of 1K–32.7K tokens by
+  `model.losses` on the val rows and by vLLM's prompt logprobs. Decode: vLLM's greedy generations (≤ 8,192 tokens)
+  from the 4 val prompts with the longest teacher responses, teacher-forced through the training model: argmax
+  agreement, the margin at disagreements, and both paths' log-probability of the chosen tokens. At step 2000
+  [measured]: prefill mean NLL differs by ≤ 0.0009 nats in every position bucket (0–512, 512–2K, 2–8K, 8–16K, 16–32K;
+  98,470 tokens); decode agrees on 98.7% of tokens 0–512, 99.85% at 512–2K and 100% at 2–8K, disagreement margins
+  ≤ 0.42 nats and not growing, mean chosen-token log-probability equal to 0.001 nats: the export's 513-token windows
+  and RoPE are honoured in both paths.
 - **Cost** [measured: `termination-1000-v1.json`, the step-1000 probe beside the training job]: 929 s per probe
   (854 s generating); the run's median tokens/s fell 34% while it generated (312,840 → 205,817), about 290 s of run
   time per probe.

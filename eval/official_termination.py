@@ -9,25 +9,46 @@ tokens the context less the prompt), and how the responses end:
   held-out problems), their context (the prompt and THINK, <split>.context) after a BOS, the ids the SFT trained on;
   each with its source group and style (val-labels.jsonl, build.py labels_path) and its teacher's reasoning tokens.
 
-Sampling: T 0.6, top-p 0.95 (the reasoning protocol's), seed SEED + the prompt's index. A response closes when it holds
-"</think>" (the reasoning parser's split, eval/official_reasoning_parser.py: the reasoning through the last one, the
-answer after it) and ends when it emits BOS (vLLM's finish reason "stop"; else "length", the limit). Per set
-(`summary`): the four exclusive outcomes (closed and ended, closed and at the limit, unclosed at the limit, unclosed
-and ended); the closing-time curve P(closed with reasoning <= B) at BUDGETS; reasoning tokens p50/p90/p95 (an unclosed
+Sampling: T 0.6, top-p 0.95 (the reasoning protocol's), seed SEED + the prompt's index, in CHUNK-token rounds with
+prefix caching (`generate`; a round's seed offset by SEED_STRIDE per round, so only the first CHUNK tokens equal a
+one-shot generation's). A response closes when it holds "</think>" (the reasoning parser's split,
+eval/official_reasoning_parser.py: the reasoning through the last one, the answer after it) and ends when it emits BOS
+(finish "stop"; else "length", the limit, or "loop": stopped after a round with its last REPEAT_TAIL tokens
+`repetition` >= LOOP and no "</think>", a loop that no response has been seen to leave). Per set (`summary`): the five
+exclusive outcomes (closed and ended, closed and at the limit, unclosed at the limit, unclosed and loop-stopped,
+unclosed and ended; unclosed at the limit or loop-stopped, comparable with an unchunked probe's unclosed at the limit);
+the closing-time curve P(closed with reasoning <= B) at BUDGETS; reasoning tokens p50/p90/p95 (an unclosed
 response all reasoning) and answer tokens p50 given closure; the shares of closed answers holding a fenced code block
 and ending with BOS; the evalplus responses' pass on EvalPlus's base and plus tests (evalplus.evaluate's
 check_correctness on the answer as EvalPlus's codegen sanitizes it; an unclosed response's answer is empty), over all
 and given closure; the val responses' outcomes by source and by teacher-length bucket (TEACHER_BUCKETS) and the rank
 correlation of teacher length with closure; the never-closed responses' mean repetition (`repetition`). Each response
-keeps its prompt's id and the last TAIL_CHARS characters of its text. Beside a training job (its metrics.jsonl and the
-probe's start time given), the job's train tokens/s during the probe against its BEFORE steps before it and the
-seconds it lost, as information. VLLM_GPU_MEMORY_UTILIZATION applies through eval/official_site/sitecustomize.py.
+keeps its prompt's id, its full answer and the last TAIL_CHARS characters of its text, an evalplus one also its full
+reasoning. Generation (`main`, with vLLM) writes the responses unscored; `score`, a separate CPU process (never one
+forked from the engine's: EvalPlus's 4 GiB address-space guard fails large allocations there), adds the pass and the
+summaries. Beside a training job (its metrics.jsonl and the probe's start time given), the job's train tokens/s during
+the probe against its BEFORE steps before it and the seconds it lost, as information. VLLM_GPU_MEMORY_UTILIZATION
+applies through eval/official_site/sitecustomize.py.
+
+With --budget, s1's budget forcing (arXiv 2501.19393 §3.1), as a measure of what the reasoning holds when cut, and the
+closure's sensitivity to sampling, in one engine session: phase 1 samples each prompt of both sets (same rendering and
+seeds) under each of CONFIGS (the protocol's; T 0.8 and T 1.0; Qwen3's anti-repetition top-k 20 with presence penalty
+1.0), stopped at END_THINK (string stop, kept) or at max(FORCED_BUDGETS) new tokens; phase 2, for each evalplus prompt
+and each budget B (FORCED_BUDGETS under the protocol's sampling, max(FORCED_BUDGETS) under the others), appends to the
+prompt the reasoning (a response closed within B tokens: its reasoning, encoded alone as corpus/posttrain/build.py
+render encodes it; else its first B generated tokens) and END_THINK, and samples the answer (the config's sampling,
+seed SEED + the prompt's index, at most ANSWER_TOKENS, eos = BOS; the answer after the last "</think>"). Per config
+and set (`sampled_summary`): closure by max(FORCED_BUDGETS), the closing-time curve, the never-closed responses that
+loop (`repetition` >= LOOP); per budget (`forced_summary`): naturally closed and forced counts, the base and plus pass
+(`evalplus_check`) over all, the naturally closed and the forced, and the shares with a fenced code block and ending
+with BOS. Each response keeps its full reasoning and answers.
 
     python -m eval.official_termination <model dir> <out json> [<metrics.jsonl> <since, unix seconds>] [--prompts N]
+        [--budget]
+    python -m eval.official_termination --score <generation json> <out json>
 """
 
 import argparse
-import gc
 import json
 import os
 import re
@@ -50,8 +71,16 @@ END = "</think>"
 FENCE = re.compile(r"```[^\n]*\n.*?```", re.S)
 BUDGETS = (1024, 2048, 4096, 8192, 16384, 32768)
 TEACHER_BUCKETS = (2048, 4096, 8192, 16384)  # <2K, 2-4K, 4-8K, 8-16K, >=16K
-OUTCOMES = ("closed_ended", "closed_limit", "unclosed_limit", "unclosed_ended")
+OUTCOMES = ("closed_ended", "closed_limit", "unclosed_limit", "unclosed_loop_stopped", "unclosed_ended")
+CHUNK, SEED_STRIDE = 2048, 1_000_003
 TAIL_CHARS, REPEAT_TAIL, REPEAT_WINDOW = 2000, 4096, 32
+FORCED_BUDGETS, ANSWER_TOKENS, LOOP = (4096, 8192, 16384), 4096, 0.99
+CONFIGS = {"protocol": SAMPLING, "t0.8": {"temperature": 0.8, "top_p": 0.95},
+           "t1.0": {"temperature": 1.0, "top_p": 0.95},
+           "qwen3": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0},
+           # DRY (eval/dry.py) on the reasoning, the protocol's sampling
+           "dry": SAMPLING | {"extra_args": {"dry": {}}}}
+SENSITIVITY = ("protocol", "t0.8", "t1.0", "qwen3")
 
 
 def evalplus_prompts(template, n: int) -> list[dict]:
@@ -110,11 +139,57 @@ def response(ids: list[int], text: str, finish: str, bos: int, decode) -> dict:
         lo, hi = (mid + 1, hi) if decode(ids[:mid]).count(END) < closures else (lo, mid)
     reasoning = lo if closures else n
     answer = text.rpartition(END)[2].strip() if closures else ""
-    outcome = ("closed" if closures else "unclosed") + ("_ended" if ended else "_limit")
+    outcome = ("closed" if closures else "unclosed") + (
+        "_ended" if ended else "_loop_stopped" if finish == "loop" and not closures else "_limit")
     return {"tokens": n, "finish": finish, "outcome": outcome, "closed": closures > 0, "closures": closures,
             "ended": ended, "reasoning_tokens": reasoning, "answer_tokens": n - reasoning,
             "fenced": bool(FENCE.search(answer)), "answer": answer, "tail": text[-TAIL_CHARS:],
+            "loop_stopped_at": n if finish == "loop" else None,
             "repetition": None if closures else repetition(ids[:n])}
+
+
+def generate(llm, prompts: list[list[int]], sampling: list[dict], seeds: list[int], limits: list[int],
+             stop: str | None = None) -> list[tuple[list[int], str, str]]:
+    """Each prompt's (generated ids, their text, finish), sampled in CHUNK-token rounds, each round's prompt the
+    prompt and every token so far (prefix caching reuses its KV): finish "stop" at eos (BOS) or at `stop` (text cut
+    after its first occurrence), "length" at the prompt's limit, "loop" for a sequence holding neither `stop` nor END
+    whose last REPEAT_TAIL tokens have `repetition` >= LOOP after a round. Round r is seeded seed + r * SEED_STRIDE,
+    so the first CHUNK tokens equal a one-shot generation's and the rest differ from it (each request restarts its
+    seeded generator): chunked and one-shot generations are equal in distribution, not token for token."""
+    from vllm import SamplingParams
+
+    tok = get_tokenizer()
+    generated, finish = [[] for _ in prompts], [None] * len(prompts)
+    active, chunk = list(range(len(prompts))), 0
+    while active:
+        outputs = llm.generate(
+            [{"prompt_token_ids": prompts[k] + generated[k]} for k in active],
+            [SamplingParams(**sampling[k], max_tokens=min(CHUNK, limits[k] - len(generated[k])),
+                            seed=seeds[k] + chunk * SEED_STRIDE,
+                            **({"stop": [stop], "include_stop_str_in_output": True} if stop else {}))
+             for k in active], use_tqdm=False)
+        remaining = []
+        for k, output in zip(active, outputs, strict=True):
+            (completion,) = output.outputs
+            generated[k] += completion.token_ids
+            text = tok.enc.decode([t for t in generated[k] if t != tok.bos_token_id])
+            if completion.finish_reason == "stop" or (stop and stop in text):  # `stop` across a round's boundary
+                finish[k] = "stop"
+            elif len(generated[k]) >= limits[k]:
+                finish[k] = "length"
+            elif (len(generated[k]) >= REPEAT_TAIL and END not in text and (not stop or stop not in text)
+                  and repetition(generated[k]) >= LOOP):
+                finish[k] = "loop"
+            else:
+                remaining.append(k)
+        active, chunk = remaining, chunk + 1
+    out = []
+    for ids, f in zip(generated, finish, strict=True):
+        text = tok.enc.decode([t for t in ids if t != tok.bos_token_id])
+        if stop and stop in text:
+            text = text[:text.index(stop) + len(stop)]
+        out.append((ids, text, f))
+    return out
 
 
 def ranks(x: np.ndarray) -> np.ndarray:
@@ -130,6 +205,8 @@ def ranks(x: np.ndarray) -> np.ndarray:
 def outcomes(rows: list[dict]) -> dict:
     counts = Counter(r["outcome"] for r in rows)
     return {"responses": len(rows), "outcomes": {k: counts[k] for k in OUTCOMES},
+            # comparable with a one-shot probe's unclosed_limit
+            "unclosed_limit_or_loop_stopped": counts["unclosed_limit"] + counts["unclosed_loop_stopped"],
             "closed": sum(r["closed"] for r in rows) / len(rows),
             "at_length_limit": sum(not r["ended"] for r in rows) / len(rows)}
 
@@ -207,46 +284,140 @@ def job_cost(metrics: Path, since: float, end: float) -> dict:
             "seconds_lost": sum(seconds * (1 - rate / before) for _, rate, seconds in during)}
 
 
-def main(model: Path, out: Path, metrics: Path | None, since: float | None, n: int) -> None:
+def forced(llm, sets: dict[str, list[dict]], configs: list[str]) -> dict[str, dict[str, list[dict]]]:
+    """Phase 1 (each config's reasoning, up to max(FORCED_BUDGETS) tokens) and phase 2 (the evalplus answers per
+    budget) of --budget: {config: {set: rows}}."""
+    from vllm import SamplingParams
+
+    tok = get_tokenizer()
+    flat = [(name, p) for name, every in sets.items() for p in every]
+    runs = [(config, i, name, p) for config in configs for i, (name, p) in enumerate(flat)]
+    thoughts = generate(llm, [p["ids"] for *_, p in runs], [CONFIGS[config] for config, *_ in runs],
+                        [SEED + i for _, i, *_ in runs], [max(FORCED_BUDGETS)] * len(runs), stop=END_THINK)
+    end_think = tok.enc.encode_ordinary(END_THINK)
+    out = {config: {name: [] for name in sets} for config in configs}
+    requests = []
+    for (config, i, name, p), (generated, text, finish) in zip(runs, thoughts, strict=True):
+        ids = [t for t in generated if t != tok.bos_token_id]
+        closed = text.endswith(END_THINK)
+        reasoning = tok.enc.encode_ordinary(text[:-len(END_THINK)]) if closed else ids
+        row = {k: v for k, v in p.items() if k != "ids"} | {
+            "prompt_tokens": len(p["ids"]), "closed": closed, "finish": finish, "reasoning_tokens": len(reasoning),
+            "loop_stopped_at": len(ids) if finish == "loop" else None,
+            "repetition": None if closed else repetition(ids), "reasoning": text, "budgets": {}}
+        out[config][name].append(row)
+        if name == "evalplus":
+            for b in FORCED_BUDGETS if config == "protocol" else FORCED_BUDGETS[-1:]:
+                natural = closed and len(reasoning) <= b
+                requests.append((config, i, row, b, natural,
+                                 [*p["ids"], *(reasoning if natural else ids[:b]), *end_think]))
+    answers = llm.generate([{"prompt_token_ids": r[-1]} for r in requests],
+                           [SamplingParams(**CONFIGS[config], max_tokens=ANSWER_TOKENS, seed=SEED + i)
+                            for config, i, *_ in requests], use_tqdm=False)
+    for (_, _, row, b, natural, _), output in zip(requests, answers, strict=True):
+        (completion,) = output.outputs
+        answer = completion.text.rpartition(END)[2].strip()
+        row["budgets"][str(b)] = {"id": row["id"], "natural": natural, "ended": completion.finish_reason == "stop",
+                                  "answer_tokens": len(completion.token_ids), "fenced": bool(FENCE.search(answer)),
+                                  "answer": answer}
+    return out
+
+
+def forced_summary(rows: list[dict], b: int) -> dict:
+    answers = [r["budgets"][str(b)] for r in rows]
+    out = {"responses": len(answers)}
+    for name, rs in (("all", answers), ("natural", [a for a in answers if a["natural"]]),
+                     ("forced", [a for a in answers if not a["natural"]])):
+        out[name] = {"responses": len(rs), "base": sum(a["base"] for a in rs), "plus": sum(a["plus"] for a in rs),
+                     "fenced": sum(a["fenced"] for a in rs), "ended": sum(a["ended"] for a in rs)}
+    return out
+
+
+def sampled_summary(rows: list[dict]) -> dict:
+    unclosed = [r for r in rows if not r["closed"]]
+    out = {"responses": len(rows), "closed": sum(r["closed"] for r in rows),
+           "closed_within": {str(b): sum(r["closed"] and r["reasoning_tokens"] <= b for r in rows)
+                             for b in BUDGETS if b <= max(FORCED_BUDGETS)},
+           "unclosed_ended": sum(r["finish"] == "stop" for r in unclosed),
+           "unclosed_loops": sum(r["repetition"] >= LOOP for r in unclosed),
+           "unclosed_loop_stopped": sum(r["finish"] == "loop" for r in unclosed)}
+    if rows and rows[0]["budgets"]:
+        out["budgets"] = {b: forced_summary(rows, int(b)) for b in rows[0]["budgets"]}
+    return out
+
+
+def main(model: Path, out: Path, metrics: Path | None, since: float | None, n: int, budget: bool,
+         configs: list[str]) -> None:
+    """Generation (the GPU process): the responses, unscored, with their full answers (and the evalplus set's full
+    reasoning) to `out`; `score` scores them in a separate process."""
     from vllm import LLM, SamplingParams
 
     start = time.time()
     context = json.loads((model / "config.json").read_text())["max_position_embeddings"]
-    llm = LLM(str(model), trust_remote_code=True, dtype="bfloat16", max_model_len=context, seed=SEED)
+    processors = []
+    if budget and "dry" in configs:
+        from eval.dry import DryLogitsProcessor
+        processors = [DryLogitsProcessor]
+    llm = LLM(str(model), trust_remote_code=True, dtype="bfloat16", max_model_len=context, seed=SEED,
+              enable_prefix_caching=True, logits_processors=processors)
     tok = get_tokenizer()
-    sets = {"evalplus": evalplus_prompts(llm.get_tokenizer(), n), "val": val_prompts(n)}
-    flat = [(name, p) for name, every in sets.items() for p in every]
-    generating = time.time()
-    outputs = llm.generate([{"prompt_token_ids": p["ids"]} for _, p in flat],
-                           [SamplingParams(**SAMPLING, max_tokens=context - len(p["ids"]), seed=SEED + i)
-                            for i, (_, p) in enumerate(flat)], use_tqdm=False)
-    end = time.time()
-    rows = {name: [] for name in sets}
-    for (name, p), output in zip(flat, outputs, strict=True):
-        (completion,) = output.outputs
-        rows[name].append({k: v for k, v in p.items() if k != "ids"} | {"prompt_tokens": len(p["ids"])}
-                          | response(list(completion.token_ids), completion.text, completion.finish_reason,
-                                     tok.bos_token_id, tok.enc.decode))
-    del llm, outputs  # the engine's GPU memory, released before the CPU-only checks
-    gc.collect()
-    evalplus_check(rows["evalplus"])
     report = {"model": str(model), "context": context, "sampling": SAMPLING | {"n": 1, "seed": SEED},
-              "prompts_per_set": n,
-              "sets": {name: summary(r) for name, r in rows.items()} | {"all": summary(sum(rows.values(), []))},
-              "seconds": round(time.time() - start), "generation_seconds": round(end - generating),
-              "responses": {name: [{k: v for k, v in r.items() if k != "answer"} for r in rs]
-                            for name, rs in rows.items()}}
+              "prompts_per_set": n, "budget": budget, "chunk": CHUNK, "loop_stop": LOOP}
+    if budget:
+        sets = {"evalplus": evalplus_prompts(llm.get_tokenizer(), n), "val": val_prompts(n)}
+        generating = time.time()
+        responses = forced(llm, sets, configs)
+        end = time.time()
+        report |= {"configs": {c: CONFIGS[c] for c in configs}, "reasoning_max_tokens": max(FORCED_BUDGETS),
+                   "answer_max_tokens": ANSWER_TOKENS}
+    else:
+        sets = {"evalplus": evalplus_prompts(llm.get_tokenizer(), n), "val": val_prompts(n)}
+        flat = [(name, p) for name, every in sets.items() for p in every]
+        generating = time.time()
+        outputs = generate(llm, [p["ids"] for _, p in flat], [SAMPLING] * len(flat),
+                           [SEED + i for i in range(len(flat))], [context - len(p["ids"]) for _, p in flat])
+        end = time.time()
+        responses = {name: [] for name in sets}
+        for (name, p), (ids, text, finish) in zip(flat, outputs, strict=True):
+            responses[name].append(
+                {k: v for k, v in p.items() if k != "ids"} | {"prompt_tokens": len(p["ids"])}
+                | response(ids, text, finish, tok.bos_token_id, tok.enc.decode)
+                | ({"reasoning": text.rpartition(END)[0] or text} if name == "evalplus" else {}))
+    report |= {"seconds": round(time.time() - start), "generation_seconds": round(end - generating),
+               "responses": responses}
     if metrics is not None:
         report["job_tokens_per_second"] = job_cost(metrics, start if since is None else since, end)
     out.write_text(json.dumps(report, indent=1) + "\n")
 
 
+def score(generated: Path, out: Path) -> None:
+    """Scoring (a CPU process apart from the engine's, whose CUDA state a forked check_correctness would inherit
+    against EvalPlus's address-space limit): the evalplus answers' pass, then the summaries."""
+    report = json.loads(generated.read_text())
+    rows = report["responses"]
+    if report["budget"]:
+        evalplus_check([a for sets in rows.values() for r in sets["evalplus"] for a in r["budgets"].values()])
+        report["summary"] = {config: {name: sampled_summary(r) for name, r in sets.items()}
+                             for config, sets in rows.items()}
+    else:
+        evalplus_check(rows["evalplus"])
+        report["sets"] = {name: summary(r) for name, r in rows.items()} | {"all": summary(sum(rows.values(), []))}
+    report["responses"] = report.pop("responses")  # last, after the summaries
+    out.write_text(json.dumps(report, indent=1) + "\n")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("model", type=Path)
+    parser.add_argument("model", type=Path, help="the model dir; with --score, the generation's json")
     parser.add_argument("out", type=Path)
     parser.add_argument("metrics", type=Path, nargs="?")
     parser.add_argument("since", type=float, nargs="?")
     parser.add_argument("--prompts", type=int, default=PROMPTS)
+    parser.add_argument("--budget", action="store_true")
+    parser.add_argument("--configs", default=",".join(SENSITIVITY), help="with --budget, the samplings (CONFIGS)")
+    parser.add_argument("--score", action="store_true")
     args = parser.parse_args()
-    main(args.model, args.out, args.metrics, args.since, args.prompts)
+    if args.score:
+        score(args.model, args.out)
+    else:
+        main(args.model, args.out, args.metrics, args.since, args.prompts, args.budget, args.configs.split(","))

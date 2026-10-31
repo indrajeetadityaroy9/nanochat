@@ -24,8 +24,10 @@ summary() {
 d = json.load(open(sys.argv[1])); s = d["sets"]; r = d.get("job_tokens_per_second") or {}
 def one(k):
     x = s[k]; o = x["outcomes"]; c = x["closed_within"]
-    return "{}: {} closed-ended/closed-limit/unclosed-limit/unclosed-ended {}/{}/{}/{}; closed by 1K..32K {}".format(
-        k, x["responses"], o["closed_ended"], o["closed_limit"], o["unclosed_limit"], o["unclosed_ended"],
+    return ("{}: {} closed-ended/closed-limit/unclosed-limit/loop-stopped/unclosed-ended {}/{}/{}/{}/{};"
+            " closed by 1K..32K {}").format(
+        k, x["responses"], o["closed_ended"], o["closed_limit"], o["unclosed_limit"],
+        o.get("unclosed_loop_stopped", 0), o["unclosed_ended"],
         "/".join("{:.3f}".format(v) for v in c.values())) + (
         "; EvalPlus base/plus {:.3f}/{:.3f}".format(x["evalplus_pass"]["base"], x["evalplus_pass"]["plus"])
         if "evalplus_pass" in x else "")
