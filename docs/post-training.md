@@ -789,16 +789,18 @@ itself a preference loss, and DPO comes last].
   4 × 4 accumulation, as 1 × 16), AdamW with the library's betas, weight decay 0.01, warmup 10% then linear decay,
   gradient norm clipped at 2.5, one epoch at most. Full parameters instead of LoRA: at hidden size 768 a rank-128
   adapter already costs as much compute as full fine-tuning of the attention projections (§2.2) [arithmetic].
-- **Learning rate 5e-7**, the most selective of three measured (step-3000 export, CPU: 20 rows of 12 smoke prompts
-  trained 5 steps of 4 rows at constant lr, 17 rows of other prompts held out; collateral the NLL of 8 of the export's
-  own passing responses to untrained prompts, 17,180 positions): held-out mean Δ from −5.63 to −4.53 / −3.07 / −0.60,
-  NLL +3.7% / +11% / +59%, i.e. 0.012 / 0.016 / 0.042 NLL per logit of held-out Δ gained, at 5e-7 / 1.5e-6 / 6e-6
-  [measured; small n]. The rejected tokens (" the", "Wait", " perhaps") are lowered in every context, not only at
-  loop onsets: the rise concentrated on positions holding a train row's rejected token (+13% / +41% / ×3.0)
-  [measured]. The gradient norm (300–380) exceeded the clip at every step [measured], so AdamW moves each element by
-  about lr per step and the speed is set by lr × steps more than by the data [inference]. Antidoom's LoRA lr 1.5e-5
-  over LoRA's 10× (§2.2) maps to 1.5e-6, the middle arm; at 6e-6 the held-out chosen_win reached 0.40 in 5 steps
-  [measured].
+- **Learning rate 1.5e-6**, Antidoom's LoRA lr 1.5e-5 over LoRA's 10× (§2.2), the middle of three measured
+  (step-3000 export, CPU: 20 rows of 12 smoke prompts trained 5 steps of 4 rows at constant lr, 17 rows of other
+  prompts held out; collateral the NLL of 8 of the export's own passing responses to untrained prompts, 17,180
+  positions): held-out mean Δ from −5.63 to −4.53 / −3.07 / −0.60, NLL +3.7% / +11% / +59%, i.e. 0.012 / 0.016 /
+  0.042 NLL per logit of held-out Δ gained, at 5e-7 / 1.5e-6 / 6e-6 [measured; small n]; 1.5e-6 moved the held-out Δ
+  2.3× as far as 5e-7 [arithmetic], and at 6e-6 the held-out chosen_win reached 0.40 in 5 steps [measured]. The most
+  selective arm, 5e-7, was too slow on the step-7676 rows: in 90 of 306 steps it moved the held-out Δ only from −6.95
+  to −4.69, slowing under the decay [measured], toward about −3.5 and a chosen_win near 0.05 at the epoch's end,
+  against the 0.35 stop [estimate]. The rejected tokens (" the", "Wait", " perhaps") are lowered in every context,
+  not only at loop onsets: the NLL rise concentrated on positions holding a train row's rejected token (+13% / +41% /
+  ×3.0) [measured]. The gradient norm (300–380) exceeded the clip at every step [measured], so AdamW moves each
+  element by about lr per step and the speed is set by lr × steps more than by the data [inference].
 - **Held-out monitor and stop** (`monitor_split`, `monitor`, `STOP`): before training, 256 rows of whole prompts (a
   seeded permutation of the prompt ids; the stop's standard error sqrt(0.35 × 0.65 / 256) ≈ 0.03 against 0.053 for
   Antidoom's 5-step window of 16 rows [arithmetic], the forwards every 10 steps about a third of a training step's
@@ -836,17 +838,18 @@ itself a preference loss, and DPO comes last].
   AdamW state, and a DPO pair holds both sides' activations, about 8.0 GB for the longest val pair (16,839 tokens,
   §8.4) [estimate], and at most 2 × 32,768 tokens, about 15.4 GB, at the length cap (a loop pair's two sequences
   both carry its history) [arithmetic]; training runs alone at 0.85 of the GPU's memory (§8.7).
-- **Stochastic rounding to bf16** (`bf16`): one AdamW step moves an element by at most about lr, so a run at 5e-7
-  over a few hundred steps moves most elements less than half their bf16 spacing (median |w| 0.0243 of the decoder's
-  matmul weights: spacing 2⁻¹³ = 1.22e-4 [measured: export of step 3000]), and rounding to nearest at the write erases
-  such updates: in a 3-step CPU DPO at lr 5e-7 the written weights kept 0.007 of the fp32 update along its direction
-  [measured]. The bf16 tensors are rounded stochastically (uniform noise below the 16 dropped bits, then truncation:
-  unbiased, a value on the bf16 grid unchanged; a shift of 1e-5 survives as 0.9998 of itself on average against 0.103
-  by nearest rounding [measured]). `train-log.json` records the written model's step and `retention`: ⟨written −
-  start, final − start⟩ / |final − start|² and the share of elements changed; the log history (FTPO: loss, its three
-  terms, chosen_win, margin_win, mean Δ, every 5 steps; DPO: loss, the implicit rewards β(log π − log π_ref) of each
-  side, their margin and accuracy, the sides' log-probabilities, every step) and the peak GPU memory; for FTPO also
-  the chosen sets' statistics and the monitor points ({step, chosen_win, margin_win, delta, nontarget}).
+- **Stochastic rounding to bf16** (`bf16`): one AdamW step moves an element by at most about lr, so the DPO run at
+  5e-7 over a few hundred steps moves most elements less than half their bf16 spacing (median |w| 0.0243 of the
+  decoder's matmul weights: spacing 2⁻¹³ = 1.22e-4 [measured: export of step 3000]), and rounding to nearest at the
+  write erases such updates: in a 3-step CPU DPO at lr 5e-7 the written weights kept 0.007 of the fp32 update along
+  its direction [measured]. The bf16 tensors are rounded stochastically (uniform noise below the 16 dropped bits, then
+  truncation: unbiased, a value on the bf16 grid unchanged; a shift of 1e-5 survives as 0.9998 of itself on average
+  against 0.103 by nearest rounding [measured]). `train-log.json` records the written model's step and `retention`:
+  ⟨written − start, final − start⟩ / |final − start|² and the share of elements changed; the log history (FTPO: loss,
+  its three terms, chosen_win, margin_win, mean Δ, every 5 steps; DPO: loss, the implicit rewards β(log π − log
+  π_ref) of each side, their margin and accuracy, the sides' log-probabilities, every step) and the peak GPU memory;
+  for FTPO also the chosen sets' statistics and the monitor points ({step, chosen_win, margin_win, delta,
+  nontarget}).
 - **Smoke** [measured]: on the 35 rows of the step-3000 smoke's 160 T 0.6 rollouts (§8.4), the export's chosen sets
   hold 1 / 3 / 10.6 tokens (p10 / p50 / p90; regularisation pruned 1); 3 steps of 4 rows on the GPU: loss 10.29 =
   L_pref 10.25 + 0.05 × 0.326 + 0.4 × 0.061 (every w_c = 1, where both normalizations agree), chosen_win 0,
@@ -896,10 +899,9 @@ in 9,719 s, 3,911 tokens/s per engine), against 18.7K for one 0.85 engine (the s
   A mining response stops once its tail is an exact cycle (§8.2, `MiningLoopStop`), since an FTPO row needs the
   loop only through its first repeat. Antidoom collects 20,000 ("stops after collecting 20k pairs" [blog]); here a
   group of 24,000 prompts generates ≈152M tokens, ≈2.7 h at wave 0's 15.6K tokens/s in total [measured rate,
-  arithmetic], and the stop at chosen_win 0.35 is projected near step 165 at lr 5e-7, ≈2,600 rows [estimate, from CPU
-  FTPO probes on step-3000 rows], so one group suffices and a second would mostly go unused. At the step-7676 probe's
-  loop share (≈0.4) one group yields ≈8–10K rows [estimate], ≈6–7K after rebalancing. The mining rollouts are not
-  verified: the rows need no verdicts.
+  arithmetic]; one group suffices: the step-7676 group's rows gave an FTPO epoch of 306 steps of 16 rows [measured],
+  and the chosen_win stop can end it earlier. At the step-7676 probe's loop share (≈0.4) one group yields ≈8–10K rows
+  [estimate], ≈6–7K after rebalancing. The mining rollouts are not verified: the rows need no verdicts.
 - **DPO waves** (`dpo_waves`): 2,000 KodCode train-pool prompts per wave (§8.1 `sample`, wave k seeded k and
   excluding the earlier DPO waves' prompts) × 4 samples at T 0.6 from the FTPO model, each exact-cycle loop then
   resumed twice from its history (§8.2), in one group of 2 engines at 0.425 each (4,000 prompts), verified (§8.3);

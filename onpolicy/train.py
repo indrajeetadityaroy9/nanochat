@@ -96,10 +96,12 @@ MARGIN, LAMBDA_TARGET, TAU_TARGET, LAMBDA_NONTARGET = 2.0, 0.05, 0.5, 0.4
 # src/antidoom/ftpo_train.py:126,140
 BATCH, WARMUP, WEIGHT_DECAY = 16, 0.1, 0.01
 LOG_STEPS, MAX_GRAD_NORM = 5, 2.5
-# Full-parameter lr: the most selective measured (step-3000 export, CPU, 20 trained rows, constant lr, batch 4): the
-# NLL of the export's own passing responses rose 3.7% / 11% / 59%, 0.012 / 0.016 / 0.042 NLL per logit of held-out
-# Delta gained, at 5e-7 / 1.5e-6 / 6e-6 (docs/post-training.md §8.5)
-LR = 5e-7
+# Full-parameter lr: Antidoom's LoRA 1.5e-5 (configs/default.yaml) / 10. On the step-3000 export (CPU, 20 trained
+# rows, constant lr, batch 4) the NLL of its own passing responses rose 3.7% / 11% / 59%, 0.012 / 0.016 / 0.042 NLL
+# per logit of held-out Delta gained, at 5e-7 / 1.5e-6 / 6e-6 (docs/post-training.md §8.5); at 5e-7 the live run
+# moved the held-out Delta only from -6.95 to -4.69 in 90 of 306 steps, slowing under the decay (projected about -3.5
+# and chosen_win about 0.05 at the epoch's end, against the 0.35 stop), where 1.5e-6 moved the CPU rows 2.3x as far
+LR = 1.5e-6
 # held-out monitor and its stop: early stopping at chosen_win 0.35, the setting of Antidoom's published runs
 # (liquid.ai/blog/antidoom; the repository's default.yaml early_stopping_chosen_win is 0.4, its README's band 0.15-0.3
 # "strong reduction", past 0.5 "overtraining"); 256 rows put the stop's standard error at sqrt(0.35 x 0.65 / 256) ≈
