@@ -13,8 +13,8 @@
 #      the FTPO rows before rebalancing
 #      reach TARGET_ROWS (default 4,000, docs/post-training.md §8.7 Waves) or the group's last wave finds fewer than
 #      PROMPTS prompts left (the pool is exhausted);
-#   4. FTPO from the export (onpolicy/train.py ftpo, FREEZE none or head, default none) to ftpo/: one model, written
-#      when the held-out chosen_win reaches 0.35 or at the epoch's end, and ftpo/train-log.json;
+#   4. FTPO from the export (onpolicy/train.py ftpo: the last 5 layers and the head, the NLL guard) to ftpo/: one
+#      model, written when the held-out chosen_win reaches 0.35, the guard's NLL rises 10%, or at the epoch's end;
 #   5. DPO waves (`dpo_waves`): PROMPTS_DPO distinct KodCode train-pool prompts per wave (default 2,000) x 4 samples
 #      at T 0.6 from ftpo/ to dpo-rollouts/wave-<k>/, each exact-cycle loop resumed 2 times from its history
 #      (onpolicy/rollouts.py), in groups of at most ENGINES concurrent engines as in 2.-3., verified
@@ -38,7 +38,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2
 PROMPTS=${PROMPTS:-6000} SAMPLES=${SAMPLES:-0.6:1} VAL_PROMPTS=${VAL_PROMPTS:-512} TARGET_ROWS=${TARGET_ROWS:-4000}
-PROBE_PROMPTS=${PROBE_PROMPTS:-128} FREEZE=${FREEZE:-none} ENGINES=${ENGINES:-4}
+PROBE_PROMPTS=${PROBE_PROMPTS:-128} ENGINES=${ENGINES:-4}
 PROMPTS_DPO=${PROMPTS_DPO:-2000} DPO_PAIRS=${DPO_PAIRS:-8000} DPO_WAVES=${DPO_WAVES:-2}
 STAGES=${STAGES:-rollouts train dpo evaluate} UTIL=${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
 for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
@@ -178,7 +178,7 @@ if [[ " $STAGES " == *" rollouts "* ]]; then
 fi
 if [[ " $STAGES " == *" train "* ]]; then
   [ -f "$OUT/ftpo/train-log.json" ] || timed ftpo "${GPU[@]}" nanochat-onpolicy python -m onpolicy.train ftpo \
-    "$(w "$OUT/model")" "$(w "$OUT/rollouts/ftpo.jsonl")" "$(w "$OUT/ftpo")" --freeze "$FREEZE"
+    "$(w "$OUT/model")" "$(w "$OUT/rollouts/ftpo.jsonl")" "$(w "$OUT/ftpo")"
 fi
 if [[ " $STAGES " == *" dpo "* ]] && [ -f "$OUT/ftpo/train-log.json" ] && [ ! -f "$OUT/dpo/train-log.json" ]; then
   dpo_waves
