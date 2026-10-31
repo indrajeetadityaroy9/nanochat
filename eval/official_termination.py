@@ -247,8 +247,7 @@ def generate(llm, prompts: list[list[int]], sampling: list[dict], seeds: list[in
                 finish[k] = "stop"
             elif len(generated[k]) >= limits[k]:
                 finish[k] = "length"
-            elif (len(generated[k]) >= REPEAT_TAIL and END not in text and (not stop or stop not in text)
-                  and repetition(generated[k]) >= LOOP):
+            elif len(generated[k]) >= REPEAT_TAIL and END not in text and repetition(generated[k]) >= LOOP:
                 finish[k] = "loop"
             else:
                 remaining.append(k)

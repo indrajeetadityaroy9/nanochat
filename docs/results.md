@@ -14,7 +14,6 @@ measured; [unverified] a figure without a record. Paper values are the papers' o
 |`artifacts/runs/<base run>/official-69874/summary.json`|per-problem verdicts and pass@1 with standard errors and 95% intervals per benchmark|
 |`…/official-69874/{evalplus,multipl-e,lm-eval,infilling}/`|each tool's own samples and verdict files (`lm-eval/`: MBPP 3-shot with normalized line endings, task `mbpp_lf`)|
 |`…/official-69874/lm-eval-crlf/`|MBPP 3-shot on lm-evaluation-harness's unmodified CRLF prompts (task `mbpp`)|
-|`…/official-69874/compare-eval-69874.json`|per-problem agreement of the official tools with the in-repository harness|
 |`artifacts/runs/<base run>/likelihood-<step>.json`|bits per byte per domain at 8K and 32K context, per saved step from 62,887|
 |`results/pretrain/trajectory.json`|those steps' bits per byte with standard errors, and each step's paired change from step 66,063 (8K, solutions) or 66,163 (32K) and from the step before (`eval/trajectory.py`)|
 |`artifacts/runs/<SFT run>/metrics.jsonl`|the SFT run's train records and its `val` records (held-out response loss)|
@@ -64,10 +63,8 @@ by the reference code. Same model, settings and 500 problems [measured]:
 
 A glued response holds a `def`, `class`, `if`, `elif`, `else`, `for`, `while`, `try`, `except`, `finally` or `with`
 line whose colon is followed by a character that is neither whitespace nor `#` (`def binary_to_decimal(n):n`). Per
-problem, CRLF and LF both pass 83, CRLF only 9, LF only 78, neither 330 (exact McNemar p = 7.5e-15); against the
-in-repository harness, which prompted with the CRLF shots (docs/evaluation.md §8), LF passes 70 problems the harness
-fails and fails 12 it passes (p = 4.1e-11) [measured]. On EvalPlus, whose prompts hold no carriage return, no failure
-is a syntax error (§3).
+problem, CRLF and LF both pass 83, CRLF only 9, LF only 78, neither 330 (exact McNemar p = 7.5e-15) [measured]. On
+EvalPlus, whose prompts hold no carriage return, no failure is a syntax error (§3).
 
 ## 2. Comparison with published base models
 

@@ -3,7 +3,7 @@
 How a checkpoint is scored: the likelihoods, the parse measure and the 1@10 mode by the repository's own evaluation,
 the code benchmarks by their official tools on the exported checkpoint; every metric and error bar the repository
 computes (`metrics.py`), the decoder, the syntax constraint and checks of the 1@10 mode, and the Hugging Face export
-with its agreement and the cross-check of the two scorings.
+with its agreement.
 
 Markers: [arithmetic] derived from code numbers; [inference] reasoning, not measured; [estimate]; [unverified] a
 figure without a record, or a paper value its extracted text lacks. Measurements give their setting
@@ -20,7 +20,7 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/line_endings.py` (`lf`: the corpus's line endings for text an official tool sends the model) | §4 |
 | `scripts/official_eval.sh`, `docker/Dockerfile.eval`, `eval/official.py`, `eval/official_infilling.py`, `eval/official_site/sitecustomize.py` | §4, §8 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_lcb_shards.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_loop_stop.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8; its loop stop, §10 |
-| `eval/official_termination.py`, `eval/loop.py` (the loop measure and stop rule), `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/test_official_processors.py` (the parser, the loop stop, DRY), `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
+| `eval/official_termination.py`, `eval/loop.py` (the loop measure and stop rule), `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/test_dry.py` (DRY against Eq. 1), `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function); `results/pretrain/mbpp_3shot_contamination.json` (MBPP 3-shot's overlap with the train corpus) | §5; §4 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
@@ -412,7 +412,7 @@ reference, Mbpp/130 (`max(d, key=d.get)` on a `defaultdict`, an overload miss); 
 scores it (sanitize drops its helper). The
 checks not kept: `docs/experiments.md` §6.
 
-## 8. Export, vLLM and the standard-protocol cross-check
+## 8. Export and vLLM
 
 `inference/export_hf.py` `export` writes a checkpoint (`checkpoint-<step>.pt` or `weights-<step>.pt`) as a Hugging
 Face model directory that `AutoModelForCausalLM.from_pretrained(<dir>, trust_remote_code=True)` and
@@ -443,11 +443,9 @@ attends within each packed piece (`cu_seqlens`); the model file attends over its
 scored segment by segment.
 
 **Agreement with the training forward** (CPU, fp32 load, `sdpa`): the d24 rehearsal's `checkpoint-1102.pt` (8K;
-`docs/training.md` §7) against a re-evaluation of that checkpoint by `eval/suite.py`, whose per-row bits come from the
-compiled bf16 `CausalLM.losses` on the GH200. (The run directory's `eval-1102.json`, written by earlier code, has the
-same rows and bytes and per-corpus bpb 0.07% lower to 0.34% higher than the re-evaluation's [unverified: cause not
-established].) Val rows j = 0 and ⌊n/2⌋ of `"8k"` `"corpora"` (n the record's `"rows"`), each piece its own sequence
-from position 0:
+`docs/training.md` §7) against its evaluation by `eval/suite.py`, whose per-row bits come from the compiled bf16
+`CausalLM.losses` on the GH200. Val rows j = 0 and ⌊n/2⌋ of `"8k"` `"corpora"` (n the record's `"rows"`), each piece
+its own sequence from position 0:
 
 | Corpus | j | Pieces | Bytes (record = export) | Record bits | Export bits | Δbpb |
 |---|---|---|---|---|---|---|
@@ -495,43 +493,8 @@ so the difference is of the size of bf16 rounding [measured; inference].
   greedy continuations stays within one standard error (HumanEval+ 0.0488/0.0488 for every variant; MBPP+
   0.0265/0.0238 → 0.0238/0.0212).
 
-**Cross-check of the official tools against the harness** (step 69,874: the official summary against the harness's
-record of the same checkpoint, written by the removed harness modes at `be9027f` with `NativeDecoder`, §6, by
-`metrics.compare` and the per-problem agreement of `eval/official.py`'s record argument,
-`official-69874/compare-eval-69874.json`; that argument was removed after `eba63da`, as master's `evaluate` writes no
-greedy or sampled records to pair with; MBPP 3-shot from the official run on lm-eval's own CRLF shots,
-`official-69874/lm-eval-crlf/`, as the harness prompted). Per problem (exact McNemar; Holm over the rows):
-
-| Benchmark | Harness | Official | Both / harness only / official only / neither | p (Holm) |
-|---|---|---|---|---|
-| HumanEval | 0.2683 | 0.2683 | 43 / 1 / 1 / 119 | 1.0 (1.0) |
-| HumanEval+ | 0.2256 | 0.2195 | 36 / 1 / 0 / 127 | 1.0 (1.0) |
-| MBPP (EvalPlus base) | 0.4233 | 0.4444 | 159 / 1 / 9 / 209 | 0.021 (0.26) |
-| MBPP+ | 0.3519 | 0.3651 | 132 / 1 / 6 / 239 | 0.125 (1.0) |
-| HumanEval-C++ greedy | 0.2236 | 0.2174 | 35 / 1 / 0 / 125 | 1.0 (1.0) |
-| MBPP-C++ greedy | 0.3602 | 0.3678 | 141 / 2 / 5 / 249 | 0.45 (1.0) |
-| HumanEval-C++ sampled (20) | 0.2255 | 0.2199 | — | 0.29, normal (1.0) |
-| MBPP-C++ sampled (20) | 0.3503 | 0.3510 | — | 0.83, normal (1.0) |
-| MBPP 3-shot | 0.206 | 0.184 | 86 / 17 / 6 / 391 | 0.035 (0.38) |
-| Infilling single-line PSM | 0.5537 | 0.5528 | 565 / 7 / 6 / 455 | 1.0 (1.0) |
-| Infilling multi-line PSM | 0.2600 | 0.2612 | 1,479 / 33 / 40 / 4,263 | 0.48 (1.0) |
-| Infilling random-span PSM | 0.1165 | 0.1134 | 170 / 21 / 16 / 1,433 | 0.51 (1.0) |
-
-No row differs after Holm's adjustment. The prompts are token-identical (EvalPlus, MultiPL-E, MBPP 3-shot 500 of 500,
-infilling through the same `fim_prompt`), and so are the budgets and stops but two: MultiPL-E's 1,024 positions with
-the prompt in the harness against 1,024 new tokens in `automodel_vllm.py`, and MBPP's stop, `"[DONE]"` in both, plus
-the EOS string lm-eval adds and vLLM's EOS id (BOS), where `NativeDecoder` ends at BOS. All 44 greedy
-problems whose verdicts differ (HumanEval+ 2, MBPP+ 11, HumanEval-C++ 1, MBPP-C++ 7, MBPP 3-shot 23) are token
-divergences: the two completions differ at a token before either ends, so no stop or budget decides one. At the first
-differing token the export's fp32 forward on CPU ranks the official token first 25 times and the harness's 19, by a
-median |log-probability margin| of 0.038 nats (43 of the 44 below 0.15; HumanEval/96 1.5): near-ties that the two
-bf16 decoders break apart [inference]. MBPP 3-shot's 23: the harness passes 17 and the official tool 6; among the 17,
-fp32 prefers the official token 11 times, among the 6 the harness's 3 times; first divergence at generated token
-0–70, median |margin| 0.048 nats. Infilling middles are identical for 971 of 1,033, 5,011 of 5,815 and 1,169 of 1,640
-problems, and about as many run to the budget (harness 138, 843, 1,028; official 136, 835, 1,029). The harness's own
-modes were removed on this evidence (`docs/experiments.md` §6); `evaluate` keeps the likelihoods, the parse measure
-and the 1@10 mode. `eval/official.py` rerun on the stored tool outputs of `official-69874/` reproduces its
-`summary.json` byte for byte [measured].
+**Official summary** (`eval/official.py`): rerun on the stored tool outputs of `official-69874/`, it reproduces that
+directory's `summary.json` byte for byte [measured].
 
 **The reasoning protocol's requests** (`scripts/official_reasoning.sh`, `docs/post-training.md` §5) as `vllm serve`
 received them [measured: `--enable-log-requests` on a step-1,000 SFT export, two HumanEval+ problems per EvalPlus
@@ -618,9 +581,9 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
   `termination-2000.json`, `termination-budget-2000.json`]. `scripts/official_reasoning.sh`'s server applies the same
   stop as a vLLM logits processor (`eval/official_loop_stop.py`): at each multiple of 2,048 generated tokens from
   4,096 on, a response that meets it gets BOS as its next token and ends with an empty answer, scored as the loop run
-  on to the budget would be; each stop is a line of `loop-stops.jsonl`. `eval/test_official_processors.py` checks the
-  rule, the served stop (BOS forced only at a check, never in a refill chunk) and the reasoning parser on a recorded
-  loop.
+  on to the budget would be. EvalPlus's stops are counted from its samples' token ids (`eval/loop.py` `stopped`);
+  LiveCodeBench's, which keeps no ids, from the server's log of stops, emptied before each shard and kept with the
+  shard's outputs (`lcb/shards/<start>/loop-stops.jsonl`), so a rerun counts each kept output's stops once.
 - **Metrics** (per set and pooled; `RUNS/<run>/termination-<step>.json`): five exclusive outcomes, closed and ended
   (BOS), closed with the answer at the limit, never closed at the limit, never closed and loop-stopped, never closed
   and ended; the closing-time curve P(closed with reasoning ≤ B) for B = 1K, 2K, 4K, 8K, 16K, 32K tokens; reasoning
@@ -651,8 +614,8 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
   forced. `--dry`: the same under the protocol's sampling with and without DRY on the reasoning (`eval/dry.py`, a
   vLLM logits processor; arXiv 2608.22761 App. A Eq. 1 with its Table 8 setting: multiplier 0.8, base 1.75, allowed
   length 2, range 1,024; breakers the tokens holding a newline, colon, quote or asterisk; off once `</think>` is
-  emitted; a request opts in with `extra_args={"dry": {}}`). `eval/test_official_processors.py` checks its penalties
-  against a direct evaluation of Eq. 1 and its mirror of each request's output through the engine's step state.
+  emitted; a request opts in with `extra_args={"dry": {}}`). `eval/test_dry.py` checks its penalties against a direct
+  evaluation of Eq. 1.
 - **Serving faithfulness** (`scripts/serving_check.sh`, `eval/serving_check.py`,
   `RUNS/<run>/serving-check-<step>.json`):
   the export in vLLM against the training model on SFT val documents. Prefill: per-token NLL of 8 documents of

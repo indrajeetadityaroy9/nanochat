@@ -5,8 +5,9 @@ top-p 0.95), how the samples end (eval/official_evalplus.py's <samples>.endings.
 ended by the server's loop stop (eval/official_loop_stop.py), pass@1 over every sample, and pass@1 over the samples
 that closed (pooled: each problem weighted by its closed samples); "base" on HumanEval's or MBPP's tests, "plus" on
 both those and EvalPlus's (base_status and plus_status "pass"). A sample joins its verdict by its problem and its
-sanitized solution text. "loop_stops": the server's stops (its LOOP_STOPS log, one line each) of EvalPlus's samples
-and of lcb_runner's (the rest; lcb_runner keeps no token ids).
+sanitized solution text. "loop_stops": the server's stops of EvalPlus's samples (from their token ids) and of
+lcb_runner's (lcb_runner keeps no token ids: the lines of each shard's kept log, lcb/shards/<start>/loop-stops.jsonl,
+over the shards of lcb/shards.txt).
 
     python -m eval.official_reasoning <official-<step> dir>
 """
@@ -18,7 +19,7 @@ from pathlib import Path
 
 MODES = {"greedy": "nanochat_openai_temp_0.0", "sampled": "nanochat_openai_temp_0.6"}
 BENCHMARKS = {"humaneval_plus": "humaneval", "mbpp_plus": "mbpp"}
-LOOP_STOPS = "loop-stops.jsonl"  # scripts/official_reasoning.sh's NANOCHAT_LOOP_STOP_LOG
+LOOP_STOPS = "loop-stops.jsonl"  # a LiveCodeBench shard's log of scripts/official_reasoning.sh's NANOCHAT_LOOP_STOP_LOG
 
 
 def jsonl(path: Path) -> list[dict]:
@@ -58,7 +59,9 @@ if __name__ == "__main__":
     summary = {benchmark: {mode: cell(samples(out / "evalplus" / dataset / identifier))
                            for mode, identifier in MODES.items()}
                for benchmark, dataset in BENCHMARKS.items()}
-    evalplus = sum(c["loop_stopped"] for modes in summary.values() for c in modes.values())
-    summary["loop_stops"] = {"evalplus": evalplus, "lcb": len(jsonl(out / LOOP_STOPS)) - evalplus}
+    shards = [line.split()[0] for line in (out / "lcb" / "shards.txt").read_text().splitlines()]
+    summary["loop_stops"] = {
+        "evalplus": sum(c["loop_stopped"] for modes in summary.values() for c in modes.values()),
+        "lcb": sum(len(jsonl(out / "lcb" / "shards" / start / LOOP_STOPS)) for start in shards)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(json.dumps(summary, indent=1))

@@ -9,19 +9,21 @@
 # evaluator. max_tokens 32,768 in every request: vLLM caps it at the context less the prompt
 # (api_utils.get_max_tokens). First, the natural-termination probe (eval/official_termination.py) on the export; then
 # every prompt either tool will send is checked for "\r" and the first's served ids against the SFT context
-# (eval/official_tokenize.py). The parser is registered in every server process by eval/official_site/sitecustomize.py
-# (NANOCHAT_REASONING_PARSER). The server stops loops as the probe does (eval/official_loop_stop.py: a response with
-# no "</think>" whose last 4,096 tokens repeat, checked every 2,048, is ended, an empty answer either way), each stop
-# a line of loop-stops.jsonl. Every client of the server fails (exit 1) once the server stops answering its /health
+# (eval/official_tokenize.py). The parser is registered in every server process by eval/official_site/sitecustomize.py.
+# The server stops loops as the probe does (eval/official_loop_stop.py: a response with no "</think>" whose last 4,096
+# tokens repeat, checked every 2,048, is ended, an empty answer either way), each stop a line of the log
+# loop-stops.jsonl; the log is emptied before each LiveCodeBench shard and kept in the shard's directory once the shard
+# completes, so each kept log holds exactly the stops of its shard's kept outputs (EvalPlus's stops are read from its
+# samples' token ids). Every client of the server fails (exit 1) once the server stops answering its /health
 # (`served`). LiveCodeBench is generated in shards of the window, calendar months (eval/official_lcb_shards.py), each
 # kept and skipped on a rerun, and lcb_runner's evaluation scores their union.
 #
 #   [MODEL=<model dir> TAG=<name>] scripts/official_reasoning.sh <run name> <step> [<problems per benchmark, a smoke>]
 #
 # Outputs in RUNS/<run>/official-<step>/: model/, tokenize-{evalplus,lcb}.json, evalplus/ (each samples file with its
-# .endings.jsonl), lcb/ (shards/<start>/ each shard's lcb_runner directory; output/ the union's outputs and
-# evaluation), loop-stops.jsonl, server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's
-# closure rate, loop stops, pass@1 and pass@1 given closure; both tools' loop stops); RUNS/<run>/termination-<step>.json
+# .endings.jsonl), lcb/ (shards/<start>/ each shard's lcb_runner directory and loop-stops.jsonl; output/ the union's
+# outputs and evaluation), server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's closure rate,
+# loop stops, pass@1 and pass@1 given closure; both tools' loop stops); RUNS/<run>/termination-<step>.json
 # (generated, then scored in a CPU container).
 # With MODEL and TAG, a model directory in the export's format (onpolicy/train.py's) is evaluated in place of the
 # step's export, its outputs in RUNS/<run>/official-<step>-<TAG>/ with no termination probe (scripts/onpolicy.sh
@@ -39,7 +41,6 @@ OUT=$RUN_DIR/official-$STEP${TAG:+-$TAG}
 mkdir -p "$OUT"/{model,evalplus,lcb}
 W=/workspace/nanochat C=/workspace/nanochat/${OUT#"$ROOT"/} PORT=${PORT:-8000} SERVER=nanochat-eval-serve-$$
 LCB_WINDOW=(release_v6 2024-08-01 2025-05-01)  # lcb_runner's --release_version, --start_date, --end_date
-touch "$OUT/loop-stops.jsonl"
 docker build -q -f "$ROOT/docker/Dockerfile.eval" -t nanochat-eval "$ROOT/docker" > /dev/null
 
 # XDG_CACHE_HOME as the nanochat image's (docker/Dockerfile): EvalPlus's datasets and ground-truth caches
@@ -86,7 +87,7 @@ fi
 
 docker run -d --rm --name $SERVER --ipc=host --init --network host --ulimit core=0 --device nvidia.com/gpu=all \
   --user "$(id -u):$(id -g)" -e HOME=/tmp -e VLLM_CACHE_ROOT=$W/artifacts/cache/vllm \
-  -e PYTHONPATH=$W/eval/official_site:$W -e NANOCHAT_REASONING_PARSER=1 -e NANOCHAT_LOOP_STOP_LOG=$C/loop-stops.jsonl \
+  -e PYTHONPATH=$W/eval/official_site:$W -e NANOCHAT_LOOP_STOP_LOG=$C/loop-stops.jsonl \
   -v "$ROOT":$W -v "$(realpath "$ROOT/artifacts")":$W/artifacts -v "$OUT/model":/model:ro nanochat-eval \
   vllm serve /model --served-model-name nanochat --trust-remote-code --dtype bfloat16 --port $PORT \
   --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" --reasoning-parser nanochat \
@@ -141,9 +142,11 @@ else
   mapfile -t SHARDS < "$OUT/lcb/shards.txt"
   for shard in "${SHARDS[@]}"; do
     read -r start end <<< "$shard"
-    [ -f "$OUT/lcb/shards/$start/$LCB_OUTPUT" ] ||
-      step "lcb_runner $start $end" served "${CLIENT_RUN[@]}" -w "$(lcb_dir shards/$start)" nanochat-eval \
-        /opt/lcb/bin/python -m eval.official_lcb "${LCB[@]}" --start_date $start --end_date $end
+    [ -f "$OUT/lcb/shards/$start/$LCB_OUTPUT" ] && continue
+    : > "$OUT/loop-stops.jsonl"
+    step "lcb_runner $start $end" served "${CLIENT_RUN[@]}" -w "$(lcb_dir shards/$start)" nanochat-eval \
+      /opt/lcb/bin/python -m eval.official_lcb "${LCB[@]}" --start_date $start --end_date $end
+    mv "$OUT/loop-stops.jsonl" "$OUT/lcb/shards/$start/loop-stops.jsonl"
   done
   step "lcb_runner evaluate" "${CPU[@]}" -w "$(lcb_dir .)" nanochat-eval /opt/lcb/bin/python -m \
     eval.official_lcb_shards evaluate "${LCB[@]}" --start_date ${LCB_WINDOW[1]} --end_date ${LCB_WINDOW[2]} \

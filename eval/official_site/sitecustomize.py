@@ -7,17 +7,15 @@
   (corpus/pretrain/prepare.py), so the model never trained on one; a tool whose prompts carry one gets a normalizing
   task or hook (docs/evaluation.md §4) instead of a silently corrupted measurement. Token-id prompts are decoded to
   check.
-- With NANOCHAT_REASONING_PARSER set, every process registers the "nanochat" reasoning parser
-  (eval/official_reasoning_parser.py): `vllm serve --reasoning-parser-plugin` imports it in the API server only, and
-  the spawned engine core looks the parser up too.
+- Every process registers the "nanochat" reasoning parser (eval/official_reasoning_parser.py): `vllm serve
+  --reasoning-parser-plugin` imports it in the API server only, and the spawned engine core looks the parser up too.
 """
 import functools
 import os
 
 from vllm import LLM
 
-if os.environ.get("NANOCHAT_REASONING_PARSER"):
-    import eval.official_reasoning_parser  # noqa: F401 (registers the parser)
+import eval.official_reasoning_parser  # noqa: F401 (registers the parser)
 
 init, generate = LLM.__init__, LLM.generate
 

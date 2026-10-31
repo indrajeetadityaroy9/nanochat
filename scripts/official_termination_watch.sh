@@ -21,7 +21,7 @@ print(max(r["step"] for r in rows if r.get("kind") == "train"), "ended" if any(r
 
 summary() {
   python3 -c 'import json, sys
-d = json.load(open(sys.argv[1])); s = d["sets"]; r = d.get("job_tokens_per_second") or {}
+d = json.load(open(sys.argv[1])); s = d["sets"]; r = d["job_tokens_per_second"]
 def one(k):
     x = s[k]; o = x["outcomes"]; c = x["closed_within"]
     return ("{}: {} closed-ended/closed-limit/unclosed-limit/loop-stopped/unclosed-ended {}/{}/{}/{}/{};"
@@ -33,7 +33,7 @@ def one(k):
         if "evalplus_pass" in x else "")
 lost = r.get("seconds_lost")
 print(" | ".join(one(k) for k in ("evalplus", "val", "all")) + " | {} s; run tok/s {} -> {}, {} s lost".format(
-    d["seconds"], r.get("before_median") and round(r["before_median"]), r.get("during_median") and
+    d["seconds"], round(r["before_median"]), r.get("during_median") and
     round(r["during_median"]), None if lost is None else round(lost)))' "$1"
 }
 
