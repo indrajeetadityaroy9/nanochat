@@ -26,6 +26,7 @@ another domain transfer poorly (arXiv 2610.19376 Table 12: 55.3% loops left agai
 
     python -m onpolicy.prompts [--mix]
 """
+import argparse
 import ast
 import hashlib
 import json
@@ -51,12 +52,10 @@ TRAIN: set[bytes] = set()  # a read_mix worker's train context keys (init_mix)
 
 
 def names(test: str, info: list[dict] | None) -> list[str]:
-    """The names a pytest file imports from solution, else test_info's function names."""
-    try:
-        found = [a.name for node in ast.walk(ast.parse(test)) if isinstance(node, ast.ImportFrom)
-                 and node.module == "solution" for a in node.names if a.name != "*"]
-    except SyntaxError:
-        found = []
+    """The names a pytest file imports from solution (every KodCode pytest file parses), else test_info's function
+    names."""
+    found = [a.name for node in ast.walk(ast.parse(test)) if isinstance(node, ast.ImportFrom)
+             and node.module == "solution" for a in node.names if a.name != "*"]
     return sorted(set(found)) or sorted({f["function_name"] for f in info or [] if f.get("function_name")})
 
 
@@ -223,6 +222,6 @@ def sample_mix(pool: list[dict], n: int, seed: int) -> list[dict]:
 
 
 if __name__ == "__main__":
-    import sys
-
-    build_mix() if sys.argv[1:] == ["--mix"] else build()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mix", action="store_true", help="the mining pool (onpolicy-mix.parquet)")
+    build_mix() if parser.parse_args().mix else build()

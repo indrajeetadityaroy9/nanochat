@@ -29,6 +29,9 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+from vllm import LLM
 
 from corpus.tokenizer import get_tokenizer
 from eval.official_termination import CHUNK, LOOP, generate, job_cost, response
@@ -68,8 +71,6 @@ def parse_samples(text: str) -> list[tuple[float, int]]:
 
 def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, int]], seed: int, max_tokens: int,
          exclude: list[Path], metrics: Path | None, since: float | None) -> None:
-    from vllm import LLM
-
     start = time.time()
     tok = get_tokenizer()
     out.mkdir(parents=True, exist_ok=True)
@@ -106,9 +107,6 @@ def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, 
                         "loop": loop, "loop_onset": onset, "loop_period": period}
                        | {key: r[key] for key in ("finish", "outcome", "closed", "ended", "tokens", "reasoning_tokens",
                                                   "answer_tokens", "answer", "repetition")})
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     pq.write_table(pa.Table.from_pylist(records), out / "rollouts.parquet")
     generated = sum(len(r["ids"]) for r in records)
     meta = {"model": str(model), "split": split, "held_out": held, "excluded": len(seen), "prompts": len(rows),

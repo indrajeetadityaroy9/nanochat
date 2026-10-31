@@ -20,17 +20,19 @@ computes them), against the reference's y_ref (`ftpo_loss`, App. J with the offi
 Delta_c = y[c] - y[r] and w_c = clamp((MARGIN - Delta_c) / MARGIN, 0, 1), L_pref = sum_c w_c softplus(MARGIN -
 Delta_c) / k over the row's k chosen tokens (src/antidoom/reference_ftpo_trainer.py:282-283; App. J divides by
 sum_c w_c instead, equal while every w_c is 1); L_target = mean over T = C + {r} of max(|y - y_ref| - TAU_TARGET,
-0)^2; L_nontarget = mean over the rest of the vocabulary of (y - y_ref)^2; L = L_pref + LAMBDA_TARGET L_target +
-LAMBDA_NONTARGET L_nontarget. MARGIN, LAMBDA_TARGET, TAU_TARGET, LAMBDA_NONTARGET: configs/default.yaml
-(clip_epsilon_logits, lambda_mse_target, tau_mse_target, lambda_mse).
+0)^2; L_nontarget = mean over the rest of the vocabulary of (y - y_ref)^2 (both per row, as App. J defines them; the
+official trainer pools them over its 4-row micro-batch); L = L_pref + LAMBDA_TARGET L_target + LAMBDA_NONTARGET
+L_nontarget. MARGIN, LAMBDA_TARGET, TAU_TARGET, LAMBDA_NONTARGET: configs/default.yaml (clip_epsilon_logits,
+lambda_mse_target, tau_mse_target, lambda_mse).
 
-Training (transformers' Trainer): full parameters loaded in fp32 (master weights and AdamW state), bf16 autocast,
-each decoder layer recomputed in the backward pass (`load`), SDPA attention, one epoch at most, seed 0; batch BATCH
-rows (Antidoom's 4 x 4 accumulation, as 1 x 16), AdamW (betas the library's), weight decay WEIGHT_DECAY, linear decay
-after a WARMUP share of the steps, gradient norm clipped at MAX_GRAD_NORM (src/antidoom/ftpo_train.py:119-141); the
-reference logits computed once, before the first update, by the same model. LR: see its constant. --freeze head
-(or FREEZE=head) trains without the output head, the token embedding and every value embedding (`frozen`); none,
-the default, trains every parameter.
+Training (transformers' Trainer): full parameters loaded in fp32 (master weights and AdamW state), the backbone under
+bf16 autocast in every pass (explicit: the Trainer's autocast wraps only the model's top-level forward, which no pass
+here calls), each decoder layer recomputed in the backward pass (`load`), SDPA attention, one epoch at most, seed 0;
+batch BATCH rows (Antidoom's 4 x 4 accumulation, as 1 x 16), AdamW (betas the library's), weight decay WEIGHT_DECAY,
+linear decay after a WARMUP share of the steps, gradient norm clipped at MAX_GRAD_NORM
+(src/antidoom/ftpo_train.py:119-141); the reference logits computed once, before the first update, by the same model.
+LR: see its constant. --freeze head trains without the output head, the token embedding and every value embedding
+(`frozen`); none, the default, trains every parameter.
 
 Held-out monitor and stop (`monitor_split`, `monitor`): before training, the rows of whole prompts, drawn in a
 default_rng(SEED) permutation of the prompt ids until MONITOR_ROWS rows, leave the training set; at step 0, every
@@ -68,7 +70,6 @@ import argparse
 import functools
 import json
 import math
-import os
 import re
 import shutil
 from collections import Counter, defaultdict
@@ -78,6 +79,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
+from torch.utils.checkpoint import checkpoint
+from transformers import AutoModelForCausalLM, Trainer, TrainerCallback, TrainingArguments
+
+from corpus.tokenizer import get_tokenizer
+from inference.modeling_nanochat import NanochatPreTrainedModel
+from onpolicy.selection import quantiles
 
 # chosen tokens: configs/default.yaml generation.top_logprobs, chosen_max_tokens, min_p (chosen_min_p null),
 # chosen_min_decoded_chars; train.chosen_regularisation_strength; src/antidoom/ftpo_data.py:71-72
@@ -93,27 +100,24 @@ LOG_STEPS, MAX_GRAD_NORM = 5, 2.5
 # NLL of the export's own passing responses rose 3.7% / 11% / 59%, 0.012 / 0.016 / 0.042 NLL per logit of held-out
 # Delta gained, at 5e-7 / 1.5e-6 / 6e-6 (docs/post-training.md §8.5)
 LR = 5e-7
-# held-out monitor and its stop: Antidoom's run setting, early stopping at chosen_win 0.35 (liquid.ai/blog/antidoom;
-# its README's band: 0.15-0.3 "strong reduction", past 0.5 "overtraining")
+# held-out monitor and its stop: early stopping at chosen_win 0.35, the setting of Antidoom's published runs
+# (liquid.ai/blog/antidoom; the repository's default.yaml early_stopping_chosen_win is 0.4, its README's band 0.15-0.3
+# "strong reduction", past 0.5 "overtraining")
 MONITOR_ROWS, MONITOR_EVERY, STOP, SEED = 512, 10, 0.35, 0
 # dpo: DeLoop's beta and batch (arXiv 2610.19376 App. G.1), Phi-4-mini-reasoning's rollout-DPO lr (arXiv 2504.21233
 # §5.3), warmup ratio 0.1; head positions per chunk of `completion_logp`
 DPO_LR, DPO_BATCH, DPO_WARMUP, DPO_BETA, HEAD_CHUNK = 5e-7, 16, 0.1, 0.05, 1024
 
 
-def load(model_dir: Path, train: bool = True):
-    """The model in fp32; to train, each decoder layer recomputed in the backward pass (torch's non-reentrant
-    checkpoint, autocast state kept): 0.68 MB of saved activations per token instead of 2.04, with identical gradients
-    (a 4,096-token sequence, CPU, bf16 autocast). The export's model file declares no gradient checkpointing for
+def load(model_dir: Path):
+    """The model in fp32, each decoder layer recomputed in the backward pass (torch's non-reentrant checkpoint,
+    autocast state kept): 0.68 MB of saved activations per token instead of 2.04, with identical gradients (a
+    4,096-token sequence, CPU, bf16 autocast). The export's model file declares no gradient checkpointing for
     transformers to enable."""
-    from torch.utils.checkpoint import checkpoint
-    from transformers import AutoModelForCausalLM
-
     model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True, dtype=torch.float32,
                                                  attn_implementation="sdpa")
-    if train:
-        for layer in model.model.layers:
-            layer.forward = functools.partial(checkpoint, layer.forward, use_reentrant=False)
+    for layer in model.model.layers:
+        layer.forward = functools.partial(checkpoint, layer.forward, use_reentrant=False)
     return model
 
 
@@ -132,7 +136,7 @@ def ftpo_loss(y: torch.Tensor, ref: torch.Tensor, chosen: torch.Tensor, rejected
     tokens as the official trainer divides it (reference_ftpo_trainer.py:282-283), and its terms and statistics."""
     delta = y[chosen] - y[rejected]
     w = ((MARGIN - delta) / MARGIN).clamp(0, 1)
-    pref = (w * F.softplus(MARGIN - delta)).sum() / max(len(chosen), 1)
+    pref = (w * F.softplus(MARGIN - delta)).sum() / len(chosen)
     targets = torch.zeros_like(y, dtype=torch.bool)
     targets[chosen] = True
     targets[rejected] = True
@@ -219,8 +223,6 @@ def bf16(v: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
 def served(model) -> dict[str, torch.Tensor]:
     """The state dict as inference/export_hf.py writes it: fp32 the parameters the forward reads in fp32, the rest
     rounded to bf16 stochastically (one generator, seed 0)."""
-    from inference.modeling_nanochat import NanochatPreTrainedModel
-
     fp32, generator = set(NanochatPreTrainedModel._keep_in_fp32_modules_strict), torch.Generator().manual_seed(0)
     return {k: v.detach().float().cpu().contiguous() if fp32 & set(k.split(".")) else bf16(v, generator)
             for k, v in model.state_dict().items()}
@@ -250,10 +252,6 @@ def write(model, source: Path, out: Path) -> dict:
         if f.is_file() and f.name not in ("model.safetensors", "train-log.json"):
             shutil.copy(f, out / f.name)
     return kept
-
-
-def quantiles(values: list[float]) -> dict | None:
-    return {"n": len(values), "p10_p50_p90": np.percentile(values, [10, 50, 90]).tolist()} if values else None
 
 
 def frozen(model, freeze: str) -> list[str]:
@@ -297,13 +295,9 @@ def monitor(model, examples: list[dict], device: torch.device) -> dict:
 
 def ftpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | None, cpu: bool, freeze: str,
          monitor_rows: int, monitor_every: int, stop: float) -> dict:
-    from transformers import Trainer, TrainerCallback, TrainingArguments
-
-    from corpus.tokenizer import get_tokenizer
-
     decode = functools.lru_cache(maxsize=None)(lambda i: get_tokenizer().enc.decode([i]))
     rows = [json.loads(line) for line in data.read_text().splitlines()]
-    device = torch.device("cpu" if cpu or not torch.cuda.is_available() else "cuda")
+    device = torch.device("cpu" if cpu else "cuda")
     model = load(model_dir).to(device).eval()
     refs = []
     with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
@@ -325,8 +319,9 @@ def ftpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | No
         stored = defaultdict(list)
 
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-            loss, stats = ftpo_loss(last_logits(model, inputs["input_ids"]), inputs["ref"], inputs["chosen"],
-                                    int(inputs["rejected"]))
+            with torch.autocast(device.type, dtype=torch.bfloat16):  # the reference's (module docstring)
+                y = last_logits(model, inputs["input_ids"])
+            loss, stats = ftpo_loss(y, inputs["ref"], inputs["chosen"], int(inputs["rejected"]))
             for k, v in stats.items():
                 self.stored[k].append(v)
             return loss
@@ -357,9 +352,8 @@ def ftpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | No
     args = TrainingArguments(
         output_dir=str(out / "trainer"), per_device_train_batch_size=1, gradient_accumulation_steps=batch or BATCH,
         learning_rate=LR, warmup_steps=WARMUP, lr_scheduler_type="linear", weight_decay=WEIGHT_DECAY,
-        max_grad_norm=MAX_GRAD_NORM, num_train_epochs=1, max_steps=max_steps, bf16=True, use_cpu=device.type == "cpu",
-        logging_steps=LOG_STEPS, save_strategy="no", report_to="none", seed=0, data_seed=0,
-        dataloader_num_workers=0, remove_unused_columns=False, gradient_checkpointing=False)
+        max_grad_norm=MAX_GRAD_NORM, num_train_epochs=1, max_steps=max_steps, use_cpu=cpu, logging_steps=LOG_STEPS,
+        save_strategy="no", report_to="none", seed=SEED, data_seed=SEED, remove_unused_columns=False)
     model.train()
     trainer = FTPOTrainer(model=model, args=args, train_dataset=train, data_collator=lambda features: features[0],
                           callbacks=[Monitor()])
@@ -378,8 +372,6 @@ def completion_logp(model, prompt: torch.Tensor, completion: torch.Tensor) -> to
     """The summed log-probability of completion (C,) after prompt (P,) under the capped logits: the backbone under
     the caller's autocast, the head and cap in fp32 outside it (`last_logits`), HEAD_CHUNK positions at a time, each
     chunk's logits recomputed in the backward pass rather than kept."""
-    from torch.utils.checkpoint import checkpoint
-
     ids = torch.cat([prompt, completion])[None]
     h = model.model(input_ids=ids, use_cache=False).last_hidden_state[0, len(prompt) - 1:-1]
     head, c = model.lm_head.weight, model.config.final_logit_softcapping
@@ -405,12 +397,10 @@ def dpo_loss(chosen: torch.Tensor, rejected: torch.Tensor, ref_chosen: float, re
 
 
 def dpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | None, cpu: bool) -> dict:
-    from transformers import Trainer, TrainingArguments
-
     rows = [json.loads(line) for line in data.read_text().splitlines()]
     if not rows:
         raise ValueError(f"no pairs in {data}")
-    device = torch.device("cpu" if cpu or not torch.cuda.is_available() else "cuda")
+    device = torch.device("cpu" if cpu else "cuda")
     model = load(model_dir).to(device).eval()
     examples = []
     with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
@@ -424,10 +414,8 @@ def dpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | Non
         stored = defaultdict(list)
 
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-            # the reference's autocast, explicit: on the CPU the Trainer's own pass otherwise ran without it (a
-            # learning-rate-0 step's rewards were off by about 1 nat per pair)
             prompt = inputs["prompt"]
-            with torch.autocast(prompt.device.type, dtype=torch.bfloat16):
+            with torch.autocast(device.type, dtype=torch.bfloat16):  # the reference's (module docstring)
                 chosen = completion_logp(model, prompt, inputs["chosen"])
                 rejected = completion_logp(model, prompt, inputs["rejected"])
             loss, stats = dpo_loss(chosen, rejected, inputs["ref_chosen"], inputs["ref_rejected"], DPO_BETA)
@@ -443,9 +431,8 @@ def dpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | Non
     args = TrainingArguments(
         output_dir=str(out / "trainer"), per_device_train_batch_size=1, gradient_accumulation_steps=batch or DPO_BATCH,
         learning_rate=DPO_LR, warmup_steps=DPO_WARMUP, lr_scheduler_type="linear", adam_beta1=0.9, adam_beta2=0.95,
-        weight_decay=0.0, max_grad_norm=1.0, num_train_epochs=1, max_steps=max_steps, bf16=True,
-        use_cpu=device.type == "cpu", logging_steps=1, save_strategy="no", report_to="none", seed=0, data_seed=0,
-        dataloader_num_workers=0, remove_unused_columns=False, gradient_checkpointing=False)
+        weight_decay=0.0, max_grad_norm=1.0, num_train_epochs=1, max_steps=max_steps, use_cpu=cpu, logging_steps=1,
+        save_strategy="no", report_to="none", seed=SEED, data_seed=SEED, remove_unused_columns=False)
     model.train()
     trainer = DPOTrainer(model=model, args=args, train_dataset=examples, data_collator=lambda features: features[0])
     trainer.loss_is_scaled_for_ga = False  # a pair's loss: the step averages its pairs
@@ -466,7 +453,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--batch", type=int, help="rows (ftpo) or pairs (dpo) per step; a smoke's")
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--freeze", choices=("none", "head"), default=os.environ.get("FREEZE") or "none")
+    parser.add_argument("--freeze", choices=("none", "head"), default="none")
     parser.add_argument("--monitor-rows", type=int, default=MONITOR_ROWS)
     parser.add_argument("--monitor-every", type=int, default=MONITOR_EVERY)
     parser.add_argument("--stop", type=float, default=STOP, help="ftpo: the held-out chosen_win to stop at")

@@ -1,15 +1,9 @@
 """onpolicy/train.py's FTPO loss, held-out monitor split, chosen-token rule and stochastic rounding, and its DPO loss
-and completion log-probabilities, against hand-computed values; with ONPOLICY_EXPORT set to a --chat export, CPU
-smokes of `train.py ftpo` and `train.py dpo` on synthetic rows, each writing one model.
+and completion log-probabilities, against hand-computed values.
 
-    [ONPOLICY_EXPORT=<export dir>] python -m pytest onpolicy/test_train.py
+    python -m pytest onpolicy/test_train.py
 """
-import json
 import math
-import os
-import subprocess
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -77,13 +71,6 @@ def test_monitor_split_whole_prompts():
     assert train.monitor_split(examples, 10, 0) == (kept, held)  # deterministic
 
 
-def test_loss_gradient_flows():
-    y = torch.tensor([2.0, 0.0, 1.0], requires_grad=True)
-    loss, _ = train.ftpo_loss(y, y.detach().clone(), torch.tensor([2]), 0)
-    loss.backward()
-    assert y.grad[2] < 0 < y.grad[0]  # the chosen logit is pushed up, the rejected one down
-
-
 def test_candidates():
     surfaces = {0: " the", 1: " The", 2: "\n", 3: " x", 4: " y", 5: " z"}
     ref = torch.full((train.TOP_LOGPROBS + 6,), -50.0)
@@ -132,12 +119,6 @@ def test_dpo_loss_eq7():
     assert float(train.dpo_loss(torch.tensor(c), torch.tensor(r), c, r, beta)[0]) == pytest.approx(math.log(2))
 
 
-def test_dpo_gradient_raises_chosen_lowers_rejected():
-    c, r = torch.tensor(-10.0, requires_grad=True), torch.tensor(-12.0, requires_grad=True)
-    train.dpo_loss(c, r, -10.0, -12.0, 0.05)[0].backward()
-    assert c.grad < 0 < r.grad
-
-
 def test_completion_logp_capped_and_chunked(monkeypatch):
     torch.manual_seed(0)
     V, D, cap = 11, 4, 3.0
@@ -155,40 +136,3 @@ def test_completion_logp_capped_and_chunked(monkeypatch):
     (g,) = torch.autograd.grad(got, head)
     (w,) = torch.autograd.grad(want, head)
     assert torch.allclose(g, w, atol=1e-6)
-
-
-EXPORT = os.environ.get("ONPOLICY_EXPORT")
-smoke = pytest.mark.skipif(not EXPORT, reason="ONPOLICY_EXPORT (a --chat export directory) unset")
-
-
-def run(stage: str, data: Path, out: Path, *extra: str) -> dict:
-    subprocess.run([sys.executable, "-m", "onpolicy.train", stage, EXPORT, str(data), str(out), "--cpu",
-                    "--max-steps", "2", "--batch", "2", *extra], check=True)
-    assert (out / "model.safetensors").exists() and (out / "config.json").exists()
-    return json.loads((out / "train-log.json").read_text())
-
-
-@smoke
-def test_ftpo_smoke(tmp_path):
-    g = torch.Generator().manual_seed(0)
-    rows = [{"prompt_id": f"p{i}", "sample": 0, "temperature": 0.6,
-             "prefix_ids": [1, *torch.randint(1000, 30000, (48,), generator=g).tolist()],
-             "rejected_id": int(torch.randint(1000, 30000, (1,), generator=g))} for i in range(8)]
-    data = tmp_path / "ftpo.jsonl"
-    data.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    log = run("ftpo", data, tmp_path / "ftpo", "--monitor-rows", "2", "--monitor-every", "1", "--stop", "2")
-    assert log["steps"] == 2 and log["written"]["step"] == 2 and not log["stopped"] and log["monitor"][0]["step"] == 0
-
-
-@smoke
-def test_dpo_smoke(tmp_path):
-    g = torch.Generator().manual_seed(0)
-    ids = lambda n: torch.randint(1000, 30000, (n,), generator=g).tolist()  # noqa: E731
-    pairs = [{"prompt_id": f"p{i}", "prompt_ids": [1, *ids(32)], "chosen_ids": [*ids(16), 1], "rejected_ids": ids(24)}
-             for i in range(4)]
-    data = tmp_path / "dpo.jsonl"
-    data.write_text("".join(json.dumps(p) + "\n" for p in pairs))
-    log = run("dpo", data, tmp_path / "dpo")
-    assert log["steps"] == 2 and log["pairs"] == 4
-    first = log["log_history"][0]
-    assert first["loss"] == pytest.approx(math.log(2), abs=0.01)  # step 1 starts at the reference

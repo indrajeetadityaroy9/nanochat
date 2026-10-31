@@ -18,7 +18,7 @@ def test_dpo_pairs():
     looping = [10, 11, *cycle]
     rows = [
         # a: two successes (the shorter, sample 1, is chosen; its BOS kept), three exact loops (two pairs, sample
-        # order), a loop without an exact cycle (skipped)
+        # order), a loop without an exact cycle (a failure after the exact loops: past the cap)
         row("a", 0, [30, 31, 32, 33, BOS], True), row("a", 1, [40, 41], True),
         row("a", 4, looping, False, (2, 4)), row("a", 2, looping, False, (2, 4)), row("a", 3, looping, False, (2, 4)),
         {**row("a", 5, looping, False), "loop": True},

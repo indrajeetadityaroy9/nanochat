@@ -10,7 +10,7 @@
 #      memory profiling; vLLM's engine core is CPU-bound, so one engine leaves the GPU idle), and after each group
 #      the selection over every wave (onpolicy/selection.py: rollouts/ftpo.jsonl, rollouts/selection.json; the rows
 #      need no verdicts, so the train rollouts are not verified); groups stop once the FTPO rows before rebalancing
-#      reach TARGET_ROWS (default 8,000, docs/post-training.md §8.7 Waves) or the group's last wave finds fewer than
+#      reach TARGET_ROWS (default 4,000, docs/post-training.md §8.7 Waves) or the group's last wave finds fewer than
 #      PROMPTS prompts left (the pool is exhausted);
 #   4. FTPO from the export (onpolicy/train.py ftpo, FREEZE none or head, default none) to ftpo/: one model, written
 #      when the held-out chosen_win reaches 0.35 or at the epoch's end, and ftpo/train-log.json;
@@ -18,7 +18,7 @@
 #      at T 0.6 from ftpo/ to dpo-rollouts/wave-<k>/, in groups of at most ENGINES concurrent engines as in 2.-3.,
 #      verified (onpolicy/verify.py), and after each group the selection over every DPO wave (dpo-rollouts/dpo.jsonl,
 #      dpo-rollouts/selection.json); groups stop once the pairs reach DPO_PAIRS (default 8,000, DeLoop's count),
-#      after DPO_WAVES (default 12) waves, or when the group's last wave finds fewer than PROMPTS_DPO prompts left;
+#      after DPO_WAVES (default 4) waves, or when the group's last wave finds fewer than PROMPTS_DPO prompts left;
 #      then DPO from ftpo/ on dpo.jsonl (onpolicy/train.py dpo) to dpo/;
 #   6. the evaluation (`evaluate`) of each of model/, ftpo/ and dpo/ present, or only of EVAL_MODELS (names: model,
 #      ftpo, dpo) when set, to eval-<name>/: the natural-termination probe on PROBE_PROMPTS (default 128) prompts per
@@ -35,9 +35,9 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2
-PROMPTS=${PROMPTS:-6000} SAMPLES=${SAMPLES:-0.6:1} VAL_PROMPTS=${VAL_PROMPTS:-512} TARGET_ROWS=${TARGET_ROWS:-8000}
+PROMPTS=${PROMPTS:-6000} SAMPLES=${SAMPLES:-0.6:1} VAL_PROMPTS=${VAL_PROMPTS:-512} TARGET_ROWS=${TARGET_ROWS:-4000}
 PROBE_PROMPTS=${PROBE_PROMPTS:-128} FREEZE=${FREEZE:-none} ENGINES=${ENGINES:-4}
-PROMPTS_DPO=${PROMPTS_DPO:-2000} DPO_PAIRS=${DPO_PAIRS:-8000} DPO_WAVES=${DPO_WAVES:-12}
+PROMPTS_DPO=${PROMPTS_DPO:-2000} DPO_PAIRS=${DPO_PAIRS:-8000} DPO_WAVES=${DPO_WAVES:-4}
 STAGES=${STAGES:-rollouts train dpo evaluate} UTIL=${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
 for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
 [ -n "$CHECKPOINT" ] || { echo "no checkpoint or weights of step $STEP in $RUN_DIR" >&2; exit 1; }
@@ -65,9 +65,8 @@ prompts_per_set() {  # <probe record>: its prompts per set
 }
 
 verify() {  # <rollouts dir>: its verdicts unless written
-  # the cpuset's cores: GNU nproc honours OMP_NUM_THREADS (1 in CPU containers), so it is unset for the count
   [ -f "$1/verdicts.jsonl" ] || timed "verify $(basename "$1")" "${CPU[@]}" nanochat-onpolicy \
-    python -m onpolicy.verify "$(w "$1")" --workers "$("${CPU[@]}" nanochat-onpolicy env -u OMP_NUM_THREADS nproc)"
+    python -m onpolicy.verify "$(w "$1")"
 }
 
 rollouts() {  # <model dir> <out dir> <rollouts args...>: rollouts, verdicts, selection
