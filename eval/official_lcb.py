@@ -25,7 +25,12 @@ def messages(problem, style: lm_styles.LMStyle) -> list[dict]:
     return [m | {"content": lf(m["content"])} for m in format_prompt_generation(problem, style)]
 
 
-if __name__ == "__main__":
+def register() -> None:
+    """lcb_runner's model store and prompt with "nanochat" and its line-ending-normalized messages."""
     lm_styles.LanguageModelStore[MODEL] = lm_styles.LanguageModel(MODEL, MODEL, lm_styles.LMStyle.OpenAIChat, None)
     scenario_router.format_prompt_generation = messages  # build_prompt_benchmark's code-generation prompt
+
+
+if __name__ == "__main__":
+    register()
     runpy.run_module("lcb_runner.runner.main", run_name="__main__")

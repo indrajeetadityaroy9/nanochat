@@ -18,7 +18,7 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/trajectory.py` (`main`, `score`, `trajectory`, `rows_by_measure`, `groups`, `summaries`, `likelihoods`, `saved_steps`, `likelihood_path`) | §2 |
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `parse_record`, `truncated`, `filtered_generation`, `filtered_completions`, `codegen_runs`, `vetted`, evaluator wrappers: `evalplus`, `multipl_e`) | §1, §3, §7 |
 | `scripts/official_eval.sh`, `docker/Dockerfile.eval`, `eval/official.py`, `eval/official_infilling.py`, `eval/official_site/sitecustomize.py` | §4, §8 |
-| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_loop_stop.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8; its loop stop, §10 |
+| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_lcb_shards.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_loop_stop.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8; its loop stop, §10 |
 | `eval/official_termination.py`, `eval/loop.py` (the loop measure and stop rule), `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function); `results/pretrain/mbpp_3shot_contamination.json` (MBPP 3-shot's overlap with the train corpus) | §5; §4 |
@@ -542,6 +542,12 @@ Every prompt's ids start with one BOS (32764) and the message's encoding (`<|bos
 One fix came from this check: EvalPlus's OpenAI backend drops `--max_new_tokens` (`evalplus.provider.make_model`
 builds `OpenAIChatDecoder` without it), so every request asked 768 new tokens, `DecoderBase`'s default, and every
 smoke sample ended at exactly 768 [measured]; `eval/official_evalplus.py` sets the decoder's budget from the flag.
+A client of the server fails (exit 1) once the server stops answering `/health` (`served`, checked every 5 s): on a
+dead server EvalPlus's `make_auto_request` retries indefinitely and lcb_runner's `OpenAIRunner` records no outputs.
+LiveCodeBench is generated in calendar-month shards of the window (`eval/official_lcb_shards.py`: each boundary the
+month's first day without a contest, as lcb_runner's day filters are inclusive), each shard's outputs kept and
+skipped on a rerun, then lcb_runner's evaluation code scores their union: on the CPU stand-in server the union's
+outputs, per-problem verdicts and pass@1/5/10 equal one unsharded run's (only the measured execution times differ).
 
 ## 9. Validation of the harness
 

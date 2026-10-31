@@ -12,12 +12,15 @@
 # (eval/official_tokenize.py). The parser is registered in every server process by eval/official_site/sitecustomize.py
 # (NANOCHAT_REASONING_PARSER). The server stops loops as the probe does (eval/official_loop_stop.py: a response with
 # no "</think>" whose last 4,096 tokens repeat, checked every 2,048, is ended, an empty answer either way), each stop
-# a line of loop-stops.jsonl; LOOP_STOP=0 serves without it.
+# a line of loop-stops.jsonl; LOOP_STOP=0 serves without it. Every client of the server fails (exit 1) once the
+# server stops answering its /health (`served`). LiveCodeBench is generated in shards of the window, calendar months
+# (eval/official_lcb_shards.py), each kept and skipped on a rerun, and lcb_runner's evaluation scores their union.
 #
 #   [MODEL=<model dir> TAG=<name>] scripts/official_reasoning.sh <run name> <step> [<problems per benchmark, a smoke>]
 #
 # Outputs in RUNS/<run>/official-<step>/: model/, tokenize-{evalplus,lcb}.json, evalplus/ (each samples file with its
-# .endings.jsonl), lcb/, loop-stops.jsonl, server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's
+# .endings.jsonl), lcb/ (shards/<start>/ each shard's lcb_runner directory; output/ the union's outputs and
+# evaluation), loop-stops.jsonl, server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's
 # closure rate, loop stops, pass@1 and pass@1 given closure; both tools' loop stops); RUNS/<run>/termination-<step>.json
 # (generated, then scored in a CPU container).
 # With MODEL and TAG, a model directory in the export's format (onpolicy/train.py's) is evaluated in place of the
@@ -54,6 +57,22 @@ CPU=("${DOCKER[@]}" --cpuset-mems="${CPU_NODE:-0}" -e OPENBLAS_NUM_THREADS=1 -e 
 step() {  # <name> <command...>: run, and append the wall time to timings.tsv
   local start=$SECONDS; "${@:2}"; printf '%s\t%d\n' "$1" $((SECONDS - start)) >> "$OUT/timings.tsv"
 }
+HEALTH_INTERVAL=5  # seconds between the watchdog's checks of the server
+served() {  # <docker run of the container CLIENT...>: a client of the server, stopped and failed (exit 1) once the
+  # server stops answering /health (its container gone or hung): EvalPlus's and lcb_runner's clients retry forever
+  "$@" &
+  local client=$!
+  while kill -0 $client 2> /dev/null; do
+    if ! curl -sf --max-time $HEALTH_INTERVAL http://127.0.0.1:$PORT/health > /dev/null; then
+      echo "$(date -u +%FT%TZ) the server stopped answering: client $CLIENT stopped" >&2
+      docker rm -f $CLIENT > /dev/null 2>&1 || true
+      wait $client || true
+      return 1
+    fi
+    sleep $HEALTH_INTERVAL
+  done
+  wait $client
+}
 
 if [ -n "$MODEL" ]; then
   [ -f "$OUT/model/model.safetensors" ] || cp -r "$MODEL"/. "$OUT/model/"
@@ -82,9 +101,12 @@ until curl -sf http://127.0.0.1:$PORT/health > /dev/null; do
   docker inspect $SERVER > /dev/null 2>&1 || { echo "vllm serve exited" >&2; exit 1; }; sleep 5
 done
 API=(-e OPENAI_BASE_URL=http://127.0.0.1:$PORT/v1 -e OPENAI_API_KEY=none -e OPENAI_KEY=none)
+CLIENT=nanochat-eval-client-$$
+CLIENT_RUN=("${DOCKER[@]}" --name $CLIENT "${API[@]}")
 
-"${DOCKER[@]}" nanochat-eval python -m eval.official_tokenize evalplus http://127.0.0.1:$PORT $C/tokenize-evalplus.json
-"${DOCKER[@]}" -w /opt/LiveCodeBench nanochat-eval /opt/lcb/bin/python -m eval.official_tokenize lcb \
+served "${CLIENT_RUN[@]}" nanochat-eval python -m eval.official_tokenize evalplus http://127.0.0.1:$PORT \
+  $C/tokenize-evalplus.json
+served "${CLIENT_RUN[@]}" -w /opt/LiveCodeBench nanochat-eval /opt/lcb/bin/python -m eval.official_tokenize lcb \
   http://127.0.0.1:$PORT $C/tokenize-lcb.json "${LCB_WINDOW[@]}"
 "${CPU[@]}" nanochat python -m eval.official_tokenize check $C/tokenize-{evalplus,lcb}.json
 
@@ -92,9 +114,9 @@ EVALPLUS=(--model nanochat --backend openai --base_url http://127.0.0.1:$PORT/v1
           --root $C/evalplus ${LIMIT:+--id_range "[0,$LIMIT]"})
 for dataset in humaneval mbpp; do
   # the samples files: nanochat_openai_temp_0.0 (greedy), nanochat_openai_temp_0.6 (sampled)
-  step "evalplus.codegen $dataset greedy" "${DOCKER[@]}" "${API[@]}" nanochat-eval python -m eval.official_evalplus \
+  step "evalplus.codegen $dataset greedy" served "${CLIENT_RUN[@]}" nanochat-eval python -m eval.official_evalplus \
     --dataset $dataset --greedy "${EVALPLUS[@]}"
-  step "evalplus.codegen $dataset sampled" "${DOCKER[@]}" "${API[@]}" nanochat-eval python -m eval.official_evalplus \
+  step "evalplus.codegen $dataset sampled" served "${CLIENT_RUN[@]}" nanochat-eval python -m eval.official_evalplus \
     --dataset $dataset --n_samples 20 --temperature 0.6 "${EVALPLUS[@]}"
   [ -n "$LIMIT" ] ||  # evalplus.evaluate requires every task's samples
     for temperature in 0.0 0.6; do
@@ -103,10 +125,32 @@ for dataset in humaneval mbpp; do
     done
 done
 
-# lcb_runner reads its prompt files relative to the working directory and writes output/ there
-step "lcb_runner" "${DOCKER[@]}" "${API[@]}" -w $C/lcb nanochat-eval bash -c "ln -sfn /opt/LiveCodeBench/lcb_runner . &&
-  /opt/lcb/bin/python -m eval.official_lcb --model nanochat --scenario codegeneration \
-    --release_version ${LCB_WINDOW[0]} --start_date ${LCB_WINDOW[1]} --end_date ${LCB_WINDOW[2]} --n 16 \
-    --temperature 0.6 --top_p 0.95 --max_tokens 32768 --openai_timeout 86400 --multiprocess 64 --evaluate \
-    --num_process_evaluate 32 ${LIMIT:+--debug}"
+# LiveCodeBench, generated in shards of the window, one after another (eval/official_lcb_shards.py plan: calendar
+# months of the contest dates), each shard's outputs kept and a shard with outputs skipped on a rerun; then
+# lcb_runner's evaluation over their union (eval/official_lcb_shards.py evaluate), the files one run would write.
+# lcb_runner reads its prompt files relative to the working directory and writes output/ there.
+LCB=(--model nanochat --scenario codegeneration --release_version ${LCB_WINDOW[0]} --n 16 --temperature 0.6
+     --top_p 0.95 --max_tokens 32768 --openai_timeout 86400 --multiprocess 64)
+LCB_OUTPUT=output/nanochat/Scenario.codegeneration_16_0.6.json  # lcb_runner's utils/path_utils.get_output_path
+lcb_dir() {  # <directory under lcb/>: created, lcb_runner linked in it; its path in the containers
+  mkdir -p "$OUT/lcb/$1" && ln -sfn /opt/LiveCodeBench/lcb_runner "$OUT/lcb/$1/lcb_runner" && echo "$C/lcb/$1"
+}
+if [ -n "$LIMIT" ]; then  # a smoke: lcb_runner's --debug, its first 15 problems, unsharded
+  step "lcb_runner" served "${CLIENT_RUN[@]}" -w "$(lcb_dir debug)" nanochat-eval /opt/lcb/bin/python -m \
+    eval.official_lcb "${LCB[@]}" --start_date ${LCB_WINDOW[1]} --end_date ${LCB_WINDOW[2]} --evaluate \
+    --num_process_evaluate 32 --debug
+else
+  "${CPU[@]}" -w /opt/LiveCodeBench nanochat-eval /opt/lcb/bin/python -m eval.official_lcb_shards plan \
+    "${LCB_WINDOW[@]}" $C/lcb/shards.txt
+  mapfile -t SHARDS < "$OUT/lcb/shards.txt"
+  for shard in "${SHARDS[@]}"; do
+    read -r start end <<< "$shard"
+    [ -f "$OUT/lcb/shards/$start/$LCB_OUTPUT" ] ||
+      step "lcb_runner $start $end" served "${CLIENT_RUN[@]}" -w "$(lcb_dir shards/$start)" nanochat-eval \
+        /opt/lcb/bin/python -m eval.official_lcb "${LCB[@]}" --start_date $start --end_date $end
+  done
+  step "lcb_runner evaluate" "${CPU[@]}" -w "$(lcb_dir .)" nanochat-eval /opt/lcb/bin/python -m \
+    eval.official_lcb_shards evaluate "${LCB[@]}" --start_date ${LCB_WINDOW[1]} --end_date ${LCB_WINDOW[2]} \
+    --num_process_evaluate 32
+fi
 [ -n "$LIMIT" ] || "${CPU[@]}" nanochat python -m eval.official_reasoning $C
