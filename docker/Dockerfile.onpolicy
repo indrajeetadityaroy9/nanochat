@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
-# The on-policy post-SFT stage's image (onpolicy/, scripts/onpolicy.sh, docs/post-training.md §8): the evaluation image
-# (docker/Dockerfile.eval: vLLM 0.32.0, torch, transformers and accelerate for onpolicy/train.py's Trainer, EvalPlus)
-# with matplotlib for the KodCode tests that import it (onpolicy/verify.py), under the image's constraints.
+# The post-SFT stage's vLLM image (onpolicy/, scripts/onpolicy.sh, scripts/rl.sh, docs/post-training.md §5, §6): the
+# evaluation image (docker/Dockerfile.eval: vLLM 0.32.0, torch, transformers, EvalPlus) with matplotlib for the KodCode
+# tests that import it (onpolicy/verify.py), under the image's constraints.
 FROM nanochat-eval
 ARG MATPLOTLIB=3.11.2
 RUN uv pip install -c /opt/base-constraints.txt matplotlib==$MATPLOTLIB && \

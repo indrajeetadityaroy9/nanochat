@@ -184,7 +184,7 @@ standard error) [measured]:
 
 ## 6. Post-training
 
-The SFT run (docs/post-training.md §4) from the base model of §1, and the stages after it (docs/post-training.md §8).
+The SFT run (docs/post-training.md §4) from the base model of §1, and the RL stage after it (docs/post-training.md §6).
 Each table has one row per evaluated checkpoint; later checkpoints and the post-SFT model append rows. The probe's
 method is docs/evaluation.md §10: 64 HumanEval+ prompts in EvalPlus's chat rendering and 64 SFT val-split prompts
 (held out by problem text; 12 of their 20 KodCode rows are another style of a train-split question with the same test

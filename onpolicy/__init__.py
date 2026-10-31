@@ -1,4 +1,3 @@
-"""The on-policy post-SFT stage (docs/post-training.md §8): rollouts of the SFT model on its SFT train prompts, FTPO at
-its reasoning loops' first repeats, then DPO on the FTPO model's KodCode rollouts verified by KodCode's tests: loop
-pairs (a loop's repeat against a successful continuation from the same history) and outcome pairs (a success against
-a failure of the same prompt)."""
+"""The post-SFT stage (docs/post-training.md §5, §6): KodCode's prompt pools with tests (prompts), the SFT model's
+KodCode val evaluation (rollouts, verify, outcomes), and RL with verifiable rewards from it (rl, the trainer in the
+training image; sampler, the rollouts and their tests in the vLLM image; scripts/rl.sh)."""

@@ -1,21 +1,20 @@
 #!/bin/bash
-# The GPU queue after an SFT run (docs/post-training.md §8.7). While the run trains it waits; once the run has written
+# The GPU queue after an SFT run (docs/post-training.md §6). While the run trains it waits; once the run has written
 # its end record (metrics.jsonl kind "end") and its container CONTAINER (default sft-run) is gone, it stops the run's
 # termination watchers (scripts/official_termination_watch.sh, if any), lets a probe already started finish (the
 # probes' lock), and runs, in order:
 #   1. alone at PROBE_UTIL (default 0.85) of the GPU's memory: the final step's natural-termination probe on
 #      PROBE_PROMPTS (default 128) prompts per set (scripts/official_termination.sh; termination-<step>.json, or
 #      termination-<step>-p<PROBE_PROMPTS>.json beside an earlier probe of another size), then the export and its
-#      KodCode val evaluation (scripts/onpolicy.sh, STAGES evaluate, EVAL_MODELS model; the probe copied);
-#   2. the gate: FTPO and DPO only if that probe's responses loop (never closed, repetition >= 0.99) in at least
-#      FTPO_ABOVE (default 0.05) of both sets together; else 3 runs the SFT model's evaluation alone;
-#   3. the on-policy stage alone (scripts/onpolicy.sh, STAGES "rollouts train dpo evaluate": mining waves, FTPO, DPO
-#      waves and DPO, the evaluation of model/, ftpo/ and dpo/) at ONPOLICY_UTIL (default 0.85) on every core; then at
-#      once the reasoning protocol (scripts/official_reasoning.sh) of the final step (port 8000, CPUs OFFICIAL_CPUS)
-#      and of the final model, dpo/ if written, else ftpo/ (MODEL/TAG dpo or ftpo: official-<step>-<tag>/, port
-#      PICKED_PORT, default 8001, CPUs PICKED_CPUS), each at SERVE_UTIL (default 0.45); both awaited;
-#   4. alone at PROBE_UTIL: the final step's DRY comparison (scripts/official_termination.sh --dry) only if the final
-#      model (else the SFT model) loops in at least DRY_BELOW (default 0.05) of its probe's responses.
+#      KodCode val evaluation (scripts/onpolicy.sh; the probe copied);
+#   2. RL from the final step alone (scripts/rl.sh: its sampler's engines and its trainer share the GPU for the
+#      trainer's time budget; its last policy evaluated and kept as onpolicy-<step>/rl/step-<k>), skipped once a
+#      policy past step 0 is kept;
+#   3. at once the reasoning protocol (scripts/official_reasoning.sh) of the final step (port 8000, CPUs
+#      OFFICIAL_CPUS) and of RL's last policy (MODEL rl/step-<k>, TAG rl: official-<step>-rl/, port PICKED_PORT,
+#      default 8001, CPUs PICKED_CPUS), each at SERVE_UTIL (default 0.45); both awaited;
+#   4. alone at PROBE_UTIL: the final step's DRY comparison (scripts/official_termination.sh --dry) only if the SFT
+#      model loops in at least DRY_BELOW (default 0.05) of its probe's responses.
 # The shares: KV cache per token 2 x 24 layers x 6 heads x 128 x 2 bytes = 72 KiB, so of 94.5 GiB, 0.45 holds 20
 # sequences (EvalPlus's n) of about 28K tokens after the weights; the two 0.45 shares run side by side in 3. The CPUs:
 # official scoring runs EvalPlus's evaluate with its default cpu_count // 2 workers and lcb_runner with
@@ -23,8 +22,8 @@
 # first) and the final model's scoring the rest (PICKED_CPUS), so no timed test shares a core with another's. Every
 # item whose output exists is skipped; a failed item is logged and the queue goes on. The body is one function, parsed
 # before it runs, so a checkout updated while the queue waits does not change the running script.
-# DRY_RUN=1 logs each command instead of running it (the waiting, watcher, skip and gate logic run as they would; with
-# no probe written the gate is open, and without dpo/ or ftpo/ the final model is dpo/, so every item shows).
+# DRY_RUN=1 logs each command instead of running it (the waiting, watcher and skip logic run as they would; without a
+# kept RL policy the final model is rl/step-K, so every item shows).
 #
 #   [DRY_RUN=1] scripts/post_sft_queue.sh <run name> [<final step, default 7676>]
 #
@@ -36,8 +35,8 @@ main() {
   RUN=$1 FINAL=${2:-7676}
   DIR=${RUNS:-$ROOT/artifacts/runs}/$RUN
   local LOG=${LOG:-$DIR/post-sft-queue.log} CONTAINER=${CONTAINER:-sft-run} POLL=${POLL:-60}
-  local DRY_BELOW=${DRY_BELOW:-0.05} FTPO_ABOVE=${FTPO_ABOVE:-0.05} PROBE_PROMPTS=${PROBE_PROMPTS:-128}
-  local PROBE_UTIL=${PROBE_UTIL:-0.85} SERVE_UTIL=${SERVE_UTIL:-0.45} ONPOLICY_UTIL=${ONPOLICY_UTIL:-0.85}
+  local DRY_BELOW=${DRY_BELOW:-0.05} PROBE_PROMPTS=${PROBE_PROMPTS:-128}
+  local PROBE_UTIL=${PROBE_UTIL:-0.85} SERVE_UTIL=${SERVE_UTIL:-0.45}
   local PICKED_PORT=${PICKED_PORT:-8001}
   local LOCK=${LOCK:-$ROOT/artifacts/cache/termination.lock}  # scripts/official_termination.sh's
   local ONPOLICY=$DIR/onpolicy-$FINAL cores official_cores
@@ -89,10 +88,10 @@ sys.exit(0 if any(json.loads(l).get("kind") == "end" for l in open(sys.argv[1]) 
     item "probe $FINAL" "$DIR/termination-$FINAL${tag:+-$tag}.log" env VLLM_GPU_MEMORY_UTILIZATION="$PROBE_UTIL" \
       ${tag:+TAG="$tag"} "$ROOT/scripts/official_termination.sh" "$RUN" "$FINAL" "$PROBE_PROMPTS"
   }
-  onpolicy() {  # <stages> <eval models> <GPU memory share>
-    item "onpolicy $1${2:+ ($2)}" "$DIR/onpolicy-$FINAL-${1// /-}${2:+-${2// /-}}.log" env STAGES="$1" \
-      EVAL_MODELS="$2" VLLM_GPU_MEMORY_UTILIZATION="$3" PROBE_PROMPTS="$PROBE_PROMPTS" \
-      "$ROOT/scripts/onpolicy.sh" "$RUN" "$FINAL"
+  rl_policy() {  # RL's last evaluated policy (onpolicy-<step>/rl/step-<k>, k > 0), if kept
+    local k
+    k=$(ls -d "$ONPOLICY"/rl/step-* 2> /dev/null | sed 's/.*step-//' | sort -n | tail -1)
+    [ -n "$k" ] && [ "$k" -gt 0 ] && echo "$ONPOLICY/rl/step-$k"
   }
   official() {  # <port> <cpu set> <tag or empty> [<model dir>]
     local out=$DIR/official-$FINAL${3:+-$3}
@@ -117,45 +116,29 @@ print(sum(not r["closed"] and (r.get("repetition") or 0) >= 0.99 for r in rows) 
 
   # 1. the SFT model's probe, export and KodCode val evaluation
   probe
-  onpolicy evaluate model "$PROBE_UTIL"
+  item "onpolicy $FINAL" "$DIR/onpolicy-$FINAL.log" env VLLM_GPU_MEMORY_UTILIZATION="$PROBE_UTIL" \
+    PROBE_PROMPTS="$PROBE_PROMPTS" "$ROOT/scripts/onpolicy.sh" "$RUN" "$FINAL"
 
-  # 2. the gate
-  local sft_probe loops ftpo=1 final="" final_dir=""
-  if ! sft_probe=$(probe_record) || ! loops=$(loop_share "$sft_probe"); then
-    log "gate: no probe of $PROBE_PROMPTS prompts per set; FTPO and DPO run"
-  elif below "$loops" "$FTPO_ABOVE"; then
-    log "gate: the SFT model loops in $loops of its probe's responses, below $FTPO_ABOVE; no FTPO or DPO"
-    ftpo=""
-  else
-    log "gate: the SFT model loops in $loops of its probe's responses; FTPO and DPO run"
-  fi
+  # 2. RL alone
+  local final
+  if rl_policy > /dev/null; then log "rl $FINAL: done before"
+  else item "rl $FINAL" "$DIR/rl-$FINAL.log" "$ROOT/scripts/rl.sh" "$RUN" "$FINAL"; fi
+  final=$(rl_policy) || final=${DRY_RUN:+$ONPOLICY/rl/step-K}
+  log "final model: ${final:-none}"
 
-  # 3. the on-policy stage alone (its mining is bound by memory bandwidth and KV space: four engines of 0.21 beside
-  # nothing else generated 15.6K tokens/s, a single 0.85 engine 18.7K), then the reasoning protocol of the SFT model
-  # and of the final model at once
-  if [ -n "$ftpo" ]; then
-    onpolicy "rollouts train dpo evaluate" "" "$ONPOLICY_UTIL"
-    for final in dpo ftpo ""; do
-      [ -n "$final" ] && [ -f "$ONPOLICY/$final/model.safetensors" ] && break
-    done
-    [ -z "$final" ] && [ -n "${DRY_RUN:-}" ] && final=dpo
-    final_dir=${final:+$ONPOLICY/$final}
-    log "final model: ${final:-none}"
-  fi
+  # 3. the reasoning protocol of the SFT model and of RL's last policy at once
   official 8000 "$OFFICIAL_CPUS" "" &
   local sft_official=$!
-  [ -z "$final" ] || official "$PICKED_PORT" "$PICKED_CPUS" "$final" "$final_dir"
+  [ -z "$final" ] || official "$PICKED_PORT" "$PICKED_CPUS" rl "$final"
   wait "$sft_official"
   log "official evaluations done"
 
-  # 4. DRY, only if the final model (else the SFT model) still loops
-  local final_probe
-  if [ -n "$final" ]; then final_probe=$ONPOLICY/eval-$final/termination.json
-  else final_probe=$(probe_record) || final_probe=""; fi
+  # 4. DRY, only if the SFT model loops
+  local sft_probe loops
   if [ -f "$DIR/termination-dry-$FINAL.json" ]; then
     log "dry $FINAL: done before"
-  elif [ -f "$final_probe" ] && loops=$(loop_share "$final_probe") && below "$loops" "$DRY_BELOW"; then
-    log "dry $FINAL: skipped, ${final:-the SFT model} loops in $loops of its probe's responses"
+  elif sft_probe=$(probe_record) && loops=$(loop_share "$sft_probe") && below "$loops" "$DRY_BELOW"; then
+    log "dry $FINAL: skipped, the SFT model loops in $loops of its probe's responses"
   else
     item "dry $FINAL" "$DIR/termination-dry-$FINAL.log" \
       env VLLM_GPU_MEMORY_UTILIZATION="$PROBE_UTIL" "$ROOT/scripts/official_termination.sh" --dry "$RUN" "$FINAL"

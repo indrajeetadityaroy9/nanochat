@@ -25,9 +25,9 @@
 # outputs and evaluation), server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's closure rate,
 # loop stops, pass@1 and pass@1 given closure; both tools' loop stops); RUNS/<run>/termination-<step>.json
 # (generated, then scored in a CPU container).
-# With MODEL and TAG, a model directory in the export's format (onpolicy/train.py's) is evaluated in place of the
-# step's export, its outputs in RUNS/<run>/official-<step>-<TAG>/ with no termination probe (scripts/onpolicy.sh
-# evaluates it). VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as scripts/official_eval.sh; CPU_SET (docker --cpuset-cpus,
+# With MODEL and TAG, a model directory in the export's format (an RL policy, onpolicy/rl.py) is evaluated in place of
+# the step's export, its outputs in RUNS/<run>/official-<step>-<TAG>/ with no termination probe.
+# VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as scripts/official_eval.sh; CPU_SET (docker --cpuset-cpus,
 # default all) confines the containers other than the server (the clients and both tools' scoring).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

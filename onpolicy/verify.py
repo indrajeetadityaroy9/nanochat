@@ -1,16 +1,17 @@
 """
-KodCode's tests on a response's answer (docs/post-training.md §8). The answer's code (`code`) is its last fenced block
-tagged python that defines one of the names the tests import (else its last python block: a later block is often a
-usage example or a test), else its last untagged block, dedented; a response with none fails. Instruct and complete
-problems: the code as solution.py beside KodCode's pytest file after `from solution import *` (a share of the files
-name the solution's functions and modules without importing them), passing when pytest exits 0 within
+KodCode's tests on a response's answer (docs/post-training.md §5, §6). The answer's code (`code`) is its last fenced
+block tagged python that defines one of the names the tests import (else its last python block: a later block is
+often a usage example or a test), else its last untagged block, dedented; a response with none fails. Instruct and
+complete problems: the code as solution.py beside KodCode's pytest file after `from solution import *` (a share of
+the files name the solution's functions and modules without importing them), passing when pytest exits 0 within
 PYTEST_TIMEOUT. Online-judge problems: the code as a program per stdin case within CASE_TIMEOUT each, passing when
 every case's stdout equals the expected one line by line, trailing whitespace and trailing blank lines ignored. A
 prompt whose tests a wrong program (`stub`: its names returning None, or no output) passes has trivial tests; its
 passes are 'pass_trivial', not successes. Each run is a fresh process in its own session and temporary directory,
 under resource limits (address space MEMORY, file size FILE_SIZE, CPU seconds its timeout, no core files), its whole
 process group killed at the end, with single-threaded BLAS and no network (the container's); one spawned worker per
-core of the CPU set, so no parent state (CUDA) is inherited. Run in a CPU-only container.
+core of the CPU set, so no parent state (CUDA) is inherited. Run in a container without a network: a CPU-only one, or
+the RL sampler's (onpolicy/sampler.py, through `judge`).
 
 On the pool's own R1 answers (each passed KodCode's tests in KodCode's environment), `--known-good`: 2,995 of 3,000
 train and 1,499 of 1,500 val rows pass; the 6 others are answers naming the function otherwise than the tests (2),
@@ -39,6 +40,8 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from corpus.parallel import SPAWN
+from corpus.tokenizer import get_tokenizer
+from eval.loop import END
 from onpolicy.prompts import read_pool, sample
 
 PYTEST_TIMEOUT, CASE_TIMEOUT = 30, 10  # seconds
@@ -121,6 +124,18 @@ def verify(tasks: list[tuple[str | None, str, str]]) -> list[str]:
     """`check` of each task, one worker per core of the CPU set."""
     with ProcessPoolExecutor(len(os.sched_getaffinity(0)), mp_context=SPAWN) as pool:
         return list(pool.map(check, tasks, chunksize=4))
+
+
+def judge(task: tuple[list[int], list[str], str, str]) -> str:
+    """A sampled response's verdict (onpolicy/sampler.py) from its generated ids, its problem's names, test and kind:
+    'not_closed' when its text (BOS dropped) holds no END, else `check` on the code of its answer, the text after the
+    last END (as eval/official_termination.py `response` reads it)."""
+    ids, names, test, kind = task
+    tok = get_tokenizer()
+    text = tok.enc.decode([i for i in ids if i != tok.bos_token_id])
+    if END not in text:
+        return "not_closed"
+    return check((code(text.rpartition(END)[2].strip(), names), test, kind))
 
 
 def stub(row: dict) -> str:
