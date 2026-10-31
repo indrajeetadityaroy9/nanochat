@@ -15,11 +15,12 @@
 #   4. FTPO from the export (onpolicy/train.py ftpo, FREEZE none or head, default none) to ftpo/: one model, written
 #      when the held-out chosen_win reaches 0.35 or at the epoch's end, and ftpo/train-log.json;
 #   5. DPO waves (`dpo_waves`): PROMPTS_DPO distinct KodCode train-pool prompts per wave (default 2,000) x 4 samples
-#      at T 0.6 from ftpo/ to dpo-rollouts/wave-<k>/, in groups of at most ENGINES concurrent engines as in 2.-3.,
-#      verified (onpolicy/verify.py), and after each group the selection over every DPO wave (dpo-rollouts/dpo.jsonl,
-#      dpo-rollouts/selection.json); groups stop once the pairs reach DPO_PAIRS (default 8,000, DeLoop's count),
-#      after DPO_WAVES (default 4) waves, or when the group's last wave finds fewer than PROMPTS_DPO prompts left;
-#      then DPO from ftpo/ on dpo.jsonl (onpolicy/train.py dpo) to dpo/;
+#      at T 0.6 from ftpo/ to dpo-rollouts/wave-<k>/, each exact-cycle loop resumed 4 times from its history
+#      (onpolicy/rollouts.py), in groups of at most ENGINES concurrent engines as in 2.-3., verified
+#      (onpolicy/verify.py), and after each group the selection over every DPO wave (dpo-rollouts/dpo.jsonl: loop and
+#      outcome pairs; dpo-rollouts/selection.json); groups stop once the pairs reach DPO_PAIRS (default 8,000,
+#      DeLoop's count), after DPO_WAVES (default 4) waves, or when the group's last wave finds fewer than PROMPTS_DPO
+#      prompts left; then DPO from ftpo/ on dpo.jsonl (onpolicy/train.py dpo) to dpo/;
 #   6. the evaluation (`evaluate`) of each of model/, ftpo/ and dpo/ present, or only of EVAL_MODELS (names: model,
 #      ftpo, dpo) when set, to eval-<name>/: the natural-termination probe on PROBE_PROMPTS (default 128) prompts per
 #      set (eval/official_termination.py, scored in a CPU container; for the export, the step's own probe,

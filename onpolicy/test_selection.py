@@ -29,7 +29,7 @@ def test_dpo_pairs():
         # d: a pair longer than max_length: dropped
         row("d", 0, [50] * 20, True), row("d", 1, looping, False, (2, 4)),
     ]
-    pairs, too_long = selection.dpo_pairs(prompts, rows, max_length=20, bos=BOS)
+    pairs, too_long = selection.dpo_pairs(prompts, rows, [], max_length=20, bos=BOS)
     assert too_long == 1
     assert [(p["prompt_id"], p["chosen_sample"], p["rejected_sample"]) for p in pairs] == [("a", 1, 2), ("a", 1, 3)]
     assert pairs[0]["prompt_ids"] == [BOS, 7, 8] and pairs[0]["chosen_ids"] == [40, 41, BOS]

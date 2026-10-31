@@ -576,7 +576,7 @@ What each source contributes:
 
 | Source | Taken | Not taken |
 |---|---|---|
-| DeLoop (arXiv 2610.19376) | self-mined rows from the model's own failed rollouts, no task label (§4.1, App. G.1); contrast at the loop rather than imitation of a way out (SFT on the chosen action 37.7% loops against 6.1%, Table 15); sigmoid DPO as the last stage ("When SFT and DPO are staged, DPO must come last", App. G.12) with no likelihood anchor (6.1% → 27.0% loops with one, App. G.13); β 0.05, batch 16, one epoch, 8,000 pairs (App. G.1) | its chosen side, the loop-breaking action later in the same rollout: this model's own continuations re-enter the loop (above), so a DPO pair's chosen side is another sample's verified success of the same prompt (§8.4); LoRA (full parameters here, §8.5) |
+| DeLoop (arXiv 2610.19376) | rows mined from the model's own failed rollouts (§4.1, App. G.1); the loop pair: the history before the looping action, the looping action rejected, an action that breaks the loop chosen (§4.1; the loop pairs of §8.4); contrast at the loop rather than imitation of a way out (SFT on the chosen action 37.7% loops against 6.1%, Table 15); sigmoid DPO as the last stage ("When SFT and DPO are staged, DPO must come last", App. G.12) with no likelihood anchor (6.1% → 27.0% loops with one, App. G.13); β 0.05, batch 16, one epoch, 8,000 pairs (App. G.1) | its chosen action from later in the same rollout with no task label: this model does not leave its own loops (above), so the chosen side is a continuation resampled from the loop's history that ends in a verified success (§8.2, §8.4), and the loops without one give outcome pairs (§8.4); LoRA (full parameters here, §8.5) |
 | Antidoom / FTPO (blog; arXiv 2510.15061 §5, App. J) | the unit: one rejected token at the first repeat, the prefix before it; chosen tokens from the model's own next-token distribution; logit tethers to the reference; the stop at chosen_win 0.35; rebalancing of frequent rejected tokens (§8.4); one completion per prompt | LoRA (full parameters here, §8.5); the stop measured on training batches (here on held-out rows, §8.5) |
 | DITTO (arXiv 2206.02369 §2.2) | the mechanism: sentence-level repetition is self-reinforcing, so the loop is cut at its first repeat, before it reinforces | its pseudo-repetition training data |
 | Why reasoning models loop (arXiv 2512.12895 §2, §3) | loops as learning errors that temperature hides without fixing ("temperature reduces looping, but it does not remove the underlying learning errors", §3), so loops are mined at the evaluation temperature, T 0.6 (§8.2) | — |
@@ -584,15 +584,16 @@ What each source contributes:
 **Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on SFT train prompts of every source at T 0.6, one
 per prompt, in waves until 4,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its first repeat (§8.4); FTPO from
 the SFT model, stopped once held-out chosen_win reaches 0.35 (§8.5); rollouts of the FTPO model on KodCode train
-prompts, 4 per prompt, verified, in waves until 8,000 DPO pairs or 8,000 prompts (§8.7), each pair a prompt's
-shortest success against one of its failures, loops first (§8.4); DPO from the FTPO model for one epoch (§8.5); the
-SFT, FTPO and DPO models evaluated on the same probe prompts and KodCode val problems (§8.6); FTPO and DPO run only if
-the SFT model loops (§8.7). One model per stage, no candidates and no pick: each stage stops where its source stops
-(Antidoom's chosen_win 0.35; DeLoop's one epoch). Why DPO, and last: every objective DeLoop compares "cuts the loop
-rate to 15.0% or below, and DPO (DeLoop) gives the lowest loop rate (6.1%)" (§5.3, Table 2), and "When SFT and DPO
-are staged, DPO must come last": SFT after DPO reopened loops (6.5% → 29.7%) and a final DPO stage closed them again
-(2.3%) (App. G.12). FTPO before DPO is not tested there [inference: FTPO is itself a preference loss, and DPO comes
-last].
+prompts, 4 per prompt, each exact-cycle loop resumed 4 times from its history, verified, in waves until 8,000 DPO
+pairs or 8,000 prompts (§8.2, §8.7): loop pairs, a loop's first repeat against a successful continuation from the same
+history, and outcome pairs, a prompt's shortest success against one of its failures, loops first (§8.4); DPO from the
+FTPO model for one epoch (§8.5); the SFT, FTPO and DPO models evaluated on the same probe prompts and KodCode val
+problems (§8.6); FTPO and DPO run only if the SFT model loops (§8.7). One model per stage, no candidates and no pick:
+each stage stops where its source stops (Antidoom's chosen_win 0.35; DeLoop's one epoch). Why DPO, and last: every
+objective DeLoop compares "cuts the loop rate to 15.0% or below, and DPO (DeLoop) gives the lowest loop rate (6.1%)"
+(§5.3, Table 2), and "When SFT and DPO are staged, DPO must come last": SFT after DPO reopened loops (6.5% → 29.7%)
+and a final DPO stage closed them again (2.3%) (App. G.12). FTPO before DPO is not tested there [inference: FTPO is
+itself a preference loss, and DPO comes last].
 
 ### 8.1 Prompts
 
@@ -632,13 +633,17 @@ last].
 
 ### 8.2 Rollouts
 
-- **Generation** (`onpolicy/rollouts.py`): vLLM offline on the `--chat` export, the termination probe's generation
-  (`eval/official_termination.py` `generate`: 2,048-token rounds with prefix caching; a response with no `</think>`
-  whose last 4,096 tokens have repetition ≥ 0.99 is stopped as a loop after its round), top-p 0.95, at most 16,384
-  new tokens (the longest closed reasoning in the step-2000 probe was 11,757), request k seeded base + k. Mining and
-  DPO rollouts (splits mix and train) are also stopped as loops after a round once `cycle` finds an exact cycle
-  (`generate`'s `looped`), since their rows need a loop only through its first repeat: on the step-7676 val rollouts
-  that saves 18.6% of the generated tokens [measured]; val rollouts keep the protocol's rule alone.
+- **Generation** (`onpolicy/rollouts.py`): vLLM offline on the `--chat` export, top-p 0.95, at most 16,384 new
+  tokens (the longest closed reasoning in the step-2000 probe was 11,757), request k seeded base + k. Val rollouts use
+  the termination probe's generation, comparable across models (`eval/official_termination.py` `generate`: 2,048-token
+  rounds with prefix caching; a response with no `</think>` whose last 4,096 tokens have repetition ≥ 0.99 is stopped
+  as a loop after its round). Mining and DPO rollouts (splits mix and train) run in one engine call with the stop
+  inside the engine (`MiningLoopStop`, a logits processor on the served stop's mechanism,
+  `eval/official_loop_stop.py`): every 128 generated tokens past 1,024, a response with no `</think>` that ends in an
+  exact cycle (`cycle`) or meets the protocol's rule at its 2,048-token checks gets BOS as its next token, which
+  `mined` reads back as finish "loop" and drops. Their rows need a loop only through its first repeat, where the
+  protocol's rule runs a loop ≈4,100 tokens past four repeats (29% of the step-7676 val rollouts' tokens) [measured];
+  one engine call also avoids the rounds' re-prefill of every context once the requests outnumber the KV cache.
 - **Temperature and samples** (`SAMPLES`): one sample per prompt at T 0.6, the evaluation protocol's, where the
   loops are: at step 2000, on the probe's 128 prompts with a 16K cap, T 0.6 left 54 responses in loops and T 1.0 7
   (`termination-budget-2000.json`); on the step-3000 export, 40 KodCode train prompts × 4, 47 of 160 responses looped
@@ -648,6 +653,13 @@ last].
   samples often share a cycle, so more prompts give more distinct loop contexts per row [inference].
 - **Loops**: a never-closed response with repetition ≥ 0.99 is a loop; when its last 1,024 tokens repeat exactly at
   a period p ≤ 2,048 (`cycle`), its onset is the first index from which every token equals the one p later.
+- **Resumes** (split train, the DPO waves; `RESAMPLES`, `RESUMED`, `RESUME_SEED`): after the samples, each
+  exact-cycle loop whose first copy ends before the length limit is resumed 4 times from its history through that
+  copy, `ids[:o + p]`, in the same engine at its temperature, under the same stop and the same limit on the whole
+  response; each continuation is a row of sample 100 + 4 × (the loop's sample) + m, seeded base + 500,000 + n (past
+  the samples' seeds), `resume_of` the loop's sample and `resume_from` o + p, its ids the shared history and the
+  continuation. They feed the loop pairs (§8.4); `meta.json` counts them (`resumed`), and its generated tokens leave
+  out the shared histories.
 
 ### 8.3 Verifier
 
@@ -700,29 +712,44 @@ last].
   160 KodCode responses, 30 of 64 of the step-3000 probe's val set), about 7,000–11,000 exact-cycle rows a wave before
   rebalancing at the smoke's 43 exact cycles per 47 loops [estimate], against Antidoom's 15K–20K generated and 12K
   trained (README) and DeLoop's level-off at 8K pairs.
-- **DPO pairs** (`dpo_pairs`, `exact`, `rejected_side`, `dpo.jsonl`): outcome pairs, correct against incorrect
-  rollouts of the same prompt (Phi-4-mini-reasoning's rollout preference learning, arXiv 2504.21233 §3.3, without its
-  filter for incorrect responses with minor differences): per verified prompt with a success and a failure, up to 2
-  pairs: chosen the prompt's shortest success (fewest tokens) through its closing BOS; rejected its failures,
-  exact-cycle loops first, then the other failures (each in sample order). A loop's rejected side ends at its first
-  repeat, `ids[:o + p + min(p, 256)]`, with no BOS; another failure's rejected side is its whole response. Both follow
-  the prompt's ids; unverified rollouts (the mining waves) give no pairs. These are not DeLoop's pairs: its chosen
-  side is the loop-breaking action later in the same rollout, both sides conditioned on the same history (arXiv
-  2610.19376 §4.1), whereas here the two sides are separate samples with no shared history, and on a loop's rejected
-  side 99.2% of the gradient lands on the pre-cycle prefix, the repeat's tokens (probability 0.95–0.998) taking about
-  0.3% [measured]. DPO here therefore targets correctness; suppressing loop entry rests on FTPO, DeLoop's
-  shared-history contrast at the token level (§8.5). Pairs whose prompt and longer side exceed 32,768 tokens are
-  dropped. On the step-7676 export's 512 × 4 KodCode val rollouts the rule gives 369 pairs from 214 prompts (227
-  against exact loops, 118 against closed failures, 19 against loops without an exact cycle, 5 against length-cut
-  responses), none dropped, pair lengths 1,878 / 3,970 / 7,588 tokens (p10 / p50 / p90) [measured].
+- **DPO pairs** (`dpo_pairs`, `exact`, `rejected_side`, `dpo.jsonl`, each pair's `kind`), from verified rollouts only
+  (the mining waves give none), both kinds scored on correctness:
+  - **Loop pairs**, DeLoop's unit (arXiv 2610.19376 §4.1: x the history before the looping action, y⁻ the looping
+    action, y⁺ an action that breaks the loop, from the same history): on the DPO waves each exact-cycle loop is
+    resumed 4 times from `ids[:o + p]`, its history through the cycle's first copy (§8.2); for a loop of a verified
+    prompt whose continuations include a success, x is the prompt's ids and that history, y⁺ the shortest successful
+    continuation through its closing BOS, y⁻ the loop's first repeat, `min(p, 256)` tokens with no BOS. The tokens the
+    two sides share at their start cancel in the margin, so the pair's gradient falls where the loop and its break
+    diverge [arithmetic]. DeLoop's y⁺ is the first loop-breaking action within the same rollout, and a stricter rule
+    (new observations after it) did not help (App. G.11: 41.7% loops against 38.7% at 1,726 pairs); here y⁺ must end
+    in a verified success, since this model's departures from a cycle mostly re-enter it or paraphrase it (§8, "This
+    model does not leave its own loops") [inference: a departure that merely breaks the cycle would mostly be a
+    near-loop]. In a GPU smoke (the SFT export, 16 KodCode train prompts × 4) 17 loops gave 68 continuations, 3 of
+    them successes, and 1 loop pair beside 14 outcome pairs [measured].
+  - **Outcome pairs** (rollout DPO, correct against incorrect rollouts of the same prompt: Phi-4-mini-reasoning,
+    arXiv 2504.21233 §3.3, without its filter for incorrect responses with minor differences): per verified prompt
+    with a success and a failure not already in a loop pair, up to 2 pairs: chosen the prompt's shortest success
+    (fewest tokens) through its closing BOS; rejected its failures, exact-cycle loops first, then the other failures
+    (each in sample order). A loop's side ends at its first repeat, `ids[:o + p + min(p, 256)]`, with no BOS; another
+    failure's side is its whole response. Both follow the prompt's ids. The sides are separate samples with no shared
+    history: on a loop's side 99.2% of the gradient lands on the pre-cycle prefix, the repeat's tokens (probability
+    0.95–0.998) taking about 0.3% [measured], so these pairs target correctness; loop entry rests on FTPO (§8.5) and
+    the loop pairs. On the step-7676 export's 512 × 4 KodCode val rollouts (no resumes: the val split is never
+    resumed) the rule gives 369 outcome pairs from 214 prompts (227 against exact loops, 118 against closed failures,
+    19 against loops without an exact cycle, 5 against length-cut responses), none dropped, pair lengths 1,878 / 3,970
+    / 7,588 tokens (p10 / p50 / p90) [measured].
+
+  Pairs whose prompt and longer side exceed 32,768 tokens are dropped (counted). The resumed rows enter only the loop
+  pairs: every summary, FTPO row and outcome pair is computed without them.
 - **Statistics** (`selection.json`): per temperature, per source and pooled, the outcomes, loop rates per response
   and per prompt, onset and period lengths, and over verified prompts (the val evaluation's and the DPO waves'; the
   mining waves are not verified, §8.7) pass@1 and pass@n (unbiased, arXiv 2107.03374), the share of prompts solved
   and with mixed outcomes (a success and a loop) and success lengths; the rows: loops with an exact cycle,
   duplicates, rows before and after rebalancing (and per source), the 20 most frequent rejected tokens before and
   after, rows of verified prompts never solved, and position, onset, period and prefix lengths; the pairs: their
-  count, prompts, the dropped, and chosen, rejected and pair lengths. The loops' targets are computed in a process per
-  core of the CPU set (`loop_target`).
+  count (loop and outcome pairs), prompts, the dropped, the resumed rows, their successes and the loops resumed, and
+  chosen, rejected and pair lengths. The loops' targets are computed in a process per core of the CPU set
+  (`loop_target`).
 
 ### 8.5 Training
 
@@ -771,8 +798,10 @@ last].
   about lr per step and the speed is set by lr × steps more than by the data [inference]. Antidoom's LoRA lr 1.5e-5
   over LoRA's 10× (§2.2) maps to 1.5e-6, the middle arm; at 6e-6 the held-out chosen_win reached 0.40 in 5 steps
   [measured].
-- **Held-out monitor and stop** (`monitor_split`, `monitor`, `STOP`): before training, 512 rows of whole prompts (a
-  seeded permutation of the prompt ids) leave the training set; at step 0, every 10 optimizer steps and at the last
+- **Held-out monitor and stop** (`monitor_split`, `monitor`, `STOP`): before training, 256 rows of whole prompts (a
+  seeded permutation of the prompt ids; the stop's standard error sqrt(0.35 × 0.65 / 256) ≈ 0.03 against 0.053 for
+  Antidoom's 5-step window of 16 rows [arithmetic], the forwards every 10 steps about a third of a training step's
+  work, 512 rows about one [estimate]) leave the training set; at step 0, every 10 optimizer steps and at the last
   step they are scored without gradient: per row chosen_win (the share of its chosen tokens whose logit beats the
   rejected one), margin_win (ahead by m), mean Δ and L_nontarget, averaged over rows. Training stops at the first
   monitor point after step 0 whose chosen_win reaches 0.35, the stop of Antidoom's published runs [blog] (the
@@ -804,7 +833,8 @@ last].
   a DPO pair cost 0.235 MB per token of each sequence (peaks 11.49 / 11.97 GB at 1,024 / 2,048-token pairs, TRL's
   trainer) [measured], so a 32,768-token FTPO row needs about 7.7 GB beside 8.4 GB of fp32 weights, gradients and
   AdamW state, and a DPO pair holds both sides' activations, about 8.0 GB for the longest val pair (16,839 tokens,
-  §8.4) [estimate]; training runs beside one vLLM server at 0.45 of the GPU's memory (§8.7).
+  §8.4) [estimate], and at most 2 × 32,768 tokens, about 15.4 GB, at the length cap (a loop pair's two sequences
+  both carry its history) [arithmetic]; training runs beside one vLLM server at 0.45 of the GPU's memory (§8.7).
 - **Stochastic rounding to bf16** (`bf16`): one AdamW step moves an element by at most about lr, so a run at 5e-7
   over a few hundred steps moves most elements less than half their bf16 spacing (median |w| 0.0243 of the decoder's
   matmul weights: spacing 2⁻¹³ = 1.22e-4 [measured: export of step 3000]), and rounding to nearest at the write erases
@@ -836,9 +866,9 @@ last].
   0.4 over 256 probe responses has a binomial standard error of 0.031 [arithmetic]; pairing removes the
   between-prompt variance from the differences. No rule chooses among the models: the final model is `dpo/` (else
   `ftpo/`), each stage trained once to its source's stopping point (§8). Two risks of the DPO stage to read in its
-  results: a brevity bias (the chosen side is the shortest success, and the rejected side is longer in 72% of the
-  val pairs [measured]) and a falling chosen log-probability (`logp_chosen` in `dpo/train-log.json`), DPO's known
-  failure mode that the absent likelihood term leaves unchecked [inference].
+  results: a brevity bias in the outcome pairs (the chosen side is the shortest success, and the rejected side is
+  longer in 72% of the val pairs [measured]) and a falling chosen log-probability (`logp_chosen` in
+  `dpo/train-log.json`), DPO's known failure mode that the absent likelihood term leaves unchecked [inference].
 - **Reasoning protocol** (§5; `scripts/official_reasoning.sh`, `MODEL`/`TAG` for a trained directory): the SFT model
   and the final model, both served in bf16.
 
@@ -859,18 +889,21 @@ is logged and the queue goes on.
   previous one has written its prompts and logged vLLM's "KV cache size"): vLLM's engine core is CPU-bound, and one
   engine left the GPU at 42–56% utilization [measured: nvidia-smi during the step-7676 mining]. The selection over
   all waves runs after each group; groups stop once the rows before rebalancing reach 4,000 or the pool runs out.
-  Antidoom collects 20,000 ("stops after collecting 20k pairs" [blog]); here a group of 24,000 prompts generates
-  ≈120M tokens, ≈1.9 h at the 18.7K tokens/s the step-7676 KodCode val rollouts ran at on one engine [measured rate,
-  arithmetic], and the stop at chosen_win 0.35 is projected near step 165 at lr 5e-7, ≈2,600 rows [estimate, from
-  CPU FTPO probes on step-3000 rows], so one group suffices and a second would mostly go unused. At the step-7676
-  probe's loop share (≈0.4) one group yields ≈8–10K rows [estimate], ≈6–7K after rebalancing. The mining rollouts
-  are not verified: the rows need no verdicts.
+  A mining response stops once its tail is an exact cycle (§8.2, `MiningLoopStop`), since an FTPO row needs the
+  loop only through its first repeat. Antidoom collects 20,000 ("stops after collecting 20k pairs" [blog]); here a
+  group of 24,000 prompts generates ≈120M tokens, ≈1.9 h at the 18.7K tokens/s the step-7676 KodCode val rollouts
+  ran at on one engine [measured rate, arithmetic], and the stop at chosen_win 0.35 is projected near step 165 at lr
+  5e-7, ≈2,600 rows [estimate, from CPU FTPO probes on step-3000 rows], so one group suffices and a second would
+  mostly go unused. At the step-7676 probe's loop share (≈0.4) one group yields ≈8–10K rows [estimate], ≈6–7K after
+  rebalancing. The mining rollouts are not verified: the rows need no verdicts.
 - **DPO waves** (`dpo_waves`): 2,000 KodCode train-pool prompts per wave (§8.1 `sample`, wave k seeded k and
-  excluding the earlier DPO waves' prompts) × 4 samples at T 0.6 from the FTPO model, in one group of 4 engines
-  (8,000 prompts) as above, verified (§8.3); the selection over the DPO waves after the group; it stops at 8,000 pairs
-  (DeLoop's count, arXiv 2610.19376 App. G.1), after 4 waves, or when the pool runs out, and DPO trains on every pair.
-  At the SFT model's val rate (369 pairs from 512 prompts, §8.4) the group would give ≈5,800 pairs [estimate]; the
-  FTPO model should loop less, so fewer of them are against loops [inference].
+  excluding the earlier DPO waves' prompts) × 4 samples at T 0.6 from the FTPO model, each exact-cycle loop then
+  resumed 4 times from its history (§8.2), in one group of 4 engines (8,000 prompts) as above, verified (§8.3); the
+  selection over the DPO waves after the group (loop and outcome pairs, §8.4); it stops at 8,000 pairs (DeLoop's
+  count, arXiv 2610.19376 App. G.1), after 4 waves, or when the pool runs out, and DPO trains on every pair. At the
+  SFT model's val rate (369 outcome pairs from 512 prompts, §8.4) the group would give ≈5,800 pairs [estimate]; at
+  the smoke's rate (§8.4: 3 successes in 68 continuations) loop pairs are a small share of them [estimate], and the
+  FTPO model should loop less [inference].
 - **GPU shares**: the KV cache costs 2 × 24 layers × 6 heads × 128 × 2 bytes = 72 KiB per token, so of 94.5 GiB, 0.45
   holds EvalPlus's 20 samples of about 28K tokens after the weights, and 0.85 about 70 rollouts at the 16,384-token
   cap [arithmetic]; in (3) two 0.45 shares run side by side, FTPO or DPO training (≈14–16 GB, §8.5) inside one.

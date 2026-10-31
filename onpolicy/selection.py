@@ -17,25 +17,32 @@ closed and its tail repeats (onpolicy/rollouts.py `loop`).
   and dropped; rows with an identical prefix are kept once (the first in prompt and sample order); rows whose prefix
   and rejected token exceed --max-length are dropped (counted). The rows are then rebalanced on their rejected token
   and source as Antidoom's trainer does (`rebalance`).
-- DPO pairs (dpo.jsonl, `dpo_pairs`): outcome pairs, correct against incorrect rollouts of the same prompt
-  (Phi-4-mini-reasoning's rollout preference learning, arXiv 2504.21233 §3.3, without its filter for incorrect
-  responses with minor differences); chosen and rejected are separate samples with no shared history, so the pairs
-  target correctness, while loop entry is FTPO's (DeLoop's shared-history contrast, arXiv 2610.19376 §4.1, at token
-  level). Per verified prompt with a success and a failure, up to PAIRS_PER_PROMPT pairs: chosen the prompt's
-  shortest success (fewest tokens; the lower sample index on a tie) through its closing BOS; rejected its failures,
-  exact-cycle loops first (in sample order), then the other failures (in sample order). A loop's rejected side ends
-  at its first repeat, ids[:onset + period + min(period, WINDOW_CAP)], with no BOS (WINDOW_CAP bounds a long period's
-  share of its tokens), so it is not a stop that the pair lowers; its gradient falls almost entirely on the pre-cycle
-  prefix, the repeat's tokens being near-certain. Another failure's rejected side is its whole response. Only
-  verified prompts have successes, so unverified rollouts (the mix waves) yield no pairs. Pairs whose prompt and
-  longer side exceed --max-length are dropped (counted).
+- DPO pairs (dpo.jsonl, `dpo_pairs`), of two kinds, both scored on correctness:
+  - loop pairs (DeLoop's unit, arXiv 2610.19376 §4.1: the history just before the looping action, the looping action
+    rejected, an action that breaks the loop chosen): per exact-cycle loop of a verified prompt whose continuations
+    resampled from its history (onpolicy/rollouts.py, the rows with `resume_of`) include a success: the prompt is the
+    prompt and the loop through its first copy, ids[:onset + period]; chosen the shortest successful continuation
+    from there (the lower sample index on a tie) through its closing BOS; rejected the loop's first repeat,
+    min(period, WINDOW_CAP) tokens, with no BOS. The shared history puts the pair's gradient on the tokens where the
+    loop and its break diverge.
+  - outcome pairs (correct against incorrect rollouts of the same prompt, Phi-4-mini-reasoning's rollout preference
+    learning, arXiv 2504.21233 §3.3, without its filter for incorrect responses with minor differences): per
+    verified prompt with a success and a failure not already in a loop pair, up to PAIRS_PER_PROMPT pairs: chosen
+    the prompt's shortest success (fewest tokens; the lower sample index on a tie) through its closing BOS; rejected
+    its failures, exact-cycle loops first, then the others (each in sample order). A loop's side ends at its first
+    repeat, ids[:onset + period + min(period, WINDOW_CAP)], with no BOS (WINDOW_CAP bounds a long period's share of
+    its tokens); its gradient falls almost entirely on the pre-cycle prefix, the repeat's tokens being near-certain.
+    Another failure's side is its whole response.
+  Only verified prompts have successes, so unverified rollouts (the mix waves) yield no pairs. Pairs whose prompt and
+  longer side exceed --max-length are dropped (counted). The resumed rows enter the loop pairs only.
 - selection.json: per temperature and pooled, the outcomes, loop rates per response and per prompt, loop onsets and
   periods, and over the prompts whose responses are verified pass@1 and pass@n (unbiased, arXiv 2107.03374 Eq. 1),
   the share of prompts with a success and with mixed outcomes (a success and a loop) and the successes' lengths; per
   source (the prompt's `source`, onpolicy/rollouts.py); and the rows:
   loops with an exact cycle, duplicates, rows before and after rebalancing (and per source), the 20 most frequent
   rejected tokens (decoded) before and after, the rows of verified prompts never solved, and position, onset and
-  period statistics; the pairs: their count, prompts, the dropped, and chosen, rejected and pair lengths.
+  period statistics; the pairs: their count per kind, prompts, the dropped, the resumed rows, their successes and the
+  loops resumed, and chosen, rejected and pair lengths.
 
 The loops' targets are computed in a process per core of the CPU set (`loop_target`).
 
@@ -280,33 +287,61 @@ def rejected_side(r: dict) -> list[int]:
     return r["ids"][:r["loop_onset"] + r["loop_period"] + min(r["loop_period"], WINDOW_CAP)]
 
 
-def dpo_pairs(prompts: dict[str, dict], rows: list[dict], max_length: int, bos: int) -> tuple[list[dict], int]:
-    """The DPO pairs (module docstring) in prompt order and the number dropped for length."""
-    by_prompt = defaultdict(list)
+def dpo_pairs(prompts: dict[str, dict], rows: list[dict], resumed: list[dict], max_length: int,
+              bos: int) -> tuple[list[dict], int]:
+    """The DPO pairs (module docstring) in prompt order, each prompt's loop pairs (in loop sample order) before its
+    outcome pairs, and the number dropped for length."""
+    by_prompt, wins_from = defaultdict(list), defaultdict(list)
     for r in rows:
         by_prompt[r["prompt_id"]].append(r)
+    for r in resumed:
+        if r["success"]:
+            wins_from[(r["prompt_id"], r["resume_of"])].append(r)
     pairs, too_long = [], 0
+
+    def add(kind: str, pid: str, prompt: list[int], chosen: dict, chosen_ids: list[int], rejected: dict,
+            rejected_ids: list[int]) -> None:
+        nonlocal too_long
+        if len(prompt) + max(len(chosen_ids), len(rejected_ids)) > max_length:
+            too_long += 1
+            return
+        pairs.append({"kind": kind, "prompt_id": pid, "chosen_sample": chosen["sample"],
+                      "rejected_sample": rejected["sample"], "loop_onset": rejected["loop_onset"],
+                      "loop_period": rejected["loop_period"], "prompt_ids": prompt, "chosen_ids": chosen_ids,
+                      "rejected_ids": rejected_ids})
+
     for pid, rs in sorted(by_prompt.items()):
+        context = prompts[pid]["ids"]
+        loops = sorted((r for r in rs if r["success"] is False and exact(r)), key=lambda r: r["sample"])
+        broken = set()
+        for loop in loops:
+            wins = sorted(wins_from[(pid, loop["sample"])], key=lambda r: (r["tokens"], r["sample"]))
+            if not wins:
+                continue
+            cut = loop["loop_onset"] + loop["loop_period"]
+            best = wins[0]
+            if best["ids"][:cut] != loop["ids"][:cut]:
+                raise ValueError(f"{pid} sample {best['sample']} does not continue sample {loop['sample']}'s history")
+            chosen = best["ids"][cut:] if best["ids"][-1:] == [bos] else [*best["ids"][cut:], bos]
+            add("loop", pid, context + loop["ids"][:cut], best, chosen, loop,
+                loop["ids"][cut:cut + min(loop["loop_period"], WINDOW_CAP)])
+            broken.add(loop["sample"])
         wins = sorted((r for r in rs if r["success"]), key=lambda r: (r["tokens"], r["sample"]))
         if not wins:
             continue
-        best, context = wins[0], prompts[pid]["ids"]
+        best = wins[0]
         chosen = best["ids"] if best["ids"][-1:] == [bos] else [*best["ids"], bos]
-        failures = sorted((r for r in rs if r["success"] is False), key=lambda r: (not exact(r), r["sample"]))
-        for fail in failures[:PAIRS_PER_PROMPT]:
-            side = rejected_side(fail) if exact(fail) else fail["ids"]
-            if len(context) + max(len(chosen), len(side)) > max_length:
-                too_long += 1
-                continue
-            pairs.append({"prompt_id": pid, "chosen_sample": best["sample"], "rejected_sample": fail["sample"],
-                          "loop_onset": fail["loop_onset"] if exact(fail) else None,
-                          "loop_period": fail["loop_period"] if exact(fail) else None,
-                          "prompt_ids": context, "chosen_ids": chosen, "rejected_ids": side})
+        other = sorted((r for r in rs if r["success"] is False and not exact(r)), key=lambda r: r["sample"])
+        for fail in [*(r for r in loops if r["sample"] not in broken), *other][:PAIRS_PER_PROMPT]:
+            add("outcome", pid, context, best, chosen, fail, rejected_side(fail) if exact(fail) else fail["ids"])
     return pairs, too_long
 
 
 def select(out: Path, directories: list[Path], max_length: int) -> dict:
     prompts, rows = load(directories)
+    # loop continuations (onpolicy/rollouts.py `resume_of`; rollouts written before it have no such column): pairs only
+    resumed = [r for r in rows if r.get("resume_of") is not None]
+    rows = [r for r in rows if r.get("resume_of") is None]
     tok = get_tokenizer()
     decode = tok.enc.decode
     source = {i: p["source"] for i, p in prompts.items()}
@@ -317,7 +352,7 @@ def select(out: Path, directories: list[Path], max_length: int) -> dict:
     kept = rebalance(candidates, min(MAX_ROWS, int(KEEP * len(candidates))), STRENGTH, SEED)
     with open(out / "ftpo.jsonl", "w") as f:
         f.writelines(json.dumps({k: v for k, v in c.items() if k not in ("rejected", "source")}) + "\n" for c in kept)
-    pairs, too_long = dpo_pairs(prompts, rows, max_length, tok.bos_token_id)
+    pairs, too_long = dpo_pairs(prompts, rows, resumed, max_length, tok.bos_token_id)
     with open(out / "dpo.jsonl", "w") as f:
         f.writelines(json.dumps(p) + "\n" for p in pairs)
     verified = {r["prompt_id"] for r in rows if r["verdict"] is not None}
@@ -343,6 +378,10 @@ def select(out: Path, directories: list[Path], max_length: int) -> dict:
             "period_tokens": quantiles([c["period"] for c in kept]),
             "prefix_tokens": quantiles([len(c["prefix_ids"]) for c in kept])},
         "dpo": {"pairs": len(pairs), "prompts": len({p["prompt_id"] for p in pairs}), "dropped_too_long": too_long,
+                "loop_pairs": sum(p["kind"] == "loop" for p in pairs),
+                "outcome_pairs": sum(p["kind"] == "outcome" for p in pairs),
+                "resumed": len(resumed), "resumed_successes": sum(bool(r["success"]) for r in resumed),
+                "loops_resumed": len({(r["prompt_id"], r["resume_of"]) for r in resumed}),
                 "max_length": max_length, "per_prompt_cap": PAIRS_PER_PROMPT, "window_cap": WINDOW_CAP,
                 "chosen_tokens": quantiles([len(p["chosen_ids"]) for p in pairs]),
                 "rejected_tokens": quantiles([len(p["rejected_ids"]) for p in pairs]),

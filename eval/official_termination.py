@@ -62,7 +62,6 @@ import re
 import statistics
 import time
 from collections import Counter
-from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -221,13 +220,11 @@ def response(ids: list[int], text: str, finish: str, bos: int, decode) -> dict:
 
 
 def generate(llm, prompts: list[list[int]], sampling: list[dict], seeds: list[int], limits: list[int],
-             stop: str | None = None,
-             looped: Callable[[list[int]], bool] | None = None) -> list[tuple[list[int], str, str]]:
+             stop: str | None = None) -> list[tuple[list[int], str, str]]:
     """Each prompt's (generated ids, their text, finish), sampled in CHUNK-token rounds, each round's prompt the
     prompt and every token so far (prefix caching reuses its KV): finish "stop" at eos (BOS) or at `stop` (text cut
     after its first occurrence), "length" at the prompt's limit, "loop" for a sequence holding neither `stop` nor END
-    whose last REPEAT_TAIL tokens have `repetition` >= LOOP after a round, or, given `looped` (generated ids -> bool),
-    for which it holds after a round. Round r is seeded seed + r * SEED_STRIDE,
+    whose last REPEAT_TAIL tokens have `repetition` >= LOOP after a round. Round r is seeded seed + r * SEED_STRIDE,
     so the first CHUNK tokens equal a one-shot generation's and the rest differ from it (each request restarts its
     seeded generator): chunked and one-shot generations are equal in distribution, not token for token."""
     from vllm import SamplingParams
@@ -251,8 +248,7 @@ def generate(llm, prompts: list[list[int]], sampling: list[dict], seeds: list[in
                 finish[k] = "stop"
             elif len(generated[k]) >= limits[k]:
                 finish[k] = "length"
-            elif END not in text and ((len(generated[k]) >= REPEAT_TAIL and repetition(generated[k]) >= LOOP)
-                                      or (looped is not None and looped(generated[k]))):
+            elif len(generated[k]) >= REPEAT_TAIL and END not in text and repetition(generated[k]) >= LOOP:
                 finish[k] = "loop"
             else:
                 remaining.append(k)

@@ -102,8 +102,10 @@ LOG_STEPS, MAX_GRAD_NORM = 5, 2.5
 LR = 5e-7
 # held-out monitor and its stop: early stopping at chosen_win 0.35, the setting of Antidoom's published runs
 # (liquid.ai/blog/antidoom; the repository's default.yaml early_stopping_chosen_win is 0.4, its README's band 0.15-0.3
-# "strong reduction", past 0.5 "overtraining")
-MONITOR_ROWS, MONITOR_EVERY, STOP, SEED = 512, 10, 0.35, 0
+# "strong reduction", past 0.5 "overtraining"); 256 rows put the stop's standard error at sqrt(0.35 x 0.65 / 256) ≈
+# 0.03 (Antidoom's 5-step window of 16 rows: 0.053), their forwards every 10 steps about a third of a step's work
+# (512 rows: about as much as the training step itself)
+MONITOR_ROWS, MONITOR_EVERY, STOP, SEED = 256, 10, 0.35, 0
 # dpo: DeLoop's beta and batch (arXiv 2610.19376 App. G.1), Phi-4-mini-reasoning's rollout-DPO lr (arXiv 2504.21233
 # §5.3), warmup ratio 0.1; head positions per chunk of `completion_logp`
 DPO_LR, DPO_BATCH, DPO_WARMUP, DPO_BETA, HEAD_CHUNK = 5e-7, 16, 0.1, 0.05, 1024
