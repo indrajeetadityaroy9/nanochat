@@ -460,12 +460,13 @@ in a random order. The loss also excludes padding tokens.
 \section{Model Architecture}
 \label{sec:model}
 
-The model is a GPT-style decoder-only transformer trained from scratch; Table~\ref{tab:model} gives its configuration.
-Each layer applies attention and an MLP to an RMS-normalized copy of the residual stream (pre-norm), which, unlike
-post-norm, trains without a learning-rate warm-up stage~\cite{xiong2020prenorm}; a final RMSNorm precedes the output
-layer. The norms have no learned gains, the linear layers have no biases, and the input and output embeddings are not
-tied. This section describes the components that differ from this standard design, the reason for each, and the GPU
-implementation that makes training on one GPU practical.
+The model is a GPT-style decoder-only transformer trained from scratch (Table~\ref{tab:model}). It uses pre-norm
+layers with RMSNorm without a learned scale, a final RMSNorm before the output layer, linear layers without biases, and
+separate input and output embeddings; pre-norm, unlike post-norm, trains without a learning-rate warm-up
+stage~\cite{xiong2020prenorm}. Unlike a standard transformer, the layers are not all identical: 6 of the 24 layers use
+global attention and the other 18 local attention, and 12 of the 24 layers add value embeddings. Each paragraph below
+covers one component that differs from the standard design: the choice, its reason, its scope, then its configuration
+and evidence.
 
 \begin{table}
   \caption{Model configuration. Non-embedding parameters are those of the transformer layers and the output layer;
@@ -477,11 +478,12 @@ implementation that makes training on one GPU practical.
     Layers & 24 \\
     Hidden size & 768 \\
     Attention & multi-head, 6 heads of 128 \\
-    Local and global layers & 18 (512 tokens) and 6 \\
+    Local attention & 18 layers, window 512 \\
+    Global attention & 6 layers (4, 8, \ldots, 24) \\
     Position encoding & RoPE, base $10^6$ \\
     Normalization & pre-norm RMSNorm, QK-norm \\
     MLP & ReLU$^2$, hidden size 3,072 \\
-    Value embeddings & 12 of 24 layers \\
+    Value embeddings & 12 layers (2, 4, \ldots, 24) \\
     Output logits & $15 \tanh(z / 15)$ \\
     Vocabulary & 32,768 \\
     Context length & 8,192, then 32,768 \\
@@ -494,58 +496,70 @@ implementation that makes training on one GPU practical.
   \end{tabular}
 \end{table}
 
-\paragraph{Shape.} The hidden size is 30 times the number of layers, rounded up to whole 128-dimensional heads: 768
-for 24 layers. This is the ratio of MobileLLM-350M (32 layers of width 960); MobileLLM found depth more important than
-width for models below one billion parameters~\cite{liu2024mobilellm}.
+\paragraph{Depth and width.} The model is deep and narrow: 24 layers of width 768. MobileLLM found depth more
+important than width for models below one billion parameters~\cite{liu2024mobilellm}. The width is 30 times the
+number of layers, the ratio of MobileLLM-350M (32 layers of width 960), rounded up to a multiple of the 128-dimensional
+head.
 
-\paragraph{Attention.} The model uses multi-head attention with 6 heads of dimension 128. Queries and keys are
-RMS-normalized per head and scaled by a learned per-dimension gain (QK-norm) before the rotary position encoding, as
-in Qwen3~\cite{yang2025qwen3}; normalizing queries and keys prevents the growth of attention logits that destabilizes
-training~\cite{wortsman2023smallscale}. The rotary position encoding (RoPE)~\cite{su2021roformer} uses a base of
-$10^6$ in both stages, above the lower bound of $6.4 \times 10^5$ for a 32,768-token context~\cite{men2024ropebase},
-so the base does not change when the context grows. Of the 24 layers, 18 use sliding-window attention over the
-previous 512 tokens~\cite{beltagy2020longformer}; every fourth layer and the last layer attend to the whole context, a
-3:1 ratio of local to global layers. Local layers reduce the attention cost at long context, and in Gemma 3 the ratio
-of local to global layers had minimal effect on perplexity up to 7:1~\cite{gemma2025gemma3}. Multi-head attention is
-used rather than grouped-query attention, whose main benefit is a smaller key-value cache at inference. Attention is
-masked within each document (Section~\ref{sec:sequences}).
+\paragraph{Attention.} Every layer uses multi-head attention with 6 heads of dimension 128, QK-norm and rotary
+position embeddings (RoPE)~\cite{su2021roformer}. QK-norm applies RMSNorm with a learned per-dimension scale to each
+head's queries and keys, as in Qwen3~\cite{yang2025qwen3}; it prevents the growth of attention logits that
+destabilizes training~\cite{wortsman2023smallscale}. The RoPE base is $10^6$ in both stages, above the lower bound of
+$6.4 \times 10^5$ for a 32,768-token context~\cite{men2024ropebase}, so it does not change when the context length
+grows. Multi-head attention is used rather than grouped-query attention, whose main benefit is a smaller key-value
+cache at inference. Attention is masked within each document (Section~\ref{sec:sequences}).
 
-\paragraph{Value embeddings.} In 12 alternating layers, including the last, a learned per-layer token embedding is
-added to the attention values: for each head, $v \leftarrow v + 2\sigma(x W_g)\, E_l[t]$, where $t$ is the input
-token, $E_l$ the layer's embedding table and $W_g$ a learned gate on the normalized input $x$~\cite{li2026move}. The
-tables add parametric memory at almost no compute, since a table lookup replaces a matrix multiplication. In the MoVE
-experiments, these layer-wise value embeddings on half of the layers lowered validation bits per byte by 0.010--0.016
-at three model depths~\cite{li2026move}. The tables hold 302M of the model's 522M parameters (Table~\ref{tab:model}),
-so the model has 195M non-embedding parameters. Their placement and the gate are not ablated here.
+\paragraph{Local and global attention layers.} Three of every four layers use local (sliding-window)
+attention~\cite{beltagy2020longformer}, in which each token attends only to the previous 512 tokens; every fourth layer
+uses global attention over the whole context. Local attention costs time and memory in proportion to the window
+rather than to the context length, which matters at a 32,768-token context, while the global layers still pass
+information across the whole context. The global layers are layers 4, 8, \ldots, 24, so the last layer is global; the
+other 18 layers are local. In Gemma 3, the ratio of local to global layers had minimal effect on perplexity, even at
+7:1, and the window could be reduced significantly without affecting perplexity~\cite{gemma2025gemma3}. The 3:1 ratio
+and the 512-token window are not ablated here.
+
+\paragraph{Value embeddings.} Every second layer adds a value embedding: a learned token embedding, one per layer,
+added to the attention values~\cite{li2026move}. A value embedding gives the layer token-specific parameters that cost
+a table lookup instead of a matrix multiplication, so it adds capacity at almost no compute. In the MoVE experiments,
+value embeddings in half of the layers lowered validation bits per byte by 0.010--0.016 at three model
+depths~\cite{li2026move}. The 12 layers with value embeddings are layers 2, 4, \ldots, 24, including the last. Using
+every second layer rather than every layer halves the added parameters: in the same experiments, at depth 12, value
+embeddings in half of the layers gave a gain of 0.016 against 0.020 in every layer, with 302M instead of 604M added
+parameters~\cite{li2026move}. In layer $l$, for each head, $v \leftarrow v + 2\sigma(x W_g)\, E_l[t]$, where $t$ is
+the input token, $E_l$ the layer's embedding table and $W_g$ a learned gate on the layer's normalized input $x$,
+initialized so that the gate is 1. The 12 tables hold 302M of the model's 522M parameters, so the model has 195M
+non-embedding parameters (Table~\ref{tab:model}). The placement and the gate are not ablated here.
 
 \paragraph{Residual stream.} Before each layer, the residual stream $x$ is mixed with the normalized input embedding
-$x_0$ through two learned scalars per layer, $x \leftarrow \lambda_r x + \lambda_0 x_0$, initialized to the plain
-residual stream ($\lambda_r = 1$, $\lambda_0 = 0$). This is a simplified form of DenseFormer's depth-weighted average,
-which gives each layer direct access to earlier representations~\cite{pagliardini2024denseformer}.
+$x_0$ through two learned scalars per layer: $x \leftarrow \lambda_r x + \lambda_0 x_0$. This gives every layer direct
+access to the input embedding, a simplified form of DenseFormer's weighted average over earlier
+layers~\cite{pagliardini2024denseformer}. The scalars start at $\lambda_r = 1$ and $\lambda_0 = 0$, the plain residual
+stream.
 
-\paragraph{MLP\@.} The MLP has hidden size $4 \times 768$ and the squared ReLU activation, which Primer found to be the
-most effective of its modifications~\cite{so2021primer}. Gated units such as SwiGLU outperform ReLU at matched
-parameters~\cite{shazeer2020glu}; squared ReLU against SwiGLU is not ablated here.
+\paragraph{MLP\@.} The MLP uses the squared ReLU activation with hidden size 3,072 ($4 \times 768$). Primer found
+squared ReLU the most effective of its modifications~\cite{so2021primer}. Gated units such as SwiGLU outperform ReLU at
+matched parameters~\cite{shazeer2020glu}; squared ReLU against SwiGLU is not ablated here.
 
 \paragraph{Output logit cap.} The output logits $z$ are capped as $15 \tanh(z / 15)$ in training, evaluation and
-sampling, as in Gemma 2~\cite{gemma2024gemma2}. QK-norm bounds the attention logits but not the output logits, whose
-divergence is a separate training instability~\cite{wortsman2023smallscale,chameleon2024}. The value 15 is not ablated;
-the cap costs 0.58\% of the training step time.
+sampling. QK-norm bounds the attention logits but not the output logits, whose divergence is a separate training
+instability~\cite{wortsman2023smallscale,chameleon2024}. Gemma 2 uses the same cap with a value of
+30~\cite{gemma2024gemma2}. The value 15 is not ablated; the cap costs 0.58\% of the training step time.
 
 \paragraph{Precision.} Parameters, gradients and optimizer states are kept in FP32. Activations and matrix
 multiplication inputs are BF16, with FP32 accumulation.
 
-\paragraph{GPU implementation.} A training step is bound by GPU compute, so the implementation removes memory traffic
-between the matrix multiplications. Attention uses FlashAttention-4~\cite{zadouri2026fa4} with variable-length
-sequences, which applies the document mask without padding, and a persistent kernel for the sliding-window layers.
-The query, key and value projections are one matrix multiplication, and QK-norm with RoPE is one kernel. The RMSNorm
-statistics are computed in the epilogue of the preceding matrix multiplication and applied, with the squared ReLU,
-inside the MLP's matrix multiplications. The cross-entropy loss, including the logit cap, is computed inside the output
-layer's matrix multiplication, so the 32,768 logits per token are never stored. The value-embedding gate is one kernel
-in each direction. In the base run, the median training throughput was 381K tokens per second in the file-level stage
-and 299K in the repository-level stage, a model FLOPs utilization (MFU) of 0.508 and 0.515, where MFU is the model
-FLOPs executed per second over the GPU's dense BF16 peak of 989 TFLOP/s. The 103B tokens took 76.3 hours, with a
-peak memory of 71 GiB of the GPU's 95.6 GiB.
+\paragraph{GPU implementation.} The training operations are fused into fewer GPU kernels. A training step is limited
+by GPU compute, and separate kernels add memory traffic and launch overhead around the matrix multiplications. The
+fusion covers attention, normalization, the MLP and the loss. Attention uses FlashAttention-4~\cite{zadouri2026fa4}
+with variable-length sequences, which applies the document mask without padding. The query, key and value projections
+are one matrix multiplication, and QK-norm with RoPE is one kernel. The RMSNorm statistics are computed inside the
+kernel of the preceding matrix multiplication and applied, with the squared ReLU, inside the MLP's matrix
+multiplication kernels. The cross-entropy loss and the logit cap are computed inside the output layer's matrix
+multiplication, so the 32,768 logits per token are never stored. The value-embedding gate is one kernel. In the base
+run, the median training throughput was 381K tokens per second in the file-level stage and 299K in the
+repository-level stage, a model FLOPs utilization (MFU) of 0.508 and 0.515, where MFU is the model FLOPs executed per
+second over the GPU's dense BF16 peak of 989 TFLOP/s. The 103B tokens took 76.3 hours, with a peak memory of 71 GiB
+of the GPU's 95.6 GiB.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
