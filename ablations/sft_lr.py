@@ -11,8 +11,9 @@ import metrics
 from paths import POSTTRAIN_RESULTS
 
 # The optimum lr falls with the run's steps at a fixed batch as steps^-STEPS_EXPONENT: 0.32 in arXiv 2409.19913 §6
-# Eq. 5, 0.30 in its §4.1 (Llama-1), 0.24-0.30 from the repository's d8 pair (docs/training.md §5) [inference:
-# transferred to SFT]
+# Eq. 5, 0.30 in its §4.1 (Llama-1); the repository's d8 pair (docs/training.md §5: optimum x0.574 over 20.0x the
+# steps, 40.05x the tokens, at 2x the batch, taken as sqrt(2)) gives 0.30 per steps, 0.24 per tokens [arithmetic;
+# inference: transferred to SFT]
 STEPS_EXPONENT = 0.30
 
 

@@ -23,10 +23,10 @@ def tau_weight_decay(*, lr: float, steps: int, tokens_per_param: float) -> float
 
 
 class Muon(torch.optim.Muon):
-    """NorMuon (arXiv 2510.05491 Alg. 1 lines 7-9) on torch.optim.Muon's update, Newton-Schulz batched per shape (may
-    round differently from per-matrix mm): rows of O divided by sqrt(v) + eps, v an EMA of their mean square, then
-    rescaled to O's Frobenius norm. Sets update_norms: per shape, (its parameters, their (adjusted lr x update) norms
-    on the device)."""
+    """NorMuon (arXiv 2510.05491 Alg. 1 lines 7-9) on torch.optim.Muon's update (its Nesterov momentum; the group's
+    `nesterov` is not read), Newton-Schulz batched per shape (may round differently from per-matrix mm): rows of O
+    divided by sqrt(v) + eps, v an EMA of their mean square, then rescaled to O's Frobenius norm. Sets update_norms:
+    per shape, (its parameters, their (adjusted lr x update) norms on the device)."""
 
     @torch.no_grad()
     def step(self) -> None:

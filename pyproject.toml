@@ -6,7 +6,6 @@ dependencies = [
     "basedpyright==1.40.2",
     "duckdb==2.0.0",
     "evalplus",
-    "fire==0.7.1",
     "fissix==24.4.24",
     "flash-attn-4==4.0.0b36",
     "huggingface-hub==2.3.0",
@@ -23,7 +22,7 @@ dependencies = [
     "statsmodels==0.15.0",
     "tiktoken==0.14.0",
     "tokenizers==0.23.3",
-    # with fire: the requirements of the human-eval-infilling and MultiPL-E checkouts (docker/Dockerfile)
+    # MultiPL-E's judge (evaluation/src/main.py, the checkout in docker/Dockerfile) imports it
     "tqdm==4.70.1",
     "transformers==5.21.0",
 ]

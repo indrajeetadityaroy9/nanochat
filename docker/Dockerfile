@@ -12,15 +12,12 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy VIRTUAL_ENV=/opt/venv PATH=/opt/venv
 WORKDIR /workspace/nanochat
 
 # Rust toolchain (pinned, minimal profile) for the crates, built on first use; CARGO_HOME in artifacts/cache (below).
-# rustup-init 1.29.2 for the build's architecture (GH200 arm64, H100 amd64), verified against its published SHA-256
-ARG TARGETARCH
+# rustup-init 1.29.2 for the GH200 (aarch64), verified against its published SHA-256
 ENV RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
-RUN case $TARGETARCH in \
-      arm64) T=aarch64-unknown-linux-gnu S=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697 ;; \
-      amd64) T=x86_64-unknown-linux-gnu S=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4 ;; \
-    esac && \
-    curl -sSfo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/$T/rustup-init && \
-    echo "$S  /tmp/rustup-init" | sha256sum -c - && chmod +x /tmp/rustup-init && \
+RUN curl -sSfo /tmp/rustup-init \
+      https://static.rust-lang.org/rustup/archive/1.29.2/aarch64-unknown-linux-gnu/rustup-init && \
+    echo "a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697  /tmp/rustup-init" | sha256sum -c - && \
+    chmod +x /tmp/rustup-init && \
     CARGO_HOME=/usr/local/cargo /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.99.1 && \
     rm /tmp/rustup-init
 # the image's `flash_attn` (FA2 with an FA4 beta) would hide the locked flash_attn.cute
@@ -56,16 +53,16 @@ with open(path, "w", newline="") as f:
 assert compileall.compile_file(str(path), quiet=1)
 EOF
 
-# openai/human-eval-infilling: the checkout on sys.path (.pth; read_problems reads <package>/../data; its requirements
-# are in pyproject.toml), execution enabled (its README's step) and HumanEval-RandomSpan.jsonl.gz, the name
-# data.py:13 reads, linked to the shipped file
+# openai/human-eval-infilling's problems (read_problems: corpus/decontaminate.py, eval/official_infilling.py): the
+# checkout on sys.path (.pth; read_problems reads <package>/../data) and HumanEval-RandomSpan.jsonl.gz, the name
+# data.py:13 reads, linked to the shipped file; its judge runs in the nanochat-eval image (docker/Dockerfile.eval)
 RUN git clone https://github.com/openai/human-eval-infilling /opt/human-eval-infilling && \
     git -C /opt/human-eval-infilling checkout 88062ff9859c875d04db115b698ed4b0f0395170 && \
-    sed -i 's/^#\( *exec(check_program, exec_globals)\)/\1/' /opt/human-eval-infilling/human_eval_infilling/execution.py && \
     ln -s HumanEval-RandomSpanInfilling.jsonl.gz /opt/human-eval-infilling/data/HumanEval-RandomSpan.jsonl.gz && \
     echo /opt/human-eval-infilling > "$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/human_eval_infilling.pth"
 
-# nuprl/MultiPL-E's official C++ judge (eval/code_eval.py runs its scripts from $MULTIPL_E)
+# nuprl/MultiPL-E's official C++ judge (eval/code_eval.py runs its scripts from $MULTIPL_E; main.py's tqdm is in
+# pyproject.toml)
 ENV MULTIPL_E=/opt/MultiPL-E
 RUN git clone https://github.com/nuprl/MultiPL-E $MULTIPL_E && \
     git -C $MULTIPL_E checkout 3025a531af7450e7df8b96fe0440e9804480bbad

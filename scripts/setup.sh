@@ -1,5 +1,5 @@
 #!/bin/bash
-# Prepare a GH200 or H100 host (Docker, the NVIDIA driver and Container Toolkit): the CDI spec, the locked SM clock,
+# Prepare a GH200 host (Docker, the NVIDIA driver and Container Toolkit): the CDI spec, the locked SM clock,
 # the docker group, the image and the curated corpus (a private dataset). Idempotent; re-run after a reboot, which
 # resets the clock lock. Usage: HF_TOKEN=<read token> scripts/setup.sh
 set -euo pipefail

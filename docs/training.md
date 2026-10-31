@@ -18,7 +18,7 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 |`train/loop.py` (`train`, `SEED`), `train/diagnostics.py` (`Diagnostics`, `sidecar`), `train/checkpoint.py`|§6, §8|
 |`ablations/peak_lr.py` (`lr_multiplier`); `conf/experiment/peak_lr_d24.yaml`; `results/pretrain/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
 |`ablations/records.py` (`Records`, `record`, `results_dir`, `curves`, `export_curves`); `results/pretrain/trajectory.json`, `results/pretrain/pretrain-curves.jsonl`|§6|
-|`scripts/setup.sh`, `scripts/container.sh`, `scripts/release.sh`, `paths.py`|§7, §9|
+|`scripts/setup.sh`, `scripts/container.sh`, `paths.py`|§7, §9|
 |`docker/Dockerfile`, `docker/Dockerfile.dockerignore`, `pyproject.toml`, `uv.lock`|§8|
 |`conf/experiment/sft.yaml`, `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`)|§10|
 
@@ -168,8 +168,9 @@ Kaggle notebooks 0.0156 and CodeXGLUE Python 0.0006 at 8K, Codeforces CoTs 0.055
 
 **Rule** (`ablations/peak_lr.py` `lr_multiplier`): the base multiplier is the vertex of the parabola through the three
 runs' code bits per byte against u = ln(multiplier) (`metrics.parabola_vertex`, `docs/evaluation.md` §5; arXiv
-2409.19913 §3.1 fits quadratics in log lr); the base lr is it times the law's lr on the base plan. The recorded
-minimum is interior (× 2), the curvature positive and no run diverged, so the vertex lies inside the grid.
+2409.19913 §3.1 fits quadratics in log lr); the base lr is it times the law's lr on the base plan. It raises
+`ValueError` unless every arm has measures (none diverged), the curvature is positive and the vertex lies inside the
+grid; the records pass (minimum at × 2, curvature 0.0086).
 
 **Result** (`results/pretrain/peak_lr_d24.jsonl`; 3,307 steps of 294,912 tokens; bits per byte; no run diverged). On 8K
 code the vertex is × 2.7193 (curvature 0.0086): the base multiplier 2.7192600, 2.8% below the earlier recipe's 2.7970369
@@ -561,25 +562,6 @@ whose entrypoint creates `artifacts/` (`paths.py`).
    results/pretrain/trajectory.json` scores the 12 analysis checkpoints from step 62,887 (the grid's 63,000–69,000
    and the five weights-only files after the stage switch) by `likelihood` and writes the trajectory against step
    66,063, the last file-level model (`docs/evaluation.md` §2).
-5. **Release**: `HF_TOKEN=<write token> scripts/release.sh <run_name> <repo>` uploads the run's checkpoints,
-   `metrics.jsonl`, the diagnostics sidecar, evaluations, the official tools' records (`official-<step>/` without its
-   export), termination records, likelihood records, `.hydra/`, the corpus tokenizer (`artifacts/corpus/tokenizer/`)
-   and `results/` to a Hugging Face model repository; the first command below restores them where `load_model` and a
-   resumed run read them. A checkpoint as a transformers model (`docs/evaluation.md` §8) goes to its own model
-   repository (the export and upload below), with `inference/model_card_base.md` as the base model's card.
-
-```bash
-scripts/container.sh hf download <repo> --local-dir /workspace/nanochat
-scripts/container.sh python -m inference.export_hf \
-  artifacts/runs/<run_name>/checkpoint-<step>.pt artifacts/export/<run_name>-<step>
-cp inference/model_card_base.md artifacts/export/<run_name>-<step>/README.md
-HF_TOKEN=<write token> scripts/container.sh hf upload <model repo> \
-  /workspace/nanochat/artifacts/export/<run_name>-<step> . --repo-type model
-```
-
-For the base model the run directory holds 80 full-state checkpoints (447.06 GB), 15 weights-only files (31.34 GB) and
-0.29 GB of records and tokenizer: 2,385 files, 478.68 GB, the largest 5.59 GB (`huggingface_hub`'s filter over the
-checkout with `release.sh`'s patterns) [measured]; the export is 1.05 GB.
 
 Everything a run reads or writes lives in the checkout (`paths.py`): `artifacts/` (gitignored) holds `corpus/`,
 `runs/<run_name>/` and `cache/`; `results/` (tracked) holds the records the paper's tables are drawn from, in
