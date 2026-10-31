@@ -3,8 +3,9 @@
 The method that turns the base model into a code model that reasons before it answers: its starting point (§1), the
 published evidence each choice rests on (§2), the format (§3), the supervised fine-tuning recipe the repository
 implements (§4), its evaluation (§5), the code RL stage it defers (§6), what the pipeline leaves out (§7) and the
-planned on-policy stage after SFT (§8). The SFT corpus is `docs/corpus.md` §10; the shared training loop
-`docs/training.md`; the natural-termination probe `docs/evaluation.md` §10; measured results `docs/results.md`.
+on-policy stage after SFT that trains against the SFT model's own reasoning loops (§8). The SFT corpus is
+`docs/corpus.md` §10; the shared training loop `docs/training.md`; the natural-termination probe
+`docs/evaluation.md` §10; measured results `docs/results.md`.
 
 Markers: [measured] from a record or a run; [arithmetic] derived from code numbers; [inference] reasoning, not
 measured; [estimate]; [unverified] a figure without a record, or a paper value its extracted text lacks. Below 1B the
@@ -21,6 +22,8 @@ to the 522M base model is [inference].
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`, `results_dir`), `results/posttrain/sft_lr.jsonl` and its `-curves.jsonl` | §4 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
 | `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/serving_check.py`, `scripts/serving_check.sh` | §5.1 (the method: `docs/evaluation.md` §10) |
+| `onpolicy/prompts.py`, `onpolicy/verify.py`, `onpolicy/rollouts.py`, `onpolicy/selection.py`, `onpolicy/train.py`, `scripts/onpolicy.sh`, `docker/Dockerfile.onpolicy` | §8 |
+| `scripts/post_sft_queue.sh` | §8.7 |
 
 ## 1. Starting point
 
@@ -505,9 +508,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 | Software-engineering RL | a 72B or 120B judge, or agentic execution over 256K tokens (arXiv 2512.13607 §4.7; arXiv 2603.19220 §4.8) |
 | On-policy distillation (§2.5) | one RL domain leaves no specialists to merge; Nemotron-Cascade 2's teachers are its own per-domain checkpoints (arXiv 2603.19220 §4.4) |
 
-## 8. On-policy stage after SFT, planned
-
-Not implemented in the repository; the method is fixed here so that it starts from settled choices.
+## 8. On-policy loop removal: RSFT, then DPO
 
 **Why.** At step 2,000 of the SFT, 55 of 128 probe responses never close and 53 of them end in a verbatim loop;
 closure fell from step 1,000 (89 → 73 of 128, McNemar p = 0.011) while the held-out loss fell; the loops are the
@@ -529,27 +530,117 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
   §5.3); loops fell 3.5× at 14B and 3.0× at 32B, and levelled off after 8K pairs (§5.2, App. G.3). Token-level
   preference at the loop's first token (Antidoom, FTPO of arXiv 2510.15061) took LFM2.5-2.6B from 10.2% to 1.4% and
   Qwen3.5-4B from 22.9% to 1% [blog: liquid.ai/blog/antidoom; not peer-reviewed]. No result below 2.6B is published.
+- **Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on KodCode train prompts (§8.1–§8.2), verified by
+  KodCode's tests (§8.3); RSFT, one epoch on each prompt's shortest terminating success; then DPO of those successes
+  against the model's loops cut shortly after their onset (§8.4–§8.5); the termination probe and KodCode val pass@1
+  before and after (§8.6). DPO comes last: SFT after DPO reopened loops from 6.5% to 29.7% (arXiv 2610.19376
+  App. G.12).
 
-**Method** [inference from the evidence above; settings marked [estimate] are starting values]:
+### 8.1 Prompts
 
-| Step | What | Basis |
-|---|---|---|
-| Problems | the SFT model's problems with tests; per problem its own pass rate ρ over its rollouts; problems with ρ = 0 give no training row (no verified success to imitate or prefer) | the stage-specific data rule: a later stage trains on problems the model already solves with non-zero probability, all-zero problems are not optimized directly (arXiv 2606.04466 §3.1, Eqs. 1–3) |
-| Rollouts for loops | the evaluation protocol's sampling, T 0.6, top-p 0.95, in the probe's 2,048-token rounds, stopped at loop detection (last 4,096 tokens repetition ≥ 0.99); the onset is the first token of the repeating tail | loops are what the protocol produces (`docs/results.md` §6.2); loop stopping saves most of a looping sample's tokens (`docs/evaluation.md` §10) |
-| Rollouts for successes | T 0.8–1.0, top-p 0.95 | T 1.0 closes 59 of 64 HumanEval+ responses against 42 at T 0.6, with 3 loops against 18 (`docs/results.md` §6.4) [measured] |
-| Verification | a success closes `</think>` and its last fenced code block passes every test (`eval/verify.py`, §6's reward) | §2.7 |
-| RSFT mini-epoch | per problem its most concise passing success (the shortest by reasoning tokens), one pass, §4's response loss | Kimi k1.5's shortest rejection sampling: the shortest correct of 8 samples as SFT data (arXiv 2501.12599 §2.4) |
-| DPO | per problem, chosen = a verified closing success; rejected = its own looping rollout, truncated shortly after the loop's onset; the reference model the RSFT model, frozen; plain DPO, no likelihood term on the chosen; β 0.05, one epoch, ≤ 8K pairs [estimate] | DeLoop's objective, β and pair count (arXiv 2610.19376 §4.2, App. G.3); a negative log-likelihood anchor on the chosen raised loops 6.1% → 27.0% (App. G.13); the tail after onset repeats at near-zero loss (`docs/results.md` §6.2), so it adds length, not contrast [inference] |
-| Order | DPO last: no SFT after it | SFT after DPO reopened loops (6.5% → 29.7%) and a final DPO closed them again (2.3%) (arXiv 2610.19376 App. G.12) |
-| Evaluation | the probe at T 0.6 and the reasoning protocol (§5, `docs/evaluation.md` §10); rows appended to `docs/results.md` §6 | — |
+- **Pool** (`onpolicy/prompts.py`): KodCode-V1-SFT-R1's rows (arXiv 2503.02951; function-level Python with pytest
+  tests, and stdin/stdout cases for its online-judge style) whose SFT context is a document context of the SFT
+  corpus's train split (250,646 distinct prompts) or val split (2,547), the context matched by its tokens, so a
+  prompt is rendered exactly as SFT trained on it and inference sends it (BOS, the prompt, `\n\n<think>\n`).
+  Training prompts come from the train split (on-policy improvement on prompts SFT saw); the val split's are held
+  out for evaluation; benchmarks are not used.
+- **Usable rows**: the prompt names every function or class its tests import, as code (called or declared, or in
+  backticks): an instruct prompt often does not name it, so a correct answer under another name would fail; and no
+  Docs subset, whose tests depend on library versions (pandas, torch, the standard library's) other than KodCode's:
+  45 of their 171 R1 answers fail here.
+- **Sampling** (`sample`): stratified by KodCode style (instruct, complete, online_judge) and difficulty
+  (easy, medium, hard), proportional allocation, seeded.
+
+### 8.2 Rollouts
+
+- **Generation** (`onpolicy/rollouts.py`): vLLM offline on the `--chat` export, the termination probe's generation
+  (`eval/official_termination.py` `generate`: 2,048-token rounds with prefix caching; a response with no `</think>`
+  whose last 4,096 tokens have repetition ≥ 0.99 is stopped as a loop after its round), top-p 0.95, at most 16,384
+  new tokens (the longest closed reasoning in the step-2000 probe was 11,757), request k seeded base + k.
+- **Temperatures**: 4 samples at T 0.6 and 4 at T 1.0 per prompt. At step 2000, on the probe's 128 prompts with a
+  16K cap, T 0.6 left 54 responses in loops and T 1.0 7, with closure 70 → 103 of 128 and HumanEval+ pass not lower
+  (`termination-budget-2000.json`) [measured]: T 0.6, the evaluation protocol's, yields the rejected loops; T 1.0
+  more successes to choose from. Each response keeps its temperature.
+- **Loops**: a never-closed response with repetition ≥ 0.99 is a loop; when its last 1,024 tokens repeat exactly at
+  a period p ≤ 2,048 (`cycle`), its onset is the first index from which every token equals the one p later.
+
+### 8.3 Verifier
+
+- **Rule** (`onpolicy/verify.py`): the answer (after the last `</think>`) is tested by its last python block that
+  defines a tested name (else its last python block, else its last untagged block), dedented; pytest problems run
+  KodCode's test file after `from solution import *`, online-judge problems compare each case's stdout line by line.
+  A success is closed, ended with BOS and passing.
+- **Isolation**: a fresh process per test in its own session and temporary directory, address space 16 GiB, file size
+  64 MiB, CPU time = the timeout (30 s per pytest file, 10 s per stdin case), no core files, the process group killed
+  after; spawned workers in a CPU-only container without network, so no CUDA parent.
+- **Known-good check** (`--known-good`): on the pool's own R1 answers, each correct in KodCode's environment,
+  2,995 / 3,000 train and 1,499 / 1,500 val usable rows pass [measured]; the 6 others are answers naming the function
+  otherwise than the tests (2), tests reading the environment (the home directory; bs4, absent here) and answers that
+  fail (2). Wrong programs (each tested name returning None, or no output) pass 3 / 3,000 and 4 / 1,500 (tests of
+  plotting or printing side effects): at verification each tested prompt's stub runs too, and a pass on a prompt
+  whose stub passes is not a success (`pass_trivial`).
+
+### 8.4 Selection
+
+- **RSFT set** (`onpolicy/selection.py`): per prompt with a success, its shortest success (fewest tokens), through
+  its closing BOS: the model's own most concise terminating correct answer.
+- **Pairs**: per prompt with a success and a loop with an exact cycle, up to 2 pairs, one per loop: chosen the
+  prompt's shortest success, rejected the loop through its first repeat, `ids[:onset + p + min(p, 256)]`, with no
+  BOS. The cut follows the loop literature's preference point: the looping token itself (Antidoom, FTPO on the first
+  token of the repeat [blog]) and the first repeated action (DeLoop, arXiv 2610.19376 §4.1); one period puts the
+  re-entry into the cycle on the rejected side while most of a 30K-token loop is left out, and no BOS keeps the
+  gradient off stopping. A prompt never solved gives no pair: preference and RL data are prompts the model solves
+  sometimes (arXiv 2606.04466 §3.1 keeps non-all-zero problems for RL).
+- **Statistics** (`selection.json`): per temperature and pooled, the outcomes, pass@1 and pass@n (unbiased, arXiv
+  2107.03374), loop rates per response and per prompt, the share of prompts solved and with mixed outcomes (a success
+  and a loop), success, onset, period and rejected lengths, the pairs' temperature combinations.
+
+### 8.5 Training
+
+- **Framework** (`onpolicy/train.py`, `docker/Dockerfile.onpolicy`: the evaluation image with TRL 1.17.1): full
+  parameters on the export, loaded in fp32 (master weights and AdamW state) with bf16 autocast, the LM head and its
+  cap in fp32 (TRL's fused head), SDPA attention, seed 0, one epoch; the sets' token ids as sampled (TRL's
+  tokenization would append an eos to the rejected side); the result written in the export's format (fp32 the
+  parameters the forward reads in fp32, bf16 the rest), so vLLM serves it as it serves the export.
+- **RSFT**: the loss on the completion, averaged over the tokens of a 128-sequence batch; AdamW lr 1e-5, β (0.9,
+  0.95), warmup 10%, cosine decay, no weight decay, clip 1.0: Phi-4-mini-reasoning's distillation stages (batch 128,
+  lr 1e-5, warmup ratio 0.1, arXiv 2504.21233 §5.3).
+- **DPO**: the sigmoid loss with the RSFT model as the frozen reference and no likelihood term on the chosen side
+  (an NLL anchor raised DeLoop's loops from 6.1% to 27.0%, arXiv 2610.19376 App. G.13); β 0.05, DeLoop's, chosen from
+  0.02–0.5 on a screening set and its lowest loop rate (App. G.1, G.6); lr 5e-7, Phi-4-mini-reasoning's rollout DPO
+  with full parameters, one epoch at 16K (§5.3) (DeLoop's LoRA lr is 8e-6, about LoRA's 10× over full parameters,
+  §2.2); batch 16 pairs (DeLoop's), warmup 10%, linear decay; pairs longer than 16,384 tokens (the prompt and the
+  longer side) dropped. DeLoop's loop rate levels off after 8K pairs (App. G.3).
+- **Smoke** [measured, CPU]: 2 DPO steps (rewards exactly 0 at step 0: policy and reference agree) and 3 RSFT steps
+  (loss 0.894 → 0.686) on the step-2000 export; the written model has the export's keys and dtypes.
+
+### 8.6 Evaluation
+
+- **Before and after** (`scripts/onpolicy.sh` `evaluate`, for the export, RSFT and DPO models): the termination probe
+  (§5.1; the same 128 prompts, seeds and chunked generation, so outcomes compare one to one), and KodCode val pass@1:
+  256 usable val-split prompts × 4 samples at T 0.6, verified and summarized as the rollouts are. Then the reasoning
+  protocol on the SFT and DPO models (§5; `scripts/official_reasoning.sh`, `MODEL`/`TAG` for a trained directory).
+
+### 8.7 The post-SFT queue
+
+`scripts/post_sft_queue.sh <run>` waits for the SFT run's end record and its container's exit (stopping the run's
+termination watcher once it has settled step 4000, so no checkpoint is probed twice), then runs back to back on the
+free GPU (vLLM at 0.85 of its memory): the termination probe of the final step; the on-policy stage's rollouts,
+RSFT and DPO; the DPO model's probe and val pass@1; the reasoning protocol on the SFT and the DPO models; the
+export's and RSFT model's evaluations; then the deferred items (the probes of steps 3000/5000/6000/7000, the
+per-source held-out loss of steps 7676/4000/6000, and the DRY comparison unless the DPO model loops in fewer than 5%
+of its probe's responses). Sizes: 8,000 prompts × 8 rollouts by default (`PROMPTS`); the pair count this yields is
+the pilot's pair yield per prompt × 8,000 [estimate], against DeLoop's level-off at 8K pairs.
 
 ## References
 
 | arXiv | Title |
 |---|---|
 | 2104.09864 | RoFormer: Enhanced Transformer with Rotary Position Embedding |
+| 2107.03374 | Evaluating Large Language Models Trained on Code |
 | 2206.02369 | Learning to Break the Loop: Analyzing and Mitigating Repetitions for Neural Text Generation |
 | 2305.14314 | QLoRA: Efficient Finetuning of Quantized LLMs |
+| 2305.18290 | Direct Preference Optimization: Your Language Model is Secretly a Reward Model |
 | 2401.00788 | Astraios: Parameter-Efficient Instruction Tuning Code Large Language Models |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming - The Rise of Code Intelligence |
 | 2402.03300 | DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models |
