@@ -31,79 +31,37 @@ pretraining alone used 53 times as many tokens; on MBPP it trails that model by 
 
 \section{Introduction}
 
-Language models trained on source code write functionally correct programs from natural-language
-specifications~\cite{chen2021codex,austin2021mbpp}. The open models of this kind with one to a few billion parameters,
-or fewer, are pretrained on trillions of tokens: DeepSeek-Coder-1.3B on 2T~\cite{guo2024deepseekcoder},
-StarCoder2-3B on 3.1T~\cite{lozhkov2024starcoder2}, MobileLLM-R1-360M on 4.2T~\cite{zhao2025mobilellmr1}, and
-Qwen2.5-Coder-0.5B on 5.5T tokens of code-focused pretraining on top of a general base
-model~\cite{hui2024qwen25coder}. At the 0.38M tokens per second our model trains at on one GPU, 2T tokens would take
-two months.
+Large language models (LLMs) now write, test and repair software well enough to work as software-engineering agents.
+Anthropic's Claude Opus 5.5 resolves 89.9\% of the tasks in SWE-bench Pro~\cite{anthropic2026opus55,deng2025swebenchpro},
+whose problems come from actively maintained repositories and require large, multi-file changes; OpenAI's GPT-6
+Astra~\cite{openai2026gpt6astra} and DeepSeek's V4 series~\cite{deepseek2026v4} are its contemporaries from the other
+leading developers.
 
-We ask how far a code model gets with the opposite allocation: one GPU, about three days and 0.1T tokens. With the
-budget fixed, what remains to choose is which tokens are trained on, what they train, and how much of the GPU's time
-does useful work. We therefore take each component from the published evidence for it, measure where an experiment is
-affordable, and record what every choice rests on. The starting point is nanochat~\cite{karpathy2025nanochat}, a
-minimal code base for training small language models on one node, and the optimizer and architecture changes
-collected in modded-nanogpt~\cite{jordan2024moddednanogpt}; we adapt both to code.
+This capability rests on scale. The cross-entropy loss of a language model falls as a power law in its number of
+parameters, its training tokens and its training compute~\cite{kaplan2020scaling}, and compute-optimal training grows
+the model and its data in equal proportion~\cite{hoffmann2022chinchilla}. Frontier developers follow these laws on
+large accelerator clusters. DeepSeek-V3, a 671B-parameter mixture of experts with 37B parameters active per token, was
+pretrained on 14.8T tokens on a cluster of 2,048 H800 GPUs, in 2.788M GPU hours in all~\cite{deepseek2024v3}, and
+DeepSeek-V4-Pro, with 1.6T parameters and 49B active, on more than 32T tokens~\cite{deepseek2026v4}. The system cards of
+the closed models describe their training data only qualitatively~\cite{anthropic2026opus55,openai2026gpt6astra}.
 
-\paragraph{Data.} The corpus draws on 18 public sources of Python and C++: educational and classifier-selected
-repository code~\cite{benallal2025smollm2,tu2026ultradatacode}, model-rewritten and transpiled code and synthetic
-exercises~\cite{nvidia2025nemotron3nano,tu2026ultradatacode}, notebooks~\cite{lozhkov2024starcoder2},
-competitive-programming solutions, and fixed shares of web text (10\%)~\cite{diao2025climb} and mathematics (3\%).
-Rows are exactly deduplicated, and every training row sharing a 10-gram of words with a prompt or reference solution of
-the EvalPlus, MultiPL-E or infilling benchmarks is dropped, the rule of Qwen2.5-Coder and
-DeepSeek-Coder~\cite{hui2024qwen25coder,guo2024deepseekcoder}. As in Qwen2.5-Coder, training reads 8,192-token
-files and, over the last 5.45\% of steps, 32,768-token repositories, with structure-aware
-fill-in-the-middle~\cite{bavarian2022fim,gong2025astfim} on repository code. The tokenizer is a byte-level BPE of
-32,768 entries whose merges are scored with source attribution (SA-BPE)~\cite{chizhov2026sabpe}. The token budget is
-the largest at which no document is read twice: 103.03B tokens, 528 per non-embedding parameter, 26 times the
-compute-optimal ratio of about 20~\cite{hoffmann2022chinchilla}.
+Models specialized for code are trained the same way. DeepSeek-Coder was pretrained from scratch on 2T
+tokens~\cite{guo2024deepseekcoder}, StarCoder2 on 3.3--4.3T~\cite{lozhkov2024starcoder2} and Seed-Coder on
+6T~\cite{seed2025coder}, while DeepSeek-Coder-V2 and Qwen2.5-Coder continued the pretraining of general models with a
+further 6T and 5.5T tokens of code-focused data~\cite{deepseek2024coderv2,hui2024qwen25coder}. Their instruction and
+reasoning variants add post-training for code on top: supervised fine-tuning followed by preference optimization or
+reinforcement learning~\cite{deepseek2024coderv2,seed2025coder,hui2024qwen25coder}. The smallest members of these
+families inherit the same budgets: every Qwen2.5-Coder model, down to 0.5B parameters, continues pretraining on over
+5.5T tokens~\cite{hui2024qwen25coder}, and every Qwen3 model, down to 0.6B, was pretrained on 36T
+tokens~\cite{yang2025qwen3}.
 
-\paragraph{Model and optimization.} The model is a 24-layer pre-norm decoder of width 768 with 522M parameters, 195M of
-them outside the embedding tables. It uses QK-normalized multi-head attention with 512-key sliding windows in three of
-every four layers, ReLU$^2$ MLPs, value embeddings on alternating layers and a capped output logit: choices taken
-from nanochat and modded-nanogpt and traced to their published sources. NorMuon~\cite{li2025normuon}, a normalized
-variant of Muon~\cite{jordan2024muon,liu2025muon}, trains the hidden matrices and AdamW the remaining parameters. The
-batch size and the peak learning rate follow the compute scaling laws of DeepSeek LLM~\cite{deepseek2024llm}, with the
-learning rate scaled by a single multiplier that we calibrate on the full-size model.
-
-\paragraph{Systems.} One NVIDIA GH200 runs the whole pretraining. Its GPU is capped at 700\,W and the training step is
-GPU-bound, so throughput comes from removing work rather than adding parallelism: FlashAttention-4~\cite{zadouri2026fa4}
-over the real packed segments only, normalizations and activations folded into matrix-multiplication epilogues, and
-fused kernels for the value-embedding gate, the query--key prologue and the capped cross entropy. Each change landed
-only after an exclusive A/B timing and a numerical check against fp64 or against the previous code's outputs. The
-69,874-step run completed in one attempt in 76.3 hours, at a median of 381K tokens per second and a model-FLOPs
-utilization of 0.51 at 8,192 tokens, and 299K tokens per second at 0.52 at 32,768.
-
-\paragraph{Evaluation.} We score the model with the benchmarks' official tools, unmodified and at pinned versions:
-EvalPlus~\cite{liu2023evalplus}, MultiPL-E~\cite{cassano2023multiple}, the infilling benchmark of Bavarian et
-al.~\cite{bavarian2022fim} and lm-evaluation-harness~\cite{gao2023lmeval}. Greedy pass@1 is 26.8 on HumanEval, 22.0
-on HumanEval+, 44.4 on MBPP and 36.5 on MBPP+, 21.7 and 36.8 on MultiPL-E's C++ HumanEval and MBPP, and 55.3 on
-single-line infilling. HumanEval and HumanEval+ match Qwen2.5-Coder-0.5B's reported 28.0 and 23.8 within our 95\%
-intervals, with 1/53 of the tokens of that model's code pretraining, and all four EvalPlus scores exceed those reported
-for StarCoderBase-3B~\cite{lozhkov2024starcoder2}. MBPP and MBPP+ trail Qwen2.5-Coder-0.5B by 8.5 and 10.6 points. MBPP
-states each task in prose, and natural-language text is our model's weakest held-out domain, at 0.84 bits per byte
-against 0.29 for code. Comparisons across papers carry protocol variance on top of these intervals: the HumanEval
-score reported for DeepSeek-Coder-1.3B differs by 6.1 points between two
-reports~\cite{hui2024qwen25coder,lozhkov2024starcoder2}.
-
-Running the tools unmodified also exposed an artifact in a widely used prompt. The MBPP 3-shot prompt of
-lm-evaluation-harness keeps the original dataset's carriage returns in its three example solutions. Our corpus maps
-every carriage return to a line feed, and on the unmodified prompt the model glues text after block-header colons and
-132 of its 500 responses fail to parse. With the prompt's line endings normalized as the corpus normalizes them,
-unparsable responses fall to 10 and pass@1 rises from 18.4 to 32.2 (exact McNemar $p = 7.5 \times 10^{-15}$).
-
-Our contributions are:
-\begin{itemize}
-\item a pretraining recipe for a 0.5B-parameter Python and C++ code model on one GPU, from corpus construction and
-  decontamination through the context stages, fill-in-the-middle, tokenizer, architecture, optimizer and
-  learning-rate calibration, with the evidence for each choice and the proxy experiments we ran;
-\item fused training kernels for the GH200, each checked numerically before landing, that keep the step near half of
-  the GPU's dense bf16 peak under its power cap;
-\item base-model results from official tools with per-problem intervals and a failure analysis, a comparison with
-  published small code models, and a line-ending artifact in a widely used MBPP prompt that changes a small model's
-  score by 13.8 points.
-\end{itemize}
+Budgets of this size lie far beyond a single accelerator. At the 0.38M tokens per second at which a 0.5B-parameter
+model trains on one GPU in this work, the 5.5T tokens of Qwen2.5-Coder alone would take more than five months. This
+paper asks whether code generation comparable to that of the smallest code LLMs can be reached on one GPU with a small
+fraction of their tokens. It presents a generative, GPT-style decoder-only LLM for Python and C++ code generation with
+522M parameters, pretrained from scratch on 103B tokens in 76.3 hours on a single NVIDIA GH200. On HumanEval and
+HumanEval+~\cite{chen2021codex,liu2023evalplus}, its function-level code generation is within its 95\% interval of
+Qwen2.5-Coder-0.5B, whose code-focused pretraining alone used 53 times as many tokens~\cite{hui2024qwen25coder}.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
