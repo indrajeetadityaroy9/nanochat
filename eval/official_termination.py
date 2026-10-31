@@ -69,6 +69,7 @@ import numpy as np
 from scipy.stats import spearmanr
 
 from corpus.layout import TOKEN_DTYPE, split_path
+from corpus.posttrain.build import labels_path
 from corpus.posttrain.sft import END_THINK, NAME, THINK
 from corpus.tokenizer import get_tokenizer
 from eval.loop import CHUNK, END, LOOP, REPEAT_TAIL, REPEAT_WINDOW, covered, repetition
@@ -110,7 +111,7 @@ def val_prompts(n: int) -> list[dict]:
     tokens = np.memmap(path.with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r")
     offsets = np.memmap(path.with_suffix(".idx"), dtype=np.int64, mode="r")
     contexts = np.fromfile(path.with_suffix(".context"), dtype=np.int64)
-    labels = [json.loads(line) for line in path.with_name("val-labels.jsonl").read_text().splitlines()]
+    labels = [json.loads(line) for line in labels_path().read_text().splitlines()]
     out = []
     for i in sorted(np.random.default_rng(SEED).choice(len(contexts), size=n, replace=False).tolist()):
         document = tokens[offsets[i]:offsets[i + 1]].tolist()
