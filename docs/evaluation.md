@@ -18,8 +18,8 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/trajectory.py` (`main`, `score`, `trajectory`, `rows_by_measure`, `groups`, `summaries`, `likelihoods`, `saved_steps`, `likelihood_path`) | §2 |
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `parse_record`, `truncated`, `filtered_generation`, `filtered_completions`, `codegen_runs`, `vetted`, evaluator wrappers: `evalplus`, `multipl_e`) | §1, §3, §7 |
 | `scripts/official_eval.sh`, `docker/Dockerfile.eval`, `eval/official.py`, `eval/official_infilling.py`, `eval/official_site/sitecustomize.py` | §4, §8 |
-| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8 |
-| `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
+| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_loop_stop.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8; its loop stop, §10 |
+| `eval/official_termination.py`, `eval/loop.py` (the loop measure and stop rule), `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function); `results/pretrain/mbpp_3shot_contamination.json` (MBPP 3-shot's overlap with the train corpus) | §5; §4 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
@@ -599,7 +599,10 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
   generation's. Checked at step 2,000 against two one-shot replicates (the 32K probe and the 16K-capped protocol
   sampling of `--budget`): 68 of 128 closed against 73 and 70, closure agreeing with the 32K probe on 119 of 128
   prompts, in 387 s of generation against 1,102 s [measured: `termination-2000-chunked.json`,
-  `termination-2000.json`, `termination-budget-2000.json`].
+  `termination-2000.json`, `termination-budget-2000.json`]. `scripts/official_reasoning.sh`'s server applies the same
+  stop as a vLLM logits processor (`eval/official_loop_stop.py`): at each multiple of 2,048 generated tokens from
+  4,096 on, a response that meets it gets BOS as its next token and ends with an empty answer, scored as the loop run
+  on to the budget would be (`LOOP_STOP=0` serves without it).
 - **Metrics** (per set and pooled; `RUNS/<run>/termination-<step>.json`): five exclusive outcomes, closed and ended
   (BOS), closed with the answer at the limit, never closed at the limit, never closed and loop-stopped, never closed
   and ended; the closing-time curve P(closed with reasoning ≤ B) for B = 1K, 2K, 4K, 8K, 16K, 32K tokens; reasoning

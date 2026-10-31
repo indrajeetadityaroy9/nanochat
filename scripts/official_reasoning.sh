@@ -10,13 +10,16 @@
 # (api_utils.get_max_tokens). First, the natural-termination probe (eval/official_termination.py) on the export; then
 # every prompt either tool will send is checked for "\r" and the first's served ids against the SFT context
 # (eval/official_tokenize.py). The parser is registered in every server process by eval/official_site/sitecustomize.py
-# (NANOCHAT_REASONING_PARSER).
+# (NANOCHAT_REASONING_PARSER). The server stops loops as the probe does (eval/official_loop_stop.py: a response with
+# no "</think>" whose last 4,096 tokens repeat, checked every 2,048, is ended, an empty answer either way), each stop
+# a line of loop-stops.jsonl; LOOP_STOP=0 serves without it.
 #
 #   [MODEL=<model dir> TAG=<name>] scripts/official_reasoning.sh <run name> <step> [<problems per benchmark, a smoke>]
 #
 # Outputs in RUNS/<run>/official-<step>/: model/, tokenize-{evalplus,lcb}.json, evalplus/ (each samples file with its
-# .endings.jsonl), lcb/, server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's closure rate,
-# pass@1 and pass@1 given closure); RUNS/<run>/termination-<step>.json (generated, then scored in a CPU container).
+# .endings.jsonl), lcb/, loop-stops.jsonl, server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's
+# closure rate, loop stops, pass@1 and pass@1 given closure; both tools' loop stops); RUNS/<run>/termination-<step>.json
+# (generated, then scored in a CPU container).
 # With MODEL and TAG, a model directory in the export's format (onpolicy/train.py's) is evaluated in place of the
 # step's export, its outputs in RUNS/<run>/official-<step>-<TAG>/ with no termination probe (scripts/onpolicy.sh
 # evaluates it). VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as scripts/official_eval.sh.
@@ -32,6 +35,12 @@ OUT=$RUN_DIR/official-$STEP${TAG:+-$TAG}
 mkdir -p "$OUT"/{model,evalplus,lcb}
 W=/workspace/nanochat C=/workspace/nanochat/${OUT#"$ROOT"/} PORT=${PORT:-8000} SERVER=nanochat-eval-serve-$$
 LCB_WINDOW=(release_v6 2024-08-01 2025-05-01)  # lcb_runner's --release_version, --start_date, --end_date
+SERVE_ENV=() SERVE_ARGS=()
+if [ "${LOOP_STOP:-1}" != 0 ]; then
+  touch "$OUT/loop-stops.jsonl"
+  SERVE_ENV=(-e NANOCHAT_LOOP_STOP_LOG=$C/loop-stops.jsonl)
+  SERVE_ARGS=(--logits-processors eval.official_loop_stop:LoopStopLogitsProcessor)
+fi
 docker build -q -f "$ROOT/docker/Dockerfile.eval" -t nanochat-eval "$ROOT/docker" > /dev/null
 
 # XDG_CACHE_HOME as the nanochat image's (docker/Dockerfile): EvalPlus's datasets and ground-truth caches
@@ -62,10 +71,11 @@ fi
 
 docker run -d --rm --name $SERVER --ipc=host --init --network host --ulimit core=0 --device nvidia.com/gpu=all \
   --user "$(id -u):$(id -g)" -e HOME=/tmp -e VLLM_CACHE_ROOT=$W/artifacts/cache/vllm \
-  -e PYTHONPATH=$W/eval/official_site:$W -e NANOCHAT_REASONING_PARSER=1 \
+  -e PYTHONPATH=$W/eval/official_site:$W -e NANOCHAT_REASONING_PARSER=1 "${SERVE_ENV[@]}" \
   -v "$ROOT":$W -v "$(realpath "$ROOT/artifacts")":$W/artifacts -v "$OUT/model":/model:ro nanochat-eval \
   vllm serve /model --served-model-name nanochat --trust-remote-code --dtype bfloat16 --port $PORT \
-  --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" --reasoning-parser nanochat > /dev/null
+  --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.9}" --reasoning-parser nanochat "${SERVE_ARGS[@]}" \
+  > /dev/null
 trap 'docker logs $SERVER > "$OUT/server.log" 2>&1; docker stop $SERVER > /dev/null' EXIT
 until curl -sf http://127.0.0.1:$PORT/health > /dev/null; do
   docker inspect $SERVER > /dev/null 2>&1 || { echo "vllm serve exited" >&2; exit 1; }; sleep 5
@@ -91,7 +101,6 @@ for dataset in humaneval mbpp; do
         --dataset $dataset --samples $C/evalplus/$dataset/nanochat_openai_temp_$temperature.jsonl
     done
 done
-[ -n "$LIMIT" ] || "${CPU[@]}" nanochat python -m eval.official_reasoning $C
 
 # lcb_runner reads its prompt files relative to the working directory and writes output/ there
 step "lcb_runner" "${DOCKER[@]}" "${API[@]}" -w $C/lcb nanochat-eval bash -c "ln -sfn /opt/LiveCodeBench/lcb_runner . &&
@@ -99,3 +108,4 @@ step "lcb_runner" "${DOCKER[@]}" "${API[@]}" -w $C/lcb nanochat-eval bash -c "ln
     --release_version ${LCB_WINDOW[0]} --start_date ${LCB_WINDOW[1]} --end_date ${LCB_WINDOW[2]} --n 16 \
     --temperature 0.6 --top_p 0.95 --max_tokens 32768 --openai_timeout 86400 --multiprocess 64 --evaluate \
     --num_process_evaluate 32 ${LIMIT:+--debug}"
+[ -n "$LIMIT" ] || "${CPU[@]}" nanochat python -m eval.official_reasoning $C

@@ -70,18 +70,18 @@ import numpy as np
 from corpus.layout import TOKEN_DTYPE, split_path
 from corpus.posttrain.sft import END_THINK, NAME, THINK
 from corpus.tokenizer import get_tokenizer
+from eval.loop import CHUNK, END, LOOP, REPEAT_TAIL, REPEAT_WINDOW, repetition
 from eval.official_tokenize import evalplus_tasks
 
 PROMPTS, SEED, BEFORE = 64, 0, 50
 SAMPLING = {"temperature": 0.6, "top_p": 0.95}
-END = "</think>"
 FENCE = re.compile(r"```[^\n]*\n.*?```", re.S)
 BUDGETS = (1024, 2048, 4096, 8192, 16384, 32768)
 TEACHER_BUCKETS = (2048, 4096, 8192, 16384)  # <2K, 2-4K, 4-8K, 8-16K, >=16K
 OUTCOMES = ("closed_ended", "closed_limit", "unclosed_limit", "unclosed_loop_stopped", "unclosed_ended")
-CHUNK, SEED_STRIDE = 2048, 1_000_003
-TAIL_CHARS, REPEAT_TAIL, REPEAT_WINDOW = 2000, 4096, 32
-FORCED_BUDGETS, ANSWER_TOKENS, LOOP = (4096, 8192, 16384), 4096, 0.99
+SEED_STRIDE = 1_000_003
+TAIL_CHARS = 2000
+FORCED_BUDGETS, ANSWER_TOKENS = (4096, 8192, 16384), 4096
 CONFIGS = {"protocol": SAMPLING, "t0.8": {"temperature": 0.8, "top_p": 0.95},
            "t1.0": {"temperature": 1.0, "top_p": 0.95},
            "qwen3": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0},
@@ -121,18 +121,6 @@ def val_prompts(n: int) -> list[dict]:
         out.append({"id": i, "ids": [tok.bos_token_id, *context], "source": source,
                     "teacher_reasoning_tokens": len(tok.enc.encode_ordinary(reasoning))})
     return out
-
-
-def repetition(ids: list[int]) -> float:
-    """The share of the last REPEAT_TAIL tokens inside a REPEAT_WINDOW-token window that recurs within them."""
-    tail = ids[-REPEAT_TAIL:]
-    windows = [tuple(tail[i:i + REPEAT_WINDOW]) for i in range(len(tail) - REPEAT_WINDOW + 1)]
-    counts = Counter(windows)
-    covered = np.zeros(len(tail), bool)
-    for i, w in enumerate(windows):
-        if counts[w] > 1:
-            covered[i:i + REPEAT_WINDOW] = True
-    return float(covered.mean()) if len(tail) else 0.0
 
 
 def loop_onset(ids: list[int]) -> int:

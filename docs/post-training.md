@@ -20,7 +20,7 @@ to the 522M base model is [inference].
 | `run.py` (`RunConfig.base`, `base_step`, `sft_epochs`, `generate` "none"; `base_plan`, `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml`, `train/stages.py` (`stage_batches`: epochs past the first; `val_batches`) | §4 |
 | `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/loop.py` (base weights, `validate`), `eval/sft_val.py` | §4 |
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`, `results_dir`), `results/posttrain/sft_lr.jsonl` and its `-curves.jsonl` | §4 |
-| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
+| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_loop_stop.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
 | `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/serving_check.py`, `scripts/serving_check.sh` | §5.1 (the method: `docs/evaluation.md` §10) |
 | `onpolicy/prompts.py`, `onpolicy/verify.py`, `onpolicy/rollouts.py`, `onpolicy/selection.py`, `onpolicy/train.py`, `scripts/onpolicy.sh`, `docker/Dockerfile.onpolicy` | §8 |
 | `scripts/post_sft_queue.sh` | §8.7 |
@@ -420,7 +420,9 @@ unmeasured. Each choice is [inference] from the cited evidence.
   sample's generated ids (`return_token_ids`) and records its finish reason (`stop` at BOS, `length` at the budget)
   and whether `</think>` closed (`<samples>.endings.jsonl`); `eval/official_reasoning.py` writes `summary.json`: per
   benchmark and mode, the closure rate, the finish reasons, pass@1 over every sample and pass@1 over the closed
-  samples (pooled), on the base and the plus tests.
+  samples (pooled), on the base and the plus tests. The server stops loops as the termination probe does
+  (`eval/official_loop_stop.py`, `docs/evaluation.md` §10): such a response has no `</think>`, so it scores 0 as it
+  would after running on to the budget; each sample's `loop_stopped` and both tools' stop counts are in `summary.json`.
 - **Contamination**: the SFT prompts' measured overlap with LiveCodeBench v6 is `docs/corpus.md` §10's.
 - **The base's records** (likelihood, the official benchmarks; `docs/evaluation.md` §1, §4) are taken at every stage
   to measure what it loses, not as a gate.
