@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs scripts/official_termination.sh on every full-state checkpoint of a run (docs/post-training.md §5.1), in step
+# Runs scripts/official_termination.sh on every full-state checkpoint of a run (docs/evaluation.md §10), in step
 # order, one at a time, each once its file has stopped growing (a minute apart). While the run trains, only the steps
 # in DURING (space-separated; default every step), each once the run has logged SETTLE (default 30) train steps past
 # it; once the run has ended (its `end` record, or the docker container CONTAINER, if given, gone), every checkpoint

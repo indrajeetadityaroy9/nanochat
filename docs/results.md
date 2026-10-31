@@ -21,6 +21,8 @@ measured; [unverified] a figure without a record. Paper values are the papers' o
 |`artifacts/runs/<SFT run>/termination-<step>.json`|the natural-termination probe of an SFT checkpoint (docs/evaluation.md §10): per-set summaries and every response's ending; `termination-1000-v1.json` the first step-1000 probe, before the per-response fields; `termination-2000-chunked.json` the step-2000 probe in 2,048-token rounds with loop stopping|
 |`artifacts/runs/<SFT run>/termination-budget-<step>.json`|budget forcing and sampling sensitivity of an SFT checkpoint (docs/evaluation.md §10)|
 |`artifacts/runs/<SFT run>/serving-check-<step>.json`|the exported checkpoint in vLLM against the training model (docs/evaluation.md §10)|
+|`artifacts/runs/<SFT run>/loop-onsets-<step>-chunked.json`, `loop-onsets-budget-<step>.json`|each never-closed response's loop onset (`eval/official_termination.py` `--onsets`), from the probe records that store the reasoning|
+|`results/posttrain/sft-data-repetition.json`|the SFT documents' reasoning repetition per threshold and reasoning-length bucket (`--data-repetition`)|
 
 `<base run>` is `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10`; `<SFT run>` is
 `base=<base run>,generate=none,learning_rate_scale=0.06449599703255417,sft_epochs=2.0`.
@@ -222,12 +224,15 @@ limit / never closed, ended [measured: `termination-<step>.json`, one-shot gener
 - **The never-closed responses loop**: at step 1,000, 36 of 39 have ≥ 99.85% of their last 4,096 tokens inside a
   32-token window that recurs there; the other 3 are enumerations with an incrementing number ("The combination
   (1,2,3,4,571) … (1,2,3,4,577)") that never repeat a window exactly. At step 2,000, 53 of 55 repeat ≥ 99% of their
-  last 4,096 tokens [measured]. Loop onset (the first token of the repeating tail) has median ≈ 2.0K tokens on
-  HumanEval+ and ≈ 2.5K on held-out prompts [measured, step 2,000].
+  last 4,096 tokens [measured]. Loop onset (the first token of the repeating tail, `loop_onset`) has median 1,342
+  tokens on HumanEval+ (18 loops) and 2,525 on held-out prompts (36) in the protocol sampling of
+  `termination-budget-2000.json`, and 1,332 on HumanEval+ (19) in the chunked probe [measured:
+  `loop-onsets-budget-2000.json`, `loop-onsets-2000-chunked.json`; the stored reasoning re-encoded].
 - **Loops are near-deterministic**: in greedy generations from held-out prompts the chosen tokens' mean
   log-probability is −0.0016 nats at 2–4K tokens and −0.0009 at 4–8K, identical in both paths (§6.3) [measured:
-  `serving-check-2000.json` decode buckets]. The SFT data hold almost no loops: 8 of its 797,950 documents have tail
-  repetition ≥ 0.8 [measured], 1.0e-5 [arithmetic].
+  `serving-check-2000.json` decode buckets]. The SFT data hold almost no loops: 8 of the 797,950 train documents
+  have reasoning repetition ≥ 0.8 (all with reasoning ≥ 8K tokens; 0 of the 8,013 val documents), 1.0e-5
+  [measured: `results/posttrain/sft-data-repetition.json`; arithmetic].
 - **Chunked probe** (`termination-2000-chunked.json`: 2,048-token rounds, a never-closed response stopped once its
   last 4,096 tokens repeat ≥ 99%): 68 of 128 closed (42 HumanEval+, 26 held-out), 54 loop-stopped, 6 at the limit;
   against the one-shot probe's 73 and the 16K-capped protocol replicate's 70 (§6.4). Per prompt it agrees with the

@@ -607,6 +607,12 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
   4–8K, 8–16K, ≥ 16K) with the rank correlation of teacher length and closure; for never-closed responses the share
   of their last 4,096 tokens inside a repeated 32-token window, and every response's last 2,000 characters. Each
   response keeps its full answer (a HumanEval+ one also its full reasoning).
+- **Loop onset and the data's repetition**: `--onsets` writes, for each never-closed response whose reasoning a
+  record stores (HumanEval+ responses, every `--budget` response), its reasoning re-encoded as ordinary text and
+  `loop_onset`, one past the last token not inside a 32-token window that recurs in it (`loop-onsets-*.json` beside
+  the record). `--data-repetition` applies the same repetition measure (last 4,096 tokens, 32-token windows) to every
+  SFT document's reasoning, train and val, counted per threshold (0.5, 0.8, 0.9, 0.99) and teacher-length bucket
+  (`results/posttrain/sft-data-repetition.json`; 64 CPU processes, about a minute).
 - **Clean-process scoring**: EvalPlus's own sanitizer and `check_correctness` run after generation in a CPU container
   of their own with single-threaded BLAS (`--score`), never in a process forked from vLLM's: there EvalPlus's 4 GiB
   address-space guard (RLIMIT_AS) counts vLLM's mappings and fails tests that allocate much (HumanEval/15's plus

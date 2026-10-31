@@ -1,4 +1,4 @@
-"""Natural termination of a post-trained checkpoint's reasoning (docs/post-training.md §5.1): a fixed prompt set sampled
+"""Natural termination of a post-trained checkpoint's reasoning (docs/evaluation.md §10): a fixed prompt set sampled
 once each by vLLM offline from the --chat export (inference/export_hf.py; bf16, the head in fp32, eos = BOS, max new
 tokens the context less the prompt), and how the responses end:
 
@@ -43,9 +43,16 @@ loop (`repetition` >= LOOP); per budget (`forced_summary`): naturally closed and
 (`evalplus_check`) over all, the naturally closed and the forced, and the shares with a fenced code block and ending
 with BOS. Each response keeps its full reasoning and answers.
 
+With --onsets, each never-closed response's loop onset (`loop_onset`) in a probe's json, from the stored reasoning
+(evalplus responses, and every --budget response) re-encoded as ordinary text; written to a sidecar json. With
+--data-repetition, `repetition` of every SFT document's reasoning (train and val splits), the teacher's analogue of a
+loop, counted per threshold and per reasoning-length bucket.
+
     python -m eval.official_termination <model dir> <out json> [<metrics.jsonl> <since, unix seconds>] [--prompts N]
         [--budget]
     python -m eval.official_termination --score <generation json> <out json>
+    python -m eval.official_termination --onsets <probe json> <out json>
+    python -m eval.official_termination --data-repetition <workers> <out json>
 """
 
 import argparse
@@ -126,6 +133,86 @@ def repetition(ids: list[int]) -> float:
         if counts[w] > 1:
             covered[i:i + REPEAT_WINDOW] = True
     return float(covered.mean()) if len(tail) else 0.0
+
+
+def loop_onset(ids: list[int]) -> int:
+    """The first token of the repeating tail: one past the last token not inside a REPEAT_WINDOW-token window that
+    recurs anywhere in `ids` (0 if every token is; len(ids) if the last token is not)."""
+    windows = [tuple(ids[i:i + REPEAT_WINDOW]) for i in range(len(ids) - REPEAT_WINDOW + 1)]
+    counts = Counter(windows)
+    covered = np.zeros(len(ids), bool)
+    for i, w in enumerate(windows):
+        if counts[w] > 1:
+            covered[i:i + REPEAT_WINDOW] = True
+    free = np.flatnonzero(~covered)
+    return int(free[-1]) + 1 if len(free) else 0
+
+
+def onsets(record: Path, out: Path) -> None:
+    """Loop onsets of a probe's never-closed responses whose reasoning the json stores; per set, the median."""
+    report = json.loads(record.read_text())
+    rows = report["responses"]
+    configs = rows if report.get("budget") else {"": rows}
+    enc = get_tokenizer().enc
+    result = {}
+    for config, sets in configs.items():
+        for name, responses in sets.items():
+            found = []
+            for r in responses:
+                if r["closed"] or not r.get("reasoning"):
+                    continue
+                ids = enc.encode_ordinary(r["reasoning"])
+                found.append({"id": r["id"], "tokens": len(ids), "repetition": r["repetition"],
+                              "onset": loop_onset(ids)})
+            loops = [f["onset"] for f in found if (f["repetition"] or 0) >= LOOP]
+            result[f"{config}/{name}" if config else name] = {
+                "unclosed_with_text": len(found), "loops": len(loops),
+                "onset_median": statistics.median(loops) if loops else None, "responses": found}
+    out.write_text(json.dumps({"record": record.name, "window": REPEAT_WINDOW, "loop": LOOP, "sets": result},
+                              indent=1) + "\n")
+
+
+def document_repetition(task: tuple[str, int, int]) -> list[tuple[int, float]]:
+    """(reasoning tokens, `repetition`) of documents [start, end) of an SFT split."""
+    split, start, end = task
+    tok = get_tokenizer()
+    path = split_path(NAME, split, tok)
+    tokens = np.memmap(path.with_suffix(".bin"), dtype=TOKEN_DTYPE, mode="r")
+    offsets = np.memmap(path.with_suffix(".idx"), dtype=np.int64, mode="r")
+    contexts = np.fromfile(path.with_suffix(".context"), dtype=np.int64)
+    out = []
+    for i in range(start, end):
+        # the reasoning, encoded alone as build.py render encodes it
+        text = tok.enc.decode(tokens[offsets[i] + contexts[i]:offsets[i + 1]].tolist()).partition(END_THINK)[0]
+        ids = tok.enc.encode_ordinary(text)
+        out.append((len(ids), repetition(ids)))
+    return out
+
+
+def data_repetition(workers: int, out: Path) -> None:
+    """Counts of SFT documents by reasoning `repetition` (thresholds) and by reasoning-length bucket."""
+    tok = get_tokenizer()
+    tasks = []
+    for split in ("train", "val"):
+        n = len(np.fromfile(split_path(NAME, split, tok).with_suffix(".context"), dtype=np.int64))
+        step = -(-n // (workers * 8))
+        tasks += [(split, s, min(s + step, n)) for s in range(0, n, step)]
+    with ProcessPoolExecutor(workers) as pool:
+        parts = list(pool.map(document_repetition, tasks))
+    thresholds = (0.5, 0.8, 0.9, 0.99)
+    report = {"tail": REPEAT_TAIL, "window": REPEAT_WINDOW, "splits": {}}
+    for split in ("train", "val", "all"):
+        rows = [r for (s, _, _), p in zip(tasks, parts) if split in (s, "all") for r in p]
+        lengths = np.array([n for n, _ in rows])
+        reps = np.array([r for _, r in rows])
+        buckets = np.digitize(lengths, TEACHER_BUCKETS)
+        report["splits"][split] = {
+            "documents": len(rows),
+            "at_least": {str(t): int((reps >= t).sum()) for t in thresholds},
+            "by_length": [{"bucket": b, "documents": int((buckets == b).sum()),
+                           "at_least": {str(t): int(((buckets == b) & (reps >= t)).sum()) for t in thresholds}}
+                          for b in range(len(TEACHER_BUCKETS) + 1)]}
+    out.write_text(json.dumps(report, indent=1) + "\n")
 
 
 def response(ids: list[int], text: str, finish: str, bos: int, decode) -> dict:
@@ -408,7 +495,9 @@ def score(generated: Path, out: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("model", type=Path, help="the model dir; with --score, the generation's json")
+    parser.add_argument("model", type=Path,
+                        help="the model dir; with --score or --onsets, the probe's json; with --data-repetition, the "
+                             "worker count")
     parser.add_argument("out", type=Path)
     parser.add_argument("metrics", type=Path, nargs="?")
     parser.add_argument("since", type=float, nargs="?")
@@ -416,8 +505,14 @@ if __name__ == "__main__":
     parser.add_argument("--budget", action="store_true")
     parser.add_argument("--configs", default=",".join(SENSITIVITY), help="with --budget, the samplings (CONFIGS)")
     parser.add_argument("--score", action="store_true")
+    parser.add_argument("--onsets", action="store_true")
+    parser.add_argument("--data-repetition", action="store_true")
     args = parser.parse_args()
     if args.score:
         score(args.model, args.out)
+    elif args.onsets:
+        onsets(args.model, args.out)
+    elif args.data_repetition:
+        data_repetition(int(str(args.model)), args.out)
     else:
         main(args.model, args.out, args.metrics, args.since, args.prompts, args.budget, args.configs.split(","))
