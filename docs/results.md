@@ -12,7 +12,8 @@ measured; [unverified] a figure without a record. Paper values are the papers' o
 |Record|Holds|
 |---|---|
 |`artifacts/runs/<base run>/official-69874/summary.json`|per-problem verdicts and pass@1 with standard errors and 95% intervals per benchmark|
-|`…/official-69874/{evalplus,multipl-e,lm-eval,infilling}/`|each tool's own samples and verdict files|
+|`…/official-69874/{evalplus,multipl-e,lm-eval,infilling}/`|each tool's own samples and verdict files (`lm-eval/`: MBPP 3-shot with normalized line endings, task `mbpp_lf`)|
+|`…/official-69874/lm-eval-crlf/`|MBPP 3-shot on lm-evaluation-harness's unmodified CRLF prompts (task `mbpp`)|
 |`…/official-69874/compare-eval-69874.json`|per-problem agreement of the official tools with the in-repository harness|
 |`artifacts/runs/<base run>/likelihood-<step>.json`|bits per byte per domain at 8K and 32K context, per saved step from 62,887|
 
@@ -32,7 +33,7 @@ the 95% normal interval of the problem mean [measured].
 |EvalPlus average (the four above, per problem)|542|0.324|0.020|—|
 |HumanEval-C++ (MultiPL-E), greedy / sampled|161|0.217 / 0.220|0.033 / 0.029|[0.153, 0.281] / [0.164, 0.276]|
 |MBPP-C++ (MultiPL-E), greedy / sampled|397|0.368 / 0.351|0.024 / 0.021|[0.320, 0.415] / [0.309, 0.393]|
-|MBPP 3-shot (lm-evaluation-harness), see below|500|0.184|0.017|[0.150, 0.218]|
+|MBPP 3-shot (lm-evaluation-harness, task `mbpp_lf`), see below|500|0.322|0.021|[0.281, 0.363]|
 |HumanEval infilling, single-line (PSM)|1,033|0.553|—|—|
 |HumanEval infilling, multi-line (PSM)|5,815|0.261|—|—|
 |HumanEval infilling, random-span (PSM)|1,640|0.113|—|—|
@@ -41,13 +42,24 @@ Sampled MultiPL-E is n = 20 at temperature 0.2, top-p 0.95. Infilling is pass@1 
 evaluator over greedy middles that end at the model's end-of-text token (BOS) or the benchmark's longest reference
 middle in tokens.
 
-The MBPP 3-shot row is measured with lm-evaluation-harness's unmodified prompt, whose three few-shot solutions keep the
-original dataset's CRLF line endings: 11 carriage returns per prompt, in all 500 prompts [measured]. Corpus
-standardization maps every "\r\n" and "\r" to "\n" (`corpus/prepare.py`), so the model has never trained on a carriage
-return. With them in the prompt, 64 of 500 responses glue text after a block's colon (`def binary_to_decimal(n):n`)
-and 131 (26.2%) do not parse [measured]; on EvalPlus, whose prompts hold none, no failure is a syntax error (§3). The
-row is superseded by the measurement with the few-shot code's line endings normalized as the corpus normalizes them;
-scoring is unaffected, as MBPP judges a response by its tests, not by the reference code.
+lm-evaluation-harness's unmodified MBPP prompt keeps the original dataset's CRLF line endings in its three few-shot
+solutions: 11 carriage returns per prompt, in all 500 prompts [measured]. Corpus standardization maps every "\r\n" and
+"\r" to "\n" (`corpus/prepare.py`), so the model has never trained on a carriage return. The row above is the task
+`mbpp_lf`, the same prompt with its fields' line endings normalized as the corpus normalizes them
+(`eval/official_lm_eval/`, docs/evaluation.md §4); scoring is unaffected, as MBPP judges a response by its tests, not
+by the reference code. Same model, settings and 500 problems [measured]:
+
+|MBPP 3-shot prompt|pass@1|Responses not parsing|Text glued after a block header's colon|Responses at the 256-token limit|
+|---|---|---|---|---|
+|CRLF (task `mbpp`)|0.184|132|133|25|
+|LF (task `mbpp_lf`)|0.322|10|6|15|
+
+A glued response holds a `def`, `class`, `if`, `elif`, `else`, `for`, `while`, `try`, `except`, `finally` or `with`
+line whose colon is followed by a character that is neither whitespace nor `#` (`def binary_to_decimal(n):n`). Per
+problem, CRLF and LF both pass 83, CRLF only 9, LF only 78, neither 330 (exact McNemar p = 7.5e-15); against the
+in-repository harness, which prompted with the CRLF shots (docs/evaluation.md §8), LF passes 70 problems the harness
+fails and fails 12 it passes (p = 4.1e-11) [measured]. On EvalPlus, whose prompts hold no carriage return, no failure
+is a syntax error (§3).
 
 ## 2. Comparison with published base models
 
@@ -55,7 +67,7 @@ Greedy pass@1 (%), each paper's own evaluation; training tokens from the same pa
 
 |Model|Parameters|Training tokens|HumanEval|HumanEval+|MBPP|MBPP+|MBPP 3-shot|Source|
 |---|---|---|---|---|---|---|---|---|
-|**d24, step 69,874**|0.20B non-embedding (0.52B)|**0.10T**|**26.8**|**22.0**|**44.4**|**36.5**|18.4 (§1)|this document|
+|**d24, step 69,874**|0.20B non-embedding (0.52B)|**0.10T**|**26.8**|**22.0**|**44.4**|**36.5**|32.2 (§1)|this document|
 |Qwen2.5-Coder-0.5B|0.5B|5.5T (continued pretraining)|28.0|23.8|52.9|47.1|40.4|arXiv 2409.12186 §6.1|
 |Qwen2.5-0.5B|0.49B|—|28.1|—|—|—|29.6|arXiv 2509.24945 Table 6|
 |MobileLLM-R1-360M base|0.36B|4.2T|32.9|—|—|—|20.8|arXiv 2509.24945 Table 6|
@@ -110,7 +122,9 @@ statuses [measured].
   one line, i.e. the model did not emit its end-of-text token when the hole was filled [measured], and the 5.6% of
   verdicts that are syntax errors are over-generation's [inference]. Bavarian et al. describe the failure: a model that
   "fails to generate an <EOT> token" connects badly to the suffix, "a common failure in FIM sampling" (arXiv
-  2207.14255 §3, §6).
+  2207.14255 §3, §6). Middles that ran to the budget, by `summary.json` `at_budget` (tokens re-encoded from the text):
+  136 of 1,033 single-line (13.2%), 835 of 5,815 multi-line (14.4%) and 1,029 of 1,640 random-span (62.7%); the
+  others ended at BOS or another special token [measured].
 
 ## 4. Likelihood at the end of pretraining
 

@@ -15,7 +15,7 @@ reasoning not measured; [estimate]; [unverified] a figure without a record, or a
 | Branches (on `origin`) `qkv-epi`, `mlp-out-mix`, `mlp-out-mix-land`, `mlp-out-mix-v2`, `window-attn` | §5 |
 | Branch `scalar-learning-rates` (on `origin`) | §4 |
 | Removed experiment code: the D6/D7 experiments, the tokenizer runs, `RunConfig.muon_tau_scale`, `adamw_learning_rate_scale`, `ablations/contrast.py`, the `logit_softcap` experiment | §1–§4 |
-| Removed: the native vLLM model class (`inference/vllm_model.py`), `eval/rescore.py`, `scripts/standard_eval.sh`; the harness's standard-benchmark modes (`7b7f26d`: greedy, sampled, MBPP 3-shot, infilling, the reasoning protocol, `eval/livecodebench.py`); SantaCoder FIM, the infilling 1@10 mode and the CrossCodeEval scores (`CODECOMMIT`) | §6 |
+| Removed: the native vLLM model class (`inference/vllm_model.py`), `eval/rescore.py`, `scripts/standard_eval.sh`; the harness's standard-benchmark modes (`bddeb54`: greedy, sampled, MBPP 3-shot, infilling, the reasoning protocol, `eval/livecodebench.py`); SantaCoder FIM, the infilling 1@10 mode and the CrossCodeEval scores (`7f02786`) | §6 |
 
 ## 1. Protocol and status
 
@@ -430,7 +430,7 @@ vLLM's Transformers backend, and `eval/rescore.py` replayed a record's scorers o
 validated the evaluation (`docs/evaluation.md` §8–§9). The vLLM path returned as the benchmarks' official path
 (`scripts/official_eval.sh`, `docs/evaluation.md` §4).
 
-**The harness's standard-benchmark modes** (removed, `7b7f26d`). `evaluate` generated EvalPlus, MultiPL-E, MBPP
+**The harness's standard-benchmark modes** (removed, `bddeb54`). `evaluate` generated EvalPlus, MultiPL-E, MBPP
 3-shot and infilling with `NativeDecoder` and scored them with each benchmark's evaluator, plus the post-trained
 model's reasoning protocol with LiveCodeBench (`eval/livecodebench.py`). On the base run's step 69,874 the official
 tools, unmodified, on the export served by vLLM give the same per-problem verdicts within decoding noise: no benchmark
@@ -439,7 +439,7 @@ verdicts differ diverges at a near-tie token (the export's fp32 forward picks th
 harness's 19; median margin 0.038 nats) (`docs/evaluation.md` §8). The official tools are the published protocols
 (`docs/evaluation.md` §4); `evaluate` keeps the likelihoods, the parse measure and the 1@10 mode, which no tool runs.
 
-**SantaCoder FIM, the infilling 1@10 mode, sampled and SPM infilling** (removed, `CODECOMMIT`). The model is
+**SantaCoder FIM, the infilling 1@10 mode, sampled and SPM infilling** (removed, `7f02786`). The model is
 pretrained on Python and C++ only, and bigcode-evaluation-harness's `santacoder_fim` task (`8fc5bae`) scores Python,
 JavaScript and Java; its Python split is 1,043 single-line holes cut from 153 HumanEval problems, scored by exact
 match, a duplicate of HumanEval single-line infilling, which is scored by execution [arithmetic: the task's rows].

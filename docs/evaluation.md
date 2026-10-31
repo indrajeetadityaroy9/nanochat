@@ -162,20 +162,15 @@ memory). `VLLM_GPU_MEMORY_UTILIZATION` sets every `vllm.LLM`'s `gpu_memory_utili
 The post-trained model's protocol (EvalPlus's chat prompt and LiveCodeBench, `scripts/official_reasoning.sh`):
 `docs/post-training.md` §11.4. Benchmarks and modes no longer run: `docs/experiments.md` §6.
 
-**Results of the base run's final checkpoint** (step 69,874; `summary.json`; pass@1 with its standard error, §5):
-
-| HumanEval | HumanEval+ | MBPP | MBPP+ | EvalPlus avg. | HumanEval-C++ greedy / sampled | MBPP-C++ greedy / sampled | MBPP 3-shot | Infilling single / multi / random-span |
-|---|---|---|---|---|---|---|---|---|
-| 0.2683 ± 0.0347 | 0.2195 ± 0.0324 | 0.4444 ± 0.0256 | 0.3651 ± 0.0248 | 0.3243 ± 0.0203 | 0.2174 / 0.2199 | 0.3678 / 0.3510 | MBPP_LF | 0.5528 / 0.2612 / 0.1134 |
-
-Infilling middles that ran to the budget (tokens re-encoded, `summary.json` `at_budget`): 136 of 1,033 single-line,
-835 of 5,815 multi-line, 1,029 of 1,640 random-span; the others ended at BOS or another special token.
+Results of the base run's final checkpoint (step 69,874), their comparison with published models and their failure
+analysis: `docs/results.md` §1–§3.
 
 - **Line endings.** The corpus normalizes `"\r\n"`, then `"\r"`, to `"\n"` (`corpus/prepare.py`), so the model never
   trained on `"\r"`. lm-evaluation-harness's three MBPP shots carry MBPP's CRLF code (`tasks/mbpp/utils.py`
-  `list_fewshot_samples`): every one of the 500 prompts holds 11 carriage returns. MBPP_CRLF The task `mbpp_lf` is
-  `mbpp.yaml` with the prompt's fields (statement, code, asserts) normalized (`utils.py` `process_docs`,
-  `list_fewshot_samples`); scoring is unchanged, since MBPP is judged by its asserts, not by the reference code. The
+  `list_fewshot_samples`): every one of the 500 prompts holds 11 carriage returns (their effect on the score:
+  `docs/results.md` §1). The task `mbpp_lf` is `mbpp.yaml` with the prompt's fields (statement, code, asserts)
+  normalized (`utils.py` `process_docs`, `list_fewshot_samples`); scoring is unchanged, since MBPP is judged by its
+  asserts, not by the reference code. The
   EvalPlus, MultiPL-E and infilling prompts hold no `"\r"` [measured on 69,874's prompts], nor do EvalPlus's chat
   messages; 177 of LiveCodeBench v6's 454 window problems do, and `eval/official_lcb.py` normalizes lcb_runner's
   messages alike (`messages`) [measured: `eval/official_tokenize.py`]. `sitecustomize.py` makes every
@@ -524,8 +519,8 @@ bf16 decoders break apart [inference]. MBPP 3-shot's 23: the harness passes 17 a
 fp32 prefers the official token 11 times, among the 6 the harness's 3 times; first divergence at generated token
 0–70, median |margin| 0.048 nats. Infilling middles are identical for 971 of 1,033, 5,011 of 5,815 and 1,169 of 1,640
 problems, and about as many run to the budget (harness 138, 843, 1,028; official 136, 835, 1,029). The harness's own
-modes were removed on this
-evidence (`docs/experiments.md` §6); `evaluate` keeps the likelihoods, the parse measure and the 1@10 mode.
+modes were removed on this evidence (`docs/experiments.md` §6); `evaluate` keeps the likelihoods, the parse measure
+and the 1@10 mode.
 
 ## 9. Validation of the harness
 

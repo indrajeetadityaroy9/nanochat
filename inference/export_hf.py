@@ -29,7 +29,6 @@ from model.modeling import ModelConfig, has_ve, layer_windows
 from model.ops.linear import EPS
 from posttrain.sft import THINK
 
-
 # docs/post-training.md §11.1's context; Jinja's trim is Python's str.strip; THINK as a Jinja string literal, since a
 # template's own trailing newline is dropped (Jinja's keep_trailing_newline is off)
 CHAT_TEMPLATE = ("{{ bos_token }}{{ messages | map(attribute='content') | join('\\n\\n') | trim }}"
