@@ -402,26 +402,34 @@ two stages use disjoint parts of the dataset, so no training document is packed 
 
 \subsection{Fill-in-the-middle}
 
-\paragraph{Format.} A FIM example moves a span of a chunk, the middle, to the end. Prefix, suffix and middle are
-tokenized separately and joined with the three FIM tokens, in prefix-suffix-middle (PSM) or suffix-prefix-middle (SPM)
-order~\cite{bavarian2022fim}. The model is trained to predict the BOS token after the middle, so it learns where a
-middle ends. Half of the repository-code chunks become FIM examples (FIM rate 0.5). The choice is made for each chunk
-after a document is cut to the context length, which is called context-level FIM; half of the examples are PSM and
-half SPM. The middle is a random character span in 10\% of the examples. Otherwise it follows the syntax tree
-(AST-FIM): it is a single syntax-tree node or a span of whole nodes, with equal probability~\cite{gong2025astfim}.
+\paragraph{What FIM is.} A left-to-right language model predicts each token only from the text before it.
+Fill-in-the-middle (FIM) training also teaches it to use the text after a span: a span of a document, the middle, is
+moved to the end, and the model is trained to generate it from the prefix and the suffix~\cite{bavarian2022fim}.
+Three special tokens mark the prefix, the suffix and the middle, which are placed in prefix-suffix-middle (PSM) or
+suffix-prefix-middle (SPM) order.
 
-\paragraph{Why FIM\@.} The evaluation includes infilling (HumanEval single-line, multi-line and random-span infilling),
-which a model trained only left to right cannot do. FIM rates up to 0.9 did not reduce left-to-right performance,
-and context-level FIM performed better than FIM applied to whole documents~\cite{bavarian2022fim}. DeepSeek-Coder
-chose a FIM rate of 0.5 because a rate of 100\% gave its weakest code completion~\cite{guo2024deepseekcoder}. Training
-on both PSM and SPM matched or exceeded training on either alone, and a model trained only on SPM cannot infill in
-PSM~\cite{bavarian2022fim}. The 90\% share of syntax-aligned middles follows AST-FIM; at a FIM rate of 0.7, AST-FIM
-kept HumanEval+ and MBPP+ close to a left-to-right model~\cite{gong2025astfim}.
+\paragraph{Why FIM is used.} Code completion often inserts code between existing code, and the evaluation includes
+infilling benchmarks (HumanEval single-line, multi-line and random-span infilling), which a model trained only left to
+right cannot do. FIM costs little left-to-right ability: FIM rates up to 0.9 did not reduce left-to-right
+performance~\cite{bavarian2022fim}.
 
 \paragraph{Scope.} FIM is applied only to repository code: the six repository sources and the repository-level
 documents. In these sources FIM examples make up about 50\% of the tokens, which is 29.7\% of the file-level stage's
 tokens and 40.8\% of the repository-level stage's. Synthetic code and functions get no FIM examples; this choice was
 not ablated.
+
+\paragraph{Rate and format.} Half of the repository-code chunks become FIM examples (FIM rate 0.5); DeepSeek-Coder
+chose this rate because a rate of 100\% gave its weakest code completion~\cite{guo2024deepseekcoder}. The choice is
+made for each chunk after a document is cut to the context length (context-level FIM), which performed better than
+FIM applied to whole documents~\cite{bavarian2022fim}. Half of the examples are PSM and half SPM: training on both
+matched or exceeded training on either alone, and a model trained only on SPM cannot infill in
+PSM~\cite{bavarian2022fim}. Prefix, suffix and middle are tokenized separately, and the model is trained to predict
+the BOS token after the middle, so it learns where a middle ends.
+
+\paragraph{Choice of the middle.} The middle is a random character span in 10\% of the examples. Otherwise it follows
+the syntax tree (AST-FIM): it is a single syntax-tree node or a span of whole nodes, with equal probability. This
+split follows AST-FIM, which at a FIM rate of 0.7 kept HumanEval+ and MBPP+ close to a left-to-right
+model~\cite{gong2025astfim}.
 
 \paragraph{Whole-line middles.} A syntax-tree node starts after its line's indentation and ends before its line
 break. Without a correction, no AST-FIM example in PSM order would have a prefix that ends with a line break and a
@@ -429,8 +437,8 @@ middle made of whole lines, which is the layout of line-level infilling: all 1,0
 HumanEval infilling prefixes end with a line break, and every reference middle ends with one. Therefore, when a syntax
 middle starts a line, with probability 0.5 it also includes the line's indentation, and its final line break when it
 ends at one. In the packed Python repository data, about 36\% of the PSM middles are whole lines and 22--25\% start a
-line and stop before its line break, so both layouts are trained.
-AST-FIM reports that closer training and test distributions give stronger performance~\cite{gong2025astfim}.
+line and stop before its line break, so both layouts are trained. AST-FIM reports that closer training and test
+distributions give stronger performance~\cite{gong2025astfim}.
 
 \subsection{Batching and data order}
 
