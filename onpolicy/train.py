@@ -1,7 +1,8 @@
 """
 RSFT and DPO of a --chat export with TRL (docs/post-training.md §8.5), full parameters: the model loaded in fp32 (master
 weights and AdamW state), bf16 autocast, the LM head and its cap in fp32 as the evaluation computes them
-(inference/modeling_nanochat.py; TRL's fused head with cast_lm_head_to_fp32), SDPA attention; one epoch, no dropout
+(inference/modeling_nanochat.py; TRL's fused head with cast_lm_head_to_fp32), SDPA attention, each decoder layer
+recomputed in the backward pass (`load`); one epoch, no dropout
 (the model has none), seed 0. The sets are onpolicy/selection.py's token ids, used as sampled (TRL's tokenization is
 skipped: it would append an eos to the rejected side).
 
@@ -20,8 +21,8 @@ The result is written as the export is (inference/export_hf.py: fp32 the paramet
 the rest; config, generation config, tokenizer and model file copied), so vLLM serves it as it serves the export. The
 bf16 tensors are rounded stochastically (`bf16`: E[rounded] = the fp32 value, a value on the bf16 grid unchanged): an
 update smaller than half an element's bf16 spacing, which most of DPO's are, survives in expectation, where rounding
-to nearest erases it. train-log.json holds TRL's log history and `retention`: the share of the fp32 update (final -
-start) the written weights keep along its direction.
+to nearest erases it. train-log.json holds TRL's log history, `retention`: the share of the fp32 update (final -
+start) the written weights keep along its direction, and the peak GPU memory allocated.
 
     python -m onpolicy.train rsft|dpo <model dir> <set jsonl> <out dir> [--max-steps N] [--batch N] [--cpu]
 """
@@ -38,11 +39,20 @@ RSFT_LR, RSFT_BATCH, RSFT_WARMUP = 1e-5, 128, 0.1
 DPO_LR, DPO_BATCH, DPO_WARMUP, DPO_BETA = 5e-7, 16, 0.1, 0.05
 
 
-def load(model_dir: Path):
+def load(model_dir: Path, train: bool = True):
+    """The model in fp32; to train, each decoder layer recomputed in the backward pass (torch's non-reentrant
+    checkpoint, autocast state kept): 0.68 MB of saved activations per token instead of 2.04, with identical gradients
+    (a 4,096-token sequence, CPU, bf16 autocast); on the GPU 0.235 MB per token of each sequence of a DPO pair
+    (scripts/onpolicy.sh `pair_tokens`). The export's model file declares no gradient checkpointing for transformers
+    to enable."""
+    from torch.utils.checkpoint import checkpoint
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True, dtype=torch.float32,
                                                  attn_implementation="sdpa")
+    if train:
+        for layer in model.model.layers:
+            layer.forward = functools.partial(checkpoint, layer.forward, use_reentrant=False)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     tokenizer.pad_token = tokenizer.eos_token  # padding is masked out of attention and loss
     return model, tokenizer
@@ -96,7 +106,8 @@ def write(trainer, source: Path, out: Path) -> dict:
     for f in source.iterdir():
         if f.is_file() and f.name != "model.safetensors":
             shutil.copy(f, out / f.name)
-    return {"retention": kept, "log_history": trainer.state.log_history}
+    return {"retention": kept, "max_memory_allocated": torch.cuda.max_memory_allocated() if torch.cuda.is_available()
+            else None, "log_history": trainer.state.log_history}
 
 
 def common(out: Path, batch: int, lr: float, warmup: float, max_steps: int, cpu: bool) -> dict:
@@ -137,7 +148,7 @@ def dpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | Non
     rows = [json.loads(line) for line in data.read_text().splitlines()]
     dataset = Dataset.from_list([{k: r[k] for k in ("prompt_ids", "chosen_ids", "rejected_ids")} for r in rows])
     model, tokenizer = load(model_dir)
-    reference, _ = load(model_dir)
+    reference, _ = load(model_dir, train=False)
     args = DPOConfig(**common(out, batch or DPO_BATCH, DPO_LR, DPO_WARMUP, max_steps, cpu),
                      lr_scheduler_type="linear", beta=DPO_BETA, loss_type=["sigmoid"], max_length=None,
                      precompute_ref_log_probs=False)
@@ -160,4 +171,4 @@ if __name__ == "__main__":
     record = {"rsft": rsft, "dpo": dpo}[args.stage](args.model, args.data, args.out, args.max_steps, args.batch,
                                                     args.cpu)
     (args.out / "train-log.json").write_text(json.dumps(record, indent=1) + "\n")
-    print(json.dumps(record["retention"]), flush=True)
+    print(json.dumps({k: record[k] for k in ("retention", "max_memory_allocated")}), flush=True)

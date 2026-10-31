@@ -69,9 +69,10 @@ sys.exit(0 if any(json.loads(l).get("kind") == "end" for l in open(sys.argv[1]) 
     item "probe $1" "$DIR/termination-$1.log" \
       env VLLM_GPU_MEMORY_UTILIZATION="$PROBE_UTIL" "$ROOT/scripts/official_termination.sh" "$RUN" "$1"
   }
-  onpolicy() {  # <util> <stages> <eval models>
+  onpolicy() {  # <util> <stages> <eval models>; training sizes its pairs beside A's server (SERVER_UTIL)
     item "onpolicy $2${3:+ ($3)}" "$DIR/onpolicy-$FINAL-${2// /-}${3:+-${3// /-}}.log" env STAGES="$2" \
-      EVAL_MODELS="$3" VLLM_GPU_MEMORY_UTILIZATION="$1" "$ROOT/scripts/onpolicy.sh" "$RUN" "$FINAL"
+      EVAL_MODELS="$3" VLLM_GPU_MEMORY_UTILIZATION="$1" SERVER_UTIL="$SERVE_UTIL" "$ROOT/scripts/onpolicy.sh" "$RUN" \
+      "$FINAL"
   }
   official() {  # <util> <port> <tag or empty> [<model dir>]
     local out=$DIR/official-$FINAL${3:+-$3}

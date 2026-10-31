@@ -608,9 +608,10 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
 
 - **Framework** (`onpolicy/train.py`, `docker/Dockerfile.onpolicy`: the evaluation image with TRL 1.17.1): full
   parameters on the export, loaded in fp32 (master weights and AdamW state) with bf16 autocast, the LM head and its
-  cap in fp32 (TRL's fused head), SDPA attention, seed 0, one epoch; the sets' token ids as sampled (TRL's
-  tokenization would append an eos to the rejected side); the result written in the export's format (fp32 the
-  parameters the forward reads in fp32, bf16 the rest), so vLLM serves it in bf16 as it serves the SFT model.
+  cap in fp32 (TRL's fused head), SDPA attention, each decoder layer recomputed in the backward pass (torch's
+  checkpoint), seed 0, one epoch; the sets' token ids as sampled (TRL's tokenization would append an eos to the
+  rejected side); the result written in the export's format (fp32 the parameters the forward reads in fp32, bf16 the
+  rest), so vLLM serves it in bf16 as it serves the SFT model.
 - **RSFT**: the loss on the completion, averaged over the tokens of a 128-sequence batch; AdamW lr 1e-5, β (0.9,
   0.95), warmup 10%, cosine decay, no weight decay, clip 1.0: Phi-4-mini-reasoning's distillation stages (batch 128,
   lr 1e-5, warmup ratio 0.1, arXiv 2504.21233 §5.3).
@@ -621,11 +622,13 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
   LoRA's 10× over full parameters, §2.2); batch 16 pairs (DeLoop's), warmup 10%, linear decay. DeLoop trains one
   epoch on 8,000 pairs (App. G.1); its loop rate levels off after 8K pairs (App. G.3), and a higher lr, a larger rank
   or a second epoch lowered it further to 0.7–1.7% while its default kept the highest task success (App. G.6).
-- **Pair length**: no activation recomputation, so a pair's two sequences train together; pairs longer than 14,848
-  tokens (the prompt and the longer side; `scripts/onpolicy.sh` `PAIR_TOKENS`) are dropped: beside the queue's server
-  (§8.7) training has 0.7 × 94.5 GiB = 71.0 GB, less 10.45 GB of fp32 weights, gradients, AdamW state and reference,
-  at 2.04 MB per token per sequence (forward and backward of a 4,096-token sequence on CPU, bf16 autocast, peak RSS
-  less the gradients) [estimate].
+- **Memory and pair length**: recomputing each decoder layer saves 0.68 MB of activations per token instead of 2.04
+  with identical gradients (a 4,096-token sequence, CPU, bf16 autocast) [measured]. On the GPU, DPO's peak allocation
+  is 11.49 GB at 1,024-token pairs and 11.97 GB at 2,048 (3 steps of 2 pairs on the step-3000 export; RSFT 9.15 and
+  9.35 GB) [measured], so 0.235 MB per token of each of a pair's two sequences over 11.0 GB [arithmetic]. Beside the
+  queue's 0.3 server (§8.7) that fits 129,661-token pairs in 0.7 of the GPU's 97,871 MiB, more than the 32,768-token
+  context that bounds every rollout and so every pair; `scripts/onpolicy.sh` `pair_tokens` computes the cap as the
+  smaller, so no pair is dropped for length, and a pair at the full context needs about 26.4 GB [arithmetic].
 - **Stochastic rounding to bf16** (`bf16`): one AdamW step moves an element by at most about lr, so DPO at 5e-7 over
   ~100 steps moves most elements less than half their bf16 spacing (median |w| 0.0243 of the decoder's matmul
   weights: spacing 2⁻¹³ = 1.22e-4 [measured: export of step 3000]), and rounding to nearest at the write erased them:
@@ -635,9 +638,10 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
   as 0.9998 of itself on average against 0.103 by nearest rounding [measured]); the hyper-parameters stay the
   published ones. `train-log.json` records `retention`: ⟨written − start, final − start⟩ / |final − start|² and the
   share of elements changed.
-- **Smoke** [measured, CPU, 3 steps of 2 on the step-3000 export]: RSFT loss 0.863 → 0.692, retention 1.0001 (5.1%
-  of elements changed); DPO from it, loss ln 2 → 0.681, margin 0.024 at step 3, retention 1.0002 (0.54% changed); the
-  written models have the export's keys, shapes and dtypes.
+- **Smoke** [measured, 3 steps of 2 on the step-3000 export]: CPU: RSFT loss 0.863 → 0.692, retention 1.0001 (5.1%
+  of elements changed); DPO from it, loss ln 2 → 0.681, margin 0.024 at step 3, retention 1.0002 (0.54% changed).
+  GPU, from the export, at 1,024 / 2,048 tokens: RSFT retention 1.0000 / 0.9999, DPO 1.0000 / 0.9986, DPO margin
+  0.022 / 0.025 at step 3. The written models have the export's keys, shapes and dtypes.
 
 ### 8.6 Evaluation
 

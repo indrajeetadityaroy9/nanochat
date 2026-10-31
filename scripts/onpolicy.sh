@@ -6,10 +6,8 @@
 #      (default 8000) under SAMPLES (default 0.6:4,1.0:4) to rollouts/;
 #   3. their verdicts (onpolicy/verify.py) in a CPU container without network or GPU;
 #   4. the selection (onpolicy/selection.py): rsft.jsonl, pairs.jsonl, selection.json; pairs longer than PAIR_TOKENS
-#      (the prompt and the longer side) dropped: DPO trains a pair's two sequences together with no recomputation, so
-#      beside the post-SFT queue's server (0.3 of 94.5 GiB) it has 0.7 x 94.5 GiB = 71.0 GB, less 10.45 GB of fp32
-#      weights, gradients, AdamW state and reference, at 2.04 MB per token per sequence (forward and backward of a
-#      4,096-token sequence, CPU, bf16 autocast, peak RSS less the gradients) [estimate]: 14,848 tokens;
+#      (the prompt and the longer side) dropped, by default the tokens a pair's two sequences fit in DPO's memory
+#      (`pair_tokens`), at most the model's context, which bounds every rollout and so every pair;
 #   5. RSFT from the export (onpolicy/train.py rsft) to rsft/, then DPO from rsft/ against it (train.py dpo) to dpo/;
 #   6. the evaluation of each of EVAL_MODELS (default "dpo model rsft": dpo/, the export, rsft/; `evaluate`): the
 #      natural-termination probe on the model directory (eval/official_termination.py, scored in a CPU container; for
@@ -24,7 +22,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2
-PROMPTS=${PROMPTS:-8000} SAMPLES=${SAMPLES:-0.6:4,1.0:4} VAL_PROMPTS=${VAL_PROMPTS:-256} PAIR_TOKENS=${PAIR_TOKENS:-14848}
+PROMPTS=${PROMPTS:-8000} SAMPLES=${SAMPLES:-0.6:4,1.0:4} VAL_PROMPTS=${VAL_PROMPTS:-256}
 STAGES=${STAGES:-rollouts train evaluate} UTIL=${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
 for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
 [ -n "$CHECKPOINT" ] || { echo "no checkpoint or weights of step $STEP in $RUN_DIR" >&2; exit 1; }
@@ -71,8 +69,25 @@ evaluate() {  # <model dir> <name>
   rollouts "$1" "$out/val" --split val --prompts "$VAL_PROMPTS" --samples 0.6:4
 }
 
+pair_tokens() {  # DPO's memory: the GPU's less SERVER_UTIL (default 0.3: the post-SFT queue's concurrent server) and
+  # FIXED_BYTES, over 2 sequences x BYTES_PER_TOKEN (decoder layers recomputed, onpolicy/train.py `load`); at most the
+  # model's context
+  local total
+  total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)  # MiB
+  python3 -c 'import json, sys
+total, server, fixed, per_token, config = sys.argv[1:]
+memory = (int(total) * 2**20 * (1 - float(server)) - float(fixed)) / (2 * float(per_token))
+print(int(min(memory, json.load(open(config))["max_position_embeddings"])))' \
+    "$total" "${SERVER_UTIL:-0.3}" "$FIXED_BYTES" "$BYTES_PER_TOKEN" "$OUT/model/config.json"
+}
+# GPU peaks (torch.cuda.max_memory_allocated) of train.py dpo, 3 steps of 2 pairs of 1,024 and of 2,048 tokens: the
+# slope per token of each of a pair's 2 sequences, and the intercept (weights, gradients, AdamW state, reference)
+PEAK_1K=11486814208 PEAK_2K=11967229952
+BYTES_PER_TOKEN=$(((PEAK_2K - PEAK_1K) / (2 * 1024)))
+FIXED_BYTES=$((PEAK_1K - 2 * 1024 * BYTES_PER_TOKEN))
 [ -f "$OUT/model/model.safetensors" ] ||
   timed export "${CPU[@]}" nanochat python -m inference.export_hf "$(w "$CHECKPOINT")" "$(w "$OUT/model")" --chat
+PAIR_TOKENS=${PAIR_TOKENS:-$(pair_tokens)}
 if [[ " $STAGES " == *" rollouts "* ]]; then
   rollouts "$OUT/model" "$OUT/rollouts" --split train --prompts "$PROMPTS" --samples "$SAMPLES" "${METRICS[@]}"
 fi
