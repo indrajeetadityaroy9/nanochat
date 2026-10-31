@@ -1,9 +1,9 @@
 """
-The rollouts' outcomes and the FTPO rows drawn from their loops (docs/post-training.md §8), over one or several
-rollout directories (the waves of scripts/onpolicy.sh), written to <out dir>. A response is a success when it closed
-its reasoning, ended with BOS and its answer passed the prompt's tests (onpolicy/verify.py verdicts.jsonl, where a
-directory has one: rows need no verdicts); a loop when it never closed and its tail repeats (onpolicy/rollouts.py
-`loop`).
+The rollouts' outcomes, the FTPO rows drawn from their loops and the DPO pairs drawn from their verified prompts
+(docs/post-training.md §8), over one or several rollout directories (the waves of scripts/onpolicy.sh), written to
+<out dir>. A response is a success when it closed its reasoning, ended with BOS and its answer passed the prompt's
+tests (onpolicy/verify.py verdicts.jsonl, where a directory has one: rows need no verdicts); a loop when it never
+closed and its tail repeats (onpolicy/rollouts.py `loop`).
 
 - FTPO rows (ftpo.jsonl; Antidoom's unit, final-token preference of arXiv 2510.15061 §5): one per loop with an exact
   cycle (onpolicy/rollouts.py `cycle`: onset o, period p), at Antidoom's target (`target`): the first token of the
@@ -16,30 +16,45 @@ directory has one: rows need no verdicts); a loop when it never closed and its t
   are counted and dropped; rows with an identical prefix are kept once (the first in prompt and sample order); rows
   whose prefix and rejected token exceed --max-length are dropped (counted). The rows are then rebalanced on their
   rejected token as Antidoom's trainer does (`rebalance`).
+- DPO pairs (dpo.jsonl, `dpo_pairs`; DeLoop's unit, arXiv 2610.19376 §4.1): per prompt with a success and a loop
+  whose cycle is exact, up to PAIRS_PER_PROMPT pairs, one per such loop in sample order: chosen the prompt's shortest
+  success (fewest tokens; the lower sample index on a tie) through its closing BOS, rejected the loop through its
+  first repeat, ids[:onset + period + min(period, WINDOW_CAP)], both after the prompt's ids. The rejected side ends
+  where the model has re-entered the cycle once (DeLoop's rejected action is the first repeat of an earlier action),
+  with no BOS, so the pair moves probability away from re-entering the cycle and not from a stop; WINDOW_CAP bounds a
+  long period's share of the rejected tokens. Only verified prompts have successes, so unverified rollouts (the mix
+  waves) yield no pairs. Pairs whose prompt and longer side exceed --max-length are dropped (counted).
 - selection.json: per temperature and pooled, the outcomes, loop rates per response and per prompt, loop onsets and
   periods, and over the prompts whose responses are verified pass@1 and pass@n (unbiased, arXiv 2107.03374 Eq. 1),
   the share of prompts with a success and with mixed outcomes (a success and a loop) and the successes' lengths; per
   source (the prompt's `source`, onpolicy/rollouts.py; a KodCode row without one: kodcode/<style>); and the rows:
   loops with an exact cycle, duplicates, rows before and after rebalancing (and per source), the 20 most frequent
   rejected tokens (decoded) before and after, the rows of verified prompts never solved, and position, onset and
-  period statistics.
+  period statistics; the pairs: their count, prompts, the dropped, and chosen, rejected and pair lengths.
+
+The loops' targets are computed in a process per core of the CPU set (`loop_target`).
 
     python -m onpolicy.selection <out dir> [<rollouts dir> ...] [--max-length 32768]
 """
 import argparse
 import json
+import os
 import re
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from math import comb
 from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
 
+from corpus.parallel import SPAWN
 from corpus.tokenizer import get_tokenizer
 
 MAX_LENGTH = 32768
+# DPO pairs per prompt and the rejected side's cap past the first repeat
+PAIRS_PER_PROMPT, WINDOW_CAP = 2, 256
 # Antidoom's rebalancing (github.com/Liquid4All/antidoom @ bd6a126): rejected_regularisation_strength and
 # max_train_examples of configs/default.yaml:91, :87, and its README's "set max_train_examples to at most 70% of the
 # actual number of preference rows"; its seed (default.yaml:86)
@@ -203,17 +218,25 @@ def target(text: Callable[[int], str], ids: list[int], onset: int, period: int) 
     return None
 
 
-def ftpo_rows(prompts: dict[str, dict], rows: list[dict], max_length: int,
-              decode: Callable[[list[int]], str]) -> tuple[list[dict], dict]:
+def loop_target(loop: tuple[list[int], int, int]) -> int | None:
+    """`target` of a loop (ids, onset, period), its tokens' text by the tokenizer."""
+    ids, onset, period = loop
+    decode = get_tokenizer().enc.decode
+    return target(lambda i: decode([ids[i]]), ids, onset, period)
+
+
+def ftpo_rows(prompts: dict[str, dict], rows: list[dict], max_length: int) -> tuple[list[dict], dict]:
     """One row per loop with an exact cycle at its `target`, duplicates and over-long rows removed (in prompt and
-    sample order); `decode` gives a token's text."""
+    sample order)."""
     out, seen, counts = [], set(), Counter()
-    for r in sorted(rows, key=lambda r: (r["prompt_id"], r["sample"])):
-        if not r["loop"] or r["loop_period"] is None:
-            continue
+    loops = [r for r in sorted(rows, key=lambda r: (r["prompt_id"], r["sample"]))
+             if r["loop"] and r["loop_period"] is not None]
+    with ProcessPoolExecutor(len(os.sched_getaffinity(0)), mp_context=SPAWN) as pool:
+        positions = list(pool.map(loop_target, [(r["ids"], r["loop_onset"], r["loop_period"]) for r in loops],
+                                  chunksize=16))
+    for r, position in zip(loops, positions, strict=True):
         counts["loops_exact_cycle"] += 1
         ids, onset, period = r["ids"], r["loop_onset"], r["loop_period"]
-        position = target(lambda i: decode([ids[i]]), ids, onset, period)
         if position is None:
             counts["no_target"] += 1
             continue
@@ -232,15 +255,48 @@ def ftpo_rows(prompts: dict[str, dict], rows: list[dict], max_length: int,
     return out, dict(counts)
 
 
+def rejected_side(r: dict) -> list[int]:
+    """A loop through its first repeat, the repeat capped at WINDOW_CAP tokens."""
+    return r["ids"][:r["loop_onset"] + r["loop_period"] + min(r["loop_period"], WINDOW_CAP)]
+
+
+def dpo_pairs(prompts: dict[str, dict], rows: list[dict], max_length: int, bos: int) -> tuple[list[dict], int]:
+    """The DPO pairs (module docstring) in prompt order and the number dropped for length."""
+    by_prompt = defaultdict(list)
+    for r in rows:
+        by_prompt[r["prompt_id"]].append(r)
+    pairs, too_long = [], 0
+    for pid, rs in sorted(by_prompt.items()):
+        wins = sorted((r for r in rs if r["success"]), key=lambda r: (r["tokens"], r["sample"]))
+        if not wins:
+            continue
+        best, context = wins[0], prompts[pid]["ids"]
+        chosen = best["ids"] if best["ids"][-1:] == [bos] else [*best["ids"], bos]
+        loops = sorted((r for r in rs if r["loop"] and r["loop_period"] is not None), key=lambda r: r["sample"])
+        for loop in loops[:PAIRS_PER_PROMPT]:
+            side = rejected_side(loop)
+            if len(context) + max(len(chosen), len(side)) > max_length:
+                too_long += 1
+                continue
+            pairs.append({"prompt_id": pid, "chosen_sample": best["sample"], "rejected_sample": loop["sample"],
+                          "loop_onset": loop["loop_onset"], "loop_period": loop["loop_period"],
+                          "prompt_ids": context, "chosen_ids": chosen, "rejected_ids": side})
+    return pairs, too_long
+
+
 def select(out: Path, directories: list[Path], max_length: int) -> dict:
     prompts, rows = load(directories)
-    decode = get_tokenizer().enc.decode
-    candidates, counts = ftpo_rows(prompts, rows, max_length, decode)
+    tok = get_tokenizer()
+    decode = tok.enc.decode
+    candidates, counts = ftpo_rows(prompts, rows, max_length)
     for c in candidates:
         c["rejected"] = decode([c["rejected_id"]])  # Antidoom balances on the decoded token (`rejected_decoded`)
     kept = rebalance(candidates, min(MAX_ROWS, int(KEEP * len(candidates))), STRENGTH, SEED)
     with open(out / "ftpo.jsonl", "w") as f:
         f.writelines(json.dumps({k: v for k, v in c.items() if k != "rejected"}) + "\n" for c in kept)
+    pairs, too_long = dpo_pairs(prompts, rows, max_length, tok.bos_token_id)
+    with open(out / "dpo.jsonl", "w") as f:
+        f.writelines(json.dumps(p) + "\n" for p in pairs)
     verified = {r["prompt_id"] for r in rows if r["verdict"] is not None}
     solved = {r["prompt_id"] for r in rows if r["success"]}
     temperatures = sorted({r["temperature"] for r in rows})
@@ -263,14 +319,20 @@ def select(out: Path, directories: list[Path], max_length: int) -> dict:
             "rows_target_moved": sum(c["target"] > 0 for c in kept),
             "onset_tokens": quantiles([c["onset"] for c in kept]),
             "period_tokens": quantiles([c["period"] for c in kept]),
-            "prefix_tokens": quantiles([len(c["prefix_ids"]) for c in kept])}}
+            "prefix_tokens": quantiles([len(c["prefix_ids"]) for c in kept])},
+        "dpo": {"pairs": len(pairs), "prompts": len({p["prompt_id"] for p in pairs}), "dropped_too_long": too_long,
+                "max_length": max_length, "per_prompt_cap": PAIRS_PER_PROMPT, "window_cap": WINDOW_CAP,
+                "chosen_tokens": quantiles([len(p["chosen_ids"]) for p in pairs]),
+                "rejected_tokens": quantiles([len(p["rejected_ids"]) for p in pairs]),
+                "pair_length": quantiles([len(p["prompt_ids"]) + max(len(p["chosen_ids"]), len(p["rejected_ids"]))
+                                          for p in pairs])}}
     (out / "selection.json").write_text(json.dumps(report, indent=1) + "\n")
     return report
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("out", type=Path, help="where ftpo.jsonl and selection.json go")
+    parser.add_argument("out", type=Path, help="where ftpo.jsonl, dpo.jsonl and selection.json go")
     parser.add_argument("rollouts", type=Path, nargs="*", help="rollout directories (default: out)")
     parser.add_argument("--max-length", type=int, default=MAX_LENGTH)
     args = parser.parse_args()

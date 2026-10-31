@@ -1,6 +1,8 @@
 """
-Final-token preference optimization (FTPO, arXiv 2510.15061 §5, App. J) of a --chat export against its own loops, as
-Antidoom applies it to reasoning loops (github.com/Liquid4All/antidoom, commit bd6a126; docs/post-training.md §8.5).
+The on-policy stage's training (docs/post-training.md §8.5): final-token preference optimization (`ftpo`; FTPO,
+arXiv 2510.15061 §5, App. J) of a --chat export against its own loops, as Antidoom applies it to reasoning loops
+(github.com/Liquid4All/antidoom, commit bd6a126), then DPO (`dpo`; arXiv 2305.18290) of the FTPO model on its own
+verified KodCode rollouts.
 
 A row (onpolicy/selection.py ftpo.jsonl) is a loop's prefix through its first repeat's first token's position
 (prefix_ids, BOS first) and that token (rejected_id). Its chosen tokens are the frozen reference's (the starting
@@ -30,32 +32,37 @@ reference logits computed once, before the first update, by the same model. LR: 
 (or FREEZE=head) trains without the output head, the token embedding and every value embedding (`frozen`); none,
 the default, trains every parameter.
 
-Held-out monitor (`monitor_split`, `monitor`): before training, the rows of whole prompts, drawn in a
+Held-out monitor and stop (`monitor_split`, `monitor`): before training, the rows of whole prompts, drawn in a
 default_rng(SEED) permutation of the prompt ids until MONITOR_ROWS rows, leave the training set; at step 0, every
 MONITOR_EVERY optimizer steps and at the last step their statistics are computed without gradient: the mean per row
 of chosen_win (the share of the row's chosen tokens whose logit beats the rejected one), margin_win (the share ahead
-by MARGIN), Delta (the mean Delta_c) and nontarget (L_nontarget). At the first monitor point (after step 0) whose
-chosen_win reaches each of THRESHOLDS, the model is written as ftpo-<threshold>/ (Antidoom's README: "Around
-0.15-0.3 ... strong reduction ... past 0.5 may be overtraining"); training stops after the last threshold's save; an
-epoch that ends below it writes ftpo-final/. The training batches' statistics are logged every LOG_STEPS steps.
+by MARGIN), Delta (the mean Delta_c) and nontarget (L_nontarget). Training stops at the first monitor point after
+step 0 whose chosen_win reaches STOP and the model is written to <out dir> then; an epoch that ends below STOP writes
+it at its end. The training batches' statistics are logged every LOG_STEPS steps.
 
-Each candidate is written as the export is (inference/export_hf.py: fp32 the parameters the forward reads in fp32,
+dpo (DeLoop's preference stage, arXiv 2610.19376 §4.2, App. G.1; the pairs: onpolicy/selection.py dpo.jsonl): the
+sigmoid loss -log sigmoid(beta ((log pi(y+|x) - log pi_ref(y+|x)) - (log pi(y-|x) - log pi_ref(y-|x)))) on the
+completions' summed log-probabilities under the capped logits (`completion_logp`, the head and cap in fp32) and
+nothing else: no likelihood term on the chosen side (DeLoop's NLL anchor raised loops 6.1% -> 27.0%, App. G.13).
+The reference is the starting model, frozen: its log-probabilities computed once before the first update by the same
+model. beta DPO_BETA (DeLoop's, chosen from {0.02, 0.05, 0.1, 0.2, 0.5} on a screening set, App. G.1, the lowest loop
+rate of those values, App. G.6); AdamW at DPO_LR (Phi-4-mini-reasoning's rollout DPO with full parameters, one epoch
+at 16K, arXiv 2504.21233 §5.3; DeLoop's LoRA lr 8e-6 is 16x that, against LoRA's optimum of about 10x the
+full-parameter lr, docs/post-training.md §2.2), betas (0.9, 0.95), no weight decay, gradient norm clipped at 1.0;
+batch DPO_BATCH pairs (DeLoop's 16), warmup DPO_WARMUP of the steps, linear decay; one epoch, seed 0; the model
+loaded and written as ftpo's (`load`, `write`).
+
+Each model is written as the export is (inference/export_hf.py: fp32 the parameters the forward reads in fp32,
 bf16 the rest; config, generation config, tokenizer and model file copied), so vLLM serves it as it serves the
 export. The bf16 tensors are rounded stochastically (`bf16`: E[rounded] = the fp32 value, a value on the bf16 grid
 unchanged): an update smaller than half an element's bf16 spacing survives in expectation, where rounding to nearest
-erases it. <out dir>/train-log.json holds the chosen sets' statistics, the monitor points ({step, chosen_win,
-margin_win, delta, nontarget}), the candidates written (their step, monitor point and `retention`, the share of the
-fp32 update the written weights keep along its direction), the log history (loss, its three terms, chosen_win,
-margin_win, Delta of the training batches) and the peak GPU memory allocated.
-
-`nll`: the mean per-token negative log-likelihood (capped logits at T 1, the model's forward, `nll`) of a fixed set
-of responses given their prompts: a rollouts directory's passing responses (verified, closed and ended,
-onpolicy/selection.py `load`), at most NLL_RESPONSES of them (a default_rng(SEED) draw in (prompt, sample) order); the
-same directory for every model gives the same set. Writes {model, rollouts, responses, tokens, nll}.
+erases it. <out dir>/train-log.json holds the written model's step and `retention` (the share of the fp32 update the
+written weights keep along its direction), the log history and the peak GPU memory allocated; for ftpo also the
+chosen sets' statistics and the monitor points ({step, chosen_win, margin_win, delta, nontarget}).
 
     python -m onpolicy.train ftpo <model dir> <ftpo.jsonl> <out dir> [--max-steps N] [--batch N] [--cpu]
-        [--freeze none|head] [--monitor-rows N] [--monitor-every N] [--thresholds 0.15,0.25,0.35]
-    python -m onpolicy.train nll <model dir> <rollouts dir> <out json> [--cpu]
+        [--freeze none|head] [--monitor-rows N] [--monitor-every N] [--stop 0.35]
+    python -m onpolicy.train dpo <model dir> <dpo.jsonl> <out dir> [--max-steps N] [--batch N] [--cpu]
 """
 import argparse
 import functools
@@ -86,10 +93,12 @@ LOG_STEPS, MAX_GRAD_NORM = 5, 2.5
 # NLL of the export's own passing responses rose 3.7% / 11% / 59%, 0.012 / 0.016 / 0.042 NLL per logit of held-out
 # Delta gained, at 5e-7 / 1.5e-6 / 6e-6 (docs/post-training.md §8.5)
 LR = 5e-7
-# held-out monitor and candidates: Antidoom's README chosen_win band (0.15-0.3 "strong reduction", past 0.5
-# "overtraining")
-MONITOR_ROWS, MONITOR_EVERY, THRESHOLDS, SEED = 512, 10, (0.15, 0.25, 0.35), 0
-NLL_RESPONSES, NLL_CHUNK = 256, 1024  # nll: responses at most; positions per head chunk
+# held-out monitor and its stop: Antidoom's run setting, early stopping at chosen_win 0.35 (liquid.ai/blog/antidoom;
+# its README's band: 0.15-0.3 "strong reduction", past 0.5 "overtraining")
+MONITOR_ROWS, MONITOR_EVERY, STOP, SEED = 512, 10, 0.35, 0
+# dpo: DeLoop's beta and batch (arXiv 2610.19376 App. G.1), Phi-4-mini-reasoning's rollout-DPO lr (arXiv 2504.21233
+# §5.3), warmup ratio 0.1; head positions per chunk of `completion_logp`
+DPO_LR, DPO_BATCH, DPO_WARMUP, DPO_BETA, HEAD_CHUNK = 5e-7, 16, 0.1, 0.05, 1024
 
 
 def load(model_dir: Path, train: bool = True):
@@ -231,13 +240,14 @@ def retention(start: dict[str, torch.Tensor], model, saved: dict[str, torch.Tens
 
 
 def write(model, source: Path, out: Path) -> dict:
-    """The trained model in the export's format beside the export's other files; its retention."""
+    """The trained model in the export's format beside the source's other files (its train-log.json aside); its
+    retention."""
     saved = served(model)
     kept = retention(load_file(source / "model.safetensors"), model, saved)
     out.mkdir(parents=True, exist_ok=True)
     save_file(saved, out / "model.safetensors", metadata={"format": "pt"})
     for f in source.iterdir():
-        if f.is_file() and f.name != "model.safetensors":
+        if f.is_file() and f.name not in ("model.safetensors", "train-log.json"):
             shutil.copy(f, out / f.name)
     return kept
 
@@ -286,7 +296,7 @@ def monitor(model, examples: list[dict], device: torch.device) -> dict:
 
 
 def ftpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | None, cpu: bool, freeze: str,
-         monitor_rows: int, monitor_every: int, thresholds: tuple[float, ...]) -> dict:
+         monitor_rows: int, monitor_every: int, stop: float) -> dict:
     from transformers import Trainer, TrainerCallback, TrainingArguments
 
     from corpus.tokenizer import get_tokenizer
@@ -328,9 +338,8 @@ def ftpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | No
 
     def point(model, step: int) -> dict:
         p = {"step": step} | monitor(model, held, device)
-        p["saved"] = [] if step == 0 else [t for t in thresholds if t not in written and p["chosen_win"] >= t]
-        for t in p["saved"]:
-            written[t] = {"step": step, "retention": write(model, model_dir, out / f"ftpo-{t:g}")}
+        if step > 0 and p["chosen_win"] >= stop:
+            written.update(step=step, retention=write(model, model_dir, out))
         points.append(p)
         print(json.dumps(p), flush=True)
         return p
@@ -342,7 +351,7 @@ def ftpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | No
         def on_step_end(self, args, state, control, model=None, **kwargs):
             if state.global_step % monitor_every == 0 or state.global_step >= state.max_steps:
                 point(model, state.global_step)
-                if max(thresholds) in written:
+                if written:
                     control.should_training_stop = True
 
     args = TrainingArguments(
@@ -356,68 +365,117 @@ def ftpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | No
                           callbacks=[Monitor()])
     trainer.loss_is_scaled_for_ga = False  # a row's loss is a mean: the step averages its rows
     trainer.train()
-    candidates_written = {f"ftpo-{t:g}": v for t, v in written.items()}
-    if max(thresholds) not in written:
-        candidates_written["ftpo-final"] = {"step": trainer.state.global_step,
-                                            "retention": write(trainer.model, model_dir, out / "ftpo-final")}
-    return {"sets": sets, "lr": LR, "freeze": freeze, "frozen": names, "monitor_every": monitor_every,
-            "thresholds": list(thresholds), "monitor": points, "candidates": candidates_written,
+    if not written:
+        written.update(step=trainer.state.global_step, retention=write(trainer.model, model_dir, out))
+    return {"sets": sets, "lr": LR, "freeze": freeze, "frozen": names, "monitor_every": monitor_every, "stop": stop,
+            "stopped": trainer.state.global_step < trainer.state.max_steps, "monitor": points, "written": written,
             "steps": trainer.state.global_step, "max_steps": trainer.state.max_steps,
             "max_memory_allocated": torch.cuda.max_memory_allocated() if device.type == "cuda" else None,
             "log_history": trainer.state.log_history}
 
 
-def nll(model_dir: Path, rollouts: Path, cpu: bool) -> dict:
-    """The mean per-token NLL (capped logits, T 1) of the rollouts' passing responses (at most NLL_RESPONSES) given
-    their prompts: the backbone under bf16 autocast, the head and cap in fp32 (`last_logits`), NLL_CHUNK positions at
-    a time."""
-    from onpolicy.selection import load as load_rollouts
+def completion_logp(model, prompt: torch.Tensor, completion: torch.Tensor) -> torch.Tensor:
+    """The summed log-probability of completion (C,) after prompt (P,) under the capped logits: the backbone under
+    the caller's autocast, the head and cap in fp32 outside it (`last_logits`), HEAD_CHUNK positions at a time, each
+    chunk's logits recomputed in the backward pass rather than kept."""
+    from torch.utils.checkpoint import checkpoint
 
-    prompts, rows = load_rollouts([rollouts])
-    passing = sorted((r for r in rows if r["success"]), key=lambda r: (r["prompt_id"], r["sample"]))
-    if len(passing) > NLL_RESPONSES:
-        keep = np.random.default_rng(SEED).choice(len(passing), size=NLL_RESPONSES, replace=False)
-        passing = [passing[i] for i in sorted(keep.tolist())]
+    ids = torch.cat([prompt, completion])[None]
+    h = model.model(input_ids=ids, use_cache=False).last_hidden_state[0, len(prompt) - 1:-1]
+    head, c = model.lm_head.weight, model.config.final_logit_softcapping
+
+    def chunk(h: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        with torch.autocast(h.device.type, enabled=False):
+            y = F.linear(h.float(), head.float())
+            return (c * torch.tanh(y / c)).log_softmax(-1).gather(-1, target[:, None]).sum()
+
+    run = functools.partial(checkpoint, chunk, use_reentrant=False) if torch.is_grad_enabled() else chunk
+    return sum(run(h[a:a + HEAD_CHUNK], completion[a:a + HEAD_CHUNK]) for a in range(0, len(completion), HEAD_CHUNK))
+
+
+def dpo_loss(chosen: torch.Tensor, rejected: torch.Tensor, ref_chosen: float, ref_rejected: float,
+             beta: float) -> tuple[torch.Tensor, dict]:
+    """DPO's sigmoid loss for one pair from its sides' summed log-probabilities under the model and the reference;
+    the implicit rewards beta (log pi - log pi_ref) of each side."""
+    r_chosen, r_rejected = beta * (chosen - ref_chosen), beta * (rejected - ref_rejected)
+    loss = -F.logsigmoid(r_chosen - r_rejected)
+    stats = {"reward_chosen": r_chosen, "reward_rejected": r_rejected, "reward_margin": r_chosen - r_rejected,
+             "reward_accuracy": (r_chosen > r_rejected).float(), "logp_chosen": chosen, "logp_rejected": rejected}
+    return loss, {k: float(v.detach()) for k, v in stats.items()}
+
+
+def dpo(model_dir: Path, data: Path, out: Path, max_steps: int, batch: int | None, cpu: bool) -> dict:
+    from transformers import Trainer, TrainingArguments
+
+    rows = [json.loads(line) for line in data.read_text().splitlines()]
+    if not rows:
+        raise ValueError(f"no pairs in {data}")
     device = torch.device("cpu" if cpu or not torch.cuda.is_available() else "cuda")
-    model = load(model_dir, train=False).to(device).eval()
-    c, head = model.config.final_logit_softcapping, model.lm_head.weight.float()
-    total, tokens = 0.0, 0
-    with torch.no_grad():
-        for r in passing:
-            context = prompts[r["prompt_id"]]["ids"]
-            ids = torch.tensor([context + list(r["ids"])], device=device)
-            with torch.autocast(device.type, dtype=torch.bfloat16):
-                h = model.model(input_ids=ids, use_cache=False).last_hidden_state[0]
-            h, target = h[len(context) - 1:-1].float(), ids[0, len(context):]
-            for a in range(0, len(target), NLL_CHUNK):
-                y = F.linear(h[a:a + NLL_CHUNK], head)
-                total += float(F.cross_entropy(c * torch.tanh(y / c), target[a:a + NLL_CHUNK], reduction="sum"))
-            tokens += len(target)
-    return {"model": str(model_dir), "rollouts": str(rollouts), "responses": len(passing), "tokens": tokens,
-            "nll": total / tokens if tokens else None}
+    model = load(model_dir).to(device).eval()
+    examples = []
+    with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
+        for r in rows:
+            e = {k: torch.tensor(r[f"{k}_ids"]) for k in ("prompt", "chosen", "rejected")}
+            for side in ("chosen", "rejected"):
+                e[f"ref_{side}"] = float(completion_logp(model, e["prompt"].to(device), e[side].to(device)))
+            examples.append(e)
+
+    class DPOTrainer(Trainer):
+        stored = defaultdict(list)
+
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            # the reference's autocast, explicit: on the CPU the Trainer's own pass otherwise ran without it (a
+            # learning-rate-0 step's rewards were off by about 1 nat per pair)
+            prompt = inputs["prompt"]
+            with torch.autocast(prompt.device.type, dtype=torch.bfloat16):
+                chosen = completion_logp(model, prompt, inputs["chosen"])
+                rejected = completion_logp(model, prompt, inputs["rejected"])
+            loss, stats = dpo_loss(chosen, rejected, inputs["ref_chosen"], inputs["ref_rejected"], DPO_BETA)
+            for k, v in stats.items():
+                self.stored[k].append(v)
+            return loss
+
+        def log(self, logs, *args, **kwargs):
+            logs = logs | {k: sum(v) / len(v) for k, v in self.stored.items() if v}
+            self.stored.clear()
+            return super().log(logs, *args, **kwargs)
+
+    args = TrainingArguments(
+        output_dir=str(out / "trainer"), per_device_train_batch_size=1, gradient_accumulation_steps=batch or DPO_BATCH,
+        learning_rate=DPO_LR, warmup_steps=DPO_WARMUP, lr_scheduler_type="linear", adam_beta1=0.9, adam_beta2=0.95,
+        weight_decay=0.0, max_grad_norm=1.0, num_train_epochs=1, max_steps=max_steps, bf16=True,
+        use_cpu=device.type == "cpu", logging_steps=1, save_strategy="no", report_to="none", seed=0, data_seed=0,
+        dataloader_num_workers=0, remove_unused_columns=False, gradient_checkpointing=False)
+    model.train()
+    trainer = DPOTrainer(model=model, args=args, train_dataset=examples, data_collator=lambda features: features[0])
+    trainer.loss_is_scaled_for_ga = False  # a pair's loss: the step averages its pairs
+    trainer.train()
+    return {"pairs": len(rows), "beta": DPO_BETA, "lr": DPO_LR,
+            "written": {"step": trainer.state.global_step, "retention": write(trainer.model, model_dir, out)},
+            "steps": trainer.state.global_step, "max_steps": trainer.state.max_steps,
+            "max_memory_allocated": torch.cuda.max_memory_allocated() if device.type == "cuda" else None,
+            "log_history": trainer.state.log_history}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=("ftpo", "nll"))
+    parser.add_argument("stage", choices=("ftpo", "dpo"))
     parser.add_argument("model", type=Path)
-    parser.add_argument("data", type=Path, help="ftpo: ftpo.jsonl; nll: a rollouts directory with verdicts")
-    parser.add_argument("out", type=Path, help="ftpo: the out directory; nll: the out json")
+    parser.add_argument("data", type=Path, help="ftpo.jsonl or dpo.jsonl (onpolicy/selection.py)")
+    parser.add_argument("out", type=Path)
     parser.add_argument("--max-steps", type=int, default=-1)
-    parser.add_argument("--batch", type=int, help="rows per step; a smoke's")
+    parser.add_argument("--batch", type=int, help="rows (ftpo) or pairs (dpo) per step; a smoke's")
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--freeze", choices=("none", "head"), default=os.environ.get("FREEZE") or "none")
     parser.add_argument("--monitor-rows", type=int, default=MONITOR_ROWS)
     parser.add_argument("--monitor-every", type=int, default=MONITOR_EVERY)
-    parser.add_argument("--thresholds", type=lambda s: tuple(sorted(map(float, s.split(",")))), default=THRESHOLDS)
+    parser.add_argument("--stop", type=float, default=STOP, help="ftpo: the held-out chosen_win to stop at")
     args = parser.parse_args()
-    if args.stage == "nll":
-        result = nll(args.model, args.data, args.cpu)
-        args.out.write_text(json.dumps(result) + "\n")
-        print(json.dumps(result), flush=True)
-    else:
-        args.out.mkdir(parents=True, exist_ok=True)
+    args.out.mkdir(parents=True, exist_ok=True)
+    if args.stage == "ftpo":
         record = ftpo(args.model, args.data, args.out, args.max_steps, args.batch, args.cpu, args.freeze,
-                      args.monitor_rows, args.monitor_every, args.thresholds)
-        (args.out / "train-log.json").write_text(json.dumps(record, indent=1) + "\n")
-        print(json.dumps({k: record[k] for k in ("sets", "steps", "candidates", "max_memory_allocated")}), flush=True)
+                      args.monitor_rows, args.monitor_every, args.stop)
+    else:
+        record = dpo(args.model, args.data, args.out, args.max_steps, args.batch, args.cpu)
+    (args.out / "train-log.json").write_text(json.dumps(record, indent=1) + "\n")
+    print(json.dumps({k: record[k] for k in ("steps", "written", "max_memory_allocated")}), flush=True)

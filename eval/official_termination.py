@@ -328,7 +328,7 @@ def evalplus_check(rows: list[dict]) -> None:
 
     problems = get_human_eval_plus()
     expected = get_groundtruth(problems, get_human_eval_plus_hash(), [])
-    with ProcessPoolExecutor(max_workers=max(1, (os.cpu_count() or 2) // 2)) as pool:
+    with ProcessPoolExecutor(max_workers=len(os.sched_getaffinity(0))) as pool:  # every core of the CPU set
         futures = [pool.submit(check_correctness, "humaneval", 0, problems[r["id"]],
                                sanitize(r["answer"], entrypoint=problems[r["id"]]["entry_point"]),
                                expected[r["id"]], False, True) for r in rows]

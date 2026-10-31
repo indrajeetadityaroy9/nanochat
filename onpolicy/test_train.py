@@ -1,9 +1,16 @@
-"""onpolicy/train.py's FTPO loss, held-out monitor split, chosen-token rule and stochastic rounding against
-hand-computed values.
+"""onpolicy/train.py's FTPO loss, held-out monitor split, chosen-token rule and stochastic rounding, and its DPO loss
+and completion log-probabilities, against hand-computed values; with ONPOLICY_EXPORT set to a --chat export, CPU
+smokes of `train.py ftpo` and `train.py dpo` on synthetic rows, each writing one model.
 
-    python -m pytest onpolicy/test_train.py
+    [ONPOLICY_EXPORT=<export dir>] python -m pytest onpolicy/test_train.py
 """
+import json
 import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -111,3 +118,77 @@ def test_stochastic_rounding_unbiased_and_exact_on_grid():
     assert torch.equal((grid + shift).to(torch.bfloat16).float(), grid)
     mean = torch.stack([train.bf16(grid + shift, g).float() for _ in range(4000)]).mean(0)
     assert torch.allclose(mean - grid, shift, rtol=0.2)
+
+
+def test_dpo_loss_eq7():
+    # arXiv 2305.18290 Eq. 7 on summed completion log-probs: -log sigmoid(beta ((c - ref_c) - (r - ref_r)))
+    c, r, ref_c, ref_r, beta = -40.0, -35.0, -44.0, -30.0, 0.05
+    z = beta * ((c - ref_c) - (r - ref_r))  # 0.05 x (4 - (-5)) = 0.45
+    loss, stats = train.dpo_loss(torch.tensor(c), torch.tensor(r), ref_c, ref_r, beta)
+    assert float(loss) == pytest.approx(-math.log(1 / (1 + math.exp(-z))), rel=1e-6)
+    assert stats["reward_chosen"] == pytest.approx(0.2) and stats["reward_rejected"] == pytest.approx(-0.25)
+    assert stats["reward_margin"] == pytest.approx(0.45) and stats["reward_accuracy"] == 1.0
+    # at the reference the loss is log 2
+    assert float(train.dpo_loss(torch.tensor(c), torch.tensor(r), c, r, beta)[0]) == pytest.approx(math.log(2))
+
+
+def test_dpo_gradient_raises_chosen_lowers_rejected():
+    c, r = torch.tensor(-10.0, requires_grad=True), torch.tensor(-12.0, requires_grad=True)
+    train.dpo_loss(c, r, -10.0, -12.0, 0.05)[0].backward()
+    assert c.grad < 0 < r.grad
+
+
+def test_completion_logp_capped_and_chunked(monkeypatch):
+    torch.manual_seed(0)
+    V, D, cap = 11, 4, 3.0
+    embed, head = torch.randn(V, D), torch.randn(V, D, requires_grad=True)
+    model = SimpleNamespace(
+        model=lambda input_ids, use_cache: SimpleNamespace(last_hidden_state=embed[input_ids]),
+        lm_head=SimpleNamespace(weight=head), config=SimpleNamespace(final_logit_softcapping=cap))
+    prompt, completion = torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6, 7, 8])
+    monkeypatch.setattr(train, "HEAD_CHUNK", 2)
+    got = train.completion_logp(model, prompt, completion)
+    h = embed[torch.cat([prompt, completion])][2:-1]
+    y = h @ head.T
+    want = (cap * torch.tanh(y / cap)).log_softmax(-1).gather(-1, completion[:, None]).sum()
+    assert float(got) == pytest.approx(float(want), rel=1e-6)
+    (g,) = torch.autograd.grad(got, head)
+    (w,) = torch.autograd.grad(want, head)
+    assert torch.allclose(g, w, atol=1e-6)
+
+
+EXPORT = os.environ.get("ONPOLICY_EXPORT")
+smoke = pytest.mark.skipif(not EXPORT, reason="ONPOLICY_EXPORT (a --chat export directory) unset")
+
+
+def run(stage: str, data: Path, out: Path, *extra: str) -> dict:
+    subprocess.run([sys.executable, "-m", "onpolicy.train", stage, EXPORT, str(data), str(out), "--cpu",
+                    "--max-steps", "2", "--batch", "2", *extra], check=True)
+    assert (out / "model.safetensors").exists() and (out / "config.json").exists()
+    return json.loads((out / "train-log.json").read_text())
+
+
+@smoke
+def test_ftpo_smoke(tmp_path):
+    g = torch.Generator().manual_seed(0)
+    rows = [{"prompt_id": f"p{i}", "sample": 0, "temperature": 0.6,
+             "prefix_ids": [1, *torch.randint(1000, 30000, (48,), generator=g).tolist()],
+             "rejected_id": int(torch.randint(1000, 30000, (1,), generator=g))} for i in range(8)]
+    data = tmp_path / "ftpo.jsonl"
+    data.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    log = run("ftpo", data, tmp_path / "ftpo", "--monitor-rows", "2", "--monitor-every", "1", "--stop", "2")
+    assert log["steps"] == 2 and log["written"]["step"] == 2 and not log["stopped"] and log["monitor"][0]["step"] == 0
+
+
+@smoke
+def test_dpo_smoke(tmp_path):
+    g = torch.Generator().manual_seed(0)
+    ids = lambda n: torch.randint(1000, 30000, (n,), generator=g).tolist()  # noqa: E731
+    pairs = [{"prompt_id": f"p{i}", "prompt_ids": [1, *ids(32)], "chosen_ids": [*ids(16), 1], "rejected_ids": ids(24)}
+             for i in range(4)]
+    data = tmp_path / "dpo.jsonl"
+    data.write_text("".join(json.dumps(p) + "\n" for p in pairs))
+    log = run("dpo", data, tmp_path / "dpo")
+    assert log["steps"] == 2 and log["pairs"] == 4
+    first = log["log_history"][0]
+    assert first["loss"] == pytest.approx(math.log(2), abs=0.01)  # step 1 starts at the reference
