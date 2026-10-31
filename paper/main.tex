@@ -85,7 +85,7 @@ The paper makes three contributions:
 The model is trained on three datasets, one per stage: a pretraining corpus of code, web text and mathematics,
 reasoning traces for supervised fine-tuning, and programming problems with unit tests for reinforcement learning. This
 section describes the datasets in that order and gives, for each processing step, what it does and why. Tokenization,
-packing and fill-in-the-middle are described in a later section.
+packing and fill-in-the-middle are described in Section~\ref{sec:sequences}.
 
 \subsection{Pretraining corpus}
 \label{sec:data-pretrain}
@@ -317,6 +317,145 @@ are also held out from the training problems by question and by test file. This 
 question in several styles with different statements, so the SFT split by problem can place two styles of the same
 question on different sides. Of the 2,547 rows, 1,115 remain and 785 of them are usable; 512 problems are drawn from
 them, stratified by style and difficulty.
+
+\section{Tokenization, Packing and Fill-in-the-Middle}
+\label{sec:sequences}
+
+This section describes how the curated text becomes training rows: the tokenizer, the packing of documents into rows
+of a stage's context length, the fill-in-the-middle (FIM) examples, and the order in which training reads the rows.
+As in Section~\ref{sec:data}, each step is given with what it does and why.
+
+\subsection{Tokenizer}
+\label{sec:tokenizer}
+
+\paragraph{Vocabulary.} The tokenizer is a byte-level BPE tokenizer with 32,768 ids: the 256 bytes, 32,508 merged
+tokens, a beginning-of-sequence token (BOS) and the three FIM sentinel tokens of
+DeepSeek-Coder~\cite{guo2024deepseekcoder}. Larger vocabularies gave no clear gain on code in earlier work: StarCoder2
+found that increasing the vocabulary to 100K ids did not improve performance~\cite{lozhkov2024starcoder2}, and across
+vocabularies of 32K to 256K ids the HumanEval pass@1 of a 1.5B model varied only from 20.52 to 20.84 and did not grow
+with the vocabulary~\cite{dagan2024tokenizer}. The SA-BPE tokenizers described below also use 32,768
+ids~\cite{chizhov2026sabpe}.
+
+\paragraph{Pre-tokenization.} Before merging, the text is split into chunks by the regular expression of OpenAI's
+cl100k tokenizer with one change: the clause that attaches line breaks to a run of punctuation is removed, so no token
+joins the end of a line, such as \texttt{):}, to the line break after it. Across 18 byte-level tokenizers, the number
+of vocabulary tokens that contain a line break correlated with MBPP pass@1 at Spearman $\rho = -0.717$
+\cite{meister2026tokeval}. The final vocabulary has 72 tokens that contain a line break and none that joins
+punctuation to a line break (Table~\ref{tab:tokenizers}).
+
+\paragraph{Merge rule: SA-BPE instead of BPE\@.} BPE adds, at each step, the most frequent pair of adjacent tokens. In
+code, many frequent pairs come from identifiers and strings that repeat inside a single repository. The tokens built
+from them rarely occur in other code, so their embeddings receive few updates during training. Such under-trained
+tokens have poor representations and can cause hallucinations~\cite{land2024magikarp,chizhov2026sabpe}. SA-BPE scores
+each pair by $F \cdot \ln R$, where $F$ is the pair's frequency and $R$ is the number of repositories that contain it,
+so a pair that occurs in only one repository scores 0~\cite{chizhov2026sabpe}. In the SA-BPE evaluation, this score
+gave a compression rate of 3.643 against 3.623 for BPE and 72 verified under-trained tokens against
+640~\cite{chizhov2026sabpe}. Here, $R$ counts repositories for repository files and CodeXGLUE functions; every other
+document counts as its own unit.
+
+\paragraph{Comparison on this corpus.} Four tokenizers were trained on the same sample and measured on the 6.21~GB of
+validation text (Table~\ref{tab:tokenizers}): SA-BPE with the chosen pattern, BPE with the same pattern, SA-BPE with
+line breaks attached to punctuation (fused), and SA-BPE with a pattern that also puts line breaks and indentation in
+chunks of their own (split). BPE matches SA-BPE in compression (3.623 against 3.624 bytes per token over the
+file-level stage) but leaves more merged tokens that the validation text rarely uses: 15 never used against 5, and 84
+used fewer than 100 times against 54. The fused pattern compresses best but has 748 tokens that contain a line break,
+the property that correlates with lower MBPP pass@1. The split pattern gives a statement the same tokens at every
+indentation depth but compresses 0.2\% less, and it is untested as a whole. SA-BPE with the chosen pattern is used.
+Training runs that would compare the four tokenizers by downstream accuracy were designed but not run, so the choice
+rests on these measurements and the cited results.
+
+\begin{table}
+  \caption{Four tokenizers trained on the same sample and measured on the validation splits (6.21~GB). Fused: line
+  breaks attached to punctuation. Split: line breaks and indentation in chunks of their own. Bytes per token is over
+  the file-level stage's mixture. The next two rows count vocabulary tokens that contain a line break and tokens that
+  join punctuation to a line break; the last two count merged tokens by how often the validation text uses them.}
+  \label{tab:tokenizers}
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    Measure & SA-BPE & BPE & Fused & Split \\
+    \midrule
+    Bytes per token & 3.624 & 3.623 & 3.868 & 3.616 \\
+    With a line break & 72 & 67 & 748 & 9 \\
+    Punctuation + line break & 0 & 0 & 693 & 0 \\
+    Never used & 5 & 15 & 5 & 5 \\
+    Used $<$100 times & 54 & 84 & 54 & 56 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Training sample.} The tokenizer is trained on 13.4~GB drawn from the training splits of the 17 file-level
+sources, each in proportion to its share of the file-level stage's bytes, so the sample is 85.6\% code. A tokenizer's
+training data should be representative of the model's training data, since tokens that are frequent in the tokenizer
+data but rare in the model data are under-trained~\cite{land2024magikarp}.
+
+\subsection{Encoding}
+
+Each document is encoded separately, without BOS or padding. Text that looks like a special token is encoded as
+ordinary text, so a document cannot produce a BOS or a FIM sentinel. Each repository file ends with a line break,
+added when it is missing, so that two concatenated files never share a line.
+
+\subsection{Packing}
+
+\paragraph{Pieces.} Documents are packed into rows of the stage's context length, 8,192 or 32,768 tokens. A document
+that fits in a row is one piece; the BOS after it is a training target, so the model learns where a document ends. A
+longer document is cut into pieces. Each cut is placed at the last statement boundary that fits (from a tree-sitter
+parse, for repository code), otherwise after the last line break, otherwise before the last token that starts a
+character. Cuts at statement boundaries keep statements whole, and no cut splits a multi-byte character.
+
+\paragraph{Document masking.} Each piece is its own attention segment: its tokens attend only to earlier tokens of
+the same piece. Causal masking within each document gave lower perplexity than causal attention across concatenated
+documents~\cite{zhao2024seqcomp}.
+
+\paragraph{Best-fit packing.} Pieces are placed by Best-Fit-Decreasing: longest first, each into the row with the
+least free space that can hold it, otherwise into a new row. No piece is truncated to fit a row; packing with fewer
+truncations improved language modeling over the usual concatenate-then-split method~\cite{ding2024fewer}. The two
+stages read disjoint shards, so no training document is packed twice. Every random choice in packing and FIM is
+drawn from a ChaCha8 generator keyed by the document, the piece and the corpus, so the packed data does not depend on
+the order in which the work runs.
+
+\subsection{Fill-in-the-middle}
+
+\paragraph{Format.} A FIM example moves a span of a piece, the middle, to the end. Prefix, suffix and middle are
+encoded separately and joined with the three sentinels, in PSM order (prefix, suffix, middle) or SPM order (suffix,
+prefix, middle)~\cite{bavarian2022fim}. The BOS after the middle is a target, so the model learns where a middle ends.
+Half of the repository-code pieces become FIM examples (rate 0.5), drawn for each piece before it is cut, which is
+FIM at the context level; half of the examples are PSM and half SPM. The middle is a random character span in 10\%
+of the examples. Otherwise it follows the syntax tree (AST-FIM): with equal probability, one tree-sitter node chosen
+in proportion to its size in bytes, or the span of whole nodes that best overlaps a random character
+span~\cite{gong2025astfim}.
+
+\paragraph{Why FIM\@.} The evaluation includes infilling (HumanEval single-line, multi-line and random-span infilling),
+which a model trained only left to right cannot do. FIM rates up to 0.9 did not reduce left-to-right performance,
+and FIM at the context level performed better than at the document level~\cite{bavarian2022fim}. DeepSeek-Coder chose
+a rate of 0.5 because a rate of 100\% gave its weakest code completion~\cite{guo2024deepseekcoder}. Training on both
+PSM and SPM matched or exceeded training on either alone, and a model trained only on SPM cannot infill in
+PSM~\cite{bavarian2022fim}. The 90\% share of syntax-aligned middles is AST-FIM's; at a FIM rate of 0.7, AST-FIM kept
+HumanEval+ and MBPP+ close to a left-to-right model~\cite{gong2025astfim}.
+
+\paragraph{Scope.} FIM is applied only to repository code: the six repository sources and the repository-level
+documents. In those corpora FIM examples hold about 50\% of the tokens, which is 29.7\% of the file-level stage's
+tokens and 40.8\% of the repository-level stage's. Synthetic code and functions get no FIM examples; this scope was
+not ablated.
+
+\paragraph{Line-start rule.} A syntax node starts after its line's indentation and ends before its line break. Without
+a correction, no AST-FIM example in PSM order would have a prefix that ends with a line break and a middle made of
+whole lines, which is the layout of line-level infilling: all 1,033 single-line and 5,815 multi-line HumanEval
+infilling prefixes end with a line break, and every reference middle ends with one. Therefore, when a syntax middle
+starts a line, with probability 0.5 it also takes the line's indentation, and its final line break when it ends at
+one. In the packed data, 35.9--36.5\% of the PSM middles in the Python repository corpora (22.0\% in Stack-Edu C++)
+are whole lines, and 21.6--25.4\% start a line and stop before its line break, so both layouts are trained. AST-FIM
+reports that closer training and test distributions give stronger performance~\cite{gong2025astfim}.
+
+\subsection{Reading rows during training}
+
+A training step has 15 micro-batches of 98,304 tokens: 12 rows of 8,192 tokens in the file-level stage or 3 rows of
+32,768 tokens in the repository-level stage, 1,474,560 tokens per step in both. Rows are assigned to corpora by the
+mixture weights with a Weyl sequence: row $n$ goes to the corpus whose interval of the cumulative weights contains the
+fractional part of $(n + 1)(\sqrt{5} - 1)/2$, which spreads every prefix of the run evenly over the corpora. Each
+corpus's rows are read in a random permutation with a fixed seed. Within a row, padding and a BOS that does not end a
+document have no training target, and the pieces' attention segments are passed to FlashAttention as
+variable-length sequences.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
