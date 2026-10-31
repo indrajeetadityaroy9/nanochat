@@ -15,7 +15,7 @@ to the 522M base model is [inference].
 | File | Section |
 |---|---|
 | `corpus/posttrain/sft.py` (`THINK`, `END_THINK`), `corpus/loader.py` (`PackedSplit.contexts`, `PretrainingBatches.assemble`) | §3 markers and loss (the corpus: `docs/corpus.md` §10) |
-| `run.py` (`RunConfig.base`, `base_step`, `sft_epochs`, `generate` "none"; `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml`, `train/stages.py` (`stage_batches`: epochs past the first; `val_batches`) | §4 |
+| `run.py` (`RunConfig.base`, `base_step`, `sft_epochs`, `generate` "none"; `base_plan`, `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml`, `train/stages.py` (`stage_batches`: epochs past the first; `val_batches`) | §4 |
 | `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/loop.py` (base weights, `validate`) | §4 |
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`, `results_dir`), `results/posttrain/sft_lr.jsonl` and its `-curves.jsonl` | §4 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
@@ -309,13 +309,14 @@ unmeasured. Each choice is [inference] from the cited evidence.
 ## 4. SFT recipe
 
 - **Plan: one stage, 2 epochs** (`run.py` `RunConfig.base`, `sft_epochs`; `conf/experiment/sft.yaml`;
-  `train/schedule.py` `sft_plan`; `train/stages.py` `stage_batches`): the base run's weights after `base_step` steps
-  (default 69,874, its last) with fresh optimizer state; 3 rows per micro-batch and 15 micro-batches, 1,474,560
-  tokens, per step as in the base's 32K stage; ⌊2 × 172,726 / 45⌋ = 7,676 steps, 11.32B tokens (58.02 per
-  parameter) [arithmetic]. The first epoch reads every train row in the seeded permutation; the second is a fresh
-  permutation (seed + 1) read for its first 172,694 rows, so no row repeats within an epoch; a resume continues at its
-  row across the boundary. ≈10.9 h at the base's exclusive 287,476 tok/s (`docs/training.md` §7) [estimate], without
-  the 9 validation passes (≈0.16 h [estimate]).
+  `train/schedule.py` `sft_plan`; `train/stages.py` `stage_batches`): the base run (`conf/experiment/pretrain.yaml`'s,
+  named at the measured multiplier `${lr_multiplier:}`), its weights after `base_step` steps (default its last,
+  69,874, read with its batch and peak from its `run` record, `run.py` `base_plan`) with fresh optimizer state; the
+  base's batch, 1,474,560 tokens: 15 micro-batches of 3 rows of 32,768 tokens (`SFT_STAGE`, as the 32K stage);
+  ⌊2 × 172,726 / 45⌋ = 7,676 steps, 11.32B tokens (58.02 per parameter) [arithmetic]. The first epoch reads every
+  train row in the seeded permutation; the second is a fresh permutation (seed + 1) read for its first 172,694 rows,
+  so no row repeats within an epoch; a resume continues at its row across the boundary. ≈10.9 h at the base's
+  exclusive 287,476 tok/s (`docs/training.md` §7) [estimate], without the 9 validation passes (≈0.16 h [estimate]).
 - **Basis of the epochs** [inference]: the published recipes run 1.5–8 epochs (Nemotron-Cascade 2's single packed
   stage "reaches optimal performance after approximately 1.5 epochs", arXiv 2603.19220 §3.1.1; Olmo 3 Think 2;
   others §2.3), and short traces need 2–3 (arXiv 2601.06953 Table 4). Nemotron-Cascade runs one epoch per stage over

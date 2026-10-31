@@ -1,9 +1,10 @@
 # @package _global_
-# SFT of the base model (docs/post-training.md §4): from the pre-training run's checkpoint after base_step steps,
-# 2 epochs over the SFT corpus (corpus/posttrain/build.py) at the calibrated share of its peak lr for that many steps
-# (ablations/sft_lr.py), full states every 1,000 steps; trained only (generate "none"), the final checkpoint
-# evaluated by the benchmarks' official tools (§5)
-base: generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10
+# SFT of the base model (docs/post-training.md §4): from the last checkpoint of conf/experiment/pretrain.yaml's run
+# (its name at the measured base multiplier, conf/run.yaml), 2 epochs over the SFT corpus (corpus/posttrain/build.py;
+# Nemotron-Cascade 2's single stage peaks at about 1.5, arXiv 2603.19220 §3.1.1) at the calibrated share of its peak
+# lr for that many steps (ablations/sft_lr.py), full states every run.py FULL_STATE_EVERY steps; trained only
+# (generate "none"), the final checkpoint evaluated by the benchmarks' official tools (§5)
+base: generate=benchmarks,learning_rate_scale=${lr_multiplier:},num_checkpoints=10
 sft_epochs: 2.0
 learning_rate_scale: ${sft_lr_scale:${sft_epochs}}
 generate: none

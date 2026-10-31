@@ -5,7 +5,7 @@ learning-rate multiplier: warmup, then linear decay to zero through the last sta
 import math
 from dataclasses import dataclass
 
-from corpus.mixture import BATCH_SIZE, FILE_LEVEL_STAGE, MICRO_BATCH_TOKENS, REPO_LEVEL_SHARE, REPO_LEVEL_STAGE, Stage
+from corpus.mixture import FILE_LEVEL_STAGE, MICRO_BATCH_TOKENS, REPO_LEVEL_SHARE, REPO_LEVEL_STAGE, Stage
 from corpus.posttrain.sft import SFT_STAGE
 from model.modeling import CausalLM, non_embedding_flops_per_token, num_non_embedding_params
 from train.optim import BETAS
@@ -47,15 +47,15 @@ def plan(*, model: CausalLM, tokens_per_param: float) -> RunPlan:
     )
 
 
-def sft_plan(*, model: CausalLM, rows: int, epochs: float, learning_rate: float) -> RunPlan:
-    """SFT's plan (docs/post-training.md §4): SFT_STAGE from the first step, the base plan's 15 micro-batches per
-    step (45 rows of 32,768 tokens), whole steps over `epochs` times the `rows` packed rows (train/stages.py
-    stage_batches reads past the first epoch), at peak `learning_rate`, no weight decay."""
-    gradient_accumulation_steps = BATCH_SIZE // MICRO_BATCH_TOKENS
+def sft_plan(*, model: CausalLM, rows: int, epochs: float, batch_size: int, learning_rate: float) -> RunPlan:
+    """SFT's plan (docs/post-training.md §4): SFT_STAGE from the first step, the base run's `batch_size` tokens per
+    step (15 micro-batches of 3 rows of 32,768 tokens for d24's), whole steps over `epochs` times the `rows` packed
+    rows (train/stages.py stage_batches reads past the first epoch), at peak `learning_rate`, no weight decay."""
+    gradient_accumulation_steps = batch_size // MICRO_BATCH_TOKENS
     max_steps = math.floor(epochs * rows / (gradient_accumulation_steps * SFT_STAGE.micro_batch_size))
-    return RunPlan(batch_size=BATCH_SIZE, gradient_accumulation_steps=gradient_accumulation_steps,
+    return RunPlan(batch_size=batch_size, gradient_accumulation_steps=gradient_accumulation_steps,
                    max_steps=max_steps, repo_level_start=0,
-                   tokens_per_param=max_steps * BATCH_SIZE / num_non_embedding_params(model),
+                   tokens_per_param=max_steps * batch_size / num_non_embedding_params(model),
                    learning_rate=learning_rate, weight_decay=0.0, last_stage=SFT_STAGE)
 
 

@@ -49,7 +49,7 @@ class RunConfig:
     num_checkpoints: int = 1
     generate: str = "parse"  # one of EVALUATED, or "none"
     base: str | None = None  # SFT: the base run's name; its checkpoint after base_step steps is the start
-    base_step: int = 69_874
+    base_step: int | None = None  # None: the base run's last step (its run record's plan)
     sft_epochs: float = 1.0  # SFT: passes over the SFT corpus's packed train rows (a share of one: a calibration arm)
 
 
@@ -61,9 +61,16 @@ def run_name(config: RunConfig) -> str:
     return ",".join(f"{name}={value}" for name, value in changed) or "defaults"
 
 
+def base_plan(config: RunConfig) -> dict:
+    """An SFT run's base run's plan from its run record: the batch, the last step and the peak lr the SFT reuses."""
+    started = next(r for r in metrics.records(config.base) if r["kind"] == "run")
+    return started["plan"]
+
+
 def plan_of(config: RunConfig) -> "RunPlan":
     """The base model's plan (schedule.plan) at the run's tokens_per_param (default max_tokens_per_param), lr
-    scaled; an SFT run's (schedule.sft_plan) over its epochs of the SFT rows, its base run's peak lr scaled."""
+    scaled; an SFT run's (schedule.sft_plan) over its epochs of the SFT rows at its base run's batch, the base's peak
+    lr scaled."""
     from model.modeling import meta_model
     from train.schedule import plan, sft_plan
     from train.stages import max_tokens_per_param
@@ -72,10 +79,10 @@ def plan_of(config: RunConfig) -> "RunPlan":
         from corpus.layout import packed_rows
         from corpus.posttrain.sft import NAME, SFT_STAGE
 
-        started = next(r for r in metrics.records(config.base) if r["kind"] == "run")
+        base = base_plan(config)
         rows = packed_rows(NAME, "train", get_tokenizer(), SFT_STAGE.seq_len)
-        return sft_plan(model=meta_model(), rows=rows, epochs=config.sft_epochs,
-                        learning_rate=config.learning_rate_scale * started["learning_rate"]["muon"][0])
+        return sft_plan(model=meta_model(), rows=rows, epochs=config.sft_epochs, batch_size=base["batch_size"],
+                        learning_rate=config.learning_rate_scale * base["learning_rate"])
     tokens_per_param = (max_tokens_per_param(get_tokenizer()) if config.tokens_per_param is None
                         else config.tokens_per_param)
     base = plan(model=meta_model(), tokens_per_param=tokens_per_param)
@@ -119,10 +126,12 @@ def training(config: RunConfig, run: "RunPlan") -> None:
     from train.loop import train
 
     full, weights = analysis_steps(config, run)
+    base = None
+    if config.base is not None:
+        step = base_plan(config)["max_steps"] if config.base_step is None else config.base_step
+        base = checkpoint_path(config.base, step)
     train(model=meta_model(), run=run, checkpoints=checkpoint_steps(config, run) | full, weights=weights,
-          run_name=run_name(config), config=asdict(config),
-          base=None if config.base is None else checkpoint_path(config.base, config.base_step),
-          validations=validation_steps(config, run))
+          run_name=run_name(config), config=asdict(config), base=base, validations=validation_steps(config, run))
 
 
 def evaluation(config: RunConfig, step: int, previous: "Event | None", released: "Event") -> None:

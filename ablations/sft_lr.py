@@ -19,7 +19,8 @@ STEPS_EXPONENT = 0.30
 def sft_lr_fit(epochs: float) -> dict:
     """The arms' final held-out losses against u = ln(scale), fitted by a parabola (metrics.parabola_vertex, as
     ablations/peak_lr.py lr_multiplier); its vertex times (run steps / arm steps)^-STEPS_EXPONENT, the steps from the
-    arms' plans (their run records) and the full run's (train/schedule.py sft_plan over `epochs` of the train rows).
+    arms' plans (their run records) and the full run's (train/schedule.py sft_plan over `epochs` of the train rows at
+    the arms' batch, their base run's).
     Raises ValueError unless every arm has a val record (a diverged arm has none) and the curvature is positive and the
     vertex inside the grid (then an arm 3x beyond the edge with the lowest loss is added to the grid)."""
     from corpus.layout import packed_rows
@@ -43,9 +44,12 @@ def sft_lr_fit(epochs: float) -> dict:
     if not (curvature > 0 and min(u) < vertex < max(u)):
         raise ValueError(f"SFT lr: no interior minimum (curvature {curvature:.4g}, vertex x{math.exp(vertex):.4g}); "
                          f"final val loss by scale {dict(zip(scales, losses, strict=True))}")
-    (arm_steps,) = {next(r for r in line["records"] if r["kind"] == "run")["plan"]["max_steps"] for line in lines}
+    ((arm_steps, batch_size),) = {(plan["max_steps"], plan["batch_size"])
+                                  for line in lines
+                                  for plan in [next(r for r in line["records"] if r["kind"] == "run")["plan"]]}
     rows = packed_rows(NAME, "train", get_tokenizer(), SFT_STAGE.seq_len)
-    run_steps = sft_plan(model=meta_model(), rows=rows, epochs=epochs, learning_rate=1.0).max_steps
+    run_steps = sft_plan(model=meta_model(), rows=rows, epochs=epochs, batch_size=batch_size,
+                         learning_rate=1.0).max_steps
     factor = (run_steps / arm_steps) ** -STEPS_EXPONENT
     return {"losses": dict(zip(scales, losses, strict=True)), "curvature": curvature, "vertex": math.exp(vertex),
             "arm_steps": arm_steps, "run_steps": run_steps, "factor": factor, "scale": math.exp(vertex) * factor}
