@@ -624,14 +624,12 @@ and keys prevents this growth~\cite{wortsman2023smallscale}. Multi-head attentio
 attention, whose main benefit is a smaller key-value cache at inference. Attention is masked within each document
 (Section~\ref{sec:sequences}).
 
-\paragraph{Rotary position embeddings.} Positions are encoded with RoPE~\cite{su2021roformer} with base $b = 10^6$ in
-both training stages. RoPE rotates each pair of dimensions $(2i, 2i{+}1)$ of a query or key at position $m$ by the
-angle $m\theta_i$, with $\theta_i = b^{-2i/d_h}$ for $i = 0, \ldots, 63$, so the score between positions $m$ and $n$
-depends on their positions only through $m - n$. The base sets the slowest rotation: the last pair turns by
-$\theta_{63} = b^{-126/128}$ per token, a period of about 5.1M tokens at $b = 10^6$ against about 54K tokens at the
-common base $10^4$. The base bounds the usable context: below a lower bound, a model keeps a low perplexity but loses
-the ability to retrieve information from far back in its context, and the bound for a 32,768-token context is
-$6.4 \times 10^5$~\cite{men2024ropebase}. The base $10^6$ is above this bound and is used from the first step, so the
+\paragraph{Rotary position embeddings.} Positions are encoded with RoPE~\cite{su2021roformer} with base $10^6$ in both
+training stages. A larger base slows RoPE's rotations: its slowest rotation has a period of about 5.1M tokens at base
+$10^6$, against about 54K tokens at the common base $10^4$. The base bounds the usable context: below a lower bound, a
+model keeps a low perplexity but loses the ability to retrieve information from far back in its context, and the bound
+for a 32,768-token context is $6.4 \times 10^5$~\cite{men2024ropebase}. The base $10^6$ is above this bound and is used
+from the first step, so the
 position encoding does not change when the context grows from 8,192 to 32,768 tokens; Qwen2.5-Coder instead raises
 its base from $10^4$ to $10^6$ at its 32K stage~\cite{hui2024qwen25coder}. A large base costs little at short context:
 Gemma 2B models trained from scratch with bases $10^4$ and $5 \times 10^5$ reached validation perplexities of 4.4627
