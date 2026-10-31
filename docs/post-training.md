@@ -2,8 +2,9 @@
 
 The method that turns the base model into a code model that reasons before it answers: its starting point (§1), the
 published evidence each choice rests on (§2), the format (§3), the supervised fine-tuning recipe the repository
-implements (§4), its evaluation (§5), the code RL stage it defers (§6) and what the pipeline leaves out (§7). The SFT
-corpus is `docs/corpus.md` §10; the shared training loop `docs/training.md`; measured results `docs/results.md`.
+implements (§4), its evaluation (§5), the code RL stage it defers (§6), what the pipeline leaves out (§7) and the
+planned on-policy stage after SFT (§8). The SFT corpus is `docs/corpus.md` §10; the shared training loop
+`docs/training.md`; the natural-termination probe `docs/evaluation.md` §10; measured results `docs/results.md`.
 
 Markers: [measured] from a record or a run; [arithmetic] derived from code numbers; [inference] reasoning, not
 measured; [estimate]; [unverified] a figure without a record, or a paper value its extracted text lacks. Below 1B the
@@ -19,8 +20,7 @@ to the 522M base model is [inference].
 | `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/loop.py` (base weights, `validate`), `eval/sft_val.py` | §4 |
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`, `results_dir`), `results/posttrain/sft_lr.jsonl` and its `-curves.jsonl` | §4 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
-| `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh` | §5.1 |
-| `eval/serving_check.py`, `scripts/serving_check.sh` | §5.1 serving faithfulness |
+| `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/serving_check.py`, `scripts/serving_check.sh` | §5.1 (the method: `docs/evaluation.md` §10) |
 
 ## 1. Starting point
 
@@ -167,7 +167,8 @@ Off-policy distillation is SFT on a teacher's text, so it needs no shared vocabu
   Table 22). Length-normalized DPO, β = 5, lr 8e-8, 150K pairs, one epoch (Table 48).
 - **Rollout pairs**: DPO on Phi-4-mini-reasoning's rejected R1 rollouts took AIME 43.3 → 50.0 (arXiv 2504.21233
   Table 3); Seed-Coder samples about 20K pairs on-policy and labels them by sandbox tests (arXiv 2506.03524 §3.1).
-- **Here** [inference]: not used; Nemotron-Cascade goes from SFT to RL (§7).
+- **Here** [inference]: no DPO on teacher pairs; DPO on the model's own loop pairs is the last step of the planned
+  on-policy stage (§8).
 
 ### 2.5 On-policy distillation
 
@@ -295,6 +296,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 |---|---|---|---|---|---|
 | 0. Base | — | — | — | — | the base run's last checkpoint (`base_step` 69,874; `docs/results.md` §1, §4) |
 | 1. SFT (§4) | the base | the SFT corpus's reasoning traces (`docs/corpus.md` §10) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§5) |
+| 2. On-policy stage, planned (§8) | the SFT model | its own rollouts on problems with tests | RSFT mini-epoch on its shortest verified successes, then DPO on its own loop pairs | as the SFT | loop rate down and closure up on the probe; pass@1 not down beyond noise (`docs/evaluation.md` §10) |
 | Code RL, deferred (§6) | the SFT model | problems with tests, 47,468 before filtering | Nemotron-Cascade's GRPO, one update per batch, sequence-level truncated importance weights; FP16 | responses ≤ 16,384, then ≤ 28,672 | pass@1 up, pass@20 not down beyond its error bar (§5) |
 
 ## 3. Format
@@ -422,66 +424,20 @@ unmeasured. Each choice is [inference] from the cited evidence.
 - **No selection on the benchmarks**: RL, when run, stops on its held-out problems (§6); HumanEval+, MBPP+ and
   LiveCodeBench are read once per stage, at its end.
 
-### 5.1 Natural-termination evaluation on held-out prompts
+### 5.1 Natural termination and evaluation-time settings
 
-- **Purpose**: the teacher-forced response loss on the val split (§4) does not measure whether generation ends. The
-  model must itself emit `</think>`, a fenced answer and the closing BOS; a response that never closes its reasoning
-  has no answer and scores 0 in every benchmark (§5). Natural closure is the primary measure: a forced thinking budget
-  (s1's budget forcing, which appends the end-of-thinking delimiter at a maximum token count, arXiv 2501.19393 §3.1)
-  would mix learned and imposed termination. In Olmo3-7B's SFT, "Single-epoch models terminate only 24% of
-  generations, while 32-epoch models approach the rate of 89%", termination tracking accuracy (arXiv 2602.11149
-  §4.2); whether termination moves likewise over the epochs of this run is what the evaluation measures [inference].
-- **Prompt sets** (`eval/official_termination.py`): the first 64 HumanEval+ tasks as EvalPlus's chat path renders
-  them (§5; each checked to render as BOS + `encode_ordinary(prompt.strip() + "\n\n<think>\n")`) and 64 SFT val
-  documents drawn by `default_rng(0)`, their contexts as the SFT trained on them; the val problems are disjoint from
-  the train split's by the problem-level split (`docs/corpus.md` §10). Each val prompt carries its source group and
-  style (`val-labels.jsonl`) and its teacher's reasoning length.
-- **Protocol**: the `--chat` export (`inference/export_hf.py`), vLLM offline in bf16 with the head in fp32, eos = BOS,
-  T 0.6, top-p 0.95, one sample per prompt seeded by 0 + its index, max new tokens the context less the prompt; every
-  full-state checkpoint of the run, with the same prompts and seeds at every step (`scripts/official_termination.sh`
-  per checkpoint, `scripts/official_termination_watch.sh` over a run as its checkpoints appear;
-  `scripts/official_reasoning.sh` runs the probe on its export). Beside the training job the probe takes 0.12 of the
-  GPU's memory and is skipped if less than 15 GB is free at its start. Generation runs in rounds of 2,048 new tokens
-  with prefix caching, and a response with no `</think>` whose last 4,096 tokens have repetition ≥ 0.99 after a round
-  is stopped there (outcome "unclosed, loop-stopped"; with "unclosed at the limit" it compares with a one-shot probe's
-  "unclosed at the limit"): loops take most of a one-shot probe's tokens, and none has been seen to close. Each round
-  restarts a request's seeded generator (seed + round × 1,000,003), so only the first 2,048 tokens equal a one-shot
-  generation's.
-- **Metrics** (per set and pooled; `RUNS/<run>/termination-<step>.json`): five exclusive outcomes, closed and ended
-  (BOS), closed with the answer at the limit, never closed at the limit, never closed and loop-stopped, never closed
-  and ended; the closing-time curve
-  P(closed with reasoning ≤ B) for B = 1K, 2K, 4K, 8K, 16K, 32K tokens; reasoning tokens p50/p90/p95 (an unclosed
-  response all reasoning) and answer tokens p50 given closure; the shares of closed answers with a fenced code block
-  and with the closing BOS; the HumanEval+ responses' pass on the base and the plus tests (EvalPlus's own sanitizer
-  and `check_correctness`, single-threaded BLAS), overall and given closure; outcomes per source group and style and
-  per teacher-length bucket (< 2K, 2–4K, 4–8K, 8–16K, ≥ 16K) with the rank correlation of teacher length and
-  closure; for never-closed responses the share of their last 4,096 tokens inside a repeated 32-token window, and every
-  response's last 2,000 characters, to test whether they run away in loops. Each response keeps its full answer (an
-  evalplus one also its full reasoning); scoring runs after generation in a CPU container of its own with
-  single-threaded BLAS (`--score`), never in a process forked from vLLM's: there EvalPlus's 4 GiB address-space guard
-  fails tests that allocate much (HumanEval/15's plus tests failed so at steps 1000 and 2000, whose
-  `termination-<step>.json` plus counts are therefore low by at least one [measured: the stored tails re-scored]).
-- **Budget forcing and sampling sensitivity** (`--budget`, `RUNS/<run>/termination-budget-<step>.json`): both sets
-  under four samplings (the protocol's; T 0.8 and T 1.0 at top-p 0.95; Qwen3's top-k 20 with presence penalty 1.0),
-  reasoning stopped at `END_THINK` or 16,384 tokens; closure, the closing-time curve and loops (repetition ≥ 0.99) per
-  sampling; the HumanEval+ answers after the reasoning cut at B = 4K, 8K, 16K tokens (s1's budget forcing, arXiv
-  2501.19393 §3.1: `END_THINK` appended to the first B tokens of a response not closed by B) under the protocol's
-  sampling, and at 16K under the others, scored as above, split into naturally closed and forced. `--dry`: the same
-  under the protocol's sampling with and without DRY on the reasoning (`eval/dry.py`, a vLLM logits processor;
-  arXiv 2608.22761 App. A Eq. 1 with its Table 8 setting: multiplier 0.8, base 1.75, allowed length 2, range 1,024;
-  breakers the tokens holding a newline, colon, quote or asterisk; off once `</think>` is emitted).
-- **Serving faithfulness** (`scripts/serving_check.sh`, `RUNS/<run>/serving-check-<step>.json`): the export in vLLM
-  against the training model on SFT val documents. Prefill: per-token NLL of 8 documents of 1K–32.7K tokens by
-  `model.losses` on the val rows and by vLLM's prompt logprobs. Decode: vLLM's greedy generations (≤ 8,192 tokens)
-  from the 4 val prompts with the longest teacher responses, teacher-forced through the training model: argmax
-  agreement, the margin at disagreements, and both paths' log-probability of the chosen tokens. At step 2000
-  [measured]: prefill mean NLL differs by ≤ 0.0009 nats in every position bucket (0–512, 512–2K, 2–8K, 8–16K, 16–32K;
-  98,470 tokens); decode agrees on 98.7% of tokens 0–512, 99.85% at 512–2K and 100% at 2–8K, disagreement margins
-  ≤ 0.42 nats and not growing, mean chosen-token log-probability equal to 0.001 nats: the export's 513-token windows
-  and RoPE are honoured in both paths.
-- **Cost** [measured: `termination-1000-v1.json`, the step-1000 probe beside the training job]: 929 s per probe
-  (854 s generating); the run's median tokens/s fell 34% while it generated (312,840 → 205,817), about 290 s of run
-  time per probe.
+- **Natural termination**: every full-state checkpoint is probed for whether its responses close and end, apart from
+  their scores (method: `docs/evaluation.md` §10; results: `docs/results.md` §6). In Olmo3-7B's SFT termination rose
+  from 24% at one epoch to ≈ 89% at 32 (arXiv 2602.11149 §4.2); whether it moves likewise over this run's epochs is
+  what the probe measures [inference].
+- **Secondary settings, disclosed**: forced closure (s1's budget forcing, arXiv 2501.19393 §3.1: `</think>` appended
+  at B reasoning tokens) and a sampling temperature above the protocol's 0.6 change pass@1. s1 reports budget forcing
+  in its headline numbers (arXiv 2501.19393 §3.1, §4); a forced stop recovered a correct answer in 0.364 of a
+  post-trained Qwen3-0.6B's unfinished samples on problems it had solved 3–4 times in 4 and 0.049 on unsolved ones
+  (arXiv 2609.37326 §5, App. E Table 18). Here B and the temperature are chosen on the probe's held-out SFT prompts
+  only, fixed before a benchmark is read, and reported beside the protocol's natural number with the forced fraction;
+  the step-2000 measurements they are chosen from are `docs/results.md` §6.4 (T 1.0 closes 59 of 64 HumanEval+
+  responses against 42 at T 0.6; forcing at 4K recovers 7 plus passes of 22 unclosed) [measured].
 
 ## 6. Code RL, deferred
 
@@ -543,17 +499,56 @@ unmeasured. Each choice is [inference] from the cited evidence.
 |---|---|
 | A non-thinking mode | the format is thinking-mode only (§3) |
 | LoRA, QLoRA | at hidden size 768 LoRA saves compute only below rank 128–205, where it lags full fine-tuning on code; QLoRA saves memory the run does not need (§2.2) |
-| DPO (§2.4) | Nemotron-Cascade goes from SFT to RL without it |
+| DPO on teacher pairs (§2.4) | Nemotron-Cascade goes from SFT to RL without it; DPO on the model's own loop pairs is §8 |
 | Math RL | the SFT data holds no math; Nemotron-Cascade's math RL moved LiveCodeBench v6 by −0.3 to +2.2 (arXiv 2512.13607 §4.5) |
 | RLHF, instruction-following, multi-domain and long-context RL | chat, judges or tools the model is not trained for; reward models of 72B–235B (arXiv 2512.13607 §4.2–§4.4; arXiv 2603.19220 §4.2–§4.6) |
 | Software-engineering RL | a 72B or 120B judge, or agentic execution over 256K tokens (arXiv 2512.13607 §4.7; arXiv 2603.19220 §4.8) |
 | On-policy distillation (§2.5) | one RL domain leaves no specialists to merge; Nemotron-Cascade 2's teachers are its own per-domain checkpoints (arXiv 2603.19220 §4.4) |
+
+## 8. On-policy stage after SFT, planned
+
+Not implemented in the repository; the method is fixed here so that it starts from settled choices.
+
+**Why.** At step 2,000 of the SFT, 55 of 128 probe responses never close and 53 of them end in a verbatim loop;
+closure fell from step 1,000 (89 → 73 of 128, McNemar p = 0.011) while the held-out loss fell; the loops are the
+model's, not the serving path's; the SFT data hold almost none (8 of 797,950 documents) (`docs/results.md` §6)
+[measured]. The literature attributes such loops to learning errors, not to loops in the data:
+
+- **Small students loop more than their teachers**: R1-Distill-Qwen-1.5B loops on 76% of AIME samples at T 0 and
+  the 32B on 37%; OpenThinker3-1.5B on 30% against 4% for its teacher, 51% on hard and 13% on easy problems (arXiv
+  2512.12895 §2). Its causes: risk aversion when the progress step is hard to learn, temporally correlated errors,
+  and confidence that grows as text repeats (§3–§5). Repetition is self-reinforcing: "the more times a sentence is
+  repeated in the context, the higher the probability of continuing to generate that sentence" (arXiv 2206.02369
+  abstract).
+- **Small students do not learn to stop off the teacher's trajectory**: on-policy-distilled Qwen3-0.6B leaves 0.627
+  of its samples at a 30,720-token cap; the teacher stops at the end of a finished derivation, which the student
+  rarely reaches (arXiv 2609.37326 §4, Table 2). Imitating more teacher traces cannot show the student its own loop
+  states [inference].
+- **Training against the model's own loops is what removed them**: DPO on self-mined loop pairs took Qwen3-8B
+  agents from 57.3% to 6.1% loops, against 37.7% for SFT on the loop-breaking action alone (arXiv 2610.19376 §5.2,
+  §5.3); loops fell 3.5× at 14B and 3.0× at 32B, and levelled off after 8K pairs (§5.2, App. G.3). Token-level
+  preference at the loop's first token (Antidoom, FTPO of arXiv 2510.15061) took LFM2.5-2.6B from 10.2% to 1.4% and
+  Qwen3.5-4B from 22.9% to 1% [blog: liquid.ai/blog/antidoom; not peer-reviewed]. No result below 2.6B is published.
+
+**Method** [inference from the evidence above; settings marked [estimate] are starting values]:
+
+| Step | What | Basis |
+|---|---|---|
+| Problems | the SFT model's problems with tests; per problem its own pass rate ρ over its rollouts; problems with ρ = 0 give no training row (no verified success to imitate or prefer) | the stage-specific data rule: a later stage trains on problems the model already solves with non-zero probability, all-zero problems are not optimized directly (arXiv 2606.04466 §3.1, Eqs. 1–3) |
+| Rollouts for loops | the evaluation protocol's sampling, T 0.6, top-p 0.95, in the probe's 2,048-token rounds, stopped at loop detection (last 4,096 tokens repetition ≥ 0.99); the onset is the first token of the repeating tail | loops are what the protocol produces (`docs/results.md` §6.2); loop stopping saves most of a looping sample's tokens (`docs/evaluation.md` §10) |
+| Rollouts for successes | T 0.8–1.0, top-p 0.95 | T 1.0 closes 59 of 64 HumanEval+ responses against 42 at T 0.6, with 3 loops against 18 (`docs/results.md` §6.4) [measured] |
+| Verification | a success closes `</think>` and its last fenced code block passes every test (`eval/verify.py`, §6's reward) | §2.7 |
+| RSFT mini-epoch | per problem its most concise passing success (the shortest by reasoning tokens), one pass, §4's response loss | Kimi k1.5's shortest rejection sampling: the shortest correct of 8 samples as SFT data (arXiv 2501.12599 §2.4) |
+| DPO | per problem, chosen = a verified closing success; rejected = its own looping rollout, truncated shortly after the loop's onset; the reference model the RSFT model, frozen; plain DPO, no likelihood term on the chosen; β 0.05, one epoch, ≤ 8K pairs [estimate] | DeLoop's objective, β and pair count (arXiv 2610.19376 §4.2, App. G.3); a negative log-likelihood anchor on the chosen raised loops 6.1% → 27.0% (App. G.13); the tail after onset repeats at near-zero loss (`docs/results.md` §6.2), so it adds length, not contrast [inference] |
+| Order | DPO last: no SFT after it | SFT after DPO reopened loops (6.5% → 29.7%) and a final DPO closed them again (2.3%) (arXiv 2610.19376 App. G.12) |
+| Evaluation | the probe at T 0.6 and the reasoning protocol (§5, `docs/evaluation.md` §10); rows appended to `docs/results.md` §6 | — |
 
 ## References
 
 | arXiv | Title |
 |---|---|
 | 2104.09864 | RoFormer: Enhanced Transformer with Rotary Position Embedding |
+| 2206.02369 | Learning to Break the Loop: Analyzing and Mitigating Repetitions for Neural Text Generation |
 | 2305.14314 | QLoRA: Efficient Finetuning of Quantized LLMs |
 | 2401.00788 | Astraios: Parameter-Efficient Instruction Tuning Code Large Language Models |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming - The Rise of Code Intelligence |
@@ -564,6 +559,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 | 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2409.19913 | Scaling Optimal LR Across Token Horizons |
 | 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models |
+| 2501.12599 | Kimi k1.5: Scaling Reinforcement Learning with LLMs |
 | 2501.12948 | DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning |
 | 2501.19393 | s1: Simple test-time scaling |
 | 2502.12143 | Small Models Struggle to Learn from Strong Reasoners |
@@ -594,9 +590,11 @@ unmeasured. Each choice is [inference] from the cited evidence.
 | 2509.24945 | MobileLLM-R1: Exploring the Limits of Sub-Billion Language Model Reasoners with Open Training Recipes |
 | 2510.06101 | The Valley of Code Reasoning: Scaling Knowledge Distillation of Large Language Models |
 | 2510.13786 | The Art of Scaling Reinforcement Learning Compute for LLMs |
+| 2510.15061 | Antislop: A Comprehensive Framework for Identifying and Eliminating Repetitive Patterns in Language Models |
 | 2510.26788 | Defeating the Training-Inference Mismatch via FP16 |
 | 2511.07833 | Murphy: Multi-Turn GRPO for Self-Correcting Code Generation |
 | 2512.02556 | DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models |
+| 2512.12895 | Wait, Wait, Wait… Why Do Reasoning Models Loop? |
 | 2512.13607 | Nemotron-Cascade: Scaling Cascaded Reinforcement Learning for General-Purpose Reasoning Models |
 | 2512.13961 | Olmo 3 |
 | 2512.23165 | Evaluating Parameter Efficient Methods for RLVR |
@@ -613,9 +611,12 @@ unmeasured. Each choice is [inference] from the cited evidence.
 | 2604.00626 | A Survey of On-Policy Distillation for Large Language Models |
 | 2604.02721 | GrandCode: Achieving Grandmaster Level in Competitive Programming via Agentic Reinforcement Learning |
 | 2604.13010 | Lightning OPD: Efficient Post-Training for Large Reasoning Models with Offline On-Policy Distillation |
+| 2606.04466 | Learning What to Learn: Stage-Specific Data Sets for SFT-then-RL in Small Language Model Reasoning |
 | 2607.15161 | On-Policy Delta Distillation |
 | 2607.24653 | Kimi K3: Open Frontier Intelligence |
 | 2608.24135 | Robust Code RL via Faulty-Code-Driven Test case Synthesis and Dense Reward Shaping |
 | 2609.20807 | Score Centering Stabilizes Off-policy Reinforcement Learning |
 | 2609.32444 | Rethinking Training-Inference Mismatch in LLM Reinforcement Learning: Where It Arises and How to Correct It |
 | 2609.35259 | On-Policy or Off-Policy Learning? A Systematic Study of Distillation Dynamics |
+| 2609.37326 | Solving Without Stopping: On-Policy Distillation at Small Scale |
+| 2610.19376 | DeLoop: Repeated Actions as Self-Supervision for Long-Horizon Agents |

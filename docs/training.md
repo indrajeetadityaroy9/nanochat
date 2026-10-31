@@ -429,6 +429,15 @@ and `results/posttrain/sft_lr-curves.jsonl` predate `stages` and `validations`. 
 the base run's likelihood trajectory (`docs/evaluation.md` §2) from step 62,887 against step 66,063, written by §9
 step 4; its values are `docs/results.md` §4.
 
+**The base run's end** [measured: its `metrics.jsonl`]: one attempt, no `failure` record, 69,874 train records
+(steps 0–69,873); 103,033,405,440 tokens, 97,413,857,280 through step 66,062 at 8K and 5,619,548,160 at 32K
+[arithmetic]. Loss at the last step 0.8586 (trailing 50-step mean 0.8691), at the file-level stage's end (trailing
+50-step mean to step 66,062) 0.9058; last-step lr 3.358e-8, gradient norm 0.304, 290,245 tok/s, MFU 0.516; peak
+allocated 71.11 GiB in the file-level stage and 71.12 GiB in the repository stage (`stage`, `end` records), reserved
+73.17 GiB; 76.29 h from the first step's record to the last's. Every step's values:
+`results/pretrain/pretrain-curves.jsonl`; the likelihood trajectory to the last step: `results/pretrain/trajectory.json`
+(`docs/results.md` §4).
+
 The ablation records and their status: `docs/experiments.md` §1. `results/pretrain/peak_lr_d24.jsonl`'s `run`
 records carry the earlier multi-depth code's `RunConfig` fields (`num_hidden_layers` 24, `seed` 0, `tokenizer`
 "corpus"), all at their defaults. `results/pretrain/muon_wd_timescale_20tpp.jsonl` and

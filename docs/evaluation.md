@@ -18,7 +18,8 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/trajectory.py` (`main`, `score`, `trajectory`, `rows_by_measure`, `groups`, `summaries`, `likelihoods`, `saved_steps`, `likelihood_path`) | §2 |
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `parse_record`, `truncated`, `filtered_generation`, `filtered_completions`, `codegen_runs`, `vetted`, evaluator wrappers: `evalplus`, `multipl_e`) | §1, §3, §7 |
 | `scripts/official_eval.sh`, `docker/Dockerfile.eval`, `eval/official.py`, `eval/official_infilling.py`, `eval/official_site/sitecustomize.py` | §4, §8 |
-| `scripts/official_reasoning.sh`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_termination.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8 |
+| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8 |
+| `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function); `results/pretrain/mbpp_3shot_contamination.json` (MBPP 3-shot's overlap with the train corpus) | §5; §4 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
@@ -568,6 +569,69 @@ smoke sample ended at exactly 768 [measured]; `eval/official_evalplus.py` sets t
   20 tokens per parameter, code bpb 0.439, HumanEval+ 0.061, MBPP+ 0.071/0.050. The suite's greedy MBPP+ on the
   step-4,552 checkpoint was 0.045/0.037, so the two are not the same evaluation [inference].
 
+## 10. Natural-termination probe and serving check
+
+A post-trained checkpoint's endings, measured apart from its benchmark scores; results: `docs/results.md` §6.
+
+- **Purpose**: the teacher-forced response loss does not measure whether generation ends. The model must itself emit
+  `</think>`, a fenced answer and the closing BOS; a response that never closes its reasoning has no answer and scores
+  0 in every benchmark. Natural closure is the primary measure: a forced thinking budget (s1's budget forcing, which
+  appends the end-of-thinking delimiter at a maximum token count, arXiv 2501.19393 §3.1) would mix learned and imposed
+  termination. In Olmo3-7B's SFT, "Single-epoch models terminate only 24% of generations, while 32-epoch models
+  approach the rate of 89%" (arXiv 2602.11149 §4.2).
+- **Prompt sets** (`eval/official_termination.py`): the first 64 HumanEval+ tasks as EvalPlus's chat path renders
+  them (`docs/post-training.md` §5; each checked to render as BOS + `encode_ordinary(prompt.strip() +
+  "\n\n<think>\n")`) and 64 SFT val documents drawn by `default_rng(0)`, their contexts as the SFT trained on them; the
+  val problems are disjoint from the train split's by the problem-level split (`docs/corpus.md` §10). Each val prompt
+  carries its source group and style (`val-labels.jsonl`) and its teacher's reasoning length.
+- **Protocol**: the `--chat` export (`inference/export_hf.py`), vLLM offline in bf16 with the head in fp32, eos = BOS,
+  T 0.6, top-p 0.95, one sample per prompt seeded by 0 + its index, max new tokens the context less the prompt; every
+  full-state checkpoint of a run, with the same prompts and seeds at every step (`scripts/official_termination.sh`
+  per checkpoint, `scripts/official_termination_watch.sh` over a run as its checkpoints appear;
+  `scripts/official_reasoning.sh` runs the probe on its export). Beside a training job the probe takes 0.12 of the
+  GPU's memory and is skipped if less than 15 GB is free at its start.
+- **Rounds and loop stopping**: generation runs in rounds of 2,048 new tokens with prefix caching, and a response with
+  no `</think>` whose last 4,096 tokens have repetition ≥ 0.99 after a round is stopped there (outcome "unclosed,
+  loop-stopped"; with "unclosed at the limit" it compares with a one-shot probe's "unclosed at the limit"). Each round
+  restarts a request's seeded generator (seed + round × 1,000,003), so only the first 2,048 tokens equal a one-shot
+  generation's. Checked at step 2,000 against two one-shot replicates (the 32K probe and the 16K-capped protocol
+  sampling of `--budget`): 68 of 128 closed against 73 and 70, closure agreeing with the 32K probe on 119 of 128
+  prompts, in 387 s of generation against 1,102 s [measured: `termination-2000-chunked.json`,
+  `termination-2000.json`, `termination-budget-2000.json`].
+- **Metrics** (per set and pooled; `RUNS/<run>/termination-<step>.json`): five exclusive outcomes, closed and ended
+  (BOS), closed with the answer at the limit, never closed at the limit, never closed and loop-stopped, never closed
+  and ended; the closing-time curve P(closed with reasoning ≤ B) for B = 1K, 2K, 4K, 8K, 16K, 32K tokens; reasoning
+  tokens p50/p90/p95 (an unclosed response all reasoning) and answer tokens p50 given closure; the shares of closed
+  answers with a fenced code block and with the closing BOS; the HumanEval+ responses' pass on the base and the plus
+  tests, overall and given closure; outcomes per source group and style and per teacher-length bucket (< 2K, 2–4K,
+  4–8K, 8–16K, ≥ 16K) with the rank correlation of teacher length and closure; for never-closed responses the share
+  of their last 4,096 tokens inside a repeated 32-token window, and every response's last 2,000 characters. Each
+  response keeps its full answer (a HumanEval+ one also its full reasoning).
+- **Clean-process scoring**: EvalPlus's own sanitizer and `check_correctness` run after generation in a CPU container
+  of their own with single-threaded BLAS (`--score`), never in a process forked from vLLM's: there EvalPlus's 4 GiB
+  address-space guard (RLIMIT_AS) counts vLLM's mappings and fails tests that allocate much (HumanEval/15's plus
+  tests at steps 1,000 and 2,000; `docs/results.md` §6.5).
+- **Budget forcing and sampling sensitivity** (`--budget`, `RUNS/<run>/termination-budget-<step>.json`): both sets
+  under four samplings (the protocol's; T 0.8 and T 1.0 at top-p 0.95; Qwen3's top-k 20 with presence penalty 1.0),
+  reasoning stopped at `END_THINK` or 16,384 tokens, the answer at 4,096; closure, the closing-time curve and loops
+  (repetition ≥ 0.99) per sampling; the HumanEval+ answers after the reasoning cut at B = 4K, 8K, 16K tokens (s1's
+  budget forcing, arXiv 2501.19393 §3.1: `END_THINK` appended to the first B tokens of a response not closed by B)
+  under the protocol's sampling, and at 16K under the others, scored as above, split into naturally closed and
+  forced. `--dry`: the same under the protocol's sampling with and without DRY on the reasoning (`eval/dry.py`, a
+  vLLM logits processor; arXiv 2608.22761 App. A Eq. 1 with its Table 8 setting: multiplier 0.8, base 1.75, allowed
+  length 2, range 1,024; breakers the tokens holding a newline, colon, quote or asterisk; off once `</think>` is
+  emitted).
+- **Serving faithfulness** (`scripts/serving_check.sh`, `eval/serving_check.py`,
+  `RUNS/<run>/serving-check-<step>.json`):
+  the export in vLLM against the training model on SFT val documents. Prefill: per-token NLL of 8 documents of
+  1K–32.7K tokens by `model.losses` on the val rows and by vLLM's prompt logprobs, per position bucket (0–512, 512–2K,
+  2–8K, 8–16K, 16–32K). Decode: vLLM's greedy generations (≤ 8,192 tokens) from the 4 val prompts with the longest
+  teacher responses, teacher-forced through the training model: argmax agreement, the margin at disagreements, and
+  both paths' log-probability of the chosen tokens.
+- **Cost** [measured: `termination-1000-v1.json`, the step-1000 one-shot probe beside the training job]: 929 s per
+  probe (854 s generating); the run's median tokens/s fell 34% while it generated (312,840 → 205,817), about 290 s of
+  run time per probe.
+
 ## References
 
 | arXiv | Title |
@@ -592,14 +656,17 @@ smoke sample ended at exactly 768 [measured]; `eval/official_evalplus.py` sets t
 | 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2411.00640 | Adding Error Bars to Evals: A Statistical Approach to Language Model Evaluations |
 | 2412.04403 | Establishing Task Scaling Laws via Compute-Efficient Model Ladders |
+| 2501.19393 | s1: Simple test-time scaling |
 | 2503.13423 | SuperBPE: Space Travel for Language Models |
 | 2504.09246 | Type-Constrained Code Generation with Language Models |
 | 2504.11393 | DataDecide: How to Predict Best Pretraining Data with Small Experiments |
 | 2505.09388 | Qwen3 Technical Report |
 | 2508.13144 | Signal and Noise: A Framework for Reducing Uncertainty in Language Model Evaluation |
+| 2602.11149 | Data Repetition Beats Data Scaling in Long-CoT Supervised Fine-Tuning |
 | 2604.07769 | An Empirical Study on Influence-Based Pretraining Data Selection for Code Large Language Models |
 | 2606.21619 | The Alignment Problem in Constrained Code Generation |
 | 2608.18062 | TokEval: A Tokenizer Evaluation Suite; companion post cimeister.github.io/blog/code_tokenizer_ablations |
+| 2608.22761 | Don't Repeat Yourself: Stopping Verbatim Loops at Sampling Time |
 
 Repositories and other sources, at the pins of `docker/Dockerfile.eval` (the official tools) and `docker/Dockerfile`
 (the harness's judges): `evalplus/evalplus` (`26d6d00`; the harness's in `pyproject.toml`), `nuprl/MultiPL-E`

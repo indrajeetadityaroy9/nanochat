@@ -17,7 +17,10 @@ measured; [unverified] a figure without a record. Paper values are the papers' o
 |`…/official-69874/compare-eval-69874.json`|per-problem agreement of the official tools with the in-repository harness|
 |`artifacts/runs/<base run>/likelihood-<step>.json`|bits per byte per domain at 8K and 32K context, per saved step from 62,887|
 |`results/pretrain/trajectory.json`|those steps' bits per byte with standard errors, and each step's paired change from step 66,063 (8K, solutions) or 66,163 (32K) and from the step before (`eval/trajectory.py`)|
-|`artifacts/runs/<SFT run>/termination-<step>.json`|the natural-termination evaluation of an SFT checkpoint (docs/post-training.md §5.1): per-set summaries and every response's ending; `termination-1000-v1.json` the first step-1000 probe, before the per-response fields|
+|`artifacts/runs/<SFT run>/metrics.jsonl`|the SFT run's train records and its `val` records (held-out response loss)|
+|`artifacts/runs/<SFT run>/termination-<step>.json`|the natural-termination probe of an SFT checkpoint (docs/evaluation.md §10): per-set summaries and every response's ending; `termination-1000-v1.json` the first step-1000 probe, before the per-response fields; `termination-2000-chunked.json` the step-2000 probe in 2,048-token rounds with loop stopping|
+|`artifacts/runs/<SFT run>/termination-budget-<step>.json`|budget forcing and sampling sensitivity of an SFT checkpoint (docs/evaluation.md §10)|
+|`artifacts/runs/<SFT run>/serving-check-<step>.json`|the exported checkpoint in vLLM against the training model (docs/evaluation.md §10)|
 
 `<base run>` is `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10`; `<SFT run>` is
 `base=<base run>,generate=none,learning_rate_scale=0.06449599703255417,sft_epochs=2.0`.
@@ -180,39 +183,113 @@ standard error) [measured]:
   5.1, Qwen2.5-0.5B-Instruct 3.6, and MobileLLM-R1-950M and DeepSeek-R1-Distill-Qwen-1.5B 19.9 (pass@1, n = 16;
   arXiv 2509.24945 Table 7). EvalPlus under the reasoning protocol is the more sensitive measure of the SFT's effect.
 
-## 6. Post-training: natural termination
+## 6. Post-training
 
-The natural-termination evaluation (docs/post-training.md §5.1) of the SFT run's full-state checkpoints: 64 HumanEval+
-prompts in EvalPlus's chat rendering and 64 held-out SFT prompts, one sample each at T 0.6, top-p 0.95, max new tokens
-the context less the prompt. Outcomes are exclusive: closed `</think>` and ended with BOS / closed, the answer at the
-limit / never closed, at the limit / never closed, ended.
+The SFT run (docs/post-training.md §4) from the base model of §1, and the stages after it (docs/post-training.md §8).
+Each table has one row per evaluated checkpoint; later checkpoints and the post-SFT model append rows. The probe's
+method is docs/evaluation.md §10: 64 HumanEval+ prompts in EvalPlus's chat rendering and 64 held-out SFT prompts, one
+seeded sample each at T 0.6, top-p 0.95, up to the 32,768-token context.
+
+### 6.1 Held-out loss
+
+Mean next-token loss (nats) on the SFT val split's responses, 53,474,648 labels [measured: `metrics.jsonl` `val`].
+
+| Model | Step | Held-out loss |
+|---|---|---|
+| base (§1) | 0 | 1.1574 |
+| SFT | 1,000 | 0.8533 |
+| SFT | 2,000 | 0.8139 |
+
+### 6.2 Natural termination
+
+Exclusive outcomes: closed `</think>` and ended with BOS / closed, the answer at the limit / never closed, at the
+limit / never closed, ended [measured: `termination-<step>.json`, one-shot generation].
 
 | Step | Set | Closed, ended | Closed, at limit | Unclosed, at limit | Unclosed, ended | P(closed ≤ 1K / 2K / 4K / 8K / 16K / 32K) |
 |---|---|---|---|---|---|---|
 | 1,000 | HumanEval+ (64) | 51 | 0 | 13 | 0 | 0.484 / 0.766 / 0.797 / 0.797 / 0.797 / 0.797 |
 | 1,000 | held-out SFT (64) | 37 | 1 | 26 | 0 | 0.156 / 0.344 / 0.500 / 0.594 / 0.594 / 0.594 |
 | 1,000 | all (128) | 88 | 1 | 39 | 0 | 0.320 / 0.555 / 0.648 / 0.695 / 0.695 / 0.695 |
+| 2,000 | HumanEval+ (64) | 44 | 0 | 20 | 0 | 0.375 / 0.625 / 0.672 / 0.672 / 0.688 / 0.688 |
+| 2,000 | held-out SFT (64) | 29 | 0 | 35 | 0 | 0.156 / 0.266 / 0.391 / 0.453 / 0.453 / 0.453 |
+| 2,000 | all (128) | 73 | 0 | 55 | 0 | 0.266 / 0.445 / 0.531 / 0.563 / 0.570 / 0.570 |
 
-All bullets are step 1,000 [measured: `termination-1000.json`; the re-run with the per-response fields gave the same
-responses as `termination-1000-v1.json`, the prompts and seeds being fixed].
+- **Closure fell from step 1,000 to 2,000**: 89 → 73 of 128 closed; per prompt (same prompts and seeds), 26 closed
+  only at 1,000 and 10 only at 2,000, exact McNemar p = 0.011 [measured; arithmetic], while the held-out loss fell
+  (§6.1).
+- **Closure is early or not at all**: the latest closure is at 6,361 reasoning tokens at step 1,000 and 11,355 at
+  step 2,000; every closed answer holds a fenced code block, and all but one (step 1,000) end with BOS.
+- **The never-closed responses loop**: at step 1,000, 36 of 39 have ≥ 99.85% of their last 4,096 tokens inside a
+  32-token window that recurs there; the other 3 are enumerations with an incrementing number ("The combination
+  (1,2,3,4,571) … (1,2,3,4,577)") that never repeat a window exactly. At step 2,000, 53 of 55 repeat ≥ 99% of their
+  last 4,096 tokens [measured]. Loop onset (the first token of the repeating tail) has median ≈ 2.0K tokens on
+  HumanEval+ and ≈ 2.5K on held-out prompts [measured, step 2,000].
+- **Loops are near-deterministic**: in greedy generations from held-out prompts the chosen tokens' mean
+  log-probability is −0.0016 nats at 2–4K tokens and −0.0009 at 4–8K, identical in both paths (§6.3) [measured:
+  `serving-check-2000.json` decode buckets]. The SFT data hold almost no loops: 8 of its 797,950 documents have tail
+  repetition ≥ 0.8 [measured], 1.0e-5 [arithmetic].
+- **Chunked probe** (`termination-2000-chunked.json`: 2,048-token rounds, a never-closed response stopped once its
+  last 4,096 tokens repeat ≥ 99%): 68 of 128 closed (42 HumanEval+, 26 held-out), 54 loop-stopped, 6 at the limit;
+  against the one-shot probe's 73 and the 16K-capped protocol replicate's 70 (§6.4). Per prompt it agrees with the
+  one-shot probe on 119 of 128 closures; its generation took 387 s against 1,102 s [measured]. Every round after the
+  first reseeds the sampler (docs/evaluation.md §10), so per-prompt differences are sampling noise [inference].
+- **Held-out closure falls with the teacher's reasoning length** (rank correlation −0.43 at step 1,000, −0.53 at
+  2,000 [arithmetic]); closed of prompts:
 
-- **Closure is early or not at all**: no response closes after 6,361 reasoning tokens (the last four closures at
-  5,032, 5,775, 6,152 and 6,361), so every response either closes within about 6K tokens or runs to the length limit.
-  Every closed answer holds a fenced code block, and 88 of the 89 end with BOS.
-- **EvalPlus on the 64 HumanEval+ responses**: base tests 28 of 64 (0.438), plus tests 26 (0.406); given closure 28
-  and 26 of 51 (0.549, 0.510). No unclosed response can pass (its answer is empty).
-- **The never-closed responses loop**: in 36 of the 39, at least 99.85% of the last 4,096 tokens lie inside a 32-token
-  window that recurs there; the other 3 score 0 on that measure but their tails are enumerations with an incrementing
-  number ("The combination (1,2,3,4,571) … (1,2,3,4,577)"), loops that never repeat a window exactly.
-- **Held-out closure falls with the teacher's reasoning length** (rank correlation −0.43):
-
-  | Teacher reasoning (tokens) | < 2K | 2–4K | 4–8K | 8–16K | ≥ 16K |
+  | Step | < 2K (17) | 2–4K (8) | 4–8K (14) | 8–16K (19) | ≥ 16K (6) |
   |---|---|---|---|---|---|
-  | Prompts | 17 | 8 | 14 | 19 | 6 |
-  | Closed | 17 | 5 | 6 | 8 | 2 |
+  | 1,000 | 17 | 5 | 6 | 8 | 2 |
+  | 2,000 | 13 | 4 | 8 | 4 | 0 |
 
-  By source (closed of prompts): Exercism 5 of 5, KodCode online-judge 2 of 2, instruct 5 of 7, complete 5 of 11,
-  Cascade-1 Stage-1 11 of 18, Stage-2 8 of 15, CP-v2 C++ 1 of 2, Python 1 of 4.
+- **By source** (closed of prompts; the table below).
+
+| Step | Exercism (5) | KodCode online-judge (2) | instruct (7) | complete (11) | Cascade Stage-1 (18) | Stage-2 (15) | CP-v2 C++ (2) | Python (4) |
+|---|---|---|---|---|---|---|---|---|
+| 1,000 | 5 | 2 | 5 | 5 | 11 | 8 | 1 | 1 |
+| 2,000 | 5 | 1 | 4 | 6 | 8 | 3 | 1 | 1 |
+
+### 6.3 Serving faithfulness
+
+The `--chat` export in vLLM against the training model (docs/evaluation.md §10) [measured: `serving-check-2000.json`].
+
+| Step | Prefill: largest bucket difference in mean NLL (0–512 … 16–32K; 98,470 tokens) | Decode argmax agreement 0–512 / 512–2K / 2–4K / 4–8K | Mean chosen-token log-probability, vLLM / training |
+|---|---|---|---|
+| 2,000 | 0.0009 nats (0–512); ≤ 0.0006 elsewhere | 98.7% / 99.85% / 100% / 100% | equal within 0.001 nats in every bucket |
+
+Disagreements are near ties: their margins average 0.07 nats at 0–512 and 0.05 at 512–2K, at most 0.42, and do not
+grow with position [measured]. The loops of §6.2 are therefore the model's, not the serving path's [inference].
+
+### 6.4 Budget forcing and sampling sensitivity
+
+HumanEval+ (the probe's 64 problems), one sample each, reasoning stopped at `</think>` or 16,384 tokens; forced
+closure at B appends `</think>` to the first B reasoning tokens of a response not closed by B (docs/evaluation.md
+§10); pass counts on the base / plus tests [measured: `termination-budget-<step>.json`].
+
+| Model | Sampling | Closed by 16K (HumanEval+ / held-out) | Loops (HumanEval+ / held-out) | Natural closures: base / plus | Forced at B = 4K / 8K / 16K: all 64, base / plus |
+|---|---|---|---|---|---|
+| SFT 2,000 | T 0.6, top-p 0.95 (protocol) | 42 / 28 | 18 / 36 | 26 / 26 of 42 | 34 / 33, 34 / 33, 33 / 31 |
+| SFT 2,000 | T 0.8, top-p 0.95 | 46 / 32 | 16 / 18 | 29 / 29 of 46 | 16K: 32 / 32 |
+| SFT 2,000 | T 1.0, top-p 0.95 | 59 / 44 | 3 / 4 | 34 / 32 of 59 | 16K: 35 / 32 |
+| SFT 2,000 | T 0.6, top-p 0.95, top-k 20, presence penalty 1.0 (Qwen3's) | 55 / 31 | 9 / 26 | 32 / 29 of 55 | 16K: 35 / 31 |
+| base (§1) | greedy, completion protocol | — | — | — | 37 / 31 |
+
+- **Forcing recovers few answers**: at the protocol's sampling, 8 / 7 of the 22 unclosed responses pass when closed
+  at 4K or 8K, 7 / 5 at 16K; at T 1.0 only 5 are forced and 1 / 0 pass.
+- **No setting differs from the base beyond noise on these 64**: the SFT checkpoint's best plus count is 33 against
+  the base's 31, its best base-test count 35 against 37. One sample per problem at T > 0 varies by about ±2–3 passes
+  per 64 [estimate: most problems pass always or never, so only the rest contribute binomial variance], and vLLM's
+  seeded sampling is not batch-invariant, so a rerun with the same seeds need not reproduce a row.
+- **Temperature removes loops** (HumanEval+ loops 18 → 3 from T 0.6 to T 1.0) at no measured cost in passes. The
+  evaluation-time settings these rows select are disclosed secondary settings (docs/post-training.md §5).
+
+### 6.5 Scoring correction
+
+EvalPlus's tests scored inside a process forked from vLLM's fail tests that allocate much: its address-space guard
+(RLIMIT_AS) counts the vLLM process's mappings, so HumanEval/15's plus input failed with MemoryError. The plus counts
+stored in `termination-1000.json` and `termination-2000.json` are therefore low by at least one [measured: the stored
+answers re-scored in a clean process]; §6.4's counts and every later record are scored in a clean CPU process
+(docs/evaluation.md §10). The same guard, inflated by per-core thread pools, affected the base's scoring
+(docs/evaluation.md §4).
 
 ## References
 
