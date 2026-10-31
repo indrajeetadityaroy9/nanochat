@@ -581,8 +581,8 @@ What each source contributes:
 **Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on SFT train prompts of every source at T 0.6, one
 per prompt, in waves until 8,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its first repeat (§8.4); FTPO from
 the SFT model, stopped once held-out chosen_win reaches 0.35 (§8.5); rollouts of the FTPO model on KodCode train
-prompts, 4 per prompt, verified, in waves until 8,000 DPO pairs or 3 waves (§8.7), each pair a prompt's shortest
-success against its own loop (§8.4); DPO from the FTPO model for one epoch (§8.5); the SFT, FTPO and DPO models
+prompts, 4 per prompt, verified, in waves until 8,000 DPO pairs or 24,000 prompts (§8.7), each pair a prompt's
+shortest success against its own loop (§8.4); DPO from the FTPO model for one epoch (§8.5); the SFT, FTPO and DPO models
 evaluated on the same probe prompts and KodCode val problems (§8.6); FTPO and DPO run only if the SFT model loops
 (§8.7). One model per stage, no candidates and no pick: each stage stops where its source stops (Antidoom's
 chosen_win 0.35; DeLoop's one epoch). Why DPO, and last: every objective DeLoop compares "cuts the loop rate to 15.0%
@@ -838,12 +838,12 @@ is logged and the queue goes on.
   CPU FTPO probes on step-3000 rows], so a second group would mostly go unused. At the step-7676 probe's loop share
   (≈0.4) one group yields ≈8–10K rows [estimate], ≈6–7K after rebalancing. The mining rollouts are not verified: the
   rows need no verdicts.
-- **DPO waves** (`dpo_waves`): 8,000 KodCode train-pool prompts per wave (§8.1 `sample`, wave k seeded k and
-  excluding the earlier DPO waves' prompts) × 4 samples at T 0.6 from the FTPO model, in groups of at most 4 engines
-  as above, verified (§8.3); the selection over all DPO waves after each group; waves stop at 8,000 pairs (DeLoop's
-  count, arXiv 2610.19376 App. G.1), after 3 waves, or when the pool runs out, and DPO trains on every pair. At the
-  SFT model's val rate (227 pairs from 512 prompts, §8.4) a wave would give ≈3,500 pairs [estimate]; the FTPO model
-  should loop less and so give fewer [inference].
+- **DPO waves** (`dpo_waves`): 2,000 KodCode train-pool prompts per wave (§8.1 `sample`, wave k seeded k and
+  excluding the earlier DPO waves' prompts) × 4 samples at T 0.6 from the FTPO model, in groups of 4 engines (8,000
+  prompts) as above, verified (§8.3); the selection over all DPO waves after each group; groups stop at 8,000 pairs
+  (DeLoop's count, arXiv 2610.19376 App. G.1), after 12 waves (24,000 prompts), or when the pool runs out, and DPO
+  trains on every pair. At the SFT model's val rate (227 pairs from 512 prompts, §8.4) a group would give ≈3,500
+  pairs [estimate]; the FTPO model should loop less and so give fewer [inference].
 - **GPU shares**: the KV cache costs 2 × 24 layers × 6 heads × 128 × 2 bytes = 72 KiB per token, so of 94.5 GiB, 0.45
   holds EvalPlus's 20 samples of about 28K tokens after the weights, and 0.85 about 70 rollouts at the 16,384-token
   cap [arithmetic]; in (3) two 0.45 shares run side by side, FTPO or DPO training (≈14–16 GB, §8.5) inside one.
