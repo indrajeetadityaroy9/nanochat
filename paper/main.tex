@@ -106,13 +106,12 @@ language before the code. Only Codeforces solutions that finished before the gen
 language comes from Nemotron-ClimbMix, a pretraining mixture built by clustering Nemotron-CC web text and
 smollm-corpus~\cite{diao2025climb}, and from the LLM-generated mathematics of UltraData-Math L3, four of its five
 formats~\cite{wang2026ultradatamath}. The reasons for including synthetic code and natural language are given with the
-mixture below. Synthetic code, web text and mathematics are downloaded only in the amount the mixture uses, plus a 6\%
-margin; the other sources are downloaded in full.
+mixture below.
 
 \begin{table*}
   \caption{Pretraining sources after cleaning and decontamination. The synthetic code and the mathematics are generated
-  by LLMs. Train docs: training documents. GB: size of the published zstd-compressed Parquet files of the training and
-  validation splits ($10^9$ bytes). A pair of numbers gives Python, then C++.}
+  by LLMs. Train docs: training documents. GB: compressed size of the training and validation splits. A pair of
+  numbers gives Python, then C++.}
   \label{tab:sources}
   \small
   \begin{tabular}{lllrr}
@@ -183,59 +182,50 @@ margin; the other sources are downloaded in full.
   \end{tabular}
 \end{table*}
 
-\paragraph{Normalization.} Line endings are converted to LF and a leading byte-order mark is removed, as Python and
-C++ do when they read a source file; the text is otherwise unchanged. The same file appears in different sources with
-different line endings. After normalization these copies are byte-identical, so deduplication removes them.
-Normalization also keeps carriage returns and byte-order marks, which the interpreter and the compiler discard, out of
-the text the model learns to generate.
+\paragraph{Normalization.} Line endings are converted to LF and byte-order marks are removed; the text is otherwise
+unchanged. Copies of a file that differ only in these bytes then become identical, so deduplication removes them.
 
 \paragraph{Syntax check and repair.} Every Python file must parse as Python~3.12, except in the LLM-written
 exercises, the notebooks and the Codeforces solutions. The evaluation runs every Python answer with Python~3, so a
 training file that does not parse, such as Python~2 code or a file broken by anonymization, teaches syntax that fails
 before any test runs. DeepSeek-Coder also uses a compiler to remove code with syntax errors~\cite{guo2024deepseekcoder}.
-Both causes are mechanical, so a failing file is repaired when possible instead of being dropped. The repair applies
-the smallest combination of three fixes that makes the file parse: replacing The Stack v3's anonymization placeholders
-(such as \texttt{<EMAIL>}) with plain words, expanding tab indentation with Python~2's tab stops, and converting
-Python~2 syntax with 2to3. A file that no combination repairs is dropped.
+Both causes are mechanical, so a failing file is repaired when possible instead of being dropped: anonymization
+placeholders are replaced by plain words, tab indentation is expanded, and Python~2 syntax is converted to Python~3.
+A file that cannot be repaired is dropped.
 
-\paragraph{Exact deduplication.} Identical documents are removed across all sources; the first copy in a fixed source
-order is kept. Duplicates are repeated data, and repeating even a small part of the data degrades a
-model~\cite{hernandez2022repeated}. Deduplicating before the split also ensures that no text appears in both the
-training and the validation split.
+\paragraph{Exact deduplication.} Identical documents are removed across all sources, keeping one copy. Duplicates are
+repeated data, and repeating even a small part of the data degrades a model~\cite{hernandez2022repeated}.
+Deduplicating before the split also ensures that no text appears in both the training and the validation split.
 
 \paragraph{Decontamination.} A model that has seen a benchmark solution during training can reproduce it instead of
-solving the task, which inflates its score. Qwen2.5-Coder decontaminates its training data for this
-reason~\cite{hui2024qwen25coder}. A training document is removed if it shares a 10-gram of whitespace-separated words
-with a benchmark text. This is the rule of Qwen2.5-Coder~\cite{hui2024qwen25coder}, and DeepSeek-Coder's rule for
-texts of 10 words or more~\cite{guo2024deepseekcoder}. DeepSeek-Coder's exact match of shorter test strings is not
-used, because it would remove common lines such as \texttt{return x + y}. The 1,428 benchmark texts are the prompts
-and reference solutions of HumanEval+, MBPP+~\cite{liu2023evalplus} and HumanEval-X C++~\cite{zheng2023codegeex}, the
-C++ prompts of MultiPL-E~\cite{cassano2023multiple}, which have no reference solutions, and the HumanEval infilling
-programs~\cite{bavarian2022fim}. The filter removes 491,203 training documents (0.28\%). The removed documents match
-every HumanEval+ task, 372 of the 378 MBPP+ tasks and 157 of the 164 HumanEval-X C++ references. The rule also
-removes common code: for example, 8,539 documents of one source share a 10-gram with the reference solution of a
-primality test (HumanEval/31). Removing 0.28\% of the documents is an acceptable cost for keeping these benchmarks out
-of the training data. Two evaluated benchmarks are not covered by this filter: the original MBPP problems of the base
-model's 3-shot evaluation, of which 298 of the 500 statements share a 10-gram with 4,315 training documents, and
-LiveCodeBench~\cite{jain2024livecodebench}, whose overlap with the pretraining data is not measured. Validation
-documents are not filtered, so every likelihood measurement during training uses the same set.
+solving the task, which inflates its score. Following Qwen2.5-Coder, which decontaminates its data for this reason, a
+training document is removed if it shares a 10-gram of whitespace-separated words with a benchmark
+text~\cite{hui2024qwen25coder}. The 1,428 benchmark texts are the prompts and reference solutions of HumanEval+,
+MBPP+~\cite{liu2023evalplus} and HumanEval-X C++~\cite{zheng2023codegeex}, the C++ prompts of
+MultiPL-E~\cite{cassano2023multiple}, and the HumanEval infilling programs~\cite{bavarian2022fim}. The filter removes
+491,203 training documents (0.28\%), matching every HumanEval+ task, 372 of the 378 MBPP+ tasks and 157 of the 164
+HumanEval-X C++ references. The rule also removes common code, such as many implementations of a primality test that
+match a HumanEval reference solution; removing 0.28\% of the documents is an acceptable cost for keeping these
+benchmarks out of the training data. Two evaluated benchmarks are not covered by this filter: the original MBPP
+problems of the base model's 3-shot evaluation, of which 298 of the 500 statements share a 10-gram with 4,315 training
+documents, and LiveCodeBench~\cite{jain2024livecodebench}, whose overlap with the pretraining data is not measured.
+Validation documents are not filtered, so every likelihood measurement during training uses the same set.
 
 \paragraph{Train and validation split.} The validation split holds out 1\% of the corpus to measure how well the
-model predicts text it has not seen. Documents are assigned to a split by a hash of their repository for repository
-files and CodeXGLUE functions, of their problem for Codeforces solutions, and of the document itself for the other
-sources. Splitting by repository keeps all files of a repository on the same side: files of one repository share
-names, helper functions and style, so a split by file would put files closely related to a validation file in the
-training split. Codeforces solutions are split by problem because each problem has several solutions. One source of
-leakage remains: an LLM-rewritten version of a validation file, or an exercise generated from it, can be in the
-training split, because the synthetic sources do not record which file each document was generated from.
+model predicts text it has not seen. Repository files and CodeXGLUE functions are split by repository, Codeforces
+solutions by problem, and the other sources by document. Splitting by repository keeps all files of a repository on
+the same side: files of one repository share names, helper functions and style, so a split by file would put files
+closely related to a validation file in the training split. Codeforces solutions are split by problem because each
+problem has several solutions. One source of leakage remains: an LLM-rewritten version of a validation file, or an
+exercise generated from it, can be in the training split, because the synthetic sources do not record which file each
+document was generated from.
 
 \paragraph{Repository-level documents.} A file uses definitions from the files it imports, and a model trained on
 single files never sees them together. Following DeepSeek-Coder~\cite{guo2024deepseekcoder}, the files of each
-repository are grouped by their import dependencies (Python imports and C++ includes, resolved within the repository)
-and sorted in dependency order: every file comes after the files it imports, except within import cycles, so the
-definitions a file uses appear before it in the context. Each file starts with a comment that gives its path. In the
-file-level stage, each group of connected files is one document. In the repository-level stage, all files of a
-repository, from the three repository sources of its language, form one document, so this stage trains on whole
+repository are grouped by their import dependencies and sorted so that every file comes after the files it imports,
+which places the definitions a file uses before it in the context. Each file starts with a comment that gives its
+path. In the file-level stage, each group of connected files is one document. In the repository-level stage, all files
+of a repository, from the three repository sources of its language, form one document, so this stage trains on whole
 repositories.
 
 \paragraph{Mixture.} Pretraining runs in two stages with the mixtures in Table~\ref{tab:mixture}. The choices and
@@ -317,7 +307,7 @@ the same prompt. Exercism and KodCode have about one trace per prompt.
 \paragraph{Split.} The validation split holds out 1\% of the problems, not of the prompts. The same problem appears in
 several sources with different wrappers, for example a language header or a function header written in two forms, so
 a split by prompt would leave other versions of a validation problem in the training split. A problem is therefore
-identified by its statement with these wrappers removed, lowercased and reduced to its words. In an earlier version of
+identified by its statement with these wrappers removed and its case and spacing normalized. In an earlier version of
 the dataset without KodCode and without the cap, a split by exact prompt left 928 of 2,921 validation problems with
 their statement in the training split, and a split by problem left none. In the same version, no SFT prompt shared more
 than 18.6\% of the distinctive 8-word sequences of any of the 454 LiveCodeBench problems used in the
@@ -329,14 +319,14 @@ evaluation~\cite{jain2024livecodebench}; KodCode's prompts were not measured.
 RL needs problems whose tests decide correctness. KodCode is the only SFT source with tests, so the RL problems are
 the KodCode examples of the SFT training split: 250,646 distinct prompts, each with KodCode's tests, either a pytest
 file for a function or standard-input test cases for a program~\cite{xu2025kodcode}. A test can reward a correct answer
-only if it calls what the prompt asks for. Three kinds of examples are therefore excluded: prompts that do not name
-every function their tests import, since a correct answer that uses another name would fail; pytest examples whose
-tests name no function; and problems that test library APIs, because the installed library versions differ from
-KodCode's (in a sample of 2,000 examples, the reference solutions of 45 of the 171 such examples fail). This leaves
-180,911 problems: 107,244 functions to complete, 52,740 functions described in prose and 20,927 standard-input
-programs. The test harness is checked in both directions. It passes the DeepSeek-R1 solutions of 2,995 of 3,000
-sampled problems, and a deliberately wrong program passes the tests of 3 of them. A pass on such a problem is not
-counted, because its tests cannot distinguish a wrong answer from a correct one. RL is evaluated on the KodCode
+only if it calls what the prompt asks for. Two kinds of problems are therefore excluded: problems whose prompt does
+not name every function their tests call, including tests that name no function, since a correct answer that uses
+another name would fail; and problems that test library APIs, because the installed library versions differ from
+KodCode's and even reference solutions can fail. This leaves 180,911 problems: 107,244 functions to complete, 52,740
+functions described in prose and 20,927 standard-input programs. The test harness is checked in both directions. It
+passes the DeepSeek-R1 solutions of 2,995
+of 3,000 sampled problems, and a deliberately wrong program passes the tests of 3 of them. A pass on such a problem is
+not counted, because its tests cannot distinguish a wrong answer from a correct one. RL is evaluated on the KodCode
 examples of the SFT validation split, which are also held out from the training problems by question and by test
 file. This is needed because KodCode writes one question in several styles with different statements, so the SFT split
 by problem can place two styles of the same question on different sides. Of the 2,547 examples, 1,115 remain and 785
@@ -393,20 +383,13 @@ file-level sources, each in proportion to its share of the file-level stage's by
 tokenizer's training data should be representative of the model's training data, since tokens that are frequent in
 the tokenizer data but rare in the model data are under-trained~\cite{land2024magikarp}.
 
-\subsection{Tokenizing documents}
-
-Each document is tokenized separately, without BOS or padding tokens. Text that looks like a special token is
-tokenized as ordinary text, so a document cannot produce a BOS or a FIM token. Each repository file ends with a line
-break, added when it is missing, so that two concatenated files never share a line.
-
 \subsection{Packing}
 
-\paragraph{Chunking.} Documents are packed into training sequences of the stage's context length, 8,192 or 32,768
-tokens. A document that fits in a sequence is one chunk, and the model is trained to predict the BOS token after it,
-so it learns where a document ends. A longer document is cut into chunks. Each cut is placed at the last statement
-boundary that fits (from a tree-sitter parse, for repository code), otherwise after the last line break, otherwise
-before the last token that starts a character. Cuts at statement boundaries keep statements whole, and no cut splits
-a multi-byte character.
+\paragraph{Chunking.} Each document is tokenized separately and packed into training sequences of the stage's
+context length, 8,192 or 32,768 tokens. A document that fits in a sequence is one chunk, and the model is trained to
+predict the BOS token after it, so it learns where a document ends. A longer document is cut into chunks, each cut at
+the last statement boundary that fits (from a tree-sitter parse, for repository code) or otherwise at a line break, so
+chunks keep statements and lines whole.
 
 \paragraph{Document masking.} Each chunk attends only to earlier tokens of the same chunk, not to other chunks in the
 same sequence. Causal masking within each document gave lower perplexity than causal attention across concatenated
@@ -415,9 +398,7 @@ documents~\cite{zhao2024seqcomp}.
 \paragraph{Best-fit packing.} Chunks are placed by Best-Fit-Decreasing: longest first, each into the sequence with the
 least free space that can hold it, otherwise into a new sequence. No chunk is truncated to fit a sequence; packing with
 fewer truncations improved language modeling over the usual concatenate-then-split method~\cite{ding2024fewer}. The
-two stages use disjoint parts of the dataset, so no training document is packed twice. All random choices in packing
-and FIM come from a ChaCha8 random number generator seeded by the document, the chunk and the source, so the packed
-data does not depend on the order in which the work runs.
+two stages use disjoint parts of the dataset, so no training document is packed twice.
 
 \subsection{Fill-in-the-middle}
 
@@ -427,8 +408,7 @@ order~\cite{bavarian2022fim}. The model is trained to predict the BOS token afte
 middle ends. Half of the repository-code chunks become FIM examples (FIM rate 0.5). The choice is made for each chunk
 after a document is cut to the context length, which is called context-level FIM; half of the examples are PSM and
 half SPM. The middle is a random character span in 10\% of the examples. Otherwise it follows the syntax tree
-(AST-FIM): with equal probability, one syntax-tree node chosen in proportion to its size in bytes, or the span of
-whole nodes that best overlaps a random character span~\cite{gong2025astfim}.
+(AST-FIM): it is a single syntax-tree node or a span of whole nodes, with equal probability~\cite{gong2025astfim}.
 
 \paragraph{Why FIM\@.} The evaluation includes infilling (HumanEval single-line, multi-line and random-span infilling),
 which a model trained only left to right cannot do. FIM rates up to 0.9 did not reduce left-to-right performance,
@@ -448,19 +428,16 @@ break. Without a correction, no AST-FIM example in PSM order would have a prefix
 middle made of whole lines, which is the layout of line-level infilling: all 1,033 single-line and 5,815 multi-line
 HumanEval infilling prefixes end with a line break, and every reference middle ends with one. Therefore, when a syntax
 middle starts a line, with probability 0.5 it also includes the line's indentation, and its final line break when it
-ends at one. In the packed data, 35.9--36.5\% of the PSM middles in the Python repository sources (22.0\% in Stack-Edu
-C++) are whole lines, and 21.6--25.4\% start a line and stop before its line break, so both layouts are trained.
+ends at one. In the packed Python repository data, about 36\% of the PSM middles are whole lines and 22--25\% start a
+line and stop before its line break, so both layouts are trained.
 AST-FIM reports that closer training and test distributions give stronger performance~\cite{gong2025astfim}.
 
 \subsection{Batching and data order}
 
-A training step has 15 micro-batches of 98,304 tokens: 12 sequences of 8,192 tokens in the file-level stage or 3
-sequences of 32,768 tokens in the repository-level stage, 1,474,560 tokens per step in both. Sequences are assigned to
-sources in proportion to the mixture weights with a deterministic low-discrepancy (golden-ratio) sequence: sequence
-$n$ goes to the source whose interval of the cumulative weights contains the fractional part of
-$(n + 1)(\sqrt{5} - 1)/2$, so every prefix of training follows the mixture weights closely. Each source's sequences
-are read in a random order with a fixed seed. The loss excludes padding tokens and the BOS token after a chunk that
-does not end its document. Document masking is implemented with FlashAttention's variable-length attention.
+A training step has 1,474,560 tokens: 180 sequences of 8,192 tokens in the file-level stage or 45 sequences of 32,768
+tokens in the repository-level stage. Sequences from the different sources are interleaved deterministically in
+proportion to the mixture weights, so every part of training follows the mixture; within a source, sequences are read
+in a random order. The loss excludes padding tokens and the BOS token after a chunk that does not end its document.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
