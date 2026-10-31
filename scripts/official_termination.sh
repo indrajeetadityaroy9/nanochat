@@ -26,8 +26,10 @@ for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECK
 [ -n "$CHECKPOINT" ] || { echo "no checkpoint or weights of step $STEP in $RUN_DIR" >&2; exit 1; }
 OUT=$RUN_DIR/$KIND-$STEP${TAG:+-$TAG}.json W=/workspace/nanochat
 docker build -q -f "$ROOT/docker/Dockerfile.eval" -t nanochat-eval "$ROOT/docker" > /dev/null
+# XDG_CACHE_HOME as the nanochat image's: EvalPlus's HumanEval+ and its ground truth cached in artifacts/cache/evalplus
 DOCKER=(docker run --rm --ipc=host --init --network host --ulimit core=0 --user "$(id -u):$(id -g)" -e HOME=/tmp
-        -e PYTHONPATH=$W -v "$ROOT":$W -v "$(realpath "$ROOT/artifacts")":$W/artifacts -w $W)
+        -e XDG_CACHE_HOME=$W/artifacts/cache -e PYTHONPATH=$W -v "$ROOT":$W
+        -v "$(realpath "$ROOT/artifacts")":$W/artifacts -w $W)
 
 mkdir -p "$ROOT/artifacts/cache"
 exec 9> "$ROOT/artifacts/cache/termination.lock"

@@ -12,38 +12,53 @@
 # (eval/official_tokenize.py). The parser is registered in every server process by eval/official_site/sitecustomize.py
 # (NANOCHAT_REASONING_PARSER).
 #
-#   scripts/official_reasoning.sh <run name> <step> [<problems per benchmark, a smoke>]
+#   [MODEL=<model dir> TAG=<name>] scripts/official_reasoning.sh <run name> <step> [<problems per benchmark, a smoke>]
 #
 # Outputs in RUNS/<run>/official-<step>/: model/, tokenize-{evalplus,lcb}.json, evalplus/ (each samples file with its
 # .endings.jsonl), lcb/, server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's closure rate,
-# pass@1 and pass@1 given closure); RUNS/<run>/termination-<step>.json. VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as
-# scripts/official_eval.sh.
+# pass@1 and pass@1 given closure); RUNS/<run>/termination-<step>.json (generated, then scored in a CPU container).
+# With MODEL and TAG, a model directory in the export's format (onpolicy/train.py's) is evaluated in place of the
+# step's export, its outputs in RUNS/<run>/official-<step>-<TAG>/ with no termination probe (scripts/onpolicy.sh
+# evaluates it). VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as scripts/official_eval.sh.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2 LIMIT=${3:-}
-for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
-[ -n "$CHECKPOINT" ] || { echo "no checkpoint or weights of step $STEP in $RUN_DIR" >&2; exit 1; }
-OUT=$RUN_DIR/official-$STEP
+RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2 LIMIT=${3:-} MODEL=${MODEL:-} TAG=${TAG:-}
+[ -z "$MODEL" ] || [ -n "$TAG" ] || { echo "MODEL needs TAG" >&2; exit 1; }
+CHECKPOINT=
+[ -n "$MODEL" ] ||
+  for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
+[ -n "$MODEL$CHECKPOINT" ] || { echo "no checkpoint or weights of step $STEP in $RUN_DIR" >&2; exit 1; }
+OUT=$RUN_DIR/official-$STEP${TAG:+-$TAG}
 mkdir -p "$OUT"/{model,evalplus,lcb}
 W=/workspace/nanochat C=/workspace/nanochat/${OUT#"$ROOT"/} PORT=${PORT:-8000} SERVER=nanochat-eval-serve-$$
 LCB_WINDOW=(release_v6 2024-08-01 2025-05-01)  # lcb_runner's --release_version, --start_date, --end_date
 docker build -q -f "$ROOT/docker/Dockerfile.eval" -t nanochat-eval "$ROOT/docker" > /dev/null
 
+# XDG_CACHE_HOME as the nanochat image's (docker/Dockerfile): EvalPlus's datasets and ground-truth caches
+# (artifacts/cache/evalplus) persist across its containers instead of downloading and recomputing in each
 DOCKER=(docker run --rm --ipc=host --init --network host --ulimit memlock=-1 --ulimit stack=67108864:-1 --ulimit core=0
-        --user "$(id -u):$(id -g)" -e HOME=/tmp -e HF_HOME=$W/artifacts/cache/huggingface -e PYTHONPATH=$W
+        --user "$(id -u):$(id -g)" -e HOME=/tmp -e XDG_CACHE_HOME=$W/artifacts/cache
+        -e HF_HOME=$W/artifacts/cache/huggingface -e PYTHONPATH=$W
         -v "$ROOT":$W -v "$(realpath "$ROOT/artifacts")":$W/artifacts -w $W)
 CPU=("${DOCKER[@]}" --cpuset-mems="${CPU_NODE:-0}" -e OPENBLAS_NUM_THREADS=1 -e OMP_NUM_THREADS=1 -e MKL_NUM_THREADS=1)
 step() {  # <name> <command...>: run, and append the wall time to timings.tsv
   local start=$SECONDS; "${@:2}"; printf '%s\t%d\n' "$1" $((SECONDS - start)) >> "$OUT/timings.tsv"
 }
 
-[ -f "$OUT/model/model.safetensors" ] ||
-  step export "${CPU[@]}" nanochat python -m inference.export_hf "${CHECKPOINT/#$ROOT/$W}" $C/model --chat
+if [ -n "$MODEL" ]; then
+  [ -f "$OUT/model/model.safetensors" ] || cp -r "$MODEL"/. "$OUT/model/"
+else
+  [ -f "$OUT/model/model.safetensors" ] ||
+    step export "${CPU[@]}" nanochat python -m inference.export_hf "${CHECKPOINT/#$ROOT/$W}" $C/model --chat
+fi
 "${DOCKER[@]}" nanochat-eval cp /opt/tools.json $C/tools.json
-[ -f "$RUN_DIR/termination-$STEP.json" ] || [ -n "$LIMIT" ] ||
+PROBE=${RUN_DIR/#$ROOT/$W}/termination-$STEP.json
+if [ -z "$MODEL" ] && [ ! -f "$RUN_DIR/termination-$STEP.json" ] && [ -z "$LIMIT" ]; then
   step termination "${DOCKER[@]}" --device nvidia.com/gpu=all -e VLLM_CACHE_ROOT=$W/artifacts/cache/vllm \
     -e PYTHONPATH=$W/eval/official_site:$W ${VLLM_GPU_MEMORY_UTILIZATION:+-e VLLM_GPU_MEMORY_UTILIZATION} \
-    nanochat-eval python -m eval.official_termination $C/model "${RUN_DIR/#$ROOT/$W}/termination-$STEP.json"
+    nanochat-eval python -m eval.official_termination $C/model "$PROBE.generated"
+  "${CPU[@]}" nanochat-eval python -m eval.official_termination --score "$PROBE.generated" "$PROBE"
+fi
 
 docker run -d --rm --name $SERVER --ipc=host --init --network host --ulimit core=0 --device nvidia.com/gpu=all \
   --user "$(id -u):$(id -g)" -e HOME=/tmp -e VLLM_CACHE_ROOT=$W/artifacts/cache/vllm \
