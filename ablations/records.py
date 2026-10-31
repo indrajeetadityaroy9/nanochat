@@ -16,7 +16,7 @@ from omegaconf import DictConfig, OmegaConf
 import metrics
 from eval import suite
 from paths import POSTTRAIN_RESULTS, PRETRAIN_RESULTS
-from run import EVALUATED, RunConfig, plan_of, run_name
+from run import EVALUATED, RunConfig, run_name
 
 
 def results_dir(config: RunConfig) -> Path:
@@ -56,12 +56,12 @@ def export_curves(name: str, experiment: str, fields: dict[str, int] | None = No
 
 
 def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
-    """A run's line of <results>/<experiment>.jsonl; its measures from its final checkpoint's evaluation (none with
-    generate "none": its log's val records hold what it measured)."""
-    name, run = run_name(config), plan_of(config)
-    stopped = metrics.diverged(log)
+    """A run's line of <results>/<experiment>.jsonl; its measures from the evaluation of the last step of the plan it
+    trained by (its run record's; none with generate "none": its log's val records hold what it measured)."""
+    name, stopped = run_name(config), metrics.diverged(log)
     # the first attempt's run record: a resumed attempt's flops_per_token is at its own stage's context
     started = next(r for r in log if r["kind"] == "run")
+    run = started["plan"]
     peaks = [r for r in log if r["kind"] in ("stage", "end")]
     measured = errors = offset = efficiency = None
     if stopped is None:
@@ -70,8 +70,8 @@ def record(config: RunConfig, experiment: str, log: list[dict]) -> dict:
                       "peak_memory_bytes": max(r["peak_memory_bytes"] for r in peaks),
                       "peak_reserved_bytes": max(r["peak_reserved_bytes"] for r in peaks)}
     if stopped is None and config.generate in EVALUATED:
-        evaluation = json.loads(suite.evaluation_path(name, run.max_steps).read_text(encoding="utf-8"))
-        measured = metrics.measures(evaluation, metrics.train_steps(log), repo_level_start=run.repo_level_start)
+        evaluation = json.loads(suite.evaluation_path(name, run["max_steps"]).read_text(encoding="utf-8"))
+        measured = metrics.measures(evaluation, metrics.train_steps(log), repo_level_start=run["repo_level_start"])
         errors, offset = metrics.measure_errors(evaluation), evaluation["32k"]["offset_bpb"]["code"]
     return {"experiment": experiment} | suite.record(name, log) | {
         "config": dataclasses.asdict(config), "measures": measured, "errors": errors, "offset_bpb": offset,

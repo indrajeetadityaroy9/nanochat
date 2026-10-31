@@ -19,7 +19,8 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 |`ablations/peak_lr.py` (`lr_multiplier`); `conf/experiment/peak_lr_d24.yaml`; `results/pretrain/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
 |`ablations/records.py` (`Records`, `record`, `results_dir`, `curves`, `export_curves`); `results/pretrain/trajectory.json`, `results/pretrain/pretrain-curves.jsonl`|§6|
 |`scripts/setup.sh`, `scripts/container.sh`, `scripts/release.sh`, `paths.py`|§7, §9|
-|`docker/Dockerfile`, `pyproject.toml`, `uv.lock`|§8|
+|`docker/Dockerfile`, `docker/Dockerfile.dockerignore`, `pyproject.toml`, `uv.lock`|§8|
+|`conf/experiment/sft.yaml`, `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`)|§10|
 
 ## 1. Data and stages
 
@@ -108,7 +109,7 @@ flat across a 2× batch at 8× Chinchilla (arXiv 2509.02046 App. C.9 Table 85: 1
   (DeepSeek LLM §2.3). Adam is invariant to the gradient's scale (arXiv 1412.6980 §2.1) and Newton–Schulz divides its
   input by its norm (`torch/optim/_muon.py` `_zeropower_via_newtonschulz`), so under a slowly varying gradient scale
   the clip damps only spikes [inference]. The largest norm in the earlier recipe's `peak_lr` runs is 10.76 (d8 at 200,
-  ×1, step 14,202; that curves file is not on master), far below the ~5e7–2e11 at which Megatron-LM PR 5395 reports a
+  ×1, step 14,202) [unverified: no record], far below the ~5e7–2e11 at which Megatron-LM PR 5395 reports a
   1.0 clip stalling training (an SFT of Qwen3.5-35B-A3B; Muon and AdamW alike: the clipped gradients fall below the
   optimizers' eps floors).
 
@@ -120,7 +121,7 @@ flat across a 2× batch at 8× Chinchilla (arXiv 2509.02046 App. C.9 Table 85: 1
 | Gradient clip | 1.0 | 1.0 (DeepSeek LLM §2.3) |
 
 **NorMuon's adoption.** A screen at d16 at 20 tokens per parameter, one seed per arm paired with base seed 0, at ×1
-(the law's lr, below the base multiplier) [unverified: no record; the screen's code is not on master]: NorMuon's
+(the law's lr, below the base multiplier) [unverified: no record]: NorMuon's
 training loss over the last 50% of steps −0.0029 below the base's (negative in every hundred-step window), every
 bits-per-byte measure better by 0.0003–0.0013. One seed cannot resolve that: base seeds 1 and 0 differ by
 0.0014–0.0027 bpb and the treatment effect's seed spread is unestimated. NorMuon is adopted on the literature: 11.31%
@@ -227,7 +228,7 @@ peak lr lies between the × 1 and × 2 arms' (1.5443e-3, 3.0886e-3): the law low
 `conf/run.yaml` sets every run's `learning_rate_scale` to the resolver `${lr_multiplier:}`, which fits the records at
 launch (no stored copy); the `peak_lr_d24` experiment sets the scale per arm.
 
-**Earlier recipe** (`results/peak_lr.jsonl` of the earlier recipe, not on master; code bits per byte; no run
+**Earlier recipe** (`peak_lr.jsonl` of the earlier recipe [unverified: no record]; code bits per byte; no run
 diverged). 11 arms (× 1–8 at d8 at 5 and at 200, × 1–4 at d24 at 5) under the reference tokenizer's dataset, no
 output-logit cap, nanochat's per-window FLOP count for the law's lr (Eq. 2's M, §2, lowers it by 1/1.1186 at d8 and
 1/1.0776 at d24, hence the re-based vertices) and an earlier mixture (eleven corpora at 8K; at 32K file-level Python
@@ -275,6 +276,7 @@ records), `kind`, `time`, `step`):
 | `stage` | the repository stage's first step | `stage` with its `mixture`, `model_flops_per_token` (32K), `peak_memory_bytes` and `peak_reserved_bytes` (`torch.cuda.max_memory_allocated`/`max_memory_reserved` since the process start: the file-level stage, or its part after a resume); both peaks are reset after this record |
 | `end` | after the last step | `peak_memory_bytes`, `peak_reserved_bytes` since the reset (the repository stage) or the process start |
 | `failure` | a non-finite loss or gradient norm | only `step`; training then stops |
+| `val` | each step in `validations` (an SFT run's, `run.py` `validation_steps`) | `loss` (mean over the last stage's val labels), `labels` |
 
 A step's `loss` is the mean next-token loss in nats over its valid labels (Σ loss / Σ labels pooled over the
 micro-batches; `corpus/loader.py` `IGNORE_INDEX` marks padding and a BOS that is no target), in fp32 on the capped
@@ -379,9 +381,10 @@ steps 1,000 and 2,000 (the v projections' 1e-2). By checkpoint 20,000 layers 5, 
 saturation (input past ±10 at 10–34%), layers 7, 21 and 23 not (at least 96%), and the gated embedding's norm
 reached 0.76–1.41× the value's in layers 13–19 (0.07–0.10× at checkpoint 1,000).
 
-**Job** (`run.job`): the run is skipped if every checkpoint's evaluation exists or it diverged; else training
-(resuming, below), then the unevaluated checkpoints' evaluations, overlapped (`run.evaluations`,
-`docs/evaluation.md` §1), each phase in a fresh process. Runs are not re-checked against the current recipe.
+**Job** (`run.job`): the run is skipped if every checkpoint's evaluation exists (with `generate` "none": every
+checkpoint) or it diverged; else training (resuming, below), then the unevaluated checkpoints' evaluations, overlapped
+(`run.evaluations`, `docs/evaluation.md` §1), each phase in a fresh process. Runs are not re-checked against the
+current recipe.
 
 **Checkpoints.** Full state (`checkpoint-<step>.pt`: model, optimizers, model config, stage rows) is saved at
 `run.checkpoint_steps`, `round(steps·k/n)` for k = 1…n plus `repo_level_start` when n > 1, the only checkpoints
@@ -406,9 +409,13 @@ step, compilation without a save, 3.31 s): ≈ 190 s over the base run's 95 save
 
 **Resume and divergence.** A relaunched run resumes from its newest full-state checkpoint (weights, optimizer state,
 scheduler, data position); a run with one checkpoint restarts from step 0. A resumed attempt's records supersede the
-earlier ones for the steps it repeats (`metrics.train_steps`). A non-finite loss or gradient norm writes a `failure`
-record and ends training; the sweep continues, a rerun skips the run (`metrics.diverged`), and its experiment record
-has `diverged_at` set and `measures`, `errors`, `offset_bpb` and `efficiency` null.
+earlier ones for the steps it repeats (`metrics.train_steps`). [measured: 4 layers at width 768, 24 steps of two
+32,768-token micro-batches, the 32K stage from step 20] Resumed from the full states at steps 8 and 20 (the latter the
+stage switch), the first step's loss, gradient norm and lr equal the uninterrupted run's bitwise; later steps differ
+as two uninterrupted processes do (loss ≤ 6e-6, gradient norm ≤ 3e-5 relative; §8), lr bitwise at every step.
+A non-finite loss or gradient norm writes a `failure` record and ends training; the sweep continues, a rerun skips
+the run (`metrics.diverged`), and its experiment record has `diverged_at` set and `measures`, `errors`, `offset_bpb`
+and `efficiency` null.
 
 **Experiment records** (`ablations/records.py` `Records`, an experiment's Hydra callback, when the sweep ends), in
 `results/pretrain/`, or in `results/posttrain/` for a sweep of runs from a base checkpoint (`results_dir`:
@@ -416,7 +423,7 @@ has `diverged_at` set and `measures`, `errors`, `offset_bpb` and `efficiency` nu
 
 | File | Content |
 |---|---|
-| `<experiment>.jsonl` | per run: `experiment`, `eval/suite.py` `record` (`run_name`, the run log's non-train records, the checkpoints' evaluations), `config`, `measures` and `errors` (`docs/evaluation.md` §5), `offset_bpb` (32K code bits per byte by byte offset), `efficiency` (the first `run` record's `num_parameters`, `flops_per_token` and `model_flops_per_token`; the peak allocated and reserved bytes over the `stage` and `end` records), `diverged_at` |
+| `<experiment>.jsonl` | per run: `experiment`, `eval/suite.py` `record` (`run_name`, the run log's non-train records, the checkpoints' evaluations), `config`, `measures` and `errors` (`docs/evaluation.md` §5; from the evaluation at the last step of the first `run` record's `plan`), `offset_bpb` (32K code bits per byte by byte offset), `efficiency` (the first `run` record's `num_parameters`, `flops_per_token` and `model_flops_per_token`; the peak allocated and reserved bytes over the `stage` and `end` records), `diverged_at` |
 | `<experiment>-curves.jsonl` | per run (`curves`): `experiment`, `run_name`, `stages` (each `stage` record's `step`, `seq_len`, `tokens`), `validations` (each `val` record's `step`, `loss`, `labels`) and its train records as columns (`metrics.curves`: one list per field in step order, None where a record lacks it) |
 
 One run's curves, at any time: `python -m ablations.records <run_name> <experiment> [field[:n] ...]` (`export_curves`)

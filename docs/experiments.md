@@ -13,16 +13,15 @@ reasoning not measured; [estimate]; [unverified] a figure without a record, or a
 | `results/pretrain/tokenizer_split_merge-intrinsic.json`, `results/pretrain/tokenizer_split_merge-data.json` | §2 |
 | `results/pretrain/muon_wd_timescale_20tpp.jsonl`, `results/pretrain/scalar_learning_rates.json[l]` | §1, §4 |
 | Branches (on `origin`) `qkv-epi`, `mlp-out-mix`, `mlp-out-mix-land`, `mlp-out-mix-v2`, `window-attn` | §5 |
-| Branch `scalar-learning-rates` (on `origin`) | §4 |
 | Removed experiment code: the D6/D7 experiments, the tokenizer runs, `RunConfig.muon_tau_scale`, `adamw_learning_rate_scale`, `ablations/contrast.py`, the `logit_softcap` experiment | §1–§4 |
 | Removed: the native vLLM model class (`inference/vllm_model.py`), `eval/rescore.py`, `scripts/standard_eval.sh`; the harness's standard-benchmark modes (`bddeb54`: greedy, sampled, MBPP 3-shot, infilling, the reasoning protocol, `eval/livecodebench.py`); SantaCoder FIM, the infilling 1@10 mode and the CrossCodeEval scores (`7f02786`) | §6 |
 
 ## 1. Protocol and status
 
 **Status.** Every experiment ran as `run.py` `RunConfig` arms on the base model's code paths, in the earlier
-multi-depth code where depth, seed and tokenizer were `RunConfig` fields; the code now runs only the base run and the
-`peak_lr` calibration (`docs/training.md` §5, §6). Names, records and divergence handling: `docs/training.md` §6;
-measures and error bars: `docs/evaluation.md` §5.
+multi-depth code where depth, seed and tokenizer were `RunConfig` fields; the code now runs only the base run, the
+`peak_lr` calibration (`docs/training.md` §5, §6) and the SFT runs (`docs/post-training.md` §4). Names, records and
+divergence handling: `docs/training.md` §6; measures and error bars: `docs/evaluation.md` §5.
 
 | Experiment | Decides | Setting | Designed runs | Status |
 |---|---|---|---|---|
@@ -47,7 +46,7 @@ tokens at peak lr 4.667e-3 (law × 2.797, the earlier recipe's multiplier, `docs
 with scale: optimizer speedups over a well-tuned AdamW fall from 1.3–1.4× below 1B to 1.1× at 1.2B (arXiv 2509.02046
 §1 Fig. 1), and vanish under incorrect hyperparameter scaling (arXiv 2512.05620 Abstract).
 
-**Shared tests** (`ablations/contrast.py`, removed). An arm against its baseline over the seeds where both have an
+**Shared tests** (no longer in the code). An arm against its baseline over the seeds where both have an
 evaluation, α = 0.05:
 - *Parsing* (MBPP+): per problem, the seeds whose healed greedy completion compiles under the arm minus under the
   baseline; the exact sign test (`scipy.stats.binomtest`) over the non-zero problems (McNemar's exact test at one
@@ -284,8 +283,8 @@ Verdict: not run; one lr for every group (basis: `docs/training.md` §3).
 
 **Scalar learning rates (`scalar_learning_rates`, D6).** `x0_lambdas` and `resid_lambdas` (1-D, AdamW) at the
 per-group lrs 0.5 and 0.005 × √(B/2^19) (0.375 and 0.00375 at 294,912 tokens per step), every other group unchanged:
-a gap from the shared lr too large to bound from the literature. One run (branch `scalar-learning-rates`, statistics
-under `torch.no_grad`), d16 at 20, against D7's τ×1 seed 0 (trees differing by the field). Rule: adopt iff code better
+a gap from the shared lr too large to bound from the literature. One run (statistics under `torch.no_grad`), d16 at
+20, against D7's τ×1 seed 0 (configurations differing by the field). Rule: adopt iff code better
 by > 0.0094 and MBPP+ parsing not worse. Record (`results/pretrain/scalar_learning_rates.json` `analysis`, `.jsonl`):
 code 0.42635 against 0.42724 (−0.0009, equal); 32K code 0.40815 against 0.40966; train loss over the last half −0.0022;
 MBPP+ parsing worse (9 problems parse more under it, 35 under the baseline, p = 1.1e-4); pooled unparsed 0.120 against
