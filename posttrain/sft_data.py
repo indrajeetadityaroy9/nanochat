@@ -1,9 +1,10 @@
 """
-The SFT corpus (docs/post-training.md §11.2): the reasoning traces of Nemotron-Cascade's SFT stages 1 and 2 (code)
-and of Nemotron-SFT-Competitive-Programming-v2 (Python, C++, Exercism), rendered in §11.1's format (render), filtered,
-at most CAP traces per prompt in each group, split by problem (problem) into train and val, tokenized and packed whole
-into 32,768-token rows by the base's packer (corpus/pack.py), one attention segment per trace. Each document's context
-(the prompt and THINK) is written as <split>.context, whose labels the loader ignores (corpus/loader.py).
+The SFT corpus (docs/post-training.md §11.2): the reasoning traces of Nemotron-Cascade's SFT stages 1 and 2 (code),
+of Nemotron-SFT-Competitive-Programming-v2 (Python, C++, Exercism) and of KodCode-V1-SFT-R1 (its R1-verified rows),
+rendered in §11.1's format (render), filtered, at most CAPS traces per prompt in each group, split by problem (problem)
+into train and val, tokenized and packed whole into 32,768-token rows by the base's packer (corpus/pack.py), one
+attention segment per trace. Each document's context (the prompt and THINK) is written as <split>.context, whose
+labels the loader ignores (corpus/loader.py).
 
 python -m posttrain.sft_data
 """
@@ -12,10 +13,12 @@ import hashlib
 import json
 import re
 import shutil
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import pyarrow.parquet as pq
 
 from corpus import decontaminate, pack
 from corpus.layout import TOKEN_DTYPE, split_path
@@ -26,16 +29,25 @@ from native import corpus_crate
 from paths import ARTIFACTS
 from posttrain.sft import END_THINK, NAME, SFT_STAGE, THINK
 
-SOURCE = ARTIFACTS / "posttrain" / "nvidia"
-# Each group's files (globs under SOURCE) and row format, in the order duplicates are resolved (the first kept)
+SOURCE = ARTIFACTS / "posttrain"
+# Each group's files (globs under SOURCE) and row format, in the order duplicates are resolved (the first kept).
+# KodCode's `train` split holds the rows whose R1 solution passed its tests (r1_correctness True; the failed ones are
+# the `incorrect` split) and leaves out KodCode's benchmark-similar questions (cosine similarity > 0.95 to HumanEval,
+# MBPP, BigCodeBench or LiveCodeBench, arXiv 2503.02951 §3.2; the `use_with_caution` split)
 GROUPS = {
-    "cascade_stage1": ("Nemotron-Cascade-SFT-Stage-1/code/*.jsonl", "cascade"),
-    "cascade_stage2": ("Nemotron-Cascade-SFT-Stage-2/code/*.jsonl", "cascade"),
-    "cp_python": ("Nemotron-SFT-Competitive-Programming-v2/data/competitive_programming_python_*.jsonl", "competitive"),
-    "cp_cpp": ("Nemotron-SFT-Competitive-Programming-v2/data/competitive_programming_cpp_*.jsonl", "competitive"),
-    "cp_exercism": ("Nemotron-SFT-Competitive-Programming-v2/data/exercism.jsonl", "exercism"),
+    "cascade_stage1": ("nvidia/Nemotron-Cascade-SFT-Stage-1/code/*.jsonl", "cascade"),
+    "cascade_stage2": ("nvidia/Nemotron-Cascade-SFT-Stage-2/code/*.jsonl", "cascade"),
+    "cp_python": ("nvidia/Nemotron-SFT-Competitive-Programming-v2/data/competitive_programming_python_*.jsonl",
+                  "competitive"),
+    "cp_cpp": ("nvidia/Nemotron-SFT-Competitive-Programming-v2/data/competitive_programming_cpp_*.jsonl",
+               "competitive"),
+    "cp_exercism": ("nvidia/Nemotron-SFT-Competitive-Programming-v2/data/exercism.jsonl", "exercism"),
+    "kodcode": ("KodCode/KodCode-V1-SFT-R1/data/train-*.parquet", "kodcode"),
 }
-CAP = 4                 # traces per prompt in each group, drawn at random
+# Traces per prompt in each group, drawn at random; None: every trace. The long-trace groups (many traces per prompt):
+# the largest cap in {2, 1} at which 2 epochs of the packed train rows stay within 12.5B tokens (docs/post-training.md
+# §11.2); Exercism and KodCode as their data gives (about one trace per problem)
+CAPS = {"cascade_stage1": 2, "cascade_stage2": 2, "cp_python": 2, "cp_cpp": 2, "cp_exercism": None, "kodcode": None}
 VAL_SHARE = 0.01        # problems held out
 MIN_REASONING = 20      # reasoning tokens
 SEED = 0
@@ -100,7 +112,19 @@ def exercism(row: dict) -> Parsed:
             TRAILING_HEADING.sub("", reply[:listing.start()].rstrip()), f"```python\n{listing.group(2)}\n```")
 
 
-FORMATS = {"cascade": cascade, "competitive": competitive, "exercism": exercism}
+def kodcode(row: dict) -> Parsed:
+    """KodCode-V1-SFT-R1: the human turn; the R1 reply's text between its leading <think> and </think>, then the
+    rest."""
+    turns = row["conversations"]
+    if [t["from"] for t in turns] != ["human", "gpt"]:
+        return "malformed"
+    head, closed, answer = turns[1]["value"].lstrip().partition("</think>")
+    if not closed or not head.startswith("<think>"):
+        return "no_reasoning"
+    return turns[0]["value"], head.removeprefix("<think>"), answer
+
+
+FORMATS = {"cascade": cascade, "competitive": competitive, "exercism": exercism, "kodcode": kodcode}
 
 
 def parse(row: dict, kind: str) -> Parsed:
@@ -137,19 +161,32 @@ def problem(prompt: str) -> str:
     return " ".join(re.findall(r"[^\W_]+", WRAPPERS.sub(" ", prompt).lower()))
 
 
-def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
-    """The rows starting in bytes [start, end) of a source file: each row's drop reason ("reasons", an index into
-    DROPS, -1 for a candidate); per candidate the digests of its prompt, its problem and its text, its context and
-    document tokens; the candidates' tokens appended to `part`. Runs in a decontaminate.worker_init worker
-    (decontaminate.GRAMS)."""
-    kind, path, start, end, part = task
-    reasons, prompts, problems, keys, contexts, lengths = [], [], [], [], [], []
-    with open(path, "rb") as f, open(part, "wb") as out:
+def source_rows(path: Path, start: int, end: int) -> Iterator[dict]:
+    """A source file's rows starting in bytes [start, end) of a JSON-lines file, or in row groups [start, end) of a
+    Parquet file."""
+    if path.suffix == ".parquet":
+        source = pq.ParquetFile(path)
+        for batch in source.iter_batches(row_groups=range(start, end), columns=["conversations"]):
+            yield from batch.to_pylist()
+        return
+    with open(path, "rb") as f:
         f.seek(max(start - 1, 0))
         if start > 0 and f.read(1) != b"\n":  # a row starting before `start` is the previous task's
             f.readline()
         while f.tell() < end and (line := f.readline()):
-            parsed = parse(json.loads(line), kind)
+            yield json.loads(line)
+
+
+def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
+    """The rows of a task's range of a source file (source_rows): each row's drop reason ("reasons", an index into
+    DROPS, -1 for a candidate); per candidate the digests of its prompt, its problem and its text, its context,
+    reasoning and document tokens; the candidates' tokens appended to `part`. Runs in a decontaminate.worker_init
+    worker (decontaminate.GRAMS)."""
+    kind, path, start, end, part = task
+    reasons, prompts, problems, keys, contexts, reasonings, lengths = [], [], [], [], [], [], []
+    with open(part, "wb") as out:
+        for row in source_rows(path, start, end):
+            parsed = parse(row, kind)
             if isinstance(parsed, str):
                 reasons.append(DROPS.index(parsed))
                 continue
@@ -168,11 +205,13 @@ def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
                 problems.append(digest(problem(prompt)))
                 keys.append(digest(prompt + THINK + reasoning + END_THINK + answer))
                 contexts.append(len(context))
+                reasonings.append(len(thought))
                 lengths.append(length)
                 out.write(np.concatenate([context, thought, rest]))
     return {"reasons": np.array(reasons, np.int64), "prompts": np.array(prompts, np.uint64),
             "problems": np.array(problems, np.uint64), "keys": np.array(keys, np.uint64),
-            "contexts": np.array(contexts, np.int64), "lengths": np.array(lengths, np.int64)}
+            "contexts": np.array(contexts, np.int64), "reasonings": np.array(reasonings, np.int64),
+            "lengths": np.array(lengths, np.int64)}
 
 
 def ranks(values: np.ndarray) -> np.ndarray:
@@ -184,11 +223,14 @@ def ranks(values: np.ndarray) -> np.ndarray:
     return rank
 
 
-def split_stats(lengths: np.ndarray, contexts: np.ndarray, prompts: np.ndarray, problems: np.ndarray
-                ) -> dict[str, int]:
-    """Rows, prompts, problems, tokens (BOS, document, BOS) and loss tokens (the response and the closing BOS)."""
+def split_stats(lengths: np.ndarray, contexts: np.ndarray, reasonings: np.ndarray, prompts: np.ndarray,
+                problems: np.ndarray) -> dict[str, int | list[int]]:
+    """Rows, prompts, problems, tokens (BOS, document, BOS), loss tokens (the response and the closing BOS) and the
+    reasoning tokens' 10th, 50th and 90th percentiles and maximum per row."""
+    quantiles = np.quantile(reasonings, (0.1, 0.5, 0.9, 1.0)).round().astype(int).tolist() if len(lengths) else []
     return {"rows": len(lengths), "prompts": len(np.unique(prompts)), "problems": len(np.unique(problems)),
-            "tokens": int((lengths + 2).sum()), "loss_tokens": int((lengths - contexts + 1).sum())}
+            "tokens": int((lengths + 2).sum()), "loss_tokens": int((lengths - contexts + 1).sum()),
+            "reasoning_p10_p50_p90_max": quantiles}
 
 
 def main() -> None:
@@ -200,9 +242,12 @@ def main() -> None:
     tasks, owners = [], []
     for g, (pattern, kind) in enumerate(GROUPS.values()):
         for path in sorted(SOURCE.glob(pattern)):
-            size = path.stat().st_size
-            for start in range(0, size, CHUNK_BYTES):
-                tasks.append((kind, path, start, min(start + CHUNK_BYTES, size), parts_dir / f"{len(tasks)}.bin"))
+            # tasks: CHUNK_BYTES byte ranges of a JSON-lines file, a Parquet file's row groups one by one
+            size = (pq.ParquetFile(path).num_row_groups if path.suffix == ".parquet"
+                    else path.stat().st_size)
+            step = 1 if path.suffix == ".parquet" else CHUNK_BYTES
+            for start in range(0, size, step):
+                tasks.append((kind, path, start, min(start + step, size), parts_dir / f"{len(tasks)}.bin"))
                 owners.append(g)
     texts = list(decontaminate.benchmark_texts().values())
     corpus_crate()  # built once here, before the workers load it
@@ -211,21 +256,22 @@ def main() -> None:
 
     # the candidates, in task order: their group, part file and offset in it
     columns = {k: np.concatenate([c[k] for c in chunks])
-               for k in ("prompts", "problems", "keys", "contexts", "lengths")}
+               for k in ("prompts", "problems", "keys", "contexts", "reasonings", "lengths")}
     counts = [len(c["lengths"]) for c in chunks]
     group = np.repeat(owners, counts)
     part = np.repeat(np.arange(len(chunks)), counts)
     offset = np.concatenate([np.cumsum(c["lengths"]) - c["lengths"] for c in chunks])
     prompts, problems = columns["prompts"], columns["problems"]
-    contexts, lengths = columns["contexts"], columns["lengths"]
+    contexts, reasonings, lengths = columns["contexts"], columns["reasonings"], columns["lengths"]
     duplicate = np.ones(len(lengths), bool)
     duplicate[np.unique(columns["keys"], return_index=True)[1]] = False
     kept, capped = [], np.zeros(len(lengths), bool)
-    for g in range(len(GROUPS)):
+    for g, cap in enumerate(CAPS[name] for name in GROUPS):
         drawn = rng.permutation(np.flatnonzero((group == g) & ~duplicate))
         rank = ranks(prompts[drawn])
-        capped[drawn[rank >= CAP]] = True
-        kept.append(drawn[rank < CAP])
+        limit = len(drawn) if cap is None else cap
+        capped[drawn[rank >= limit]] = True
+        kept.append(drawn[rank < limit])
     kept = np.concatenate(kept)
     # val: VAL_SHARE of the problems; train: every other row
     distinct = np.unique(problems[kept])
@@ -251,9 +297,10 @@ def main() -> None:
         dropped = dict(zip(DROPS, np.bincount(reasons[reasons >= 0], minlength=len(DROPS)).tolist(), strict=True))
         dropped |= {"duplicate": int((mine & duplicate).sum()), "capped": int((mine & capped).sum())}
         stats[name] = {"read": len(reasons), "dropped": dropped} | {
-            split: split_stats(lengths[r], contexts[r], prompts[r], problems[r]) for split, rows in splits.items()
+            split: split_stats(lengths[r], contexts[r], reasonings[r], prompts[r], problems[r])
+            for split, rows in splits.items()
             for r in [rows[group[rows] == g]]}
-    stats["all"] = {split: split_stats(lengths[rows], contexts[rows], prompts[rows], problems[rows])
+    stats["all"] = {split: split_stats(lengths[rows], contexts[rows], reasonings[rows], prompts[rows], problems[rows])
                     for split, rows in splits.items()}
     for split in splits:
         packed = pack.write(NAME, split, pack.packed_shards(NAME, split, range(pack.shard_count(NAME, split)),
