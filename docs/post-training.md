@@ -579,7 +579,7 @@ What each source contributes:
 | Why reasoning models loop (arXiv 2512.12895 §2, §3) | loops as learning errors that temperature hides without fixing ("temperature reduces looping, but it does not remove the underlying learning errors", §3), so loops are mined at the evaluation temperature, T 0.6 (§8.2) | — |
 
 **Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on SFT train prompts of every source at T 0.6, one
-per prompt, in waves until Antidoom's 20,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its first repeat
+per prompt, in waves until 8,000 rows, about one wave (§8.1–§8.2, §8.7); one FTPO row per loop at its first repeat
 (§8.4); FTPO from the SFT model with a held-out monitor that writes candidates at chosen_win 0.15, 0.25 and 0.35
 (§8.5); every candidate and the SFT model evaluated on the same probe prompts, KodCode val problems and NLL set, and
 one candidate kept by a rule fixed in advance (§8.6); FTPO runs only if the SFT model loops (§8.7).
@@ -805,10 +805,13 @@ SFT model) loops in fewer than 5% of its probe's responses. A failed item is log
 
 - **Waves** (`scripts/onpolicy.sh` `waves`): 24,000 distinct mining-pool prompts per wave (§8.1) × 1 sample at T 0.6,
   each wave excluding the earlier waves' prompts (`onpolicy/rollouts.py --exclude`) and seeded by its index, the
-  selection over all waves after each; waves stop once the rows before rebalancing reach 20,000, Antidoom's
-  collection target (its generation "stops after collecting 20k pairs" [blog]), or the pool runs out: about two to
-  three waves [estimate, §8.4], 12,000 rows after rebalancing. The train rollouts are not verified: the rows need no
-  verdicts.
+  selection over all waves after each; waves stop once the rows before rebalancing reach 8,000 or the pool runs out.
+  Antidoom collects 20,000 ("stops after collecting 20k pairs" [blog]); here a wave of 24,000 prompts generates
+  ≈120M tokens at the 18.7K tokens/s the step-7676 KodCode val rollouts ran at [measured rate; ≈1.9 h a wave,
+  arithmetic], and the stop at chosen_win 0.35 is projected near step 165 at lr 5e-7, ≈2,600 rows [estimate, from
+  CPU FTPO probes on step-3000 rows],
+  so a second wave would mostly go unused. At the step-7676 probe's loop share (≈0.4) one wave yields ≈8–10K rows
+  [estimate], ≈6–7K after rebalancing. The train rollouts are not verified: the rows need no verdicts.
 - **GPU shares**: the KV cache costs 2 × 24 layers × 6 heads × 128 × 2 bytes = 72 KiB per token, so of 94.5 GiB, 0.45
   holds EvalPlus's 20 samples of about 28K tokens after the weights, and 0.85 about 70 rollouts at the 16,384-token
   cap [arithmetic].

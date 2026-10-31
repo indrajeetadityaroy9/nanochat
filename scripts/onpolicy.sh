@@ -7,8 +7,8 @@
 #      waves' prompts) under SAMPLES (default 0.6:1) by onpolicy/rollouts.py on the GPU at VLLM_GPU_MEMORY_UTILIZATION
 #      (default 0.85) to rollouts/wave-<k>/, and after each wave the selection over every wave (onpolicy/selection.py:
 #      rollouts/ftpo.jsonl, rollouts/selection.json; the rows need no verdicts, so the train rollouts are not
-#      verified); waves stop once the FTPO rows before rebalancing reach TARGET_ROWS (default 20,000: Antidoom's
-#      generation "stops after collecting 20k pairs", liquid.ai/blog/antidoom) or a wave finds fewer than PROMPTS
+#      verified); waves stop once the FTPO rows before rebalancing reach TARGET_ROWS (default 8,000, about one wave,
+#      docs/post-training.md §8.7 Waves) or a wave finds fewer than PROMPTS
 #      prompts left (the pool is exhausted);
 #   5. FTPO from the export (onpolicy/train.py ftpo, FREEZE none or head, default none) to ftpo/: the candidates
 #      ftpo/ftpo-<threshold>/ (and ftpo/ftpo-final/) and ftpo/train-log.json;
@@ -28,7 +28,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2
-PROMPTS=${PROMPTS:-24000} SAMPLES=${SAMPLES:-0.6:1} VAL_PROMPTS=${VAL_PROMPTS:-512} TARGET_ROWS=${TARGET_ROWS:-20000}
+PROMPTS=${PROMPTS:-24000} SAMPLES=${SAMPLES:-0.6:1} VAL_PROMPTS=${VAL_PROMPTS:-512} TARGET_ROWS=${TARGET_ROWS:-8000}
 PROBE_PROMPTS=${PROBE_PROMPTS:-128} FREEZE=${FREEZE:-none}
 STAGES=${STAGES:-rollouts train evaluate pick} UTIL=${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
 for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
