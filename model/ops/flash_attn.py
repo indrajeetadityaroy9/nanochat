@@ -405,7 +405,7 @@ def attention_bwd_fake(dh: Tensor, qkv: Tensor, q_norm_weight: Tensor, k_norm_we
 def attention_save(ctx: FunctionCtx, inputs: tuple, output: tuple[Tensor, ...]) -> None:
     (qkv, q_norm_weight, k_norm_weight, cos, sin, ctx.window_left, cu_seqlens, segments, o_weight, o_grad, _, n, _,
      table, w, ids, order) = inputs
-    ctx.mark_non_differentiable(output[1])
+    ctx.mark_non_differentiable(*output[1:])  # rstd (relu2_mlp_bwd differentiates the norm), the backward's operands
     ctx.save_for_backward(qkv, q_norm_weight, k_norm_weight, cos, sin, *output[2:], cu_seqlens, segments, o_weight,
                           o_grad, n, table, w, ids, order)
 

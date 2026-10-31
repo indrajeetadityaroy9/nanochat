@@ -138,6 +138,8 @@ def lm_loss_fake(x: Tensor, weight: Tensor, labels: Tensor,
 
 def lm_loss_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor, float],
                  output: tuple[Tensor, Tensor, Tensor, Tensor, Tensor]) -> None:
+    """Only the mean loss is differentiable: a backward through another output raises instead of reading zeros."""
+    ctx.mark_non_differentiable(*output[1:])
     ctx.save_for_backward(output[1], output[2])
 
 

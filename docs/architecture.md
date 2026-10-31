@@ -150,7 +150,9 @@ the Rust crates through cargo (`corpus/crate`, `docs/corpus.md` §6; `inference/
 `common.cuh` holds 16-byte vector access, a fixed-order butterfly warp sum and resident-block counts for persistent
 grids; `qk_row.cuh` the q/k row math (RMS norm, gain, RoPE) shared by `qk_prologue.cu` and `decode.cu`. Each op is a
 `torch.library` custom op with a fake implementation, so `torch.compile(fullgraph=True)` traces one graph per stage
-(`train/loop.py`); attention is one op because FA4's own `autograd.Function` is not traceable.
+(`train/loop.py`); attention is one op because FA4's own `autograd.Function` is not traceable. An op's outputs other
+than its result (`lm_loss`'s per-position loss and logsumexp, the operands each op saves for its backward) are marked
+non-differentiable, so a backward through them raises instead of reading zero gradients.
 
 | Op | Implementation |
 |---|---|
@@ -168,7 +170,7 @@ grids; `qk_row.cuh` the q/k row math (RMS norm, gain, RoPE) shared by `qk_prolog
 | Optimizer | Muon's Newton–Schulz batched over same-shape matrices and NorMuon: `docs/training.md` §3 |
 
 **Landed changes** (d24 tok/s as each change's record states them: an exclusive A/B on the GH200 at 700 W against
-the master tree the change landed on, not always its immediate predecessor; the SM clock is recorded as locked for the
+the code before the change, not always its immediate predecessor; the SM clock is recorded as locked for the
 FA4-segments/batched-Newton–Schulz and value-embedding-gate changes only (`docs/training.md` §7); mostly 25 timed
 steps after 8 warm-up at 8K and 12 after 6 at 32K, median, an arm run twice by its mean; the fp32 `.grad`
 accumulation 40 steps, 29 timed; the post-attention norm's 8K rate a 200-step run against an earlier base run).

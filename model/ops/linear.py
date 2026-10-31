@@ -174,6 +174,8 @@ def relu2_mlp_bwd_fake(dy: Tensor, h: Tensor, rstd: Tensor, preact: Tensor, post
 
 def relu2_mlp_save(ctx: FunctionCtx, inputs: tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None, Tensor | None],
                    output: tuple[Tensor, Tensor, Tensor]) -> None:
+    """preact and postact are the backward's operands, not differentiable outputs."""
+    ctx.mark_non_differentiable(*output[1:])
     ctx.save_for_backward(*inputs, *output[1:])
 
 
