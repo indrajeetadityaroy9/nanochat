@@ -48,11 +48,6 @@ impl Grams {
         Grams { n, tests, grams }
     }
 
-    /** The number of distinct n-gram hashes. */
-    fn __len__(&self) -> usize {
-        self.grams.len()
-    }
-
     /** Each text's tests (indices, ascending) that share an n-gram with it. */
     fn matches(&self, py: Python<'_>, texts: Vec<PyBackedStr>) -> Vec<Vec<u32>> {
         py.detach(|| texts.par_iter().map(|text| self.matched(text)).collect())

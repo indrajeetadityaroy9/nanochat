@@ -50,14 +50,11 @@ COLUMNS = {
 }
 
 
-def curated() -> dict[str, dict[str, int]]:
-    """{source: {split: rows}} of every source."""
-    return {source: {split: footer_rows(curated_dir(source, split).iterdir()) for split in ("train", "val")}
+def card() -> str:
+    """The dataset card, its row counts from the curated shards' footers; the Hub's viewer is off, as its Parquet
+    converter would merge mixed schemas."""
+    rows = {source: {split: footer_rows(curated_dir(source, split).iterdir()) for split in ("train", "val")}
             for source in SOURCES}
-
-
-def card(rows: dict[str, dict[str, int]]) -> str:
-    """The dataset card; the Hub's viewer is off, as its Parquet converter would merge mixed schemas."""
     folders = []
     for source, splits in rows.items():
         repo = SOURCES[source].repo
@@ -96,7 +93,7 @@ def push() -> None:
     """Write the card, preupload the shards, the decontamination record, the tokenizer's two files and the card in
     batches of PREUPLOAD bytes, then replace the dataset's tree in one commit (the files it no longer has deleted, the
     rest added)."""
-    (CORPUS / "README.md").write_text(card(curated()))
+    (CORPUS / "README.md").write_text(card())
     api = HfApi()
     additions = [CommitOperationAdd(path_in_repo=f.relative_to(CURATED).as_posix(), path_or_fileobj=f)
                  for f in sorted(CURATED.glob("*/*/*.parquet"))]

@@ -1,10 +1,12 @@
 """
 Benchmark decontamination of the curated train splits: a row whose text shares a 10-gram of whitespace-separated words
-with a scored benchmark's prompt or reference program is dropped (Qwen2.5-Coder's rule, arXiv 2409.12186 §5; the
-10-gram filter of DeepSeek-Coder, arXiv 2401.14196 §2.4). Val splits are untouched (held out, never trained). A shard
-with a dropped row is rewritten with its row groups (a repository source's: whole samples) less those rows; RECORD
-lists every dropped row, written once every shard is matched and before any is rewritten. Shards in parallel, a process
-per CPU. Runs once, on curate's shards.
+with a scored benchmark's prompt or reference program (benchmark_texts) is dropped (Qwen2.5-Coder's rule, arXiv
+2409.12186 §5; the 10-gram filter of DeepSeek-Coder, arXiv 2401.14196 §2.4). Val splits are untouched (held out, never
+trained). A shard with a dropped row is rewritten with its row groups (a repository source's: whole samples) less those
+rows; RECORD lists every dropped row, written once every shard is matched and before any is rewritten. Shards in
+parallel, a process per CPU. Runs once, on curate's shards. The original MBPP's texts (mbpp_texts) are not among the
+pretraining corpus's benchmark texts (its published record lists them); the SFT corpus's filter adds them
+(corpus/posttrain/build.py).
 
 python -m corpus.decontaminate
 """
@@ -44,14 +46,14 @@ def mbpp_texts() -> dict[str, str]:
 
 
 def benchmark_texts() -> dict[str, str]:
-    """{benchmark/task: text} of every scored task: its prompt and reference solution (MultiPL-E's prompt alone, it has
-    none; the original MBPP's, mbpp_texts), and each HumanEval infilling program (prompt, reference middle and suffix;
-    its three benchmarks' problems are cut from one program per HumanEval task). Imported here: the shard workers need
-    neither torch nor eval."""
+    """{benchmark/task: text} of eval.code_eval's tasks, each its prompt and reference solution (MultiPL-E's prompt
+    alone, it has none), and of each HumanEval infilling program (prompt, reference middle and suffix; its three
+    benchmarks' problems are cut from one program per HumanEval task). Imported here: the shard workers need neither
+    torch nor eval."""
     from eval.code_eval import INFILLING, tasks
 
     texts = {f"{name}/{t.task_id}": t.prompt + (t.canonical_solution or "") for name, items in tasks().items()
-             for t in items} | mbpp_texts()
+             for t in items}
     for name in INFILLING:
         for p in read_problems(name).values():
             task = "infilling/" + "/".join(p["task_id"].split("/")[1:3])
@@ -59,19 +61,9 @@ def benchmark_texts() -> dict[str, str]:
     return texts
 
 
-def shard_matches(grams, path: Path) -> list[tuple[int, list[int]]]:
-    """(row, the matched benchmark texts' indices) of each row of a shard sharing an N-gram with a benchmark text."""
-    found, row = [], 0
-    file = pq.ParquetFile(path)
-    for g in range(file.num_row_groups):
-        contents = file.read_row_group(g, columns=["content"])["content"].to_pylist()
-        found += [(row + i, m) for i, m in enumerate(grams.matches(contents)) if m]
-        row += len(contents)
-    return found
-
-
-def drop_rows(path: Path, rows: list[int]) -> None:
+def drop_rows(task: tuple[Path, list[int]]) -> None:
     """The shard without rows (indices into the file), each row group kept, atomically."""
+    path, rows = task
     file = pq.ParquetFile(path)
     tmp = path.with_name(f"{path.name}.tmp")
     drop, start = np.asarray(rows), 0
@@ -93,8 +85,15 @@ def worker_init(texts: list[str]) -> None:
 
 
 def worker_matches(path: Path) -> list[tuple[int, list[int]]]:
-    """shard_matches of a shard with the worker's GRAMS."""
-    return shard_matches(GRAMS, path)
+    """(row, the matched benchmark texts' indices) of each row of a shard sharing an N-gram with a benchmark text, by
+    the worker's GRAMS."""
+    found, row = [], 0
+    file = pq.ParquetFile(path)
+    for g in range(file.num_row_groups):
+        contents = file.read_row_group(g, columns=["content"])["content"].to_pylist()
+        found += [(row + i, m) for i, m in enumerate(GRAMS.matches(contents)) if m]
+        row += len(contents)
+    return found
 
 
 def main() -> None:
@@ -112,7 +111,7 @@ def main() -> None:
             json.dump({"n": N, "benchmarks": names, "dropped": dropped}, record)
             record.flush()
             rewritten = [(path, [row for row, _ in rows]) for (_, path), rows in zip(shards, found, strict=True) if rows]
-            list(pool.map(drop_rows, *zip(*rewritten, strict=True)))
+            list(pool.map(drop_rows, rewritten))
         for source, rows in dropped.items():
             print(f"{source}: {len(rows):,} train rows dropped", flush=True)
 

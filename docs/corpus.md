@@ -64,7 +64,7 @@ transpilation (Qwen3-32B, arXiv 2512.20848 §2.2.2), UltraData-Math L3 (a multi-
 Stack-Edu's Hub files are metadata; each blob is read from Software Heritage's public S3 bucket by `blob_id` and
 decoded with its `src_encoding` (`prepare.blob_texts`); a blob the bucket lacks or that does not decode has no text.
 `FETCHES` = 4 files at once, the throughput peak (8.5, 11.5, 12.4 and 10.5 MB/s at 1, 2, 4 and 8 files in flight,
-one column of 8 UltraData-Code L3 files, GH200 host).
+one column of 8 UltraData-Code L3 files, GH200 host [measured]).
 
 **Extent** (`prepare.extent`): a source of a group read in part (`mixture.IN_PART`: synthetic code, ClimbMix,
 UltraData-Math L3) fetches the fewest Hub files, in the SHA-1 order of their paths (uniform, and nested as the extent
@@ -119,7 +119,7 @@ a file no subset repairs is dropped.
 1. Stack v3's placeholders `<EMAIL>`, `<KEY>`, `<NAME>`, `<PASSWORD>` become the bare word.
 2. Leading-indentation tabs expand to tab stops of 8 (Python 2 Language Reference §2.1.8).
 3. Every fixer of `fissix.fixes` (2to3), under the recursion limit `RECURSION` = 6,000 (2to3 recurses over the parse
-   tree; at Python's default 1,000 it fails on 800 nested blocks, at 6,000 not on 1,600).
+   tree: it converts at most 495 nested `if` blocks at Python's default limit of 1,000 and 997 at 6,000 [measured]).
 
 **Exact deduplication.** One row per `id` over every source (before the split), the first in `SOURCES` order, then
 file and row (`curate.duplicates`); every empty text is dropped with the copies.
@@ -132,7 +132,9 @@ strings is not applied (a short reference solution such as HumanEval/53's `retur
 [inference]). The benchmark texts (`decontaminate.benchmark_texts`, 1,428): each task's prompt and reference solution,
 as `eval/code_eval.py` `tasks` loads them (HumanEval+ 164, MBPP+ 378, HumanEval-X C++ 164), MultiPL-E's HumanEval and
 MBPP C++ prompts (161, 397; they have no reference), and each HumanEval infilling program, prompt + reference middle +
-suffix (164; the three infilling benchmarks are cut from one program per task). `Grams` (`crate/decontaminate.rs`)
+suffix (164; the three infilling benchmarks are cut from one program per task). The original MBPP's texts as
+lm-evaluation-harness prompts them (`decontaminate.mbpp_texts`, 500) are not among them; the SFT corpus's filter adds
+them (§10), and `docs/evaluation.md` §4 measures their overlap with the train splits. `Grams` (`crate/decontaminate.rs`)
 confirms a hashed 10-gram hit word by word, so no hash collision drops a row. Val splits are untouched: they are held
 out, and every bpb record scores the same rows. Each dropped row and the benchmark texts it matched are recorded in
 `curated/decontamination.json` (`decontaminate.RECORD`, published, §4). On the published curated build it drops
@@ -210,8 +212,13 @@ the tokenizer unchanged.
 **Provenance.** The SHA-256 of every local shard in `CORPUS/curated` equals the Hub's LFS hash in the decontaminated
 release: 1,812 shards, none missing or extra, each of the Hub's size; the shards whose hash differs from the curated
 release's are exactly the record's shards with a dropped row, and every folder's rows on the card equal the shards'
-Parquet footers (computed on master). Training reads only the packs derived from these shards (§6–§9); the seeded
-generators (data order, FIM's ChaCha8) select and transform rows but add no data.
+Parquet footers (computed on master). `python -m corpus.decontaminate` on the curated release's (revision `dc5391b`)
+train shard 1 of each repository source and 0 of each other source reproduces the decontaminated release's (`dbe57a81`)
+18 shards byte for byte and the record's rows of them (4,432) [measured]. The published card says every Python file
+parses; `publish.card` says it of the Python files of the repository, synthetic and function sources, the ones checked
+(§3), as notebooks and traces are not.
+Training reads only the packs derived from these shards (§6–§9); the seeded generators (data order, FIM's ChaCha8)
+select and transform rows but add no data.
 
 ## 5. Tokenizer
 
@@ -668,9 +675,10 @@ nanochat python -m corpus.<step>` (with `-e HF_TOKEN=<token>` for the steps that
 
 The pretraining corpus, once, to build the published dataset:
 1. **Prepare**: `python -m corpus.pretrain.prepare` fetches and standardizes every source's extent (§1–§2).
-2. **Curate**: `python -m corpus.pretrain.curate` (§3).
-3. **Decontaminate**: `python -m corpus.decontaminate` drops the curated train rows sharing a 10-gram with a scored
-   benchmark and writes `curated/decontamination.json` (§3).
+2. **Curate**: `python -m corpus.pretrain.curate` (§3) writes `checked/` and `curated/`, failing on an existing
+   `checked/<source>/` or `curated/<source>/<split>/` (prepare removes `checked/`).
+3. **Decontaminate**: `python -m corpus.decontaminate` drops the curated train rows sharing a 10-gram with one of the
+   1,428 benchmark texts and writes `curated/decontamination.json` (§3), failing when the record exists (it runs once).
 4. **Tokenizer**: `python -m corpus.train_tokenizer` trains sa-bpe on the sample into `CORPUS/tokenizer`
    (`tokenizer.TOKENIZER`, §5); it does not reproduce the shipped tokenizer (§5).
 5. **Publish**: `python -m corpus.pretrain.publish push` uploads the curated shards, their decontamination record and

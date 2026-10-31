@@ -134,38 +134,38 @@ def lines(texts: pa.ChunkedArray) -> pa.ChunkedArray:
     return pc.replace_substring(pc.replace_substring(texts, "\r\n", "\n"), "\r", "\n")
 
 
-def document(spec: Source, content: pa.ChunkedArray, **fields: pa.ChunkedArray) -> pa.Table:
+def document(spec: Source, content: pa.ChunkedArray, fields: dict[str, pa.ChunkedArray]) -> pa.Table:
     """A table of the source's category: content normalized (lines), its sha1 as id, the given fields and language."""
     content = lines(content)
-    fields |= {"id": sha1(content), "content": content}
+    fields = fields | {"id": sha1(content), "content": content}
     if "language" in spec.category.schema.names:
         fields["language"] = pa.repeat(spec.language, len(content))
     return pa.table({name: fields[name] for name in spec.category.schema.names}, schema=spec.category.schema)
 
 
 def repository_file(t: pa.Table, spec: Source) -> pa.Table:
-    return document(spec, t["content"], repo_name=t["repo_name"], relative_path=t["relative_path"])
+    return document(spec, t["content"], {"repo_name": t["repo_name"], "relative_path": t["relative_path"]})
 
 
 def stack_edu(t: pa.Table, spec: Source) -> pa.Table:
     """A Stack-Edu file, its path without leading "/"."""
-    return document(spec, t["text"], repo_name=t["repo_name"],
-                    relative_path=pc.utf8_ltrim(t["path"], characters="/"))
+    return document(spec, t["text"], {"repo_name": t["repo_name"],
+                                      "relative_path": pc.utf8_ltrim(t["path"], characters="/")})
 
 
 def conversation(t: pa.Table, spec: Source) -> pa.Table:
     """A finished Codeforces-CoTs trace (finish_reason "stop"): prompt followed by generation, and the problem's id."""
     t = t.filter(pc.equal(t["finish_reason"], "stop"))
-    return document(spec, pc.binary_join_element_wise(t["prompt"], t[spec.text], ""), problem_id=t["id"])
+    return document(spec, pc.binary_join_element_wise(t["prompt"], t[spec.text], ""), {"problem_id": t["id"]})
 
 
 def function(t: pa.Table, spec: Source) -> pa.Table:
     """A CodeSearchNet function (code with its docstring) and its repository."""
-    return document(spec, t["code"], repo_name=t["repo"])
+    return document(spec, t["code"], {"repo_name": t["repo"]})
 
 
 def text_only(t: pa.Table, spec: Source) -> pa.Table:
-    return document(spec, t[spec.text])
+    return document(spec, t[spec.text], {})
 
 
 def standardizer(spec: Source) -> Callable[[pa.Table, Source], pa.Table]:
