@@ -7,8 +7,8 @@
 
 __global__ void k_forward(const bf16 *__restrict__ q, const bf16 *__restrict__ k, const float *__restrict__ gq,
                           const float *__restrict__ gk, bf16 *__restrict__ qo, bf16 *__restrict__ ko,
-                          const float *__restrict__ cos, const float *__restrict__ sin, int64_t rows, unsigned nb, int H,
-                          int T) {
+                          const float *__restrict__ cos, const float *__restrict__ sin, int64_t rows, unsigned nb,
+                          int H, int T) {
     const bool isq = blockIdx.x < nb;
     const int64_t g = (int64_t)(isq ? blockIdx.x : blockIdx.x - nb) * blockDim.x + threadIdx.x, p = g / QK_LANES;
     if (p * H >= rows) return;

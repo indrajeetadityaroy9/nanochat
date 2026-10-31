@@ -182,9 +182,8 @@ template <bool CHOICE> static __device__ __forceinline__ void epilogue(const Gem
         if (a.xf) a.xf[at] = x;
         return;
     }
-    const float y = bfr(s);
     if (a.epi == EPI_STORE) {
-        a.out[at] = __float2bfloat16_rn(y);
+        a.out[at] = __float2bfloat16_rn(s);
         return;
     }
     /* EPI_ARGMAX: largest score, lowest row among exact ties (choice_key): the fp32 logit, or with CHOICE over a masked
@@ -885,16 +884,16 @@ static void enqueue_head(Decoder *d) {
     launch_gemm<true>(d, g);
     launch(k_nucleus, d->B, NUCLEUS_THREADS, 0, d->stream, choice(d), d->active, d->argmax, d->vocab);
     launch(k_commit, 1, MAX_BATCH, 0, d->stream, d->tokens, d->alt_tokens, d->pos, d->active, d->argmax, d->alt, d->B);
-    cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)d->capacity * sizeof(int32_t), cudaMemcpyDeviceToHost,
-                    d->stream);
-    cudaMemcpyAsync(d->host_tokens + d->capacity, d->alt_tokens, (size_t)d->capacity * sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, d->stream);
+    CUDA_CHECK(cudaMemcpyAsync(d->host_tokens, d->tokens, (size_t)d->capacity * sizeof(int32_t),
+                               cudaMemcpyDeviceToHost, d->stream));
+    CUDA_CHECK(cudaMemcpyAsync(d->host_tokens + d->capacity, d->alt_tokens, (size_t)d->capacity * sizeof(int32_t),
+                               cudaMemcpyDeviceToHost, d->stream));
 }
 
 template <class F> static cudaGraphExec_t capture(Decoder *d, F enqueue) {
     cudaGraph_t graph;
     cudaGraphExec_t exec;
-    cudaStreamBeginCapture(d->stream, cudaStreamCaptureModeThreadLocal);
+    CUDA_CHECK(cudaStreamBeginCapture(d->stream, cudaStreamCaptureModeThreadLocal));
     enqueue();
     CUDA_CHECK(cudaStreamEndCapture(d->stream, &graph));
     CUDA_CHECK(cudaGraphInstantiate(&exec, graph, 0));
@@ -1027,12 +1026,12 @@ extern "C" void *dec_create(const int *cfg, const uint64_t *ptrs, const float *s
 extern "C" void dec_set_prompt(void *handle, int b, int32_t token, int32_t last, float temperature, float top_p,
                                unsigned long long seed) {
     Decoder *d = (Decoder *)handle;
-    cudaMemcpyAsync(d->tokens + b, &token, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpyAsync(d->pos + b, &last, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpyAsync(d->first + b, &last, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpyAsync(d->temperature + b, &temperature, sizeof(float), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpyAsync(d->top_p + b, &top_p, sizeof(float), cudaMemcpyHostToDevice, d->stream);
-    cudaMemcpyAsync(d->seed + b, &seed, sizeof(seed), cudaMemcpyHostToDevice, d->stream);
+    CUDA_CHECK(cudaMemcpyAsync(d->tokens + b, &token, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream));
+    CUDA_CHECK(cudaMemcpyAsync(d->pos + b, &last, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream));
+    CUDA_CHECK(cudaMemcpyAsync(d->first + b, &last, sizeof(int32_t), cudaMemcpyHostToDevice, d->stream));
+    CUDA_CHECK(cudaMemcpyAsync(d->temperature + b, &temperature, sizeof(float), cudaMemcpyHostToDevice, d->stream));
+    CUDA_CHECK(cudaMemcpyAsync(d->top_p + b, &top_p, sizeof(float), cudaMemcpyHostToDevice, d->stream));
+    CUDA_CHECK(cudaMemcpyAsync(d->seed + b, &seed, sizeof(seed), cudaMemcpyHostToDevice, d->stream));
 }
 
 extern "C" int dec_prefill_rows(void *) { return MAX_BATCH; }
@@ -1043,12 +1042,12 @@ extern "C" void dec_prefill(void *handle, int n, const int32_t *rows) {
     Decoder *d = (Decoder *)handle;
     Decoder *pf = (Decoder *)d->prefill_rows;
     const size_t width = (size_t)n * sizeof(int32_t);
-    cudaMemcpy2DAsync(pf->tokens, MAX_BATCH * sizeof(int32_t), rows, width, width, 3, cudaMemcpyHostToDevice,
-                      d->stream);
+    CUDA_CHECK(cudaMemcpy2DAsync(pf->tokens, MAX_BATCH * sizeof(int32_t), rows, width, width, 3,
+                                 cudaMemcpyHostToDevice, d->stream));
     unsigned long long mask[2 * MASK_WORDS] = {};
     for (int r = 0; r < n; r++) mask[r / MASK_BITS] |= 1ull << (r % MASK_BITS);
-    cudaMemcpyAsync(pf->active, mask, sizeof mask, cudaMemcpyHostToDevice, d->stream);
-    cudaGraphLaunch(d->prefill, d->stream);
+    CUDA_CHECK(cudaMemcpyAsync(pf->active, mask, sizeof mask, cudaMemcpyHostToDevice, d->stream));
+    CUDA_CHECK(cudaGraphLaunch(d->prefill, d->stream));
 }
 
 /* Slot b's K and V at [at, at + n) to the prompt store at store_at (to_store) or back: one 2D copy per cache, L rows;
@@ -1075,8 +1074,6 @@ extern "C" void dec_load_prompt(void *handle, int b, int at, int store_at, int n
     prompt_copy((Decoder *)handle, b, at, store_at, n, false);
 }
 
-extern "C" int dec_store(void *handle) { return ((Decoder *)handle)->store; }
-
 /* The pinned host masks [B][vocab / WORD_BITS], bit t % WORD_BITS of word t / WORD_BITS of row b set iff slot b may
  * choose token t; the caller writes a masked slot's row before dec_set_active, after the previous step completed. */
 extern "C" uint32_t *dec_masks(void *handle) { return ((Decoder *)handle)->host_allow; }
@@ -1087,8 +1084,8 @@ extern "C" void dec_set_active(void *handle, const unsigned long long *slots) {
     Decoder *d = (Decoder *)handle;
     const int words = (d->B + MASK_BITS - 1) / MASK_BITS;
     const size_t row = words * sizeof(unsigned long long);
-    cudaMemcpy2DAsync(d->active, MASK_WORDS * sizeof(unsigned long long), slots, row, row, 2, cudaMemcpyHostToDevice,
-                      d->stream);
+    CUDA_CHECK(cudaMemcpy2DAsync(d->active, MASK_WORDS * sizeof(unsigned long long), slots, row, row, 2,
+                                 cudaMemcpyHostToDevice, d->stream));
     const unsigned long long *masked = slots + words;
     int high = -1;
     for (int w = 0; w < words; w++)
@@ -1102,20 +1099,20 @@ extern "C" void dec_set_active(void *handle, const unsigned long long *slots) {
         }
     if (lo >= 0) {
         const size_t n = d->vocab / WORD_BITS;
-        cudaMemcpyAsync(d->allow + lo * n, d->host_allow + lo * n, (hi + 1 - lo) * n * sizeof(uint32_t),
-                        cudaMemcpyHostToDevice, d->stream);
+        CUDA_CHECK(cudaMemcpyAsync(d->allow + lo * n, d->host_allow + lo * n, (hi + 1 - lo) * n * sizeof(uint32_t),
+                                   cudaMemcpyHostToDevice, d->stream));
     }
 }
 
 extern "C" void dec_launch_body(void *handle) {
     Decoder *d = (Decoder *)handle;
-    cudaGraphLaunch(d->body[d->narrow], d->stream);
+    CUDA_CHECK(cudaGraphLaunch(d->body[d->narrow], d->stream));
 }
 
 /* Launch one step's head (asynchronous) after its body: each slot chooses by its mask, if masked, and temperature. */
 extern "C" void dec_launch_head(void *handle) {
     Decoder *d = (Decoder *)handle;
-    cudaGraphLaunch(d->head[d->narrow], d->stream);
+    CUDA_CHECK(cudaGraphLaunch(d->head[d->narrow], d->stream));
 }
 
 /* Wait for the launched step; out[b]: the token slot b took, out[B + b]: its alternative, the choice but the lazy row

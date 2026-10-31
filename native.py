@@ -6,7 +6,6 @@ import ctypes
 import functools
 import hashlib
 import importlib.util
-import os
 import shutil
 import subprocess
 import tempfile
@@ -26,17 +25,18 @@ CORPUS_CRATE = Path(__file__).resolve().parent / "corpus" / "crate"
 
 
 def native_library(name: str, command: list[str], sources: list[Path], build: Callable[[Path], None]) -> Path:
-    """NATIVE/<name>-<sha256(command, sources)>.so, built by build(tmp) into a temporary file unique to the build and
-    renamed atomically, so concurrent first builds (any process, any container) never share a file."""
+    """NATIVE/<name>-<sha256(command, sources)>.so, built by build(file) in a temporary directory unique to the build
+    (removed on exit, a failed build's output with it) and renamed atomically, so concurrent first builds (any
+    process, any container) never share a file."""
     digest = hashlib.sha256(" ".join(command).encode())
     for source in sources:
         digest.update(source.read_bytes())
     path = NATIVE / f"{name}-{digest.hexdigest()}.so"
     if not path.exists():
-        fd, tmp = tempfile.mkstemp(suffix=".tmp", prefix=f"{path.name}.", dir=NATIVE)
-        os.close(fd)
-        build(Path(tmp))
-        Path(tmp).replace(path)
+        with tempfile.TemporaryDirectory(dir=NATIVE) as tmp:
+            built = Path(tmp) / path.name
+            build(built)
+            built.replace(path)
     return path
 
 

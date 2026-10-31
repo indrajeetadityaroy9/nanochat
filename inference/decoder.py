@@ -138,7 +138,6 @@ class NativeDecoder:
         lib.dec_prefill.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
         for copy in (lib.dec_save_prompt, lib.dec_load_prompt):
             copy.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-        lib.dec_store.argtypes = [ctypes.c_void_p]
         lib.dec_masks.argtypes = [ctypes.c_void_p]
         lib.dec_masks.restype = ctypes.POINTER(ctypes.c_uint32)
         lib.dec_set_active.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -170,7 +169,8 @@ class NativeDecoder:
         device = model.embed_tokens.weight.device
         config = np.array([L, C, model.layers[0].mlp.up_proj.weight.size(0), VOCAB_SIZE, max_length, prompt_store,
                            bos_token_id], dtype=np.int32)
-        # the prompt store: {prompt: its first store position}, the positions taken
+        # the prompt store: its positions, {prompt: its first store position}, the positions taken
+        self.store = prompt_store
         self.stored: dict[tuple[int, ...], int] = {}
         self.used = 0
         self.timings: dict[int, tuple[float, float, float]] = {}  # generate's request timestamps
@@ -185,7 +185,6 @@ class NativeDecoder:
         weakref.finalize(self, lib.dec_destroy, self.handle)
         self.batch = lib.dec_batch(self.handle)
         self.tokens = np.zeros(2 * self.batch, dtype=np.int32)  # dec_tokens: the choices, then their alternatives
-        self.store = lib.dec_store(self.handle)
         # the pinned host masks decode.cu copies to the masked slots (dec_masks), a Constraint's mask per slot
         self.masks = np.ctypeslib.as_array(lib.dec_masks(self.handle),
                                            shape=(self.batch, VOCAB_SIZE // np.iinfo(np.uint32).bits))
