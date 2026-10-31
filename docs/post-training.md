@@ -530,6 +530,10 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
   §5.3); loops fell 3.5× at 14B and 3.0× at 32B, and levelled off after 8K pairs (§5.2, App. G.3). Token-level
   preference at the loop's first token (Antidoom, FTPO of arXiv 2510.15061) took LFM2.5-2.6B from 10.2% to 1.4% and
   Qwen3.5-4B from 22.9% to 1% [blog: liquid.ai/blog/antidoom; not peer-reviewed]. No result below 2.6B is published.
+- **Why not RL for the loops**: on the same 8,000 mined pairs, DPO left Qwen3-8B looping in 6.1% of runs, GRPO with
+  the loop flag as a per-step penalty 15.0%, and chosen-only SFT 37.7%, from 57.3% (arXiv 2610.19376 §5.3, Table 2);
+  GRPO with one reward per episode left 47.3% (App. G.10, Table 19). Every objective DeLoop compares cut loops to
+  15.0% or below, DPO lowest and with the highest task success (§5.3).
 - **Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on KodCode train prompts (§8.1–§8.2), verified by
   KodCode's tests (§8.3); RSFT, one epoch on each prompt's shortest terminating success; then DPO of those successes
   against the model's loops cut shortly after their onset (§8.4–§8.5); the termination probe and KodCode val pass@1
@@ -542,12 +546,17 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
   tests, and stdin/stdout cases for its online-judge style) whose SFT context is a document context of the SFT
   corpus's train split (250,646 distinct prompts) or val split (2,547), the context matched by its tokens, so a
   prompt is rendered exactly as SFT trained on it and inference sends it (BOS, the prompt, `\n\n<think>\n`).
-  Training prompts come from the train split (on-policy improvement on prompts SFT saw); the val split's are held
-  out for evaluation; benchmarks are not used.
+  Training prompts come from the train split (on-policy improvement on prompts SFT saw); benchmarks are not used.
+- **Held-out val** (`held_out`): SFT's split is by problem text, not by KodCode question, so of the 2,547 val rows
+  1,430 are another style of a train row's question (the question id without its `_I`/`_C`/`_OJ` suffix) and 1,150
+  share a train row's test file; evaluation draws from the 1,115 rows with neither, 785 of them usable [measured].
+  The termination probe's 64 val prompts (`docs/evaluation.md` §10) include 20 KodCode rows, 12 of which are such
+  siblings of a train question with the same test file [measured]; the probe measures termination, not pass@1.
 - **Usable rows**: the prompt names every function or class its tests import, as code (called or declared, or in
-  backticks): an instruct prompt often does not name it, so a correct answer under another name would fail; and no
-  Docs subset, whose tests depend on library versions (pandas, torch, the standard library's) other than KodCode's:
-  45 of their 171 R1 answers fail here.
+  backticks): an instruct prompt often does not name it, so a correct answer under another name would fail; a pytest
+  row tests at least one name (775 train and 5 val rows name none, so the naming check says nothing about them); and
+  no Docs subset, whose tests depend on library versions (pandas, torch, the standard library's) other than
+  KodCode's: 45 of their 171 R1 answers fail here. 180,911 train and 1,870 val rows are usable [measured].
 - **Sampling** (`sample`): stratified by KodCode style (instruct, complete, online_judge) and difficulty
   (easy, medium, hard), proportional allocation, seeded.
 
@@ -601,36 +610,56 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
   parameters on the export, loaded in fp32 (master weights and AdamW state) with bf16 autocast, the LM head and its
   cap in fp32 (TRL's fused head), SDPA attention, seed 0, one epoch; the sets' token ids as sampled (TRL's
   tokenization would append an eos to the rejected side); the result written in the export's format (fp32 the
-  parameters the forward reads in fp32, bf16 the rest), so vLLM serves it as it serves the export.
+  parameters the forward reads in fp32, bf16 the rest), so vLLM serves it in bf16 as it serves the SFT model.
 - **RSFT**: the loss on the completion, averaged over the tokens of a 128-sequence batch; AdamW lr 1e-5, β (0.9,
   0.95), warmup 10%, cosine decay, no weight decay, clip 1.0: Phi-4-mini-reasoning's distillation stages (batch 128,
   lr 1e-5, warmup ratio 0.1, arXiv 2504.21233 §5.3).
-- **DPO**: the sigmoid loss with the RSFT model as the frozen reference and no likelihood term on the chosen side
-  (an NLL anchor raised DeLoop's loops from 6.1% to 27.0%, arXiv 2610.19376 App. G.13); β 0.05, DeLoop's, chosen from
-  0.02–0.5 on a screening set and its lowest loop rate (App. G.1, G.6); lr 5e-7, Phi-4-mini-reasoning's rollout DPO
-  with full parameters, one epoch at 16K (§5.3) (DeLoop's LoRA lr is 8e-6, about LoRA's 10× over full parameters,
-  §2.2); batch 16 pairs (DeLoop's), warmup 10%, linear decay; pairs longer than 16,384 tokens (the prompt and the
-  longer side) dropped. DeLoop's loop rate levels off after 8K pairs (App. G.3).
-- **Smoke** [measured, CPU]: 2 DPO steps (rewards exactly 0 at step 0: policy and reference agree) and 3 RSFT steps
-  (loss 0.894 → 0.686) on the step-2000 export; the written model has the export's keys and dtypes.
+- **DPO**: the sigmoid loss (arXiv 2305.18290) with the RSFT model as the frozen reference and no likelihood term on
+  the chosen side (an NLL anchor raised DeLoop's loops from 6.1% to 27.0%, arXiv 2610.19376 App. G.13); β 0.05,
+  DeLoop's, chosen from 0.02–0.5 on a screening set and its lowest loop rate (App. G.1, G.6); lr 5e-7,
+  Phi-4-mini-reasoning's rollout DPO with full parameters, one epoch at 16K (§5.3) (DeLoop's LoRA lr is 8e-6, about
+  LoRA's 10× over full parameters, §2.2); batch 16 pairs (DeLoop's), warmup 10%, linear decay. DeLoop trains one
+  epoch on 8,000 pairs (App. G.1); its loop rate levels off after 8K pairs (App. G.3), and a higher lr, a larger rank
+  or a second epoch lowered it further to 0.7–1.7% while its default kept the highest task success (App. G.6).
+- **Pair length**: no activation recomputation, so a pair's two sequences train together; pairs longer than 14,848
+  tokens (the prompt and the longer side; `scripts/onpolicy.sh` `PAIR_TOKENS`) are dropped: beside the queue's server
+  (§8.7) training has 0.7 × 94.5 GiB = 71.0 GB, less 10.45 GB of fp32 weights, gradients, AdamW state and reference,
+  at 2.04 MB per token per sequence (forward and backward of a 4,096-token sequence on CPU, bf16 autocast, peak RSS
+  less the gradients) [estimate].
+- **Stochastic rounding to bf16** (`bf16`): one AdamW step moves an element by at most about lr, so DPO at 5e-7 over
+  ~100 steps moves most elements less than half their bf16 spacing (median |w| 0.0243 of the decoder's matmul
+  weights: spacing 2⁻¹³ = 1.22e-4 [measured: export of step 3000]), and rounding to nearest at the write erased them:
+  in a 3-step CPU DPO at 5e-7 the written weights kept 0.007 of the fp32 update along its direction and the reward
+  margin fell from 0.0383 to −0.0005 [measured]. The bf16 tensors are therefore rounded stochastically (uniform noise
+  below the 16 dropped bits, then truncation: unbiased, a value on the bf16 grid unchanged; a shift of 1e-5 survives
+  as 0.9998 of itself on average against 0.103 by nearest rounding [measured]); the hyper-parameters stay the
+  published ones. `train-log.json` records `retention`: ⟨written − start, final − start⟩ / |final − start|² and the
+  share of elements changed.
+- **Smoke** [measured, CPU, 3 steps of 2 on the step-3000 export]: RSFT loss 0.863 → 0.692, retention 1.0001 (5.1%
+  of elements changed); DPO from it, loss ln 2 → 0.681, margin 0.024 at step 3, retention 1.0002 (0.54% changed); the
+  written models have the export's keys, shapes and dtypes.
 
 ### 8.6 Evaluation
 
-- **Before and after** (`scripts/onpolicy.sh` `evaluate`, for the export, RSFT and DPO models): the termination probe
-  (§5.1; the same 128 prompts, seeds and chunked generation, so outcomes compare one to one), and KodCode val pass@1:
-  256 usable val-split prompts × 4 samples at T 0.6, verified and summarized as the rollouts are. Then the reasoning
-  protocol on the SFT and DPO models (§5; `scripts/official_reasoning.sh`, `MODEL`/`TAG` for a trained directory).
+- **Before and after** (`scripts/onpolicy.sh` `evaluate`, for the export and the DPO model, and the RSFT model when
+  DPO closes fewer probe responses than SFT, §8.7): the termination probe (§5.1; the same 128 prompts, seeds and
+  chunked generation, so outcomes compare one to one), and KodCode val pass@1: 256 of the 785 usable held-out val
+  prompts (§8.1) × 4 samples at T 0.6, verified and summarized as the rollouts are.
+  Then the reasoning protocol on the SFT and DPO models (§5; `scripts/official_reasoning.sh`, `MODEL`/`TAG` for a
+  trained directory), both served in bf16.
 
 ### 8.7 The post-SFT queue
 
-`scripts/post_sft_queue.sh <run>` waits for the SFT run's end record and its container's exit (stopping the run's
-termination watcher once it has settled step 4000, so no checkpoint is probed twice), then runs back to back on the
-free GPU (vLLM at 0.85 of its memory): the termination probe of the final step; the on-policy stage's rollouts,
-RSFT and DPO; the DPO model's probe and val pass@1; the reasoning protocol on the SFT and the DPO models; the
-export's and RSFT model's evaluations; then the deferred items (the probes of steps 3000/5000/6000/7000, the
-per-source held-out loss of steps 7676/4000/6000, and the DRY comparison unless the DPO model loops in fewer than 5%
-of its probe's responses). Sizes: 8,000 prompts × 8 rollouts by default (`PROMPTS`); the pair count this yields is
-the pilot's pair yield per prompt × 8,000 [estimate], against DeLoop's level-off at 8K pairs.
+`scripts/post_sft_queue.sh <run>` waits for the SFT run's end record and its container's exit, then runs two branches
+at once on the free GPU: (A) at 0.3 of the GPU's memory, the reasoning protocol of the final step, which first runs
+its termination probe, then the export's KodCode val pass@1; (B) at 0.6, the on-policy stage's rollouts, verdicts and
+selection, RSFT and DPO (beside A's server), the DPO model's probe and val pass@1, and the DPO model's reasoning
+protocol (on its own port). The shares: the KV cache costs 2 × 24 layers × 6 heads × 128 × 2 bytes = 72 KiB per
+token, so of 94.5 GiB, 0.3 holds EvalPlus's 20 samples of about 18K tokens after the weights, and 0.6 about 47
+rollouts at the 16,384-token cap; training has the 0.7 left beside A (§8.5) [arithmetic]. Then, alone at 0.85: the
+RSFT model's evaluation only if the DPO model's probe closes fewer responses than the SFT model's, and the DRY
+comparison unless the DPO model loops in fewer than 5% of its probe's responses. Sizes: 8,000 prompts × 8 rollouts by
+default (`PROMPTS`), against DeLoop's level-off at 8K pairs.
 
 ## References
 

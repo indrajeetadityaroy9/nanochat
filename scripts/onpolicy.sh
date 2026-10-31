@@ -5,7 +5,11 @@
 #   2. rollouts (onpolicy/rollouts.py, GPU at VLLM_GPU_MEMORY_UTILIZATION, default 0.85): PROMPTS train-pool prompts
 #      (default 8000) under SAMPLES (default 0.6:4,1.0:4) to rollouts/;
 #   3. their verdicts (onpolicy/verify.py) in a CPU container without network or GPU;
-#   4. the selection (onpolicy/selection.py): rsft.jsonl, pairs.jsonl, selection.json;
+#   4. the selection (onpolicy/selection.py): rsft.jsonl, pairs.jsonl, selection.json; pairs longer than PAIR_TOKENS
+#      (the prompt and the longer side) dropped: DPO trains a pair's two sequences together with no recomputation, so
+#      beside the post-SFT queue's server (0.3 of 94.5 GiB) it has 0.7 x 94.5 GiB = 71.0 GB, less 10.45 GB of fp32
+#      weights, gradients, AdamW state and reference, at 2.04 MB per token per sequence (forward and backward of a
+#      4,096-token sequence, CPU, bf16 autocast, peak RSS less the gradients) [estimate]: 14,848 tokens;
 #   5. RSFT from the export (onpolicy/train.py rsft) to rsft/, then DPO from rsft/ against it (train.py dpo) to dpo/;
 #   6. the evaluation of each of EVAL_MODELS (default "dpo model rsft": dpo/, the export, rsft/; `evaluate`): the
 #      natural-termination probe on the model directory (eval/official_termination.py, scored in a CPU container; for
@@ -20,7 +24,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2
-PROMPTS=${PROMPTS:-8000} SAMPLES=${SAMPLES:-0.6:4,1.0:4} VAL_PROMPTS=${VAL_PROMPTS:-256}
+PROMPTS=${PROMPTS:-8000} SAMPLES=${SAMPLES:-0.6:4,1.0:4} VAL_PROMPTS=${VAL_PROMPTS:-256} PAIR_TOKENS=${PAIR_TOKENS:-14848}
 STAGES=${STAGES:-rollouts train evaluate} UTIL=${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
 for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
 [ -n "$CHECKPOINT" ] || { echo "no checkpoint or weights of step $STEP in $RUN_DIR" >&2; exit 1; }
@@ -48,7 +52,8 @@ rollouts() {  # <model dir> <out dir> <rollouts args...>: rollouts, verdicts, se
     python -m onpolicy.rollouts "$(w "$1")" "$(w "$2")" "${@:3}"
   [ -f "$2/verdicts.jsonl" ] || timed "verify $(basename "$2")" "${CPU[@]}" nanochat-onpolicy \
     python -m onpolicy.verify "$(w "$2")"
-  [ -f "$2/selection.json" ] || "${CPU[@]}" nanochat-onpolicy python -m onpolicy.selection "$(w "$2")" > /dev/null
+  [ -f "$2/selection.json" ] || "${CPU[@]}" nanochat-onpolicy python -m onpolicy.selection "$(w "$2")" \
+    --max-length "$PAIR_TOKENS" > /dev/null
 }
 
 evaluate() {  # <model dir> <name>

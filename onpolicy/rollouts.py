@@ -1,7 +1,8 @@
 """
 On-policy rollouts (docs/post-training.md §8): --prompts prompts of a pool (onpolicy/prompts.py `sample`, seeded by
---seed), each sampled under every (temperature, count) of --samples at top-p TOP_P, by vLLM offline from a --chat
-export (inference/export_hf.py; bf16, the head in fp32, eos = BOS) through eval/official_termination.py `generate`:
+--seed; for the val split only its rows held out from the train pool, prompts.py `held_out`), each sampled under every
+(temperature, count) of --samples at top-p TOP_P, by vLLM offline from a --chat export (inference/export_hf.py; bf16,
+the head in fp32, eos = BOS) through eval/official_termination.py `generate`:
 CHUNK-token rounds with prefix caching, a response stopped once its last REPEAT_TAIL tokens have repetition >= LOOP
 with no "</think>" (finish "loop"), else at BOS ("stop") or at min(--max-tokens, context - prompt) ("length"). Request
 k (prompts in id order, each prompt's samples in --samples order) is seeded --seed + k. Each response's ending is
@@ -10,9 +11,9 @@ a never-closed response with repetition >= LOOP is a loop, and `cycle` gives its
 exactly periodic (the loops seen so far are: per-token log-probability ≈ -0.001 once established).
 
 Writes <out dir>/prompts.jsonl (the sampled pool rows with their ids), rollouts.parquet (one row per response, its
-generated ids included) and meta.json (settings, generation time and tokens, and beside a training job its tokens/s
-during generation, eval/official_termination.py `job_cost`). VLLM_GPU_MEMORY_UTILIZATION applies through
-eval/official_site/sitecustomize.py.
+generated ids included) and meta.json (settings, the val split's held-out counts, generation time and tokens, and
+beside a training job its tokens/s during generation, eval/official_termination.py `job_cost`).
+VLLM_GPU_MEMORY_UTILIZATION applies through eval/official_site/sitecustomize.py.
 
     python -m onpolicy.rollouts <model dir> <out dir> [--split train] [--prompts N] [--samples 0.6:4,1.0:4]
         [--seed S] [--max-tokens 16384] [<metrics.jsonl> <since, unix seconds>]
@@ -26,7 +27,7 @@ import numpy as np
 
 from corpus.tokenizer import get_tokenizer
 from eval.official_termination import CHUNK, LOOP, generate, job_cost, response
-from onpolicy.prompts import context_ids, read_pool, sample
+from onpolicy.prompts import context_ids, held_out, read_pool, sample
 
 TOP_P = 0.95  # the reasoning protocol's (eval/official_termination.py SAMPLING)
 # Rollout length: closed reasoning reached 11,757 tokens at most in the step-2000 probe (128 responses), and the
@@ -62,7 +63,10 @@ def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, 
     start = time.time()
     tok = get_tokenizer()
     out.mkdir(parents=True, exist_ok=True)
-    rows = sample(read_pool(split), n, seed)
+    pool, held = read_pool(split), None
+    if split == "val":
+        pool, held = held_out(pool, read_pool("train"))
+    rows = sample(pool, n, seed)
     for row in rows:
         row["ids"] = context_ids(row)
     with open(out / "prompts.jsonl", "w") as f:
@@ -91,8 +95,9 @@ def main(model: Path, out: Path, split: str, n: int, samples: list[tuple[float, 
 
     pq.write_table(pa.Table.from_pylist(records), out / "rollouts.parquet")
     generated = sum(len(r["ids"]) for r in records)
-    meta = {"model": str(model), "split": split, "prompts": len(rows), "samples": samples, "top_p": TOP_P,
-            "max_tokens": max_tokens, "seed": seed, "chunk": CHUNK, "loop_stop": LOOP, "responses": len(records),
+    meta = {"model": str(model), "split": split, "held_out": held, "prompts": len(rows), "samples": samples,
+            "top_p": TOP_P, "max_tokens": max_tokens, "seed": seed, "chunk": CHUNK, "loop_stop": LOOP,
+            "responses": len(records),
             "generated_tokens": generated, "generation_seconds": round(end - generating),
             "generated_tokens_per_second": generated / (end - generating), "seconds": round(time.time() - start)}
     if metrics is not None:

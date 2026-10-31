@@ -113,8 +113,26 @@ def read_pool(split: str) -> list[dict]:
 
 
 def usable(row: dict) -> bool:
-    """A row whose tests can tell a correct answer (the module docstring)."""
-    return row["named"] and not row["subset"].startswith("Docs")
+    """A row whose tests can tell a correct answer (the module docstring): named, outside the Docs subsets, and for
+    pytest with a tested name (an empty set makes `named` vacuous and leaves the stub control nothing to define)."""
+    return row["named"] and (row["kind"] == "stdio" or bool(row["names"])) and not row["subset"].startswith("Docs")
+
+
+def question(row: dict) -> str:
+    """The KodCode question a row renders: its question id without the style suffix (_I instruct, _C complete, _OJ
+    online judge), so the styles of one question share it."""
+    return re.sub(r"_(I|C|OJ)$", "", row["id"].split("/")[0])
+
+
+def held_out(val: list[dict], train: list[dict]) -> tuple[list[dict], dict]:
+    """The val rows whose question and test file both differ from every train-pool row's (SFT's split is by prompt
+    text, so another style of a train question, or a question with a train row's tests, sits in val), and the
+    counts."""
+    questions, tests = {question(r) for r in train}, {r["test"] for r in train}
+    seen = [(question(r) in questions, r["test"] in tests) for r in val]
+    kept = [r for r, (q, t) in zip(val, seen, strict=True) if not (q or t)]
+    return kept, {"rows": len(val), "train_question": sum(q for q, _ in seen), "train_test": sum(t for _, t in seen),
+                  "excluded": len(val) - len(kept), "kept": len(kept), "kept_usable": sum(map(usable, kept))}
 
 
 def sample(pool: list[dict], n: int, seed: int) -> list[dict]:

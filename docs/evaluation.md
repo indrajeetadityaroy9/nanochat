@@ -582,8 +582,10 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
 - **Prompt sets** (`eval/official_termination.py`): the first 64 HumanEval+ tasks as EvalPlus's chat path renders
   them (`docs/post-training.md` §5; each checked to render as BOS + `encode_ordinary(prompt.strip() +
   "\n\n<think>\n")`) and 64 SFT val documents drawn by `default_rng(0)`, their contexts as the SFT trained on them; the
-  val problems are disjoint from the train split's by the problem-level split (`docs/corpus.md` §10). Each val prompt
-  carries its source group and style (`val-labels.jsonl`) and its teacher's reasoning length.
+  val problems are disjoint from the train split's by the problem-level split (`docs/corpus.md` §10), but not by
+  KodCode question: 20 of the 64 are KodCode rows, and 12 of those are another style of a train-split KodCode question
+  with the same test file (`docs/post-training.md` §8.1) [measured]. Each val prompt carries its source group and
+  style (`val-labels.jsonl`) and its teacher's reasoning length.
 - **Protocol**: the `--chat` export (`inference/export_hf.py`), vLLM offline in bf16 with the head in fp32, eos = BOS,
   T 0.6, top-p 0.95, one sample per prompt seeded by 0 + its index, max new tokens the context less the prompt; every
   full-state checkpoint of a run, with the same prompts and seeds at every step (`scripts/official_termination.sh`
