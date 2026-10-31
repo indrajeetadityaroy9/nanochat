@@ -135,6 +135,54 @@ margin; the other sources are downloaded in full.
   \end{tabular}
 \end{table*}
 
+\begin{table}
+  \caption{The pretraining mixture: each group's share of a stage and its tokens.}
+  \label{tab:mixture}
+  \small
+  \begin{tabular}{lrr}
+    \toprule
+    Group & Share & Tokens \\
+    \midrule
+    \multicolumn{3}{l}{\emph{File-level stage, context 8,192}} \\
+    Repository files & 59.3\% & 57.8B \\
+    Synthetic code & 26.1\% & 25.4B \\
+    Notebooks & 1.5\% & 1.5B \\
+    Functions & $<$0.1\% & 0.05B \\
+    Web text & 10.0\% & 9.7B \\
+    Mathematics & 3.0\% & 2.9B \\
+    \midrule
+    \multicolumn{3}{l}{\emph{Repository-level stage, context 32,768}} \\
+    Repositories & 81.6\% & 4.6B \\
+    Codeforces solutions & 5.4\% & 0.3B \\
+    Web text & 10.0\% & 0.6B \\
+    Mathematics & 3.0\% & 0.2B \\
+    \midrule
+    Total & & 103.0B \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table*}
+  \caption{SFT data after filtering: the Hugging Face dataset and subset of each group, its training documents
+  (distinct prompts) and tokens. The total counts prompts distinct across groups.}
+  \label{tab:sft}
+  \small
+  \begin{tabular}{lllrr}
+    \toprule
+    Dataset & Subset & Language & Documents (prompts) & Tokens \\
+    \midrule
+    \texttt{nvidia/Nemotron-Cascade-SFT-Stage-1} & code & Python & 227,585 (149,076) & 1.55B \\
+    \texttt{nvidia/Nemotron-Cascade-SFT-Stage-2} & code & Python & 147,317 (74,005) & 1.72B \\
+    \texttt{nvidia/Nemotron-SFT-Competitive-Programming-v2} & competitive programming & Python & 48,007 (24,540) & 0.55B \\
+    \texttt{nvidia/Nemotron-SFT-Competitive-Programming-v2} & competitive programming & C++ & 48,017 (24,500) & 0.56B \\
+    \texttt{nvidia/Nemotron-SFT-Competitive-Programming-v2} & Exercism & Python & 76,375 (75,341) & 0.08B \\
+    \texttt{KodCode/KodCode-V1-SFT-R1} & train & Python & 250,649 (250,646) & 1.19B \\
+    \midrule
+    Total & & & 797,950 (539,127) & 5.65B \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
 \paragraph{Standardization.} Line endings are converted to LF and a leading byte-order mark is removed, as Python and
 C++ do when they read a source file; the text is otherwise unchanged. The same file appears in different sources with
 different line endings. After normalization these copies are byte-identical, so deduplication removes them.
@@ -217,33 +265,6 @@ their reasons are:
   OpenCoder keeps 84\% of its annealing data from its original distribution for this reason~\cite{huang2024opencoder}.
 \end{itemize}
 
-\begin{table}
-  \caption{The pretraining mixture: each group's share of a stage and its tokens.}
-  \label{tab:mixture}
-  \small
-  \begin{tabular}{lrr}
-    \toprule
-    Group & Share & Tokens \\
-    \midrule
-    \multicolumn{3}{l}{\emph{File-level stage, context 8,192}} \\
-    Repository files & 59.3\% & 57.8B \\
-    Synthetic code & 26.1\% & 25.4B \\
-    Notebooks & 1.5\% & 1.5B \\
-    Functions & $<$0.1\% & 0.05B \\
-    Web text & 10.0\% & 9.7B \\
-    Mathematics & 3.0\% & 2.9B \\
-    \midrule
-    \multicolumn{3}{l}{\emph{Repository-level stage, context 32,768}} \\
-    Repositories & 81.6\% & 4.6B \\
-    Codeforces solutions & 5.4\% & 0.3B \\
-    Web text & 10.0\% & 0.6B \\
-    Mathematics & 3.0\% & 0.2B \\
-    \midrule
-    Total & & 103.0B \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
 \subsection{Supervised fine-tuning data}
 \label{sec:data-sft}
 
@@ -277,28 +298,6 @@ without KodCode and without the cap, a split by exact prompt left 928 of 2,921 v
 statement in the training split, and a split by problem left none. In the same build, no SFT prompt shared more than
 18.6\% of the distinctive 8-word sequences of any of the 454 LiveCodeBench problems used in the
 evaluation~\cite{jain2024livecodebench}; KodCode's prompts were not measured.
-
-\begin{table}
-  \caption{SFT data after filtering: training documents (distinct prompts) and tokens. Cascade: Nemotron-Cascade's SFT
-  stages. All traces are Python except the C++ competitive-programming ones. The total counts prompts distinct across
-  groups.}
-  \label{tab:sft}
-  \small
-  \begin{tabular}{lrr}
-    \toprule
-    Group & Documents (prompts) & Tokens \\
-    \midrule
-    Cascade, stage 1 & 227,585 (149,076) & 1.55B \\
-    Cascade, stage 2 & 147,317 (74,005) & 1.72B \\
-    Competitive, Python & 48,007 (24,540) & 0.55B \\
-    Competitive, C++ & 48,017 (24,500) & 0.56B \\
-    Exercism & 76,375 (75,341) & 0.08B \\
-    KodCode & 250,649 (250,646) & 1.19B \\
-    \midrule
-    Total & 797,950 (539,127) & 5.65B \\
-    \bottomrule
-  \end{tabular}
-\end{table}
 
 \subsection{Reinforcement learning data}
 \label{sec:data-rl}
