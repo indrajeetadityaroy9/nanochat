@@ -163,8 +163,8 @@ margin; the other sources are downloaded in full.
 \end{table}
 
 \begin{table*}
-  \caption{SFT data after filtering: the Hugging Face dataset and subset of each group, its training documents
-  (distinct prompts) and tokens. The total counts prompts distinct across groups.}
+  \caption{SFT data after filtering: the Hugging Face dataset and subset of each source, its training documents
+  (distinct prompts) and tokens. The total counts prompts that are distinct across sources.}
   \label{tab:sft}
   \small
   \begin{tabular}{lllrr}
@@ -183,20 +183,20 @@ margin; the other sources are downloaded in full.
   \end{tabular}
 \end{table*}
 
-\paragraph{Standardization.} Line endings are converted to LF and a leading byte-order mark is removed, as Python and
+\paragraph{Normalization.} Line endings are converted to LF and a leading byte-order mark is removed, as Python and
 C++ do when they read a source file; the text is otherwise unchanged. The same file appears in different sources with
 different line endings. After normalization these copies are byte-identical, so deduplication removes them.
 Normalization also keeps carriage returns and byte-order marks, which the interpreter and the compiler discard, out of
 the text the model learns to generate.
 
-\paragraph{Python check and repair.} Each Python file from the repository, rewritten-code and function sources must
-parse as Python~3.12. The evaluation runs every Python answer with Python~3, so a training file that does not parse,
-such as Python~2 code or a file broken by anonymization, teaches syntax that fails before any test runs. DeepSeek-Coder
-also uses a compiler to remove code with syntax errors~\cite{guo2024deepseekcoder}. Both causes are mechanical, so a
-failing file is repaired when possible instead of being dropped. The repair applies the smallest combination of three
-fixes that makes the file parse: replacing The Stack v3's anonymization placeholders (such as \texttt{<EMAIL>}) with
-plain words, expanding tab indentation with Python~2's tab stops, and converting Python~2 syntax with 2to3. A file
-that no combination repairs is dropped. The synthetic exercises, notebooks and Codeforces solutions are not checked.
+\paragraph{Syntax check and repair.} Every Python file must parse as Python~3.12, except in the LLM-written
+exercises, the notebooks and the Codeforces solutions. The evaluation runs every Python answer with Python~3, so a
+training file that does not parse, such as Python~2 code or a file broken by anonymization, teaches syntax that fails
+before any test runs. DeepSeek-Coder also uses a compiler to remove code with syntax errors~\cite{guo2024deepseekcoder}.
+Both causes are mechanical, so a failing file is repaired when possible instead of being dropped. The repair applies
+the smallest combination of three fixes that makes the file parse: replacing The Stack v3's anonymization placeholders
+(such as \texttt{<EMAIL>}) with plain words, expanding tab indentation with Python~2's tab stops, and converting
+Python~2 syntax with 2to3. A file that no combination repairs is dropped.
 
 \paragraph{Exact deduplication.} Identical documents are removed across all sources; the first copy in a fixed source
 order is kept. Duplicates are repeated data, and repeating even a small part of the data degrades a
@@ -220,21 +220,23 @@ model's 3-shot evaluation, of which 298 of the 500 statements share a 10-gram wi
 LiveCodeBench~\cite{jain2024livecodebench}, whose overlap with the pretraining data is not measured. Validation
 documents are not filtered, so every likelihood measurement during training uses the same set.
 
-\paragraph{Split.} The validation split holds out 1\% of the corpus to measure how well the model predicts text it
-has not seen. Documents are assigned by a hash of the unit they belong to, not of the document itself. For repository
-files and CodeXGLUE functions the unit is the repository: files of the same repository share names, helper functions
-and style, so a split by file would leave files related to a validation file in the training split. For Codeforces
-solutions the unit is the problem, since each problem has several solutions. For the other sources the unit is the
-document. One leak remains: a rewritten version of a validation file, or an exercise generated from it, can be in the
-training split, because the synthetic sources do not record the file each document was generated from.
+\paragraph{Train and validation split.} The validation split holds out 1\% of the corpus to measure how well the
+model predicts text it has not seen. Documents are assigned to a split by a hash of their repository for repository
+files and CodeXGLUE functions, of their problem for Codeforces solutions, and of the document itself for the other
+sources. Splitting by repository keeps all files of a repository on the same side: files of one repository share
+names, helper functions and style, so a split by file would put files closely related to a validation file in the
+training split. Codeforces solutions are split by problem because each problem has several solutions. One source of
+leakage remains: an LLM-rewritten version of a validation file, or an exercise generated from it, can be in the
+training split, because the synthetic sources do not record which file each document was generated from.
 
-\paragraph{Repository samples.} A file uses definitions from the files it imports, and a model trained on single
-files never sees them together. Following DeepSeek-Coder~\cite{guo2024deepseekcoder}, the files of each repository are
-grouped into samples of files connected by imports (Python imports and C++ includes, resolved within the repository).
-Within a sample, every file comes after the files it imports, except inside import cycles, so the definitions a file
-uses appear before it. Each file starts with a comment that gives its path. In the file-level stage, each sample is one
-document. In the repository-level stage, all samples of a repository, from the three repository sources of its
-language, form one document, so this stage trains on whole repositories.
+\paragraph{Repository-level documents.} A file uses definitions from the files it imports, and a model trained on
+single files never sees them together. Following DeepSeek-Coder~\cite{guo2024deepseekcoder}, the files of each
+repository are grouped by their import dependencies (Python imports and C++ includes, resolved within the repository)
+and sorted in dependency order: every file comes after the files it imports, except within import cycles, so the
+definitions a file uses appear before it in the context. Each file starts with a comment that gives its path. In the
+file-level stage, each group of connected files is one document. In the repository-level stage, all files of a
+repository, from the three repository sources of its language, form one document, so this stage trains on whole
+repositories.
 
 \paragraph{Mixture.} Pretraining runs in two stages with the mixtures in Table~\ref{tab:mixture}. The choices and
 their reasons are:
@@ -265,12 +267,33 @@ their reasons are:
   OpenCoder keeps 84\% of its annealing data from its original distribution for this reason~\cite{huang2024opencoder}.
 \end{itemize}
 
+\begin{table*}
+  \caption{Four tokenizers trained on the same data and measured on the validation splits (6.21~GB). Bytes per token
+  is over the file-level stage's mixture. The next two rows count vocabulary tokens that contain a line break and
+  tokens that join punctuation to a line break; the last two count merged tokens by how often the validation text
+  uses them.}
+  \label{tab:tokenizers}
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    Measure & SA-BPE (used) & BPE & \shortstack[r]{SA-BPE, line breaks\\attached to punctuation} &
+      \shortstack[r]{SA-BPE, line breaks and\\indentation as separate pre-tokens} \\
+    \midrule
+    Bytes per token & 3.624 & 3.623 & 3.868 & 3.616 \\
+    Tokens with a line break & 72 & 67 & 748 & 9 \\
+    Tokens joining punctuation to a line break & 0 & 0 & 693 & 0 \\
+    Merged tokens never used & 5 & 15 & 5 & 5 \\
+    Merged tokens used $<$100 times & 54 & 84 & 54 & 56 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
 \subsection{Supervised fine-tuning data}
 \label{sec:data-sft}
 
 \paragraph{Sources.} SFT trains the model on reasoning traces of larger models, so that it learns to reason before it
 answers. DeepSeek-R1 found that distillation from a stronger model gave small models better results than large-scale
-RL on the small models~\cite{deepseek2025r1}. Each group of traces in Table~\ref{tab:sft} covers part of the task.
+RL on the small models~\cite{deepseek2025r1}. Each source in Table~\ref{tab:sft} covers a different part of the task.
 Nemotron-Cascade's two SFT stages provide the largest share of the Python traces, generated by DeepSeek-R1 and
 DeepSeek-R1-0528~\cite{wang2025nemotroncascade}. Nemotron's competitive-programming SFT set provides harder problems
 with standard input and output, and the only C++ traces. Function-level prompts, in the format of HumanEval and MBPP,
@@ -285,177 +308,159 @@ not show reasoning followed by an answer. A trace longer than the 32,768-token c
 truncated, because a truncated trace loses its answer; this removes about half of the competitive-programming traces.
 The pretraining decontamination rule is applied to the statement, reasoning and answer, with the same benchmark texts
 plus the 500 original MBPP problems. It removes all traces of 5.5\% of the prompts in Nemotron-Cascade's first stage
-and of 5.2\% in its second stage (together with the length filter), and 5.6\% of KodCode's rows. Exact duplicates are
-removed as in pretraining. Finally, each exact prompt keeps at most two traces in each of the four long-trace groups.
-The training time allows two epochs of at most 12.5B tokens, and the cap uses this budget for more distinct prompts
-instead of more traces of the same prompt. Exercism and KodCode have about one trace per prompt.
+and of 5.2\% in its second stage (together with the length filter), and 5.6\% of KodCode's examples. Exact duplicates
+are removed as in pretraining. Finally, each prompt keeps at most two traces in the four sources with many traces per
+prompt (the two Nemotron-Cascade stages and the Python and C++ competitive programming data). The training time allows
+two epochs of at most 12.5B tokens, and the cap uses this budget for more distinct prompts instead of more traces of
+the same prompt. Exercism and KodCode have about one trace per prompt.
 
 \paragraph{Split.} The validation split holds out 1\% of the problems, not of the prompts. The same problem appears in
 several sources with different wrappers, for example a language header or a function header written in two forms, so
 a split by prompt would leave other versions of a validation problem in the training split. A problem is therefore
-identified by its statement with these wrappers removed, lowercased and reduced to its words. In an earlier build
-without KodCode and without the cap, a split by exact prompt left 928 of 2,921 validation problems with their
-statement in the training split, and a split by problem left none. In the same build, no SFT prompt shared more than
-18.6\% of the distinctive 8-word sequences of any of the 454 LiveCodeBench problems used in the
+identified by its statement with these wrappers removed, lowercased and reduced to its words. In an earlier version of
+the dataset without KodCode and without the cap, a split by exact prompt left 928 of 2,921 validation problems with
+their statement in the training split, and a split by problem left none. In the same version, no SFT prompt shared more
+than 18.6\% of the distinctive 8-word sequences of any of the 454 LiveCodeBench problems used in the
 evaluation~\cite{jain2024livecodebench}; KodCode's prompts were not measured.
 
 \subsection{Reinforcement learning data}
 \label{sec:data-rl}
 
-RL needs problems whose tests decide correctness. KodCode is the only SFT group with tests, so the RL problems are the
-KodCode rows of the SFT training split: 250,646 distinct prompts, each with KodCode's tests, either a pytest file for a
-function or standard-input cases for a program~\cite{xu2025kodcode}. A test can reward a correct answer only if it
-calls what the prompt asks for. Three kinds of rows are therefore excluded: prompts that do not name every function
-their tests import, since a correct answer that uses another name would fail; pytest rows whose tests name no
-function; and problems that test library APIs, because the installed library versions differ from KodCode's (in a
-sample of 2,000 rows, the reference solutions of 45 of the 171 such rows fail). This leaves 180,911 problems: 107,244
-functions to complete, 52,740 functions described in prose and 20,927 standard-input programs. The test harness is
-checked in both directions. It passes the DeepSeek-R1 solutions of 2,995 of 3,000 sampled problems, and a deliberately
-wrong program passes the tests of 3 of them. A pass on such a problem is not counted, because its tests cannot
-distinguish a wrong answer from a correct one. RL is evaluated on the KodCode rows of the SFT validation split, which
-are also held out from the training problems by question and by test file. This is needed because KodCode writes one
-question in several styles with different statements, so the SFT split by problem can place two styles of the same
-question on different sides. Of the 2,547 rows, 1,115 remain and 785 of them are usable; 512 problems are drawn from
-them, stratified by style and difficulty.
+RL needs problems whose tests decide correctness. KodCode is the only SFT source with tests, so the RL problems are
+the KodCode examples of the SFT training split: 250,646 distinct prompts, each with KodCode's tests, either a pytest
+file for a function or standard-input test cases for a program~\cite{xu2025kodcode}. A test can reward a correct answer
+only if it calls what the prompt asks for. Three kinds of examples are therefore excluded: prompts that do not name
+every function their tests import, since a correct answer that uses another name would fail; pytest examples whose
+tests name no function; and problems that test library APIs, because the installed library versions differ from
+KodCode's (in a sample of 2,000 examples, the reference solutions of 45 of the 171 such examples fail). This leaves
+180,911 problems: 107,244 functions to complete, 52,740 functions described in prose and 20,927 standard-input
+programs. The test harness is checked in both directions. It passes the DeepSeek-R1 solutions of 2,995 of 3,000
+sampled problems, and a deliberately wrong program passes the tests of 3 of them. A pass on such a problem is not
+counted, because its tests cannot distinguish a wrong answer from a correct one. RL is evaluated on the KodCode
+examples of the SFT validation split, which are also held out from the training problems by question and by test
+file. This is needed because KodCode writes one question in several styles with different statements, so the SFT split
+by problem can place two styles of the same question on different sides. Of the 2,547 examples, 1,115 remain and 785
+of them pass the filters above; 512 problems are sampled from them, stratified by style and difficulty.
 
 \section{Tokenization, Packing and Fill-in-the-Middle}
 \label{sec:sequences}
 
-This section describes how the curated text becomes training rows: the tokenizer, the packing of documents into rows
-of a stage's context length, the fill-in-the-middle (FIM) examples, and the order in which training reads the rows.
-As in Section~\ref{sec:data}, each step is given with what it does and why.
+This section describes how the pretraining dataset is turned into training sequences: the tokenizer, packing of
+documents into sequences of the context length, fill-in-the-middle (FIM) training examples, and the order in which
+training reads the sequences. As in Section~\ref{sec:data}, each step is given with what it does and why.
 
 \subsection{Tokenizer}
 \label{sec:tokenizer}
 
-\paragraph{Vocabulary.} The tokenizer is a byte-level BPE tokenizer with 32,768 ids: the 256 bytes, 32,508 merged
-tokens, a beginning-of-sequence token (BOS) and the three FIM sentinel tokens of
+\paragraph{Vocabulary.} The tokenizer is a byte-level BPE tokenizer with 32,768 tokens: the 256 bytes, 32,508 merged
+tokens, a beginning-of-sequence (BOS) token and the three FIM special tokens of
 DeepSeek-Coder~\cite{guo2024deepseekcoder}. Larger vocabularies gave no clear gain on code in earlier work: StarCoder2
-found that increasing the vocabulary to 100K ids did not improve performance~\cite{lozhkov2024starcoder2}, and across
-vocabularies of 32K to 256K ids the HumanEval pass@1 of a 1.5B model varied only from 20.52 to 20.84 and did not grow
-with the vocabulary~\cite{dagan2024tokenizer}. The SA-BPE tokenizers described below also use 32,768
-ids~\cite{chizhov2026sabpe}.
+found that increasing the vocabulary to 100K tokens did not improve performance~\cite{lozhkov2024starcoder2}, and
+across vocabularies of 32K to 256K tokens the HumanEval pass@1 of a 1.5B model varied only from 20.52 to 20.84 and did
+not grow with the vocabulary~\cite{dagan2024tokenizer}. The SA-BPE tokenizers described below also use 32,768
+tokens~\cite{chizhov2026sabpe}.
 
-\paragraph{Pre-tokenization.} Before merging, the text is split into chunks by the regular expression of OpenAI's
-cl100k tokenizer with one change: the clause that attaches line breaks to a run of punctuation is removed, so no token
-joins the end of a line, such as \texttt{):}, to the line break after it. Across 18 byte-level tokenizers, the number
-of vocabulary tokens that contain a line break correlated with MBPP pass@1 at Spearman $\rho = -0.717$
-\cite{meister2026tokeval}. The final vocabulary has 72 tokens that contain a line break and none that joins
-punctuation to a line break (Table~\ref{tab:tokenizers}).
+\paragraph{Pre-tokenization.} Before BPE merges are learned, the text is split into pre-tokens by the regular
+expression of OpenAI's cl100k tokenizer, with one change: the rule that attaches line breaks to a run of punctuation
+is removed, so no token joins the end of a line, such as \texttt{):}, to the line break after it. Across 18 byte-level
+tokenizers, the number of vocabulary tokens that contain a line break correlated with MBPP pass@1 at Spearman
+$\rho = -0.717$~\cite{meister2026tokeval}. The final vocabulary has 72 tokens that contain a line break and none that
+joins punctuation to a line break (Table~\ref{tab:tokenizers}).
 
-\paragraph{Merge rule: SA-BPE instead of BPE\@.} BPE adds, at each step, the most frequent pair of adjacent tokens. In
-code, many frequent pairs come from identifiers and strings that repeat inside a single repository. The tokens built
-from them rarely occur in other code, so their embeddings receive few updates during training. Such under-trained
-tokens have poor representations and can cause hallucinations~\cite{land2024magikarp,chizhov2026sabpe}. SA-BPE scores
-each pair by $F \cdot \ln R$, where $F$ is the pair's frequency and $R$ is the number of repositories that contain it,
-so a pair that occurs in only one repository scores 0~\cite{chizhov2026sabpe}. In the SA-BPE evaluation, this score
-gave a compression rate of 3.643 against 3.623 for BPE and 72 verified under-trained tokens against
+\paragraph{SA-BPE instead of BPE\@.} BPE adds, at each step, the most frequent pair of adjacent tokens. In code, many
+frequent pairs come from identifiers and strings that repeat inside a single repository. The tokens built from them
+rarely occur in other code, so their embeddings receive few updates during training. Such under-trained tokens have
+poor representations and can cause hallucinations~\cite{land2024magikarp,chizhov2026sabpe}. SA-BPE scores each pair by
+$F \cdot \ln R$, where $F$ is the pair's frequency and $R$ is the number of repositories that contain it, so a pair
+that occurs in only one repository scores 0~\cite{chizhov2026sabpe}. In the SA-BPE evaluation, this score gave a
+compression rate of 3.643 against 3.623 for BPE and 72 verified under-trained tokens against
 640~\cite{chizhov2026sabpe}. Here, $R$ counts repositories for repository files and CodeXGLUE functions; every other
-document counts as its own unit.
+document counts as its own repository.
 
-\paragraph{Comparison on this corpus.} Four tokenizers were trained on the same sample and measured on the 6.21~GB of
-validation text (Table~\ref{tab:tokenizers}): SA-BPE with the chosen pattern, BPE with the same pattern, SA-BPE with
-line breaks attached to punctuation (fused), and SA-BPE with a pattern that also puts line breaks and indentation in
-chunks of their own (split). BPE matches SA-BPE in compression (3.623 against 3.624 bytes per token over the
-file-level stage) but leaves more merged tokens that the validation text rarely uses: 15 never used against 5, and 84
-used fewer than 100 times against 54. The fused pattern compresses best but has 748 tokens that contain a line break,
-the property that correlates with lower MBPP pass@1. The split pattern gives a statement the same tokens at every
-indentation depth but compresses 0.2\% less, and it is untested as a whole. SA-BPE with the chosen pattern is used.
-Training runs that would compare the four tokenizers by downstream accuracy were designed but not run, so the choice
-rests on these measurements and the cited results.
+\paragraph{Comparison of tokenizers.} Four tokenizers were trained on the same data and measured on the 6.21~GB of
+validation text (Table~\ref{tab:tokenizers}): SA-BPE with the pre-tokenizer above, BPE with the same pre-tokenizer,
+SA-BPE with line breaks attached to the punctuation before them, and SA-BPE with line breaks and indentation as
+separate pre-tokens. BPE matches SA-BPE in compression (3.623 against 3.624 bytes per token over the file-level stage)
+but has more merged tokens that the validation text rarely uses: 15 never used against 5, and 84 used fewer than 100
+times against 54. Attaching line breaks to punctuation gives the best compression but 748 tokens that contain a line
+break, the property that correlates with lower MBPP pass@1. Separate line breaks and indentation give a statement the
+same tokens at every indentation depth but compress 0.2\% less, and this pre-tokenizer is untested as a whole. SA-BPE
+with the pre-tokenizer above is used. Training runs that would compare the four tokenizers by downstream accuracy were
+designed but not run, so the choice rests on these measurements and the cited results.
 
-\begin{table}
-  \caption{Four tokenizers trained on the same sample and measured on the validation splits (6.21~GB). Fused: line
-  breaks attached to punctuation. Split: line breaks and indentation in chunks of their own. Bytes per token is over
-  the file-level stage's mixture. The next two rows count vocabulary tokens that contain a line break and tokens that
-  join punctuation to a line break; the last two count merged tokens by how often the validation text uses them.}
-  \label{tab:tokenizers}
-  \small
-  \begin{tabular}{lrrrr}
-    \toprule
-    Measure & SA-BPE & BPE & Fused & Split \\
-    \midrule
-    Bytes per token & 3.624 & 3.623 & 3.868 & 3.616 \\
-    With a line break & 72 & 67 & 748 & 9 \\
-    Punctuation + line break & 0 & 0 & 693 & 0 \\
-    Never used & 5 & 15 & 5 & 5 \\
-    Used $<$100 times & 54 & 84 & 54 & 56 \\
-    \bottomrule
-  \end{tabular}
-\end{table}
+\paragraph{Tokenizer training data.} The tokenizer is trained on 13.4~GB sampled from the training splits of the 17
+file-level sources, each in proportion to its share of the file-level stage's bytes, so the sample is 85.6\% code. A
+tokenizer's training data should be representative of the model's training data, since tokens that are frequent in
+the tokenizer data but rare in the model data are under-trained~\cite{land2024magikarp}.
 
-\paragraph{Training sample.} The tokenizer is trained on 13.4~GB drawn from the training splits of the 17 file-level
-sources, each in proportion to its share of the file-level stage's bytes, so the sample is 85.6\% code. A tokenizer's
-training data should be representative of the model's training data, since tokens that are frequent in the tokenizer
-data but rare in the model data are under-trained~\cite{land2024magikarp}.
+\subsection{Tokenizing documents}
 
-\subsection{Encoding}
-
-Each document is encoded separately, without BOS or padding. Text that looks like a special token is encoded as
-ordinary text, so a document cannot produce a BOS or a FIM sentinel. Each repository file ends with a line break,
-added when it is missing, so that two concatenated files never share a line.
+Each document is tokenized separately, without BOS or padding tokens. Text that looks like a special token is
+tokenized as ordinary text, so a document cannot produce a BOS or a FIM token. Each repository file ends with a line
+break, added when it is missing, so that two concatenated files never share a line.
 
 \subsection{Packing}
 
-\paragraph{Pieces.} Documents are packed into rows of the stage's context length, 8,192 or 32,768 tokens. A document
-that fits in a row is one piece; the BOS after it is a training target, so the model learns where a document ends. A
-longer document is cut into pieces. Each cut is placed at the last statement boundary that fits (from a tree-sitter
-parse, for repository code), otherwise after the last line break, otherwise before the last token that starts a
-character. Cuts at statement boundaries keep statements whole, and no cut splits a multi-byte character.
+\paragraph{Chunking.} Documents are packed into training sequences of the stage's context length, 8,192 or 32,768
+tokens. A document that fits in a sequence is one chunk, and the model is trained to predict the BOS token after it,
+so it learns where a document ends. A longer document is cut into chunks. Each cut is placed at the last statement
+boundary that fits (from a tree-sitter parse, for repository code), otherwise after the last line break, otherwise
+before the last token that starts a character. Cuts at statement boundaries keep statements whole, and no cut splits
+a multi-byte character.
 
-\paragraph{Document masking.} Each piece is its own attention segment: its tokens attend only to earlier tokens of
-the same piece. Causal masking within each document gave lower perplexity than causal attention across concatenated
+\paragraph{Document masking.} Each chunk attends only to earlier tokens of the same chunk, not to other chunks in the
+same sequence. Causal masking within each document gave lower perplexity than causal attention across concatenated
 documents~\cite{zhao2024seqcomp}.
 
-\paragraph{Best-fit packing.} Pieces are placed by Best-Fit-Decreasing: longest first, each into the row with the
-least free space that can hold it, otherwise into a new row. No piece is truncated to fit a row; packing with fewer
-truncations improved language modeling over the usual concatenate-then-split method~\cite{ding2024fewer}. The two
-stages read disjoint shards, so no training document is packed twice. Every random choice in packing and FIM is
-drawn from a ChaCha8 generator keyed by the document, the piece and the corpus, so the packed data does not depend on
-the order in which the work runs.
+\paragraph{Best-fit packing.} Chunks are placed by Best-Fit-Decreasing: longest first, each into the sequence with the
+least free space that can hold it, otherwise into a new sequence. No chunk is truncated to fit a sequence; packing with
+fewer truncations improved language modeling over the usual concatenate-then-split method~\cite{ding2024fewer}. The
+two stages use disjoint parts of the dataset, so no training document is packed twice. All random choices in packing
+and FIM come from a ChaCha8 random number generator seeded by the document, the chunk and the source, so the packed
+data does not depend on the order in which the work runs.
 
 \subsection{Fill-in-the-middle}
 
-\paragraph{Format.} A FIM example moves a span of a piece, the middle, to the end. Prefix, suffix and middle are
-encoded separately and joined with the three sentinels, in PSM order (prefix, suffix, middle) or SPM order (suffix,
-prefix, middle)~\cite{bavarian2022fim}. The BOS after the middle is a target, so the model learns where a middle ends.
-Half of the repository-code pieces become FIM examples (rate 0.5), drawn for each piece before it is cut, which is
-FIM at the context level; half of the examples are PSM and half SPM. The middle is a random character span in 10\%
-of the examples. Otherwise it follows the syntax tree (AST-FIM): with equal probability, one tree-sitter node chosen
-in proportion to its size in bytes, or the span of whole nodes that best overlaps a random character
-span~\cite{gong2025astfim}.
+\paragraph{Format.} A FIM example moves a span of a chunk, the middle, to the end. Prefix, suffix and middle are
+tokenized separately and joined with the three FIM tokens, in prefix-suffix-middle (PSM) or suffix-prefix-middle (SPM)
+order~\cite{bavarian2022fim}. The model is trained to predict the BOS token after the middle, so it learns where a
+middle ends. Half of the repository-code chunks become FIM examples (FIM rate 0.5). The choice is made for each chunk
+after a document is cut to the context length, which is called context-level FIM; half of the examples are PSM and
+half SPM. The middle is a random character span in 10\% of the examples. Otherwise it follows the syntax tree
+(AST-FIM): with equal probability, one syntax-tree node chosen in proportion to its size in bytes, or the span of
+whole nodes that best overlaps a random character span~\cite{gong2025astfim}.
 
 \paragraph{Why FIM\@.} The evaluation includes infilling (HumanEval single-line, multi-line and random-span infilling),
 which a model trained only left to right cannot do. FIM rates up to 0.9 did not reduce left-to-right performance,
-and FIM at the context level performed better than at the document level~\cite{bavarian2022fim}. DeepSeek-Coder chose
-a rate of 0.5 because a rate of 100\% gave its weakest code completion~\cite{guo2024deepseekcoder}. Training on both
-PSM and SPM matched or exceeded training on either alone, and a model trained only on SPM cannot infill in
-PSM~\cite{bavarian2022fim}. The 90\% share of syntax-aligned middles is AST-FIM's; at a FIM rate of 0.7, AST-FIM kept
-HumanEval+ and MBPP+ close to a left-to-right model~\cite{gong2025astfim}.
+and context-level FIM performed better than FIM applied to whole documents~\cite{bavarian2022fim}. DeepSeek-Coder
+chose a FIM rate of 0.5 because a rate of 100\% gave its weakest code completion~\cite{guo2024deepseekcoder}. Training
+on both PSM and SPM matched or exceeded training on either alone, and a model trained only on SPM cannot infill in
+PSM~\cite{bavarian2022fim}. The 90\% share of syntax-aligned middles follows AST-FIM; at a FIM rate of 0.7, AST-FIM
+kept HumanEval+ and MBPP+ close to a left-to-right model~\cite{gong2025astfim}.
 
 \paragraph{Scope.} FIM is applied only to repository code: the six repository sources and the repository-level
-documents. In those corpora FIM examples hold about 50\% of the tokens, which is 29.7\% of the file-level stage's
-tokens and 40.8\% of the repository-level stage's. Synthetic code and functions get no FIM examples; this scope was
+documents. In these sources FIM examples make up about 50\% of the tokens, which is 29.7\% of the file-level stage's
+tokens and 40.8\% of the repository-level stage's. Synthetic code and functions get no FIM examples; this choice was
 not ablated.
 
-\paragraph{Line-start rule.} A syntax node starts after its line's indentation and ends before its line break. Without
-a correction, no AST-FIM example in PSM order would have a prefix that ends with a line break and a middle made of
-whole lines, which is the layout of line-level infilling: all 1,033 single-line and 5,815 multi-line HumanEval
-infilling prefixes end with a line break, and every reference middle ends with one. Therefore, when a syntax middle
-starts a line, with probability 0.5 it also takes the line's indentation, and its final line break when it ends at
-one. In the packed data, 35.9--36.5\% of the PSM middles in the Python repository corpora (22.0\% in Stack-Edu C++)
-are whole lines, and 21.6--25.4\% start a line and stop before its line break, so both layouts are trained. AST-FIM
-reports that closer training and test distributions give stronger performance~\cite{gong2025astfim}.
+\paragraph{Whole-line middles.} A syntax-tree node starts after its line's indentation and ends before its line
+break. Without a correction, no AST-FIM example in PSM order would have a prefix that ends with a line break and a
+middle made of whole lines, which is the layout of line-level infilling: all 1,033 single-line and 5,815 multi-line
+HumanEval infilling prefixes end with a line break, and every reference middle ends with one. Therefore, when a syntax
+middle starts a line, with probability 0.5 it also includes the line's indentation, and its final line break when it
+ends at one. In the packed data, 35.9--36.5\% of the PSM middles in the Python repository sources (22.0\% in Stack-Edu
+C++) are whole lines, and 21.6--25.4\% start a line and stop before its line break, so both layouts are trained.
+AST-FIM reports that closer training and test distributions give stronger performance~\cite{gong2025astfim}.
 
-\subsection{Reading rows during training}
+\subsection{Batching and data order}
 
-A training step has 15 micro-batches of 98,304 tokens: 12 rows of 8,192 tokens in the file-level stage or 3 rows of
-32,768 tokens in the repository-level stage, 1,474,560 tokens per step in both. Rows are assigned to corpora by the
-mixture weights with a Weyl sequence: row $n$ goes to the corpus whose interval of the cumulative weights contains the
-fractional part of $(n + 1)(\sqrt{5} - 1)/2$, which spreads every prefix of the run evenly over the corpora. Each
-corpus's rows are read in a random permutation with a fixed seed. Within a row, padding and a BOS that does not end a
-document have no training target, and the pieces' attention segments are passed to FlashAttention as
-variable-length sequences.
+A training step has 15 micro-batches of 98,304 tokens: 12 sequences of 8,192 tokens in the file-level stage or 3
+sequences of 32,768 tokens in the repository-level stage, 1,474,560 tokens per step in both. Sequences are assigned to
+sources in proportion to the mixture weights with a deterministic low-discrepancy (golden-ratio) sequence: sequence
+$n$ goes to the source whose interval of the cumulative weights contains the fractional part of
+$(n + 1)(\sqrt{5} - 1)/2$, so every prefix of training follows the mixture weights closely. Each source's sequences
+are read in a random order with a fixed seed. The loss excludes padding tokens and the BOS token after a chunk that
+does not end its document. Document masking is implemented with FlashAttention's variable-length attention.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
