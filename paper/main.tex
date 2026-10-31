@@ -14,15 +14,15 @@
   \country{}}
 
 \begin{abstract}
-Large language models (LLMs) for code with under a billion parameters are commonly pretrained on trillions of tokens.
-This paper presents a generative LLM for Python and C++ code generation, a GPT-style decoder-only transformer
+Code large language models (LLMs) with fewer than one billion parameters are typically pretrained on trillions of
+tokens. This paper presents a generative LLM for Python and C++ code generation: a GPT-style decoder-only transformer
 pretrained from scratch on a single GPU. The model has 522M parameters and is trained on 103B tokens of Python and C++
-code, web text and mathematics, first on file-level sequences of 8,192 tokens and then on repository-level sequences
-of 32,768 tokens. Pretraining took 76.3 hours on one NVIDIA GH200. Scored by each benchmark's official tool, the model
-reaches greedy pass@1 of 26.8 on HumanEval, 22.0 on
-HumanEval+, 44.4 on MBPP and 36.5 on MBPP+, 21.7 and 36.8 on the C++ versions of HumanEval and MBPP, and 55.3 on
-single-line infilling. On HumanEval and HumanEval+ it is within its 95\% interval of Qwen2.5-Coder-0.5B, whose code
-pretraining alone used 53 times as many tokens; on MBPP it trails that model by 8.5 points.
+code, web text and math, first with a context length of 8,192 tokens at the file level and then with 32,768 tokens at
+the repository level. Pretraining takes 76.3 hours on one NVIDIA GH200 GPU. Using each benchmark's official evaluation
+tool, the model achieves greedy pass@1 of 26.8 on HumanEval, 22.0 on HumanEval+, 44.4 on MBPP and 36.5 on MBPP+, 21.7
+and 36.8 on the C++ versions of HumanEval and MBPP, and 55.3 on single-line infilling. On HumanEval and HumanEval+, the
+reported scores of Qwen2.5-Coder-0.5B fall within the 95\% confidence intervals of this model, although Qwen2.5-Coder
+used 53 times more tokens for its code pretraining alone. On MBPP, this model is 8.5 points lower.
 \end{abstract}
 
 \keywords{code language models, pretraining, small language models, training efficiency, code generation}
@@ -31,37 +31,37 @@ pretraining alone used 53 times as many tokens; on MBPP it trails that model by 
 
 \section{Introduction}
 
-Large language models (LLMs) now write, test and repair software well enough to work as software-engineering agents.
-Anthropic's Claude Opus 5.5 resolves 89.9\% of the tasks in SWE-bench Pro~\cite{anthropic2026opus55,deng2025swebenchpro},
-whose problems come from actively maintained repositories and require large, multi-file changes; OpenAI's GPT-6
-Astra~\cite{openai2026gpt6astra} and DeepSeek's V4 series~\cite{deepseek2026v4} are its contemporaries from the other
-leading developers.
+Large language models (LLMs) are now strong at code generation and software engineering tasks. For example, Claude
+Opus 5.5 resolves 89.9\% of the tasks in SWE-bench Pro~\cite{anthropic2026opus55}, a benchmark of tasks from actively
+maintained repositories that require large, multi-file changes~\cite{deng2025swebenchpro}. Other frontier models
+released in 2026 include OpenAI's GPT-6 Astra~\cite{openai2026gpt6astra} and DeepSeek-V4~\cite{deepseek2026v4}.
 
-This capability rests on scale. The cross-entropy loss of a language model falls as a power law in its number of
-parameters, its training tokens and its training compute~\cite{kaplan2020scaling}, and compute-optimal training grows
-the model and its data in equal proportion~\cite{hoffmann2022chinchilla}. Frontier developers follow these laws on
-large accelerator clusters. DeepSeek-V3, a 671B-parameter mixture of experts with 37B parameters active per token, was
-pretrained on 14.8T tokens on a cluster of 2,048 H800 GPUs, in 2.788M GPU hours in all~\cite{deepseek2024v3}, and
-DeepSeek-V4-Pro, with 1.6T parameters and 49B active, on more than 32T tokens~\cite{deepseek2026v4}. The system cards of
-the closed models describe their training data only qualitatively~\cite{anthropic2026opus55,openai2026gpt6astra}.
+These capabilities come from scale. Scaling laws show that the loss of a language model decreases as a power law in
+model size, dataset size and training compute~\cite{kaplan2020scaling}, and that for compute-optimal training, model
+size and the number of training tokens should be scaled equally~\cite{hoffmann2022chinchilla}. As a result, frontier
+models are trained on large GPU clusters. DeepSeek-V3, a mixture-of-experts (MoE) model with 671B total and 37B
+activated parameters, was pretrained on 14.8T tokens on 2,048 H800 GPUs and used 2.788M GPU hours for its full
+training~\cite{deepseek2024v3}. DeepSeek-V4-Pro has 1.6T total and 49B activated parameters and was pretrained on more
+than 32T tokens~\cite{deepseek2026v4}. The system cards of the Claude and GPT models do not report model size, training
+tokens or training compute~\cite{anthropic2026opus55,openai2026gpt6astra}.
 
-Models specialized for code are trained the same way. DeepSeek-Coder was pretrained from scratch on 2T
-tokens~\cite{guo2024deepseekcoder}, StarCoder2 on 3.3--4.3T~\cite{lozhkov2024starcoder2} and Seed-Coder on
-6T~\cite{seed2025coder}, while DeepSeek-Coder-V2 and Qwen2.5-Coder continued the pretraining of general models with a
-further 6T and 5.5T tokens of code-focused data~\cite{deepseek2024coderv2,hui2024qwen25coder}. Their instruction and
-reasoning variants add post-training for code on top: supervised fine-tuning followed by preference optimization or
-reinforcement learning~\cite{deepseek2024coderv2,seed2025coder,hui2024qwen25coder}. The smallest members of these
-families inherit the same budgets: every Qwen2.5-Coder model, down to 0.5B parameters, continues pretraining on over
-5.5T tokens~\cite{hui2024qwen25coder}, and every Qwen3 model, down to 0.6B, was pretrained on 36T
-tokens~\cite{yang2025qwen3}.
+Code LLMs follow the same trend. DeepSeek-Coder was pretrained from scratch on 2T tokens~\cite{guo2024deepseekcoder},
+StarCoder2 on 3.3--4.3T tokens~\cite{lozhkov2024starcoder2} and Seed-Coder on 6T tokens~\cite{seed2025coder}.
+DeepSeek-Coder-V2 and Qwen2.5-Coder continue pretraining from general-purpose LLMs on an additional 6T and 5.5T tokens
+of code-focused data~\cite{deepseek2024coderv2,hui2024qwen25coder}. Their instruction-tuned and reasoning versions are
+then post-trained with supervised fine-tuning (SFT) followed by preference optimization or reinforcement learning
+(RL)~\cite{deepseek2024coderv2,seed2025coder,hui2024qwen25coder}. Even the smallest models use the same amount of data:
+all Qwen2.5-Coder models, including the 0.5B model, are trained on over 5.5T tokens~\cite{hui2024qwen25coder}, and all
+Qwen3 models, including the 0.6B model, are pretrained on 36T tokens~\cite{yang2025qwen3}.
 
-Budgets of this size lie far beyond a single accelerator. At the 0.38M tokens per second at which a 0.5B-parameter
-model trains on one GPU in this work, the 5.5T tokens of Qwen2.5-Coder alone would take more than five months. This
-paper asks whether code generation comparable to that of the smallest code LLMs can be reached on one GPU with a small
-fraction of their tokens. It presents a generative, GPT-style decoder-only LLM for Python and C++ code generation with
-522M parameters, pretrained from scratch on 103B tokens in 76.3 hours on a single NVIDIA GH200. On HumanEval and
-HumanEval+~\cite{chen2021codex,liu2023evalplus}, its function-level code generation is within its 95\% interval of
-Qwen2.5-Coder-0.5B, whose code-focused pretraining alone used 53 times as many tokens~\cite{hui2024qwen25coder}.
+Training budgets of this size are not feasible on a single GPU. The 0.5B-parameter model in this work trains at 0.38M
+tokens per second on one GPU; at this rate, the 5.5T tokens of Qwen2.5-Coder would take more than five months. This
+paper studies whether a code LLM pretrained on a single GPU with far fewer tokens can reach code generation performance
+comparable to the smallest existing code LLMs. It presents a 522M-parameter, GPT-style decoder-only LLM for Python and
+C++ code generation, pretrained from scratch on 103B tokens in 76.3 hours on a single NVIDIA GH200 GPU. On HumanEval
+and HumanEval+~\cite{chen2021codex,liu2023evalplus}, the reported pass@1 of Qwen2.5-Coder-0.5B falls within the 95\%
+confidence intervals of this model, although Qwen2.5-Coder used 53 times more tokens for its code pretraining
+alone~\cite{hui2024qwen25coder}.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
