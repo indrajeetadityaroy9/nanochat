@@ -760,7 +760,6 @@ than 5% of its probe's responses.
 | 2107.03374 | Evaluating Large Language Models Trained on Code |
 | 2206.02369 | Learning to Break the Loop: Analyzing and Mitigating Repetitions for Neural Text Generation |
 | 2305.14314 | QLoRA: Efficient Finetuning of Quantized LLMs |
-| 2305.18290 | Direct Preference Optimization: Your Language Model is Secretly a Reward Model |
 | 2401.00788 | Astraios: Parameter-Efficient Instruction Tuning Code Large Language Models |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming - The Rise of Code Intelligence |
 | 2402.03300 | DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models |
@@ -770,7 +769,6 @@ than 5% of its probe's responses.
 | 2409.12186 | Qwen2.5-Coder Technical Report |
 | 2409.19913 | Scaling Optimal LR Across Token Horizons |
 | 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models |
-| 2501.12599 | Kimi k1.5: Scaling Reinforcement Learning with LLMs |
 | 2501.12948 | DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning |
 | 2501.19393 | s1: Simple test-time scaling |
 | 2502.12143 | Small Models Struggle to Learn from Strong Reasoners |
