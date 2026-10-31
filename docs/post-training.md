@@ -16,7 +16,7 @@ to the 522M base model is [inference].
 |---|---|
 | `corpus/posttrain/sft.py` (`THINK`, `END_THINK`), `corpus/loader.py` (`PackedSplit.contexts`, `PretrainingBatches.assemble`) | §3 markers and loss (the corpus: `docs/corpus.md` §10) |
 | `run.py` (`RunConfig.base`, `base_step`, `sft_epochs`, `generate` "none"; `base_plan`, `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml`, `train/stages.py` (`stage_batches`: epochs past the first; `val_batches`) | §4 |
-| `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/loop.py` (base weights, `validate`) | §4 |
+| `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/loop.py` (base weights, `validate`), `eval/sft_val.py` | §4 |
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`, `results_dir`), `results/posttrain/sft_lr.jsonl` and its `-curves.jsonl` | §4 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
 
@@ -355,11 +355,16 @@ unmeasured. Each choice is [inference] from the cited evidence.
   the whole val split (1,720 rows, 53.5M labels) before the full run's first step, every 1,000 steps and after the
   last (`run.py` `validation_steps`, `train/loop.py` `validate`; `val` records); full states every 1,000 steps (resume
   points) and at the end; the full run trains with `generate` "none" (its run name carries it), and its last
-  checkpoint is evaluated by the reasoning protocol (§5).
+  checkpoint is evaluated by the reasoning protocol (§5). **Per source**: `python -m eval.sft_val <run_name> <step>`
+  scores a saved model on the same rows and labels and pools each val document's scored labels
+  (`docs/corpus.md` §10, val labels) per group, per KodCode style and in all (the `val` record's loss, up to
+  summation order), into `RUNS/<run>/sft-val-<step>.json` (`loss` in nats per label, `labels`, `documents`; and
+  `document_losses`, each document's summed loss and label count, for paired comparisons across checkpoints).
 - **Runs and records**: an SFT run is a `run.py` run whose `RunConfig.base` names the base run; its directory, name
   and log follow the base's (`docs/training.md` §6). A sweep's records go to `results/posttrain/` when its runs start
   from a base checkpoint, else to `results/pretrain/` (`ablations/records.py` `results_dir`); the calibration's are
-  `results/posttrain/sft_lr.jsonl` and `-curves.jsonl`.
+  `results/posttrain/sft_lr.jsonl` and `-curves.jsonl`; a single run's curves, `python -m ablations.records
+  <run_name> sft` (`results/posttrain/sft-curves.jsonl`, `docs/training.md` §6).
 
 ## 5. Evaluation
 

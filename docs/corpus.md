@@ -30,7 +30,7 @@ recomputed on CPU from the curated shards and the tokenized and packed data unde
 | `corpus/crate/lib.rs` (module, rayon pool), `corpus/crate/Cargo.toml`, `corpus/crate/Cargo.lock` | 6 |
 | `corpus/loader.py` (`contexts`: the SFT prompts' ignored labels) | 9, 10 |
 | `corpus/posttrain/__init__.py`, `corpus/posttrain/sft.py` (`NAME`, `SFT_STAGE`, `THINK`, `END_THINK`) | 10 |
-| `corpus/posttrain/build.py` (`SOURCE`, `GROUPS`, `render`, `problem`, `WRAPPERS`, `CAP`) | 10, 11 |
+| `corpus/posttrain/build.py` (`SOURCE`, `GROUPS`, `render`, `problem`, `WRAPPERS`, `CAP`, `val_labels`, `val_spans`) | 10, 11 |
 
 ## 1. Sources and acquisition
 
@@ -622,6 +622,18 @@ tokens are each response and its closing BOS) [measured]:
 (`stats.json` `reasoning_p10_p50_p90_max`); 208,797 documents with more than 8,192 reasoning tokens against 589,153
 shorter ones (1 : 2.82), the long ones 60.3% of the tokens; function-level answers 50.5% of the tokens and stdin
 programs 47.6% [measured: by a heuristic classifier of the answers' code that is not in the repository].
+
+**Val labels** (`val_labels`, the build's last step; `python -m corpus.posttrain.build --val-labels` recomputes them
+from a built corpus and its sources without a rebuild): `val-labels.jsonl` beside `stats.json`, one JSON line per val
+document in document order: `group` (a `GROUPS` key), `style` (KodCode's own `style` column: `complete`, `instruct` or
+`online_judge`; null elsewhere) and its place in the packed val rows, `row`, `start`, `end` and `context`: its labels
+are positions [`start`, `end`) of the row's labels (the first predicts its first token, the last its closing BOS), the
+first `context` ignored, so [`start` + `context`, `end`) are its scored labels (`val_spans`). A document's source is
+the first source row, in the build's task order, whose text digest (the duplicate key) equals that of its decoded
+tokens, the row the build kept; every val document matches one, and the per-group rows and loss tokens equal
+`stats.json`'s. KodCode's 2,547 val rows: 1,248 complete, 1,090 instruct, 209 online_judge [measured]. On all 1,720
+packed val rows the spans equal the loader's (`corpus/loader.py` `assemble`): each span's tokens are its document's
+followed by BOS, the context exactly its masked labels, the spans' union exactly the row's scored labels [measured].
 
 **The cap against time.** The cap trades answers per prompt, worth less than prompts (coefficients 2.635 against
 4.831; at a fixed budget 64K prompts × 1 beat 16K × 4; `docs/post-training.md` §2.3), for training time. Before the

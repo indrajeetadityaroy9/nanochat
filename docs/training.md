@@ -17,7 +17,7 @@ The code is the specification. Markers: [arithmetic] derived from code numbers; 
 |`train/optim.py` (`optimizers`, `Muon`, `tau_weight_decay`, `update`, `MAX_GRAD_NORM`)|§3|
 |`train/loop.py` (`train`, `SEED`), `train/diagnostics.py` (`Diagnostics`, `sidecar`), `train/checkpoint.py`|§6, §8|
 |`ablations/peak_lr.py` (`lr_multiplier`); `conf/experiment/peak_lr_d24.yaml`; `results/pretrain/peak_lr_d24.jsonl` and its `-curves.jsonl`|§5|
-|`ablations/records.py` (`Records`, `record`, `results_dir`); `results/pretrain/trajectory.json`|§6|
+|`ablations/records.py` (`Records`, `record`, `results_dir`, `curves`, `export_curves`); `results/pretrain/trajectory.json`, `results/pretrain/pretrain-curves.jsonl`|§6|
 |`scripts/setup.sh`, `scripts/container.sh`, `scripts/release.sh`, `paths.py`|§7, §9|
 |`docker/Dockerfile`, `pyproject.toml`, `uv.lock`|§8|
 
@@ -417,10 +417,17 @@ has `diverged_at` set and `measures`, `errors`, `offset_bpb` and `efficiency` nu
 | File | Content |
 |---|---|
 | `<experiment>.jsonl` | per run: `experiment`, `eval/suite.py` `record` (`run_name`, the run log's non-train records, the checkpoints' evaluations), `config`, `measures` and `errors` (`docs/evaluation.md` §5), `offset_bpb` (32K code bits per byte by byte offset), `efficiency` (the first `run` record's `num_parameters`, `flops_per_token` and `model_flops_per_token`; the peak allocated and reserved bytes over the `stage` and `end` records), `diverged_at` |
-| `<experiment>-curves.jsonl` | per run: `experiment`, `run_name` and its train records as columns (`metrics.curves`) |
+| `<experiment>-curves.jsonl` | per run (`curves`): `experiment`, `run_name`, `stages` (each `stage` record's `step`, `seq_len`, `tokens`), `validations` (each `val` record's `step`, `loss`, `labels`) and its train records as columns (`metrics.curves`: one list per field in step order, None where a record lacks it) |
 
-`results/pretrain/trajectory.json` is the base run's likelihood trajectory (`docs/evaluation.md` §2) from step
-62,887 against step 66,063, written by §9 step 4; its values are `docs/results.md` §4.
+One run's curves, at any time: `python -m ablations.records <run_name> <experiment> [field[:n] ...]` (`export_curves`)
+writes `<experiment>-curves.jsonl` to the directory `results_dir` gives its first `run` record's config; with fields
+listed, only they (and `step`) are kept, `field:n` at the steps divisible by n (None elsewhere). The base run's,
+`results/pretrain/pretrain-curves.jsonl` (16.6 MB), keeps `num_input_tokens_seen`, `loss`, `learning_rate`,
+`grad_norm`, `tokens_per_second`, `mfu`, `max_logsumexp`, `qk_norm_gain_max` at every step and `corpus_loss:10` (6,988
+steps; every step's would make 62 MB); its log predates the NVML fields. `results/pretrain/peak_lr_d24-curves.jsonl`
+and `results/posttrain/sft_lr-curves.jsonl` predate `stages` and `validations`. `results/pretrain/trajectory.json` is
+the base run's likelihood trajectory (`docs/evaluation.md` §2) from step 62,887 against step 66,063, written by §9
+step 4; its values are `docs/results.md` §4.
 
 The ablation records and their status: `docs/experiments.md` §1. `results/pretrain/peak_lr_d24.jsonl`'s `run`
 records carry the earlier multi-depth code's `RunConfig` fields (`num_hidden_layers` 24, `seed` 0, `tokenizer`
