@@ -250,7 +250,8 @@ def select(out: Path, directories: list[Path], max_length: int) -> dict:
         "by_style": {s: summary([r for r in rows if prompts[r["prompt_id"]]["style"] == s]) for s in styles},
         "ftpo": counts | {
             "max_length": max_length, "strength": STRENGTH, "rows_before_rebalance": len(candidates),
-            "rows": len(kept), "rows_unsolved_prompts": sum(c["prompt_id"] in verified - solved for c in kept),
+            "rows": len(kept),
+            "rows_unsolved_prompts": sum(c["prompt_id"] in verified - solved for c in kept) if verified else None,
             "rows_by_temperature": {str(t): sum(c["temperature"] == t for c in kept) for t in temperatures},
             "rejected_top20_before": Counter(c["rejected"] for c in candidates).most_common(20),
             "rejected_top20": Counter(c["rejected"] for c in kept).most_common(20),

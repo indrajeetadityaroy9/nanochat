@@ -49,8 +49,9 @@ timed() {  # <name> <command...>
 rollouts() {  # <model dir> <out dir> <rollouts args...>: rollouts, verdicts, selection
   [ -f "$2/meta.json" ] || timed "rollouts $(basename "$2")" "${GPU[@]}" nanochat-onpolicy \
     python -m onpolicy.rollouts "$(w "$1")" "$(w "$2")" "${@:3}"
+  # the cpuset's cores: GNU nproc honours OMP_NUM_THREADS (1 in CPU containers), so it is unset for the count
   [ -f "$2/verdicts.jsonl" ] || timed "verify $(basename "$2")" "${CPU[@]}" nanochat-onpolicy \
-    python -m onpolicy.verify "$(w "$2")" --workers "$("${CPU[@]}" nanochat-onpolicy nproc)"
+    python -m onpolicy.verify "$(w "$2")" --workers "$("${CPU[@]}" nanochat-onpolicy env -u OMP_NUM_THREADS nproc)"
   [ -f "$2/selection.json" ] || "${CPU[@]}" nanochat-onpolicy python -m onpolicy.selection "$(w "$2")" > /dev/null
 }
 
