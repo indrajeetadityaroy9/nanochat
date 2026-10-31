@@ -51,10 +51,10 @@ def train(run_name: str, step: int, out: Path) -> None:
     for target in TARGETS:
         order = np.argsort(np.abs(lengths - target), kind="stable")
         chosen.append(int(next(d for d in order if d not in chosen)))
-    # the longest teacher responses (the hardest problems, the longest generations) among the contexts with room for
-    # DECODE_TOKENS
+    # the longest teacher responses (the hardest problems, the longest generations) among the documents whose prompt
+    # (context + 1 tokens) leaves room for DECODE_TOKENS in the context
     fits = [d for d in np.argsort([start + c - end for _, start, end, c in spans], kind="stable")
-            if spans[d][3] < SFT_STAGE.seq_len // 2]
+            if spans[d][3] + 1 + DECODE_TOKENS <= SFT_STAGE.seq_len]
     decoded = [int(d) for d in fits[:DECODE]]
     rows = {}
     for d in {*chosen, *decoded}:

@@ -42,7 +42,7 @@ from eval.verify import (
 )
 from inference.decoder import NativeDecoder, Request, heal_tokens
 from inference.syntax_constraint import SyntaxConstraint
-from metrics import latency, parse_outcome, parse_shares, pass_cell
+from metrics import evalplus_passed, latency, parse_outcome, parse_shares, pass_cell
 from model.modeling import CausalLM
 
 # HF dataset revisions: MultiPL-E's, its generator's pin (multipl_e/completions.py DATASET_REVISION)
@@ -52,8 +52,6 @@ HUMANEVAL_X = {"repo_id": "zai-org/humaneval-x", "revision": "62c78627f3072a1454
 # plus-test column by the benchmark (humaneval and humaneval_plus, mbpp and mbpp_plus, as the papers name them)
 EVALPLUS = {"humaneval_plus": ("humaneval", get_human_eval_plus), "mbpp_plus": ("mbpp", get_mbpp_plus)}
 MULTIPL_E_BENCHMARKS = ("humaneval_cpp", "mbpp_cpp")
-# HumanEval infilling's benchmarks (arXiv 2207.14255; corpus/decontaminate.py's texts, scripts/official_eval.sh's runs)
-INFILLING = ("single-line", "multi-line", "random-span")
 # The filtered mode's record key: AlphaCode's n@k (arXiv 2203.07814 §2.2), one submission chosen from up to
 # verify.ATTEMPTS = 10 candidates by example tests
 FILTERED = "1@10"
@@ -140,13 +138,8 @@ def generate_groups(generator: NativeDecoder, groups: list[list[Request]],
                  latency(starts, firsts, ends, [len(out[k]) for k in span], duration=max(ends) - min(starts)))
 
 
-def pass_scores(passed: list[list[bool]]) -> dict[str, dict]:
-    """pass@1 as metrics.pass_cell (per-problem means; Wilson interval for one sample a problem)."""
-    return {"pass@1": pass_cell(passed)}
-
-
 class Filtered(NamedTuple):
-    """A filtered-mode benchmark (filtered): its verify.Search and the text of a candidate's ids."""
+    """A filtered-mode benchmark (filtered_completions): its verify.Search and the text of a candidate's ids."""
     search: Search
     text: Callable[[int, list[int]], str]
 
@@ -158,32 +151,26 @@ class Filtered(NamedTuple):
             "new_tokens": [len(chosen(c).ids) for c in tried], "latency": timing}
 
 
-def filtered(request: Callable[[int], Request], text: Callable[[int, list[int]], str],
-             check: Callable[[int, str], tuple[str, list[str]]], *, found: list[list[tuple[str, str]]],
-             language: Literal["python", "cpp"]) -> Filtered:
-    """The filtered mode of tasks 0..len(found)-1. check(i, text) returns the checked program and its known
-    diagnostics; found[i]: task i's vetted examples."""
-    return Filtered(Search(request=request, check=lambda i, ids: (found[i], *check(i, text(i, ids))),
-                           language=language, count=len(found)), text)
-
-
 def filtered_completions(tokenizer: Tokenizer, items: list[Task], prompts: list[list[int]], budgets: list[int], *,
                          special: Literal["skip", "stop"], check: Callable[[Task, str], tuple[str, list[str]]],
                          found: list[list[tuple[str, str]]], language: Literal["python", "cpp"]) -> Filtered:
-    """filtered of left-to-right prompts, healed (one more token of budget; Python under the syntax constraint);
-    found: each task's vetted examples (vetted)."""
+    """The filtered mode of tasks 0..len(items)-1 from left-to-right prompts, healed (one more token of budget; Python
+    under the syntax constraint). check(task, text) returns the checked program and its known diagnostics; found[i]:
+    task i's vetted examples (vetted)."""
     dropped = [heal_tokens(tokenizer, p)[2] for p in prompts]
 
     def request(i: int) -> Request:
         input_ids, constraint, _ = heal_tokens(tokenizer, prompts[i])  # a fresh constraint per candidate
         if language == "python":
-            constraint = SyntaxConstraint(tokenizer, tokenizer.enc.decode_bytes(input_ids[1:]), suffix=b"",
-                                          healing=constraint)
+            constraint = SyntaxConstraint(tokenizer, tokenizer.enc.decode_bytes(input_ids[1:]), healing=constraint)
         return Request(input_ids=input_ids, max_new_tokens=budgets[i] + 1, constraint=constraint,
                        stopping_criteria=KeywordsStoppingCriteria(tokenizer, items[i].stopwords, healed=dropped[i]))
 
-    return filtered(request, lambda i, ids: completion(tokenizer, items[i], ids, special=special, healed=dropped[i]),
-                    lambda i, text: check(items[i], text), found=found, language=language)
+    def text(i: int, ids: list[int]) -> str:
+        return completion(tokenizer, items[i], ids, special=special, healed=dropped[i])
+
+    return Filtered(Search(request=request, check=lambda i, ids: (found[i], *check(items[i], text(i, ids))),
+                           language=language, count=len(items)), text)
 
 
 def sanitizer_init() -> None:
@@ -255,13 +242,10 @@ def evalplus(pool: ProcessPoolExecutor, name: str, items: list[Task], samples: l
                              str(timed_workers())]), cwd=tmp).check_returncode()
         result = json.loads(scored.read_text(encoding="utf-8"))
     evaluated = [result["eval"][t.task_id] for t in items]
-    base_status = [[v["base_status"] for v in vs] for vs in evaluated]
-    plus_status = [[v["plus_status"] for v in vs] for vs in evaluated]
-    base = [[b == "pass" for b in bs] for bs in base_status]  # evalplus/evaluate.py's pass@k outcomes
-    plus = [[b == p == "pass" for b, p in zip(bs, ps, strict=True)]
-            for bs, ps in zip(base_status, plus_status, strict=True)]
-    return {"scores": {dataset: pass_scores(base), name: pass_scores(plus)},
-            "ids": [t.task_id for t in items], "base_status": base_status, "plus_status": plus_status}
+    record = {"ids": [t.task_id for t in items], "base_status": [[v["base_status"] for v in vs] for vs in evaluated],
+              "plus_status": [[v["plus_status"] for v in vs] for vs in evaluated]}
+    base, plus = evalplus_passed(record)  # evalplus/evaluate.py's pass@k outcomes
+    return {"scores": {dataset: {"pass@1": pass_cell(base)}, name: {"pass@1": pass_cell(plus)}}} | record
 
 
 @functools.cache
@@ -323,7 +307,7 @@ def multipl_e(items: list[Task], samples: list[list[str]]) -> dict:
         cache.put(new)
     status = [[r["status"] for r in rs] for rs in results]
     passed = [[s == "OK" for s in ss] for ss in status]  # eval_cpp.py: "OK" iff the program ran and exited 0
-    return {"scores": pass_scores(passed), "ids": [t.task_id for t in items], "status": status}
+    return {"scores": {"pass@1": pass_cell(passed)}, "ids": [t.task_id for t in items], "status": status}
 
 
 class CodegenRun(NamedTuple):

@@ -1,7 +1,7 @@
 """Complete Python 3.12 syntax constraint for decoding (decoder.Constraint), over the Rust crate syntax/.
 
 Allows exactly the tokens that keep the text a prefix of a module CPython 3.12 accepts (ast.parse), up to
-over-approximations (a rejected prefix allowed, never the reverse), and BOS iff ast.parse accepts text + FIM suffix.
+over-approximations (a rejected prefix allowed, never the reverse), and BOS iff ast.parse accepts the text.
 """
 
 import ast
@@ -88,25 +88,23 @@ def syntax_error(source: str) -> list[str]:
 
 
 class SyntaxConstraint:
-    """decoder.Constraint for the tokens generated after prefix (UTF-8 bytes); masks by masks(), BOS by ends().
-    suffix: the bytes after the generation (b"": none); healing: a healed prompt's decoder.Reemit or None.
-    Raises ValueError when prefix is not a prefix of any Python 3.12 module."""
+    """decoder.Constraint for the tokens generated after prefix (UTF-8 bytes) of a healed prompt; masks by masks(),
+    intersected with the healing decoder.Reemit's while it owes bytes, BOS by ends(). Raises ValueError when prefix
+    is not a prefix of any Python 3.12 module."""
 
-    def __init__(self, tokenizer: Tokenizer, prefix: bytes, *, suffix: bytes, healing: "Reemit | None" = None):
-        self.suffix, self.bos, self.healing = suffix, tokenizer.bos_token_id, healing
-        self.native = python_syntax(tokenizer).constraint(prefix, suffix=suffix)
+    def __init__(self, tokenizer: Tokenizer, prefix: bytes, *, healing: "Reemit"):
+        self.bos, self.healing = tokenizer.bos_token_id, healing
+        self.native = python_syntax(tokenizer).constraint(prefix)
 
     def push(self, token: int) -> None:
         self.native.push(token)
-        if self.healing is not None:
-            self.healing.push(token)
+        self.healing.push(token)
 
 
 def ends(constraints: list[SyntaxConstraint]) -> list[bool]:
-    """Whether each BOS candidate's text and suffix are a module: the grammar ends one, then ast.parse accepts it."""
+    """Whether each BOS candidate's text is a module: the grammar ends one, then ast.parse accepts it."""
     grammar = crate_module(CRATE).grammar_ends([c.native for c in constraints])
-    return [ok and not syntax_error((c.native.text + c.suffix).decode())
-            for c, ok in zip(constraints, grammar, strict=True)]
+    return [ok and not syntax_error(c.native.text.decode()) for c, ok in zip(constraints, grammar, strict=True)]
 
 
 def masks(constraints: list[SyntaxConstraint], out: np.ndarray, rows: list[int]) -> list[bool]:
@@ -114,7 +112,7 @@ def masks(constraints: list[SyntaxConstraint], out: np.ndarray, rows: list[int])
     token t). Returns whether each row allows some token."""
     allowed = crate_module(CRATE).masks([c.native for c in constraints], out.ctypes.data, rows, out.shape[1])
     for i, (c, row) in enumerate(zip(constraints, rows, strict=True)):
-        if c.healing is not None and (healing := c.healing.mask()) is not None:
+        if (healing := c.healing.mask()) is not None:
             out[row] &= healing
             allowed[i] = bool(out[row].any())
     return allowed

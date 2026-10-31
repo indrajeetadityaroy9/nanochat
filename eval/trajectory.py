@@ -106,7 +106,7 @@ def trajectory(run_name: str, steps: list[int], *, reference: int) -> dict:
     missing = [step for step, record in loaded.items() if record is None]
     if missing:
         raise ValueError(f"steps without likelihoods: {missing}")
-    parts = {step: rows_by_measure(record) for step, record in loaded.items() if record is not None}
+    parts = {step: rows_by_measure(record) for step, record in loaded.items()}
     names = list(dict.fromkeys(m for p in parts.values() for m in p))
     references = {m: reference if m in parts[reference] else next(s for s in steps if m in parts[s]) for m in names}
     lr = {step: r["learning_rate"] for step, r in metrics.train_steps(metrics.records(run_name)).items()}

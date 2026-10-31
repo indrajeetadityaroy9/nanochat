@@ -95,6 +95,7 @@ def mixture_bpb_summary(corpora: dict, weights: dict[str, float]) -> dict:
         variance += a**2 * sums.size * sums.var(ddof=1)
         clusters += sums.size
     se = float(np.sqrt(variance) / nbytes)
+    # the stdlib's z_0.975, 1 ulp below scipy's norm.ppf: the recorded intervals (eval-*.json, trajectory.json) use it
     half = statistics.NormalDist().inv_cdf(0.975) * se
     return {"bpb": bpb, "se": se, "interval": (bpb - half, bpb + half),
             "rows": sum(corpora[c]["rows"] for c in weights), "clusters": clusters}
@@ -308,7 +309,8 @@ def compare(a: dict, b: dict) -> dict[str, dict]:
     return rows
 
 
-# The GPU's dense BF16 peak: H100 SXM5 / GH200 (half the 1,979 TFLOP/s "with sparsity" of NVIDIA's H100 SXM specs)
+# The GPU's dense BF16 peak: NVIDIA's H100 SXM5 figure (H100 Tensor Core GPU Architecture whitepaper: 989.4 TFLOP/s,
+# 1,978.9 with sparsity; 132 SMs x 4,096 FLOPs per clock x 1.83 GHz), the GH200's GPU being an H100 of 132 SMs
 PEAK_FLOPS = 989.4e12
 
 

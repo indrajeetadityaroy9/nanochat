@@ -50,11 +50,12 @@ def benchmark_texts() -> dict[str, str]:
     alone, it has none), and of each HumanEval infilling program (prompt, reference middle and suffix; its three
     benchmarks' problems are cut from one program per HumanEval task). Imported here: the shard workers need neither
     torch nor eval."""
-    from eval.code_eval import INFILLING, tasks
+    from eval.code_eval import tasks
+    from eval.official_infilling import BENCHMARKS
 
     texts = {f"{name}/{t.task_id}": t.prompt + (t.canonical_solution or "") for name, items in tasks().items()
              for t in items}
-    for name in INFILLING:
+    for name in BENCHMARKS:
         for p in read_problems(name).values():
             task = "infilling/" + "/".join(p["task_id"].split("/")[1:3])
             texts[task] = p["prompt"] + p["canonical_solution"] + p["suffix"]

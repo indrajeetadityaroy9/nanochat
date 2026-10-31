@@ -17,6 +17,7 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/bpb.py` (`likelihood`, `val_bits`, `solution_bits`, `sums`, `sample_rows`, `row_clusters`) | §2 |
 | `eval/trajectory.py` (`main`, `score`, `trajectory`, `rows_by_measure`, `groups`, `summaries`, `likelihoods`, `saved_steps`, `likelihood_path`) | §2 |
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `parse_record`, `truncated`, `filtered_generation`, `filtered_completions`, `codegen_runs`, `vetted`, evaluator wrappers: `evalplus`, `multipl_e`) | §1, §3, §7 |
+| `eval/line_endings.py` (`lf`: the corpus's line endings for text an official tool sends the model) | §4 |
 | `scripts/official_eval.sh`, `docker/Dockerfile.eval`, `eval/official.py`, `eval/official_infilling.py`, `eval/official_site/sitecustomize.py` | §4, §8 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_lcb_shards.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_loop_stop.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8; its loop stop, §10 |
 | `eval/official_termination.py`, `eval/loop.py` (the loop measure and stop rule), `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/test_official_processors.py` (the parser, the loop stop, DRY), `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
@@ -170,13 +171,13 @@ analysis: `docs/results.md` §1–§3.
   never trained on `"\r"`. lm-evaluation-harness's three MBPP shots carry MBPP's CRLF code (`tasks/mbpp/utils.py`
   `list_fewshot_samples`): every one of the 500 prompts holds 11 carriage returns (their effect on the score:
   `docs/results.md` §1). The task `mbpp_lf` is `mbpp.yaml` with the prompt's fields (statement, code, asserts)
-  normalized (`utils.py` `process_docs`, `list_fewshot_samples`); scoring is unchanged, since MBPP is judged by its
-  asserts, not by the reference code. The
-  EvalPlus, MultiPL-E and infilling prompts hold no `"\r"` [measured on 69,874's prompts], nor do EvalPlus's chat
-  messages; 177 of LiveCodeBench v6's 454 window problems do, and `eval/official_lcb.py` normalizes lcb_runner's
-  messages alike (`messages`) [measured: `eval/official_tokenize.py`]. `sitecustomize.py` makes every
-  `vllm.LLM.generate` refuse a prompt holding one (token-id prompts decoded), and `scripts/official_reasoning.sh`
-  checks every message it will serve before generation (`eval/official_tokenize.py`).
+  normalized by `eval/line_endings.py` `lf` (`utils.py` `process_docs`, `list_fewshot_samples`); scoring is unchanged,
+  since MBPP is judged by its asserts, not by the reference code. The EvalPlus, MultiPL-E and infilling prompts hold
+  no `"\r"` [measured on 69,874's prompts], nor do EvalPlus's chat messages; 177 of LiveCodeBench v6's 454 window
+  problems do, and `eval/official_lcb.py` normalizes lcb_runner's messages by `lf` too (`messages`) [measured:
+  `eval/official_tokenize.py`]. `sitecustomize.py` makes every `vllm.LLM.generate` refuse a prompt holding one
+  (token-id prompts decoded), and `scripts/official_reasoning.sh` checks every message it will serve before generation
+  (`eval/official_tokenize.py`).
 - **Comparability.** MultiPL-E's sampled mode draws 20 samples a problem where Codex (arXiv 2107.03374 §2.1) and
   MultiPL-E drew 200 and the BigCode leaderboard 50 (arXiv 2402.19173 §7.1.2): the same estimate with more variance
   per problem [inference] (MultiPL-E notes its pass@1 rates stabilize around 20 samples, arXiv 2208.08227 §IV-B,
@@ -239,7 +240,7 @@ import it alike.
 | `model_flops_per_token(matmul_params, hidden_size, windows, context)` | nominal training FLOPs per token: 6N + 12 · C · Σ_layers min(window_l + 1, context), each layer's most keys a query attends, itself included (`layer_windows`: 512, or the context for full layers); records written before the query's own key was counted (`results/pretrain/muon_wd_timescale_20tpp.jsonl`, `results/pretrain/scalar_learning_rates.jsonl`, d16) hold 6N + 12 · C · Σ min(window_l, context), lower by 12 · C per windowed layer (d16: 73,728; 641,826,816 at 8K, 1,245,806,592 at 32K; d24: 165,888 lower) | PaLM, arXiv 2204.02311 App. B's 6N + 12LHQT; torchtitan's count without the causal halving |
 | `attended_keys(lengths, window)` | Σ over segments of Σ_p min(p, window + 1): the keys each query attends causally within its segment, itself included | — |
 | `executed_model_flops(lengths, matmul_params, hidden_size, windows)` | 6N per position + 12 · C per attended key per layer over a micro-batch's segments (QKᵀ and PV, 4C per key forward, twice that backward; FA4's score recomputation not counted) | PaLM App. B; causal, per-document counting as Megatron-LM `num_floating_point_operations` (which excludes padding) |
-| `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12, the H100 SXM5 / GH200 dense BF16 peak; half NVIDIA's 1,979 TFLOP/s "with sparsity" is 989.5 [arithmetic]) | PaLM §4.1 |
+| `mfu(flops, seconds)` | flops / seconds / `PEAK_FLOPS` (989.4e12: NVIDIA's dense BF16 peak of the H100 SXM5, 1,978.9 TFLOP/s with sparsity, H100 Tensor Core GPU Architecture whitepaper; 132 SMs × 4,096 FLOPs per clock × 1.83 GHz [arithmetic]; the GH200's GPU has the same 132 SMs) | PaLM §4.1 |
 | `parabola_vertex(x, y)` | (a, −b/2a) of the least-squares parabola (numpy `polyfit`, degree 2); used by `docs/training.md` §5 | — |
 | `latency(starts, firsts, ends, new_tokens, duration=)` | `ttft` (first − start, start when the request takes a decoder slot), `tpot` ((end − first)/(n − 1), requests of > 1 token), `e2el`, each mean, median, p99; `output_throughput` | vLLM v0.32.0 `vllm/benchmarks/serve.py` `calculate_metrics` |
 
@@ -279,14 +280,14 @@ would read 0.644 at 8K and 0.926 at 32K (medians), the latter above the 0.71 the
 parse measure, §3, and the 1@10 mode, §4); the official tools generate with vLLM (§8).
 
 - **Batching.** Up to `MAX_BATCH` = 1,024 slots (fewer if device memory is short), continuous: a finished slot takes
-  the next request. A greedy step is one captured CUDA graph and a sampled or constrained step two (body, then head),
-  each graph's kernels programmatic dependents of each other (PDL); a second set of graphs over the first
-  `SMALL_BATCH` = 256 slots runs while no slot at index ≥ `SMALL_BATCH` is active. A slot's KV cache holds
-  2 · L · max_length · C bf16 values, 73,728 bytes per position at d24 [arithmetic]. A many-slot step is bound by its
-  KV reads and its GEMMs; a few-slot step by weight reads and kernel launches [inference]. Each pass sizes its own
-  decoder (d24, the corpus tokenizer [arithmetic]): parse measure `max_length` 1,172 with no store (each healed prompt
-  is requested once); the 1@10 search 1,172 with a prompt store of 96,770 positions (the 1,100 EvalPlus and
-  MultiPL-E prompts).
+  the next request. A step is two captured CUDA graphs, the body, then the head (every request carries a constraint:
+  its healing `Reemit` or the syntax constraint, below), each graph's kernels programmatic dependents of each other
+  (PDL); a second set of graphs over the first `SMALL_BATCH` = 256 slots runs while no slot at index ≥ `SMALL_BATCH`
+  is active. A slot's KV cache holds 2 · L · max_length · C bf16 values, 73,728 bytes per position at d24
+  [arithmetic]. A many-slot step is bound by its KV reads and its GEMMs; a few-slot step by weight reads and kernel
+  launches [inference]. Each pass sizes its own decoder (d24, the corpus tokenizer [arithmetic]): parse measure
+  `max_length` 1,172 with no store (each healed prompt is requested once); the 1@10 search 1,172 with a prompt store
+  of 96,770 positions (the 1,100 EvalPlus and MultiPL-E prompts).
 - **Step.** The model's forward at one position (`docs/architecture.md` §1), GEMMs on wgmma tensor cores fed by TMA,
   attention streaming each slot's window through shared memory with the scores on tensor cores (bf16 q and k, fp32
   accumulators), softmax and the value sum in fp32. Numerics follow the compiled forward without autograd (the
@@ -306,22 +307,23 @@ parse measure, §3, and the 1@10 mode, §4); the official tools generate with vL
   host memory bound to the calling CPU's NUMA node (the GH200's LPDDR5X; `mbind`, which a container needs
   `CAP_SYS_NICE` for, `scripts/container.sh`) and registered for the copy engines over NVLink-C2C, so the slots keep
   the device memory: the positions requested, at most half of what that node can give.
-- **Request** (`Request`): `input_ids`, `max_new_tokens`, `stopping_criteria`, `temperature` (0: argmax, ties to the
-  lowest id; > 0: Gumbel-max sampling of softmax(z / T), the noise a Philox4x32-10 function of (seed, generated
-  position, token) alone, arXiv 1411.0030 §2), `top_p` (< 1: the fewest most likely allowed tokens holding top_p of
-  the probability, a tie at the cut kept whole, arXiv 1904.09751 §3.1, `k_nucleus`; transformers' `TopPLogitsWarper`,
-  the sampler of MultiPL-E's `automodel.py` and bigcode-evaluation-harness), `seed`, `constraint`. Sampled logits are
-  capped, z = c·tanh(s/c) with the model's `final_logit_softcapping`; a greedy choice needs no cap (tanh is
-  increasing). A request needs `max_new_tokens` ≥ 1 and len(input_ids) + max_new_tokens − 1 ≤ `max_length`, and
-  `max_length` at most the rotary table's; each violation raises ValueError. Generation ends at BOS (excluded), the
-  budget, or the stopping criteria (evaluated while the next step runs).
-- **Constraints.** A step with a sampled or constrained slot launches the body, writes the constraints' masks while it
-  runs (the syntax constraints' in one parallel call straight into pinned mask rows, §7), then the head, which chooses
-  within each slot's mask and also computes its best allowed token but BOS; a chosen BOS that the syntax constraint
-  rejects gives way to that alternative (the same choice as masking BOS beforehand). `heal_tokens` drops the prompt's
-  last token and returns its `Reemit` constraint: each token must be a proper prefix of the owed bytes or start with
-  them, until they are re-emitted, possibly over several tokens (token healing, Guidance 2023; generation constrained
-  until the dropped content is re-emitted, as arXiv 2608.18062 App. C.1).
+- **Request** (`Request`): `input_ids`, `max_new_tokens`, `stopping_criteria`, `constraint` (both required),
+  `temperature` (0: argmax, ties to the lowest id; > 0: Gumbel-max sampling of softmax(z / T), the noise a
+  Philox4x32-10 function of (seed, generated position, token) alone, arXiv 1411.0030 §2), `top_p` (< 1: the fewest
+  most likely allowed tokens holding top_p of the probability, a tie at the cut kept whole, arXiv 1904.09751 §3.1,
+  `k_nucleus`; transformers' `TopPLogitsWarper`, the sampler of MultiPL-E's `automodel.py` and
+  bigcode-evaluation-harness), `seed`. Sampled logits are capped, z = c·tanh(s/c) with the model's
+  `final_logit_softcapping`; a greedy choice needs no cap (tanh is increasing). A request needs `max_new_tokens` ≥ 1
+  and len(input_ids) + max_new_tokens − 1 ≤ `max_length`, and `max_length` at most the rotary table's; each violation
+  raises ValueError. Generation ends at BOS (excluded), the budget, or the stopping criteria (evaluated while the next
+  step runs).
+- **Constraints.** Each step launches the body, writes the constraints' masks while it runs (the syntax constraints'
+  in one parallel call straight into pinned mask rows, §7; none for a `Reemit` that owes no more bytes), then the
+  head, which chooses within each slot's mask and also computes its best allowed token but BOS; a chosen BOS that the
+  syntax constraint rejects gives way to that alternative (the same choice as masking BOS beforehand). `heal_tokens`
+  drops the prompt's last token and returns its `Reemit` constraint: each token must be a proper prefix of the owed
+  bytes or start with them, until they are re-emitted, possibly over several tokens (token healing, Guidance 2023;
+  generation constrained until the dropped content is re-emitted, as arXiv 2608.18062 App. C.1).
 - **Determinism.** Every sum's order depends on the shapes and the slot's position alone, so a request's tokens do not
   depend on the batch, the store, `max_length` or timing.
 
@@ -338,8 +340,8 @@ notebooks are not checked), so the model's distribution of program files lies in
 **`SyntaxConstraint`** (`inference/syntax_constraint.py`, Rust crate `inference/syntax/`, built from the caller's
 tokenizer's vocabulary by `python_syntax`). Token t is allowed iff `prefix + generated + t` can still become a valid
 Python 3.12 module, the text ending anywhere; FIM sentinels never; BOS iff the grammar ends a module after the text and
-the FIM suffix and `ast.parse` accepts both (`ends`). While a healed prompt owes bytes, each mask is intersected with
-the `Reemit`'s. `masks` writes a batch of masks in parallel (rayon) without the GIL. Layers:
+`ast.parse` accepts it (`ends`). The prefix is a healed prompt's: each mask is intersected with its `Reemit`'s while it
+owes bytes. `masks` writes a batch of masks in parallel (rayon) without the GIL. Layers:
 
 - lexer (`lexer.rs`): CPython 3.12.3's tokenizer (`Parser/tokenizer.c`) as a character-level state machine, so a
   prefix may end mid-token, mid-indent or mid-character; `\r\n` and `\r` read as `\n`;

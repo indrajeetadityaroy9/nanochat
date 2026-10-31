@@ -27,16 +27,17 @@ type Constraint = Reemit | SyntaxConstraint
 
 @dataclass(frozen=True, kw_only=True)
 class Request:
-    """A continuation of input_ids (BOS and at least one more token) by at most max_new_tokens (≥ 1) tokens.
-    temperature 0: argmax (ties to the lowest id); > 0: a softmax(logits / temperature) sample drawn from (seed,
-    generated position) alone; top_p < 1: nucleus sampling (arXiv 1904.09751 §3.1)."""
+    """A continuation of input_ids (BOS and at least one more token) by at most max_new_tokens (≥ 1) tokens, within
+    the constraint's masks, until stopping_criteria holds. temperature 0: argmax (ties to the lowest id); > 0: a
+    softmax(logits / temperature) sample drawn from (seed, generated position) alone; top_p < 1: nucleus sampling
+    (arXiv 1904.09751 §3.1)."""
     input_ids: list[int]
     max_new_tokens: int
-    stopping_criteria: Callable[[list[int]], bool] | None = None
+    stopping_criteria: Callable[[list[int]], bool]
+    constraint: Constraint
     temperature: float = 0.0
     top_p: float = 1.0
     seed: int = 0
-    constraint: Constraint | None = None
 
 
 @functools.cache
@@ -141,7 +142,6 @@ class NativeDecoder:
         lib.dec_masks.argtypes = [ctypes.c_void_p]
         lib.dec_masks.restype = ctypes.POINTER(ctypes.c_uint32)
         lib.dec_set_active.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        lib.dec_launch.argtypes = [ctypes.c_void_p]
         lib.dec_launch_body.argtypes = [ctypes.c_void_p]
         lib.dec_launch_head.argtypes = [ctypes.c_void_p]
         lib.dec_destroy.argtypes = [ctypes.c_void_p]
@@ -283,48 +283,38 @@ class NativeDecoder:
         while flags[0].any():
             self.prefill()
             active = [b for b, s in enumerate(slots) if s is not None]
-            choosing = any(slots[b].request.temperature > 0 or slots[b].request.constraint is not None
-                           for b in active)
-            if choosing:
-                lib.dec_launch_body(handle)
-            else:
-                lib.dec_launch(handle)
+            lib.dec_launch_body(handle)
             finished = sorted(b for b in stopping if slots[b].request.stopping_criteria(slots[b].out))  # meanwhile
             stopping = []
-            if choosing:
-                # a stopped slot's next token is dropped
-                masked, empty = step_masks(self.masks, [(b, r.constraint, nucleus(r)) for b in active
-                                                        if (r := slots[b].request).constraint is not None
-                                                        and b not in finished])
-                for b in empty:
-                    raise ValueError(f"request {slots[b].index}: its constraint allows no token at position "
-                                     f"{len(slots[b].out)}")
-                flags[1, masked] = True
-                set_active()
-                flags[1] = False
-                lib.dec_launch_head(handle)
+            # a stopped slot's next token is dropped
+            masked, empty = step_masks(self.masks, [(b, slots[b].request.constraint, nucleus(slots[b].request))
+                                                    for b in active if b not in finished])
+            for b in empty:
+                raise ValueError(f"request {slots[b].index}: its constraint allows no token at position "
+                                 f"{len(slots[b].out)}")
+            flags[1, masked] = True
+            set_active()
+            flags[1] = False
+            lib.dec_launch_head(handle)
             lib.dec_tokens(handle, self.tokens.ctypes.data)
-            if choosing:
-                syntax = [b for b in active if b not in finished
-                          and isinstance(slots[b].request.constraint, SyntaxConstraint)]
-                self.confirm(slots, syntax, eager={b for b in syntax if nucleus(slots[b].request)})
+            syntax = [b for b in active if b not in finished
+                      and isinstance(slots[b].request.constraint, SyntaxConstraint)]
+            self.confirm(slots, syntax, eager={b for b in syntax if nucleus(slots[b].request)})
             now = time.perf_counter()
             for b, s in enumerate(slots):
                 if s is None or b in finished:
                     continue
                 token = int(self.tokens[b])
-                constraint = s.request.constraint
                 if token == bos:
                     finished.append(b)
                     continue
                 if not s.out:
                     s.first = now
                 s.out.append(token)
-                if constraint is not None:
-                    constraint.push(token)
+                s.request.constraint.push(token)
                 if len(s.out) == s.request.max_new_tokens:
                     finished.append(b)
-                elif s.request.stopping_criteria is not None:
+                else:
                     stopping.append(b)
             if finished:
                 for b in finished:
@@ -332,4 +322,4 @@ class NativeDecoder:
                     fill(b)
                     self.timings[done.index] = (done.start, now if done.first is None else done.first, now)
                     yield done.index, done.out
-                set_active()  # each choosing step sets its masks anew
+                set_active()  # each step sets its masks anew

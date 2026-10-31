@@ -448,7 +448,8 @@ match, a duplicate of HumanEval single-line infilling, which is scored by execut
 One infilling evaluation remains: human-eval-infilling, greedy, PSM (`docs/evaluation.md` §4). Measured before the
 removal (step 69,874): SantaCoder Python exact match 0.2282 with the task's own code through vLLM (2,048 positions)
 against the harness's 0.2407 (128 new tokens). The infilling 1@10 mode's syntax-constrained middles and the
-CrossCodeEval similarity scores (`metrics.completion_scores`) went with it.
+CrossCodeEval similarity scores (`metrics.completion_scores`) went with it, and later the syntax constraint's FIM
+suffix (BOS allowed iff text and suffix form a module), which no remaining caller set.
 
 **Type-constrained decoding** (arXiv 2504.09246). Not used; Python syntax is constrained and types are checked after
 generation (basis: `docs/evaluation.md` §7).

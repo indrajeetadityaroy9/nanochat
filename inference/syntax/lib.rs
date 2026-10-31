@@ -39,18 +39,14 @@ impl Syntax {
         Syntax { inner: Arc::new(vocab::Syntax::new(lexicon, tables, token_bytes)) }
     }
 
-    /** The constraint after prefix (UTF-8), suffix following the generation; ValueError if prefix is not viable. */
-    #[pyo3(signature = (prefix, *, suffix))]
-    fn constraint(&self, prefix: &[u8], suffix: &[u8]) -> PyResult<Constraint> {
+    /** The constraint after prefix (UTF-8); ValueError if prefix is not viable. */
+    fn constraint(&self, prefix: &[u8]) -> PyResult<Constraint> {
         let syntax = &self.inner;
         let state = syntax.extend(&syntax.start(), prefix).map_err(stops_at)?;
         if !syntax.viable_end(&state) {
             return Err(stops_at(prefix.len()));
         }
-        Ok(Constraint {
-            syntax: syntax.clone(), state: Arc::new(state), text: prefix.to_vec(), settled: prefix.len(),
-            suffix: suffix.to_vec(),
-        })
+        Ok(Constraint { syntax: syntax.clone(), state: Arc::new(state), text: prefix.to_vec(), settled: prefix.len() })
     }
 }
 
@@ -59,14 +55,13 @@ fn stops_at(byte: usize) -> PyErr {
     PyValueError::new_err(format!("the text stops being a prefix of a Python 3.12 module at byte {byte}"))
 }
 
-/** A constraint's text (the prefix, then pushed bytes), its states after the settled bytes, and the suffix. */
+/** A constraint's text (the prefix, then pushed bytes) and its states after the settled bytes. */
 #[pyclass]
 struct Constraint {
     syntax: Arc<vocab::Syntax>,
     state: Arc<vocab::State>,
     text: Vec<u8>,
     settled: usize,
-    suffix: Vec<u8>,
 }
 
 impl Constraint {
@@ -107,18 +102,15 @@ impl Constraint {
     }
 }
 
-/** Whether the grammar ends a module after each text and suffix (necessary for ast.parse). */
+/** Whether the grammar ends a module after each text (necessary for ast.parse). */
 #[pyfunction]
 fn grammar_ends(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>) -> PyResult<Vec<bool>> {
     settle(py, &constraints)?;
     let jobs: Vec<_> = constraints.iter().map(|c| {
         let c = c.borrow();
-        let ends_line = matches!(c.suffix.last().or(c.text.last()), Some(b'\n' | b'\r'));
-        (c.syntax.clone(), c.state.clone(), c.suffix.clone(), ends_line)
+        (c.syntax.clone(), c.state.clone(), c.ends_line())
     }).collect();
-    Ok(py.detach(|| jobs.par_iter().map(|(syntax, state, suffix, ends_line)| {
-        syntax.extend(state, suffix).is_ok_and(|end| syntax.complete(&end, *ends_line))
-    }).collect()))
+    Ok(py.detach(|| jobs.par_iter().map(|(syntax, state, ends_line)| syntax.complete(state, *ends_line)).collect()))
 }
 
 /** Writes each next mask into row rows[r] (words uint32 per row) at address; whether each row allows a token. */
@@ -128,15 +120,15 @@ fn masks(py: Python<'_>, constraints: Vec<Bound<'_, Constraint>>, address: usize
     settle(py, &constraints)?;
     let jobs: Vec<_> = constraints.iter().zip(&rows).map(|(c, &row)| {
         let c = c.borrow();
-        (c.syntax.clone(), c.state.clone(), !c.suffix.is_empty(), c.ends_line(), row)
+        (c.syntax.clone(), c.state.clone(), c.ends_line(), row)
     }).collect();
     let bytes = words * 4;
-    Ok(py.detach(|| jobs.par_iter().map(|(syntax, state, suffixed, ends_line, row)| {
+    Ok(py.detach(|| jobs.par_iter().map(|(syntax, state, ends_line, row)| {
         /* SAFETY: the caller's buffer holds every row, and the rows are distinct (decoder.step_masks: one per slot) */
         let bits = unsafe { std::slice::from_raw_parts_mut((address + row * bytes) as *mut u8, bytes) };
         bits.fill(0);
         syntax.allowed(state, bits);
-        if *suffixed || syntax.complete(state, *ends_line) {
+        if syntax.complete(state, *ends_line) {
             bits[syntax.bos as usize / 8] |= 1 << (syntax.bos % 8);
         }
         bits.iter().any(|&b| b != 0)
