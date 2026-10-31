@@ -111,25 +111,26 @@ margin; the other sources are downloaded in full.
 
 \begin{table*}
   \caption{Pretraining sources after cleaning and decontamination. The synthetic code and the mathematics are generated
-  by LLMs.}
+  by LLMs. Train docs: training documents. GB: size of the published zstd-compressed Parquet files of the training and
+  validation splits ($10^9$ bytes). A pair of numbers gives Python, then C++.}
   \label{tab:sources}
   \small
-  \begin{tabular}{lllr}
+  \begin{tabular}{lllrr}
     \toprule
-    Group & Dataset and content & Language & Train documents \\
+    Group & Dataset and content & Language & Train docs & GB \\
     \midrule
-    Repository files & Stack-Edu: StarCoder2 data filtered for educational code & Python, C++ & 24.5M, 16.1M \\
-     & UltraData-Stack-v3-L2: The Stack v3 files selected by classifiers & Python, C++ & 17.4M, 12.4M \\
-     & UltraData-Code L2: code files selected mainly for algorithmic content & Python, C++ & 42.0M, 13.1M \\
-    Synthetic code & UltraData-Code L3: exercises written from algorithmic files & Python, C++ & 3.8M, 4.3M \\
-     & Nemotron-Pretraining-Code-v2: files rewritten; Python transpiled into C++ & Python, C++ & 18.0M, 5.1M \\
-    Functions & CodeXGLUE code-to-text: functions from open-source projects & Python & 0.25M \\
-    Notebooks & Kaggle notebooks as text & Python & 0.57M \\
-    Reasoning traces & Codeforces-CoTs: DeepSeek-R1 solutions to Codeforces problems & Python, C++ & 0.02M \\
-    Web text & Nemotron-ClimbMix & -- & 15.6M \\
-    Mathematics & UltraData-Math L3: synthetic mathematics, four of its five formats & -- & 3.4M \\
+    Repository files & Stack-Edu: StarCoder2 data filtered for educational code & Python, C++ & 24.5M, 16.1M & 19.1, 11.2 \\
+     & UltraData-Stack-v3-L2: The Stack v3 files selected by classifiers & Python, C++ & 17.4M, 12.4M & 21.3, 10.5 \\
+     & UltraData-Code L2: files selected mainly for algorithmic content & Python, C++ & 42.0M, 13.1M & 37.1, 8.3 \\
+    Synthetic code & UltraData-Code L3: exercises written from algorithmic files & Python, C++ & 3.8M, 4.3M & 3.3, 3.6 \\
+     & Nemotron-Pretraining-Code-v2: rewritten files; C++ translations & Python, C++ & 18.0M, 5.1M & 20.7, 6.2 \\
+    Functions & CodeXGLUE code-to-text: functions from open-source projects & Python & 0.25M & 0.08 \\
+    Notebooks & Kaggle notebooks as text & Python & 0.57M & 1.6 \\
+    Reasoning traces & Codeforces-CoTs: DeepSeek-R1 solutions to Codeforces problems & Python, C++ & 0.02M & 0.3 \\
+    Web text & Nemotron-ClimbMix & -- & 15.6M & 19.1 \\
+    Mathematics & UltraData-Math L3: mathematics, four of its five formats & -- & 3.4M & 3.9 \\
     \midrule
-    Total & & & 176.6M \\
+    Total & & & 176.6M & 166.2 \\
     \bottomrule
   \end{tabular}
 \end{table*}
