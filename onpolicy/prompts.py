@@ -9,8 +9,8 @@ solution (else test_info's function names), and `named`: the prompt names every 
 or declared, `name(`, or in backticks). An instruct prompt often does not name the function its tests call, or names
 it only as a word ("the median"), so a correct answer under another name fails. Only named rows (every online_judge
 row) outside the Docs subsets are used: the Docs subsets test library APIs (pandas, torch, the standard library's),
-whose versions here differ from KodCode's, so 45 of 171 of their R1 answers fail here
-(`python -m onpolicy.verify --known-good train 2000`). Written beside the SFT corpus as onpolicy-<split>.parquet;
+whose versions here differ from KodCode's: in a 2,000-row known-good sample taken before `usable` excluded them, 45 of
+the 171 Docs rows' R1 answers failed here (no record). Written beside the SFT corpus as onpolicy-<split>.parquet;
 `sample` draws prompts from a pool stratified by KodCode style and difficulty.
 
     python -m onpolicy.prompts
@@ -123,9 +123,9 @@ def question(row: dict) -> str:
 
 
 def held_out(val: list[dict], train: list[dict]) -> tuple[list[dict], dict]:
-    """The val rows whose question and test file both differ from every train-pool row's (SFT's split is by prompt
-    text, so another style of a train question, or a question with a train row's tests, sits in val), and the
-    counts."""
+    """The val rows whose question and test file both differ from every train-pool row's (SFT's split is by problem, a
+    normalized statement, which differs between the styles in which KodCode words one question, so another style of a
+    train question, or a question with a train row's tests, sits in val), and the counts."""
     questions, tests = {question(r) for r in train}, {r["test"] for r in train}
     seen = [(question(r) in questions, r["test"] in tests) for r in val]
     kept = [r for r, (q, t) in zip(val, seen, strict=True) if not (q or t)]

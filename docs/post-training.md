@@ -431,7 +431,8 @@ evaluation tests that evidence at 522M. Each choice is [inference] from the cite
   problems (§6); HumanEval+, MBPP+ and LiveCodeBench are read once per stage, at its end.
 - **KodCode val** (`scripts/onpolicy.sh`; `onpolicy/rollouts.py`, `onpolicy/verify.py`, `onpolicy/outcomes.py`): 512
   problems of the SFT val split held out from the KodCode train pool by question and by test file
-  (`onpolicy/prompts.py` `held_out`: SFT splits by prompt text, so another style of a train question can sit in val),
+  (`onpolicy/prompts.py` `held_out`: SFT splits by problem, a normalized statement, which differs between the styles
+  in which KodCode words one question, so another style of a train question can sit in val),
   4 samples each at T 0.6 and top-p 0.95 within 16,384 tokens and under the probe's loop stop, each answer run against
   its problem's tests (`onpolicy/verify.py`); pass@1 over the 2,048, a pass on a problem whose wrong program passes not
   counted. The SFT model: 0.325, pass@4 0.551, 43.5% of the responses loops [measured:

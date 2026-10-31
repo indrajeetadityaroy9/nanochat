@@ -360,7 +360,10 @@ tightest corpus, `ultradata_math_l3_conversation`, keeps 71 (computed on master)
 | `REPO_LEVEL_STAGE` | 32,768 | 65,785–69,580 (3,795) | 5,595,955,200 | 170,775 | 200,881 |
 
 Weights: `mixture.weights` of each stage at its rows on sa-bpe's packs; tokens: weight × the stage's tokens (computed
-on master; no supply corpus overdraws).
+on master; no supply corpus overdraws). These are the `MAX_STEPS` plan's; the base run (69,874 steps, the 32K stage
+from step 66,063) recorded, in its `metrics.jsonl` stage records, notebooks 0.015461 and functions 0.000564 in the file
+stage and repositories 0.81557 and traces 0.05443 in the 32K stage, the other weights as below; at its 97.41B and
+5.62B stage tokens: 57.76B, 25.43B, 1.51B, 0.05B, 9.74B and 2.92B; 4.58B, 0.31B, 0.56B and 0.17B [measured].
 
 | Stage | Group | Sources | Share | Weight | Tokens |
 |---|---|---|---|---|---|
@@ -378,9 +381,10 @@ on master; no supply corpus overdraws).
 - **Code 87%, text and mathematics 13%** (`CODE_SHARE`): DeepSeek-Coder's "87% source code, 10% English code-related
   natural language corpus, and 3% code-unrelated Chinese natural language corpus" (arXiv 2401.14196 §2), its natural
   language taken to cover web text (10%) and mathematics (3%) [inference]. Qwen2.5-Coder's 7B comparison of
-  code:text:math 100:0:0, 85:10:5 and 70:20:10 chose 70:20:10, best on its math and general benchmarks and above 85:10:5
-  on code, while 100:0:0 scored higher on its two code benchmarks (49.8 and 40.3 against 48.3 and 38.3; arXiv
-  2409.12186 §3.1.2, Table 3).
+  code:text:math 100:0:0, 85:10:5 and 70:20:10 chose 70:20:10, best on its math and general benchmarks and average and
+  above 85:10:5 on code, while 100:0:0 scored higher on its two code columns, "Common" and BigCodeBench (49.8 and 40.3
+  against 48.3 and 38.3; arXiv 2409.12186 §3.1.2, Table 3, read from the arXiv HTML v3, as the extracted text lacks
+  the table's body).
 - **Synthetic code 30% of code** [inference for code]: good mixtures' share of rephrased synthetic data, "converging
   to ∼30% for rephrased synthetic data" (Kang et al., arXiv 2510.01631 §1), measured on web text; its Limitations say
   the findings "may not directly apply to other generation methods (e.g., synthetic code, dialogues)". Code papers
@@ -563,7 +567,7 @@ source files under `artifacts/posttrain/` (`SOURCE`; `GROUPS` gives each group's
 | `nvidia/OpenCodeReasoning-2` (`train/python`) | long-trace SFT | 1,398,166: R1 solutions with QwQ-32B critiques, judged right 1,027,261 and wrong 370,905 | a pass rate per row |
 | `open-thoughts/OpenThoughts3-1.2M` | long-trace SFT | 1,200,000: math 850,000, code 250,000, science 100,000 | none (QwQ-32B answers, unfiltered) |
 | `nvidia/OpenCodeReasoning` | long-trace SFT | 735,255 (two splits, 567,850 and 167,405) | none |
-| `KodCode/KodCode-V1-SFT-R1` `incorrect`, `use_with_caution` | long-trace SFT | R1 solutions that failed their tests; the questions KodCode flags as benchmark-similar | R1 solutions with their test results |
+| `KodCode/KodCode-V1-SFT-R1` `incorrect`, `use_with_caution` | long-trace SFT | R1 solutions that failed their tests; the questions KodCode flags for caution (mostly non-Python content; the 94 benchmark-similar ones among them) | R1 solutions with their test results |
 | `agentica-org/DeepCoder-Preview-Dataset` | RL | 24,287 train; 687 test | yes; weak enough for false-positive rewards (`docs/post-training.md` §2.7) |
 
 - **Decontamination as published**: Nemotron-Cascade drops SFT samples sharing a 9-gram with coding benchmarks
