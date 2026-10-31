@@ -37,6 +37,9 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
+from corpus.tokenizer import get_tokenizer
+from eval.loop import END
+
 PYTEST_TIMEOUT, CASE_TIMEOUT = 30, 10  # seconds
 MEMORY, FILE_SIZE = 16 << 30, 64 << 20  # bytes; torch's import alone reserves more than 4 GiB of address space
 TEST_PREFIX = "from solution import *\n"
@@ -116,6 +119,18 @@ def check(task: tuple[str | None, str, str]) -> str:
 def verify(tasks: list[tuple[str | None, str, str]], workers: int) -> list[str]:
     with ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn")) as pool:
         return list(pool.map(check, tasks, chunksize=4))
+
+
+def judge(task: tuple[list[int], list[str], str, str]) -> str:
+    """A sampled response's verdict (onpolicy/sampler.py) from its generated ids, its problem's names, test and kind:
+    'not_closed' when its text (BOS dropped) holds no END, else `check` on the code of its answer, the text after the
+    last END (as eval/official_termination.py `response` reads it)."""
+    ids, names, test, kind = task
+    tok = get_tokenizer()
+    text = tok.enc.decode([i for i in ids if i != tok.bos_token_id])
+    if END not in text:
+        return "not_closed"
+    return check((code(text.rpartition(END)[2].strip(), names), test, kind))
 
 
 def stub(row: dict) -> str:

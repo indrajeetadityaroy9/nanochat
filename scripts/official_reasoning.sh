@@ -10,9 +10,10 @@
 # (api_utils.get_max_tokens). First, the natural-termination probe (eval/official_termination.py) on the export; then
 # every prompt either tool will send is checked for "\r" and the first's served ids against the SFT context
 # (eval/official_tokenize.py). The parser is registered in every server process by eval/official_site/sitecustomize.py
-# (NANOCHAT_REASONING_PARSER). The server stops loops as the probe does (eval/official_loop_stop.py: a response with
-# no "</think>" whose last 4,096 tokens repeat, checked every 2,048, is ended, an empty answer either way), each stop
-# a line of loop-stops.jsonl; LOOP_STOP=0 serves without it. Every client of the server fails (exit 1) once the
+# (NANOCHAT_REASONING_PARSER). The server catches loops as the probe does (eval/official_loop_stop.py: a response with
+# no "</think>" whose last 4,096 tokens repeat, checked every 2,048): LOOP_STOP=1 (the default) ends it, an empty
+# answer either way; LOOP_STOP=commit forces "</think>" there and lets the model answer; each catch a line of
+# loop-stops.jsonl; LOOP_STOP=0 serves without it. Every client of the server fails (exit 1) once the
 # server stops answering its /health (`served`). LiveCodeBench is generated in shards of the window, calendar months
 # (eval/official_lcb_shards.py), each kept and skipped on a rerun, and lcb_runner's evaluation scores their union.
 #
@@ -43,7 +44,8 @@ SERVE_ENV=() SERVE_ARGS=()
 if [ "${LOOP_STOP:-1}" != 0 ]; then
   touch "$OUT/loop-stops.jsonl"
   SERVE_ENV=(-e NANOCHAT_LOOP_STOP_LOG=$C/loop-stops.jsonl)
-  SERVE_ARGS=(--logits-processors eval.official_loop_stop:LoopStopLogitsProcessor)
+  SERVE_ARGS=(--logits-processors eval.official_loop_stop:$([ "${LOOP_STOP:-1}" = commit ] && echo LoopCommit ||
+              echo LoopStop)LogitsProcessor)
 fi
 docker build -q -f "$ROOT/docker/Dockerfile.eval" -t nanochat-eval "$ROOT/docker" > /dev/null
 

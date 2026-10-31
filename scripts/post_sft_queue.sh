@@ -7,14 +7,14 @@
 #      PROBE_PROMPTS (default 128) prompts per set (scripts/official_termination.sh; termination-<step>.json, or
 #      termination-<step>-p<PROBE_PROMPTS>.json beside an earlier probe of another size), then the export and its
 #      KodCode val evaluation (scripts/onpolicy.sh, STAGES evaluate, EVAL_MODELS model; the probe copied);
-#   2. the gate: FTPO and DPO only if that probe's responses loop (never closed, repetition >= 0.99) in at least
-#      FTPO_ABOVE (default 0.05) of both sets together; else 3 runs the SFT model's evaluation alone;
-#   3. at once: the reasoning protocol (scripts/official_reasoning.sh) of the final step in the background (port 8000,
-#      CPUs OFFICIAL_CPUS, SERVE_UTIL, default 0.45), and the on-policy stage (scripts/onpolicy.sh, STAGES "rollouts
-#      train dpo evaluate": mining waves, FTPO, DPO waves and DPO, the evaluation of model/, ftpo/ and dpo/) at
-#      ONPOLICY_UTIL (default 0.45, which FTPO and DPO training fit in) on CPUs PICKED_CPUS; when the on-policy
-#      stage ends, the reasoning protocol of the final model, dpo/ if written, else ftpo/ (MODEL/TAG dpo or ftpo:
-#      official-<step>-<tag>/, port PICKED_PORT, default 8001, CPUs PICKED_CPUS, SERVE_UTIL); then both awaited;
+#   2. the gate: commit training and DPO only if that probe's responses loop (never closed, repetition >= 0.99) in at
+#      least LOOP_ABOVE (default 0.05) of both sets together; else 3 runs the SFT model's evaluation alone;
+#   3. the on-policy stage alone (scripts/onpolicy.sh, STAGES "rollouts train dpo evaluate": mining waves, commit
+#      training, DPO waves and DPO, the evaluation of model/, commit/ and dpo/) at ONPOLICY_UTIL (default 0.85) on
+#      every core; then at once the reasoning protocol (scripts/official_reasoning.sh) of the final step (port 8000,
+#      CPUs OFFICIAL_CPUS)
+#      and of the final model, dpo/ if written, else commit/ (MODEL/TAG dpo or commit: official-<step>-<tag>/, port
+#      PICKED_PORT, default 8001, CPUs PICKED_CPUS), each at SERVE_UTIL (default 0.45); both awaited;
 #   4. alone at PROBE_UTIL: the final step's DRY comparison (scripts/official_termination.sh --dry) only if the final
 #      model (else the SFT model) loops in at least DRY_BELOW (default 0.05) of its probe's responses.
 # The shares: KV cache per token 2 x 24 layers x 6 heads x 128 x 2 bytes = 72 KiB, so of 94.5 GiB, 0.45 holds 20
@@ -26,7 +26,7 @@
 # goes on. The body is one function, parsed before it runs, so a checkout updated while the queue waits does not
 # change the running script.
 # DRY_RUN=1 logs each command instead of running it (the waiting, watcher, skip and gate logic run as they would; with
-# no probe written the gate is open, and without dpo/ or ftpo/ the final model is dpo/, so every item shows).
+# no probe written the gate is open, and without dpo/ or commit/ the final model is dpo/, so every item shows).
 #
 #   [DRY_RUN=1] scripts/post_sft_queue.sh <run name> [<final step, default 7676>]
 #
@@ -38,8 +38,8 @@ main() {
   RUN=$1 FINAL=${2:-7676}
   DIR=${RUNS:-$ROOT/artifacts/runs}/$RUN
   local LOG=${LOG:-$DIR/post-sft-queue.log} CONTAINER=${CONTAINER:-sft-run} POLL=${POLL:-60}
-  local DRY_BELOW=${DRY_BELOW:-0.05} FTPO_ABOVE=${FTPO_ABOVE:-0.05} PROBE_PROMPTS=${PROBE_PROMPTS:-128}
-  local PROBE_UTIL=${PROBE_UTIL:-0.85} SERVE_UTIL=${SERVE_UTIL:-0.45} ONPOLICY_UTIL=${ONPOLICY_UTIL:-0.45}
+  local DRY_BELOW=${DRY_BELOW:-0.05} LOOP_ABOVE=${LOOP_ABOVE:-0.05} PROBE_PROMPTS=${PROBE_PROMPTS:-128}
+  local PROBE_UTIL=${PROBE_UTIL:-0.85} SERVE_UTIL=${SERVE_UTIL:-0.45} ONPOLICY_UTIL=${ONPOLICY_UTIL:-0.85}
   local PICKED_PORT=${PICKED_PORT:-8001}
   local LOCK=${LOCK:-$ROOT/artifacts/cache/termination.lock}  # scripts/official_termination.sh's
   local ONPOLICY=$DIR/onpolicy-$FINAL cores official_cores
@@ -122,29 +122,31 @@ print(sum(not r["closed"] and (r.get("repetition") or 0) >= 0.99 for r in rows) 
   onpolicy evaluate model "$PROBE_UTIL"
 
   # 2. the gate
-  local sft_probe loops ftpo=1 final="" final_dir=""
+  local sft_probe loops onpolicy_run=1 final="" final_dir=""
   if ! sft_probe=$(probe_record) || ! loops=$(loop_share "$sft_probe"); then
-    log "gate: no probe of $PROBE_PROMPTS prompts per set; FTPO and DPO run"
-  elif below "$loops" "$FTPO_ABOVE"; then
-    log "gate: the SFT model loops in $loops of its probe's responses, below $FTPO_ABOVE; no FTPO or DPO"
-    ftpo=""
+    log "gate: no probe of $PROBE_PROMPTS prompts per set; commit training and DPO run"
+  elif below "$loops" "$LOOP_ABOVE"; then
+    log "gate: the SFT model loops in $loops of its probe's responses, below $LOOP_ABOVE; no commit training or DPO"
+    onpolicy_run=""
   else
-    log "gate: the SFT model loops in $loops of its probe's responses; FTPO and DPO run"
+    log "gate: the SFT model loops in $loops of its probe's responses; commit training and DPO run"
   fi
 
-  # 3. the SFT model's reasoning protocol beside the on-policy stage, then the final model's
-  official 8000 "$OFFICIAL_CPUS" "" &
-  local sft_official=$!
-  if [ -n "$ftpo" ]; then
-    onpolicy "rollouts train dpo evaluate" "" "$ONPOLICY_UTIL" "$PICKED_CPUS"
-    for final in dpo ftpo ""; do
+  # 3. the on-policy stage alone (its mining is bound by memory bandwidth and KV space: four engines of 0.21 beside
+  # nothing else generated 15.6K tokens/s, a single 0.85 engine 18.7K), then the reasoning protocol of the SFT model
+  # and of the final model at once
+  if [ -n "$onpolicy_run" ]; then
+    onpolicy "rollouts train dpo evaluate" "" "$ONPOLICY_UTIL"
+    for final in dpo commit ""; do
       [ -n "$final" ] && [ -f "$ONPOLICY/$final/model.safetensors" ] && break
     done
     [ -z "$final" ] && [ -n "${DRY_RUN:-}" ] && final=dpo
     final_dir=${final:+$ONPOLICY/$final}
     log "final model: ${final:-none}"
-    [ -z "$final" ] || official "$PICKED_PORT" "$PICKED_CPUS" "$final" "$final_dir"
   fi
+  official 8000 "$OFFICIAL_CPUS" "" &
+  local sft_official=$!
+  [ -z "$final" ] || official "$PICKED_PORT" "$PICKED_CPUS" "$final" "$final_dir"
   wait "$sft_official"
   log "official evaluations done"
 

@@ -1,5 +1,6 @@
 """The loop measure and stop rule of the natural-termination probe (eval/official_termination.py `generate`), shared
-with the served loop stop (eval/official_loop_stop.py). Import-light (numpy only): `vllm serve`'s processes import it.
+with the served loop handling (eval/official_loop_stop.py). Import-light (numpy only): `vllm serve`'s processes
+import it.
 
 A response is stopped at a check, every CHUNK generated tokens from REPEAT_TAIL on, when its output holds no END and
 its last REPEAT_TAIL tokens have `repetition` >= LOOP.
@@ -40,3 +41,10 @@ def stopped(ids: list[int], bos: int, decode) -> bool:
     """Whether a served response (its generated ids, the closing BOS included) was ended by the loop stop: it ends
     with the BOS forced at a check the rule stops (a BOS the model emits there itself would have been forced)."""
     return ids[-1:] == [bos] and looping(ids[:-1], decode) is not None
+
+
+def committed(ids: list[int], end: list[int], decode) -> bool:
+    """Whether a served response was closed by the loop commit (eval/official_loop_stop.py LoopCommitLogitsProcessor):
+    END_THINK's tokens `end` start at a check the rule catches."""
+    return any(ids[n:n + len(end)] == end and looping(ids[:n], decode) is not None
+               for n in range(REPEAT_TAIL, len(ids) - len(end) + 1, CHUNK))

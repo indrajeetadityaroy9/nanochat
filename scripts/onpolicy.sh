@@ -8,20 +8,22 @@
 #      wave k seeded k and excluding waves 0..k-1's prompts, each at VLLM_GPU_MEMORY_UTILIZATION (default 0.85) /
 #      ENGINES, each started once the previous one has written its prompts and logged "KV cache size", vLLM's
 #      memory profiling; vLLM's engine core is CPU-bound, so one engine leaves the GPU idle), and after each group
-#      the selection over every wave (onpolicy/selection.py: rollouts/ftpo.jsonl, rollouts/selection.json; the rows
-#      need no verdicts, so the train rollouts are not verified); groups stop once the FTPO rows before rebalancing
-#      reach TARGET_ROWS (default 8,000, docs/post-training.md §8.7 Waves) or the group's last wave finds fewer than
-#      PROMPTS prompts left (the pool is exhausted);
-#   4. FTPO from the export (onpolicy/train.py ftpo, FREEZE none or head, default none) to ftpo/: one model, written
-#      when the held-out chosen_win reaches 0.35 or at the epoch's end, and ftpo/train-log.json;
+#      the selection over every wave (onpolicy/selection.py: rollouts/commit.jsonl, rollouts/selection.json; the rows
+#      need no verdicts, so the train rollouts are not verified); groups stop once the commit rows reach TARGET_ROWS
+#      (default 4,000) or the group's last wave finds fewer than PROMPTS prompts left (the pool is exhausted);
+#   4. loop-commit training from the export (onpolicy/train.py commit) to commit/: one model, written at the held-out
+#      commit_win 0.4, at the epoch's end, or the last passing point of a failed gate; none when the gate fails at its
+#      first check (commit training aborted), only commit/train-log.json; then the commit model's evaluation (6.),
+#      before DPO mines from it;
 #   5. DPO waves (`dpo_waves`): PROMPTS_DPO distinct KodCode train-pool prompts per wave (default 2,000) x 4 samples
-#      at T 0.6 from ftpo/ to dpo-rollouts/wave-<k>/, in groups of at most ENGINES concurrent engines as in 2.-3.,
-#      verified (onpolicy/verify.py), and after each group the selection over every DPO wave (dpo-rollouts/dpo.jsonl,
-#      dpo-rollouts/selection.json); groups stop once the pairs reach DPO_PAIRS (default 8,000, DeLoop's count),
-#      after DPO_WAVES (default 12) waves, or when the group's last wave finds fewer than PROMPTS_DPO prompts left;
-#      then DPO from ftpo/ on dpo.jsonl (onpolicy/train.py dpo) to dpo/;
-#   6. the evaluation (`evaluate`) of each of model/, ftpo/ and dpo/ present, or only of EVAL_MODELS (names: model,
-#      ftpo, dpo) when set, to eval-<name>/: the natural-termination probe on PROBE_PROMPTS (default 128) prompts per
+#      at T 0.6 from the DPO base (commit/, the export when commit training aborted), each exact-cycle loop committed
+#      COMMITS times (onpolicy/rollouts.py), to dpo-rollouts/wave-<k>/, in groups of at most ENGINES concurrent
+#      engines as in 2.-3., verified (onpolicy/verify.py), and after each group the selection over every DPO wave
+#      (dpo-rollouts/dpo.jsonl, dpo-rollouts/selection.json); groups stop once the pairs reach DPO_PAIRS (default
+#      8,000, DeLoop's count), after DPO_WAVES (default 12) waves, or when the group's last wave finds fewer than
+#      PROMPTS_DPO prompts left; then DPO from the base on dpo.jsonl (onpolicy/train.py dpo) to dpo/;
+#   6. the evaluation (`evaluate`) of each of model/, commit/ and dpo/ present, or only of EVAL_MODELS (names: model,
+#      commit, dpo) when set, to eval-<name>/: the natural-termination probe on PROBE_PROMPTS (default 128) prompts per
 #      set (eval/official_termination.py, scored in a CPU container; for the export, the step's own probe,
 #      RUNS/<run>/termination-<step>[-p<PROBE_PROMPTS>].json, when it has as many prompts: the same prompts, seeds and
 #      generation); pass@1 on VAL_PROMPTS (default 512) held-out KodCode problems of the SFT val split, 4 samples each
@@ -35,9 +37,9 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2
-PROMPTS=${PROMPTS:-6000} SAMPLES=${SAMPLES:-0.6:1} VAL_PROMPTS=${VAL_PROMPTS:-512} TARGET_ROWS=${TARGET_ROWS:-8000}
-PROBE_PROMPTS=${PROBE_PROMPTS:-128} FREEZE=${FREEZE:-none} ENGINES=${ENGINES:-4}
-PROMPTS_DPO=${PROMPTS_DPO:-2000} DPO_PAIRS=${DPO_PAIRS:-8000} DPO_WAVES=${DPO_WAVES:-12}
+PROMPTS=${PROMPTS:-6000} SAMPLES=${SAMPLES:-0.6:1} VAL_PROMPTS=${VAL_PROMPTS:-512} TARGET_ROWS=${TARGET_ROWS:-4000}
+PROBE_PROMPTS=${PROBE_PROMPTS:-128} ENGINES=${ENGINES:-4}
+PROMPTS_DPO=${PROMPTS_DPO:-2000} DPO_PAIRS=${DPO_PAIRS:-8000} DPO_WAVES=${DPO_WAVES:-2}
 STAGES=${STAGES:-rollouts train dpo evaluate} UTIL=${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
 for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
 [ -n "$CHECKPOINT" ] || { echo "no checkpoint or weights of step $STEP in $RUN_DIR" >&2; exit 1; }
@@ -81,7 +83,7 @@ engines() {  # <model dir> <waves dir> <first wave> <waves> <rollouts args...>: 
   # engine each at UTIL / ENGINES, concurrently; wave k seeded k, excluding waves 0..k-1's prompts; each engine
   # started once the previous one has written its prompts and logged "KV cache size" (vLLM's memory profiling)
   local k dir share prev="" pid="" pids=() exclude=() failed=0 start=$SECONDS
-  share=$(python3 -c 'import sys; print(float(sys.argv[1]) / int(sys.argv[2]))' "$UTIL" "$ENGINES")
+  share=$(python3 -c 'import sys; print(float(sys.argv[1]) / int(sys.argv[2]))' "$UTIL" "$4")
   for ((k = 0; k < $3; k++)); do exclude+=("$(w "$2/wave-$k")"); done
   for ((k = $3; k < $3 + $4; k++)); do
     dir=$2/wave-$k
@@ -147,19 +149,19 @@ sys.exit(not pool_path("mix").exists())' ||
       --samples "$SAMPLES"
     k=$((k + ENGINES))
     selected "$OUT/rollouts" "$k"
-    rows=$(json "$OUT/rollouts/selection.json" ftpo rows_before_rebalance)
+    rows=$(json "$OUT/rollouts/selection.json" commit rows)
     prompts=$(json "$OUT/rollouts/wave-$((k - 1))/meta.json" prompts)
-    log "waves 0-$((k - 1)): $rows FTPO rows before rebalancing; the last wave $prompts prompts"
+    log "waves 0-$((k - 1)): $rows commit rows; the last wave $prompts prompts"
     [ "$rows" -lt "$TARGET_ROWS" ] && [ "$prompts" -ge "$PROMPTS" ] || break
   done
 }
 
-dpo_waves() {  # verified KodCode train waves from ftpo/, in groups of at most ENGINES, until DPO_PAIRS pairs,
+dpo_waves() {  # verified KodCode train waves from BASE, in groups of at most ENGINES, until DPO_PAIRS pairs,
   # DPO_WAVES waves or the pool's end
   local k=0 n j pairs prompts
   while :; do
     n=$((DPO_WAVES - k < ENGINES ? DPO_WAVES - k : ENGINES))
-    engines "$OUT/ftpo" "$OUT/dpo-rollouts" "$k" "$n" --split train --prompts "$PROMPTS_DPO" --samples 0.6:4
+    engines "$BASE" "$OUT/dpo-rollouts" "$k" "$n" --split train --prompts "$PROMPTS_DPO" --samples 0.6:4
     for ((j = k; j < k + n; j++)); do verify "$OUT/dpo-rollouts/wave-$j"; done
     k=$((k + n))
     selected "$OUT/dpo-rollouts" "$k"
@@ -176,16 +178,22 @@ if [[ " $STAGES " == *" rollouts "* ]]; then
   waves
 fi
 if [[ " $STAGES " == *" train "* ]]; then
-  [ -f "$OUT/ftpo/train-log.json" ] || timed ftpo "${GPU[@]}" nanochat-onpolicy python -m onpolicy.train ftpo \
-    "$(w "$OUT/model")" "$(w "$OUT/rollouts/ftpo.jsonl")" "$(w "$OUT/ftpo")" --freeze "$FREEZE"
+  [ -f "$OUT/commit/train-log.json" ] || timed commit "${GPU[@]}" nanochat-onpolicy python -m onpolicy.train commit \
+    "$(w "$OUT/model")" "$(w "$OUT/rollouts/commit.jsonl")" "$(w "$OUT/commit")"
+  if [[ " $STAGES " == *" evaluate "* ]] && [ -f "$OUT/commit/model.safetensors" ]; then
+    evaluate "$OUT/commit" commit
+  fi
 fi
-if [[ " $STAGES " == *" dpo "* ]] && [ -f "$OUT/ftpo/train-log.json" ] && [ ! -f "$OUT/dpo/train-log.json" ]; then
+if [[ " $STAGES " == *" dpo "* ]] && [ -f "$OUT/commit/train-log.json" ] && [ ! -f "$OUT/dpo/train-log.json" ]; then
+  BASE=$OUT/commit
+  [ -f "$BASE/model.safetensors" ] || BASE=$OUT/model
+  log "DPO base: $BASE"
   dpo_waves
-  timed dpo "${GPU[@]}" nanochat-onpolicy python -m onpolicy.train dpo "$(w "$OUT/ftpo")" \
+  timed dpo "${GPU[@]}" nanochat-onpolicy python -m onpolicy.train dpo "$(w "$BASE")" \
     "$(w "$OUT/dpo-rollouts/dpo.jsonl")" "$(w "$OUT/dpo")"
 fi
 if [[ " $STAGES " == *" evaluate "* ]]; then
-  for name in model ftpo dpo; do
+  for name in model commit dpo; do
     if [ -f "$OUT/$name/model.safetensors" ] && { [ -z "${EVAL_MODELS:-}" ] || [[ " $EVAL_MODELS " == *" $name "* ]]; }
     then
       evaluate "$OUT/$name" "$name"

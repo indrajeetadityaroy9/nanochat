@@ -37,17 +37,23 @@ CHAT_TEMPLATE = ("{{ bos_token }}{{ messages | map(attribute='content') | join('
 REASONING_SAMPLING = {"temperature": 0.6, "top_p": 0.95}
 
 
+def hf_weights(model: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """A CausalLM state dict as the export's model.safetensors: Hugging Face names, bf16 what modeling.py reads in bf16
+    (the GEMM copies, the embedding cast, ve_gate.cu's table rounding; rounded to nearest, as the copies are), fp32 the
+    rest; the compiled forward's x0 is the fp32 embedding row's norm (Inductor drops the cast; decode.cu k_norm
+    EMBED)."""
+    fp32 = set(NanochatPreTrainedModel._keep_in_fp32_modules_strict)
+    return {(k if k == "lm_head.weight" else f"model.{k}"):
+            v.detach().to(torch.float32 if fp32 & set(k.split(".")) else torch.bfloat16).cpu().contiguous()
+            for k, v in model.items()}
+
+
 def export(checkpoint: Path, out: Path, *, chat: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
     state = torch.load(checkpoint, map_location="cpu", mmap=True)
     config = ModelConfig(**state["config"])
     n, C, T = config.num_hidden_layers, config.hidden_size, config.max_position_embeddings
-    # bf16 what modeling.py reads in bf16 (the GEMM copies, the embedding cast, ve_gate.cu's table rounding); the
-    # compiled forward's x0 is the fp32 embedding row's norm (Inductor drops the cast; decode.cu k_norm EMBED)
-    fp32 = set(NanochatPreTrainedModel._keep_in_fp32_modules_strict)
-    save_file({(k if k == "lm_head.weight" else f"model.{k}"):
-               v.to(torch.float32 if fp32 & set(k.split(".")) else torch.bfloat16).contiguous()
-               for k, v in state["model"].items()}, out / "model.safetensors", metadata={"format": "pt"})
+    save_file(hf_weights(state["model"]), out / "model.safetensors", metadata={"format": "pt"})
 
     tokenizer = get_tokenizer()
     windows = layer_windows(config)

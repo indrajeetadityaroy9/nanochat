@@ -6,7 +6,8 @@
   (`return_token_ids`), and every sample adds a row to <samples>.endings.jsonl beside its samples file, in that file's
   order: {"task_id", "finish_reason" (vLLM's: "stop" at eos, BOS here, or "length"), "closed" (the decoded response
   holds "</think>", the reasoning parser's split, eval/official_reasoning_parser.py), "loop_stopped" (ended by the
-  server's loop stop, eval/official_loop_stop.py), "tokens" (generated, the closing BOS not counted)}.
+  server's loop stop) and "loop_committed" (closed by its loop commit, eval/official_loop_stop.py), "tokens"
+  (generated, the closing BOS not counted)}.
 
 Every argument is codegen's.
 
@@ -22,8 +23,9 @@ import openai
 from evalplus.gen.util import openai_request
 from evalplus.provider.openai import OpenAIChatDecoder
 
+from corpus.posttrain.sft import END_THINK
 from corpus.tokenizer import get_tokenizer
-from eval.loop import stopped
+from eval.loop import committed, stopped
 from eval.official_reasoning_parser import END
 
 ENDINGS = {}  # "path": the endings file of the samples being generated; "tasks": task id by the message sent
@@ -53,12 +55,13 @@ def codegen_api_batch(self, message: str, batch_size: int) -> list[str]:
                                            temperature=self.temperature, n=batch_size,
                                            extra_body={"return_token_ids": True})
     tokenizer = get_tokenizer()
-    bos, decode = tokenizer.bos_token_id, tokenizer.enc.decode
+    bos, decode, end = tokenizer.bos_token_id, tokenizer.enc.decode, tokenizer.enc.encode_ordinary(END_THINK)
     with open(ENDINGS["path"], "a") as f:
         for choice in ret.choices:
             ids = choice.model_extra["token_ids"]
             f.write(json.dumps({"task_id": ENDINGS["tasks"][message], "finish_reason": choice.finish_reason,
                                 "closed": END in decode(ids), "loop_stopped": stopped(ids, bos, decode),
+                                "loop_committed": committed(ids, end, decode),
                                 "tokens": len(ids) - (ids[-1:] == [bos])}) + "\n")
     return [choice.message.content for choice in ret.choices]
 

@@ -13,7 +13,7 @@ library's), whose versions here differ from KodCode's, so 45 of 171 of their R1 
 (`python -m onpolicy.verify --known-good train 2000`). Written beside the SFT corpus as onpolicy-<split>.parquet;
 `sample` draws prompts from a pool stratified by KodCode style and difficulty.
 
-The mining pool (`--mix`, onpolicy-mix.parquet; FTPO rows need no tests): every distinct document context of the SFT
+The mining pool (`--mix`, onpolicy-mix.parquet; commit rows need no tests): every distinct document context of the SFT
 train split, from every source group (build.py GROUPS), found by parsing each source row as build.py does and keying
 its context the same way; a context found in several groups is the first group's (GROUPS order, build.py's duplicate
 order). Each row: `id` (the group and the context key), `source` (the group, KodCode's with its style, as the probe's
