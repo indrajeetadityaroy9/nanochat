@@ -17,8 +17,10 @@ measured; [unverified] a figure without a record. Paper values are the papers' o
 |`…/official-69874/compare-eval-69874.json`|per-problem agreement of the official tools with the in-repository harness|
 |`artifacts/runs/<base run>/likelihood-<step>.json`|bits per byte per domain at 8K and 32K context, per saved step from 62,887|
 |`results/pretrain/trajectory.json`|those steps' bits per byte with standard errors, and each step's paired change from step 66,063 (8K, solutions) or 66,163 (32K) and from the step before (`eval/trajectory.py`)|
+|`artifacts/runs/<SFT run>/termination-<step>.json`|the natural-termination evaluation of an SFT checkpoint (docs/post-training.md §5.1): per-set summaries and every response's ending; `termination-1000-v1.json` the first step-1000 probe, before the per-response fields|
 
-`<base run>` is `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10`.
+`<base run>` is `generate=benchmarks,learning_rate_scale=2.7192599564485445,num_checkpoints=10`; `<SFT run>` is
+`base=<base run>,generate=none,learning_rate_scale=0.06449599703255417,sft_epochs=2.0`.
 
 ## 1. Base model, step 69,874
 
@@ -177,6 +179,40 @@ standard error) [measured]:
 - **LiveCodeBench v6 will be low single digits** [inference]: after reasoning post-training, MobileLLM-R1-360M scores
   5.1, Qwen2.5-0.5B-Instruct 3.6, and MobileLLM-R1-950M and DeepSeek-R1-Distill-Qwen-1.5B 19.9 (pass@1, n = 16;
   arXiv 2509.24945 Table 7). EvalPlus under the reasoning protocol is the more sensitive measure of the SFT's effect.
+
+## 6. Post-training: natural termination
+
+The natural-termination evaluation (docs/post-training.md §5.1) of the SFT run's full-state checkpoints: 64 HumanEval+
+prompts in EvalPlus's chat rendering and 64 held-out SFT prompts, one sample each at T 0.6, top-p 0.95, max new tokens
+the context less the prompt. Outcomes are exclusive: closed `</think>` and ended with BOS / closed, the answer at the
+limit / never closed, at the limit / never closed, ended.
+
+| Step | Set | Closed, ended | Closed, at limit | Unclosed, at limit | Unclosed, ended | P(closed ≤ 1K / 2K / 4K / 8K / 16K / 32K) |
+|---|---|---|---|---|---|---|
+| 1,000 | HumanEval+ (64) | 51 | 0 | 13 | 0 | 0.484 / 0.766 / 0.797 / 0.797 / 0.797 / 0.797 |
+| 1,000 | held-out SFT (64) | 37 | 1 | 26 | 0 | 0.156 / 0.344 / 0.500 / 0.594 / 0.594 / 0.594 |
+| 1,000 | all (128) | 88 | 1 | 39 | 0 | 0.320 / 0.555 / 0.648 / 0.695 / 0.695 / 0.695 |
+
+All bullets are step 1,000 [measured: `termination-1000.json`; the re-run with the per-response fields gave the same
+responses as `termination-1000-v1.json`, the prompts and seeds being fixed].
+
+- **Closure is early or not at all**: no response closes after 6,361 reasoning tokens (the last four closures at
+  5,032, 5,775, 6,152 and 6,361), so every response either closes within about 6K tokens or runs to the length limit.
+  Every closed answer holds a fenced code block, and 88 of the 89 end with BOS.
+- **EvalPlus on the 64 HumanEval+ responses**: base tests 28 of 64 (0.438), plus tests 26 (0.406); given closure 28
+  and 26 of 51 (0.549, 0.510). No unclosed response can pass (its answer is empty).
+- **The never-closed responses loop**: in 36 of the 39, at least 99.85% of the last 4,096 tokens lie inside a 32-token
+  window that recurs there; the other 3 score 0 on that measure but their tails are enumerations with an incrementing
+  number ("The combination (1,2,3,4,571) … (1,2,3,4,577)"), loops that never repeat a window exactly.
+- **Held-out closure falls with the teacher's reasoning length** (rank correlation −0.43):
+
+  | Teacher reasoning (tokens) | < 2K | 2–4K | 4–8K | 8–16K | ≥ 16K |
+  |---|---|---|---|---|---|
+  | Prompts | 17 | 8 | 14 | 19 | 6 |
+  | Closed | 17 | 5 | 6 | 8 | 2 |
+
+  By source (closed of prompts): Exercism 5 of 5, KodCode online-judge 2 of 2, instruct 5 of 7, complete 5 of 11,
+  Cascade-1 Stage-1 11 of 18, Stage-2 8 of 15, CP-v2 C++ 1 of 2, Python 1 of 4.
 
 ## References
 

@@ -18,7 +18,7 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/trajectory.py` (`main`, `score`, `trajectory`, `rows_by_measure`, `groups`, `summaries`, `likelihoods`, `saved_steps`, `likelihood_path`) | §2 |
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `parse_record`, `truncated`, `filtered_generation`, `filtered_completions`, `codegen_runs`, `vetted`, evaluator wrappers: `evalplus`, `multipl_e`) | §1, §3, §7 |
 | `scripts/official_eval.sh`, `docker/Dockerfile.eval`, `eval/official.py`, `eval/official_infilling.py`, `eval/official_site/sitecustomize.py` | §4, §8 |
-| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py` | the post-trained model's protocol, `docs/post-training.md` §5 |
+| `scripts/official_reasoning.sh`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_termination.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function); `results/pretrain/mbpp_3shot_contamination.json` (MBPP 3-shot's overlap with the train corpus) | §5; §4 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
@@ -521,6 +521,26 @@ fp32 prefers the official token 11 times, among the 6 the harness's 3 times; fir
 problems, and about as many run to the budget (harness 138, 843, 1,028; official 136, 835, 1,029). The harness's own
 modes were removed on this evidence (`docs/experiments.md` §6); `evaluate` keeps the likelihoods, the parse measure
 and the 1@10 mode.
+
+**The reasoning protocol's requests** (`scripts/official_reasoning.sh`, `docs/post-training.md` §5) as `vllm serve`
+received them [measured: `--enable-log-requests` on a step-1,000 SFT export, two HumanEval+ problems per EvalPlus
+mode and lcb_runner's first requests, each tool run as the script runs it]:
+
+| Tool | Requests | n | T | top-p | max_tokens | seed | stop, stop ids | End |
+|---|---|---|---|---|---|---|---|---|
+| EvalPlus greedy | one per problem | 1 | 0 | 1.0 (sent 0.95; vLLM sets 1 for T 0) | 32,615 (32,768 asked, capped at the context less the 153-token prompt) | none | none | eos BOS |
+| EvalPlus sampled | one per problem | 20 | 0.6 | 0.95 | 32,615 | none | none | eos BOS |
+| lcb_runner | one per problem | 16 | 0.6 | 0.95 | 32,337 for its first problem's 431-token prompt (32,768 capped) | none | none | eos BOS |
+
+Every sampling value comes from the request; the export's `generation_config.json` defaults (T 0.6, top-p 0.95) would
+apply only to a field a request omits, and none does. The end of text is not in any request: it is the export's
+`eos_token_id`, BOS (`config.json`, `generation_config.json`), with `ignore_eos` false. No tool seeds its requests.
+Every prompt's ids start with one BOS (32764) and the message's encoding (`<|bos|>Please provide a …` for EvalPlus,
+`<|bos|>You are an expert …` for lcb_runner); the full ids' equality with the SFT context is
+`eval/official_tokenize.py`'s check (§4).
+One fix came from this check: EvalPlus's OpenAI backend drops `--max_new_tokens` (`evalplus.provider.make_model`
+builds `OpenAIChatDecoder` without it), so every request asked 768 new tokens, `DecoderBase`'s default, and every
+smoke sample ended at exactly 768 [measured]; `eval/official_evalplus.py` sets the decoder's budget from the flag.
 
 ## 9. Validation of the harness
 

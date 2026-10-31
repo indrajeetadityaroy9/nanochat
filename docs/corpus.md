@@ -510,12 +510,13 @@ start position consumed.
 
 ## 10. Post-training corpus
 
-`corpus/posttrain/build.py` builds the SFT corpus (`corpus/posttrain/sft.py` `NAME` "sft") from released reasoning
-traces: each row rendered in the post-training format (`docs/post-training.md` §3; `render`), filtered, capped per
-prompt, split by problem, tokenized by the corpus tokenizer (`tokenize.tokenize_split`) and packed whole into
-32,768-token rows by the pretraining packer (§8) for its one stage (`SFT_STAGE`: 3 rows per micro-batch, as the 32K
-stage). It reads the source files under `artifacts/posttrain/` (`SOURCE`; `GROUPS` gives each group's globs) and
-writes `CORPUS/tokenized/sft-<data key>/` with the counts in `stats.json` there.
+`corpus/posttrain/build.py` builds the SFT corpus (`corpus/posttrain/sft.py` `NAME` "sft"), a reasoning-code mixture
+of released reasoning traces with increased verified function-level coverage (the KodCode group, below): each row
+rendered in the post-training format (`docs/post-training.md` §3; `render`), filtered, capped per prompt, split by
+problem, tokenized by the corpus tokenizer (`tokenize.tokenize_split`) and packed whole into 32,768-token rows by the
+pretraining packer (§8) for its one stage (`SFT_STAGE`: 3 rows per micro-batch, as the 32K stage). It reads the
+source files under `artifacts/posttrain/` (`SOURCE`; `GROUPS` gives each group's globs) and writes
+`CORPUS/tokenized/sft-<data key>/` with the counts in `stats.json` there.
 
 **Sources.** Rows from the dataset cards and the Hub's file listings; tokens in this tokenizer from ranged reads of
 30–300 rows per file [estimate]:
@@ -528,7 +529,7 @@ writes `CORPUS/tokenized/sft-<data key>/` with the counts in `stats.json` there.
 | `nvidia/Nemotron-SFT-Competitive-Programming-v2` `exercism` | 79,244 (counted from the file), 79,103 with one Python file listing, 78,156 prompts | reasoning (the answer's prose before its file) p50 302, code p50 180 | function stubs from Aider's Exercism protocol |
 | `KodCode/KodCode-V1-SFT-R1` `train` split | 268,211 (counted from the files), every row's R1 solution passing its tests (`r1_correctness` true) | after the filters 1.19B; reasoning per row p50 3,039 [measured] | Python functions (KodCode's complete and instruct styles) and stdin programs (online-judge style); R1 traces |
 
-- **Selection basis** (literature: `docs/post-training.md` §2.3) [inference]: reasoning traces only, from one
+- **Selection basis** (literature: `docs/post-training.md` §2.3) [inference]: thinking-mode traces only, from one
   teacher family (two sources beat sixteen, arXiv 2506.04178 Table 4), past the distillation valley's size (arXiv
   2510.06101 §4); Cascade-1 for Python at volume, CP-v2 for harder problems and the only C++ traces, Exercism and
   KodCode for function-form prompts (HumanEval's and MBPP's shape) with short reasoning. KodCode's `train` split holds

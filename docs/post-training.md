@@ -18,7 +18,8 @@ to the 522M base model is [inference].
 | `run.py` (`RunConfig.base`, `base_step`, `sft_epochs`, `generate` "none"; `base_plan`, `plan_of`, `validation_steps`, `job`), `conf/experiment/sft.yaml`, `train/stages.py` (`stage_batches`: epochs past the first; `val_batches`) | §4 |
 | `train/schedule.py` (`sft_plan`, `RunPlan.weight_decay`, `last_stage`), `train/loop.py` (base weights, `validate`), `eval/sft_val.py` | §4 |
 | `conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` (`sft_lr_fit`, `sft_lr_scale`), `ablations/records.py` (`record`, `results_dir`), `results/posttrain/sft_lr.jsonl` and its `-curves.jsonl` | §4 |
-| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
+| `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `inference/export_hf.py` (`--chat`, `CHAT_TEMPLATE`) | §5 |
+| `eval/official_termination.py`, `scripts/official_termination.sh`, `scripts/official_termination_watch.sh` | §5.1 |
 
 ## 1. Starting point
 
@@ -152,7 +153,7 @@ Off-policy distillation is SFT on a teacher's text, so it needs no shared vocabu
   epochs, lr 8e-5, 32K (Table 2); OpenThoughts 5 epochs, lr 8e-5, batch 512, packed (App. Table 9); Olmo 3 Think 2
   epochs, lr 5e-5, 1M-token batches of packed 32K rows (App. A.6.1); Nemotron-Cascade lr 5e-5 then 2e-5, batch 256
   (Table 14).
-- **Here** [inference]: reasoning traces only, whole rows up to 32,768 tokens, one packed stage (§4) over a corpus
+- **Here** [inference]: thinking-mode traces only, whole rows up to 32,768 tokens, one packed stage (§4) over a corpus
   past the valley, at most a few traces per prompt (`docs/corpus.md` §10).
 
 ### 2.4 Preference tuning
@@ -279,7 +280,9 @@ PPO's value model, "another model of comparable size". Current recipes keep the 
 
 ### 2.9 The pipeline
 
-SFT only: Nemotron-Cascade's SFT (arXiv 2512.13607 §3) cut to the one domain the model is for (code) and one format
+SFT only, on a reasoning-code mixture: the code traces of Nemotron-Cascade's SFT (arXiv 2512.13607 §3) and of
+Nemotron's competitive-programming set, with increased verified function-level coverage (KodCode's R1 traces, each
+solution passing its tests, beside Exercism's function stubs; the composition: `docs/corpus.md` §10), in one format
 (reasoning, then the answer), with full parameters (§2.2). Below 1B the published pipelines end at SFT or
 distillation: MobileLLM-R1 (140M–950M) has no RL, "additional RL does not observe a significant performance
 improvement" (arXiv 2509.24945 §7.4), and RL "yields suboptimal results for smaller models compared to distillation"
@@ -295,7 +298,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 
 ## 3. Format
 
-- **Reasoning is the only format**: no non-thinking mode. An example renders as BOS, the prompt, `\n\n<think>\n`, the
+- **Thinking-mode only**: no non-thinking mode. An example renders as BOS, the prompt, `\n\n<think>\n`, the
   reasoning, `\n</think>\n\n`, the answer and BOS (`corpus/posttrain/sft.py` `THINK`, `END_THINK`). The markers are
   ordinary text (6 and 6 tokens here), so the vocabulary stays (§1). Nemotron-Cascade 2 opens a thinking turn with
   `<think>` and a newline (arXiv 2603.19220 §3.1.2); its predecessor's code traces are "formatted in the thinking
@@ -305,6 +308,11 @@ unmeasured. Each choice is [inference] from the cited evidence.
   context, their labels ignored by the loader (`corpus/loader.py` `PretrainingBatches.assemble`, the context lengths
   in `<split>.context`, `docs/corpus.md` §10). Every prompt ends with `\n\n<think>\n` in SFT, RL and evaluation
   alike; the context is encoded alone, as a prompt is at inference.
+- **Positions**: a packed row's documents take their positions in the row (`model/kernels/qk_prologue.cu`: the rotary
+  table at the row position), while inference starts each prompt at 0. With RoPE the q·k score depends only on the
+  offset n − m (arXiv 2104.09864 §3.2.2 Eq. 16), and the per-document attention segments (`docs/architecture.md` §1)
+  and the windows are relative, so global and reset positions give the same attention, up to the rounding of the
+  fp32 tables at different positions [inference].
 
 ## 4. SFT recipe
 
@@ -315,8 +323,10 @@ unmeasured. Each choice is [inference] from the cited evidence.
   base's batch, 1,474,560 tokens: 15 micro-batches of 3 rows of 32,768 tokens (`SFT_STAGE`, as the 32K stage);
   ⌊2 × 172,726 / 45⌋ = 7,676 steps, 11.32B tokens (58.02 per parameter) [arithmetic]. The first epoch reads every
   train row in the seeded permutation; the second is a fresh permutation (seed + 1) read for its first 172,694 rows,
-  so no row repeats within an epoch; a resume continues at its row across the boundary. ≈10.9 h at the base's
-  exclusive 287,476 tok/s (`docs/training.md` §7) [estimate], without the 9 validation passes (≈0.16 h [estimate]).
+  so no row repeats within an epoch, and the last 32 packed rows of the second permutation stay unread (7,676 × 45 =
+  345,420 of 2 × 172,726 = 345,452 [arithmetic]); a resume continues at its row across the boundary. ≈10.9 h at the
+  base's exclusive 287,476 tok/s (`docs/training.md` §7) [estimate], without the 9 validation passes (≈0.16 h
+  [estimate]).
 - **Basis of the epochs** [inference]: the published recipes run 1.5–8 epochs (Nemotron-Cascade 2's single packed
   stage "reaches optimal performance after approximately 1.5 epochs", arXiv 2603.19220 §3.1.1; Olmo 3 Think 2;
   others §2.3), and short traces need 2–3 (arXiv 2601.06953 Table 4). Nemotron-Cascade runs one epoch per stage over
@@ -324,13 +334,15 @@ unmeasured. Each choice is [inference] from the cited evidence.
   2.96 trace passes per prompt [arithmetic]. The epoch count and the corpus's cap are set together by a token budget
   (`docs/corpus.md` §10), not by a measured optimum.
 - **Optimizer**: the base's NorMuon and AdamW with one learning rate, warmup over 40 steps and linear decay to zero
-  (`docs/training.md` §3–§4); the peak is `learning_rate_scale` times the base run's recorded peak, 2.3454e-3. No
-  weight decay (`sft_plan`): the closest-size recipe, MobileLLM-R1-950M, fine-tunes with none (arXiv 2509.24945
-  §3.2), as does OpenThoughts (arXiv 2506.04178 App. D.2); Nemotron-Cascade uses 1e-4 (arXiv 2512.13607 App. D Table
-  14), and Nemotron-Cascade 2's 0.1 (Σ_t η_t λ ≈ 0.106 over its run, arXiv 2603.19220 App. B Table 7 [arithmetic]) is
-  the exception; with λ = 0 the total decay does not depend on which learning rate wins. The τ law (`docs/training.md`
-  §3) sets a from-scratch timescale: at the SFT's 58.02 tokens per parameter it gives λ = 4.4 at 1/10 of the base
-  peak, which would leave about 2% of the base weights' scale [arithmetic].
+  (`docs/training.md` §3–§4); the peak is `learning_rate_scale` times the base run's recorded peak, 2.3454e-3.
+- **No weight decay**, in every group (`sft_plan` `weight_decay` 0.0, which `train/optim.py` `optimizers` gives the
+  NorMuon matrices and the AdamW tables; the 1-D parameters never decay): an independent choice, not tied to the
+  peak's calibration, so the total decay does not depend on which learning rate wins. The closest-size recipe,
+  MobileLLM-R1-950M, fine-tunes with none (arXiv 2509.24945 §3.2), as does OpenThoughts (arXiv 2506.04178 App. D.2);
+  Nemotron-Cascade uses 1e-4 (arXiv 2512.13607 App. D Table 14) and Nemotron-Cascade 2 0.1 (Σ_t η_t λ ≈ 0.106 over
+  its run, arXiv 2603.19220 App. B Table 7 [arithmetic]). The τ law (`docs/training.md` §3) sets a from-scratch
+  timescale: at the SFT's 58.02 tokens per parameter it gives λ = 4.4 at 1/10 of the base peak, which would leave
+  about 2% of the base weights' scale [arithmetic].
 - **Peak calibration** (`conf/experiment/sft_lr.yaml`, `ablations/sft_lr.py` `sft_lr_fit`): calibrated, not
   borrowed, since Nemotron-Cascade's AdamW 5e-5 has no NorMuon counterpart. Three complete schedules at 1/10, 1/3
   and 1 times the base peak over the same first 2% of the first epoch's order (`sft_epochs` 0.02), trained only
@@ -344,13 +356,17 @@ unmeasured. Each choice is [inference] from the cited evidence.
 - **Calibration result** (`results/posttrain/sft_lr.jsonl`): the arms ran 76 steps over the first 3,420 train rows;
   final losses 1.00505, 0.98195 and 1.03143 at 1/10, 1/3 and 1 [measured], vertex ×0.2575 (curvature 0.0279); times
   (7,676 / 76)^−0.30 = 0.2504 the scale is 0.064496, a peak of 1.5127e-4 [arithmetic].
-- **Basis of the transfer** [inference]: at a fixed batch the optimum falls with the run's length with exponent 0.32
-  (arXiv 2409.19913 §6 Eq. 5; 0.30 in its §4.1, Llama-1); the repository's d8 pair, net of its doubled batch by a
-  square-root rule, gives 0.24–0.30 (`docs/training.md` §5) and DeepSeek LLM's law 0.29 at a fixed batch
-  [arithmetic]; the one counter-claim, that the optimum hardly moves under linear decay to zero (arXiv 2502.15938
-  §4.2), is contradicted by that d8 pair; erring low is the cheaper error, forgetting growing with the learning rate
-  (§2.3). The 40 warmup steps are 53% of an arm and 0.5% of the full run, outside the regime of those fits. Cost:
-  ≈25 min of GPU [estimate].
+- **The peak is an empirically transferred estimate** (≈1.5e-4), not a measured optimum of the full run. Three arms
+  determine the parabola exactly: the fit has no residual, so neither the vertex nor the curvature has an error bar,
+  and each arm is one seed. 40 of each arm's 76 steps are warmup (53%; 0.5% of the full run), outside the regime of
+  the horizon fits below. The horizon exponent's basis [inference]: at a fixed batch the optimum falls with the run's
+  length with exponent 0.32 (arXiv 2409.19913 §6 Eq. 5; 0.30 in its §4.1, Llama-1); the repository's d8 pair, net of
+  its doubled batch by a square-root rule, gives 0.24–0.30 (`docs/training.md` §5) and DeepSeek LLM's law 0.29 at a
+  fixed batch [arithmetic]; all of them pre-training measurements, their transfer to SFT from a trained base
+  [inference]. The one counter-claim, that the optimum hardly moves under linear decay to zero (arXiv 2502.15938
+  §4.2), is contradicted by that d8 pair. The band the exponent implies: 0.24 gives scale 0.085 (peak 2.0e-4), 0.5
+  gives 0.026 (6.0e-5) [arithmetic]. Erring low is the cheaper error, forgetting growing with the learning rate
+  (§2.3). Cost: ≈25 min of GPU [estimate].
 - **Validation and checkpoints**: the response loss, mean nats per label (each response and its closing BOS), over
   the whole val split (1,720 rows, 53.5M labels) before the full run's first step, every 1,000 steps and after the
   last (`run.py` `validation_steps`, `train/loop.py` `validate`; `val` records); full states every 1,000 steps (resume
@@ -359,7 +375,11 @@ unmeasured. Each choice is [inference] from the cited evidence.
   scores a saved model on the same rows and labels and pools each val document's scored labels
   (`docs/corpus.md` §10, val labels) per group, per KodCode style and in all (the `val` record's loss, up to
   summation order), into `RUNS/<run>/sft-val-<step>.json` (`loss` in nats per label, `labels`, `documents`; and
-  `document_losses`, each document's summed loss and label count, for paired comparisons across checkpoints).
+  `document_losses`, each document's summed loss and label count, for paired comparisons across checkpoints). The
+  intermediate checkpoints are points on the 2-epoch schedule's linear decay, not annealed: at the end of epoch 1
+  (step 3,838) the lr is still 0.50 of the peak and at 1.5 epochs (step 5,757) 0.25 (`train/schedule.py` `lr_lambda`
+  [arithmetic]), so a comparison of 1.0 or 1.5 epochs against 2 needs runs of those lengths with their own decay to
+  zero [inference].
 - **Runs and records**: an SFT run is a `run.py` run whose `RunConfig.base` names the base run; its directory, name
   and log follow the base's (`docs/training.md` §6). A sweep's records go to `results/posttrain/` when its runs start
   from a base checkpoint, else to `results/pretrain/` (`ablations/records.py` `results_dir`); the calibration's are
@@ -377,20 +397,62 @@ unmeasured. Each choice is [inference] from the cited evidence.
   and, through the server's `/tokenize`, that the first problem's messages render as BOS +
   `encode_ordinary(prompt.strip() + "\n\n<think>\n")` (a calibration arm's checkpoint: equal for EvalPlus's 153 and
   LiveCodeBench's 431 ids [measured]).
-- **Benchmarks**: HumanEval+ and MBPP+ by EvalPlus's OpenAI backend (`evalplus.codegen --backend openai`: its chat
-  instruction, "Please provide a self-contained Python script that solves the following problem in a markdown code
-  block:", and the prompt in a python fence; n 20, T 0.6, top-p 0.95 set by its `openai_request.make_request`),
-  scored by `evalplus.evaluate`. LiveCodeBench v6 (arXiv 2403.07974) by lcb_runner (`eval/official_lcb.py`: the
-  problems of release_v6 with a contest date in [2024-08-01, 2025-05-01), Nemotron-Cascade's "08/24–05/25", arXiv
-  2512.13607 Table 1; its system message and question as two messages, line-ending-normalized, n 16, T 0.6, top-p
-  0.95), scored by its `codegen_metrics`. T 0.6 and top-p 0.95 are DeepSeek-R1's (arXiv 2501.12948 v1 §3) and
-  Nemotron-Cascade's (arXiv 2512.13607 §2); every request asks 32,768 new tokens, which vLLM caps at the context less
-  the prompt, in place of Nemotron-Cascade's 64K. Reported: each tool's pass@1 (avg@n), in `docs/results.md`.
+- **Benchmarks**: HumanEval+ and MBPP+ by EvalPlus's OpenAI backend (`evalplus.codegen --backend openai` through
+  `eval/official_evalplus.py`: its chat instruction, "Please provide a self-contained Python script that solves the
+  following problem in a markdown code block:", and the prompt in a python fence), run greedy (`--greedy`: n 1, T 0)
+  and sampled (n 20, T 0.6, top-p 0.95 set by its `openai_request.make_request`), scored by `evalplus.evaluate`;
+  `--max_new_tokens` 32,768 reaches the requests only through `eval/official_evalplus.py` (EvalPlus's OpenAI backend
+  drops it and asks 768, `docs/evaluation.md` §8).
+  LiveCodeBench v6 (arXiv 2403.07974) by lcb_runner (`eval/official_lcb.py`: the problems of release_v6 with a
+  contest date in [2024-08-01, 2025-05-01), Nemotron-Cascade's "08/24–05/25", arXiv 2512.13607 Table 1; its system
+  message and question as two messages, line-ending-normalized, n 16, T 0.6, top-p 0.95), scored by its
+  `codegen_metrics`. T 0.6 and top-p 0.95 are DeepSeek-R1's (arXiv 2501.12948 v1 §3) and Nemotron-Cascade's (arXiv
+  2512.13607 §2); every request asks 32,768 new tokens, which vLLM caps at the context less the prompt, in place of
+  Nemotron-Cascade's 64K. Reported: each tool's pass@1 (avg@n), in `docs/results.md`.
+- **Endings apart from scores**: a response that never closes `</think>` scores 0 whatever its reasoning, so
+  termination is reported beside pass@1, not folded into it. `eval/official_evalplus.py` asks the server for each
+  sample's generated ids (`return_token_ids`) and records its finish reason (`stop` at BOS, `length` at the budget)
+  and whether `</think>` closed (`<samples>.endings.jsonl`); `eval/official_reasoning.py` writes `summary.json`: per
+  benchmark and mode, the closure rate, the finish reasons, pass@1 over every sample and pass@1 over the closed
+  samples (pooled), on the base and the plus tests.
 - **Contamination**: the SFT prompts' measured overlap with LiveCodeBench v6 is `docs/corpus.md` §10's.
 - **The base's records** (likelihood, the official benchmarks; `docs/evaluation.md` §1, §4) are taken at every stage
   to measure what it loses, not as a gate.
 - **No selection on the benchmarks**: RL, when run, stops on its held-out problems (§6); HumanEval+, MBPP+ and
   LiveCodeBench are read once per stage, at its end.
+
+### 5.1 Natural-termination evaluation on held-out prompts
+
+- **Purpose**: the teacher-forced response loss on the val split (§4) does not measure whether generation ends. The
+  model must itself emit `</think>`, a fenced answer and the closing BOS; a response that never closes its reasoning
+  has no answer and scores 0 in every benchmark (§5). Natural closure is the primary measure: a forced thinking budget
+  (s1's budget forcing, which appends the end-of-thinking delimiter at a maximum token count, arXiv 2501.19393 §3.1)
+  would mix learned and imposed termination. In Olmo3-7B's SFT, "Single-epoch models terminate only 24% of
+  generations, while 32-epoch models approach the rate of 89%", termination tracking accuracy (arXiv 2602.11149
+  §4.2); whether termination moves likewise over the epochs of this run is what the evaluation measures [inference].
+- **Prompt sets** (`eval/official_termination.py`): the first 64 HumanEval+ tasks as EvalPlus's chat path renders
+  them (§5; each checked to render as BOS + `encode_ordinary(prompt.strip() + "\n\n<think>\n")`) and 64 SFT val
+  documents drawn by `default_rng(0)`, their contexts as the SFT trained on them; the val problems are disjoint from
+  the train split's by the problem-level split (`docs/corpus.md` §10). Each val prompt carries its source group and
+  style (`val-labels.jsonl`) and its teacher's reasoning length.
+- **Protocol**: the `--chat` export (`inference/export_hf.py`), vLLM offline in bf16 with the head in fp32, eos = BOS,
+  T 0.6, top-p 0.95, one sample per prompt seeded by 0 + its index, max new tokens the context less the prompt; every
+  full-state checkpoint of the run, with the same prompts and seeds at every step (`scripts/official_termination.sh`
+  per checkpoint, `scripts/official_termination_watch.sh` over a run as its checkpoints appear;
+  `scripts/official_reasoning.sh` runs the probe on its export). Beside the training job the probe takes 0.12 of the
+  GPU's memory and is skipped if less than 15 GB is free at its start.
+- **Metrics** (per set and pooled; `RUNS/<run>/termination-<step>.json`): four exclusive outcomes, closed and ended
+  (BOS), closed with the answer at the limit, never closed at the limit, never closed and ended; the closing-time curve
+  P(closed with reasoning ≤ B) for B = 1K, 2K, 4K, 8K, 16K, 32K tokens; reasoning tokens p50/p90/p95 (an unclosed
+  response all reasoning) and answer tokens p50 given closure; the shares of closed answers with a fenced code block
+  and with the closing BOS; the HumanEval+ responses' pass on the base and the plus tests (EvalPlus's own sanitizer
+  and `check_correctness`, single-threaded BLAS), overall and given closure; outcomes per source group and style and
+  per teacher-length bucket (< 2K, 2–4K, 4–8K, 8–16K, ≥ 16K) with the rank correlation of teacher length and
+  closure; for never-closed responses the share of their last 4,096 tokens inside a repeated 32-token window, and every
+  response's last 2,000 characters, to test whether they run away in loops.
+- **Cost** [measured: `termination-1000-v1.json`, the step-1000 probe beside the training job]: 929 s per probe
+  (854 s generating); the run's median tokens/s fell 34% while it generated (312,840 → 205,817), about 290 s of run
+  time per probe.
 
 ## 6. Code RL, deferred
 
@@ -450,7 +512,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 
 | Stage | Why not |
 |---|---|
-| A non-thinking mode | reasoning is the default and only format (§3) |
+| A non-thinking mode | the format is thinking-mode only (§3) |
 | LoRA, QLoRA | at hidden size 768 LoRA saves compute only below rank 128–205, where it lags full fine-tuning on code; QLoRA saves memory the run does not need (§2.2) |
 | DPO (§2.4) | Nemotron-Cascade goes from SFT to RL without it |
 | Math RL | the SFT data holds no math; Nemotron-Cascade's math RL moved LiveCodeBench v6 by −0.3 to +2.2 (arXiv 2512.13607 §4.5) |
@@ -462,6 +524,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 
 | arXiv | Title |
 |---|---|
+| 2104.09864 | RoFormer: Enhanced Transformer with Rotary Position Embedding |
 | 2305.14314 | QLoRA: Efficient Finetuning of Quantized LLMs |
 | 2401.00788 | Astraios: Parameter-Efficient Instruction Tuning Code Large Language Models |
 | 2401.14196 | DeepSeek-Coder: When the Large Language Model Meets Programming - The Rise of Code Intelligence |
@@ -473,6 +536,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 | 2409.19913 | Scaling Optimal LR Across Token Horizons |
 | 2411.04905 | OpenCoder: The Open Cookbook for Top-Tier Code Large Language Models |
 | 2501.12948 | DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning |
+| 2501.19393 | s1: Simple test-time scaling |
 | 2502.12143 | Small Models Struggle to Learn from Strong Reasoners |
 | 2502.15938 | Straight to Zero: Why Linearly Decaying the Learning Rate to Zero Works Best for LLMs |
 | 2503.02951 | KodCode: A Diverse, Challenging, and Verifiable Synthetic Dataset for Coding |
@@ -510,6 +574,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 | 2601.02780 | MiMo-V2-Flash Technical Report |
 | 2601.06953 | X-Coder: Advancing Competitive Programming with Fully Synthetic Tasks, Solutions, and Tests |
 | 2601.20614 | Harder Is Better: Boosting Mathematical Reasoning via Difficulty-Aware GRPO and Multi-Aspect Question Reformulation |
+| 2602.11149 | Data Repetition Beats Data Scaling in Long-CoT Supervised Fine-Tuning |
 | 2602.13367 | Nanbeige4.1-3B: A Small General Model that Reasons, Aligns, and Acts |
 | 2602.15763 | GLM-5: from Vibe Coding to Agentic Engineering |
 | 2603.00729 | Qwen3-Coder-Next Technical Report |

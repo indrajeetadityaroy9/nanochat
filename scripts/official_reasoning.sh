@@ -2,17 +2,22 @@
 # The reasoning protocol of a post-trained checkpoint (docs/post-training.md §5) by the benchmarks' official tools:
 # the checkpoint exported with the SFT's chat format (inference/export_hf.py --chat), served by `vllm serve` (vLLM
 # 0.32.0's Transformers backend, the head in fp32) with the "nanochat" reasoning parser (eval/official_reasoning_parser.py:
-# the answer after the last "</think>"); EvalPlus's OpenAI backend (its chat prompt, n 20, T 0.6, top-p 0.95 set by
-# its openai_request.make_request) and lcb_runner (eval/official_lcb.py: LiveCodeBench v6, contest dates 2024-08-01 to
-# 2025-05-01, n 16, T 0.6, top-p 0.95), each judged by its own evaluator. max_tokens 32,768 in every request: vLLM
-# caps it at the context less the prompt (api_utils.get_max_tokens). First, every prompt either tool will send is
-# checked for "\r" and the first's served ids against the SFT context (eval/official_tokenize.py). The parser is
-# registered in every server process by eval/official_site/sitecustomize.py (NANOCHAT_REASONING_PARSER).
+# the answer after the last "</think>"); EvalPlus's OpenAI backend, greedy (n 1, T 0) and sampled (its chat prompt,
+# n 20, T 0.6, top-p 0.95 set by its openai_request.make_request), each sample's ending recorded
+# (eval/official_evalplus.py: its finish reason and whether "</think>" closed), and lcb_runner (eval/official_lcb.py:
+# LiveCodeBench v6, contest dates 2024-08-01 to 2025-05-01, n 16, T 0.6, top-p 0.95), each judged by its own
+# evaluator. max_tokens 32,768 in every request: vLLM caps it at the context less the prompt
+# (api_utils.get_max_tokens). First, the natural-termination probe (eval/official_termination.py) on the export; then
+# every prompt either tool will send is checked for "\r" and the first's served ids against the SFT context
+# (eval/official_tokenize.py). The parser is registered in every server process by eval/official_site/sitecustomize.py
+# (NANOCHAT_REASONING_PARSER).
 #
 #   scripts/official_reasoning.sh <run name> <step> [<problems per benchmark, a smoke>]
 #
-# Outputs in RUNS/<run>/official-<step>/: model/, tokenize-{evalplus,lcb}.json, evalplus/, lcb/, server.log,
-# timings.tsv. VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as scripts/official_eval.sh.
+# Outputs in RUNS/<run>/official-<step>/: model/, tokenize-{evalplus,lcb}.json, evalplus/ (each samples file with its
+# .endings.jsonl), lcb/, server.log, timings.tsv, summary.json (eval/official_reasoning.py: EvalPlus's closure rate,
+# pass@1 and pass@1 given closure); RUNS/<run>/termination-<step>.json. VLLM_GPU_MEMORY_UTILIZATION and CPU_NODE as
+# scripts/official_eval.sh.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2 LIMIT=${3:-}
@@ -35,6 +40,10 @@ step() {  # <name> <command...>: run, and append the wall time to timings.tsv
 [ -f "$OUT/model/model.safetensors" ] ||
   step export "${CPU[@]}" nanochat python -m inference.export_hf "${CHECKPOINT/#$ROOT/$W}" $C/model --chat
 "${DOCKER[@]}" nanochat-eval cp /opt/tools.json $C/tools.json
+[ -f "$RUN_DIR/termination-$STEP.json" ] || [ -n "$LIMIT" ] ||
+  step termination "${DOCKER[@]}" --device nvidia.com/gpu=all -e VLLM_CACHE_ROOT=$W/artifacts/cache/vllm \
+    -e PYTHONPATH=$W/eval/official_site:$W ${VLLM_GPU_MEMORY_UTILIZATION:+-e VLLM_GPU_MEMORY_UTILIZATION} \
+    nanochat-eval python -m eval.official_termination $C/model "${RUN_DIR/#$ROOT/$W}/termination-$STEP.json"
 
 docker run -d --rm --name $SERVER --ipc=host --init --network host --ulimit core=0 --device nvidia.com/gpu=all \
   --user "$(id -u):$(id -g)" -e HOME=/tmp -e VLLM_CACHE_ROOT=$W/artifacts/cache/vllm \
@@ -53,14 +62,21 @@ API=(-e OPENAI_BASE_URL=http://127.0.0.1:$PORT/v1 -e OPENAI_API_KEY=none -e OPEN
   http://127.0.0.1:$PORT $C/tokenize-lcb.json "${LCB_WINDOW[@]}"
 "${CPU[@]}" nanochat python -m eval.official_tokenize check $C/tokenize-{evalplus,lcb}.json
 
+EVALPLUS=(--model nanochat --backend openai --base_url http://127.0.0.1:$PORT/v1 --max_new_tokens 32768
+          --root $C/evalplus ${LIMIT:+--id_range "[0,$LIMIT]"})
 for dataset in humaneval mbpp; do
-  step "evalplus.codegen $dataset" "${DOCKER[@]}" "${API[@]}" nanochat-eval python -m evalplus.codegen \
-    --model nanochat --dataset $dataset --backend openai --base_url http://127.0.0.1:$PORT/v1 --n_samples 20 \
-    --temperature 0.6 --max_new_tokens 32768 --root $C/evalplus ${LIMIT:+--id_range "[0,$LIMIT]"}
+  # the samples files: nanochat_openai_temp_0.0 (greedy), nanochat_openai_temp_0.6 (sampled)
+  step "evalplus.codegen $dataset greedy" "${DOCKER[@]}" "${API[@]}" nanochat-eval python -m eval.official_evalplus \
+    --dataset $dataset --greedy "${EVALPLUS[@]}"
+  step "evalplus.codegen $dataset sampled" "${DOCKER[@]}" "${API[@]}" nanochat-eval python -m eval.official_evalplus \
+    --dataset $dataset --n_samples 20 --temperature 0.6 "${EVALPLUS[@]}"
   [ -n "$LIMIT" ] ||  # evalplus.evaluate requires every task's samples
-    step "evalplus.evaluate $dataset" "${CPU[@]}" nanochat-eval bash -c "python -m evalplus.evaluate \
-      --dataset $dataset --samples \$(ls $C/evalplus/$dataset/*.jsonl | grep -v '\.raw\.jsonl$')"
+    for temperature in 0.0 0.6; do
+      step "evalplus.evaluate $dataset $temperature" "${CPU[@]}" nanochat-eval python -m evalplus.evaluate \
+        --dataset $dataset --samples $C/evalplus/$dataset/nanochat_openai_temp_$temperature.jsonl
+    done
 done
+[ -n "$LIMIT" ] || "${CPU[@]}" nanochat python -m eval.official_reasoning $C
 
 # lcb_runner reads its prompt files relative to the working directory and writes output/ there
 step "lcb_runner" "${DOCKER[@]}" "${API[@]}" -w $C/lcb nanochat-eval bash -c "ln -sfn /opt/LiveCodeBench/lcb_runner . &&

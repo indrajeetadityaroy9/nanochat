@@ -29,11 +29,16 @@ INSTRUCTION_PREFIX = ("Please provide a self-contained Python script that solves
                       "code block:")
 
 
-def evalplus_messages() -> list[list[dict]]:
+def evalplus_tasks() -> list[tuple[str, list[dict]]]:
+    """(task id, messages) per HumanEval+ then MBPP+ task, in EvalPlus's order."""
     from evalplus.data import get_human_eval_plus, get_mbpp_plus
 
-    return [[{"role": "user", "content": INSTRUCTION_PREFIX + f"\n```python\n{task['prompt'].strip()}\n```"}]
-            for load in (get_human_eval_plus, get_mbpp_plus) for task in load().values()]
+    return [(task_id, [{"role": "user", "content": f"{INSTRUCTION_PREFIX}\n```python\n{task['prompt'].strip()}\n```"}])
+            for load in (get_human_eval_plus, get_mbpp_plus) for task_id, task in load().items()]
+
+
+def evalplus_messages() -> list[list[dict]]:
+    return [messages for _, messages in evalplus_tasks()]
 
 
 def lcb_messages(release: str, start: str, end: str) -> tuple[list[list[dict]], int]:
