@@ -201,6 +201,7 @@ def prepare(source: str, files: list[str]) -> None:
     shutil.rmtree(directory, ignore_errors=True)
     shutil.rmtree(checked_path(source, 0).parent, ignore_errors=True)
     directory.mkdir(parents=True)
+    # a Stack-Edu file at a time: each already runs a process per CPU, every blob of its row group in flight
     with ThreadPoolExecutor(1 if spec.repo == EDU else FETCHES) as pool:
         paths = list(pool.map(functools.partial(fetch, source), files))
     with ProcessPoolExecutor(mp_context=SPAWN) as pool:

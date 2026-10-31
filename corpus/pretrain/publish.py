@@ -1,6 +1,6 @@
 """
 The curated corpus, its decontamination record and the corpus's tokenizer to the Hub (DATASET) and back: push replaces
-the tree in one commit; pull downloads it.
+the tree in one commit; pull downloads REVISION's.
 
 python -m corpus.pretrain.publish push | pull
 """
@@ -16,6 +16,8 @@ from corpus.tokenizer import TOKENIZER
 from paths import CORPUS
 
 DATASET = "iaroy/nanochat-data"
+# The commit pull reads: push's decontaminated tree, the corpus pretraining read
+REVISION = "dbe57a81ba0314a501381da2331e598bc993be4c"
 
 # Preupload batch bytes: an LFS upload URL expires 900 s after its batch call, so 4 GiB needs at least 4.6 MiB/s
 PREUPLOAD = 4 * 1024**3
@@ -115,10 +117,10 @@ def push() -> None:
 
 
 def pull() -> None:
-    """The curated shards and their decontamination record into CURATED, the tokenizer into TOKENIZER."""
-    snapshot_download(DATASET, repo_type="dataset", local_dir=CURATED,
+    """REVISION's curated shards and their decontamination record into CURATED, its tokenizer into TOKENIZER."""
+    snapshot_download(DATASET, repo_type="dataset", revision=REVISION, local_dir=CURATED,
                       allow_patterns=[f"{source}/**" for source in SOURCES] + [RECORD.name])
-    snapshot_download(DATASET, repo_type="dataset", local_dir=CORPUS, allow_patterns=["tokenizer/*"])
+    snapshot_download(DATASET, repo_type="dataset", revision=REVISION, local_dir=CORPUS, allow_patterns=["tokenizer/*"])
 
 
 if __name__ == "__main__":

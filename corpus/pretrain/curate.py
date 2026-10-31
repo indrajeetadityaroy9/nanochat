@@ -61,10 +61,14 @@ def database() -> duckdb.DuckDBPyConnection:
 # ---- 1. check
 
 def parses(text: str) -> bool:
+    """Whether ast.parse accepts text; each exception it raises on a source is a rejection, none depends on the host:
+    ValueError on f"{x:{y=}}" (python/cpython#121130), MemoryError when its parser's stack overflows ("Python source
+    too complex to parse"), RecursionError when the AST it builds nests deeper than CPython's C recursion limit (fixed,
+    whatever RECURSION)."""
     try:
         ast.parse(text)
         return True
-    except (SyntaxError, ValueError, MemoryError, RecursionError):  # ValueError: f"{x:{y=}}" (python/cpython#121130)
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
         return False
 
 

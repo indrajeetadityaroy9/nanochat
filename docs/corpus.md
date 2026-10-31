@@ -73,11 +73,14 @@ bytes in the group: the group's draw (the tokens both stages draw of it, `mixtur
 × (1 + `SPREAD`) × 100/99 (the train split holds 99/100, §3);
 tokens are counted from bytes at the reference tokenizer's bytes per token (`mixture.BYTES_PER_TOKEN`, 2.92–4.28 per
 source and language; SA-BPE within `SPLIT_PATTERN`, trained before this corpus; also used for the tokenizer sample,
-§5). Every other source fetches all its files. `SPREAD` = 0.06 widens the target for a retrained tokenizer
-compressing a source better than the reference [inference]. Across tokenizer training mixes NSL "only varies by 5 to
-6 percentage points" (arXiv 2402.01035 §2.3); as a relative spread of token counts that is 6.9% for code (NSL
-75.54–80.78) and 6.4% for English (84.86–90.28), Fig. 2 [arithmetic]. It held for every arm: the intrinsic record's
-`train_tokens_over_draw` is ≥ 1.017 (sa-bpe-fused, synthetic 1.0173;
+§5). Every other source fetches all its files. On master `extent` selects the published corpus's files: for each source
+read in part, 97–100% of 300 rows of its last selected file are in its curated splits (89% for Nemotron rewriting) and
+at most 1% of the next file's (15% for transpilation) [measured]; repair, deduplication and decontamination remove or
+re-identify rows, and a later file can hold copies of selected rows [inference]. `SPREAD` = 0.06 widens the target for
+a retrained tokenizer compressing a source better than the reference [inference]. Across tokenizer training mixes NSL
+"only varies by 5 to 6 percentage points" (arXiv 2402.01035 §2.3); as a relative spread of token counts that is 6.9%
+for code (NSL 75.54–80.78) and 6.4% for English (84.86–90.28), Fig. 2 [arithmetic]. It held for every arm: the
+intrinsic record's `train_tokens_over_draw` is ≥ 1.017 (sa-bpe-fused, synthetic 1.0173;
 `results/pretrain/tokenizer_split_merge-intrinsic.json`). Under the corpus's tokenizer the train splits hold 1.092
 (synthetic, draw 25.32B), 1.071 (text, 10.26B) and 1.166 (math, 3.08B) × their group's draw (computed on master; the
 intrinsic record's 1.169 for math estimates tokens from bytes, `docs/experiments.md` §2). A source whose packed shards
@@ -180,12 +183,10 @@ part (§8).
 `corpus/pretrain/publish.py`, `DATASET` = `iaroy/nanochat-data` (private on the Hub). `push` replaces the dataset's tree
 in one commit (history kept) with `<source>/<split>/<k>.parquet` (`curated/`'s: 1,812 shards, 6 × 100 repository, 12 ×
 101 others; 166,229,888,890 bytes), `decontamination.json` (§3), `tokenizer/tokenizer.{tiktoken,pattern}` (§5) and the
-card `README.md` (`publish.card`). `pull` downloads `main`'s shards and record into `CORPUS/curated` and the tokenizer
-into `CORPUS/tokenizer`. The curated shards were first published as the curated release ("nanochat corpus, curated",
-2026-10-24); a later revision added `tokenizer/` (the shipped tokenizer, §5); `main` is the decontaminated release
-("nanochat corpus, curated and decontaminated", 2026-10-27): the 1,682 shards with a dropped row rewritten, the other
-130 (the 112 untouched train shards and the 18 val shards) byte-identical to the curated release's, the record added,
-the tokenizer unchanged.
+card `README.md` (`publish.card`). `pull` downloads `publish.REVISION`, the tree pretraining read: its shards and record
+into `CORPUS/curated`, its tokenizer into `CORPUS/tokenizer`. Against its parent, the tree before decontamination,
+`REVISION` differs in exactly the 1,682 shards with a dropped row and the record; the other 130 shards (112 train, 18
+val) and the tokenizer are byte-identical [measured].
 
 | Folder | Columns | Train rows | Val rows | Parquet GB |
 |---|---|---|---|---|
@@ -209,14 +210,12 @@ the tokenizer unchanged.
 | `climbmix` | `id`, `content` | 15,625,499 | 157,894 | 19.12 |
 | All | | 176,624,564 | 1,771,524 | 166.23 |
 
-**Provenance.** The SHA-256 of every local shard in `CORPUS/curated` equals the Hub's LFS hash in the decontaminated
-release: 1,812 shards, none missing or extra, each of the Hub's size; the shards whose hash differs from the curated
-release's are exactly the record's shards with a dropped row, and every folder's rows on the card equal the shards'
-Parquet footers (computed on master). `python -m corpus.decontaminate` on the curated release's (revision `dc5391b`)
-train shard 1 of each repository source and 0 of each other source reproduces the decontaminated release's (`dbe57a81`)
-18 shards byte for byte and the record's rows of them (4,432) [measured]. The published card says every Python file
-parses; `publish.card` says it of the Python files of the repository, synthetic and function sources, the ones checked
-(§3), as notebooks and traces are not.
+**Provenance.** The SHA-256 of every local shard in `CORPUS/curated` equals its LFS hash at `REVISION` (1,812 shards,
+none missing or extra, each of the Hub's size), and every folder's rows on the card equal the shards' Parquet footers
+(computed on master). `python -m corpus.decontaminate` on the parent's train shard 1 of each repository source and 0 of
+each other source reproduces `REVISION`'s 18 shards byte for byte and the record's rows of them (4,432) [measured].
+`publish.card` says every Python file of the repository, synthetic and function sources parses (the ones checked, §3;
+exercises, notebooks and traces are not); the card at `REVISION` says it of every Python file.
 Training reads only the packs derived from these shards (§6–§9); the seeded generators (data order, FIM's ChaCha8)
 select and transform rows but add no data.
 
@@ -689,10 +688,10 @@ The pretraining corpus, once, to build the published dataset:
 4. **Tokenizer**: `python -m corpus.train_tokenizer` trains sa-bpe on the sample into `CORPUS/tokenizer`
    (`tokenizer.TOKENIZER`, §5); it does not reproduce the shipped tokenizer (§5).
 5. **Publish**: `python -m corpus.pretrain.publish push` uploads the curated shards, their decontamination record and
-   the tokenizer (§4).
+   the tokenizer (§4); its commit is the one `publish.REVISION` names.
 
-From a pull of the dataset (`python -m corpus.pretrain.publish pull`, run by `scripts/setup.sh`: the curated shards,
-their decontamination record and the shipped tokenizer):
+From a pull of the dataset (`python -m corpus.pretrain.publish pull`, run by `scripts/setup.sh`: `publish.REVISION`'s
+curated shards, their decontamination record and the shipped tokenizer):
 6. **Tokenize**: `python -m corpus.tokenize` (§6), ending with the 32K stage's repository partitions.
 7. **Pack**: `python -m corpus.pack` (§7–§8); it fails (`pack.fit`, naming the corpus, its packed rows and its draw)
    when a corpus holds fewer packed rows than its draw: a corpus read in part runs out of shards, or a corpus packed
