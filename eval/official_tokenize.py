@@ -37,10 +37,6 @@ def evalplus_tasks() -> list[tuple[str, list[dict]]]:
             for load in (get_human_eval_plus, get_mbpp_plus) for task_id, task in load().items()]
 
 
-def evalplus_messages() -> list[list[dict]]:
-    return [messages for _, messages in evalplus_tasks()]
-
-
 def lcb_messages(release: str, start: str, end: str) -> tuple[list[list[dict]], int]:
     """eval/official_lcb.py's messages of every window problem, and how many problems' unnormalized ones hold "\\r"."""
     from lcb_runner.benchmarks.code_generation import load_code_generation_dataset
@@ -82,7 +78,7 @@ if __name__ == "__main__":
     if sys.argv[1] == "check":
         sys.exit(0 if check(sys.argv[2:]) else 1)
     if sys.argv[1] == "evalplus":
-        every, raw = evalplus_messages(), None
+        every, raw = [messages for _, messages in evalplus_tasks()], None
     else:
         every, raw = lcb_messages(*sys.argv[4:7])
     first = every[0]

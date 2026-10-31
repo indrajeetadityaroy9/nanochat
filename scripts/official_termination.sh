@@ -1,8 +1,8 @@
 #!/bin/bash
 # The natural-termination probe of one post-trained checkpoint (eval/official_termination.py; docs/post-training.md
 # §5), also beside a running training job: the checkpoint exported with --chat to a temporary directory (CPU), then
-# sampled by vLLM offline on the GPU with gpu_memory_utilization VLLM_GPU_MEMORY_UTILIZATION (default 0.12), one
-# probe at a time (a lock); skipped (exit 2) if the GPU has less than MIN_FREE_MIB (default 15,360) free at its start.
+# sampled by vLLM offline on the GPU with gpu_memory_utilization VLLM_GPU_MEMORY_UTILIZATION (default 0.12; vLLM
+# fails at its start if the GPU has less free), one probe at a time (a lock).
 # The run's metrics.jsonl gives its tokens/s during the probe against before it and the time it lost, as information.
 # The responses are scored afterwards in a CPU container of their own (single-threaded BLAS), never in the vLLM process;
 # the unscored responses stay in RUNS/<run>/<output>.generated if scoring fails.
@@ -39,8 +39,6 @@ MODEL=$(mktemp -d "$ROOT/artifacts/cache/termination-$STEP-XXXXXX")
 trap 'rm -rf "$MODEL" "$OUT.partial"' EXIT
 "${DOCKER[@]}" --cpuset-mems="${CPU_NODE:-0}" nanochat python -m inference.export_hf "${CHECKPOINT/#$ROOT/$W}" \
   "${MODEL/#$ROOT/$W}" --chat
-free=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits | awk -F', ' '{print $1 - $2}')
-[ "$free" -ge "${MIN_FREE_MIB:-15360}" ] || { echo "GPU memory free $free MiB: probe skipped" >&2; exit 2; }
 METRICS=()
 [ -f "$RUN_DIR/metrics.jsonl" ] && METRICS=("${RUN_DIR/#$ROOT/$W}/metrics.jsonl" "$SINCE")
 "${DOCKER[@]}" --device nvidia.com/gpu=all -e VLLM_CACHE_ROOT=$W/artifacts/cache/vllm \

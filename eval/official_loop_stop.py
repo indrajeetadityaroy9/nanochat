@@ -6,7 +6,7 @@ its next token. A stopped response is the probe's "unclosed_loop_stopped" at the
 finish reason "stop" and, having no "</think>", an empty answer (eval/official_reasoning_parser.py), which every
 scorer fails, as it fails the same loop run on to max_tokens. Clients identify a stopped response from its token ids
 (eval/loop.py `stopped`); each stop also appends a line {"tokens", "repetition"} to the file named by
-NANOCHAT_LOOP_STOP_LOG, when set.
+NANOCHAT_LOOP_STOP_LOG (required; eval/official_reasoning.py counts the lines).
 
 Per step, the check costs a host-side test of each request's output length; only a request at a check reads its
 tokens back from the device.
@@ -20,6 +20,7 @@ import os
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (LogitsContext, LogitsProcessor,
                                                                   LogitsProcRequestState)
 
+from corpus.tokenizer import get_tokenizer
 from eval.loop import CHUNK, REPEAT_TAIL, looping
 
 LOG = "NANOCHAT_LOOP_STOP_LOG"
@@ -27,12 +28,10 @@ LOG = "NANOCHAT_LOOP_STOP_LOG"
 
 class LoopStopLogitsProcessor(LogitsProcessor):
     def __init__(self, vllm_config, req_states: LogitsProcRequestState):
-        from corpus.tokenizer import get_tokenizer
-
         tok = get_tokenizer()
         self.bos, self.decode = tok.bos_token_id, tok.enc.decode
         self.req_states = req_states
-        self.log = os.environ.get(LOG)
+        self.log = os.environ[LOG]
 
     def apply(self, logits, ctx: LogitsContext):
         slots = ctx.idx_mapping_np
@@ -47,9 +46,8 @@ class LoopStopLogitsProcessor(LogitsProcessor):
             rows = (ctx.expanded_idx_mapping == slot).nonzero().squeeze(1)
             logits[rows] = float("-inf")
             logits[rows, self.bos] = 0.0
-            if self.log:
-                with open(self.log, "a") as f:
-                    f.write(json.dumps({"tokens": n, "repetition": r}) + "\n")
+            with open(self.log, "a") as f:
+                f.write(json.dumps({"tokens": n, "repetition": r}) + "\n")
         return logits
 
     def output(self, slot: int, n: int, ctx: LogitsContext) -> list[int]:

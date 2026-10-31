@@ -12,7 +12,7 @@ from collections.abc import Sequence
 
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
-END = "</think>"
+from eval.loop import END
 
 
 @ReasoningParserManager.register_module("nanochat")

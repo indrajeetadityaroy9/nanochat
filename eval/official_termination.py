@@ -3,7 +3,7 @@ once each by vLLM offline from the --chat export (inference/export_hf.py; bf16, 
 tokens the context less the prompt), and how the responses end:
 
 - evalplus: the first --prompts HumanEval+ tasks' messages as EvalPlus's OpenAI backend sends them
-  (eval/official_tokenize.py evalplus_messages), rendered by the export's chat template as `vllm serve` renders them
+  (eval/official_tokenize.py evalplus_tasks), rendered by the export's chat template as `vllm serve` renders them
   for scripts/official_reasoning.sh, each checked to equal BOS + encode_ordinary(prompt.strip() + THINK).
 - val: --prompts SFT val documents drawn without replacement by default_rng(SEED) (corpus/posttrain/build.py's
   held-out problems), their context (the prompt and THINK, <split>.context) after a BOS, the ids the SFT trained on;
@@ -66,11 +66,12 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
+from scipy.stats import spearmanr
 
 from corpus.layout import TOKEN_DTYPE, split_path
 from corpus.posttrain.sft import END_THINK, NAME, THINK
 from corpus.tokenizer import get_tokenizer
-from eval.loop import CHUNK, END, LOOP, REPEAT_TAIL, REPEAT_WINDOW, repetition
+from eval.loop import CHUNK, END, LOOP, REPEAT_TAIL, REPEAT_WINDOW, covered, repetition
 from eval.official_tokenize import evalplus_tasks
 
 PROMPTS, SEED, BEFORE = 64, 0, 50
@@ -126,13 +127,7 @@ def val_prompts(n: int) -> list[dict]:
 def loop_onset(ids: list[int]) -> int:
     """The first token of the repeating tail: one past the last token not inside a REPEAT_WINDOW-token window that
     recurs anywhere in `ids` (0 if every token is; len(ids) if the last token is not)."""
-    windows = [tuple(ids[i:i + REPEAT_WINDOW]) for i in range(len(ids) - REPEAT_WINDOW + 1)]
-    counts = Counter(windows)
-    covered = np.zeros(len(ids), bool)
-    for i, w in enumerate(windows):
-        if counts[w] > 1:
-            covered[i:i + REPEAT_WINDOW] = True
-    free = np.flatnonzero(~covered)
+    free = np.flatnonzero(~covered(ids))
     return int(free[-1]) + 1 if len(free) else 0
 
 
@@ -140,7 +135,7 @@ def onsets(record: Path, out: Path) -> None:
     """Loop onsets of a probe's never-closed responses whose reasoning the json stores; per set, the median."""
     report = json.loads(record.read_text())
     rows = report["responses"]
-    configs = rows if report.get("budget") else {"": rows}
+    configs = rows if report["budget"] else {"": rows}
     enc = get_tokenizer().enc
     result = {}
     for config, sets in configs.items():
@@ -152,7 +147,7 @@ def onsets(record: Path, out: Path) -> None:
                 ids = enc.encode_ordinary(r["reasoning"])
                 found.append({"id": r["id"], "tokens": len(ids), "repetition": r["repetition"],
                               "onset": loop_onset(ids)})
-            loops = [f["onset"] for f in found if (f["repetition"] or 0) >= LOOP]
+            loops = [f["onset"] for f in found if f["repetition"] >= LOOP]
             result[f"{config}/{name}" if config else name] = {
                 "unclosed_with_text": len(found), "loops": len(loops),
                 "onset_median": statistics.median(loops) if loops else None, "responses": found}
@@ -267,16 +262,6 @@ def generate(llm, prompts: list[list[int]], sampling: list[dict], seeds: list[in
     return out
 
 
-def ranks(x: np.ndarray) -> np.ndarray:
-    """Average ranks (ties share their mean rank)."""
-    order = np.argsort(x, kind="stable")
-    r = np.empty(len(x))
-    r[order] = np.arange(len(x))
-    for v in np.unique(x):
-        r[x == v] = r[x == v].mean()
-    return r
-
-
 def outcomes(rows: list[dict]) -> dict:
     counts = Counter(r["outcome"] for r in rows)
     return {"responses": len(rows), "outcomes": {k: counts[k] for k in OUTCOMES},
@@ -313,10 +298,10 @@ def summary(rows: list[dict]) -> dict:
                   and (hi is None or r["teacher_reasoning_tokens"] < hi)]
             if rs:
                 out["by_teacher_reasoning"][f"{lo}-{hi or ''}"] = outcomes(rs)
-        teacher = np.array([r["teacher_reasoning_tokens"] for r in rows], float)
-        closure = np.array([r["closed"] for r in rows], float)
-        out["teacher_length_closure_spearman"] = (float(np.corrcoef(ranks(teacher), ranks(closure))[0, 1])
-                                                  if closure.std() and teacher.std() else None)
+        teacher = [r["teacher_reasoning_tokens"] for r in rows]
+        closure = [r["closed"] for r in rows]
+        out["teacher_length_closure_spearman"] = (float(spearmanr(teacher, closure).statistic)
+                                                  if len(set(closure)) > 1 and len(set(teacher)) > 1 else None)
     return out
 
 
@@ -338,16 +323,12 @@ def evalplus_check(rows: list[dict]) -> None:
             r["plus"] = r["base"] and result["plus"][0] == "pass"
 
 
-def train_steps(metrics: Path) -> list[tuple[float, int, float, float]]:
-    """The job's train steps: (time, step, tokens/s, seconds)."""
-    rows = [json.loads(line) for line in metrics.read_text().splitlines() if line.strip()]
-    return [(r["time"], r["step"], r["tokens_per_second"], r["step_seconds"]) for r in rows if r.get("kind") == "train"]
-
-
 def job_cost(metrics: Path, since: float, end: float) -> dict:
     """The job's median rate over its BEFORE steps before `since`, its steps in [since, end]: their rates and the
     seconds they took beyond the before rate."""
-    steps = train_steps(metrics)
+    rows = [json.loads(line) for line in metrics.read_text().splitlines() if line.strip()]
+    steps = [(r["time"], r["step"], r["tokens_per_second"], r["step_seconds"])
+             for r in rows if r.get("kind") == "train"]
     before = statistics.median([rate for t, _, rate, _ in steps if t < since][-BEFORE:])
     during = [(step, rate, seconds) for t, step, rate, seconds in steps if since <= t <= end]
     if not during:
@@ -425,7 +406,7 @@ def main(model: Path, out: Path, metrics: Path | None, since: float | None, n: i
          configs: list[str]) -> None:
     """Generation (the GPU process): the responses, unscored, with their full answers (and the evalplus set's full
     reasoning) to `out`; `score` scores them in a separate process."""
-    from vllm import LLM, SamplingParams
+    from vllm import LLM
 
     start = time.time()
     context = json.loads((model / "config.json").read_text())["max_position_embeddings"]
@@ -438,17 +419,15 @@ def main(model: Path, out: Path, metrics: Path | None, since: float | None, n: i
     tok = get_tokenizer()
     report = {"model": str(model), "context": context, "sampling": SAMPLING | {"n": 1, "seed": SEED},
               "prompts_per_set": n, "budget": budget, "chunk": CHUNK, "loop_stop": LOOP}
+    sets = {"evalplus": evalplus_prompts(llm.get_tokenizer(), n), "val": val_prompts(n)}
+    generating = time.time()
     if budget:
-        sets = {"evalplus": evalplus_prompts(llm.get_tokenizer(), n), "val": val_prompts(n)}
-        generating = time.time()
         responses = forced(llm, sets, configs)
         end = time.time()
         report |= {"configs": {c: CONFIGS[c] for c in configs}, "reasoning_max_tokens": max(FORCED_BUDGETS),
                    "answer_max_tokens": ANSWER_TOKENS}
     else:
-        sets = {"evalplus": evalplus_prompts(llm.get_tokenizer(), n), "val": val_prompts(n)}
         flat = [(name, p) for name, every in sets.items() for p in every]
-        generating = time.time()
         outputs = generate(llm, [p["ids"] for _, p in flat], [SAMPLING] * len(flat),
                            [SEED + i for i in range(len(flat))], [context - len(p["ids"]) for _, p in flat])
         end = time.time()

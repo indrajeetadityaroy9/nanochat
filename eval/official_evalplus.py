@@ -1,14 +1,14 @@
 """evalplus.codegen's main (docker/Dockerfile.eval's EvalPlus) with two changes to its OpenAI backend:
 
-- --max_new_tokens reaches the decoder: evalplus.provider.make_model builds OpenAIChatDecoder without it, which then
-  asks every request for DecoderBase's default 768 new tokens.
+- --max_new_tokens (required) reaches the decoder: evalplus.provider.make_model builds OpenAIChatDecoder without it,
+  which then asks every request for DecoderBase's default 768 new tokens.
 - Each sample's ending is recorded: the requests also ask `vllm serve` for the generated token ids
   (`return_token_ids`), and every sample adds a row to <samples>.endings.jsonl beside its samples file, in that file's
   order: {"task_id", "finish_reason" (vLLM's: "stop" at eos, BOS here, or "length"), "closed" (the decoded response
   holds "</think>", the reasoning parser's split, eval/official_reasoning_parser.py), "loop_stopped" (ended by the
   server's loop stop, eval/official_loop_stop.py), "tokens" (generated, the closing BOS not counted)}.
 
-Every argument is codegen's.
+Every argument is codegen's; scripts/official_reasoning.sh passes --max_new_tokens.
 
     OPENAI_BASE_URL=http://<host>:<port>/v1 OPENAI_API_KEY=none python -m eval.official_evalplus <codegen arguments>
 """
@@ -23,17 +23,15 @@ from evalplus.gen.util import openai_request
 from evalplus.provider.openai import OpenAIChatDecoder
 
 from corpus.tokenizer import get_tokenizer
-from eval.loop import stopped
-from eval.official_reasoning_parser import END
+from eval.loop import END, stopped
 
 ENDINGS = {}  # "path": the endings file of the samples being generated; "tasks": task id by the message sent
 codegen, make_model = evalplus.codegen.codegen, evalplus.codegen.make_model
 
 
-def sized_make_model(*args, max_new_tokens: int | None = None, **kwargs):
+def sized_make_model(*args, max_new_tokens: int, **kwargs):
     model = make_model(*args, **kwargs)
-    if max_new_tokens is not None:
-        model.max_new_tokens = max_new_tokens
+    model.max_new_tokens = max_new_tokens
     return model
 
 

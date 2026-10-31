@@ -6,7 +6,7 @@ ended by the server's loop stop (eval/official_loop_stop.py), pass@1 over every 
 that closed (pooled: each problem weighted by its closed samples); "base" on HumanEval's or MBPP's tests, "plus" on
 both those and EvalPlus's (base_status and plus_status "pass"). A sample joins its verdict by its problem and its
 sanitized solution text. "loop_stops": the server's stops (its LOOP_STOPS log, one line each) of EvalPlus's samples
-and of lcb_runner's (the rest; lcb_runner keeps no token ids), null when the server ran without the loop stop.
+and of lcb_runner's (the rest; lcb_runner keeps no token ids).
 
     python -m eval.official_reasoning <official-<step> dir>
 """
@@ -56,12 +56,9 @@ def cell(rows: list[dict]) -> dict:
 if __name__ == "__main__":
     out = Path(sys.argv[1])
     summary = {benchmark: {mode: cell(samples(out / "evalplus" / dataset / identifier))
-                           for mode, identifier in MODES.items()
-                           if (out / "evalplus" / dataset / f"{identifier}.eval_results.json").exists()}
+                           for mode, identifier in MODES.items()}
                for benchmark, dataset in BENCHMARKS.items()}
     evalplus = sum(c["loop_stopped"] for modes in summary.values() for c in modes.values())
-    log = out / LOOP_STOPS
-    stops = len(jsonl(log)) if log.exists() else None
-    summary["loop_stops"] = None if stops is None else {"evalplus": evalplus, "lcb": stops - evalplus}
+    summary["loop_stops"] = {"evalplus": evalplus, "lcb": len(jsonl(out / LOOP_STOPS)) - evalplus}
     (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(json.dumps(summary, indent=1))

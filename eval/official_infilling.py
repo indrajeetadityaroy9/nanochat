@@ -8,7 +8,7 @@ suffix encoded apart, BOS first. A middle ends at BOS (the model's end of text, 
 token, at most `budget` tokens, the benchmark's longest reference middle (the paper names no budget). Samples are
 written as the CLI reads them, {"task_id", "completion"} per line.
 
-    python -m eval.official_infilling <model dir> <out dir> [<tasks per benchmark>]
+    python -m eval.official_infilling <model dir> <out dir>
 """
 
 import functools
@@ -30,7 +30,7 @@ def budget(name: str) -> int:
     return max(len(encode(p["canonical_solution"])) for p in read_problems(name).values())
 
 
-def main(model: str, out: Path, limit: int | None = None) -> None:
+def main(model: str, out: Path) -> None:
     from vllm import LLM, SamplingParams, TokensPrompt
 
     tokenizer = get_tokenizer()
@@ -38,7 +38,7 @@ def main(model: str, out: Path, limit: int | None = None) -> None:
     llm = LLM(model, trust_remote_code=True, dtype="bfloat16")
     out.mkdir(parents=True, exist_ok=True)
     for name in BENCHMARKS:
-        problems = list(read_problems(name).values())[:limit]
+        problems = list(read_problems(name).values())
         prompts = [fim_prompt(tokenizer, p["prompt"], p["suffix"], mode="psm") for p in problems]
         outputs = llm.generate([TokensPrompt(prompt_token_ids=ids) for ids in prompts],
                                SamplingParams(temperature=0.0, max_tokens=budget(name), stop_token_ids=stops))
@@ -48,4 +48,4 @@ def main(model: str, out: Path, limit: int | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], Path(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else None)
+    main(sys.argv[1], Path(sys.argv[2]))

@@ -11,36 +11,34 @@
   (eval/official_reasoning_parser.py): `vllm serve --reasoning-parser-plugin` imports it in the API server only, and
   the spawned engine core looks the parser up too.
 """
+import functools
 import os
+
+from vllm import LLM
 
 if os.environ.get("NANOCHAT_REASONING_PARSER"):
     import eval.official_reasoning_parser  # noqa: F401 (registers the parser)
 
-try:
-    from vllm import LLM
-except ImportError:
-    LLM = None
+init, generate = LLM.__init__, LLM.generate
 
-if LLM is not None:
-    import functools
 
-    init, generate = LLM.__init__, LLM.generate
+@functools.wraps(init)
+def __init__(self, *args, **kwargs):
+    if share := os.environ.get("VLLM_GPU_MEMORY_UTILIZATION"):
+        kwargs = kwargs | {"gpu_memory_utilization": float(share)}
+    init(self, *args, **kwargs)
 
-    @functools.wraps(init)
-    def __init__(self, *args, **kwargs):
-        if share := os.environ.get("VLLM_GPU_MEMORY_UTILIZATION"):
-            kwargs = kwargs | {"gpu_memory_utilization": float(share)}
-        init(self, *args, **kwargs)
 
-    @functools.wraps(generate)
-    def checked_generate(self, prompts, *args, **kwargs):
-        for p in prompts if isinstance(prompts, list | tuple) else [prompts]:
-            if isinstance(p, dict) and "prompt" not in p:
-                text = self.get_tokenizer().decode(p["prompt_token_ids"])
-            else:
-                text = p["prompt"] if isinstance(p, dict) else p
-            if "\r" in text:
-                raise ValueError(f"a prompt holds a carriage return (docs/evaluation.md §4): {text[:200]!r}")
-        return generate(self, prompts, *args, **kwargs)
+@functools.wraps(generate)
+def checked_generate(self, prompts, *args, **kwargs):
+    for p in prompts if isinstance(prompts, list | tuple) else [prompts]:
+        if isinstance(p, dict) and "prompt" not in p:
+            text = self.get_tokenizer().decode(p["prompt_token_ids"])
+        else:
+            text = p["prompt"] if isinstance(p, dict) else p
+        if "\r" in text:
+            raise ValueError(f"a prompt holds a carriage return (docs/evaluation.md §4): {text[:200]!r}")
+    return generate(self, prompts, *args, **kwargs)
 
-    LLM.__init__, LLM.generate = __init__, checked_generate
+
+LLM.__init__, LLM.generate = __init__, checked_generate

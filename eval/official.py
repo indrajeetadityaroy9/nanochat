@@ -1,6 +1,6 @@
 """The official tools' outputs for one checkpoint (scripts/official_eval.sh, RUNS/<run>/official-<step>/) as one record
-in eval/suite.py's codegen and fim layout, so that metrics.compare pairs it with another checkpoint's record or with
-an earlier harness record; per-problem pass from each tool's own verdict:
+in eval/suite.py's codegen and fim layout, so that metrics.compare pairs it with another checkpoint's record;
+per-problem pass from each tool's own verdict:
 
 | Record | Tool output | Pass |
 | codegen.{humaneval,mbpp}_plus.greedy | evalplus.evaluate's `<samples>.eval_results.json` | base_status, plus_status |
@@ -13,7 +13,7 @@ metrics.summary clustered by HumanEval problem (metrics.problem_clusters), evalp
 fim record also counts the middles that ran to the benchmark's budget ("at_budget", their tokens re-encoded by
 encode_ordinary), the others having ended at BOS or another special token.
 
-    python -m eval.official <official dir> [<eval-<step>.json to compare against>]
+    python -m eval.official <official dir>
 """
 
 import gzip
@@ -73,56 +73,16 @@ def record(out: Path) -> dict:
                            else {"pass@1": metrics.pass_cell(columns["pass@1"])})
     fims = {}
     for name in BENCHMARKS:
-        path = out / "infilling" / f"{name}-psm.jsonl_results.jsonl"
-        if path.exists():
-            r = fims.setdefault(f"{name}/psm", {})["greedy"] = infilling(path, budget(name))
-            r["scores"] = {"pass@1": metrics.summary([p for (p,) in metrics.pass_columns(name, r)["pass@1"]],
-                                                     metrics.problem_clusters(r))}
+        r = infilling(out / "infilling" / f"{name}-psm.jsonl_results.jsonl", budget(name))
+        r["scores"] = {"pass@1": metrics.summary([p for (p,) in metrics.pass_columns(name, r)["pass@1"]],
+                                                 metrics.problem_clusters(r))}
+        fims[f"{name}/psm"] = {"greedy": r}
     return {"step": int(re.fullmatch(r"official-(\d+)", out.name)[1]), "codegen": codegen, "fim": fims,
             "evalplus_average": {"greedy": metrics.evalplus_average(codegen["humaneval_plus"]["greedy"],
                                                                    codegen["mbpp_plus"]["greedy"])},
             "tools": json.loads((out / "tools.json").read_text())}
 
 
-def aligned(a: dict, b: dict) -> dict:
-    """b's codegen and fim records in a's problem order, on the problems a's records hold (KeyError if b lacks one)."""
-    out = {"codegen": {}, "fim": {}}
-    for section, records in out.items():
-        for benchmark, modes in b[section].items():
-            for mode, r in modes.items():
-                if benchmark not in a.get(section, {}) or mode not in a[section][benchmark]:
-                    continue
-                where = {i: k for k, i in enumerate(r["ids"])}
-                order = [where[i] for i in a[section][benchmark][mode]["ids"]]
-                records.setdefault(benchmark, {})[mode] = {
-                    k: [v[j] for j in order] for k, v in r.items() if isinstance(v, list) and len(v) == len(r["ids"])}
-    return out
-
-
-def agreement(a: dict, b: dict) -> dict:
-    """Per single-sample row: problems both pass, a only, b only, neither (metrics.compare's McNemar table)."""
-    out = {}
-    for section in ("codegen", "fim"):
-        for benchmark, modes in b[section].items():
-            for mode, y in modes.items():
-                columns_b = metrics.pass_columns(benchmark, y)
-                for column, pa in metrics.pass_columns(benchmark, a[section][benchmark][mode]).items():
-                    pb = columns_b[column]
-                    if all(len(p) == 1 for p in (*pa, *pb)):
-                        pairs = [(x[0], z[0]) for x, z in zip(pa, pb, strict=True)]
-                        out[f"{section}/{benchmark}/{mode}/{column}"] = {
-                            "both": sum(x and z for x, z in pairs), "a_only": sum(x and not z for x, z in pairs),
-                            "b_only": sum(z and not x for x, z in pairs), "neither": sum(not (x or z) for x, z in pairs)}
-    return out
-
-
 if __name__ == "__main__":
     out = Path(sys.argv[1])
-    summary = record(out)
-    (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
-    if len(sys.argv) > 2:
-        harness = json.loads(Path(sys.argv[2]).read_text())
-        official = aligned(harness, summary)
-        (out / f"compare-{Path(sys.argv[2]).stem}.json").write_text(json.dumps(
-            {"a": str(sys.argv[2]), "b": "official", "rows": metrics.compare(harness, official),
-             "agreement": agreement(harness, official)}, indent=1) + "\n")
+    (out / "summary.json").write_text(json.dumps(record(out), indent=1) + "\n")

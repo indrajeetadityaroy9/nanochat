@@ -19,7 +19,7 @@ figure without a record, or a paper value its extracted text lacks. Measurements
 | `eval/code_eval.py` (`tasks`, `parse_generation`, `parse_record`, `truncated`, `filtered_generation`, `filtered_completions`, `codegen_runs`, `vetted`, evaluator wrappers: `evalplus`, `multipl_e`) | §1, §3, §7 |
 | `scripts/official_eval.sh`, `docker/Dockerfile.eval`, `eval/official.py`, `eval/official_infilling.py`, `eval/official_site/sitecustomize.py` | §4, §8 |
 | `scripts/official_reasoning.sh`, `eval/official_reasoning_parser.py`, `eval/official_lcb.py`, `eval/official_lcb_shards.py`, `eval/official_tokenize.py`, `eval/official_evalplus.py`, `eval/official_reasoning.py`, `eval/official_loop_stop.py` | the post-trained model's protocol, `docs/post-training.md` §5; its requests, §8; its loop stop, §10 |
-| `eval/official_termination.py`, `eval/loop.py` (the loop measure and stop rule), `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
+| `eval/official_termination.py`, `eval/loop.py` (the loop measure and stop rule), `scripts/official_termination.sh`, `scripts/official_termination_watch.sh`, `eval/dry.py`, `eval/test_official_processors.py` (the parser, the loop stop, DRY), `eval/serving_check.py`, `scripts/serving_check.sh` | §10 |
 | `eval/verify.py` (`search`, `Search`, `python_diagnostics`, `compile_error`, `solution_diagnostics`, `cpp_diagnostics`, `compiler`, `examples_pass`, `vetted_examples`), `eval/cache.py` (`VerdictCache`) | §7 |
 | `metrics.py` (every function); `results/pretrain/mbpp_3shot_contamination.json` (MBPP 3-shot's overlap with the train corpus) | §5; §4 |
 | `inference/decoder.py` (`NativeDecoder`, `Request`, `heal_tokens`, `Reemit`), `model/kernels/decode.cu` | §6 |
@@ -140,16 +140,16 @@ runs in its official tool, unmodified, at a pinned commit (`docker/Dockerfile.ev
 Transformers backend with the head in fp32 (§8):
 
 ```bash
-VLLM_GPU_MEMORY_UTILIZATION=0.75 scripts/official_eval.sh <run name> <step> [<eval record to compare against>]
+VLLM_GPU_MEMORY_UTILIZATION=0.75 scripts/official_eval.sh <run name> <step>
 ```
 
 It writes `RUNS/<run>/official-<step>/`: the export (`model/`), each tool's samples and verdicts (`evalplus/`,
 `multipl-e/`, `lm-eval/`, `infilling/`), `tools.json` (the pins and the inference stack), `timings.tsv`, and
 `eval/official.py`'s `summary.json` in `evaluate`'s layout (`codegen`, `fim`, `evalplus_average`; each cell a
-`metrics.pass_cell`, infilling `metrics.summary` clustered by HumanEval problem, §5) and, given a record,
-`compare-<record>.json` (`metrics.compare` and the per-problem agreement). A rerun keeps the export and skips the
-samples and verdicts already there. CPU work is bound to NUMA node `CPU_NODE` (default 0; on GH200 node 1 is the GPU's
-memory). `VLLM_GPU_MEMORY_UTILIZATION` sets every `vllm.LLM`'s `gpu_memory_utilization`
+`metrics.pass_cell`, infilling `metrics.summary` clustered by HumanEval problem, §5), which `metrics.compare` pairs
+with another checkpoint's. A rerun keeps the export and skips the samples and verdicts already there. CPU work is bound
+to NUMA node `CPU_NODE` (default 0; on GH200 node 1 is the GPU's memory). `VLLM_GPU_MEMORY_UTILIZATION` sets every
+`vllm.LLM`'s `gpu_memory_utilization`
 (`eval/official_site/sitecustomize.py`; MultiPL-E's `automodel_vllm.py` fixes 0.95, EvalPlus's provider leaves vLLM's
 0.92), so the tools fit beside another process on the GPU; it sizes the KV cache only.
 
@@ -420,7 +420,8 @@ Face model directory that `AutoModelForCausalLM.from_pretrained(<dir>, trust_rem
   them in); fp32 the q/k gains, `resid_lambdas`, `x0_lambdas` and the value-embedding gates, which a bf16 load keeps
   fp32 (`_keep_in_fp32_modules_strict`). The compiled forward-only graph's x0 is the norm of the fp32 embedding row
   (§6; the training graph rounds the row to bf16 first), the export's the bf16 row's. d24: 522,190,848 bf16 and 61,488
-  fp32 values, a 1,044,651,640-byte file.
+  fp32 values, a 1,044,651,640-byte file. The export is deterministic: rerun with `--chat` on the SFT run's
+  `checkpoint-7676.pt`, every file equals `official-7676/model/`'s byte for byte [measured].
 - `config.json`: `model_type` "nanochat" with `auto_map` to `modeling_nanochat.py`; MHA with `head_dim` 128; the
   per-layer windows as Gemma 3's `layer_types` + `sliding_window` = 513 (transformers' window counts the query);
   `value_embedding_layers`, `final_logit_softcapping`, `rms_norm_eps` = FLT_EPSILON; BOS (32,764) as BOS and EOS.
@@ -469,7 +470,11 @@ than a difference of the model [inference]. `tokenizer.json` encodes 171 texts (
 solutions, the decoded pieces of the rows j = 0) as BOS + tiktoken's `encode_ordinary`, and maps the four special
 tokens to 32,764–32,767. The 32K exports of `checkpoint-3307.pt` and `weights-3227.pt` give finite logits on a
 9,001-token input. Greedy `generate` of 64 tokens from HumanEval/0's prompt equals the uncached forward's argmax at
-every step, and a bf16 load generates the same tokens.
+every step, and a bf16 load generates the same tokens. The SFT run's `--chat` export of `checkpoint-7676.pt`, on a
+55-token chat prompt (BOS, an EvalPlus-style message, `THINK`), against the training model's uncompiled bf16 forward
+on the GH200 with the evaluation's head: mean KL(train ‖ export) 1.72e-3 (fp32 load, CPU; max 8.9e-3) and 2.64e-3
+(bf16 load), argmax equal at all 55 positions; the export's own fp32 and bf16 loads differ by a mean KL of 1.51e-3,
+so the difference is of the size of bf16 rounding [measured; inference].
 
 **vLLM** (`vllm/vllm-openai:v0.32.0`, its Transformers backend over this model file): the model declares
 `_supports_attention_backend`; `config.json`'s `head_dtype` "float32" runs vLLM's head in fp32
@@ -490,8 +495,10 @@ every step, and a bf16 load generates the same tokens.
 
 **Cross-check of the official tools against the harness** (step 69,874: the official summary against the harness's
 record of the same checkpoint, written by the removed harness modes at `be9027f` with `NativeDecoder`, §6, by
-`metrics.compare`; MBPP 3-shot from the official run on lm-eval's own CRLF shots, `official-69874/lm-eval-crlf/`, as
-the harness prompted). Per problem (exact McNemar; Holm over the rows):
+`metrics.compare` and the per-problem agreement of `eval/official.py`'s record argument,
+`official-69874/compare-eval-69874.json`; that argument was removed after `eba63da`, as master's `evaluate` writes no
+greedy or sampled records to pair with; MBPP 3-shot from the official run on lm-eval's own CRLF shots,
+`official-69874/lm-eval-crlf/`, as the harness prompted). Per problem (exact McNemar; Holm over the rows):
 
 | Benchmark | Harness | Official | Both / harness only / official only / neither | p (Holm) |
 |---|---|---|---|---|
@@ -521,7 +528,8 @@ fp32 prefers the official token 11 times, among the 6 the harness's 3 times; fir
 0–70, median |margin| 0.048 nats. Infilling middles are identical for 971 of 1,033, 5,011 of 5,815 and 1,169 of 1,640
 problems, and about as many run to the budget (harness 138, 843, 1,028; official 136, 835, 1,029). The harness's own
 modes were removed on this evidence (`docs/experiments.md` §6); `evaluate` keeps the likelihoods, the parse measure
-and the 1@10 mode.
+and the 1@10 mode. `eval/official.py` rerun on the stored tool outputs of `official-69874/` reproduces its
+`summary.json` byte for byte [measured].
 
 **The reasoning protocol's requests** (`scripts/official_reasoning.sh`, `docs/post-training.md` §5) as `vllm serve`
 received them [measured: `--enable-log-requests` on a step-1,000 SFT export, two HumanEval+ problems per EvalPlus
@@ -597,7 +605,7 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
   full-state checkpoint of a run, with the same prompts and seeds at every step (`scripts/official_termination.sh`
   per checkpoint, `scripts/official_termination_watch.sh` over a run as its checkpoints appear;
   `scripts/official_reasoning.sh` runs the probe on its export). Beside a training job the probe takes 0.12 of the
-  GPU's memory and is skipped if less than 15 GB is free at its start.
+  GPU's memory (vLLM fails at its start if less is free; the watcher logs a failed probe and does not retry it).
 - **Rounds and loop stopping**: generation runs in rounds of 2,048 new tokens with prefix caching, and a response with
   no `</think>` whose last 4,096 tokens have repetition ≥ 0.99 after a round is stopped there (outcome "unclosed,
   loop-stopped"; with "unclosed at the limit" it compares with a one-shot probe's "unclosed at the limit"). Each round
@@ -608,7 +616,9 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
   `termination-2000.json`, `termination-budget-2000.json`]. `scripts/official_reasoning.sh`'s server applies the same
   stop as a vLLM logits processor (`eval/official_loop_stop.py`): at each multiple of 2,048 generated tokens from
   4,096 on, a response that meets it gets BOS as its next token and ends with an empty answer, scored as the loop run
-  on to the budget would be (`LOOP_STOP=0` serves without it).
+  on to the budget would be; each stop is a line of `loop-stops.jsonl`. `eval/test_official_processors.py` checks the
+  rule, the served stop (BOS forced only at a check, never in a refill chunk) and the reasoning parser on a recorded
+  loop.
 - **Metrics** (per set and pooled; `RUNS/<run>/termination-<step>.json`): five exclusive outcomes, closed and ended
   (BOS), closed with the answer at the limit, never closed at the limit, never closed and loop-stopped, never closed
   and ended; the closing-time curve P(closed with reasoning ≤ B) for B = 1K, 2K, 4K, 8K, 16K, 32K tokens; reasoning
@@ -623,11 +633,13 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
   `loop_onset`, one past the last token not inside a 32-token window that recurs in it (`loop-onsets-*.json` beside
   the record). `--data-repetition` applies the same repetition measure (last 4,096 tokens, 32-token windows) to every
   SFT document's reasoning, train and val, counted per threshold (0.5, 0.8, 0.9, 0.99) and teacher-length bucket
-  (`results/posttrain/sft-data-repetition.json`; 64 CPU processes, about a minute).
+  (`results/posttrain/sft-data-repetition.json`; 64 CPU processes, about a minute). Rerun, both reproduce
+  `loop-onsets-2000-chunked.json`, `loop-onsets-budget-2000.json` and that record byte for byte [measured].
 - **Clean-process scoring**: EvalPlus's own sanitizer and `check_correctness` run after generation in a CPU container
   of their own with single-threaded BLAS (`--score`), never in a process forked from vLLM's: there EvalPlus's 4 GiB
   address-space guard (RLIMIT_AS) counts vLLM's mappings and fails tests that allocate much (HumanEval/15's plus
-  tests at steps 1,000 and 2,000; `docs/results.md` §6.5).
+  tests at steps 1,000 and 2,000; `docs/results.md` §6.5). Rerun on `termination-budget-2000.json.generated`, `--score`
+  reproduces `termination-budget-2000.json` byte for byte [measured].
 - **Budget forcing and sampling sensitivity** (`--budget`, `RUNS/<run>/termination-budget-<step>.json`): both sets
   under four samplings (the protocol's; T 0.8 and T 1.0 at top-p 0.95; Qwen3's top-k 20 with presence penalty 1.0),
   reasoning stopped at `END_THINK` or 16,384 tokens, the answer at 4,096; closure, the closing-time curve and loops
@@ -637,7 +649,8 @@ A post-trained checkpoint's endings, measured apart from its benchmark scores; r
   forced. `--dry`: the same under the protocol's sampling with and without DRY on the reasoning (`eval/dry.py`, a
   vLLM logits processor; arXiv 2608.22761 App. A Eq. 1 with its Table 8 setting: multiplier 0.8, base 1.75, allowed
   length 2, range 1,024; breakers the tokens holding a newline, colon, quote or asterisk; off once `</think>` is
-  emitted).
+  emitted; a request opts in with `extra_args={"dry": {}}`). `eval/test_official_processors.py` checks its penalties
+  against a direct evaluation of Eq. 1 and its mirror of each request's output through the engine's step state.
 - **Serving faithfulness** (`scripts/serving_check.sh`, `eval/serving_check.py`,
   `RUNS/<run>/serving-check-<step>.json`):
   the export in vLLM against the training model on SFT val documents. Prefill: per-token NLL of 8 documents of

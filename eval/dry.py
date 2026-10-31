@@ -1,13 +1,13 @@
 """DRY ("Don't Repeat Yourself") sampling (arXiv 2608.22761 §3, App. A Eq. 1) as a logits processor of vLLM 0.32's
-candidate token v that would extend the context's suffix into a verbatim repeat of an earlier span has its logit
-lowered by multiplier * base^(n - allowed_length), n the longest such match (the suffix and the earlier span free of
-sequence breakers, n >= allowed_length, v no breaker). The context is the last `range` tokens of prompt + output
-(App. H, Table 8: multiplier 0.8, base 1.75, allowed length 2, range 1,024); matches are measured up to MAX_MATCH
-tokens (the penalty at MAX_MATCH, 0.8 * 1.75^62, already removes the token). Applied only while the output has not
-emitted "</think>" (an answer copies code from its reasoning). Breakers: every token whose text holds a newline, a
-colon, a quote or an asterisk (the paper's default set, §3.2).
+model runner V2: every candidate token v that would extend the context's suffix into a verbatim repeat of an earlier
+span has its logit lowered by multiplier * base^(n - allowed_length), n the longest such match (the suffix and the
+earlier span free of sequence breakers, n >= allowed_length, v no breaker). The context is the last `range` tokens of
+prompt + output (App. H, Table 8: multiplier 0.8, base 1.75, allowed length 2, range 1,024); matches are measured up
+to MAX_MATCH tokens (the penalty at MAX_MATCH, 0.8 * 1.75^62, already removes the token). Applied only while the
+output has not emitted "</think>" (an answer copies code from its reasoning). Breakers: every token whose text holds
+a newline, a colon, a quote or an asterisk (the paper's default set, §3.2).
 
-A request takes it through SamplingParams(extra_args={"dry": {}}) (or with overrides of DEFAULTS); the engine
+A request takes it through SamplingParams(extra_args={"dry": {}}) with the parameters of DEFAULTS; the engine
 through LLM(logits_processors=[DryLogitsProcessor]), whose model runner is V2 (vLLM's default; the V1 runner's
 processor interface is not loaded by it).
 """
@@ -17,23 +17,18 @@ import torch
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (LogitsContext, LogitsProcessor,
                                                                   LogitsProcRequestState)
 
+from corpus.tokenizer import get_tokenizer
+from eval.loop import END
+
 DEFAULTS = {"multiplier": 0.8, "base": 1.75, "allowed_length": 2, "range": 1024}
 MAX_MATCH, BREAK_CHARS = 64, ("\n", ":", '"', "'", "*")
 
 
 def breakers() -> np.ndarray:
     """A boolean mask over the vocabulary: the tokens whose text holds a breaker character."""
-    from corpus.tokenizer import get_tokenizer
-
     enc = get_tokenizer().enc
-    mask = np.zeros(enc.n_vocab, bool)
-    for t in range(enc.n_vocab):
-        try:
-            text = enc.decode_single_token_bytes(t).decode("utf-8", errors="replace")
-        except KeyError:  # an id without a token
-            text = ""
-        mask[t] = any(c in text for c in BREAK_CHARS)
-    return mask
+    return np.array([any(c in enc.decode_single_token_bytes(t).decode("utf-8", errors="replace") for c in BREAK_CHARS)
+                     for t in range(enc.n_vocab)])
 
 
 class Dry:
@@ -76,10 +71,10 @@ class Dry:
         length = np.ones(len(candidates), np.int64)
         alive = candidates
         for ell in range(1, MAX_MATCH):
-            if t - ell < 0 or self.breaker[x[t - ell]]:
+            if self.breaker[x[t - ell]]:  # t - ell >= 0: a live candidate i < t has i >= ell - 1
                 break
-            alive = alive[(alive - ell >= 0)]
-            alive = alive[x[np.maximum(alive - ell, 0)] == x[t - ell]]
+            alive = alive[alive >= ell]
+            alive = alive[x[alive - ell] == x[t - ell]]
             if not len(alive):
                 break
             length[np.searchsorted(candidates, alive)] += 1
@@ -105,18 +100,15 @@ class DryLogitsProcessor(LogitsProcessor):
     speculative decoding)."""
 
     def __init__(self, vllm_config, req_states: LogitsProcRequestState):
-        from corpus.tokenizer import get_tokenizer
-
         self.req_states = req_states
         self.breaker = breakers()
-        self.end = get_tokenizer().enc.encode_ordinary("</think>")
+        self.end = get_tokenizer().enc.encode_ordinary(END)
         self.requests: dict[int, tuple[Dry, list[int], list[int]] | None] = {}  # slot -> (Dry, prompt, output)
 
     def add_request(self, req_idx: int, sampling_params) -> bool:
-        config = (sampling_params.extra_args or {}).get("dry")
-        self.requests[req_idx] = None if config is None else (Dry(self.breaker, self.end, **(DEFAULTS | config)),
-                                                              [], [])
-        return config is not None
+        active = "dry" in (sampling_params.extra_args or {})
+        self.requests[req_idx] = (Dry(self.breaker, self.end, **DEFAULTS), [], []) if active else None
+        return active
 
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
         slots = ctx.idx_mapping_np
@@ -143,6 +135,9 @@ class DryLogitsProcessor(LogitsProcessor):
             elif len(output) < n:
                 committed = min(int(state.total_len.gpu[slot]), seq_len)
                 output += state.all_token_ids.gpu[slot, start + len(output):committed].tolist()
-                output += inputs[i:i + seq_len - committed]
+                if committed < seq_len:  # this step's input, not yet committed
+                    output.append(inputs[i])
+            if len(output) != n:
+                raise RuntimeError(f"DRY: slot {slot} mirrors {len(output)} of its {n} generated tokens")
             logits[i] = dry(prompt, output, logits[i])
         return logits

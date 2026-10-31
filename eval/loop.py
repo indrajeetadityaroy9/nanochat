@@ -9,21 +9,26 @@ from collections import Counter
 
 import numpy as np
 
-END = "</think>"
+END = "</think>"  # the reasoning's close: the reasoning parser's split (eval/official_reasoning_parser.py)
 CHUNK = 2048  # generated tokens between checks (the probe's rounds)
 REPEAT_TAIL, REPEAT_WINDOW, LOOP = 4096, 32, 0.99
+
+
+def covered(ids: list[int]) -> np.ndarray:
+    """Per token of ids, whether it lies inside a REPEAT_WINDOW-token window that recurs within ids."""
+    windows = [tuple(ids[i:i + REPEAT_WINDOW]) for i in range(len(ids) - REPEAT_WINDOW + 1)]
+    counts = Counter(windows)
+    out = np.zeros(len(ids), bool)
+    for i, w in enumerate(windows):
+        if counts[w] > 1:
+            out[i:i + REPEAT_WINDOW] = True
+    return out
 
 
 def repetition(ids: list[int]) -> float:
     """The share of the last REPEAT_TAIL tokens inside a REPEAT_WINDOW-token window that recurs within them."""
     tail = ids[-REPEAT_TAIL:]
-    windows = [tuple(tail[i:i + REPEAT_WINDOW]) for i in range(len(tail) - REPEAT_WINDOW + 1)]
-    counts = Counter(windows)
-    covered = np.zeros(len(tail), bool)
-    for i, w in enumerate(windows):
-        if counts[w] > 1:
-            covered[i:i + REPEAT_WINDOW] = True
-    return float(covered.mean()) if len(tail) else 0.0
+    return float(covered(tail).mean()) if len(tail) else 0.0
 
 
 def looping(output: list[int], decode) -> float | None:
