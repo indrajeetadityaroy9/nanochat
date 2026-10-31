@@ -127,19 +127,26 @@ def kodcode(row: dict) -> Parsed:
 FORMATS = {"cascade": cascade, "competitive": competitive, "exercism": exercism, "kodcode": kodcode}
 
 
-def parse(row: dict, kind: str) -> Parsed:
-    """A row's stripped (prompt, reasoning, answer), or the first drop reason before tokenization."""
+def lines(text: str) -> str:
+    """text with CR LF and a lone CR as LF, as the pre-training corpus's standardization (corpus/prepare.py lines)."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def parse(row: dict, kind: str) -> tuple[str, str, str, bool] | str:
+    """A row's (prompt, reasoning, answer) with normalized line endings (lines), stripped, and whether any held a CR;
+    or the first drop reason before tokenization."""
     parsed = FORMATS[kind](row)
     if isinstance(parsed, str):
         return parsed
-    prompt, reasoning, answer = (text.strip() for text in parsed)
+    carriage = any("\r" in text for text in parsed)
+    prompt, reasoning, answer = (lines(text).strip() for text in parsed)
     if prompt in ("", "-"):
         return "placeholder"
     if not reasoning:
         return "no_reasoning"
     if not answer:
         return "no_answer"
-    return prompt, reasoning, answer
+    return prompt, reasoning, answer, carriage
 
 
 def render(prompt: str, reasoning: str, answer: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -179,18 +186,20 @@ def source_rows(path: Path, start: int, end: int) -> Iterator[dict]:
 
 def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
     """The rows of a task's range of a source file (source_rows): each row's drop reason ("reasons", an index into
-    DROPS, -1 for a candidate); per candidate the digests of its prompt, its problem and its text, its context,
-    reasoning and document tokens; the candidates' tokens appended to `part`. Runs in a decontaminate.worker_init
-    worker (decontaminate.GRAMS)."""
+    DROPS, -1 for a candidate) and whether its line endings were normalized ("carriages"); per candidate the digests
+    of its prompt, its problem and its text, its context, reasoning and document tokens; the candidates' tokens
+    appended to `part`. Runs in a decontaminate.worker_init worker (decontaminate.GRAMS)."""
     kind, path, start, end, part = task
-    reasons, prompts, problems, keys, contexts, reasonings, lengths = [], [], [], [], [], [], []
+    reasons, carriages, prompts, problems, keys, contexts, reasonings, lengths = [], [], [], [], [], [], [], []
     with open(part, "wb") as out:
         for row in source_rows(path, start, end):
             parsed = parse(row, kind)
             if isinstance(parsed, str):
                 reasons.append(DROPS.index(parsed))
+                carriages.append(False)
                 continue
-            prompt, reasoning, answer = parsed
+            prompt, reasoning, answer, carriage = parsed
+            carriages.append(carriage)
             context, thought, rest = render(prompt, reasoning, answer)
             length = len(context) + len(thought) + len(rest)
             if len(thought) < MIN_REASONING:
@@ -208,7 +217,8 @@ def read_chunk(task: tuple[str, Path, int, int, Path]) -> dict[str, np.ndarray]:
                 reasonings.append(len(thought))
                 lengths.append(length)
                 out.write(np.concatenate([context, thought, rest]))
-    return {"reasons": np.array(reasons, np.int64), "prompts": np.array(prompts, np.uint64),
+    return {"reasons": np.array(reasons, np.int64), "carriages": np.array(carriages, bool),
+            "prompts": np.array(prompts, np.uint64),
             "problems": np.array(problems, np.uint64), "keys": np.array(keys, np.uint64),
             "contexts": np.array(contexts, np.int64), "reasonings": np.array(reasonings, np.int64),
             "lengths": np.array(lengths, np.int64)}
@@ -296,7 +306,9 @@ def main() -> None:
         mine = group == g
         dropped = dict(zip(DROPS, np.bincount(reasons[reasons >= 0], minlength=len(DROPS)).tolist(), strict=True))
         dropped |= {"duplicate": int((mine & duplicate).sum()), "capped": int((mine & capped).sum())}
-        stats[name] = {"read": len(reasons), "dropped": dropped} | {
+        # normalized: the parsed rows (kept or dropped later) whose text held a CR
+        normalized = sum(int(c["carriages"].sum()) for c, owner in zip(chunks, owners, strict=True) if owner == g)
+        stats[name] = {"read": len(reasons), "normalized": normalized, "dropped": dropped} | {
             split: split_stats(lengths[r], contexts[r], reasonings[r], prompts[r], problems[r])
             for split, rows in splits.items()
             for r in [rows[group[rows] == g]]}
