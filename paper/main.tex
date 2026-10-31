@@ -14,11 +14,12 @@
   \country{}}
 
 \begin{abstract}
-Open code language models with under a billion parameters are commonly pretrained on trillions of tokens. This paper
-presents a Python and C++ code generation model pretrained from scratch on a single GPU. The model has 522M parameters
-and is trained on 103B tokens of Python and C++ code, synthetic code, web text and mathematics, first on file-level
-sequences of 8,192 tokens and then on repository-level sequences of 32,768 tokens. Pretraining took 76.3 hours on one
-NVIDIA GH200. Scored by each benchmark's official tool, the model reaches greedy pass@1 of 26.8 on HumanEval, 22.0 on
+Large language models (LLMs) for code with under a billion parameters are commonly pretrained on trillions of tokens.
+This paper presents a generative LLM for Python and C++ code generation, a GPT-style decoder-only transformer
+pretrained from scratch on a single GPU. The model has 522M parameters and is trained on 103B tokens of Python and C++
+code, web text and mathematics, first on file-level sequences of 8,192 tokens and then on repository-level sequences
+of 32,768 tokens. Pretraining took 76.3 hours on one NVIDIA GH200. Scored by each benchmark's official tool, the model
+reaches greedy pass@1 of 26.8 on HumanEval, 22.0 on
 HumanEval+, 44.4 on MBPP and 36.5 on MBPP+, 21.7 and 36.8 on the C++ versions of HumanEval and MBPP, and 55.3 on
 single-line infilling. On HumanEval and HumanEval+ it is within its 95\% interval of Qwen2.5-Coder-0.5B, whose code
 pretraining alone used 53 times as many tokens; on MBPP it trails that model by 8.5 points.
