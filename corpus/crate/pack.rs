@@ -324,7 +324,8 @@ fn pack_shard(split: &Split, offsets: &[i64], (first, last): (usize, usize)) -> 
             pieces.push(piece);
         }
     }
-    let lengths: Vec<usize> = pieces.iter().map(|([s, e], example)| 1 + example.as_ref().map_or(0, Vec::len).max(e - s)).collect();
+    /* a piece's row slots: its BOS, then what the loader reads, the FIM example or else the tokens */
+    let lengths: Vec<usize> = pieces.iter().map(|([s, e], example)| 1 + example.as_ref().map_or(e - s, Vec::len)).collect();
     let rows = best_fit_decreasing(&lengths, &targeted, split.row_len);
     let (mut index, mut fim_tokens) = (Vec::with_capacity(pieces.len()), Vec::new());
     for &p in rows.iter().flat_map(|row| row.iter().filter(|&&p| targeted[p]).chain(row.iter().filter(|&&p| !targeted[p]))) {

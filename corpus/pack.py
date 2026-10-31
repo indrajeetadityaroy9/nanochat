@@ -88,13 +88,17 @@ def shard_count(corpus: str, split: str) -> int:
 
 def fit(stage: mixture.Stage, rows: dict[str, int], more: dict[str, Generator[Shard]],
         held: dict[str, list[Shard]]) -> dict[str, float]:
-    """The stage's weights once every corpus read in part (more) has packed shards into held to cover its draw."""
+    """The stage's weights once every corpus read in part (more) has packed shards into held to cover its draw; fails
+    when an overdrawn corpus has no shard left (read in part and exhausted, or packed whole)."""
     while True:
-        shares, _, over = mixture.weights(stage, rows, stage.rows)
+        shares, draws, over = mixture.weights(stage, rows, stage.rows)
         if not over:
             return shares
         for name in over:
-            shard = next(more[name])
+            shard = next(more[name], None) if name in more else None
+            if shard is None:
+                raise ValueError(f"T{stage.seq_len} {name}: {rows[name]:,} packed rows, {draws[name]:,} drawn at "
+                                 f"Stage.rows, and no train shard left to pack")
             held[name].append(shard)
             rows[name] += len(shard[1])
 

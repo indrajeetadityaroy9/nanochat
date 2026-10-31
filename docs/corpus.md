@@ -431,10 +431,11 @@ drawn as a FIM example fits its row with its BOS, the example and the target BOS
 three sentinels and shrinks by any excess of the built example. Each piece is its own attention segment (document
 masking: IntraDoc lowers perplexity over UniChunk, arXiv 2402.13991 §3.2, Table 1).
 
-**Rows** (`best_fit_decreasing`): pieces longest first, each into the row with the fewest free slots that holds it,
-else a new row (Best-Fit-Decreasing, arXiv 2404.10830 §3.1), so no piece is truncated. Within a row the pieces whose
-next BOS is a target come first and cut pieces last, which keeps no slot for a BOS after them. A row's pieces come from
-one curated shard.
+**Rows** (`best_fit_decreasing`): pieces longest first (a piece's length: its BOS and the tokens the loader reads, a
+FIM piece's example), each into the row with the fewest free slots that holds it, else a new row
+(Best-Fit-Decreasing, arXiv 2404.10830 §3.1), so no piece is truncated. Within a row the pieces whose next BOS is a
+target come first and cut pieces last, which keeps no slot for a BOS after them. A row's pieces come from one curated
+shard.
 
 **FIM** (`pack.FIM_RATE`, `RANDOM_SPAN_RATE`, `SINGLE_NODE_RATE`, `LINE_START_RATE`, `SPM_RATE`), in the train splits
 of repository code only (`layout.fim_packed`: the six repository sources and the repositories corpora). The scope is
@@ -693,8 +694,9 @@ The pretraining corpus, once, to build the published dataset:
 From a pull of the dataset (`python -m corpus.pretrain.publish pull`, run by `scripts/setup.sh`: the curated shards,
 their decontamination record and the shipped tokenizer):
 6. **Tokenize**: `python -m corpus.tokenize` (§6), ending with the 32K stage's repository partitions.
-7. **Pack**: `python -m corpus.pack` (§7–§8); it fails (`pack.fit`) when a corpus holds fewer packed rows than its
-   draw: a corpus read in part runs out of shards, or a corpus packed whole is overdrawn.
+7. **Pack**: `python -m corpus.pack` (§7–§8); it fails (`pack.fit`, naming the corpus, its packed rows and its draw)
+   when a corpus holds fewer packed rows than its draw: a corpus read in part runs out of shards, or a corpus packed
+   whole is overdrawn.
 
 The post-training corpus, with the shipped tokenizer in place (the pull above) and the source datasets' files
 downloaded under `artifacts/posttrain/<owner>/<dataset>/` (§10, `GROUPS`):
