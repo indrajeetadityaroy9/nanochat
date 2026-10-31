@@ -610,11 +610,10 @@ original transformer; each has $V d = 25.2$M parameters.
 important than width for models below one billion parameters~\cite{liu2024mobilellm}. The width is 30 times the
 number of layers, the ratio of MobileLLM-350M (32 layers of width 960), rounded up to a multiple of the head size.
 
-\paragraph{Normalization.} Each attention and MLP sublayer reads the normalized residual stream
-$\bar{x} = \mathrm{RMSNorm}(x) = x / \sqrt{\mathrm{mean}(x^2) + \epsilon}$ and adds its output back to $x$ (pre-norm),
-and a final RMSNorm precedes the output layer. Pre-norm, unlike the post-norm of the original transformer, trains
-without a learning-rate warm-up stage~\cite{xiong2020prenorm}. RMSNorm has no learned scale here, so it is invariant
-to the scale of its input: $\mathrm{RMSNorm}(c x) = \mathrm{RMSNorm}(x)$ for $c > 0$. The linear layers have no biases.
+\paragraph{Normalization.} Each attention and MLP sublayer reads the RMS-normalized residual stream
+$\bar{x} = \mathrm{RMSNorm}(x)$ and adds its output back to $x$ (pre-norm), and a final RMSNorm precedes the output
+layer. Pre-norm, unlike the post-norm of the original transformer, trains without a learning-rate warm-up
+stage~\cite{xiong2020prenorm}. RMSNorm has no learned scale, and the linear layers have no biases.
 
 \paragraph{Attention and QK-norm.} Every layer uses multi-head attention with $H = 6$ heads of size 128. Queries and
 keys are RMS-normalized per head and multiplied by a learned per-dimension scale before RoPE (QK-norm), as in
@@ -681,8 +680,9 @@ $l$, the stream is rescaled and mixed with the normalized token embedding (Figur
 with two learned scalars per layer, 48 in all. The term $\lambda_0^{(l)} x_0$ adds the token embedding back, so a deep
 layer can read the token's identity directly, a simplified form of DenseFormer's learned weighted average over all
 earlier layer outputs~\cite{pagliardini2024denseformer}. The factor $\lambda_r^{(l)}$ scales everything accumulated so
-far. Because $\mathrm{RMSNorm}(c x) = \mathrm{RMSNorm}(x)$ for $c > 0$, this scaling does not change what the layer
-reads when $\lambda_0^{(l)} = 0$; it changes the weight of the accumulated stream relative to the layer's own outputs,
+far. Because RMSNorm ignores the scale of its input ($\mathrm{RMSNorm}(c x) = \mathrm{RMSNorm}(x)$ for $c > 0$), this
+scaling does not change what the layer reads when $\lambda_0^{(l)} = 0$; it changes the weight of the accumulated
+stream relative to the layer's own outputs,
 which are added unscaled. A factor below 1 lets the layer's output dominate the stream, and a factor above 1 preserves
 the earlier layers' contributions. The scalars start at $\lambda_r = 1$ and $\lambda_0 = 0$, which is exactly the
 standard pre-norm transformer. At the end of training, $\lambda_r$ ranges from 0.16 to 2.60: from 0.16 to 0.61 in the
