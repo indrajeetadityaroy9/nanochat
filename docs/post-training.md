@@ -584,8 +584,8 @@ What each source contributes:
 **Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on SFT train prompts of every source at T 0.6, one
 per prompt, in waves until 4,000 rows (§8.1–§8.2, §8.7); one FTPO row per loop at its first repeat (§8.4); FTPO from
 the SFT model, stopped once held-out chosen_win reaches 0.35 (§8.5); rollouts of the FTPO model on KodCode train
-prompts, 4 per prompt, each exact-cycle loop resumed 4 times from its history, verified, in waves until 8,000 DPO
-pairs or 8,000 prompts (§8.2, §8.7): loop pairs, a loop's first repeat against a successful continuation from the same
+prompts, 4 per prompt, each exact-cycle loop resumed 2 times from its history, verified, in waves until 8,000 DPO
+pairs or 4,000 prompts (§8.2, §8.7): loop pairs, a loop's first repeat against a successful continuation from the same
 history, and outcome pairs, a prompt's shortest success against one of its failures, loops first (§8.4); DPO from the
 FTPO model for one epoch (§8.5); the SFT, FTPO and DPO models evaluated on the same probe prompts and KodCode val
 problems (§8.6); FTPO and DPO run only if the SFT model loops (§8.7). One model per stage, no candidates and no pick:
@@ -654,9 +654,9 @@ itself a preference loss, and DPO comes last].
 - **Loops**: a never-closed response with repetition ≥ 0.99 is a loop; when its last 1,024 tokens repeat exactly at
   a period p ≤ 2,048 (`cycle`), its onset is the first index from which every token equals the one p later.
 - **Resumes** (split train, the DPO waves; `RESAMPLES`, `RESUMED`, `RESUME_SEED`): after the samples, each
-  exact-cycle loop whose first copy ends before the length limit is resumed 4 times from its history through that
+  exact-cycle loop whose first copy ends before the length limit is resumed twice from its history through that
   copy, `ids[:o + p]`, in the same engine at its temperature, under the same stop and the same limit on the whole
-  response; each continuation is a row of sample 100 + 4 × (the loop's sample) + m, seeded base + 500,000 + n (past
+  response; each continuation is a row of sample 100 + 2 × (the loop's sample) + m, seeded base + 500,000 + n (past
   the samples' seeds), `resume_of` the loop's sample and `resume_from` o + p, its ids the shared history and the
   continuation. They feed the loop pairs (§8.4); `meta.json` counts them (`resumed`), and its generated tokens leave
   out the shared histories.
@@ -716,7 +716,7 @@ itself a preference loss, and DPO comes last].
   (the mining waves give none), both kinds scored on correctness:
   - **Loop pairs**, DeLoop's unit (arXiv 2610.19376 §4.1: x the history before the looping action, y⁻ the looping
     action, y⁺ an action that breaks the loop, from the same history): on the DPO waves each exact-cycle loop is
-    resumed 4 times from `ids[:o + p]`, its history through the cycle's first copy (§8.2); for a loop of a verified
+    resumed twice from `ids[:o + p]`, its history through the cycle's first copy (§8.2); for a loop of a verified
     prompt whose continuations include a success, x is the prompt's ids and that history, y⁺ the shortest successful
     continuation through its closing BOS, y⁻ the loop's first repeat, `min(p, 256)` tokens with no BOS. The tokens the
     two sides share at their start cancel in the margin, so the pair's gradient falls where the loop and its break
@@ -724,8 +724,9 @@ itself a preference loss, and DPO comes last].
     (new observations after it) did not help (App. G.11: 41.7% loops against 38.7% at 1,726 pairs); here y⁺ must end
     in a verified success, since this model's departures from a cycle mostly re-enter it or paraphrase it (§8, "This
     model does not leave its own loops") [inference: a departure that merely breaks the cycle would mostly be a
-    near-loop]. In a GPU smoke (the SFT export, 16 KodCode train prompts × 4) 17 loops gave 68 continuations, 3 of
-    them successes, and 1 loop pair beside 14 outcome pairs [measured].
+    near-loop]. In a GPU smoke (the SFT export, 16 KodCode train prompts × 4, 4 resumes per loop) 17 loops gave 68
+    continuations, 3 of them successes, and 1 loop pair beside 14 outcome pairs [measured]. At that rate 2 resumes give
+    a loop a success with probability ≈ 0.086 and 4 ≈ 0.17, at twice the generation [arithmetic]; the pipeline takes 2.
   - **Outcome pairs** (rollout DPO, correct against incorrect rollouts of the same prompt: Phi-4-mini-reasoning,
     arXiv 2504.21233 §3.3, without its filter for incorrect responses with minor differences): per verified prompt
     with a success and a failure not already in a loop pair, up to 2 pairs: chosen the prompt's shortest success
@@ -834,7 +835,7 @@ itself a preference loss, and DPO comes last].
   trainer) [measured], so a 32,768-token FTPO row needs about 7.7 GB beside 8.4 GB of fp32 weights, gradients and
   AdamW state, and a DPO pair holds both sides' activations, about 8.0 GB for the longest val pair (16,839 tokens,
   §8.4) [estimate], and at most 2 × 32,768 tokens, about 15.4 GB, at the length cap (a loop pair's two sequences
-  both carry its history) [arithmetic]; training runs beside one vLLM server at 0.45 of the GPU's memory (§8.7).
+  both carry its history) [arithmetic]; training runs alone at 0.85 of the GPU's memory (§8.7).
 - **Stochastic rounding to bf16** (`bf16`): one AdamW step moves an element by at most about lr, so a run at 5e-7
   over a few hundred steps moves most elements less than half their bf16 spacing (median |w| 0.0243 of the decoder's
   matmul weights: spacing 2⁻¹³ = 1.22e-4 [measured: export of step 3000]), and rounding to nearest at the write erases
@@ -877,40 +878,44 @@ itself a preference loss, and DPO comes last].
 `scripts/post_sft_queue.sh <run>` waits for the SFT run's end record and its container's exit, then runs, in order:
 (1) alone at 0.85 of the GPU's memory, the final step's termination probe on 128 prompts per set, then the export
 and its KodCode val evaluation (§8.6); (2) the gate: FTPO and DPO only if that probe loops in at least 5% of its
-responses; (3) at once, the SFT model's reasoning protocol (§5) at 0.45 on port 8000 and the on-policy stage at 0.45:
-mining waves, FTPO, DPO waves, DPO and the evaluation of the three models (§8.4–§8.6); when the stage ends, the final
-model's reasoning protocol at 0.45 on port 8001; (4) alone at 0.85, the DRY comparison only if the final model (else
-the SFT model) loops in at least 5% of its probe's responses. A finished item is skipped on a restart; a failed item
-is logged and the queue goes on.
+responses; (3) the on-policy stage alone at 0.85 on every core: mining waves, FTPO, DPO waves, DPO and the evaluation
+of the three models (§8.4–§8.6); then at once the SFT model's reasoning protocol (§5) at 0.45 on port 8000 and the
+final model's at 0.45 on port 8001; (4) alone at 0.85, the DRY comparison only if the final model (else the SFT
+model) loops in at least 5% of its probe's responses. A finished item is skipped on a restart; a failed item is
+logged and the queue goes on. The on-policy stage runs alone because its mining is bound by memory bandwidth and KV
+space: 4 engines of 0.21 beside nothing else generated 15.6K tokens/s in total (step-7676 mining wave 0: 38.0M tokens
+in 9,719 s, 3,911 tokens/s per engine), against 18.7K for one 0.85 engine (the step-7676 KodCode val rollouts)
+[measured].
 
 - **Waves** (`scripts/onpolicy.sh` `waves`, `engines`): 6,000 distinct mining-pool prompts per wave (§8.1) × 1
-  sample at T 0.6, in groups of 4 concurrent vLLM engines, each at a quarter of the stage's memory share (wave k
-  seeded k and excluding waves 0..k−1's prompts, `onpolicy/rollouts.py --exclude`; each engine started once the
-  previous one has written its prompts and logged vLLM's "KV cache size"): vLLM's engine core is CPU-bound, and one
-  engine left the GPU at 42–56% utilization [measured: nvidia-smi during the step-7676 mining]. The selection over
+  sample at T 0.6, in groups of 4 concurrent vLLM engines, each at the stage's memory share over the group's waves
+  (wave k seeded k and excluding waves 0..k−1's prompts, `onpolicy/rollouts.py --exclude`; each engine started once
+  the previous one has written its prompts and logged vLLM's "KV cache size"): vLLM's engine core is CPU-bound, and
+  one engine left the GPU at 42–56% utilization [measured: nvidia-smi during the step-7676 mining]. The selection over
   all waves runs after each group; groups stop once the rows before rebalancing reach 4,000 or the pool runs out.
   A mining response stops once its tail is an exact cycle (§8.2, `MiningLoopStop`), since an FTPO row needs the
   loop only through its first repeat. Antidoom collects 20,000 ("stops after collecting 20k pairs" [blog]); here a
-  group of 24,000 prompts generates ≈120M tokens, ≈1.9 h at the 18.7K tokens/s the step-7676 KodCode val rollouts
-  ran at on one engine [measured rate, arithmetic], and the stop at chosen_win 0.35 is projected near step 165 at lr
-  5e-7, ≈2,600 rows [estimate, from CPU FTPO probes on step-3000 rows], so one group suffices and a second would
-  mostly go unused. At the step-7676 probe's loop share (≈0.4) one group yields ≈8–10K rows [estimate], ≈6–7K after
-  rebalancing. The mining rollouts are not verified: the rows need no verdicts.
+  group of 24,000 prompts generates ≈152M tokens, ≈2.7 h at wave 0's 15.6K tokens/s in total [measured rate,
+  arithmetic], and the stop at chosen_win 0.35 is projected near step 165 at lr 5e-7, ≈2,600 rows [estimate, from CPU
+  FTPO probes on step-3000 rows], so one group suffices and a second would mostly go unused. At the step-7676 probe's
+  loop share (≈0.4) one group yields ≈8–10K rows [estimate], ≈6–7K after rebalancing. The mining rollouts are not
+  verified: the rows need no verdicts.
 - **DPO waves** (`dpo_waves`): 2,000 KodCode train-pool prompts per wave (§8.1 `sample`, wave k seeded k and
   excluding the earlier DPO waves' prompts) × 4 samples at T 0.6 from the FTPO model, each exact-cycle loop then
-  resumed 4 times from its history (§8.2), in one group of 4 engines (8,000 prompts) as above, verified (§8.3); the
-  selection over the DPO waves after the group (loop and outcome pairs, §8.4); it stops at 8,000 pairs (DeLoop's
-  count, arXiv 2610.19376 App. G.1), after 4 waves, or when the pool runs out, and DPO trains on every pair. At the
-  SFT model's val rate (369 outcome pairs from 512 prompts, §8.4) the group would give ≈5,800 pairs [estimate]; at
-  the smoke's rate (§8.4: 3 successes in 68 continuations) loop pairs are a small share of them [estimate], and the
-  FTPO model should loop less [inference].
+  resumed twice from its history (§8.2), in one group of 2 engines at 0.425 each (4,000 prompts), verified (§8.3);
+  the selection over the DPO waves after the group (loop and outcome pairs, §8.4); it stops at 8,000 pairs (DeLoop's
+  count, arXiv 2610.19376 App. G.1), after 2 waves, or when the pool runs out, and DPO trains on every pair. At the
+  SFT model's val rate (369 outcome pairs from 512 prompts, §8.4) the group would give ≈2,900 pairs [estimate]; at
+  the smoke's rate (§8.4) loop pairs are a small share of them [estimate], and the FTPO model should loop less
+  [inference].
 - **GPU shares**: the KV cache costs 2 × 24 layers × 6 heads × 128 × 2 bytes = 72 KiB per token, so of 94.5 GiB, 0.45
   holds EvalPlus's 20 samples of about 28K tokens after the weights, and 0.85 about 70 rollouts at the 16,384-token
-  cap [arithmetic]; in (3) two 0.45 shares run side by side, FTPO or DPO training (≈14–16 GB, §8.5) inside one.
+  cap [arithmetic]; in (3) the two protocols' 0.45 shares run side by side after the on-policy stage, whose FTPO or
+  DPO training (≈14–24 GB, §8.5) fits its 0.85.
 - **CPU sets**: official scoring runs EvalPlus's evaluate with its default cpu_count // 2 workers and lcb_runner with
   32 (`--num_process_evaluate`), so the SFT model's `scripts/official_reasoning.sh` gets the first max(nproc / 2, 32)
-  cores (0–31 of 64) and the on-policy stage's CPU containers, then the final model's protocol, the rest (32–63)
-  (`CPU_SET`), so no timed test shares a core with another's. Per-item CPU work uses every core of its set:
+  cores (0–31 of 64) and the final model's the rest (32–63) (`CPU_SET`), so no timed test shares a core with
+  another's; the on-policy stage, alone, uses every core. Per-item CPU work uses every core of its set:
   verification's workers, selection's loop targets and the probe's EvalPlus checks (`eval/official_termination.py`
   `evalplus_check`).
 

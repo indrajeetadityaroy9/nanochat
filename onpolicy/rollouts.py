@@ -66,12 +66,13 @@ CHECK = 128
 # come from as many distinct prompts as it has rows
 SAMPLES = "0.6:1"
 # DPO waves (split train): DeLoop's chosen action breaks the loop from the loop's own history (arXiv 2610.19376 §4.1).
-# These loops do not break on their own (docs/post-training.md §8), so RESAMPLES continuations, as many as the DPO
-# waves' samples per prompt, are sampled from each exact-cycle loop's history through its first copy (its first repeat
-# starts at onset + period); onpolicy/selection.py takes one as chosen only if it succeeds (§8.4, App. G.11). They are
-# samples RESUMED + sample * RESAMPLES + m (RESUMED above any sample index), seeded --seed + RESUME_SEED + n (past
-# every sample's seed --seed + k)
-RESAMPLES, RESUMED, RESUME_SEED = 4, 100, 500_000
+# These loops do not break on their own (docs/post-training.md §8), so RESAMPLES continuations are sampled from each
+# exact-cycle loop's history through its first copy (its first repeat starts at onset + period); onpolicy/selection.py
+# takes one as chosen only if it succeeds (§8.4, App. G.11). 2, the cost bound: at the smoke's 3 successes in 68
+# continuations, a loop gets a success with probability ≈ 0.086 from 2 and ≈ 0.17 from 4, at half the generation.
+# They are samples RESUMED + sample * RESAMPLES + m (RESUMED above any sample index), seeded --seed + RESUME_SEED + n
+# (past every sample's seed --seed + k)
+RESAMPLES, RESUMED, RESUME_SEED = 2, 100, 500_000
 
 
 def cycle(ids: list[int]) -> tuple[int, int] | None:

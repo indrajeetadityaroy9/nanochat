@@ -5,22 +5,23 @@
 #   2.-3. rollout waves (`waves`): PROMPTS distinct prompts per wave (default 6,000) of the mining pool, every
 #      source's SFT train contexts (onpolicy/prompts.py --mix, built here if absent), under SAMPLES (default 0.6:1) by
 #      onpolicy/rollouts.py to rollouts/wave-<k>/, in groups of ENGINES (default 4) concurrent engines (`engines`:
-#      wave k seeded k and excluding waves 0..k-1's prompts, each at VLLM_GPU_MEMORY_UTILIZATION (default 0.85) /
-#      ENGINES, each started once the previous one has written its prompts and logged "KV cache size", vLLM's
-#      memory profiling; vLLM's engine core is CPU-bound, so one engine leaves the GPU idle), and after each group
-#      the selection over every wave (onpolicy/selection.py: rollouts/ftpo.jsonl, rollouts/selection.json; the rows
-#      need no verdicts, so the train rollouts are not verified); groups stop once the FTPO rows before rebalancing
+#      wave k seeded k and excluding waves 0..k-1's prompts, each at VLLM_GPU_MEMORY_UTILIZATION (default 0.85)
+#      divided by the group's wave count, each started once the previous one has written its prompts and logged "KV
+#      cache size", vLLM's memory profiling; vLLM's engine core is CPU-bound, so one engine leaves the GPU idle), and
+#      after each group the selection over every wave (onpolicy/selection.py: rollouts/ftpo.jsonl,
+#      rollouts/selection.json; the rows need no verdicts, so the train rollouts are not verified); groups stop once
+#      the FTPO rows before rebalancing
 #      reach TARGET_ROWS (default 4,000, docs/post-training.md §8.7 Waves) or the group's last wave finds fewer than
 #      PROMPTS prompts left (the pool is exhausted);
 #   4. FTPO from the export (onpolicy/train.py ftpo, FREEZE none or head, default none) to ftpo/: one model, written
 #      when the held-out chosen_win reaches 0.35 or at the epoch's end, and ftpo/train-log.json;
 #   5. DPO waves (`dpo_waves`): PROMPTS_DPO distinct KodCode train-pool prompts per wave (default 2,000) x 4 samples
-#      at T 0.6 from ftpo/ to dpo-rollouts/wave-<k>/, each exact-cycle loop resumed 4 times from its history
+#      at T 0.6 from ftpo/ to dpo-rollouts/wave-<k>/, each exact-cycle loop resumed 2 times from its history
 #      (onpolicy/rollouts.py), in groups of at most ENGINES concurrent engines as in 2.-3., verified
 #      (onpolicy/verify.py), and after each group the selection over every DPO wave (dpo-rollouts/dpo.jsonl: loop and
 #      outcome pairs; dpo-rollouts/selection.json); groups stop once the pairs reach DPO_PAIRS (default 8,000,
-#      DeLoop's count), after DPO_WAVES (default 4) waves, or when the group's last wave finds fewer than PROMPTS_DPO
-#      prompts left; then DPO from ftpo/ on dpo.jsonl (onpolicy/train.py dpo) to dpo/;
+#      DeLoop's count), after DPO_WAVES (default 2, one group of 4,000 prompts) waves, or when the group's last wave
+#      finds fewer than PROMPTS_DPO prompts left; then DPO from ftpo/ on dpo.jsonl (onpolicy/train.py dpo) to dpo/;
 #   6. the evaluation (`evaluate`) of each of model/, ftpo/ and dpo/ present, or only of EVAL_MODELS (names: model,
 #      ftpo, dpo) when set, to eval-<name>/: the natural-termination probe on PROBE_PROMPTS (default 128) prompts per
 #      set (eval/official_termination.py, scored in a CPU container; for the export, the step's own probe,
@@ -38,7 +39,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUN_DIR=$ROOT/artifacts/runs/$1 STEP=$2
 PROMPTS=${PROMPTS:-6000} SAMPLES=${SAMPLES:-0.6:1} VAL_PROMPTS=${VAL_PROMPTS:-512} TARGET_ROWS=${TARGET_ROWS:-4000}
 PROBE_PROMPTS=${PROBE_PROMPTS:-128} FREEZE=${FREEZE:-none} ENGINES=${ENGINES:-4}
-PROMPTS_DPO=${PROMPTS_DPO:-2000} DPO_PAIRS=${DPO_PAIRS:-8000} DPO_WAVES=${DPO_WAVES:-4}
+PROMPTS_DPO=${PROMPTS_DPO:-2000} DPO_PAIRS=${DPO_PAIRS:-8000} DPO_WAVES=${DPO_WAVES:-2}
 STAGES=${STAGES:-rollouts train dpo evaluate} UTIL=${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
 for CHECKPOINT in "$RUN_DIR"/{checkpoint,weights}-"$STEP".pt ""; do [ -f "$CHECKPOINT" ] && break; done
 [ -n "$CHECKPOINT" ] || { echo "no checkpoint or weights of step $STEP in $RUN_DIR" >&2; exit 1; }
@@ -78,10 +79,10 @@ rollouts() {  # <model dir> <out dir> <rollouts args...>: rollouts, verdicts, se
 }
 
 engines() {  # <model dir> <waves dir> <first wave> <waves> <rollouts args...>: the waves without meta.json, one
-  # engine each at UTIL / ENGINES, concurrently; wave k seeded k, excluding waves 0..k-1's prompts; each engine
+  # engine each at UTIL / <waves>, concurrently; wave k seeded k, excluding waves 0..k-1's prompts; each engine
   # started once the previous one has written its prompts and logged "KV cache size" (vLLM's memory profiling)
   local k dir share prev="" pid="" pids=() exclude=() failed=0 start=$SECONDS
-  share=$(python3 -c 'import sys; print(float(sys.argv[1]) / int(sys.argv[2]))' "$UTIL" "$ENGINES")
+  share=$(python3 -c 'import sys; print(float(sys.argv[1]) / int(sys.argv[2]))' "$UTIL" "$4")
   for ((k = 0; k < $3; k++)); do exclude+=("$(w "$2/wave-$k")"); done
   for ((k = $3; k < $3 + $4; k++)); do
     dir=$2/wave-$k
