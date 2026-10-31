@@ -202,26 +202,44 @@ Mean next-token loss (nats) on the SFT val split's responses, 53,474,648 labels 
 | base (§1) | 0 | 1.1574 |
 | SFT | 1,000 | 0.8533 |
 | SFT | 2,000 | 0.8139 |
+| SFT | 3,000 | 0.7921 |
 
 ### 6.2 Natural termination
 
 Exclusive outcomes: closed `</think>` and ended with BOS / closed, the answer at the limit / never closed, at the
-limit / never closed, ended [measured: `termination-<step>.json`, one-shot generation].
+limit / never closed, ended / never closed, loop-stopped [measured: `termination-<step>.json`; steps 1,000 and 2,000
+one-shot generation, step 3,000 chunked with loop stopping as in the chunked probe below, so its loop-stopped
+responses would otherwise run to the limit; its like-for-like comparison is `termination-2000-chunked.json`].
 
-| Step | Set | Closed, ended | Closed, at limit | Unclosed, at limit | Unclosed, ended | P(closed ≤ 1K / 2K / 4K / 8K / 16K / 32K) |
-|---|---|---|---|---|---|---|
-| 1,000 | HumanEval+ (64) | 51 | 0 | 13 | 0 | 0.484 / 0.766 / 0.797 / 0.797 / 0.797 / 0.797 |
-| 1,000 | held-out SFT (64) | 37 | 1 | 26 | 0 | 0.156 / 0.344 / 0.500 / 0.594 / 0.594 / 0.594 |
-| 1,000 | all (128) | 88 | 1 | 39 | 0 | 0.320 / 0.555 / 0.648 / 0.695 / 0.695 / 0.695 |
-| 2,000 | HumanEval+ (64) | 44 | 0 | 20 | 0 | 0.375 / 0.625 / 0.672 / 0.672 / 0.688 / 0.688 |
-| 2,000 | held-out SFT (64) | 29 | 0 | 35 | 0 | 0.156 / 0.266 / 0.391 / 0.453 / 0.453 / 0.453 |
-| 2,000 | all (128) | 73 | 0 | 55 | 0 | 0.266 / 0.445 / 0.531 / 0.563 / 0.570 / 0.570 |
+| Step | Set | Closed, ended | Closed, at limit | Unclosed, at limit | Unclosed, ended | Unclosed, loop-stopped | P(closed ≤ 1K / 2K / 4K / 8K / 16K / 32K) |
+|---|---|---|---|---|---|---|---|
+| 1,000 | HumanEval+ (64) | 51 | 0 | 13 | 0 | — | 0.484 / 0.766 / 0.797 / 0.797 / 0.797 / 0.797 |
+| 1,000 | held-out SFT (64) | 37 | 1 | 26 | 0 | — | 0.156 / 0.344 / 0.500 / 0.594 / 0.594 / 0.594 |
+| 1,000 | all (128) | 88 | 1 | 39 | 0 | — | 0.320 / 0.555 / 0.648 / 0.695 / 0.695 / 0.695 |
+| 2,000 | HumanEval+ (64) | 44 | 0 | 20 | 0 | — | 0.375 / 0.625 / 0.672 / 0.672 / 0.688 / 0.688 |
+| 2,000 | held-out SFT (64) | 29 | 0 | 35 | 0 | — | 0.156 / 0.266 / 0.391 / 0.453 / 0.453 / 0.453 |
+| 2,000 | all (128) | 73 | 0 | 55 | 0 | — | 0.266 / 0.445 / 0.531 / 0.563 / 0.570 / 0.570 |
+| 2,000 chunked | HumanEval+ (64) | 42 | 0 | 3 | 0 | 19 | 0.375 / 0.625 / 0.656 / 0.656 / 0.656 / 0.656 |
+| 2,000 chunked | held-out SFT (64) | 26 | 0 | 3 | 0 | 35 | 0.156 / 0.266 / 0.344 / 0.406 / 0.406 / 0.406 |
+| 2,000 chunked | all (128) | 68 | 0 | 6 | 0 | 54 | 0.266 / 0.445 / 0.500 / 0.531 / 0.531 / 0.531 |
+| 3,000 chunked | HumanEval+ (64) | 49 | 0 | 1 | 0 | 14 | 0.438 / 0.656 / 0.734 / 0.766 / 0.766 / 0.766 |
+| 3,000 chunked | held-out SFT (64) | 34 | 0 | 0 | 0 | 30 | 0.203 / 0.328 / 0.453 / 0.516 / 0.531 / 0.531 |
+| 3,000 chunked | all (128) | 83 | 0 | 1 | 0 | 44 | 0.320 / 0.492 / 0.594 / 0.641 / 0.648 / 0.648 |
 
-- **Closure fell from step 1,000 to 2,000**: 89 → 73 of 128 closed; per prompt (same prompts and seeds), 26 closed
-  only at 1,000 and 10 only at 2,000, exact McNemar p = 0.011 [measured; arithmetic], while the held-out loss fell
-  (§6.1).
-- **Closure is early or not at all**: the latest closure is at 6,361 reasoning tokens at step 1,000 and 11,355 at
-  step 2,000; every closed answer holds a fenced code block, and all but one (step 1,000) end with BOS.
+- **Closure fell from step 1,000 to 2,000 and partly recovered at 3,000**: 89 → 73 of 128 closed; per prompt (same
+  prompts and seeds), 26 closed only at 1,000 and 10 only at 2,000, exact McNemar p = 0.011 [measured; arithmetic],
+  while the held-out loss fell (§6.1). At step 3,000, 83 of 128 closed against the chunked 2,000 probe's 68
+  (HumanEval+ 42 → 49 chunked, 44 → 49 against the one-shot row; held-out 26 → 34 chunked, 29 → 34 one-shot)
+  [measured]; the HumanEval+ change is within the ±2–3 per 64 sampling noise of §6.4 [inference].
+- **Closure is early or not at all**: the latest closure is at 6,361 reasoning tokens at step 1,000, 11,355 at
+  step 2,000 and 11,967 at step 3,000; every closed answer holds a fenced code block, and all but one (step 1,000)
+  end with BOS. At step 3,000, 44 of the 45 never-closed responses were loop-stopped (repetition ≥ 0.99) [measured].
+- **HumanEval+ pass at step 3,000** (chunked probe, one sample at T 0.6): 30 / 29 of 64 on the base / plus tests,
+  30 / 29 of the 49 closed and 0 of the 15 unclosed; the base model's official greedy passes 37 / 31 on the same 64
+  (§6.4) [measured]. Per problem among the 49 closed, the base model passes 32 on base tests (SFT gains 4, loses 6,
+  exact McNemar p = 0.75) and 27 on plus (gains 8, loses 6, p = 0.79); among the 15 unclosed it passes 5 / 4
+  [measured; arithmetic]. On the closed problems the SFT model matches the base within noise; the deficit is the
+  unclosed ones [inference].
 - **The never-closed responses loop**: at step 1,000, 36 of 39 have ≥ 99.85% of their last 4,096 tokens inside a
   32-token window that recurs there; the other 3 are enumerations with an incrementing number ("The combination
   (1,2,3,4,571) … (1,2,3,4,577)") that never repeat a window exactly. At step 2,000, 53 of 55 repeat ≥ 99% of their
@@ -240,12 +258,13 @@ limit / never closed, ended [measured: `termination-<step>.json`, one-shot gener
   one-shot probe on 119 of 128 closures; its generation took 387 s against 1,102 s [measured]. Every round after the
   first reseeds the sampler (docs/evaluation.md §10), so per-prompt differences are sampling noise [inference].
 - **Held-out closure falls with the teacher's reasoning length** (rank correlation −0.43 at step 1,000, −0.53 at
-  2,000 [arithmetic]); closed of prompts:
+  2,000, −0.50 at 3,000 [arithmetic]); closed of prompts:
 
   | Step | < 2K (17) | 2–4K (8) | 4–8K (14) | 8–16K (19) | ≥ 16K (6) |
   |---|---|---|---|---|---|
   | 1,000 | 17 | 5 | 6 | 8 | 2 |
   | 2,000 | 13 | 4 | 8 | 4 | 0 |
+  | 3,000 (chunked) | 16 | 4 | 8 | 6 | 0 |
 
 - **By source** (closed of prompts; the table below).
 
@@ -253,6 +272,7 @@ limit / never closed, ended [measured: `termination-<step>.json`, one-shot gener
 |---|---|---|---|---|---|---|---|---|
 | 1,000 | 5 | 2 | 5 | 5 | 11 | 8 | 1 | 1 |
 | 2,000 | 5 | 1 | 4 | 6 | 8 | 3 | 1 | 1 |
+| 3,000 (chunked) | 5 | 1 | 5 | 6 | 11 | 4 | 1 | 1 |
 
 ### 6.3 Serving faithfulness
 
