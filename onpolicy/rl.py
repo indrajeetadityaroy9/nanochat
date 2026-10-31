@@ -10,15 +10,18 @@ the token-level policy gradient (DAPO, arXiv 2503.14476 §3.3, Eq. 12)
     -sum_i A_i sum_t log pi(o_i,t) / sum_i |o_i|,
 A_i = (r_i - its group's mean reward) / the std of the batch's rewards (Lite PPO, arXiv 2508.08221 §4.1: the group's
 mean, the batch's std), r_i 1 when the response's answer passes its problem's tests and 0 otherwise (an unclosed or
-failing answer, or a loop: an exact cycle never ends, so it is a failure rather than an answer cut short). A response
-cut at the length limit is masked, neither rewarded nor trained on (overlong filtering: DAPO §3.4; "clear benefits
-when the token limit is short (e.g., 8K or 16K)", arXiv 2506.13284 §4.5.3). The trained groups are those whose
-remaining rewards differ (a group of equal rewards has zero advantage and no gradient, DAPO §3.2); a trivial prompt's
+failing answer, or a loop: an exact cycle never ends, so it is a failure rather than an answer cut short), plus DAPO's
+soft overlong punishment (`overlong`, arXiv 2503.14476 §3.4, Eq. 13): 0 up to L_MAX - L_CACHE tokens, then falling
+linearly to -1 at L_MAX, the sampler's limit, so a cut response scores -1. Masking cut responses instead (overlong
+filtering, DAPO §3.4) left nothing against length: from the SFT model the cut share rose from 3.7% to 19.5% in six
+batches and the pass rate over all responses fell from 0.420 to 0.391 (rl/attempt-16k-masked-train.jsonl), where
+10-15% truncation "typically destabilized training" (ScaleRL, arXiv 2510.13786 App. A.15). The trained groups are
+those whose rewards differ (a group of equal rewards has zero advantage and no gradient, DAPO §3.2); a trivial prompt's
 group is unused; no KL term (DAPO §2.3). pi is the distribution the sampler draws from at T 1.0: the capped logits
 c tanh(h W / c) of the final hidden states, the head in fp32 as vLLM computes it (the export's "head_dtype"). The head
 and its loss are `Head`, its gradients computed in its forward HEAD_CHUNK rows at a time and only at the trained
-positions (no prompt position, no masked response); the backbone runs over the responses packed into rows of the
-context (`pack`: first fit decreasing, each response its own attention segment).
+positions (no prompt position); the backbone runs over the responses packed into rows of the context (`pack`: first
+fit decreasing, each response its own attention segment).
 
 Optimizer (docs/post-training.md §6): AdamW at a constant LR, beta (0.9, 0.95), no weight decay, the gradient's norm
 clipped at 1.0; eps 1e-15, as an eps near the gradients' scale clips them (ScaleRL, arXiv 2510.13786 App. A.3). The
@@ -54,6 +57,9 @@ from model.ops.cross_entropy import CHUNK as HEAD_CHUNK
 
 LR, BETAS, EPS, MAX_GRAD_NORM = 2e-6, (0.9, 0.95), 1e-15, 1.0
 BUDGET = 2 * 3600
+# the sampler's and the evaluation's response limit (onpolicy/rollouts.py MAX_TOKENS; rollouts imports vLLM, which the
+# training image lacks) and DAPO's punishment interval below it ("4,096 tokens as the soft punish cache", §4.1)
+L_MAX, L_CACHE = 16384, 4096
 # responses per packed row at most (attention segments, the padding's included): the row's cu_seqlens has a fixed
 # MAX_SEGMENTS + 1 entries, so the compiled forward sees one shape
 MAX_SEGMENTS = 256
@@ -121,6 +127,12 @@ def pack(lengths: list[int], row: int) -> list[list[int]]:
     return rows
 
 
+def overlong(n: int) -> float:
+    """DAPO's soft overlong punishment of an n-token response (arXiv 2503.14476 §3.4, Eq. 13): 0 up to
+    L_MAX - L_CACHE, then ((L_MAX - L_CACHE) - n) / L_CACHE, -1 at L_MAX and beyond."""
+    return max(-1.0, min(0.0, (L_MAX - L_CACHE - n) / L_CACHE))
+
+
 class Policy:
     def __init__(self, checkpoint: Path, out: Path):
         self.device = torch.device("cuda")
@@ -169,19 +181,21 @@ class Policy:
                 put(np.concatenate(target)), put(np.concatenate(weight)))
 
     def update(self, batch: dict) -> dict:
-        # each group's responses that ended (stop or a caught loop), with their rewards; the cut ones masked
-        kept = [([s for s in g["samples"] if s["finish"] != "length"], g["prompt"]) for g in batch["groups"]
-                if not g["trivial"]]
-        rewards = [np.array([s["verdict"] == "pass" for s in samples], np.float64) for samples, _ in kept]
+        # every response of each group, its reward its pass plus the length's punishment
+        kept = [(g["samples"], g["prompt"]) for g in batch["groups"] if not g["trivial"]]
+        rewards = [np.array([(s["verdict"] == "pass") + overlong(len(s["ids"])) for s in samples], np.float64)
+                   for samples, _ in kept]
         flat = np.concatenate(rewards)
         mixed = [(samples, prompt, r) for (samples, prompt), r in zip(kept, rewards, strict=True)
                  if len(r) > 1 and r.min() < r.max()]
         seqs = [(prompt + s["ids"], len(prompt), float(a))
                 for samples, prompt, r in mixed for s, a in zip(samples, (r - r.mean()) / flat.std(), strict=True)]
+        samples = [s for g in batch["groups"] for s in g["samples"]]
         stats = {"groups": len(batch["groups"]), "trivial": sum(g["trivial"] for g in batch["groups"]),
-                 "masked": sum(s["finish"] == "length" for g in batch["groups"] for s in g["samples"]),
+                 "cut": sum(s["finish"] == "length" for s in samples),
+                 "pass_rate": sum(s["verdict"] == "pass" for s in samples) / len(samples),
                  "reward": float(flat.mean()), "mixed_groups": len(mixed), "trained_responses": len(seqs),
-                 "verdicts": dict(Counter(s["verdict"] for g in batch["groups"] for s in g["samples"]))}
+                 "verdicts": dict(Counter(s["verdict"] for s in samples))}
         self.step += 1
         if not seqs:
             return stats | {"updated": False}

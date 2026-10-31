@@ -301,7 +301,7 @@ evaluation tests that evidence at 522M. Each choice is [inference] from the cite
 |---|---|---|---|---|---|
 | 0. Base | — | — | — | — | the base run's last checkpoint (`base_step` 69,874; `docs/results.md` §1, §4) |
 | 1. SFT (§4) | the base | the SFT corpus's reasoning traces (`docs/corpus.md` §10) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§5) |
-| 2. RL (§6) | the SFT model | KodCode train problems with tests, 180,911 usable | the token-level policy gradient, one on-policy update per batch, cut responses masked | responses ≤ 16,384 | KodCode val pass@1 of the last policy against the SFT model's (§6); the reasoning protocol after it (§5) |
+| 2. RL (§6) | the SFT model | KodCode train problems with tests, 180,911 usable | the token-level policy gradient, one on-policy update per batch, DAPO's soft length penalty | responses ≤ 16,384 | KodCode val pass@1 of the last policy against the SFT model's (§6); the reasoning protocol after it (§5) |
 
 ## 3. Format
 
@@ -471,10 +471,19 @@ batch k, and the trainer updates on it. Sampling and the update alternate on the
   equal left out (zero advantage, DAPO §3.2); no KL and no entropy term (DAPO §2.3).
 - **Reward** (`onpolicy/verify.py` `judge`): 1 when the answer, the text after the last `</think>`, holds code that
   passes every test of the problem (`check`), else 0 (no `</think>`, no code, a failure or a time-out); a problem
-  whose wrong program (`stub`) passes is left out. A response cut at the length limit is masked, neither rewarded nor
-  trained on (overlong filtering, DAPO §3.4; "clear benefits when the token limit is short (e.g., 8K or 16K)", arXiv
-  2506.13284 §4.5.3); a loop the sampler aborts scores 0, a failure rather than an answer cut short: an exact cycle
-  repeats its tokens to the limit (§8) [inference].
+  whose wrong program (`stub`) passes is left out. A loop the sampler aborts scores 0, a failure rather than an answer
+  cut short: an exact cycle repeats its tokens to the limit (§8) [inference]. To the reward is added DAPO's soft
+  overlong punishment (arXiv 2503.14476 §3.4, Eq. 13; `onpolicy/rl.py` `overlong`): 0 up to 12,288 tokens, then
+  falling linearly to −1 at the 16,384-token limit, so a cut response scores −1 (`L_CACHE` 4,096, DAPO's "soft punish
+  cache", §4.1). Masking cut responses instead (overlong filtering, DAPO §3.4; "clear benefits when the token limit is
+  short (e.g., 8K or 16K)", arXiv 2506.13284 §4.5.3) was tried first and left nothing against length: from the SFT
+  model the cut share of the six batches was 3.7%, 3.9%, 7.9%, 9.2%, 11.4% and 19.5%, the mean response grew from
+  7,676 to 9,735 tokens and the gradient norm from 0.147 to 0.179, while the pass rate over all responses fell from
+  0.420 to 0.391 (the logged reward, over the uncut responses only, 0.436 to 0.479) [measured:
+  `onpolicy-7676/rl/attempt-16k-masked-train.jsonl`], past the 10–15% truncation that "typically destabilized
+  training" (arXiv 2510.13786 App. A.15). DAPO added the soft punishment on top of filtering and Clip-Higher, AIME24
+  38 → 41 (Table 1); ScaleRL found a length penalty no better than interruptions at 16K GPU-hours (App. A.10), but
+  an interruption trains answers the evaluation, which cuts at 16,384, never asks for.
 - **Problems** (`onpolicy/prompts.py`): KodCode's train pool, its usable rows (named tests, no Docs subset): 180,911,
   of them 107,244 complete, 52,740 instruct and 20,927 online judge [measured]; a seeded permutation, batch k its k-th
   slice of 128 prompts × 8 samples (Lite PPO's 1,024, arXiv 2508.08221 §3; Nemotron-Cascade's 128 × 8, arXiv
@@ -500,9 +509,9 @@ batch k, and the trainer updates on it. Sampling and the update alternate on the
   Each finished response is judged at once by a pool of spawned workers, so the tests run while generation continues
   (18 s of judging after the last response). The trainer packs the trained responses into rows of 32,768 tokens (first
   fit decreasing, each its own attention segment) and computes the head and its loss only at the trained positions
-  (`Head`: gradients in its forward, 8,192 rows at a time, the head in fp32). Batch 0: 421 s of generation (7.86M
-  tokens, 18.7K tokens/s) and 31 s for the update (606 responses, 4.14M tokens), about 7.5 minutes an update
-  (`onpolicy-7676/rl/train.jsonl`).
+  (`Head`: gradients in its forward, 8,192 rows at a time, the head in fp32). The masked attempt's batch 0: 421 s of
+  generation (7.86M tokens, 18.7K tokens/s) and 31 s for the update (606 responses, 4.14M tokens), about 7.5 minutes
+  an update (`onpolicy-7676/rl/attempt-16k-masked-train.jsonl`).
 - **Budget and evaluation**: the trainer stops at the batch whose end would let the next overrun `BUDGET`, 2 hours:
   about 15 updates at 7.5 minutes [arithmetic]; Nemotron-Cascade's code RL ran 22 to 90 steps (arXiv 2603.19220
   App. B; arXiv 2512.13607 App. D Table 19). The sampler evaluates the first and the last policy on `eval-model/val`'s

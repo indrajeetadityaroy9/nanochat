@@ -8,8 +8,8 @@ the k-th slice) x GROUP samples, Lite PPO's batch (arXiv 2508.08221 §3: 128 pro
 and top-p 1.0, sampling the trainer's distribution exactly (DAPO samples at 1.0, arXiv 2503.14476 §4.1; ProRL's
 rollouts at T 0.6 destabilised training against 1.2, arXiv 2507.12507 §5.1), at most MAX_TOKENS each: the SFT
 model's first T 1.0 batch averaged 7,582 tokens a response and 3.6% (37 of 1,024) reached the limit, where an 8,192
-limit cut 42% (truncation above 10-15% destabilizes training, arXiv 2510.13786 App. A.15); the trainer masks the cut
-ones (onpolicy/rl.py).
+limit cut 42% (truncation above 10-15% destabilizes training, arXiv 2510.13786 App. A.15); the trainer punishes the
+responses that near or reach it (onpolicy/rl.py `overlong`).
 
 Engines: ENGINES vLLM engines (one: with a batch's 1,024 requests in flight it holds the GPU at 100% utilization and
 660 W), each driven by a thread through LLMEngine.step with token deltas, a group's samples on one engine (its
