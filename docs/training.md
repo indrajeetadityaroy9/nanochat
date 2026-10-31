@@ -442,7 +442,9 @@ step 4; its values are `docs/results.md` §4.
 [arithmetic]. Loss at the last step 0.8586 (trailing 50-step mean 0.8691), at the file-level stage's end (trailing
 50-step mean to step 66,062) 0.9058; last-step lr 3.358e-8, gradient norm 0.304, 290,245 tok/s, MFU 0.516; peak
 allocated 71.11 GiB in the file-level stage and 71.12 GiB in the repository stage (`stage`, `end` records), reserved
-73.17 GiB; 76.29 h from the first step's record to the last's. Every step's values:
+73.17 GiB; 76.29 h from the first step's record to the last's. Median over each stage's train records from step 100:
+381,146 tok/s, MFU 0.5076 in the file-level stage (65,963 steps) and 299,281 tok/s, MFU 0.515 in the repository stage
+(3,811 steps) [measured: `results/pretrain/pretrain-curves.jsonl`]. Every step's values:
 `results/pretrain/pretrain-curves.jsonl`; the likelihood trajectory to the last step: `results/pretrain/trajectory.json`
 (`docs/results.md` §4).
 
