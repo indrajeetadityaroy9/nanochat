@@ -335,78 +335,80 @@ of them pass the filters above; 512 problems are sampled from them, stratified b
 \section{Tokenization, Packing and Fill-in-the-Middle}
 \label{sec:sequences}
 
-This section describes how the pretraining dataset is turned into training sequences: the tokenizer, packing of
-documents into sequences of the context length, fill-in-the-middle (FIM) training examples, and the order in which
-training reads the sequences. As in Section~\ref{sec:data}, each step is given with what it does and why.
+This section describes how the pretraining dataset is turned into training sequences: the tokenizer, the packing of
+documents into sequences, fill-in-the-middle (FIM) training examples, and batching.
 
 \subsection{Tokenizer}
 \label{sec:tokenizer}
 
-\paragraph{Vocabulary.} The tokenizer is a byte-level BPE tokenizer with 32,768 tokens: the 256 bytes, 32,508 merged
-tokens, a beginning-of-sequence (BOS) token and the three FIM special tokens of
-DeepSeek-Coder~\cite{guo2024deepseekcoder}. Larger vocabularies gave no clear gain on code in earlier work: StarCoder2
-found that increasing the vocabulary to 100K tokens did not improve performance~\cite{lozhkov2024starcoder2}, and
-across vocabularies of 32K to 256K tokens the HumanEval pass@1 of a 1.5B model varied only from 20.52 to 20.84 and did
-not grow with the vocabulary~\cite{dagan2024tokenizer}. The SA-BPE tokenizers described below also use 32,768
+\paragraph{Tokenizer.} The tokenizer is a byte-level SA-BPE tokenizer~\cite{chizhov2026sabpe} with 32,768 tokens:
+the 256 bytes, 32,508 merged tokens, a beginning-of-sequence (BOS) token and the three FIM special tokens of
+DeepSeek-Coder~\cite{guo2024deepseekcoder}. It uses a modified cl100k pre-tokenizer and is trained on a sample of the
+pretraining data.
+
+\paragraph{Why SA-BPE\@.} BPE merges the most frequent pairs of adjacent tokens. In code, many frequent pairs come
+from identifiers and strings that repeat inside a single repository. The tokens built from them rarely occur in other
+code, so their embeddings receive few updates during training; such under-trained tokens have poor representations
+and can cause hallucinations~\cite{land2024magikarp,chizhov2026sabpe}. SA-BPE scores each pair by $F \cdot \ln R$,
+where $F$ is the pair's frequency and $R$ is the number of repositories that contain it, so a pair that occurs in only
+one repository scores 0. In the SA-BPE evaluation, this score gave a compression rate of 3.643 against 3.623 for BPE
+and 72 verified under-trained tokens against 640~\cite{chizhov2026sabpe}.
+
+\paragraph{Training data.} The tokenizer is trained on 13.4~GB sampled from the training splits of the 17 file-level
+sources, each in proportion to its share of the file-level stage's bytes, so the sample is 85.6\% code. A tokenizer's
+training data should be representative of the model's training data, since tokens that are frequent in the tokenizer
+data but rare in the model data are under-trained~\cite{land2024magikarp}. For $R$, repository files and CodeXGLUE
+functions are grouped by repository; every other document counts as its own repository.
+
+\paragraph{Pre-tokenizer.} The regular expression of OpenAI's cl100k tokenizer is used with one change: the rule that
+attaches line breaks to a run of punctuation is removed, so no token joins the end of a line, such as \texttt{):}, to
+the line break after it. Across 18 byte-level tokenizers, the number of vocabulary tokens that contain a line break
+correlated with MBPP pass@1 at Spearman $\rho = -0.717$~\cite{meister2026tokeval}.
+
+\paragraph{Vocabulary size.} Larger vocabularies gave no clear gain on code in earlier work: StarCoder2 found that
+increasing the vocabulary to 100K tokens did not improve performance~\cite{lozhkov2024starcoder2}, and across
+vocabularies of 32K to 256K tokens the HumanEval pass@1 of a 1.5B model varied only from 20.52 to 20.84 and did not
+grow with the vocabulary~\cite{dagan2024tokenizer}. The SA-BPE tokenizers also use 32,768
 tokens~\cite{chizhov2026sabpe}.
-
-\paragraph{Pre-tokenization.} Before BPE merges are learned, the text is split into pre-tokens by the regular
-expression of OpenAI's cl100k tokenizer, with one change: the rule that attaches line breaks to a run of punctuation
-is removed, so no token joins the end of a line, such as \texttt{):}, to the line break after it. Across 18 byte-level
-tokenizers, the number of vocabulary tokens that contain a line break correlated with MBPP pass@1 at Spearman
-$\rho = -0.717$~\cite{meister2026tokeval}. The final vocabulary has 72 tokens that contain a line break and none that
-joins punctuation to a line break (Table~\ref{tab:tokenizers}).
-
-\paragraph{SA-BPE instead of BPE\@.} BPE adds, at each step, the most frequent pair of adjacent tokens. In code, many
-frequent pairs come from identifiers and strings that repeat inside a single repository. The tokens built from them
-rarely occur in other code, so their embeddings receive few updates during training. Such under-trained tokens have
-poor representations and can cause hallucinations~\cite{land2024magikarp,chizhov2026sabpe}. SA-BPE scores each pair by
-$F \cdot \ln R$, where $F$ is the pair's frequency and $R$ is the number of repositories that contain it, so a pair
-that occurs in only one repository scores 0~\cite{chizhov2026sabpe}. In the SA-BPE evaluation, this score gave a
-compression rate of 3.643 against 3.623 for BPE and 72 verified under-trained tokens against
-640~\cite{chizhov2026sabpe}. Here, $R$ counts repositories for repository files and CodeXGLUE functions; every other
-document counts as its own repository.
 
 \paragraph{Comparison of tokenizers.} Four tokenizers were trained on the same data and measured on the 6.21~GB of
 validation text (Table~\ref{tab:tokenizers}): SA-BPE with the pre-tokenizer above, BPE with the same pre-tokenizer,
 SA-BPE with line breaks attached to the punctuation before them, and SA-BPE with line breaks and indentation as
-separate pre-tokens. BPE matches SA-BPE in compression (3.623 against 3.624 bytes per token over the file-level stage)
-but has more merged tokens that the validation text rarely uses: 15 never used against 5, and 84 used fewer than 100
-times against 54. Attaching line breaks to punctuation gives the best compression but 748 tokens that contain a line
-break, the property that correlates with lower MBPP pass@1. Separate line breaks and indentation give a statement the
-same tokens at every indentation depth but compress 0.2\% less, and this pre-tokenizer is untested as a whole. SA-BPE
-with the pre-tokenizer above is used. Training runs that would compare the four tokenizers by downstream accuracy were
-designed but not run, so the choice rests on these measurements and the cited results.
-
-\paragraph{Tokenizer training data.} The tokenizer is trained on 13.4~GB sampled from the training splits of the 17
-file-level sources, each in proportion to its share of the file-level stage's bytes, so the sample is 85.6\% code. A
-tokenizer's training data should be representative of the model's training data, since tokens that are frequent in
-the tokenizer data but rare in the model data are under-trained~\cite{land2024magikarp}.
+separate pre-tokens. The chosen tokenizer has 72 tokens that contain a line break and none that joins punctuation to a
+line break. BPE matches SA-BPE in compression (3.623 against 3.624 bytes per token over the file-level stage) but has
+more merged tokens that the validation text rarely uses: 15 never used against 5, and 84 used fewer than 100 times
+against 54. Attaching line breaks to punctuation gives the best compression but 748 tokens that contain a line break,
+the property that correlates with lower MBPP pass@1. Separate line breaks and indentation give a statement the same
+tokens at every indentation depth but compress 0.2\% less, and this pre-tokenizer is untested as a whole. Training runs
+that would compare the four tokenizers by downstream accuracy were designed but not run, so the choice rests on these
+measurements and the cited results.
 
 \subsection{Packing}
 
-\paragraph{Chunking.} Each document is tokenized separately and packed into training sequences of the stage's
-context length, 8,192 or 32,768 tokens. A document that fits in a sequence is one chunk, and the model is trained to
-predict the BOS token after it, so it learns where a document ends. A longer document is cut into chunks, each cut at
-the last statement boundary that fits (from a tree-sitter parse, for repository code) or otherwise at a line break, so
-chunks keep statements and lines whole.
+\paragraph{Packing.} Documents are packed into sequences of the stage's context length, 8,192 or 32,768 tokens, with
+document masking and without truncation: each document chunk attends only to earlier tokens of the same chunk, and
+whole chunks are placed into sequences by Best-Fit-Decreasing.
 
-\paragraph{Document masking.} Each chunk attends only to earlier tokens of the same chunk, not to other chunks in the
-same sequence. Causal masking within each document gave lower perplexity than causal attention across concatenated
-documents~\cite{zhao2024seqcomp}.
+\paragraph{Why this packing.} Causal masking within each document gave lower perplexity than causal attention across
+concatenated documents~\cite{zhao2024seqcomp}, and packing with fewer truncations improved language modeling over the
+usual concatenate-then-split method~\cite{ding2024fewer}.
 
-\paragraph{Best-fit packing.} Chunks are placed by Best-Fit-Decreasing: longest first, each into the sequence with the
-least free space that can hold it, otherwise into a new sequence. No chunk is truncated to fit a sequence; packing with
-fewer truncations improved language modeling over the usual concatenate-then-split method~\cite{ding2024fewer}. The
-two stages use disjoint parts of the dataset, so no training document is packed twice.
+\paragraph{Scope.} Both stages are packed this way. They use disjoint parts of the dataset, so no training document
+is packed twice.
+
+\paragraph{Chunking and placement.} A document that fits in a sequence is one chunk. A longer document is cut into
+chunks, each cut at the last statement boundary that fits (from a tree-sitter parse, for repository code) or otherwise
+at a line break, so chunks keep statements and lines whole. Chunks are placed longest first, each into the sequence
+with the least free space that can hold it, otherwise into a new sequence. The model is trained to predict the BOS
+token after a chunk that ends its document, so it learns where a document ends; the BOS token after a chunk that does
+not end its document is excluded from the loss.
 
 \subsection{Fill-in-the-middle}
 
-\paragraph{What FIM is.} A left-to-right language model predicts each token only from the text before it.
-Fill-in-the-middle (FIM) training also teaches it to use the text after a span: a span of a document, the middle, is
-moved to the end, and the model is trained to generate it from the prefix and the suffix~\cite{bavarian2022fim}.
-Three special tokens mark the prefix, the suffix and the middle, which are placed in prefix-suffix-middle (PSM) or
-suffix-prefix-middle (SPM) order.
+\paragraph{What FIM is.} Fill-in-the-middle (FIM) training teaches a left-to-right model to use the text after a span:
+a span of a document, the middle, is moved to the end, and the model is trained to generate it from the prefix and
+the suffix~\cite{bavarian2022fim}. Three special tokens mark the prefix, the suffix and the middle, which are placed in
+prefix-suffix-middle (PSM) or suffix-prefix-middle (SPM) order.
 
 \paragraph{Why FIM is used.} Code completion often inserts code between existing code, and the evaluation includes
 infilling benchmarks (HumanEval single-line, multi-line and random-span infilling), which a model trained only left to
@@ -445,7 +447,7 @@ distributions give stronger performance~\cite{gong2025astfim}.
 A training step has 1,474,560 tokens: 180 sequences of 8,192 tokens in the file-level stage or 45 sequences of 32,768
 tokens in the repository-level stage. Sequences from the different sources are interleaved deterministically in
 proportion to the mixture weights, so every part of training follows the mixture; within a source, sequences are read
-in a random order. The loss excludes padding tokens and the BOS token after a chunk that does not end its document.
+in a random order. The loss also excludes padding tokens.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
