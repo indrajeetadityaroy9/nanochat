@@ -28,6 +28,7 @@ from corpus.parallel import SPAWN
 from corpus.posttrain.sft import END_THINK, NAME, SFT_STAGE, THINK
 from corpus.tokenize import tokenize_split
 from corpus.tokenizer import get_tokenizer
+from eval.line_endings import lf
 from native import corpus_crate
 from paths import ARTIFACTS
 
@@ -57,8 +58,7 @@ CHUNK_BYTES = 2**28     # a worker task: one byte range of a source file
 SHARD_DOCUMENTS = 4096  # documents per packed shard (one crate pack call)
 WANTED: set[int] = set()  # a label_chunk worker's val document digests (init_labels)
 # Drop reasons, in the order a row is tested
-DROPS = ("malformed", "placeholder", "no_reasoning", "no_answer", "short_reasoning", "over_length", "contaminated",
-         "duplicate", "capped")
+DROPS = ("no_reasoning", "no_answer", "short_reasoning", "over_length", "contaminated", "duplicate", "capped")
 # Aider's file listing (CP-v2 Exercism): a filename line, then a fenced block
 LISTING = re.compile(r"^(\S+\.\w+)\n```[^\n]*\n(.*?)\n```", re.S | re.M)
 # Aider's editing instructions after an Exercism problem statement
@@ -80,23 +80,28 @@ WRAPPERS = re.compile("|".join((
 Parsed = tuple[str, str, str] | str  # (prompt, reasoning, answer) or a drop reason
 
 
-def cascade(row: dict) -> Parsed:
-    """Nemotron-Cascade: the user message; the reply's text between its leading <think> and </think>, then the rest."""
-    messages = row["messages"]
-    if [m["role"] for m in messages] != ["user", "assistant"]:
-        return "malformed"
-    head, closed, answer = messages[1]["content"].lstrip().partition("</think>")
+def thinking(prompt: str, reply: str) -> Parsed:
+    """The prompt; the reply's text between its leading <think> and </think>, then the rest."""
+    head, closed, answer = reply.lstrip().partition("</think>")
     if not closed or not head.startswith("<think>"):
         return "no_reasoning"
-    return messages[0]["content"], head.removeprefix("<think>"), answer
+    return prompt, head.removeprefix("<think>"), answer
+
+
+def cascade(row: dict) -> Parsed:
+    """Nemotron-Cascade: the user message and the reply (thinking)."""
+    messages = row["messages"]
+    if (roles := [m["role"] for m in messages]) != ["user", "assistant"]:
+        raise ValueError(f"a Nemotron-Cascade row with roles {roles}, not a user message and a reply")
+    return thinking(messages[0]["content"], messages[1]["content"])
 
 
 def competitive(row: dict) -> Parsed:
     """CP-v2 Python and C++: the user message; the reply's reasoning_content, then its content."""
     messages = row["messages"]
-    if [m["role"] for m in messages] != ["user", "assistant"]:
-        return "malformed"
-    return messages[0]["content"], messages[1].get("reasoning_content") or "", messages[1]["content"] or ""
+    if (roles := [m["role"] for m in messages]) != ["user", "assistant"]:
+        raise ValueError(f"a CP-v2 row with roles {roles}, not a user message and a reply")
+    return messages[0]["content"], messages[1]["reasoning_content"], messages[1]["content"]
 
 
 def exercism(row: dict) -> Parsed:
@@ -106,7 +111,7 @@ def exercism(row: dict) -> Parsed:
     Code"), then that listing's code as a Python block."""
     messages = row["messages"]
     if len(messages) != 9 or (stub := LISTING.search(messages[5]["content"])) is None:
-        return "malformed"
+        raise ValueError(f"an Exercism row of {len(messages)} messages, not Aider's 9 with the stub's listing")
     reply = messages[8]["content"]
     if (listing := LISTING.search(reply)) is None:
         return "no_answer"
@@ -116,36 +121,25 @@ def exercism(row: dict) -> Parsed:
 
 
 def kodcode(row: dict) -> Parsed:
-    """KodCode-V1-SFT-R1: the human turn; the R1 reply's text between its leading <think> and </think>, then the
-    rest."""
+    """KodCode-V1-SFT-R1: the human turn and the R1 reply (thinking)."""
     turns = row["conversations"]
-    if [t["from"] for t in turns] != ["human", "gpt"]:
-        return "malformed"
-    head, closed, answer = turns[1]["value"].lstrip().partition("</think>")
-    if not closed or not head.startswith("<think>"):
-        return "no_reasoning"
-    return turns[0]["value"], head.removeprefix("<think>"), answer
+    if (roles := [t["from"] for t in turns]) != ["human", "gpt"]:
+        raise ValueError(f"a KodCode row with roles {roles}, not a human turn and a reply")
+    return thinking(turns[0]["value"], turns[1]["value"])
 
 
 FORMATS = {"cascade": cascade, "competitive": competitive, "exercism": exercism, "kodcode": kodcode}
 
 
-def lines(text: str) -> str:
-    """text with CR LF and a lone CR as LF, as the pre-training corpus's standardization (corpus/pretrain/prepare.py
-    lines)."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
-
-
 def parse(row: dict, kind: str) -> tuple[str, str, str, bool] | str:
-    """A row's (prompt, reasoning, answer) with normalized line endings (lines), stripped, and whether any held a CR;
-    or the first drop reason before tokenization."""
+    """A row's (prompt, reasoning, answer), each with the corpus's line endings (eval/line_endings.py lf) and stripped,
+    and whether any held a CR; or the first drop reason before tokenization. A row outside its source's message
+    structure fails the build."""
     parsed = FORMATS[kind](row)
     if isinstance(parsed, str):
         return parsed
     carriage = any("\r" in text for text in parsed)
-    prompt, reasoning, answer = (lines(text).strip() for text in parsed)
-    if prompt in ("", "-"):
-        return "placeholder"
+    prompt, reasoning, answer = (lf(text).strip() for text in parsed)
     if not reasoning:
         return "no_reasoning"
     if not answer:
@@ -241,18 +235,20 @@ def split_stats(lengths: np.ndarray, contexts: np.ndarray, reasonings: np.ndarra
                 problems: np.ndarray) -> dict[str, int | list[int]]:
     """Rows, prompts, problems, tokens (BOS, document, BOS), loss tokens (the response and the closing BOS) and the
     reasoning tokens' 10th, 50th and 90th percentiles and maximum per row."""
-    quantiles = np.quantile(reasonings, (0.1, 0.5, 0.9, 1.0)).round().astype(int).tolist() if len(lengths) else []
     return {"rows": len(lengths), "prompts": len(np.unique(prompts)), "problems": len(np.unique(problems)),
             "tokens": int((lengths + 2).sum()), "loss_tokens": int((lengths - contexts + 1).sum()),
-            "reasoning_p10_p50_p90_max": quantiles}
+            "reasoning_p10_p50_p90_max": np.quantile(reasonings, (0.1, 0.5, 0.9, 1.0)).round().astype(int).tolist()}
 
 
 def source_tasks() -> list[tuple[int, str, Path, int, int]]:
     """The worker tasks over the sources, in GROUPS order (the order duplicates are resolved in): (group index, row
-    format, file, start, end), CHUNK_BYTES byte ranges of a JSON-lines file, a Parquet file's row groups one by one."""
+    format, file, start, end), CHUNK_BYTES byte ranges of a JSON-lines file, a Parquet file's row groups one by one.
+    A group none of whose files is downloaded fails here, not as a silently missing group."""
     tasks = []
     for g, (pattern, kind) in enumerate(GROUPS.values()):
-        for path in sorted(SOURCE.glob(pattern)):
+        if not (paths := sorted(SOURCE.glob(pattern))):
+            raise FileNotFoundError(f"no source file matches {SOURCE / pattern} (docs/corpus.md §11)")
+        for path in paths:
             size = pq.ParquetFile(path).num_row_groups if path.suffix == ".parquet" else path.stat().st_size
             step = 1 if path.suffix == ".parquet" else CHUNK_BYTES
             tasks += [(g, kind, path, start, min(start + step, size)) for start in range(0, size, step)]
@@ -348,7 +344,8 @@ def main() -> None:
     sources = source_tasks()
     owners = [g for g, *_ in sources]
     tasks = [(kind, path, start, end, parts_dir / f"{i}.bin") for i, (_, kind, path, start, end) in enumerate(sources)]
-    texts = list(decontaminate.benchmark_texts().values())
+    # every task the evaluation scores: benchmark_texts' and the original MBPP's (mbpp_texts, lm-eval's MBPP 3-shot)
+    texts = list((decontaminate.benchmark_texts() | decontaminate.mbpp_texts()).values())
     corpus_crate()  # built once here, before the workers load it
     with ProcessPoolExecutor(mp_context=SPAWN, initializer=decontaminate.worker_init, initargs=(texts,)) as pool:
         chunks = list(pool.map(read_chunk, tasks))

@@ -30,7 +30,7 @@ recomputed on CPU from the curated shards and the tokenized and packed data unde
 | `corpus/crate/lib.rs` (module, rayon pool), `corpus/crate/Cargo.toml`, `corpus/crate/Cargo.lock` | 6 |
 | `corpus/loader.py` (`contexts`: the SFT prompts' ignored labels) | 9, 10 |
 | `corpus/posttrain/__init__.py`, `corpus/posttrain/sft.py` (`NAME`, `SFT_STAGE`, `THINK`, `END_THINK`) | 10 |
-| `corpus/posttrain/build.py` (`SOURCE`, `GROUPS`, `render`, `problem`, `WRAPPERS`, `CAP`, `val_labels`, `val_spans`) | 10, 11 |
+| `corpus/posttrain/build.py` (`SOURCE`, `GROUPS`, `parse`, `render`, `problem`, `WRAPPERS`, `CAPS`, `DROPS`, `val_labels`, `val_spans`) | 10, 11 |
 
 ## 1. Sources and acquisition
 
@@ -577,27 +577,32 @@ source files under `artifacts/posttrain/` (`SOURCE`; `GROUPS` gives each group's
 
 **Groups and rendering** (`GROUPS`, `parse`): six groups, Cascade-1's Stage-1 and Stage-2 code, CP-v2's Python, C++
 and Exercism traces, and KodCode. A Cascade-1 row's reasoning is its reply between the leading `<think>` and
-`</think>`, its answer the rest, and a KodCode row's likewise from its R1 turn; a CP-v2 row's are its
-`reasoning_content` and `content` (no prompt is a `-` placeholder). An Exercism row is Aider's 9-message protocol: the
-prompt is the stub's file listing and the problem statement without Aider's editing instructions (`AIDER_REQUEST`),
-the reasoning the reply's prose before its file less the markdown heading that closes it ("### Solution Code",
-`TRAILING_HEADING`), the answer that file's code in a Python block. Every field's line endings are normalized as the
-pretraining corpus's (`lines`: CR LF, then a lone CR, to LF; §2), so no document holds a carriage return; the rows
-normalized are in the table below (`normalized`).
+`</think>`, its answer the rest, and a KodCode row's likewise from its R1 turn (`thinking`); a CP-v2 row's are its
+`reasoning_content` and `content`. An Exercism row is Aider's 9-message protocol: the prompt is the stub's file listing
+and the problem statement without Aider's editing instructions (`AIDER_REQUEST`), the reasoning the reply's prose
+before its file less the markdown heading that closes it ("### Solution Code", `TRAILING_HEADING`), the answer that
+file's code in a Python block. A row outside its source's message structure (other roles; an Exercism row without 9
+messages or the stub's listing) fails the build; none does. Every field's line endings become LF
+(`eval/line_endings.py` `lf`: CR LF, then a lone CR; the pretraining standardization's rule, §2, without its
+leading-U+FEFF drop), so no document holds a carriage return; the rows normalized are in the table below
+(`normalized`).
 
 **Filters** (`DROPS`, in order, each row counted at the first it fails): no reasoning or no answer; reasoning under
-20 tokens (`MIN_REASONING`); above 32,768 tokens rendered, dropped, not cut (a cut trace loses its answer;
-Nemotron-Cascade drops over-length samples from its math data, arXiv 2512.13607 §3.2.2, and states nothing for code);
+20 tokens (`MIN_REASONING`); a document whose tokens with its two BOS exceed 32,768 (`SFT_STAGE.seq_len`), dropped,
+not cut (a cut trace loses its answer; Nemotron-Cascade drops over-length samples from its math data, arXiv 2512.13607
+§3.2.2, and states nothing for code; the packer's rows of 32,769 tokens would hold one token more, the 19 rows of
+exactly 32,767 rendered tokens before the later filters, 11 Cascade-1 Stage-2, 3 CP-v2 Python, 5 C++ [measured]);
 §3's 10-gram rule on prompt, reasoning and answer against every task the evaluation scores (`decontaminate`
-`benchmark_texts`: EvalPlus, MultiPL-E, MBPP's 500 original test problems, HumanEval-X C++ and the infilling
-programs), which removes every trace of 5.5% of Stage-1's distinct prompts (8,773 of 159,304) and 5.2% of Stage-2's
-(4,105 of 78,852, over-length drops included), and 15,015 of KodCode's 268,211 rows (5.6%) [measured]; exact
-duplicates of prompt, reasoning and answer (the first kept, groups in `GROUPS` order); then `CAPS` traces per exact
-prompt in each group, drawn at random (`SEED` 0): 2 in the four long-trace groups (Cascade-1 Stage-1 and Stage-2, CP-v2
-Python and C++), every trace in Exercism and KodCode, whose prompts hold about one trace each (76,375 train rows of
-75,341 prompts and 250,649 of 250,646). The long-trace cap is the largest in {2, 1} at which 2 epochs of the packed
-train rows stay within 12.5B tokens: at 2, 2 × 172,726 rows of 32,768 tokens are 11.32B [arithmetic]; the 12.5B
-budget is a time limit (≈12.1 h at 287,476 tok/s, `docs/training.md` §7 [arithmetic]), not a measured optimum.
+`benchmark_texts` and `mbpp_texts`: EvalPlus, MultiPL-E, HumanEval-X C++, the infilling programs and MBPP's 500
+original test problems), which removes every trace of 5.5% of Stage-1's distinct prompts (8,773 of 159,304) and
+5.2% of Stage-2's (4,105 of 78,852, over-length drops included), and 15,015 of KodCode's 268,211 rows (5.6%)
+[measured]; exact duplicates of prompt, reasoning and answer (the first kept, groups in `GROUPS` order); then `CAPS`
+traces per exact prompt in each group, drawn at random (`SEED` 0): 2 in the four long-trace groups (Cascade-1 Stage-1
+and Stage-2, CP-v2 Python and C++), every trace in Exercism and KodCode, whose prompts hold about one trace each
+(76,375 train rows of 75,341 prompts and 250,649 of 250,646). The long-trace cap is the largest in {2, 1} at which 2
+epochs of the packed train rows stay within 12.5B tokens: at 2, 2 × 172,726 rows of 32,768 tokens are 11.32B
+[arithmetic]; the 12.5B budget is a time limit (≈12.1 h at 287,476 tok/s, `docs/training.md` §7 [arithmetic]), not a
+measured optimum.
 
 **LiveCodeBench overlap.** LiveCodeBench is not among the rule's tasks. Against its 454 v6-window problems
 (`docs/post-training.md` §5), on the corpus built before the KodCode group and the caps of 2, the rule's hits on the
@@ -618,7 +623,8 @@ Nemotron-Cascade statement was in train, and 240 of the 2,074 val problems (26.1
 300 normalized characters with a train problem, near duplicates.
 
 **Statistics** (`stats.json`; prompts distinct within a group, "All" across groups; tokens include both BOS, the loss
-tokens are each response and its closing BOS) [measured]:
+tokens are each response and its closing BOS; the built corpus's `dropped` also holds `malformed` and `placeholder`,
+0 in every group, counts the code no longer keeps) [measured]:
 
 | Group | Rows read | Line endings normalized | No reasoning or answer | Over 32,768 | 10-gram | Duplicate | Over the cap | Train rows (prompts) | Val rows (prompts) | Train tokens (loss) |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -628,7 +634,7 @@ tokens are each response and its closing BOS) [measured]:
 | CP-v2 C++ | 332,186 | 21 | 0 | 175,514 | 403 | 0 | 107,773 | 48,017 (24,500) | 479 (246) | 0.56B (0.53B) |
 | CP-v2 Exercism | 79,244 | 0 | 336: 170 without prose, 141 without a file, 25 under 20 tokens | 0 | 1,736 | 0 | — (no cap) | 76,375 (75,341) | 797 (789) | 0.083B (0.044B) |
 | KodCode | 268,211 | 26 | 0 | 0 | 15,015 | 0 | — (no cap) | 250,649 (250,646) | 2,547 (2,547) | 1.19B (1.12B) |
-| All | 3,707,624 | 17,020 | 336 | 359,000 | 164,222 | 22,547 | 2,355,557 | 797,950 (539,127; 455,953 problems) | 8,013 (5,443; 4,606 problems) | 5.65B (5.37B) |
+| All | 3,707,624 | 17,020 | 336 | 358,999 | 164,222 | 22,547 | 2,355,557 | 797,950 (539,127; 455,953 problems) | 8,013 (5,443; 4,606 problems) | 5.65B (5.37B) |
 
 **Composition** (train split): reasoning per document p10/p50/p90/max 389 / 4,022 / 14,930 / 32,273 tokens
 (`stats.json` `reasoning_p10_p50_p90_max`); 208,797 documents with more than 8,192 reasoning tokens against 589,153
