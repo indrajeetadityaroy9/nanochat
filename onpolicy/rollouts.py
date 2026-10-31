@@ -15,7 +15,7 @@ generated ids included) and meta.json (settings, the val split's held-out counts
 beside a training job its tokens/s during generation, eval/official_termination.py `job_cost`).
 VLLM_GPU_MEMORY_UTILIZATION applies through eval/official_site/sitecustomize.py.
 
-    python -m onpolicy.rollouts <model dir> <out dir> [--split train] [--prompts N] [--samples 0.6:4,1.0:4]
+    python -m onpolicy.rollouts <model dir> <out dir> [--split train] [--prompts N] [--samples 0.6:4]
         [--seed S] [--max-tokens 16384] [<metrics.jsonl> <since, unix seconds>]
 """
 import argparse
@@ -35,6 +35,9 @@ TOP_P = 0.95  # the reasoning protocol's (eval/official_termination.py SAMPLING)
 MAX_TOKENS = 16384
 # `cycle`: periods tried, and the tail that must repeat exactly at the period
 MAX_PERIOD, CYCLE_TAIL = 2048, 1024
+# Samples per prompt: 4 at the evaluation protocol's T 0.6, where the loops are (in the step-3000 smoke, 47 of 160
+# responses looped at T 0.6 against 7 of 160 at T 1.0, docs/post-training.md §8.2)
+SAMPLES = "0.6:4"
 
 
 def cycle(ids: list[int]) -> tuple[int, int] | None:
@@ -114,7 +117,7 @@ if __name__ == "__main__":
     parser.add_argument("since", type=float, nargs="?")
     parser.add_argument("--split", default="train")
     parser.add_argument("--prompts", type=int, default=500)
-    parser.add_argument("--samples", type=parse_samples, default=parse_samples("0.6:4,1.0:4"))
+    parser.add_argument("--samples", type=parse_samples, default=parse_samples(SAMPLES))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
     args = parser.parse_args()

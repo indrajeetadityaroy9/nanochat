@@ -170,8 +170,8 @@ Off-policy distillation is SFT on a teacher's text, so it needs no shared vocabu
   Table 22). Length-normalized DPO, β = 5, lr 8e-8, 150K pairs, one epoch (Table 48).
 - **Rollout pairs**: DPO on Phi-4-mini-reasoning's rejected R1 rollouts took AIME 43.3 → 50.0 (arXiv 2504.21233
   Table 3); Seed-Coder samples about 20K pairs on-policy and labels them by sandbox tests (arXiv 2506.03524 §3.1).
-- **Here** [inference]: no DPO on teacher pairs; DPO on the model's own loop pairs is the last step of the planned
-  on-policy stage (§8).
+- **Here** [inference]: no DPO on teacher pairs; a token-level preference (FTPO) at the model's own loops is the
+  planned on-policy stage (§8).
 
 ### 2.5 On-policy distillation
 
@@ -299,7 +299,7 @@ unmeasured. Each choice is [inference] from the cited evidence.
 |---|---|---|---|---|---|
 | 0. Base | — | — | — | — | the base run's last checkpoint (`base_step` 69,874; `docs/results.md` §1, §4) |
 | 1. SFT (§4) | the base | the SFT corpus's reasoning traces (`docs/corpus.md` §10) | next-token loss on the response | rows ≤ 32,768 tokens, packed | reasoning pass@1 on HumanEval+ and MBPP+ above the base's greedy pass@1 (§5) |
-| 2. On-policy stage, planned (§8) | the SFT model | its own rollouts on problems with tests | RSFT mini-epoch on its shortest verified successes, then DPO on its own loop pairs | as the SFT | loop rate down and closure up on the probe; pass@1 not down beyond noise (`docs/evaluation.md` §10) |
+| 2. On-policy stage, planned (§8) | the SFT model | its own rollouts on problems with tests, at T 0.6 | FTPO at the first repeat of each of its own loops | as the SFT | loop rate down and closure up on the probe; pass@1 not down beyond noise (`docs/evaluation.md` §10) |
 | Code RL, deferred (§6) | the SFT model | problems with tests, 47,468 before filtering | Nemotron-Cascade's GRPO, one update per batch, sequence-level truncated importance weights; FP16 | responses ≤ 16,384, then ≤ 28,672 | pass@1 up, pass@20 not down beyond its error bar (§5) |
 
 ## 3. Format
@@ -437,12 +437,13 @@ unmeasured. Each choice is [inference] from the cited evidence.
   what the probe measures [inference].
 - **Secondary settings, disclosed**: forced closure (s1's budget forcing, arXiv 2501.19393 §3.1: `</think>` appended
   at B reasoning tokens) and a sampling temperature above the protocol's 0.6 change pass@1. s1 reports budget forcing
-  in its headline numbers (arXiv 2501.19393 §3.1, §4); a forced stop recovered a correct answer in 0.364 of a
-  post-trained Qwen3-0.6B's unfinished samples on problems it had solved 3–4 times in 4 and 0.049 on unsolved ones
-  (arXiv 2609.37326 §5, App. E Table 18). Here B and the temperature are chosen on the probe's held-out SFT prompts
-  only, fixed before a benchmark is read, and reported beside the protocol's natural number with the forced fraction;
-  the step-2000 measurements they are chosen from are `docs/results.md` §6.4 (T 1.0 closes 59 of 64 HumanEval+
-  responses against 42 at T 0.6; forcing at 4K recovers 7 plus passes of 22 unclosed) [measured].
+  in its headline numbers (arXiv 2501.19393 §3.1, §4); a forced stop recovered a correct answer in 0.364 of the
+  unfinished samples of the officially post-trained Qwen3-0.6B after 20 thinking-mode on-policy distillation steps
+  on problems it had solved 3–4 times in 4, and 0.049 on unsolved ones (arXiv 2609.37326 §5, App. E Table 18). Here
+  B and the temperature are chosen on the probe's held-out SFT prompts only, fixed before a benchmark is read, and
+  reported beside the protocol's natural number with the forced fraction; the step-2000 measurements they are chosen
+  from are `docs/results.md` §6.4 (T 1.0 closes 59 of 64 HumanEval+ responses against 42 at T 0.6; forcing at 4K
+  recovers 7 plus passes of 22 unclosed) [measured].
 
 ## 6. Code RL, deferred
 
@@ -504,43 +505,82 @@ unmeasured. Each choice is [inference] from the cited evidence.
 |---|---|
 | A non-thinking mode | the format is thinking-mode only (§3) |
 | LoRA, QLoRA | at hidden size 768 LoRA saves compute only below rank 128–205, where it lags full fine-tuning on code; QLoRA saves memory the run does not need (§2.2) |
-| DPO on teacher pairs (§2.4) | Nemotron-Cascade goes from SFT to RL without it; DPO on the model's own loop pairs is §8 |
+| DPO on teacher pairs (§2.4) | Nemotron-Cascade goes from SFT to RL without it; preference at the model's own loops (FTPO) is §8 |
 | Math RL | the SFT data holds no math; Nemotron-Cascade's math RL moved LiveCodeBench v6 by −0.3 to +2.2 (arXiv 2512.13607 §4.5) |
 | RLHF, instruction-following, multi-domain and long-context RL | chat, judges or tools the model is not trained for; reward models of 72B–235B (arXiv 2512.13607 §4.2–§4.4; arXiv 2603.19220 §4.2–§4.6) |
 | Software-engineering RL | a 72B or 120B judge, or agentic execution over 256K tokens (arXiv 2512.13607 §4.7; arXiv 2603.19220 §4.8) |
 | On-policy distillation (§2.5) | one RL domain leaves no specialists to merge; Nemotron-Cascade 2's teachers are its own per-domain checkpoints (arXiv 2603.19220 §4.4) |
 
-## 8. On-policy loop removal: RSFT, then DPO
+## 8. On-policy loop removal: FTPO at the loop's first repeat
 
 **Why.** At step 2,000 of the SFT, 55 of 128 probe responses never close and 53 of them end in a verbatim loop;
 closure fell from step 1,000 (89 → 73 of 128, McNemar p = 0.011) while the held-out loss fell; the loops are the
 model's, not the serving path's; the SFT data hold almost none (8 of 797,950 documents) (`docs/results.md` §6)
-[measured]. The literature attributes such loops to learning errors, not to loops in the data:
+[measured]. What the literature reports on where such loops come from and what removes them:
 
+- **A tiny share of looping data can seed loops**: in a synthetic graph task, 0.001 of deterministically looping
+  training traces drove the probability of the looping action toward 1 once a loop began; "a tiny fraction of looping
+  traces during training can produce such a buildup", and repetition seen in pretraining is named as one possible
+  source of the bias (arXiv 2512.12895 §5). The SFT data's share is 1.0e-5 (`docs/results.md` §6) [measured]; whether
+  the data, the base model's pretraining or learning errors seed this model's loops is not measured [inference].
 - **Small students loop more than their teachers**: R1-Distill-Qwen-1.5B loops on 76% of AIME samples at T 0 and
   the 32B on 37%; OpenThinker3-1.5B on 30% against 4% for its teacher, 51% on hard and 13% on easy problems (arXiv
   2512.12895 §2). Its causes: risk aversion when the progress step is hard to learn, temporally correlated errors,
   and confidence that grows as text repeats (§3–§5). Repetition is self-reinforcing: "the more times a sentence is
   repeated in the context, the higher the probability of continuing to generate that sentence" (arXiv 2206.02369
   abstract).
-- **Small students do not learn to stop off the teacher's trajectory**: on-policy-distilled Qwen3-0.6B leaves 0.627
-  of its samples at a 30,720-token cap; the teacher stops at the end of a finished derivation, which the student
-  rarely reaches (arXiv 2609.37326 §4, Table 2). Imitating more teacher traces cannot show the student its own loop
-  states [inference].
-- **Training against the model's own loops is what removed them**: DPO on self-mined loop pairs took Qwen3-8B
-  agents from 57.3% to 6.1% loops, against 37.7% for SFT on the loop-breaking action alone (arXiv 2610.19376 §5.2,
-  §5.3); loops fell 3.5× at 14B and 3.0× at 32B, and levelled off after 8K pairs (§5.2, App. G.3). Token-level
-  preference at the loop's first token (Antidoom, FTPO of arXiv 2510.15061) took LFM2.5-2.6B from 10.2% to 1.4% and
-  Qwen3.5-4B from 22.9% to 1% [blog: liquid.ai/blog/antidoom; not peer-reviewed]. No result below 2.6B is published.
+- **Small students do not learn to stop off the teacher's trajectory**: a Qwen3-0.6B after thinking-mode on-policy
+  distillation leaves 0.627 of its samples at a 30,720-token cap (arXiv 2609.37326 §5, Table 2); "the teacher stops
+  at the end of a finished derivation, which the small student rarely reaches" (§6). Imitating more teacher traces
+  cannot show the student its own loop states [inference].
+- **Training against the model's own loops removed them**: DeLoop mines pairs from the tool-call loops of Qwen3-8B
+  agents: rejected the looping action a_t, chosen the agent's first loop-breaking action later in the same rollout,
+  both conditioned on the same history h_<t (arXiv 2610.19376 §4.1); the miner reads no reward, and 82.6% of its
+  8,000 pairs come from failed runs (App. G.1). DPO with LoRA (r = 32, sequences ≤ 4,500 tokens, App. G.1) took loops
+  from 57.3% to 6.1% with task success 25.1% → 25.9%, against 37.7% loops for SFT on the loop-breaking action alone
+  (§5.2, App. G.6 Table 15); loops fell 3.5× at 14B and 3.0× at 32B, and levelled off after 8K pairs (§5.2, App. G.3).
+  Every model is 8B or larger.
+- **Both sides of a pair carry the signal**: with the same prompts, rejected actions and recipe, a chosen action drawn
+  at random from the same history left 41.9% loops and the chosen action of another pair 36.1%, against 5.7% with the
+  loop-breaking action (App. I.4 Table 28). Pairs that do not contrast a loop with its own way out stay in that range:
+  gold-label DPO (looping pairs ranked by outcome) 22.3%, outcome DPO (rejected a random step of a failed run) 34.7%
+  (Table 1).
+- **This model does not leave its own loops**: resampling continuations from the onset of a loop's cycle (the step-3000
+  export, 40 KodCode train prompts, 35 loops × 4 attempts at T 1.0, up to the loop's remaining budget) closed the
+  reasoning in 14 of 140 attempts; 120 of the other 126 were stopped as loops, 66% of them back in the same cycle
+  [measured]. Counting any departure from the cycle within the rejected side's length as a recovery (DeLoop's "first
+  loop-breaking action", which a stricter rule did not improve, App. G.11) accepted 59 of 140, but about half of
+  those copy the cycle's first copy and diverge only at its re-entry, into a paraphrase of the same loop: after the
+  divergence 0.94–1.00 of their tokens lie in a 32-token window already in the reasoning, against 0.00–0.48 for those
+  that write new code or a new test [measured]. DeLoop's agents leave loops within the rollout; this model's loops
+  are near-deterministic (`docs/results.md` §6), so a sequence-level chosen side would mostly be a near-loop
+  [inference]. Self-reinforcement explains it: "the more times a sentence is repeated in the context, the higher the
+  probability of continuing to generate that sentence", measured on a 750M-parameter Transformer trained on
+  Wikitext-103 (arXiv 2206.02369 §2.2, §4.1).
+- **Token-level preference at the loop's first repeat** (Antidoom [blog: liquid.ai/blog/antidoom; not
+  peer-reviewed]; code github.com/Liquid4All/antidoom) applies FTPO, a final-token preference loss introduced
+  against overused phrases ("slop") of 12B–70B creative-writing models (arXiv 2510.15061 §5, §6.1), to doom loops:
+  the rejected token is the first token of the repeat, the chosen tokens the model's own plausible alternatives at
+  that position. It took LFM2.5-2.6B from 10.2% to 1.4% and Qwen3.5-4B from 22.9% to 1%, with LoRA of rank 128–256
+  and early stopping at a chosen_win of 0.35; "Training longer tended to degrade the model, often creating new
+  doom-looping issues" [blog]. No result below 2.6B is published.
 - **Why not RL for the loops**: on the same 8,000 mined pairs, DPO left Qwen3-8B looping in 6.1% of runs, GRPO with
   the loop flag as a per-step penalty 15.0%, and chosen-only SFT 37.7%, from 57.3% (arXiv 2610.19376 §5.3, Table 2);
   GRPO with one reward per episode left 47.3% (App. G.10, Table 19). Every objective DeLoop compares cut loops to
   15.0% or below, DPO lowest and with the highest task success (§5.3).
-- **Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on KodCode train prompts (§8.1–§8.2), verified by
-  KodCode's tests (§8.3); RSFT, one epoch on each prompt's shortest terminating success; then DPO of those successes
-  against the model's loops cut shortly after their onset (§8.4–§8.5); the termination probe and KodCode val pass@1
-  before and after (§8.6). DPO comes last: SFT after DPO reopened loops from 6.5% to 29.7% (arXiv 2610.19376
-  App. G.12).
+
+What each source contributes:
+
+| Source | Taken | Not taken |
+|---|---|---|
+| DeLoop (arXiv 2610.19376) | self-mined rows from the model's own failed rollouts, no task label (§4.1, App. G.1); contrast at the loop rather than imitation of a way out (SFT on the chosen action 37.7% loops against 6.1%, Table 15); preference training last (App. G.12 Table 20); no likelihood anchor (6.1% → 27.0% loops with one, App. G.13) | its sequence-level chosen side: this model's own continuations re-enter the loop (above) |
+| Antidoom / FTPO (blog; arXiv 2510.15061 §5, App. J) | the unit: one rejected token at the first repeat, the prefix before it; chosen tokens from the model's own next-token distribution; logit tethers to the reference; early stopping on chosen_win; rebalancing of frequent rejected tokens (§8.4) | LoRA (full parameters here, §8.5) |
+| DITTO (arXiv 2206.02369 §2.2) | the mechanism: sentence-level repetition is self-reinforcing, so the loop is cut at its first repeat, before it reinforces | its pseudo-repetition training data |
+| Why reasoning models loop (arXiv 2512.12895 §2, §3) | loops as learning errors that temperature hides without fixing ("temperature reduces looping, but it does not remove the underlying learning errors", §3), so loops are mined at the evaluation temperature, T 0.6 (§8.2) | — |
+
+**Pipeline** (`scripts/onpolicy.sh`): rollouts of the SFT model on KodCode train prompts at T 0.6 (§8.1–§8.2),
+verified by KodCode's tests (§8.3) for the outcome statistics; one FTPO row per loop at its first repeat (§8.4); FTPO
+from the SFT model (§8.5); the termination probe and KodCode val pass@1 before and after (§8.6).
 
 ### 8.1 Prompts
 
@@ -568,10 +608,11 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
   (`eval/official_termination.py` `generate`: 2,048-token rounds with prefix caching; a response with no `</think>`
   whose last 4,096 tokens have repetition ≥ 0.99 is stopped as a loop after its round), top-p 0.95, at most 16,384
   new tokens (the longest closed reasoning in the step-2000 probe was 11,757), request k seeded base + k.
-- **Temperatures**: 4 samples at T 0.6 and 4 at T 1.0 per prompt. At step 2000, on the probe's 128 prompts with a
-  16K cap, T 0.6 left 54 responses in loops and T 1.0 7, with closure 70 → 103 of 128 and HumanEval+ pass not lower
-  (`termination-budget-2000.json`) [measured]: T 0.6, the evaluation protocol's, yields the rejected loops; T 1.0
-  more successes to choose from. Each response keeps its temperature.
+- **Temperature** (`SAMPLES`): 4 samples per prompt at T 0.6, the evaluation protocol's, where the loops are: at step
+  2000, on the probe's 128 prompts with a 16K cap, T 0.6 left 54 responses in loops and T 1.0 7
+  (`termination-budget-2000.json`); on the step-3000 export, 40 KodCode train prompts × 4, 47 of 160 responses looped
+  at T 0.6 and 7 of 160 at T 1.0, with pass@1 0.400 and 0.419 [measured]. Temperature hides loops without removing
+  their cause (arXiv 2512.12895 §3), so they are mined where the model is evaluated.
 - **Loops**: a never-closed response with repetition ≥ 0.99 is a loop; when its last 1,024 tokens repeat exactly at
   a period p ≤ 2,048 (`cycle`), its onset is the first index from which every token equals the one p later.
 
@@ -593,18 +634,30 @@ model's, not the serving path's; the SFT data hold almost none (8 of 797,950 doc
 
 ### 8.4 Selection
 
-- **RSFT set** (`onpolicy/selection.py`): per prompt with a success, its shortest success (fewest tokens), through
-  its closing BOS: the model's own most concise terminating correct answer.
-- **Pairs**: per prompt with a success and a loop with an exact cycle, up to 2 pairs, one per loop: chosen the
-  prompt's shortest success, rejected the loop through its first repeat, `ids[:onset + p + min(p, 256)]`, with no
-  BOS. The cut follows the loop literature's preference point: the looping token itself (Antidoom, FTPO on the first
-  token of the repeat [blog]) and the first repeated action (DeLoop, arXiv 2610.19376 §4.1); one period puts the
-  re-entry into the cycle on the rejected side while most of a 30K-token loop is left out, and no BOS keeps the
-  gradient off stopping. A prompt never solved gives no pair: preference and RL data are prompts the model solves
-  sometimes (arXiv 2606.04466 §3.1 keeps non-all-zero problems for RL).
+- **FTPO rows** (`onpolicy/selection.py` `ftpo_rows`, `ftpo.jsonl`): one per loop with an exact cycle (onset o,
+  period p), at the first token of the cycle's first repeat, o + p: `prefix_ids` the prompt's ids and the response's
+  `ids[:o + p]` (all inside the reasoning: loops never close), `rejected_id` = `ids[o + p]` = `ids[o]`. This is
+  Antidoom's target: its seed index slid left while tokens equal the ones a period later, plus one period
+  (github.com/Liquid4All/antidoom `src/antidoom/generate.py:246-248`); Antidoom then also steps over up to 4
+  whitespace- or punctuation-only tokens, and past a sentence end before a restart word ("Wait", "So", …,
+  `generate.py:252-287`), which is not done here: in the step-3000 smoke, 21 of 50 rejected tokens are "." or ","
+  [measured]. The chosen tokens come from the reference model at that position at training time (§8.5). No success
+  is required: 18 of the smoke's 35 rows are from prompts never solved [measured], as DeLoop's miner reads no reward.
+  Rows with an identical prefix are kept once; rows whose prefix and rejected token exceed `--max-length` are
+  dropped.
+- **Rebalancing** (`rebalance`, `ratios`): Antidoom's rejected-token normalisation (`src/antidoom/ftpo_data.py:105-114`,
+  `:141-214`; one source): a rejected token's target share is its count weighted by (median / count)^0.3 when above
+  the median count (strength 0.3, `configs/default.yaml:91`), rows are drawn greedily from the token furthest below
+  its share up to round(share × target), then without that cap; target = min(12,000, 70% of the rows)
+  (`default.yaml:87`; the README's "set max_train_examples to at most 70% of the actual number of preference rows").
+  The smoke's 50 rows (no duplicates) give 35; "." falls from 11 to 5, "," from 10 to 5 [measured]. At 8,000 prompts
+  and the smoke's 43 exact-cycle loops per 160 T 0.6 responses, about 8,600 rows before and 6,000 after rebalancing
+  [estimate], against Antidoom's 15K–20K generated and 12K trained (README) and DeLoop's level-off at 8K pairs.
 - **Statistics** (`selection.json`): per temperature and pooled, the outcomes, pass@1 and pass@n (unbiased, arXiv
   2107.03374), loop rates per response and per prompt, the share of prompts solved and with mixed outcomes (a success
-  and a loop), success, onset, period and rejected lengths, the pairs' temperature combinations.
+  and a loop), success, onset and period lengths; the rows: loops with an exact cycle, duplicates, rows before and
+  after rebalancing, the 20 most frequent rejected tokens before and after, rows of prompts never solved, and
+  position, onset, period and prefix lengths.
 
 ### 8.5 Training
 
@@ -737,7 +790,6 @@ default (`PROMPTS`), against DeLoop's level-off at 8K pairs.
 | 2604.00626 | A Survey of On-Policy Distillation for Large Language Models |
 | 2604.02721 | GrandCode: Achieving Grandmaster Level in Competitive Programming via Agentic Reinforcement Learning |
 | 2604.13010 | Lightning OPD: Efficient Post-Training for Large Reasoning Models with Offline On-Policy Distillation |
-| 2606.04466 | Learning What to Learn: Stage-Specific Data Sets for SFT-then-RL in Small Language Model Reasoning |
 | 2607.15161 | On-Policy Delta Distillation |
 | 2607.24653 | Kimi K3: Open Frontier Intelligence |
 | 2608.24135 | Robust Code RL via Faulty-Code-Driven Test case Synthesis and Dense Reward Shaping |
