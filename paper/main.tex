@@ -768,9 +768,10 @@ Table~\ref{tab:train} lists the settings.
   \centering
   \includegraphics[width=\textwidth]{figures/fig_stability}
   \caption{Training stability. (a) Gradient norm of every step (gray) and its median over 250 steps (black), with the
-  clipping threshold. (b) Largest and root-mean-square log-sum-exp of the soft-capped output logits of every step
-  (the root mean square over tokens, averaged over 250 steps), with the bound $c + \ln V$ that soft-capping imposes.
-  (c) Largest QK-norm scale of each layer. The shaded region is the 32,768-token repository-level stage.}
+  clipping threshold; steps 3 to 41, the first 0.06B tokens, are not resolved at this scale. (b) Largest and
+  root-mean-square log-sum-exp of the soft-capped output logits of every step (the root mean square over tokens,
+  averaged over 250 steps), with the bound $c + \ln V$ that soft-capping imposes. (c) Largest QK-norm scale of each
+  layer. The shaded region is the 32,768-token repository-level stage.}
   \label{fig:stability}
 \end{figure*}
 
@@ -841,6 +842,7 @@ than at $\times 2$, so the optimum is flat between $\times 2$ and $\times 4$.
 \end{figure}
 
 \subsection{Weight decay}
+\label{sec:weight-decay}
 
 \paragraph{Weight decay.} The weight decay is $\lambda = 0.153$, decoupled from the gradient
 update~\cite{loshchilov2019adamw} and set from the training length.
@@ -861,7 +863,7 @@ gives $\lambda = 0.153$ at the peak learning rate.
 \subsection{Learning-rate schedule and gradient clipping}
 
 \paragraph{Schedule.} The learning rate rises linearly over the first 40 steps and then decays linearly to zero at the
-last step.
+last step (Figure~\ref{fig:loss}, dashed line).
 
 \paragraph{Why this schedule.} A linear warm-up over $2/(1 - \beta_2)$ steps, 40 for $\beta_2 = 0.95$, is an untuned
 warm-up rule for Adam that trains about as well as RAdam~\cite{ma2021warmup}. Linear decay to zero outperformed decay
@@ -900,6 +902,7 @@ the last 3,811 steps at 32,768 (Section~\ref{sec:data-pretrain}). At the switch 
 change; the batch size in tokens, the optimizer state, the learning-rate schedule and the RoPE base stay the same.
 
 \subsection{Initialization and precision}
+\label{sec:init}
 
 \paragraph{Initialization.} The query, key and value matrices, the MLP input matrix, the token embedding and the
 value-embedding tables are drawn uniformly with standard deviation $d^{-1/2}$. The attention output matrix, the MLP
@@ -918,21 +921,47 @@ statistics and the loss are computed in FP32.
 
 \subsection{The training run}
 
+This subsection reports how each choice above shows in the training dynamics: the loss and the learning-rate schedule
+in Figure~\ref{fig:loss}, the gradient norm and clipping in Figure~\ref{fig:stability}a, the output logits under
+soft-capping in Figure~\ref{fig:stability}b, the QK-norm scales in Figure~\ref{fig:stability}c and the residual
+scalars in Figure~\ref{fig:residual}.
+
 \paragraph{Run.} The run finished in one attempt, without restarts or interventions, in 76.3 hours of training steps.
 The median throughput from step 100 was 381,146 tokens per second at the 8,192-token context and 299,281 at 32,768,
-an MFU of 0.508 and 0.515 against the dense BF16 peak of 989 TFLOP/s.
+an MFU of 0.508 and 0.515 against the dense BF16 peak of 989 TFLOP/s. No loss or gradient was non-finite.
 
-\paragraph{Loss.} The first step's loss was 10.397, $\ln V$, as the zero-initialized output layer implies. The loss
-fell to 0.906 at the end of the file-level stage and 0.869 at the end of training, as means over each stage's last 50
-steps (Figure~\ref{fig:loss}). No document is read twice, so each step's loss is measured on documents the model has
-not yet trained on; exact duplicates were removed, but near-duplicates and the LLM-written exercises derived from
-corpus files were not, so this loss approximates a held-out loss.
+\paragraph{Loss and schedule.} The first step's loss was 10.397, $\ln V$, as the zero-initialized output layer implies
+(Section~\ref{sec:init}). The loss fell fast in the first 10B tokens, to 1.10, and then steadily while the learning
+rate decayed: 1.00 at 50B tokens and 0.906 at the end of the file-level stage (Figure~\ref{fig:loss}; means over 250
+steps, and over the last 50 steps of a stage). The repository-level stage is measured on different data; its loss
+ended at 0.869. No document is read twice, so each step's loss is measured on documents the model has not yet trained
+on; exact duplicates were removed, but near-duplicates and the LLM-written exercises derived from corpus files were
+not, so this loss approximates a held-out loss.
 
-\paragraph{Stability.} No loss or gradient was non-finite (Figure~\ref{fig:stability}). After step 41, the gradient
-norm exceeded the clipping threshold in only 3 steps (largest 3.93, step 66,817). In 17 steps the loss exceeded the
-mean of the previous 200 steps by more than 4 standard deviations, at most by 6.2 (step 66,109, just after the switch
-to the 32,768-token context). The largest log-sum-exp of the soft-capped logits was 18.9, below its bound
-$15 + \ln V = 25.4$, and the largest QK-norm scale grew from 1 to 4.15.
+\paragraph{Gradient norm and clipping.} The gradient norm exceeded the clipping threshold in steps 3 to 41, during and
+just after the warm-up, and afterwards in only three steps, at 87.7B, 98.1B and 98.5B tokens (largest 3.93;
+Figure~\ref{fig:stability}a). Its median over 250 steps fell to 0.12 at 1.3B tokens and then rose to 0.43 at 83B
+tokens, while the learning rate decayed to about 20\% of its peak. Such a rise is explained by the interaction of
+weight decay, normalization layers and the learning-rate schedule~\cite{defazio2025gradients}; unlike in that
+analysis, the median then fell to 0.37 by the end of the file-level stage. At the switch to 32,768-token sequences it
+rose to 0.42, and it ended at 0.32. In 17 steps the loss exceeded the mean of the previous 200 steps by more than 4
+standard deviations, at most by 6.2 (step 66,109, just after the switch).
+
+\paragraph{Output logits.} The output logits did not drift, the outcome that soft-capping and the weight-decayed
+output layer are meant to ensure (Section~\ref{sec:model}). After the first 5B tokens, the root mean square of the
+log-sum-exp over tokens stayed between 12.1 and 12.9, and its largest value per step between 17.7 and 18.9, below the
+bound $15 + \ln V = 25.4$ of soft-capping (Figure~\ref{fig:stability}b).
+
+\paragraph{QK-norm scales.} The learned QK-norm scales, which are not weight-decayed (Section~\ref{sec:weight-decay})
+and bound the attention logits, grew in the first half of training and then levelled off
+(Figure~\ref{fig:stability}c): each layer's largest scale reached 90\% of its final value after a median of 44B
+tokens. The largest final scale is 4.15, on the keys of the first layer.
+
+\paragraph{Residual scalars.} The residual scalars, also not weight-decayed, start as in a standard pre-norm
+transformer (Section~\ref{sec:init}) and move away from these values within the first 10B tokens
+(Figure~\ref{fig:residual}). By 10B tokens, $\lambda_r$ ranged from 0.13 to 1.99 and $\lambda_0$ in layers 3 to 24 from
+$-0.98$ to 0.65; $\lambda_0$ in these layers then shrank to between $-0.03$ and 0.07 at the end of training, while
+$\lambda_r$ widened to 0.16--2.60.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
