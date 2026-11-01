@@ -77,21 +77,30 @@ Greedy pass@1 (%), each paper's own evaluation; training tokens from the same pa
 |Qwen2.5-0.5B|0.49B|—|28.1|—|—|—|29.6|arXiv 2509.24945 Table 6|
 |MobileLLM-R1-360M base|0.36B|4.2T|32.9|—|—|—|20.8|arXiv 2509.24945 Table 6|
 |SmolLM2-360M|0.36B|—|0.0|—|—|—|19.4|arXiv 2509.24945 Table 6|
+|Qwen3-0.6B-Base|0.60B|36T (as stated in arXiv 2509.24945 §4)|30.5|—|—|—|39.0|arXiv 2509.24945 Table 6|
+|MobileLLM-R1-950M base|0.95B|4.2T|46.3|—|—|—|39.2|arXiv 2509.24945 Table 6|
 |StarCoderBase-3B|3B|—|21.3|17.1|42.6|35.8|—|arXiv 2402.19173 Table 9|
 |DeepSeek-Coder-1.3B|1.3B|2T|34.8|26.8|55.6|46.9|46.2|arXiv 2409.12186 §6.1|
 |DeepSeek-Coder-1.3B|1.3B|2T|28.7|23.8|55.4|46.9|—|arXiv 2402.19173 Table 9|
 |StarCoder2-3B|3B|3.1T|31.7|27.4|57.4|47.4|—|arXiv 2402.19173 Table 9|
+|StarCoder2-3B|3B|3.1T|31.7|27.4|60.2|49.1|47.4|arXiv 2409.12186 §6.1|
 
-DeepSeek-Coder's token count is arXiv 2401.14196's abstract. The same model's HumanEval differs by 6.1 points between
-the two papers that report it, so a single-benchmark comparison across papers carries several points of protocol
-variance on top of this model's own ±6.8-point interval on HumanEval (§1).
+DeepSeek-Coder's token count is arXiv 2401.14196's abstract. The same model differs between the papers that report it:
+DeepSeek-Coder-1.3B's HumanEval by 6.1 points and HumanEval+ by 3.0, StarCoder2-3B's MBPP by 2.8 and MBPP+ by 1.7
+(arXiv 2409.12186 §6.1 Table 5 against arXiv 2402.19173 Table 9). A comparison across papers therefore supports
+ranges, not rankings: a difference smaller than these carries no conclusion, on top of this model's own ±6.8-point
+interval on HumanEval (§1).
 
-- **Token efficiency.** HumanEval and HumanEval+ equal the 0.5B models' within the interval (26.8 / 22.0 against
-  Qwen2.5-Coder-0.5B's 28.0 / 23.8) at 1/53 of Qwen2.5-Coder's continued-pretraining tokens and 1/19 of
-  DeepSeek-Coder's [arithmetic]; all four EvalPlus scores exceed StarCoderBase-3B's.
-- **MBPP lags.** MBPP and MBPP+ are 8.5 and 10.6 points below Qwen2.5-Coder-0.5B, where HumanEval is level. MBPP
-  states each task in prose; the corpus is code-heavy, and the model's held-out text is its weakest domain (0.84 bits
-  per byte at 8K against 0.29 for code, §4) [measured; the cause: inference].
+- **Within the range on HumanEval.** HumanEval 26.8 and HumanEval+ 22.0 lie within the published base models'
+  21.3–46.3 and 17.1–27.4 (SmolLM2-360M's 0.0 left out of the range: a failed evaluation rather than a score
+  [inference]), 1.2 and 1.8 points below Qwen2.5-Coder-0.5B, less than the cross-paper differences above; the models
+  with reported tokens trained on 2T–36T, 19–350 times this model's 0.103T [arithmetic]. Only MobileLLM-R1-950M base is
+  clearly ahead (46.3). The four EvalPlus differences from StarCoderBase-3B (+5.5, +4.9, +1.8, +0.7) are within the
+  cross-paper differences, so no ranking is claimed.
+- **MBPP lags.** MBPP and MBPP+ are 8.5–15.8 and 10.4–12.6 points below Qwen2.5-Coder-0.5B, DeepSeek-Coder-1.3B and
+  StarCoder2-3B, beyond the 2.8 and 1.7 points by which two papers differ on the same model. MBPP states each task in
+  prose; the corpus is code-heavy, and the model's held-out text is its weakest domain (0.84 bits per byte at 8K
+  against 0.29 for code, §4) [measured; the cause: inference].
 - **C++ follows Python.** HumanEval-C++ is 0.81 of HumanEval and MBPP-C++ 0.83 of MBPP (greedy) [arithmetic].
 
 ## 3. Failure analysis

@@ -79,8 +79,8 @@ The paper makes three contributions:
   8,192 tokens, a repository-level stage at 32,768 tokens and fused GPU kernels.
   \item Post-training on the same GPU: SFT on reasoning traces, which teaches the model to reason before it answers,
   followed by RL with rewards from unit tests.
-  \item An evaluation of every stage with each benchmark's official tool, in Python and C++, against the published
-  scores of sub-billion-parameter models, with 95\% confidence intervals.
+  \item An evaluation of every stage with each benchmark's official tool, in Python and C++, with 95\% confidence
+  intervals, and a comparison with the published scores of base models of 0.36B to 3B parameters.
 \end{itemize}
 
 \section{Data}
@@ -1186,6 +1186,7 @@ limit. Stopping a loop saves generation time; it assumes that a looping response
 that stops before EvalPlus's 768-token limit.
 
 \subsection{Pretrained model}
+\label{sec:results-base}
 
 \begin{table}
   \caption{The pretrained model (step 69,874) on code benchmarks: pass@1 (\%) with its 95\% interval. Greedy unless
@@ -1216,6 +1217,37 @@ that stops before EvalPlus's 768-token limit.
     \bottomrule
   \end{tabular}
 \end{table}
+
+\begin{table*}
+  \caption{The pretrained model and published base models: greedy pass@1 (\%). Each published score comes from the
+  paper in the last column, with that paper's own evaluation, not the evaluation of this work; DeepSeek-Coder-1.3B and
+  StarCoder2-3B appear once per paper to show how much two evaluations of the same model differ. Training tokens as
+  reported by each model's developers~\cite{guo2024deepseekcoder,hui2024qwen25coder,lozhkov2024starcoder2,
+  zhao2025mobilellmr1}; Qwen2.5-Coder-0.5B continues the pretraining of Qwen2.5, and Qwen3-0.6B's tokens are as
+  reported by MobileLLM-R1. MBPP 3-shot of the pretrained model uses LF prompts (Section~\ref{sec:results-base}).
+  --: not reported.}
+  \label{tab:published}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lrlrrrrrl}
+    \toprule
+    Model & Parameters & Training tokens & HumanEval & HumanEval+ & MBPP & MBPP+ & MBPP 3-shot & Source \\
+    \midrule
+    Pretrained (this work) & 0.52B & 0.10T & 26.8 & 22.0 & 44.4 & 36.5 & 32.2 & -- \\
+    \midrule
+    MobileLLM-R1-360M-base & 0.36B & 4.2T & 32.9 & -- & -- & -- & 20.8 & \cite{zhao2025mobilellmr1} \\
+    Qwen2.5-0.5B & 0.49B & -- & 28.1 & -- & -- & -- & 29.6 & \cite{zhao2025mobilellmr1} \\
+    Qwen2.5-Coder-0.5B & 0.5B & 5.5T, continued & 28.0 & 23.8 & 52.9 & 47.1 & 40.4 & \cite{hui2024qwen25coder} \\
+    Qwen3-0.6B-Base & 0.60B & 36T & 30.5 & -- & -- & -- & 39.0 & \cite{zhao2025mobilellmr1} \\
+    MobileLLM-R1-950M-base & 0.95B & 4.2T & 46.3 & -- & -- & -- & 39.2 & \cite{zhao2025mobilellmr1} \\
+    DeepSeek-Coder-1.3B & 1.3B & 2T & 34.8 & 26.8 & 55.6 & 46.9 & 46.2 & \cite{hui2024qwen25coder} \\
+    DeepSeek-Coder-1.3B & 1.3B & 2T & 28.7 & 23.8 & 55.4 & 46.9 & -- & \cite{lozhkov2024starcoder2} \\
+    StarCoderBase-3B & 3B & -- & 21.3 & 17.1 & 42.6 & 35.8 & -- & \cite{lozhkov2024starcoder2} \\
+    StarCoder2-3B & 3B & 3.1T & 31.7 & 27.4 & 60.2 & 49.1 & 47.4 & \cite{hui2024qwen25coder} \\
+    StarCoder2-3B & 3B & 3.1T & 31.7 & 27.4 & 57.4 & 47.4 & -- & \cite{lozhkov2024starcoder2} \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
 
 \begin{table*}
   \caption{The pretrained, SFT and RL models on HumanEval (164 problems), greedy: pass@1 (\%) with its 95\% Wilson
@@ -1251,6 +1283,19 @@ the training middles in PSM order (Section~\ref{sec:fim}).
 never occur in the training data, pass@1 drops from 32.2\% to 18.4\%, and 132 of the 500 responses do not parse,
 against 10 with LF line endings: the model is sensitive to a formatting it never saw. MBPP 3-shot is also the only
 benchmark not covered by decontamination, so its score should be read with this caveat.
+
+\paragraph{Published base models.} Table~\ref{tab:published} places the pretrained model among published base models
+of 0.36B to 3B parameters. Their scores come from each paper's own evaluation, not from the evaluation used here, and
+evaluations differ: two papers report HumanEval scores of 34.8 and 28.7 for DeepSeek-Coder-1.3B, and MBPP scores of
+60.2 and 57.4 for StarCoder2-3B. The table therefore supports statements about ranges, not rankings. On HumanEval and
+HumanEval+, the pretrained model, trained on 0.10T tokens on one GPU, is within the range of the published models:
+26.8 against 21.3--46.3 and 22.0 against 17.1--27.4. It is 1.2 and 1.8 points below Qwen2.5-Coder-0.5B, less than two
+evaluations of the same model differ; only MobileLLM-R1-950M-base is clearly ahead, at 46.3. The published models with
+reported training tokens were trained on 2T to 36T tokens, 19 to 350 times more. On MBPP and MBPP+, the pretrained
+model is 8.5 to 15.8 and 10.4 to 12.6 points below the code models trained on 2T tokens or more (Qwen2.5-Coder-0.5B,
+DeepSeek-Coder-1.3B and StarCoder2-3B), more than two evaluations of the same model differ (2.8 and 1.7 points); only
+StarCoderBase-3B scores in the same range. MBPP 3-shot, at 32.2, lies within the published range (20.8--47.4), with
+the prompt-format caveat above.
 
 \subsection{SFT and RL models on HumanEval}
 
