@@ -75,7 +75,8 @@ leaves 44.8\% of its responses on held-out problems unfinished. RL removes most 
 it adds are wrong, so its gain comes from finishing responses rather than from more accurate answers.
 The final RL model is a minimal working reasoning code model: on LeetCode problems, including graph search and
 backtracking, it reasons in a thinking block, outlines an algorithm and checks it on examples, closes its reasoning,
-and writes a solution; it solved eight of the nine problems it was given (Figure~\ref{fig:example}).
+and writes a solution. It solved eight of nine LeetCode problems and two of three tasks that ask it to reduce a
+function's time complexity, but found none of the bugs in three buggy functions (Appendix~\ref{sec:examples}).
 
 The paper makes five contributions:
 \begin{itemize}
@@ -86,8 +87,8 @@ The paper makes five contributions:
   \item Post-training on the same GPU: SFT on reasoning traces, which teaches the model to reason before it answers,
   followed by RL with rewards from unit tests and an objective based on DAPO.
   \item A minimal viable reasoning code model: the final RL model reasons in a thinking block before it answers, and
-  solves eight of nine LeetCode problems, including graph and backtracking problems, with every test passing
-  (Figure~\ref{fig:example}).
+  solves eight of nine LeetCode problems, including graph and backtracking problems, and two of three tasks that
+  reduce a function's time complexity, with every test passing (Appendix~\ref{sec:examples}).
   \item A failure analysis of each model that traces its main failure to a root cause and to the stage that addresses
   it: the wrong and unending completions of the pretrained model, the reasoning loops of the SFT model, and the
   remaining wrong answers of the RL model.
@@ -1452,16 +1453,47 @@ losing 15 against SFT ($p = 0.12$) and 33 and 6 against the pretrained model ($p
 HumanEval+ among its finished answers, against 51.5\% for SFT: it answers more problems, with a lower pass rate on the
 answers it gives.
 
-\paragraph{Example.} Figure~\ref{fig:example} shows the RL model on LeetCode problem 52, N-Queens II (hard), with the
-evaluation's chat prompt and greedy decoding. It identifies the problem as backtracking, outlines the steps, weighs and
-drops an alternative, drafts a recursion that tracks one queen per row and rejects shared columns and diagonals,
-checks the draft on $n = 4$ and $n = 1$, closes its reasoning and writes an explained solution whose code passes every
-test. Of nine LeetCode problems given with the same prompt, the model solved eight, each answer passing every test:
-3, 20 and 56; graph problems 207 (Course Schedule) and 200 (Number of Islands); backtracking problems 79 (Word
-Search), 39 (Combination Sum) and 52; each response used 1,147 to 1,804 tokens and closed its reasoning. It failed
-on 124, Binary Tree Maximum Path Sum (hard): its answer follows only paths that descend from a node and calls
-\texttt{max} on an integer. LeetCode problems were not removed from the training data, so these examples show how the
-model reasons and answers, not that it generalizes.
+\paragraph{Examples.} Appendix~\ref{sec:examples} shows the RL model's reasoning on three kinds of tasks, each answer
+checked by running it. It solves eight of nine LeetCode problems, including graph and backtracking problems, and two of
+three tasks that ask it to rewrite an $O(n^2)$ function in $O(n)$ time, but none of three tasks that ask it to find and
+fix a bug.
+
+\paragraph{Failure analysis.} RL reduces unfinished responses to 21 (19 loops) and finishes 143 answers. Of the 63
+problems on which the SFT model did not finish, RL finishes 48 and passes 19; the other 29 answers are wrong, and wrong
+outputs rise from 38 to 65 (Table~\ref{tab:failures}). Of the 26 problems that RL newly passes, these 19 are the
+majority: RL's gain comes mostly from finishing the reasoning and answering, not from more accurate answers. All
+answers of the three models are valid Python, so syntax is not a failure mode on HumanEval.
+
+\paragraph{Root cause.} RL finished mostly problems that the SFT model could not solve, and RL raises the probability
+of solutions the model already samples rather than adding new ones (Section~\ref{sec:rl}), so most of its new answers
+are wrong. No later stage addresses these failures: the 21 unfinished responses and 65 wrong outputs remain in the
+final model.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\appendix
+
+\section{Inference Examples}
+\label{sec:examples}
+
+The examples below show the RL model's responses to three kinds of tasks, each given with a chat prompt in the format
+of the evaluation (Section~\ref{sec:results-setup}) and decoded greedily. Every answer is checked by running it.
+Responses that finish do so within 2,113 tokens; the debugging responses that do not finish were generated without a
+token limit, up to the 32,768-token context. The figures show excerpts of the output with line breaks added and blank
+lines removed; [...] marks omitted text.
+
+\subsection{LeetCode problems}
+
+Figure~\ref{fig:example} shows the model on LeetCode problem 52, N-Queens II (hard). It identifies the problem as
+backtracking, outlines the steps, weighs and drops an alternative, drafts a recursion that tracks one queen per row and
+rejects shared columns and diagonals, checks the draft on $n = 4$ and $n = 1$, closes its reasoning and writes an
+explained solution whose code passes every test. Of nine LeetCode problems given with the same prompt, the model
+solved eight, each answer passing every test: 3, 20 and 56; graph problems 207 (Course Schedule) and 200 (Number of
+Islands); backtracking problems 79 (Word Search), 39 (Combination Sum) and 52; each response used 1,147 to 1,804
+tokens and closed its reasoning. It failed on 124, Binary Tree Maximum Path Sum (hard): its answer follows only paths
+that descend from a node and calls \texttt{max} on an integer. LeetCode problems were not removed from the training
+data, so these examples show how the model reasons and answers, not that it generalizes.
 \begin{figure*}
   \centering
   \begin{minipage}[t]{0.49\textwidth}
@@ -1589,18 +1621,104 @@ def total_n_queens(n: int) -> int:
   \label{fig:example}
 \end{figure*}
 
-\paragraph{Failure analysis.} RL reduces unfinished responses to 21 (19 loops) and finishes 143 answers. Of the 63
-problems on which the SFT model did not finish, RL finishes 48 and passes 19; the other 29 answers are wrong, and wrong
-outputs rise from 38 to 65 (Table~\ref{tab:failures}). Of the 26 problems that RL newly passes, these 19 are the
-majority: RL's gain comes mostly from finishing the reasoning and answering, not from more accurate answers. All
-answers of the three models are valid Python, so syntax is not a failure mode on HumanEval.
+\subsection{Improving time complexity}
 
-\paragraph{Root cause.} RL finished mostly problems that the SFT model could not solve, and RL raises the probability
-of solutions the model already samples rather than adding new ones (Section~\ref{sec:rl}), so most of its new answers
-are wrong. No later stage addresses these failures: the 21 unfinished responses and 65 wrong outputs remain in the
-final model.
+Given a correct function that runs in $O(n^2)$ time and asked to rewrite it in $O(n)$ time, the model succeeds on two
+of three tasks. On the maximum subarray sum (Figure~\ref{fig:optimize}), it recognizes the problem that Kadane's
+algorithm solves, derives the update of the best sum ending at each element, checks the case of all-negative inputs,
+closes its reasoning and writes an $O(n)$ function in 992 tokens; the function passes four tests and processes a list
+of 200,000 elements in 0.04 seconds. On counting the pairs whose difference is $k$, it replaces the double loop with a
+frequency count (2,113 tokens; 0.03 seconds on 200,000 elements). On two sum it applies the two-pointer method, which
+needs a sorted list, to an unsorted one, and returns no pair for $[3, 2, 4]$ with target 6.
+\begin{figure*}
+  \centering
+  \begin{minipage}[t]{0.49\textwidth}
+    \scriptsize
+    \textbf{Prompt}\vspace{-0.5em}
+\begin{verbatim}
+The following Python function is correct but too slow: it runs in O(n^2)
+time. Rewrite it to run in O(n) time, explain why the new version is faster,
+and provide the result as a self-contained Python script in a markdown code
+block:
+```python
+def max_subarray(nums: list[int]) -> int:
+    """Return the largest sum of a non-empty contiguous subarray of nums."""
+    best = nums[0]
+    for i in range(len(nums)):
+        total = 0
+        for j in range(i, len(nums)):
+            total += nums[j]
+            best = max(best, total)
+    return best
+```
+\end{verbatim}
+    \vspace{-0.5em}\textbf{Response: reasoning}\vspace{-0.5em}
+\begin{verbatim}
+<think>
+Okay, I need to rewrite the function max_subarray to run in O(n) time. Hmm,
+I remember that the standard maximum subarray problem is solved using
+Kadane's algorithm. So let's think about that.
+[...]
+Wait, Kadane's algorithm works by keeping track of the maximum sum ending at
+each position. So for each element, we decide whether to start a new
+subarray or add to the existing one.
+[...]
+So that's O(n^2) time.
+So to optimize, I can compute the maximum subarray sum in O(n) time.
+[...]
+Initialize max_current and max_global to the first element.
+Then for each element starting from the second:
+max_current = max(nums[i], max_current + nums[i])
+max_global = max(max_global, max_current)
+[...]
+Wait, but what if all numbers are negative? Then the maximum is the least
+negative.
+[...]
+So the answer is to implement Kadane's algorithm.
+</think>
+\end{verbatim}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.49\textwidth}
+    \scriptsize
+    \textbf{Response: answer}\vspace{-0.5em}
+\begin{verbatim}
+The problem can be efficiently solved using Kadane's algorithm, which is
+designed to find the maximum sum of a contiguous subarray in linear time.
+The algorithm works by iterating through the list and maintaining the
+maximum sum of subarrays ending at each position.
+[...]
+### Solution Code
+```python
+def max_subarray(nums: list[int]) -> int:
+    """Return the largest sum of a non-empty contiguous subarray of nums."""
+    if not nums:
+        return 0
+    max_current = max_global = nums[0]
+    for num in nums[1:]:
+        max_current = max(num, max_current + num)
+        max_global = max(max_global, max_current)
+    return max_global
+```
+[...]
+This approach ensures that we efficiently find the maximum sum in O(n) time.
+\end{verbatim}
+  \end{minipage}
+  \caption{The RL model rewriting an $O(n^2)$ maximum-subarray function in $O(n)$ time with Kadane's algorithm, greedy
+  decoding. The response has 992 tokens. Excerpts of the model's output with line breaks added and blank lines
+  removed; [...] marks omitted text, which includes one false statement, that the original $O(n^2)$ code uses Kadane's
+  approach. The new function passes four tests and processes 200,000 elements in 0.04 seconds.}
+  \label{fig:optimize}
+\end{figure*}
 
-\bibliographystyle{ACM-Reference-Format}
-\bibliography{references}
+\subsection{Finding and fixing bugs}
+
+Given a function with one bug and asked to find, explain and fix it, the model fails on all three tasks: a binary
+search whose loop condition \texttt{lo < hi} misses the last remaining element, a bracket checker that returns
+\texttt{True} while unclosed brackets remain on its stack, and an interval merge that does not sort its input. In each,
+its reasoning concludes that the function is correct. On the bracket checker it closes its reasoning after 799 tokens
+and returns the function unchanged; on the other two it falls into a loop, repeating \texttt{So the function is
+correct.} or a single word until the 32,768-token context is full. These are the loops of Section~\ref{sec:sft}. The
+SFT and RL data pose problems to solve rather than code to repair (Section~\ref{sec:data}), which suggests that
+debugging lies outside what post-training taught.
 
 \end{document}
