@@ -1105,14 +1105,6 @@ a loop starts to repeat, the answer the model then wrote passed in 24.7--25.6\% 
 repeating cycle. Published pipelines below 1B parameters end at SFT, and MobileLLM-R1 found no significant gain from RL
 after SFT~\cite{zhao2025mobilellmr1}; this stage tests that at 522M, for a model whose main failure is not finishing.
 
-\paragraph{Direct loop fixes, not adopted.} Two direct fixes of the loops were tried before RL and not adopted,
-because neither changed the loops without changing normal text. Final-token preference
-optimization~\cite{paech2025antislop}, which trains the model to prefer its own alternatives to the first repeated
-token of a loop, raised the loss of the SFT model's own correct answers by 24.3\% within 20 steps when trained on the
-last five layers and the output layer, and by 4.2\% with a KL penalty at normal positions. Training the model to write
-\texttt{</think>} at loops raised its log-probability at normal line starts by 83--95\% of its rise at loops, and by
-step 40 added 0.15 premature ends of reasoning per response.
-
 \paragraph{From PPO to DAPO\@.} PPO~\cite{schulman2017ppo} is the standard policy-gradient algorithm for RL on LLMs.
 It maximizes a clipped objective, which lets each batch of sampled responses be reused for several gradient steps,
 and it estimates each token's advantage, how much better its outcome is than expected, with a learned value model
@@ -1123,19 +1115,15 @@ loss. DAPO~\cite{yu2025dapo} adapts GRPO to RL with long reasoning. It removes t
 model is expected to move far from its initial model; it raises the upper clipping bound (clip-higher); it drops
 prompts whose responses are all correct or all wrong, which have zero advantage and give no gradient (dynamic
 sampling); it averages the loss over all tokens of the batch instead of first within each response (token-level
-loss); and it handles responses that reach the length limit, either by masking them or by a reward penalty that
-grows as a response approaches the limit (overlong reward shaping).
+loss); and it adds a reward penalty that grows as a response approaches the length limit (overlong reward shaping).
 
 \paragraph{Why DAPO\@.} The objective follows DAPO because its changes address the problems of this model and this
 budget. Like GRPO, it needs no value model, so only the policy and its optimizer states are trained on the one GPU.
 The token-level loss targets the loops: when the loss is averaged within each response first, every token of a long
 response weighs less, and DAPO found that this fails to penalize long responses with repetitive text and lets
 response length and entropy grow; the unfinished responses of the SFT model are such responses. The overlong penalty
-gives the reward a direct signal against length. A first attempt used DAPO's other option, masking the responses cut
-at the limit, which gives no such signal: over six batches the share of cut responses rose from 3.7\% to 19.5\%, past
-the 10--15\% at which truncation destabilized training in ScaleRL~\cite{khatri2025scalerl}, and the pass rate fell
-from 0.420 to 0.391. Without the KL penalty, nothing pulls the model back toward the SFT model, whose loops are what
-RL has to remove.
+gives the reward a direct signal against length. Without the KL penalty, nothing pulls the model back toward the SFT
+model, whose loops are what RL has to remove.
 
 \paragraph{Differences from DAPO\@.} Three changes fit DAPO to a two-hour budget on one GPU. First, each batch is used
 for one gradient step, so the responses come from the model being trained, the probability ratio in PPO's objective is
