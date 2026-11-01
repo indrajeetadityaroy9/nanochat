@@ -452,7 +452,15 @@ clipped (gradient norm above `MAX_GRAD_NORM`): steps 3–41 (the warmup is steps
 and 66,817 (largest norm after step 100 3.93, step 66,817); median gradient norm from step 100 0.362 at 8K and 0.372 at
 32K; 17 losses above the trailing 200 steps' mean by 4 standard deviations from step 1,000, the largest 6.2 at step
 66,109 (46 steps after the stage switch); logsumexp maximum 18.92 (step 6,092), 17.70–18.92 from step 3,000; the
-largest QK-norm gain 4.150 (4.148 at the last step). Every step's values:
+largest QK-norm gain 4.150 (4.148 at the last step). Trajectory [measured: `metrics.jsonl`, `diagnostics-step.npy`,
+`diagnostics-update.npy`; 250-step windows, tokens = (step + 1) · 1,474,560]: loss means 1.10 at 10B tokens, 1.00 at
+50B, 0.929 at 90B, 0.904 over the 32K stage's first 250 steps; gradient-norm medians 0.122 at their lowest (1.3B
+tokens), 0.427 at their highest (83.2B, lr 0.19 of peak), 0.374 over the file stage's last 250 steps, 0.415 over the
+32K stage's first and 0.319 over its last; RMS logsumexp (√ of `mean_square_logsumexp`) window means 12.11–12.93 from
+5B tokens; each layer's QK-norm gain (the larger of q and k) reaches 90% of its final value after a median of 43.6B
+tokens (8.1–54.7B); `x0_lambdas` of layers 3–24 −0.98–0.65 at 10B tokens, `resid_lambdas` 0.13–1.99; update RMS over
+lr (medians over the group's tensors) from 5B to 97B tokens 0.165–0.178 for the attention and MLP matrices and
+0.135–0.204 for `embed_tokens`, `lm_head` and the value-embedding tables. Every step's values:
 `results/pretrain/pretrain-curves.jsonl`; the likelihood trajectory to the last step: `results/pretrain/trajectory.json`
 (`docs/results.md` §4).
 
