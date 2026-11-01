@@ -622,8 +622,7 @@ the ratio of MobileLLM-350M (32 layers of width 960), rounded up to a multiple o
 
 \paragraph{Normalization.} The model uses pre-norm RMSNorm without a learned scale, and linear layers without biases.
 Each attention and MLP sublayer reads $\bar{x} = \mathrm{RMSNorm}(x)$ and adds its output back to $x$, and a final
-RMSNorm precedes the output layer. RMSNorm matches the quality of LayerNorm with 7--64\% less running
-time~\cite{zhang2019rmsnorm}. The RMSNorm before each sublayer and
+RMSNorm precedes the output layer. The RMSNorm before each sublayer and
 before the output layer feeds only linear layers, which can absorb any per-dimension scale, so a learned scale there
 would be redundant; QK-norm, which feeds RoPE rather than a linear layer, keeps its learned scale.
 
@@ -634,7 +633,7 @@ $q \cdot k / \sqrt{d_h}$ can grow with the norms of the queries and keys until t
 one-hot vectors and the loss diverges; normalizing queries and keys mitigates this~\cite{wortsman2023smallscale}.
 Attention is masked within each document chunk (Section~\ref{sec:sequences}).
 
-\paragraph{Rotary position embeddings.} Positions are encoded with RoPE~\cite{su2021roformer} with base $10^6$ in both
+\paragraph{Rotary position embeddings.} Positions are encoded with RoPE~\cite{men2024ropebase} with base $10^6$ in both
 training stages. A larger base slows RoPE's rotations: its slowest rotation has a period of about 5.1M tokens at base
 $10^6$, against about 54K tokens at the common base $10^4$. The base bounds the usable context: below a lower bound, a
 model may keep a low perplexity but lose the ability to retrieve information from far back in its context, and the
@@ -644,7 +643,7 @@ position encoding does not change when the context grows from 8,192 to 32,768 to
 its base from $10^4$ to $10^6$ at its 32K stage~\cite{hui2024qwen25coder}.
 
 \paragraph{Local and global attention layers.} Three of every four layers use local (sliding-window)
-attention~\cite{beltagy2020longformer}, in which each token attends only to itself and the previous 512 tokens; every
+attention~\cite{gemma2025gemma3}, in which each token attends only to itself and the previous 512 tokens; every
 fourth layer uses global attention over all earlier tokens (Figure~\ref{fig:model}a). Local attention reduces the cost
 of long contexts. In a sequence that is one 32,768-token document chunk, a query in a global layer attends on average
 to $(T + 1)/2 \approx 16{,}384$ tokens ($T = 32{,}768$), but a query in a local layer to at most 513; with 18 local and
@@ -822,11 +821,11 @@ initialization and numerical precision. Table~\ref{tab:train} lists the settings
 \label{sec:optimizer}
 
 \paragraph{Optimizer.} The attention and MLP weight matrices and the value-embedding gate weights are trained with
-NorMuon~\cite{li2025normuon}, a variant of Muon~\cite{jordan2024muon}. The embedding tables, the output layer and the
-vector parameters (the QK-norm scales and the residual scalars) are trained with AdamW~\cite{loshchilov2019adamw}.
+NorMuon, a variant of the Muon optimizer~\cite{li2025normuon}. The embedding tables, the output layer and the
+vector parameters (the QK-norm scales and the residual scalars) are trained with AdamW~\cite{wang2024adamwema}.
 
 \paragraph{Why NorMuon\@.} Muon updates each weight matrix with its orthogonalized momentum, which gives every direction
-of the update the same size~\cite{jordan2024muon}. Its updates are balanced across
+of the update the same size~\cite{li2025normuon}. Its updates are balanced across
 directions but not across neurons: some rows of a matrix receive much larger updates than others~\cite{li2025normuon}.
 NorMuon divides each row of the update by a running estimate of its root mean square, then restores the update's
 overall norm. At 1.1B and 5.4B parameters, NorMuon reached AdamW's final loss in 21.7\% and 13.9\% fewer steps,
@@ -835,13 +834,13 @@ against 10.4\% and 6.1\% for Muon~\cite{li2025normuon}. Its adoption here rests 
 \paragraph{Scope.} NorMuon trains the 144 attention and MLP weight matrices and the 12 value-embedding gate matrices,
 one per layer, 170M parameters. AdamW trains the token embedding, the output layer and the 12 value-embedding tables,
 352M parameters, and the 6,192 vector parameters.
-This split follows Muon's original implementation and its large-scale use, which train the embeddings, the output
-layer and the normalization parameters with AdamW~\cite{jordan2024muon,liu2025muon}.
+This split follows the large-scale use of Muon, which trains the embeddings, the output layer and the normalization
+parameters with AdamW~\cite{liu2025muon}.
 
 \paragraph{Momentum.} Both optimizers update along a momentum, an exponential moving average of recent gradients, with
 coefficient 0.95 in NorMuon and 0.9 in AdamW. Averaging over steps reduces the noise of the minibatch gradients, so the
-update follows the direction that recent batches share. These coefficients are the defaults of
-Muon~\cite{jordan2024muon} and of AdamW in LLM pretraining~\cite{deepseek2024llm}. With coefficient 0.95, NorMuon's
+update follows the direction that recent batches share. These coefficients are those of Muon at
+scale~\cite{liu2025muon} and of AdamW in LLM pretraining~\cite{deepseek2024llm}. With coefficient 0.95, NorMuon's
 update averages the gradients of about the last 20 steps, 29.5M tokens.
 
 \paragraph{Shared learning rate.} Both optimizers share one peak learning rate and one weight decay: NorMuon's updates
@@ -894,8 +893,8 @@ $\times 2$, so the optimum is flat between $\times 2$ and $\times 4$.
 \subsubsection{Weight decay}
 \label{sec:weight-decay}
 
-\paragraph{Weight decay.} The weight decay is $\lambda = 0.153$, decoupled from the gradient
-update~\cite{loshchilov2019adamw} and set from the training length.
+\paragraph{Weight decay.} The weight decay is $\lambda = 0.153$, decoupled from the gradient update as in AdamW, and set
+from the training length.
 
 \paragraph{Why this weight decay.} With decoupled weight decay, the weights are an exponential moving average of recent
 updates over a timescale of $\tau = 1/(\eta\lambda)$ steps~\cite{wang2024adamwema}. The optimal $\tau$, as a fraction
@@ -1134,10 +1133,11 @@ to each of 128 new problems, each answer is run against the tests of its problem
 probability of the responses that scored above the mean of their group and lowers the others. The run had a fixed
 budget of two hours: 39 steps.
 
-\paragraph{From PPO to DAPO\@.} PPO~\cite{schulman2017ppo} is the standard policy-gradient algorithm for RL on LLMs.
-It maximizes a clipped objective, which lets each batch of sampled responses be reused for several gradient steps,
-and it estimates each token's advantage, how much better its outcome is than expected, with a learned value model
-about as large as the policy. GRPO~\cite{shao2024deepseekmath} removes the value model: it samples a group of
+\paragraph{From PPO to DAPO\@.} PPO is the standard policy-gradient algorithm for RL on LLMs. It maximizes an
+objective on the ratio between the probabilities of the current policy and of the policy that sampled the responses,
+clipped to keep each update small, and it estimates each token's advantage, how much better its outcome is than
+expected, with a learned value model about as large as the policy~\cite{shao2024deepseekmath}. GRPO, introduced in
+the same work, removes the value model: it samples a group of
 responses to each prompt and uses the group's mean reward as the baseline, so a response's advantage is its reward
 minus the group mean, divided by the group's standard deviation; it adds a KL penalty to a reference model to the
 loss. DAPO~\cite{yu2025dapo} adapts GRPO to RL with long reasoning. It removes the KL penalty, because a reasoning
@@ -1157,7 +1157,8 @@ model, whose loops are what RL has to remove.
 \paragraph{Differences from DAPO\@.} Three changes fit DAPO to a two-hour budget on one GPU. First, each batch is used
 for one gradient step, so the responses come from the model being trained, the probability ratio in PPO's objective is
 1, and its clipping, clip-higher included, never acts: the update is the policy gradient with the group baseline.
-Several steps per batch led to rapid entropy collapse in AceReason~\cite{chen2025acereason}. Second, the advantage is
+The code RL of Nemotron-Cascade also makes one update per batch, which mitigates entropy
+collapse~\cite{wang2025nemotroncascade}. Second, the advantage is
 divided by the standard deviation of the rewards over the whole batch rather than of each group, so that no problem
 is weighted by its difficulty~\cite{liu2025tricks}. Third, groups whose 8 rewards are all equal are dropped but not
 replaced by newly sampled ones, which would cost generation time; 66 to 110 of the 128 groups per batch had mixed
