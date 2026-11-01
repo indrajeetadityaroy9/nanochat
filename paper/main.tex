@@ -630,11 +630,7 @@ increased training stability for large models in PaLM~\cite{chowdhery2022palm}.
 QK-norm RMS-normalizes the queries and keys of each head, with a learned per-dimension scale, before RoPE, as Qwen3 does
 for stable training~\cite{yang2025qwen3}. Without it, at high learning rates the attention logits
 $q \cdot k / \sqrt{d_h}$ can grow with the norms of the queries and keys until the attention weights collapse to
-one-hot vectors and the loss diverges; normalizing queries and keys mitigates this~\cite{wortsman2023smallscale}. Each
-head keeps its own keys and values, rather than sharing them as in grouped-query attention, which shrinks the
-key-value cache at inference with quality close to multi-head attention~\cite{ainslie2023gqa}; in MobileLLM, reducing
-the key-value heads from 16 to 4 kept accuracy at 125M and cost 0.2 points at 350M~\cite{liu2024mobilellm}. This
-model keeps multi-head attention to avoid that cost, and accepts a key-value cache of 72 KiB per token in BF16.
+one-hot vectors and the loss diverges; normalizing queries and keys mitigates this~\cite{wortsman2023smallscale}.
 Attention is masked within each document chunk (Section~\ref{sec:sequences}).
 
 \paragraph{Rotary position embeddings.} Positions are encoded with RoPE~\cite{su2021roformer} with base $10^6$ in both
