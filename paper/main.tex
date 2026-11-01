@@ -1,5 +1,6 @@
 \documentclass[sigconf,nonacm,balance=false]{acmart}
 \usepackage{array}
+\usepackage{fontawesome5}
 \providecommand{\arraybackslash}{\let\\\tabularnewline}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,calc,fit,positioning}
@@ -23,7 +24,7 @@ tokens. This paper presents a generative LLM for Python and C++ code generation:
 pretrained from scratch on a single GPU. The model has 522M parameters and is trained on 103B tokens of Python and C++
 code, web text and math, first with a context length of 8,192 tokens at the file level and then with 32,768 tokens at
 the repository level. Pretraining takes 76.3 hours on one NVIDIA GH200 GPU. The code, configurations and training
-records are available at \url{https://github.com/indrajeetadityaroy9/single-gpu-code-llm}.
+records are available at \faGithub~\url{https://github.com/indrajeetadityaroy9/single-gpu-code-llm}.
 \end{abstract}
 
 \maketitle
