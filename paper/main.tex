@@ -602,30 +602,40 @@ and $\bar{x} = \mathrm{RMSNorm}(x)$ its normalized form.
   \end{tabular}
 \end{table}
 
-\paragraph{Token embedding and output layer.} The token embedding is a learned matrix $E \in \mathbb{R}^{V \times d}$:
-row $E[t]$ is the vector that represents token $t$ at the input. The first layer receives
-$x_0 = \mathrm{RMSNorm}(E[t])$; no position vector is added, because positions enter through RoPE inside attention. The
-output layer is a separate matrix $W_{\mathrm{out}} \in \mathbb{R}^{d \times V}$ that maps the normalized residual
-stream after the last layer, $\bar{x}$, to one logit per vocabulary token, $z = \bar{x} W_{\mathrm{out}}$. The input
-and output matrices are not shared, unlike in the original transformer; each has $V d = 25.2$M parameters.
+\paragraph{Token embedding and output layer.} The input embedding is RMS-normalized, and the output layer is a separate
+matrix. The token embedding $E \in \mathbb{R}^{V \times d}$ maps token $t$ to the row $E[t]$, and the first layer
+receives $x_0 = \mathrm{RMSNorm}(E[t])$; no position vector is added, because positions enter through RoPE inside
+attention. Normalizing the embedding gives the first layer an input of fixed scale; a normalization after the embedding
+significantly improved training stability in BLOOM, which also notes a cost in zero-shot
+generalization~\cite{bigscience2022bloom}. The output layer $W_{\mathrm{out}} \in \mathbb{R}^{d \times V}$ maps the
+normalized stream after the last layer, $\bar{x}$, to one logit per vocabulary token, $z = \bar{x} W_{\mathrm{out}}$.
+It is not shared with the input embedding, so the output layer has its own capacity. Sharing would save 25.2M
+parameters, 4.8\% of this model; in MobileLLM, sharing saved 11.8\% of a 125M model's parameters for a 0.2-point drop
+in average accuracy~\cite{liu2024mobilellm}.
 
 \paragraph{Depth and width.} The model is deep and narrow: 24 layers of width 768. MobileLLM found depth more
 important than width at 125M and 350M parameters~\cite{liu2024mobilellm}. The width is 30 times the number of layers,
 the ratio of MobileLLM-350M (32 layers of width 960), rounded up to a multiple of the head size.
 
-\paragraph{Normalization.} Each attention and MLP sublayer reads the RMS-normalized residual stream
-$\bar{x} = \mathrm{RMSNorm}(x)$ and adds its output back to $x$ (pre-norm), and a final RMSNorm precedes the output
-layer. Pre-norm, unlike the post-norm of the original transformer, can be trained without a learning-rate warm-up
-stage~\cite{xiong2020prenorm}; the model still uses a short warm-up of 40 steps. RMSNorm has no learned scale, and the
-linear layers have no biases.
+\paragraph{Normalization.} The model uses pre-norm RMSNorm without a learned scale, and linear layers without biases.
+Each attention and MLP sublayer reads $\bar{x} = \mathrm{RMSNorm}(x)$ and adds its output back to $x$, and a final
+RMSNorm precedes the output layer. Pre-norm, unlike the post-norm of the original transformer, can be trained without a
+learning-rate warm-up stage~\cite{xiong2020prenorm}; the model still uses a short warm-up of 40 steps. RMSNorm matches
+the quality of LayerNorm with 7--64\% less running time~\cite{zhang2019rmsnorm}. The RMSNorm before each sublayer and
+before the output layer feeds only linear layers, which can absorb any per-dimension scale, so a learned scale there
+would be redundant; QK-norm, which feeds RoPE rather than a linear layer, keeps its learned scale. Removing biases
+increased training stability for large models in PaLM~\cite{chowdhery2022palm}.
 
-\paragraph{Attention and QK-norm.} Every layer uses multi-head attention with $H = 6$ heads of size 128. Queries and
-keys are RMS-normalized per head, with a learned per-dimension scale, before RoPE (QK-norm, which Qwen3 uses for stable
-training~\cite{yang2025qwen3}). Without it, at high learning rates the attention logits $q \cdot k / \sqrt{d_h}$ can
-grow with the norms of the queries and keys until the attention weights collapse to one-hot vectors and the loss
-diverges; normalizing queries and keys mitigates this~\cite{wortsman2023smallscale}. Multi-head attention is used
-rather than grouped-query attention, whose main benefit is a smaller key-value cache at inference. Attention is masked
-within each document chunk (Section~\ref{sec:sequences}).
+\paragraph{Attention and QK-norm.} Every layer uses multi-head attention with $H = 6$ heads of size 128, with QK-norm.
+QK-norm RMS-normalizes the queries and keys of each head, with a learned per-dimension scale, before RoPE, as Qwen3 does
+for stable training~\cite{yang2025qwen3}. Without it, at high learning rates the attention logits
+$q \cdot k / \sqrt{d_h}$ can grow with the norms of the queries and keys until the attention weights collapse to
+one-hot vectors and the loss diverges; normalizing queries and keys mitigates this~\cite{wortsman2023smallscale}. Each
+head keeps its own keys and values, rather than sharing them as in grouped-query attention, which shrinks the
+key-value cache at inference with quality close to multi-head attention~\cite{ainslie2023gqa}; in MobileLLM, reducing
+the key-value heads from 16 to 4 kept accuracy at 125M and cost 0.2 points at 350M~\cite{liu2024mobilellm}. This
+model keeps multi-head attention to avoid that cost, and accepts a key-value cache of 72 KiB per token in BF16.
+Attention is masked within each document chunk (Section~\ref{sec:sequences}).
 
 \paragraph{Rotary position embeddings.} Positions are encoded with RoPE~\cite{su2021roformer} with base $10^6$ in both
 training stages. A larger base slows RoPE's rotations: its slowest rotation has a period of about 5.1M tokens at base
@@ -645,17 +655,17 @@ of long contexts. In a sequence that is one 32,768-token document chunk, a query
 to $(T + 1)/2 \approx 16{,}384$ tokens ($T = 32{,}768$), but a query in a local layer to at most 513; with 18 local and
 6 global layers, the model computes about 27\% of the attention scores of a model with global attention in every
 layer, and at inference a local layer needs the keys and values of only the last 512 tokens. The global layers still
-pass
-information across the whole context, every fourth layer. The global layers are layers 4, 8, \ldots, 24, so the last
-layer is global; the other 18 layers are local. In Gemma 3, the ratio of local to global layers had minimal effect on
-perplexity, even at 7:1, and the window could be reduced significantly without affecting
+pass information across the whole context, every fourth layer. The global layers are layers 4, 8, \ldots, 24, so the
+last layer is global; the other 18 layers are local. In Gemma 3, the ratio of local to global layers had minimal
+effect on perplexity, even at 7:1, and the window could be reduced significantly without affecting
 perplexity~\cite{gemma2025gemma3}.
 
-\paragraph{Value embeddings.} Every second layer adds a value embedding to its attention values
-(Figure~\ref{fig:model})~\cite{li2026move}. In standard attention, head $h$ computes the value of the token at position
-$j$ from that position's normalized hidden state, $v_{j,h} = \bar{x}_j W_V^{(h)}$, which mixes the token with everything
-that earlier layers wrote to the residual stream. A value embedding adds a vector that depends only on the token
-$t_j$ itself:
+\paragraph{Value embeddings.} Every second layer adds a value embedding, a learned per-layer token vector added to the
+attention values (Figure~\ref{fig:model})~\cite{li2026move}, to give the model more parameters at almost no extra
+compute: a table lookup replaces a matrix multiplication. In standard attention, head $h$ computes the value of the
+token at position $j$ from that position's normalized hidden state, $v_{j,h} = \bar{x}_j W_V^{(h)}$, which mixes the
+token with everything that earlier layers wrote to the residual stream. A value embedding adds a vector that depends
+only on the token $t_j$ itself:
 \[
   v_{j,h} = \bar{x}_j W_V^{(h)} + g_{j,h}\, E_l[t_j]_h, \qquad g_{j,h} = 2\,\sigma\big(\bar{x}_j\, w_{l,h}\big),
 \]
@@ -663,38 +673,37 @@ where $E_l \in \mathbb{R}^{V \times d}$ is layer $l$'s value-embedding table, $E
 slice of row $t_j$, and $g_{j,h} \in (0, 2)$ a scalar gate per position and head, computed from a learned vector
 $w_{l,h} \in \mathbb{R}^d$ initialized to zero, so that every gate starts at 1. The head's output for query $i$ is
 $o_{i,h} = \sum_j a_{ij,h}\, v_{j,h}$ over the positions $j$ that query $i$ attends to, with $a_{ij,h}$ the attention
-weights. With value embeddings, it
-therefore also returns a weighted average of the attended tokens' own table vectors: the layer can read which tokens
-it attends to directly from a table, and the gate scales this contribution per head and token between 0 and 2. The
-reason is capacity at almost no compute: the table vector is a lookup, not a matrix multiplication, and the gate costs
-$d H = 4{,}608$ multiply-adds per token, under 0.1\% of the 7.1M ($12d^2$) multiply-adds of a layer's weight matrices.
-In the MoVE experiments, value embeddings in
-half of the layers lowered validation bits per byte by 0.010--0.016 at three model depths~\cite{li2026move}. The 12
-layers with value embeddings are layers 2, 4, \ldots, 24, including the last. Using every second layer rather than
-every layer halves the added parameters: in the same experiments, at depth 12, value embeddings in half of the layers
-gave a gain of 0.016 against 0.020 in every layer, with 302M instead of 604M added parameters~\cite{li2026move}. The
-12 tables hold 302M and the token embedding 25.2M of the model's 522M parameters, which leaves 195M non-embedding
-parameters (Table~\ref{tab:model}).
+weights. With value embeddings, it therefore also returns a weighted average of the attended tokens' own table vectors:
+the layer can read which tokens it attends to directly from a table, and the gate scales this contribution per head
+and token between 0 and 2. The gate costs $d H = 4{,}608$ multiply-adds per token, under 0.1\% of the 7.1M ($12d^2$)
+multiply-adds of a layer's weight matrices. In the MoVE experiments, value embeddings in half of the layers lowered
+validation bits per byte by 0.010--0.016 at three model depths~\cite{li2026move}. The 12 layers with value embeddings
+are layers 2, 4, \ldots, 24, including the last. Using every second layer rather than every layer halves the added
+parameters: in the same experiments, at depth 12, value embeddings in half of the layers gave a gain of 0.016 against
+0.020 in every layer, with 302M instead of 604M added parameters~\cite{li2026move}. The 12 tables hold 302M and the
+token embedding 25.2M of the model's 522M parameters, which leaves 195M non-embedding parameters
+(Table~\ref{tab:model}).
 
-\paragraph{Residual stream.} In a standard pre-norm transformer, layer $l$ adds its attention and MLP outputs to the
-residual stream, which passes from layer to layer unchanged otherwise:
-$x \leftarrow x + \mathrm{Attn}_l(\bar{x})$, then $x \leftarrow x + \mathrm{MLP}_l(\bar{x})$. Here, before each layer
-$l$, the stream is rescaled and mixed with the normalized token embedding (Figure~\ref{fig:model}b):
+\paragraph{Residual stream.} Before each layer, the residual stream is rescaled and mixed with the normalized token
+embedding through two learned scalars, so that each layer can learn how much of the accumulated stream and of the
+token embedding to keep. This is a simplified form of DenseFormer, whose learned weighted average over earlier layers'
+outputs improved perplexity without increasing model size~\cite{pagliardini2024denseformer}. In a standard pre-norm
+transformer, layer $l$ adds its attention and MLP outputs to the residual stream, which passes from layer to layer
+unchanged otherwise: $x \leftarrow x + \mathrm{Attn}_l(\bar{x})$, then $x \leftarrow x + \mathrm{MLP}_l(\bar{x})$.
+Here, before each layer $l$ (Figure~\ref{fig:model}b):
 \[
   x \leftarrow \lambda_r^{(l)}\, x + \lambda_0^{(l)}\, x_0,
 \]
-with two learned scalars per layer, 48 in all. The term $\lambda_0^{(l)} x_0$ adds the token embedding back, so a deep
-layer can read the token's identity directly, a simplified form of DenseFormer's learned weighted average over all
-earlier layer outputs~\cite{pagliardini2024denseformer}. The factor $\lambda_r^{(l)}$ scales everything accumulated so
+with two scalars per layer, 48 in all. The term $\lambda_0^{(l)} x_0$ adds the token embedding back, so a deep layer
+can read the token's identity directly. The factor $\lambda_r^{(l)}$ scales everything accumulated so
 far. Because RMSNorm divides by the root mean square, it ignores the scale of its input up to its small $\epsilon$
 ($\mathrm{RMSNorm}(a x) \approx \mathrm{RMSNorm}(x)$ for $a > 0$), so this scaling does not change what the layer's
 attention reads when $\lambda_0^{(l)} = 0$; it changes the weight of the accumulated stream relative to the layer's
 own outputs, which are added unscaled. A factor below 1 lets the layer's output dominate the stream, and a factor above
-1 preserves
-the earlier layers' contributions. The scalars start at $\lambda_r = 1$ and $\lambda_0 = 0$, which is exactly the
-standard pre-norm transformer. At the end of training, $\lambda_r$ ranges from 0.16 to 2.60: from 0.16 to 0.61 in the
-even layers, the layers with value embeddings, and from 0.59 to 2.60 in the odd layers. $\lambda_0$ stays within
-$\pm 0.08$ after the first two layers, where it is $-0.23$ and $0.14$.
+1 preserves the earlier layers' contributions. The scalars start at $\lambda_r = 1$ and $\lambda_0 = 0$, which is
+exactly the standard pre-norm transformer. At the end of training, $\lambda_r$ ranges from 0.16 to 2.60: from 0.16 to
+0.61 in the even layers, the layers with value embeddings, and from 0.59 to 2.60 in the odd layers. $\lambda_0$ stays
+within $\pm 0.08$ after the first two layers, where it is $-0.23$ and $0.14$.
 
 \paragraph{MLP\@.} The MLP computes $\mathrm{ReLU}(\bar{x} W_1)^2 W_2$, the squared ReLU, with hidden size 3,072
 ($4d$). Primer found the squared ReLU the most effective of its modifications~\cite{so2021primer}.
