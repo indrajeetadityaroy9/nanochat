@@ -22,7 +22,8 @@ Code large language models (LLMs) with fewer than one billion parameters are typ
 tokens. This paper presents a generative LLM for Python and C++ code generation: a GPT-style decoder-only transformer
 pretrained from scratch on a single GPU. The model has 522M parameters and is trained on 103B tokens of Python and C++
 code, web text and math, first with a context length of 8,192 tokens at the file level and then with 32,768 tokens at
-the repository level. Pretraining takes 76.3 hours on one NVIDIA GH200 GPU.
+the repository level. Pretraining takes 76.3 hours on one NVIDIA GH200 GPU. The code, configurations and training
+records are available at \url{https://github.com/indrajeetadityaroy9/single-gpu-code-llm}.
 \end{abstract}
 
 \maketitle
@@ -1468,6 +1469,32 @@ answers of the three models are valid Python, so syntax is not a failure mode on
 of solutions the model already samples rather than adding new ones (Section~\ref{sec:rl}), so most of its new answers
 are wrong. No later stage addresses these failures: the 21 unfinished responses and 65 wrong outputs remain in the
 final model.
+
+\section{Future Work}
+\label{sec:future}
+
+\paragraph{More varied post-training data.} The SFT and RL data pose problems to solve, never code to repair, and the
+RL model fails on tasks outside that form: given three functions with one bug each, it found none of the bugs
+(Appendix~\ref{sec:examples}). Post-training data that ask the model to repair and improve existing code, with tests
+that check the result, would show whether this failure is a matter of data.
+
+\paragraph{Longer RL.} RL ran for a fixed budget of two hours, 39 steps. Its gain came from finishing responses rather
+than from more accurate answers, its entropy fell from 1.13 to 0.31, and 13.0\% of its held-out responses still do not
+finish (Section~\ref{sec:rl}). A longer run, with harder problems and the entropy kept from collapsing, would show
+whether RL at this size can also raise the accuracy of the answers. Longer SFT is a second lever against the loops: in
+long-reasoning SFT, the share of responses that finish grows with the number of epochs~\cite{kopiczko2026repetition},
+and this SFT ran two.
+
+\paragraph{Multiple GPUs.} One GPU bounded every stage. Pretraining used 103B tokens, 19 to 350 times fewer than the
+published base models that report their training tokens (Section~\ref{sec:results-base}), and the post-trained models
+were evaluated on HumanEval and HumanEval+ only, without MBPP+ or LiveCodeBench. Several GPUs would allow more
+pretraining tokens, to test whether they close the 8.5- to 15.8-point MBPP gap to the code models trained on 2T tokens
+or more, longer RL, and the complete evaluation of the post-trained models.
+
+\section*{AI Use Log}
+
+AI assistants were used to improve the writing of this paper, in the development of the code, and to debug the
+training runs. All results reported here are computed from the runs and records in the code repository.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
