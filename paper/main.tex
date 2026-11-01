@@ -1,4 +1,4 @@
-\documentclass[sigconf,nonacm]{acmart}
+\documentclass[sigconf,nonacm,balance=false]{acmart}
 \usepackage{array}
 \providecommand{\arraybackslash}{\let\\\tabularnewline}
 \usepackage{tikz}
@@ -264,10 +264,7 @@ their reasons are:
   38.3)~\cite{hui2024qwen25coder}. In addition, every problem the model solves is stated in natural language, and after
   post-training the model reasons in natural language. The code share is 87\%, as in DeepSeek-Coder, rather than 70\%
   as in Qwen2.5-Coder, because the model is evaluated on code only.
-  \item \emph{Synthetic code.} LLM-generated code is 30\% of the code. In a study of synthetic pretraining
-  data~\cite{kang2025synthetic}, mixing one third LLM-rephrased web text with two thirds natural web text reached the
-  same validation loss 5--10 times faster at large data budgets, and good shares of rephrased data were about 30\%.
-  The study notes that these results may not apply to synthetic code, and this share is not ablated here.
+  \item \emph{Synthetic code.} LLM-generated code is 30\% of the code; this share is not ablated.
   \item \emph{Small sources.} The notebooks, functions and Codeforces solutions are each used exactly once, with a
   share proportional to their size, because repeated data harms training: repeating 0.1\% of the data 100 times
   reduces an 800M-parameter model to the performance of a 400M-parameter model~\cite{hernandez2022repeated}. Repository
@@ -275,7 +272,6 @@ their reasons are:
   stage uses, so this stage trains on about half of them.
   \item \emph{Natural language in the repository-level stage.} The repository-level stage keeps 10\% web text and 3\%
   mathematics, because a large change in the data distribution late in training can cause catastrophic forgetting.
-  OpenCoder keeps 84\% of its annealing data from its original distribution for this reason~\cite{huang2024opencoder}.
 \end{itemize}
 
 \begin{table*}
@@ -370,15 +366,15 @@ pretraining data.
 \paragraph{Why SA-BPE\@.} BPE merges the most frequent pairs of adjacent tokens. In code, many frequent pairs come
 from identifiers and strings that repeat inside a single repository. The tokens built from them rarely occur in other
 code, so their embeddings receive few updates during training; such under-trained tokens have poor representations
-and can cause hallucinations~\cite{land2024magikarp,chizhov2026sabpe}. SA-BPE scores each pair by $F \cdot \ln R$,
+and can cause hallucinations~\cite{chizhov2026sabpe}. SA-BPE scores each pair by $F \cdot \ln R$,
 where $F$ is the pair's frequency and $R$ is the number of repositories that contain it, so a pair that occurs in only
 one repository scores 0. In the SA-BPE evaluation, this score gave a compression rate of 3.643 against 3.623 for BPE
 and 72 verified under-trained tokens against 640~\cite{chizhov2026sabpe}.
 
 \paragraph{Training data.} The tokenizer is trained on 13.4~GB sampled from the training splits of the 17 file-level
-sources, each in proportion to its share of the file-level stage's bytes, so the sample is 85.6\% code. A tokenizer's
-training data should be representative of the model's training data, since tokens that are frequent in the tokenizer
-data but rare in the model data are under-trained~\cite{land2024magikarp}. For $R$, repository files and CodeXGLUE
+sources, each in proportion to its share of the file-level stage's bytes, so the sample is 85.6\% code. The sample
+follows the model's training data so that no token is frequent in the tokenizer data but rare in the model data, and
+therefore under-trained. For $R$, repository files and CodeXGLUE
 functions are grouped by repository; every other document counts as its own repository.
 
 \paragraph{Pre-tokenizer.} The regular expression of OpenAI's cl100k tokenizer is used with one change: the rule that
@@ -409,9 +405,8 @@ measurements and the cited results.
 document masking and without truncation: each document chunk attends only to earlier tokens of the same chunk, and
 whole chunks are placed into sequences by Best-Fit-Decreasing.
 
-\paragraph{Why this packing.} Causal masking within each document gave lower perplexity than causal attention across
-concatenated documents~\cite{zhao2024seqcomp}, and packing with fewer truncations improved language modeling over the
-usual concatenate-then-split method~\cite{ding2024fewer}.
+\paragraph{Why this packing.} Packing with fewer truncations improved language modeling over the usual
+concatenate-then-split method~\cite{ding2024fewer}.
 
 \paragraph{Scope.} Both stages are packed this way. They use disjoint parts of the dataset, so no training document
 is packed twice.
@@ -614,9 +609,8 @@ and $\bar{x} = \mathrm{RMSNorm}(x)$ its normalized form.
 \paragraph{Token embedding and output layer.} The input embedding is RMS-normalized, and the output layer is a separate
 matrix. The token embedding $E \in \mathbb{R}^{V \times d}$ maps token $t$ to the row $E[t]$, and the first layer
 receives $x_0 = \mathrm{RMSNorm}(E[t])$; no position vector is added, because positions enter through RoPE inside
-attention. Normalizing the embedding gives the first layer an input of fixed scale; a normalization after the embedding
-significantly improved training stability in BLOOM, which also notes a cost in zero-shot
-generalization~\cite{bigscience2022bloom}. The output layer $W_{\mathrm{out}} \in \mathbb{R}^{d \times V}$ maps the
+attention. Normalizing the embedding gives the first layer an input of fixed scale. The output layer
+$W_{\mathrm{out}} \in \mathbb{R}^{d \times V}$ maps the
 normalized stream after the last layer, $\bar{x}$, to one logit per vocabulary token, $z = \bar{x} W_{\mathrm{out}}$.
 It is not shared with the input embedding, so the output layer has its own capacity. Sharing would save 25.2M
 parameters, 4.8\% of this model; in MobileLLM, sharing saved 11.8\% of a 125M model's parameters for a 0.2-point drop
@@ -631,8 +625,7 @@ Each attention and MLP sublayer reads $\bar{x} = \mathrm{RMSNorm}(x)$ and adds i
 RMSNorm precedes the output layer. RMSNorm matches the quality of LayerNorm with 7--64\% less running
 time~\cite{zhang2019rmsnorm}. The RMSNorm before each sublayer and
 before the output layer feeds only linear layers, which can absorb any per-dimension scale, so a learned scale there
-would be redundant; QK-norm, which feeds RoPE rather than a linear layer, keeps its learned scale. Removing biases
-increased training stability for large models in PaLM~\cite{chowdhery2022palm}.
+would be redundant; QK-norm, which feeds RoPE rather than a linear layer, keeps its learned scale.
 
 \paragraph{Attention and QK-norm.} Every layer uses multi-head attention with $H = 6$ heads of size 128, with QK-norm.
 QK-norm RMS-normalizes the queries and keys of each head, with a learned per-dimension scale, before RoPE, as Qwen3 does
@@ -761,7 +754,7 @@ step unless noted.
   \item \emph{Gradient norm}: the L2 norm of the gradient over all parameters, before clipping. Isolated spikes
   indicate unstable steps.
   \item \emph{Log-sum-exp of the output logits}: the log of the softmax normalizer at a position. Its growth indicates
-  drifting output logits, which z-loss penalizes~\cite{chowdhery2022palm}; soft-capping bounds it by $c + \ln V$.
+  drifting output logits, which z-loss penalizes~\cite{wortsman2023smallscale}; soft-capping bounds it by $c + \ln V$.
   \item \emph{QK-norm scale}: the largest learned scale of a layer's query or key normalization. The largest possible
   attention logit grows with the product of the query and key scales.
   \item \emph{Update size}: the root mean square of a parameter's update divided by the learning rate, logged every
@@ -981,7 +974,7 @@ output matrix, the output layer and the value-embedding gate weights start at ze
 $\lambda_r = 1$ and $\lambda_0 = 0$, and the QK-norm scales at 1.
 
 \paragraph{Why this initialization.} The uniform initialization is the standard fan-in initialization. With zero
-output matrices, as in Fixup~\cite{zhang2019fixup}, every layer
+output matrices, every layer
 starts as the identity and the model starts by predicting the uniform distribution over the vocabulary. The zero gate
 weights start every gate at 1, and the residual scalars start as in a standard pre-norm transformer.
 
@@ -1076,7 +1069,7 @@ Examples are packed whole into rows of 32,768 tokens with document masking, as i
 (Section~\ref{sec:packing}). Training runs for two epochs: 7,676 steps and 11.32B tokens, in 11.2 hours.
 
 \paragraph{Epochs.} Published reasoning SFT recipes make several passes over their data: MobileLLM-R1 trains for
-four epochs~\cite{zhao2025mobilellmr1} and Olmo 3 Think for two~\cite{olmo2025olmo3}. Here the number of epochs and
+four epochs~\cite{zhao2025mobilellmr1}. Here the number of epochs and
 the cap of two traces per prompt (Section~\ref{sec:data-sft}) were set together so that training fits the time budget;
 two epochs are not a measured optimum.
 
@@ -1111,8 +1104,8 @@ model. First, SFT trains only on the teacher's text, never on text the model gen
 fixed dataset therefore leaves a mismatch between the sequences seen in training and those the model generates at
 inference~\cite{agarwal2024gkd}, and nothing in SFT teaches the model to leave a loop it has started. Second,
 repetition reinforces itself: the more often a sentence repeats in the context, the more likely it is to be generated
-again, most strongly for high-probability text~\cite{xu2022loop}, and decoding that maximizes probability gets stuck
-in repetitive loops~\cite{holtzman2020degeneration}. On this model, the loops depend on the sampling temperature: at an
+again, most strongly for high-probability text such as the output of probability-maximizing decoding~\cite{xu2022loop}.
+On this model, the loops depend on the sampling temperature: at an
 intermediate SFT checkpoint (step 2,000), raising the temperature from 0.6 to 1.0 cut the loops on 64 HumanEval+
 problems from 18 to 3 and on 64 held-out problems from 36 to 4, and the evaluation decodes greedily. Third, learning to
 end a long reasoning trace takes many passes over the SFT data: Olmo3-7B ends 24\% of its responses after one epoch
@@ -1207,10 +1200,7 @@ such a problem gives an answer, not a correct one. This matches the finding that
 the probability of solutions the model already samples rather than adding new ones: the reasoning paths of RL-trained
 models are already present in the model before RL~\cite{yue2025rlvr}. Here the new answers pass at about the rate
 that forcing the SFT model to answer gives (28.8\% against 24.7--25.6\%), so RL made the model finish more often, not
-answer more accurately. The entropy of the model also fell from 1.13 to 0.31; in RL for reasoning, performance is
-gained at the cost of entropy and levels off as entropy runs out~\cite{cui2025entropy}, which suggests that longer
-training with the same objective would add little. No later stage addresses these failures, so they remain in the
-final model.
+answer more accurately. No later stage addresses these failures, so they remain in the final model.
 
 \section{Experimental Results}
 \label{sec:results}
