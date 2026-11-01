@@ -54,33 +54,45 @@ including the 0.6B model, are pretrained on 36T tokens~\cite{yang2025qwen3}.
 
 Training budgets of this size are not feasible on a single GPU. The 522M-parameter model in this work trains at 0.38M
 tokens per second on one GPU; at this training throughput, the 5.5T tokens of Qwen2.5-Coder would take more than five
-months. This paper studies whether a code LLM pretrained and post-trained on a single GPU, with far fewer tokens, can
-reach code generation performance comparable to the smallest existing code LLMs. Code generation is measured by
-functional correctness: pass@1 is the fraction of problems whose generated program passes all unit tests, with greedy
-decoding or averaged over sampled programs~\cite{chen2021codex}.
+months. This paper studies whether a code LLM pretrained on a single GPU, with far fewer tokens, can reach code
+generation performance within the range of the smallest existing code LLMs, and how far post-training on the same GPU
+improves it. Code generation is measured by functional correctness: pass@1 is the fraction of problems whose
+generated program passes all unit tests, with greedy decoding or averaged over sampled programs~\cite{chen2021codex}.
 
 Scaling laws predict a higher training loss for a model trained on fewer tokens~\cite{kaplan2020scaling}. At small
 scale, however, the focus and quality of the training data can substitute for its quantity: phi-1, a 1.3B-parameter
 code model pretrained on about 50B tokens drawn from 7B tokens of filtered and synthetic data, reaches 29\% pass@1 on
 HumanEval, and 50.6\% after fine-tuning on fewer than 200M tokens of exercises~\cite{gunasekar2023textbooks}. This
-paper therefore makes three predictions. First, a 522M-parameter model pretrained on 103B tokens concentrated on
-Python and C++ reaches pass@1 comparable to the smallest existing code LLMs on function-level benchmarks: HumanEval,
-MBPP and their EvalPlus versions~\cite{chen2021codex,austin2021mbpp,liu2023evalplus}. Second, in post-training, SFT
-provides most of the gain and RL adds little: for sub-billion-parameter models fully fine-tuned on SFT data,
-additional RL brings no significant improvement~\cite{zhao2025mobilellmr1}. Third, competitive programming remains in
-the low single digits: after reasoning post-training, MobileLLM-R1-360M scores 5.1 and Qwen2.5-0.5B-Instruct 3.6
-pass@1 on LiveCodeBench v6~\cite{zhao2025mobilellmr1,jain2024livecodebench}.
+paper therefore makes two predictions. First, a 522M-parameter model pretrained on 103B tokens concentrated on Python
+and C++ reaches pass@1 comparable to the smallest existing code LLMs on function-level benchmarks: HumanEval, MBPP and
+their EvalPlus versions~\cite{chen2021codex,austin2021mbpp,liu2023evalplus}. Second, in post-training, SFT provides
+most of the gain and RL adds little: for sub-billion-parameter models fully fine-tuned on SFT data, additional RL
+brings no significant improvement~\cite{zhao2025mobilellmr1}.
 
-The paper makes three contributions:
+The results (Section~\ref{sec:results}) support the first prediction on HumanEval but not on MBPP. Trained on 0.10T
+tokens, 19 to 350 times fewer than the published base models of 0.36B to 3B parameters that report their training
+tokens, the pretrained model is within their range on HumanEval and HumanEval+ (26.8\% and 22.0\%), but 8.5 to 15.8
+points below the code models trained on 2T tokens or more on MBPP. The second prediction holds on HumanEval+: SFT
+gives the larger and significant gain, from 22.0\% to 31.7\% (exact McNemar $p = 0.004$), and RL's further gain, to
+38.4\%, is not significant ($p = 0.12$).
+Post-training also reveals a failure the predictions did not anticipate: the SFT model falls into reasoning loops and
+leaves 44.8\% of its responses on held-out problems unfinished. RL removes most of these loops, but most of the answers
+it adds are wrong, so its gain comes from finishing responses rather than from more accurate answers.
+
+The paper makes four contributions:
 \begin{itemize}
   \item A 522M-parameter, GPT-style decoder-only LLM for Python and C++ code generation, pretrained from scratch on
   one NVIDIA GH200 GPU: 103B tokens (528 tokens per non-embedding parameter) in 76.3 hours, from a corpus of code, web
   text and math curated from 18 sources in 9 Hugging Face datasets, with a file-level stage at a context length of
   8,192 tokens, a repository-level stage at 32,768 tokens and fused GPU kernels.
   \item Post-training on the same GPU: SFT on reasoning traces, which teaches the model to reason before it answers,
-  followed by RL with rewards from unit tests.
-  \item An evaluation of every stage with each benchmark's official tool, in Python and C++, with 95\% confidence
-  intervals, and a comparison with the published scores of base models of 0.36B to 3B parameters.
+  followed by RL with rewards from unit tests and an objective based on DAPO.
+  \item A failure analysis of each model that traces its main failure to a root cause and to the stage that addresses
+  it: the wrong and unending completions of the pretrained model, the reasoning loops of the SFT model, and the
+  remaining wrong answers of the RL model.
+  \item An evaluation of each model with each benchmark's official tool and 95\% confidence intervals: the pretrained
+  model on Python and C++ code generation and on code infilling, the SFT and RL models on HumanEval and HumanEval+;
+  and a comparison of the pretrained model with the published scores of base models of 0.36B to 3B parameters.
 \end{itemize}
 
 \section{Data}
