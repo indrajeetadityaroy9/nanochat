@@ -1005,14 +1005,14 @@ output layer are meant to ensure (Section~\ref{sec:model}). After the first 5B t
 log-sum-exp over tokens stayed between 12.1 and 12.9, and its largest value per step between 17.7 and 18.9, below the
 bound $15 + \ln V = 25.4$ of soft-capping (Figure~\ref{fig:stability}b).
 
-\subsection{Supervised fine-tuning}
-\label{sec:sft}
+\subsection{Post-training}
+\label{sec:posttrain}
 
-\paragraph{Fine-tuning.} SFT trains all parameters of the final pretrained model on the reasoning traces of
-Section~\ref{sec:data-sft}, in one stage over all sources, for two epochs: 7,676 steps and 11.32B tokens. Each example
-is the prompt, \texttt{<think>}, the reasoning, \texttt{</think>} and the answer; the loss is the next-token
-cross-entropy on the reasoning and the answer, not on the prompt. Examples are packed whole into rows of 32,768 tokens
-with document masking, as in pretraining (Section~\ref{sec:packing}). Table~\ref{tab:post-train} lists the settings.
+Post-training turns the pretrained model, which continues code, into a model that reads a task, reasons, and then
+writes a solution. It has two stages on the same GPU (Table~\ref{tab:post-train}). SFT (Section~\ref{sec:sft}) teaches
+the model to reason before it answers by imitating the reasoning traces of larger models. RL (Section~\ref{sec:rl})
+then trains the model on its own responses, with a reward from unit tests, to fix the failures that appear when the
+model generates on its own.
 
 \begin{table}
   \caption{Post-training settings. Both stages train all parameters.}
@@ -1026,7 +1026,7 @@ with document masking, as in pretraining (Section~\ref{sec:packing}). Table~\ref
     \midrule
     Initial model & pretrained model, final step & SFT model, final step \\
     Data & reasoning traces (Section~\ref{sec:data-sft}) & 180,911 KodCode problems (Section~\ref{sec:data-rl}) \\
-    Loss & next-token loss on the response & policy gradient, averaged over tokens \\
+    Loss & next-token loss on the response & policy gradient with a group baseline, token-level (DAPO) \\
     Optimizer & NorMuon and AdamW, as in pretraining & AdamW, $\beta = (0.9, 0.95)$ \\
     Learning rate & peak $1.51 \times 10^{-4}$; warm-up over 40 steps, then linear decay to zero
       & $2 \times 10^{-6}$, constant \\
@@ -1041,99 +1041,137 @@ with document masking, as in pretraining (Section~\ref{sec:packing}). Table~\ref
   \end{tabular}
 \end{table}
 
-\paragraph{Why SFT\@.} The pretrained model continues code but has not learned to reason before it answers. SFT on
-the traces of larger reasoning models teaches this, and at small sizes it works better than RL on the small model
-alone (Section~\ref{sec:data-sft}). Every SFT example, RL prompt and evaluation prompt ends with \texttt{<think>}, so
-the model always reasons first; there is no mode without reasoning. The markers \texttt{<think>} and
-\texttt{</think>} are ordinary text, so the tokenizer is unchanged.
+\subsubsection{Supervised fine-tuning}
+\label{sec:sft}
+
+\paragraph{What is done.} SFT continues training the final pretrained model with the next-token loss on the
+reasoning traces of Section~\ref{sec:data-sft}. Each example is a prompt followed by a response: \texttt{<think>},
+the reasoning, \texttt{</think>} and the answer. The loss covers the response only. Examples are packed whole into
+rows of 32,768 tokens with document masking, as in pretraining (Section~\ref{sec:packing}). Training runs for two
+epochs: 7,676 steps and 11.32B tokens, in 11.2 hours.
+
+\paragraph{Why SFT\@.} The pretrained model continues code but does not reason before it answers. SFT on the traces
+of a stronger model, also called distillation, is the standard way to give a small model this ability: DeepSeek-R1
+found that distillation gave small models better results than RL on the small models themselves~\cite{deepseek2025r1}.
+Every SFT example, RL prompt and evaluation prompt ends with \texttt{<think>}, so the model always reasons first. The
+markers \texttt{<think>} and \texttt{</think>} are ordinary text, so the tokenizer is unchanged.
 
 \paragraph{Epochs.} Published reasoning SFT recipes make several passes over their data: MobileLLM-R1 trains for
 four epochs~\cite{zhao2025mobilellmr1} and Olmo 3 Think for two~\cite{olmo2025olmo3}. Here the number of epochs and
 the cap of two traces per prompt (Section~\ref{sec:data-sft}) were set together so that training fits the time budget;
 two epochs are not a measured optimum.
 
-\paragraph{Optimizer and learning rate.} SFT uses the pretraining optimizers, NorMuon and AdamW with one learning rate,
-with fresh optimizer states, a 40-step warm-up and linear decay to zero. Published SFT learning rates are for AdamW and
-do not carry over to NorMuon, so the peak is calibrated as in pretraining (Section~\ref{sec:batch-lr}). Three runs
-over the first 2\% of the first epoch, 76 steps, at 1/10, 1/3 and 1 times the pretraining peak reached response losses
-of 1.005, 0.982 and 1.031; the minimum of the parabola through these losses, as a function of the log learning rate,
-lies at 0.2575 times the pretraining peak. The optimal learning rate falls as training gets longer, roughly as the
-$-0.3$ power of the training length~\cite{bjorck2024horizons}, so the full run, 101 times longer, uses
+\paragraph{Learning rate.} SFT keeps the pretraining optimizers, NorMuon and AdamW with one shared learning rate, with
+fresh optimizer states, a 40-step warm-up and linear decay to zero. Published SFT learning rates are for AdamW and do
+not carry over to NorMuon, so the peak is calibrated as in pretraining (Section~\ref{sec:batch-lr}). Three short runs
+over the first 2\% of the first epoch (76 steps), at 1/10, 1/3 and 1 times the pretraining peak, reached response
+losses of 1.005, 0.982 and 1.031; the minimum of the parabola through these losses, as a function of the log learning
+rate, lies at 0.2575 times the pretraining peak. The optimal learning rate falls as training gets longer, roughly as
+the $-0.3$ power of the training length~\cite{bjorck2024horizons}, so the full run, 101 times longer, uses
 $0.2575 \times 101^{-0.3} = 0.0645$ times the pretraining peak: $1.51 \times 10^{-4}$. This peak is an estimate, not a
 measured optimum: each short run is one seed, three points fit the parabola exactly, and the length rule was measured
 in pretraining.
 
-\paragraph{No weight decay.} SFT uses no weight decay, like the fine-tuning of MobileLLM-R1~\cite{zhao2025mobilellmr1}.
+\paragraph{Weight decay.} SFT uses no weight decay, like the fine-tuning of MobileLLM-R1~\cite{zhao2025mobilellmr1}.
 The pretraining rule (Section~\ref{sec:weight-decay}) sets the decay for training from scratch; applied to SFT's 58
 tokens per parameter, it would scale the pretrained weights down by a factor of about 50 over the run.
 
 \paragraph{Result.} The response loss on the held-out SFT rows fell from 1.157 before SFT to 0.853 at step 1,000 and
 0.757 at the end, changing little in the last steps (0.763 at step 6,000). The SFT model reasons and answers: its
 HumanEval+ pass@1 is 31.7\%, against 22.0\% for the pretrained model (Table~\ref{tab:post-humaneval}). But it often
-does not finish: on the 512 held-out KodCode problems, 918 of its 2,048 responses never write \texttt{</think>}, 903 of
-them because they fall into a loop, and its pass@1 is 0.334; on HumanEval+, 61 of its 164 greedy responses end in a
-loop (Table~\ref{tab:failures}).
+does not finish: on the 512 held-out KodCode problems, 918 of its 2,048 responses (44.8\%) never write
+\texttt{</think>}, 903 of them because they fall into a loop, and its pass@1 is 0.334; on HumanEval+, 61 of its 164
+greedy responses end in a loop (Table~\ref{tab:failures}). These unfinished responses are the main failure of the SFT
+model and the reason for the RL stage.
 
-\subsection{Reinforcement learning}
+\subsubsection{Reinforcement learning}
 \label{sec:rl}
 
-\paragraph{Reinforcement learning.} RL trains the SFT model on the KodCode problems of Section~\ref{sec:data-rl} with
-rewards from their unit tests. Each batch has 128 new problems; the model samples 8 responses to each, each answer is
-run against the tests of its problem, and one gradient step moves the model toward the responses that scored above the
-mean of their group. The run trained for a fixed budget of two hours, 39 steps.
+\paragraph{What is done.} RL trains the SFT model on its own responses to the KodCode problems of
+Section~\ref{sec:data-rl}, with a reward from each problem's unit tests. In each step, the model samples 8 responses
+to each of 128 new problems, each answer is run against the tests of its problem, and one gradient step raises the
+probability of the responses that scored above the mean of their group and lowers the others. The run had a fixed
+budget of two hours: 39 steps.
 
-\paragraph{Why RL after SFT\@.} The loops of the SFT model cost it answers: a response that loops never writes
-\texttt{</think>} and fails, however far its reasoning had got. When \texttt{</think>} was forced where a loop starts
-to repeat, the answer the model then wrote passed in 24.7--25.6\% of the 802 loops that end in an exact repeating
-cycle on the held-out KodCode problems. Two direct ways of removing the loops from the SFT model were tried and not
-adopted, because neither changed the loops without changing normal text. Final-token preference
-optimization~\cite{paech2025antislop} trains the model to prefer its own alternatives to the first repeated token of a
-loop; trained on the last five layers and the output layer, it raised the loss of the SFT model's own correct answers
-by 24.3\% within 20 steps, and by 4.2\% with a KL penalty at normal positions. Training the model to write
-\texttt{</think>} at loop positions raised its log-probability at normal line starts by 83--95\% of its rise at loops,
-and by step 40 added 0.15 premature ends of reasoning per response. RL needs no loop-specific objective: its reward
-counts a loop as a failure like a wrong answer, and its length penalty makes a response that reaches the token limit
-score $-1$, so the model is trained to finish and to answer correctly at once. Published pipelines below 1B parameters
-end at SFT, and MobileLLM-R1 found no significant gain from RL after SFT for small models~\cite{zhao2025mobilellmr1};
-this stage tests that at 522M, from a model whose main failure is not finishing.
+\paragraph{Why RL after pretraining and SFT\@.} RL can only reinforce behavior that the model already produces, so it
+needs a model that already reasons and answers in the expected format; the pretrained model does neither. For small
+models, RL also works better after SFT than in its place: MobileLLM-R1-950M scored 57.0 on GSM8K after RL from its
+pretrained model and 74.0 after SFT~\cite{zhao2025mobilellmr1}. SFT, in turn, leaves a failure that only training on
+the model's own outputs can address. SFT imitates teacher text and never trains on what the model generates itself,
+and the SFT model's main failure, the loop, appears only there (Section~\ref{sec:sft}). RL trains on exactly these
+responses: an unfinished response earns no reward and a response cut at the length limit is penalized, so the model
+is pushed both to finish and to answer correctly. Finishing is worth learning: when \texttt{</think>} was forced where
+a loop starts to repeat, the answer the model then wrote passed in 24.7--25.6\% of the 802 loops that end in an exact
+repeating cycle. Published pipelines below 1B parameters end at SFT, and MobileLLM-R1 found no significant gain from RL
+after SFT~\cite{zhao2025mobilellmr1}; this stage tests that at 522M, for a model whose main failure is not finishing.
 
-\paragraph{Objective.} The baseline of each response is the mean reward of its group of 8, which replaces the value
-model of PPO~\cite{shao2024deepseekmath}, so no second model of the same size has to be trained on the one GPU. The
-advantage is the reward minus the group mean, divided by the standard deviation of the rewards over the whole batch,
-so that no group is weighted by how hard its problem is~\cite{liu2025tricks}; groups whose 8 rewards are all equal
-have zero advantage and are left out. The loss is averaged over all response tokens of the batch, not first within
-each response, so that the tokens of long responses are not down-weighted~\cite{yu2025dapo}. Each batch is used for
-one gradient step, so the responses come from the model being trained and no importance ratio or clipping is needed;
-two or four steps per batch led to rapid entropy collapse in AceReason~\cite{chen2025acereason}. There is no KL penalty
-to the SFT model and no entropy bonus, as in DAPO~\cite{yu2025dapo}.
+\paragraph{Direct loop fixes, not adopted.} Two direct fixes of the loops were tried before RL and not adopted,
+because neither changed the loops without changing normal text. Final-token preference
+optimization~\cite{paech2025antislop}, which trains the model to prefer its own alternatives to the first repeated
+token of a loop, raised the loss of the SFT model's own correct answers by 24.3\% within 20 steps when trained on the
+last five layers and the output layer, and by 4.2\% with a KL penalty at normal positions. Training the model to write
+\texttt{</think>} at loops raised its log-probability at normal line starts by 83--95\% of its rise at loops, and by
+step 40 added 0.15 premature ends of reasoning per response.
+
+\paragraph{From PPO to DAPO\@.} PPO~\cite{schulman2017ppo} is the standard policy-gradient algorithm for RL on LLMs.
+It maximizes a clipped objective, which lets each batch of sampled responses be reused for several gradient steps,
+and it estimates each token's advantage, how much better its outcome is than expected, with a learned value model
+about as large as the policy. GRPO~\cite{shao2024deepseekmath} removes the value model: it samples a group of
+responses to each prompt and uses the group's mean reward as the baseline, so a response's advantage is its reward
+minus the group mean, divided by the group's standard deviation; it adds a KL penalty to a reference model to the
+loss. DAPO~\cite{yu2025dapo} adapts GRPO to RL with long reasoning. It removes the KL penalty, because a reasoning
+model is expected to move far from its initial model; it raises the upper clipping bound (clip-higher); it drops
+prompts whose responses are all correct or all wrong, which have zero advantage and give no gradient (dynamic
+sampling); it averages the loss over all tokens of the batch instead of first within each response (token-level
+loss); and it handles responses that reach the length limit, either by masking them or by a reward penalty that
+grows as a response approaches the limit (overlong reward shaping).
+
+\paragraph{Why DAPO\@.} The objective follows DAPO because its changes address the problems of this model and this
+budget. Like GRPO, it needs no value model, so only the policy and its optimizer states are trained on the one GPU.
+The token-level loss targets the loops: when the loss is averaged within each response first, every token of a long
+response weighs less, and DAPO found that this fails to penalize long responses with repetitive text and lets
+response length and entropy grow; the unfinished responses of the SFT model are such responses. The overlong penalty
+gives the reward a direct signal against length. A first attempt used DAPO's other option, masking the responses cut
+at the limit, which gives no such signal: over six batches the share of cut responses rose from 3.7\% to 19.5\%, past
+the 10--15\% at which truncation destabilized training in ScaleRL~\cite{khatri2025scalerl}, and the pass rate fell
+from 0.420 to 0.391. Without the KL penalty, nothing pulls the model back toward the SFT model, whose loops are what
+RL has to remove.
+
+\paragraph{Differences from DAPO\@.} Three changes fit DAPO to a two-hour budget on one GPU. First, each batch is used
+for one gradient step, so the responses come from the model being trained, the probability ratio in PPO's objective is
+1, and its clipping, clip-higher included, never acts: the update is the policy gradient with the group baseline.
+Several steps per batch led to rapid entropy collapse in AceReason~\cite{chen2025acereason}. Second, the advantage is
+divided by the standard deviation of the rewards over the whole batch rather than of each group, so that no problem
+is weighted by its difficulty~\cite{liu2025tricks}. Third, groups whose 8 rewards are all equal are dropped but not
+replaced by newly sampled ones, which would cost generation time; 66 to 110 of the 128 groups per batch had mixed
+rewards. There is no entropy bonus.
 
 \paragraph{Reward.} The reward is 1 if the code in the answer, the text after \texttt{</think>}, passes every test of
-its problem, and 0 otherwise, as in the code RL of Nemotron-Cascade~\cite{wang2025nemotroncascade}; a response stopped
-as a loop scores 0. DAPO's soft overlong penalty is added~\cite{yu2025dapo}: 0 up to 12,288 tokens, then falling
-linearly to $-1$ at the 16,384-token limit. A first attempt masked the responses cut at the limit instead, which gives
-no signal against length: over six batches the share of cut responses rose from 3.7\% to 19.5\%, past the 10--15\% at
-which truncation destabilized training in ScaleRL~\cite{khatri2025scalerl}, and the pass rate fell from 0.420 to
-0.391.
+its problem, and 0 otherwise, as in the code RL of Nemotron-Cascade~\cite{wang2025nemotroncascade}. A response
+without \texttt{</think>}, without code, or stopped as a loop scores 0. DAPO's soft overlong penalty is added: 0 up to
+12,288 tokens, then falling linearly to $-1$ at the 16,384-token limit, so a response cut at the limit scores $-1$.
 
-\paragraph{Sampling and configuration.} Responses are sampled at temperature 1.0 and top-p 1.0, the model's own
-distribution; the code RL of Nemotron-Cascade also samples at temperature 1.0~\cite{wang2025nemotroncascade}. At this
-temperature the SFT model's first batch averaged 7,582 tokens per response; an 8,192-token limit would cut 42\% of the
-responses, the 16,384-token limit cuts about 4\%. Each batch has 128 problems and 8 responses per problem, as in the
-code RL of Nemotron-Cascade. The optimizer is AdamW with a constant learning rate of $2 \times 10^{-6}$, half the
-$4 \times 10^{-6}$ of Nemotron-Cascade at 8B and 14B; it was not tuned. RL uses Python problems only; C++ comes from
-SFT\@. The run stops at a fixed time budget and the last model is evaluated, so no checkpoint is chosen on a
-benchmark.
+\paragraph{Sampling and optimization.} Responses are sampled at temperature 1.0, as in the code RL of
+Nemotron-Cascade~\cite{wang2025nemotroncascade}, and top-p 1.0, so they follow the model's own distribution. The
+16,384-token limit fits the SFT model's responses: at temperature 1.0 they averaged 7,582 tokens in the first batch,
+and an 8,192-token limit would cut 42\% of them, against about 4\% at 16,384. Each batch has 128 problems and 8
+responses per problem, as in Nemotron-Cascade. The optimizer is AdamW with a constant learning rate of
+$2 \times 10^{-6}$, half the $4 \times 10^{-6}$ of Nemotron-Cascade at 8B and 14B; it was not tuned. RL uses Python
+problems only; C++ comes from SFT\@. The run stops at a fixed time budget and the last model is evaluated, so no
+checkpoint is chosen on a benchmark.
 
-\paragraph{Result.} The run made 39 steps in 119 minutes. Responses became shorter: the mean length fell from 7,598
-tokens in the first batch to 2,368 in the last, and the cut responses from 44 of 1,024 to at most 3 per batch, so the
-generation of a batch sped up from 416 to 117 seconds. The batch pass rate rose from 0.411, the mean of the first five
-batches, to 0.444, the mean of the last five; single batches ranged from 0.372 to 0.557. The entropy fell from 1.13 to
-0.31. The gradient norm, median 0.228, exceeded the clipping threshold at three steps, at most 6.41; the batches
-sampled right after them passed 0.512 and 0.461 of their responses. On the held-out KodCode problems, pass@1 rose from
-0.334 to 0.426, unfinished responses fell from 918 to 266 of 2,048 (loops from 903 to 260), and the mean response
-from 3,553 to 1,934 tokens. The gain comes from finishing: of the 652 additional finished responses, 188 more pass and
-459 more fail, so 28.8\% of the new answers pass, close to the quarter of loops that pass when \texttt{</think>} is
-forced. Among finished responses, the pass rate fell from 0.605 to 0.489. HumanEval shows the same pattern
+\paragraph{Result in training.} The run made 39 steps in 119 minutes. Responses became shorter: the mean length fell
+from 7,598 tokens in the first batch to 2,368 in the last, and the cut responses from 44 of 1,024 to at most 3 per
+batch, so the generation of a batch sped up from 416 to 117 seconds. The batch pass rate rose from 0.411, the mean of
+the first five batches, to 0.444, the mean of the last five; single batches ranged from 0.372 to 0.557. The entropy
+fell from 1.13 to 0.31. The gradient norm, median 0.228, exceeded the clipping threshold at three steps, at most 6.41;
+the batches sampled right after them passed 0.512 and 0.461 of their responses.
+
+\paragraph{Result on held-out problems.} On the 512 held-out KodCode problems, pass@1 rose from 0.334 to 0.426,
+unfinished responses fell from 918 to 266 of 2,048 (loops from 903 to 260), and the mean response from 3,553 to 1,934
+tokens. The gain comes from finishing: of the 652 additional finished responses, 188 more pass and 459 more fail, so
+28.8\% of the new answers pass, close to the quarter of loops that pass when \texttt{</think>} is forced. Among
+finished responses, the pass rate fell from 0.605 to 0.489. HumanEval shows the same pattern
 (Section~\ref{sec:failures}).
 
 \section{Experimental Results}
