@@ -742,8 +742,10 @@ $e^{15} / (e^{15} + (V - 1)\, e^{-15}) \approx 1 - 3 \times 10^{-9}$.
 
 The model is trained in three stages, each starting from the final weights of the previous one: pretraining on the
 corpus of Section~\ref{sec:data-pretrain} (Section~\ref{sec:pretraining}), SFT on reasoning traces
-(Section~\ref{sec:sft}), and RL with rewards from unit tests (Section~\ref{sec:rl}). For each choice, this section
-gives what is done, why, its scope and configuration, and the result in training.
+(Section~\ref{sec:sft}), and RL with rewards from unit tests (Section~\ref{sec:rl}). The section follows this order.
+For each choice, it gives what is done, why, its scope and configuration, and the result in training. Each
+post-training stage starts from the main failure of the model before it and the root cause of that failure, and ends
+with the failure mode of the model it produces.
 
 \paragraph{Metrics.} The results use the following quantities. The pretraining quantities are logged at every training
 step unless noted.
@@ -1009,10 +1011,11 @@ bound $15 + \ln V = 25.4$ of soft-capping (Figure~\ref{fig:stability}b).
 \label{sec:posttrain}
 
 Post-training turns the pretrained model, which continues code, into a model that reads a task, reasons, and then
-writes a solution. It has two stages on the same GPU (Table~\ref{tab:post-train}). SFT (Section~\ref{sec:sft}) teaches
-the model to reason before it answers by imitating the reasoning traces of larger models. RL (Section~\ref{sec:rl})
-then trains the model on its own responses, with a reward from unit tests, to fix the failures that appear when the
-model generates on its own.
+writes a solution. It has two stages on the same GPU (Table~\ref{tab:post-train}), each addressing the main failure of
+the model before it. SFT (Section~\ref{sec:sft}) addresses the wrong and unending completions of the pretrained model:
+it teaches the model to reason before it answers by imitating the reasoning traces of larger models. RL
+(Section~\ref{sec:rl}) addresses the unfinished, looping responses of the SFT model: it trains the model on its own
+responses, with a reward from unit tests.
 
 \begin{table}
   \caption{Post-training settings. Both stages train all parameters.}
@@ -1044,17 +1047,29 @@ model generates on its own.
 \subsubsection{Supervised fine-tuning}
 \label{sec:sft}
 
+\paragraph{Failure of the pretrained model.} The pretrained model continues code but often does not solve the task it
+is given (Section~\ref{sec:results-base}). On HumanEval+, 85 of its 164 completions return a wrong output and 22 never
+stop before the 768-token limit (Table~\ref{tab:failures}); on MBPP+, 30.7\% are wrong and 17.7\% never stop. In
+infilling, 38.3\% of the middles for a single missing line run past that line.
+
+\paragraph{Root cause.} Pretraining trains the model to predict the next token of a document. It is not trained to
+work through a stated task or to end its output when the task is done, and failing to emit the end token is a known
+failure of pretrained models in infilling~\cite{bavarian2022fim}. Fine-tuning on tasks and their solutions is how code
+models close this gap: after instruction tuning, DeepSeek-Coder-1.3B rises from 34.8\% to 65.2\% on
+HumanEval~\cite{guo2024deepseekcoder} and Qwen2.5-Coder-0.5B from 28.0\% to 61.6\%~\cite{hui2024qwen25coder}.
+
+\paragraph{Why SFT\@.} SFT on the traces of a stronger model, also called distillation, is the standard way to give a
+small model the ability to reason before it answers: DeepSeek-R1 found that distillation gave small models better
+results than RL on the small models themselves~\cite{deepseek2025r1}. Every SFT example ends with the answer and an
+end-of-document token, so SFT also trains the model to stop. Every prompt, in SFT, RL and evaluation, ends with
+\texttt{<think>}, so the model always reasons first. The markers \texttt{<think>} and \texttt{</think>} are ordinary
+text, so the tokenizer is unchanged.
+
 \paragraph{What is done.} SFT continues training the final pretrained model with the next-token loss on the
 reasoning traces of Section~\ref{sec:data-sft}. Each example is a prompt followed by a response: \texttt{<think>},
-the reasoning, \texttt{</think>} and the answer. The loss covers the response only. Examples are packed whole into
-rows of 32,768 tokens with document masking, as in pretraining (Section~\ref{sec:packing}). Training runs for two
-epochs: 7,676 steps and 11.32B tokens, in 11.2 hours.
-
-\paragraph{Why SFT\@.} The pretrained model continues code but does not reason before it answers. SFT on the traces
-of a stronger model, also called distillation, is the standard way to give a small model this ability: DeepSeek-R1
-found that distillation gave small models better results than RL on the small models themselves~\cite{deepseek2025r1}.
-Every SFT example, RL prompt and evaluation prompt ends with \texttt{<think>}, so the model always reasons first. The
-markers \texttt{<think>} and \texttt{</think>} are ordinary text, so the tokenizer is unchanged.
+the reasoning, \texttt{</think>}, the answer and the end-of-document token. The loss covers the response only.
+Examples are packed whole into rows of 32,768 tokens with document masking, as in pretraining
+(Section~\ref{sec:packing}). Training runs for two epochs: 7,676 steps and 11.32B tokens, in 11.2 hours.
 
 \paragraph{Epochs.} Published reasoning SFT recipes make several passes over their data: MobileLLM-R1 trains for
 four epochs~\cite{zhao2025mobilellmr1} and Olmo 3 Think for two~\cite{olmo2025olmo3}. Here the number of epochs and
@@ -1076,34 +1091,51 @@ in pretraining.
 The pretraining rule (Section~\ref{sec:weight-decay}) sets the decay for training from scratch; applied to SFT's 58
 tokens per parameter, it would scale the pretrained weights down by a factor of about 50 over the run.
 
-\paragraph{Result.} The response loss on the held-out SFT rows fell from 1.157 before SFT to 0.853 at step 1,000 and
-0.757 at the end, changing little in the last steps (0.763 at step 6,000). The SFT model reasons and answers: its
-HumanEval+ pass@1 is 31.7\%, against 22.0\% for the pretrained model (Table~\ref{tab:post-humaneval}). But it often
-does not finish: on the 512 held-out KodCode problems, 918 of its 2,048 responses (44.8\%) never write
-\texttt{</think>}, 903 of them because they fall into a loop, and its pass@1 is 0.334; on HumanEval+, 61 of its 164
-greedy responses end in a loop (Table~\ref{tab:failures}). These unfinished responses are the main failure of the SFT
-model and the reason for the RL stage.
+\paragraph{Result in training.} The response loss on the held-out SFT rows fell from 1.157 before SFT to 0.853 at step
+1,000 and 0.757 at the end, changing little in the last steps (0.763 at step 6,000). The SFT model reasons and
+answers: its HumanEval+ pass@1 is 31.7\%, against 22.0\% for the pretrained model, and its wrong outputs fall from 85
+to 38 (Section~\ref{sec:results-sft}).
+
+\paragraph{Failure mode of the SFT model.} The SFT model often does not finish. On the 512 held-out KodCode problems,
+918 of its 2,048 responses (44.8\%) never write \texttt{</think>}, 903 of them because they fall into a loop that
+repeats the same text, and its pass@1 is 0.334; on HumanEval+, 61 of its 164 greedy responses end in a loop
+(Table~\ref{tab:failures}). A response without \texttt{</think>} has no answer and fails, so these loops are the main
+failure of the SFT model.
+
+\paragraph{Root cause of the loops.} The literature points to three causes, each consistent with measurements on this
+model. First, SFT trains only on the teacher's text, never on text the model generates itself. Distillation from a
+fixed dataset therefore leaves a mismatch between the sequences seen in training and those the model generates at
+inference~\cite{agarwal2024gkd}, and nothing in SFT teaches the model to leave a loop it has started. Second,
+repetition reinforces itself: the more often a sentence repeats in the context, the more likely it is to be generated
+again, most strongly for high-probability text~\cite{xu2022loop}, and decoding that maximizes probability gets stuck
+in repetitive loops~\cite{holtzman2020degeneration}. On this model, the loops depend on the sampling temperature: at an
+intermediate SFT checkpoint (step 2,000), raising the temperature from 0.6 to 1.0 cut the loops on 64 HumanEval+
+problems from 18 to 3 and on 64 held-out problems from 36 to 4, and the evaluation decodes greedily. Third, learning to
+end a long reasoning trace takes many passes over the SFT data: Olmo3-7B ends 24\% of its responses after one epoch
+of long-reasoning SFT and about 89\% after 32~\cite{kopiczko2026repetition}, and this SFT ran two epochs. The loops
+also mark problems the model cannot solve: 545 of the 802 loops that end in an exact repeating cycle are on held-out
+problems the SFT model solved in none of its 4 samples.
 
 \subsubsection{Reinforcement learning}
 \label{sec:rl}
+
+\paragraph{Why RL after pretraining and SFT\@.} RL addresses the first cause of the loops directly: it trains on the
+model's own responses, the text SFT never trains on, and its reward comes from running the model's answer, so an
+unfinished response earns no reward and a response cut at the length limit is penalized. The model is therefore
+pushed both to finish and to answer correctly. Finishing is worth learning: when \texttt{</think>} was forced where a
+loop starts to repeat, the answer the model then wrote passed in 24.7--25.6\% of the 802 loops that end in an exact
+repeating cycle. RL comes after SFT, not in its place. RL can only reinforce behavior that the model already produces,
+so it needs a model that already reasons and answers in the expected format, which the pretrained model does not; and
+for small models RL works better after SFT: MobileLLM-R1-950M scored 57.0 on GSM8K after RL from its pretrained model
+and 74.0 after SFT~\cite{zhao2025mobilellmr1}. Published pipelines below 1B parameters end at SFT, and MobileLLM-R1
+found no significant gain from RL after SFT~\cite{zhao2025mobilellmr1}; this stage tests that at 522M, for a model
+whose main failure is not finishing.
 
 \paragraph{What is done.} RL trains the SFT model on its own responses to the KodCode problems of
 Section~\ref{sec:data-rl}, with a reward from each problem's unit tests. In each step, the model samples 8 responses
 to each of 128 new problems, each answer is run against the tests of its problem, and one gradient step raises the
 probability of the responses that scored above the mean of their group and lowers the others. The run had a fixed
 budget of two hours: 39 steps.
-
-\paragraph{Why RL after pretraining and SFT\@.} RL can only reinforce behavior that the model already produces, so it
-needs a model that already reasons and answers in the expected format; the pretrained model does neither. For small
-models, RL also works better after SFT than in its place: MobileLLM-R1-950M scored 57.0 on GSM8K after RL from its
-pretrained model and 74.0 after SFT~\cite{zhao2025mobilellmr1}. SFT, in turn, leaves a failure that only training on
-the model's own outputs can address. SFT imitates teacher text and never trains on what the model generates itself,
-and the SFT model's main failure, the loop, appears only there (Section~\ref{sec:sft}). RL trains on exactly these
-responses: an unfinished response earns no reward and a response cut at the length limit is penalized, so the model
-is pushed both to finish and to answer correctly. Finishing is worth learning: when \texttt{</think>} was forced where
-a loop starts to repeat, the answer the model then wrote passed in 24.7--25.6\% of the 802 loops that end in an exact
-repeating cycle. Published pipelines below 1B parameters end at SFT, and MobileLLM-R1 found no significant gain from RL
-after SFT~\cite{zhao2025mobilellmr1}; this stage tests that at 522M, for a model whose main failure is not finishing.
 
 \paragraph{From PPO to DAPO\@.} PPO~\cite{schulman2017ppo} is the standard policy-gradient algorithm for RL on LLMs.
 It maximizes a clipped objective, which lets each batch of sampled responses be reused for several gradient steps,
@@ -1158,15 +1190,31 @@ the batches sampled right after them passed 0.512 and 0.461 of their responses.
 \paragraph{Result on held-out problems.} On the 512 held-out KodCode problems, pass@1 rose from 0.334 to 0.426,
 unfinished responses fell from 918 to 266 of 2,048 (loops from 903 to 260), and the mean response from 3,553 to 1,934
 tokens. The gain comes from finishing: of the 652 additional finished responses, 188 more pass and 459 more fail, so
-28.8\% of the new answers pass, close to the quarter of loops that pass when \texttt{</think>} is forced. Among
-finished responses, the pass rate fell from 0.605 to 0.489. HumanEval shows the same pattern
-(Section~\ref{sec:failures}).
+28.8\% of the new answers pass, close to the quarter of loops that pass when \texttt{</think>} is forced.
+
+\paragraph{Failure mode of the RL model.} RL leaves two failures. Most of the answers it adds are wrong: among
+finished responses, the pass rate fell from 0.605 to 0.489, and on HumanEval+ wrong outputs rose from 38 to 65
+(Section~\ref{sec:results-rl}). And 266 of the 2,048 held-out responses (13.0\%) still do not finish, 260 of them
+loops.
+
+\paragraph{Root cause of the remaining failures.} RL turned loops into answers mainly on problems the SFT model could
+not solve: most of its loops were on problems it solved in none of 4 samples (Section~\ref{sec:sft}), and finishing
+such a problem gives an answer, not a correct one. This matches the finding that RL with verifiable rewards raises
+the probability of solutions the model already samples rather than adding new ones: the reasoning paths of RL-trained
+models are already present in the model before RL~\cite{yue2025rlvr}. Here the new answers pass at about the rate
+that forcing the SFT model to answer gives (28.8\% against 24.7--25.6\%), so RL made the model finish more often, not
+answer more accurately. The entropy of the model also fell from 1.13 to 0.31; in RL for reasoning, performance is
+gained at the cost of entropy and levels off as entropy runs out~\cite{cui2025entropy}, which suggests that longer
+training with the same objective would add little. No later stage addresses these failures, so they remain in the
+final model.
 
 \section{Experimental Results}
 \label{sec:results}
 
-This section reports the pretrained model on code generation and code infilling, analyzes the failures of the
-pretrained, SFT and RL models, and compares the three models on HumanEval.
+This section evaluates the three models in the order they were trained: the pretrained model
+(Section~\ref{sec:results-base}), the SFT model (Section~\ref{sec:results-sft}) and the RL model
+(Section~\ref{sec:results-rl}). For each, it reports the benchmark results, then analyzes the failures and relates them
+to their root causes (Section~\ref{sec:training}), which motivate the next stage.
 
 \subsection{Evaluation setup}
 \label{sec:results-setup}
@@ -1275,24 +1323,6 @@ that stops before EvalPlus's 768-token limit.
   \end{tabular}
 \end{table*}
 
-\begin{table*}
-  \caption{The pretrained, SFT and RL models on HumanEval (164 problems), greedy: pass@1 (\%) with its 95\% Wilson
-  interval. The pretrained model uses EvalPlus's completion prompt, the SFT and RL models its chat prompt. Finished:
-  responses that give an answer instead of looping or reaching the token limit (Section~\ref{sec:results-setup});
-  tokens: median response length.}
-  \label{tab:post-humaneval}
-  \small
-  \begin{tabular}{lrrrrr}
-    \toprule
-    Model & HumanEval pass@1 & HumanEval+ pass@1 & Finished (\%) & HumanEval+ pass@1 of finished & Tokens \\
-    \midrule
-    Pretrained & 26.8 [20.6, 34.1] & 22.0 [16.3, 28.9] & 86.6 & 25.4 & -- \\
-    SFT & 32.9 [26.2, 40.4] & 31.7 [25.1, 39.2] & 61.6 & 51.5 & 1,902 \\
-    RL & 40.9 [33.6, 48.5] & 38.4 [31.3, 46.0] & 87.2 & 44.1 & 1,228 \\
-    \bottomrule
-  \end{tabular}
-\end{table*}
-
 \paragraph{Python.} The pretrained model passes 26.8\% of HumanEval and 44.4\% of MBPP (Table~\ref{tab:base-results}).
 EvalPlus's additional tests lower these to 22.0\% and 36.5\%: 4.9\% of HumanEval and 7.9\% of MBPP solutions pass the
 original tests but fail the additional ones. The average of the four scores, the EvalPlus average, is 32.4\%.
@@ -1323,22 +1353,6 @@ DeepSeek-Coder-1.3B and StarCoder2-3B), more than two evaluations of the same mo
 StarCoderBase-3B scores in the same range. MBPP 3-shot, at 32.2, lies within the published range (20.8--47.4), with
 the prompt-format caveat above.
 
-\subsection{SFT and RL models on HumanEval}
-
-\paragraph{Results.} SFT raised HumanEval+ pass@1 from 22.0\% to 31.7\% (Table~\ref{tab:post-humaneval}): on the
-same 164 problems it gained 22 and lost 6 (exact McNemar $p = 0.004$). RL raised it further to 38.4\%, gaining 26
-problems and losing 15 against SFT ($p = 0.12$) and 33 and 6 against the pretrained model
-($p = 1.4 \times 10^{-5}$). The pretrained and the post-trained models are prompted differently, so these comparisons
-measure each model as it is used.
-
-\paragraph{Finished answers.} SFT finished 61.6\% of its responses and RL 87.2\%; RL's median response is 1,228
-tokens against 1,902 for SFT. Among finished answers, the HumanEval+ pass rate is 51.5\% for SFT and 44.1\% for RL.
-RL therefore answers more problems, with a lower pass rate on the answers it gives; Section~\ref{sec:failures}
-analyzes where its gain comes from.
-
-\subsection{Failure analysis}
-\label{sec:failures}
-
 \begin{table}
   \caption{Outcome of each HumanEval+ problem (164), greedy decoding. No finished answer: a response stopped in a
   reasoning loop or at the token limit, without an answer (Section~\ref{sec:results-setup}); for the pretrained model,
@@ -1365,23 +1379,73 @@ analyzes where its gain comes from.
   \end{tabular}
 \end{table}
 
-\paragraph{Pretrained model.} Table~\ref{tab:failures} classifies every HumanEval+ problem. The most common failure is
-a wrong output (85 of 164 problems; 30.7\% of MBPP+). The second is a completion that never stops: 22 HumanEval+
-completions (13.4\%) and 17.7\% of MBPP+ completions run to the token limit. Runtime errors are fewer (13; mostly
-\texttt{NameError}, \texttt{TypeError} and \texttt{ValueError}), and every completion is valid Python. In C++, 6.8\% of
-HumanEval-C++ and 14.9\% of MBPP-C++ programs fail to compile. Infilling shows the same stopping failure: 13.2\% of
-single-line, 14.4\% of multi-line and 62.7\% of random-span middles run to the token limit, and 38.3\% of single-line
-middles extend beyond the missing line, so the model keeps writing after the gap is filled.
+\paragraph{Failure analysis.} Table~\ref{tab:failures} classifies every HumanEval+ problem. The most common failure of
+the pretrained model is a wrong output (85 of 164 problems; 30.7\% of MBPP+). The second is a completion that never
+stops: 22 HumanEval+ completions (13.4\%) and 17.7\% of MBPP+ completions run to the token limit. Runtime errors are
+fewer (13; mostly \texttt{NameError}, \texttt{TypeError} and \texttt{ValueError}), and every completion is valid
+Python. In C++, 6.8\% of HumanEval-C++ and 14.9\% of MBPP-C++ programs fail to compile. Infilling shows the same
+stopping failure: 13.2\% of single-line, 14.4\% of multi-line and 62.7\% of random-span middles run to the token
+limit, and 38.3\% of single-line middles extend beyond the missing line, so the model keeps writing after the gap is
+filled.
 
-\paragraph{SFT model.} After SFT, wrong outputs fall from 85 to 38 and the pass rate among finished answers doubles,
-from 25.4\% to 51.5\%, but 63 responses never finish: 61 end in a repeating loop and 2 reach the token limit. Every
-HumanEval+ pass of the SFT and RL models comes from a finished answer, so these 63 problems are lost.
+\paragraph{Root cause.} These are the failures of a model trained only to predict the next token of documents: it
+has not learned to work through a stated task or to end its output when the task is done. SFT addresses both
+(Section~\ref{sec:sft}).
 
-\paragraph{RL model.} RL reduces unfinished responses to 21 (19 loops) and finishes 143 answers. Of the 63 problems on
-which the SFT model did not finish, RL finishes 48 and passes 19; the other 29 answers are wrong, which lowers the pass
-rate among finished answers to 44.1\%. Of the 26 problems that RL newly passes, these 19 are the majority: RL's gain
-comes mostly from finishing the reasoning and answering, not from more accurate answers. All answers of the three
-models are valid Python, so syntax is not a failure mode on HumanEval.
+\subsection{SFT model}
+\label{sec:results-sft}
+
+\begin{table*}
+  \caption{The pretrained, SFT and RL models on HumanEval (164 problems), greedy: pass@1 (\%) with its 95\% Wilson
+  interval. The pretrained model uses EvalPlus's completion prompt, the SFT and RL models its chat prompt. Finished:
+  responses that give an answer instead of looping or reaching the token limit (Section~\ref{sec:results-setup});
+  tokens: median response length.}
+  \label{tab:post-humaneval}
+  \small
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Model & HumanEval pass@1 & HumanEval+ pass@1 & Finished (\%) & HumanEval+ pass@1 of finished & Tokens \\
+    \midrule
+    Pretrained & 26.8 [20.6, 34.1] & 22.0 [16.3, 28.9] & 86.6 & 25.4 & -- \\
+    SFT & 32.9 [26.2, 40.4] & 31.7 [25.1, 39.2] & 61.6 & 51.5 & 1,902 \\
+    RL & 40.9 [33.6, 48.5] & 38.4 [31.3, 46.0] & 87.2 & 44.1 & 1,228 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\paragraph{Results.} SFT raised HumanEval+ pass@1 from 22.0\% to 31.7\% (Table~\ref{tab:post-humaneval}): on the same
+164 problems it gained 22 and lost 6 (exact McNemar $p = 0.004$). The pretrained and the post-trained models are
+prompted differently, so these comparisons measure each model as it is used. SFT finished 61.6\% of its responses,
+with a median response of 1,902 tokens, and passed 51.5\% of HumanEval+ among its finished answers.
+
+\paragraph{Failure analysis.} After SFT, wrong outputs fall from 85 to 38 and the pass rate among finished answers
+doubles, from 25.4\% to 51.5\% (Table~\ref{tab:failures}), but 63 responses never finish: 61 end in a repeating loop
+and 2 reach the token limit. Every HumanEval+ pass of the SFT and RL models comes from a finished answer, so these 63
+problems are lost.
+
+\paragraph{Root cause.} The loops come from training only on the teacher's text, from the self-reinforcement of
+repetition under greedy decoding, and from the few SFT epochs (Section~\ref{sec:sft}). RL addresses the first by
+training on the model's own responses (Section~\ref{sec:rl}).
+
+\subsection{RL model}
+\label{sec:results-rl}
+
+\paragraph{Results.} RL raised HumanEval+ pass@1 to 38.4\% (Table~\ref{tab:post-humaneval}), gaining 26 problems and
+losing 15 against SFT ($p = 0.12$) and 33 and 6 against the pretrained model ($p = 1.4 \times 10^{-5}$). RL finished
+87.2\% of its responses, with a median response of 1,228 tokens against 1,902 for SFT, and passed 44.1\% of
+HumanEval+ among its finished answers, against 51.5\% for SFT: it answers more problems, with a lower pass rate on the
+answers it gives.
+
+\paragraph{Failure analysis.} RL reduces unfinished responses to 21 (19 loops) and finishes 143 answers. Of the 63
+problems on which the SFT model did not finish, RL finishes 48 and passes 19; the other 29 answers are wrong, and wrong
+outputs rise from 38 to 65 (Table~\ref{tab:failures}). Of the 26 problems that RL newly passes, these 19 are the
+majority: RL's gain comes mostly from finishing the reasoning and answering, not from more accurate answers. All
+answers of the three models are valid Python, so syntax is not a failure mode on HumanEval.
+
+\paragraph{Root cause.} RL finished mostly problems that the SFT model could not solve, and RL raises the probability
+of solutions the model already samples rather than adding new ones (Section~\ref{sec:rl}), so most of its new answers
+are wrong. No later stage addresses these failures: the 21 unfinished responses and 65 wrong outputs remain in the
+final model.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
