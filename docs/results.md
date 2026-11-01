@@ -314,6 +314,28 @@ answers re-scored in a clean process]; §6.4's counts and every later record are
 (docs/evaluation.md §10). The same guard, inflated by per-core thread pools, affected the base's scoring
 (docs/evaluation.md §4).
 
+### 6.6 HumanEval greedy under the reasoning protocol
+
+The SFT model (step 7676) and the RL policy (`onpolicy-7676/rl/step-39`) under `scripts/official_reasoning.sh`
+(EvalPlus's chat prompt, greedy, up to 32,768 tokens; docs/post-training.md §5). The samples are the protocol's own,
+`official-7676{,-rl}/evalplus/humaneval/nanochat_openai_temp_0.0.jsonl`; they were scored by the protocol's
+`evalplus.evaluate` command (same image, one BLAS thread, NUMA node 0) on copies, before the protocol's own scoring
+step, which runs after the MBPP generations [measured]. Wilson 95% intervals (`metrics.pass_cell`); the base row is
+§1's.
+
+| Model | HumanEval | HumanEval+ | Closed `</think>` | Loop-stopped | Length limit | Median / mean tokens |
+|---|---|---|---|---|---|---|
+| base (§1, completion prompt) | 0.268 [0.206, 0.341] | 0.220 [0.163, 0.289] | — | — | — | — |
+| SFT 7676 | 0.329 [0.262, 0.404] | 0.317 [0.251, 0.392] | 101 | 61 | 2 | 1,902 / 3,776 |
+| RL step 39 | 0.409 [0.336, 0.485] | 0.384 [0.313, 0.460] | 143 | 19 | 2 | 1,228 / 2,170 |
+
+- **Paired** (HumanEval+, exact McNemar): base → SFT 22 gained, 6 lost, p = 0.0037; SFT → RL 26 gained, 15 lost,
+  p = 0.12; base → RL 33 gained, 6 lost, p = 1.4e-5. On base tests: base → SFT 21 / 11 (p = 0.11), SFT → RL 26 / 13
+  (p = 0.053), base → RL 32 / 9 (p = 4.3e-4) [measured].
+- **Every pass closed its reasoning**: plus passes 52 of 101 closed SFT responses and 0 of 63 unclosed; 63 of 143 and
+  0 of 21 for RL. Of RL's 26 HumanEval+ gains over SFT, 19 are problems on which the SFT response was loop-stopped;
+  RL closed 48 of the SFT model's 63 unclosed responses [measured].
+
 ## References
 
 | arXiv | Title |
