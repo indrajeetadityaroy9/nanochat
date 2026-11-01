@@ -512,13 +512,15 @@ batch k, and the trainer updates on it. Sampling and the update alternate on the
   (`Head`: gradients in its forward, 8,192 rows at a time, the head in fp32). The masked attempt's batch 0: 421 s of
   generation (7.86M tokens, 18.7K tokens/s) and 31 s for the update (606 responses, 4.14M tokens), about 7.5 minutes
   an update (`onpolicy-7676/rl/attempt-16k-masked-train.jsonl`).
-- **Budget and evaluation**: the trainer stops at the batch whose end would let the next overrun `BUDGET`, 2 hours:
-  about 15 updates at 7.5 minutes [arithmetic]; Nemotron-Cascade's code RL ran 22 to 90 steps (arXiv 2603.19220
-  App. B; arXiv 2512.13607 App. D Table 19). The sampler evaluates the first and the last policy on `eval-model/val`'s
-  512 KodCode val prompts × 4 at the protocol's T 0.6 and top-p 0.95, with their seeds and its own loop stop: the SFT
-  model's pass@1 is 0.334 there against 0.325 under `onpolicy/rollouts.py`'s round-based stop [measured]. The last
-  policy is then evaluated by the reasoning protocol (§5) beside the SFT model (`scripts/post_sft_queue.sh`); results
-  in `docs/results.md` §6.
+- **Budget and evaluation**: the trainer stops at the batch whose end would let the next overrun `BUDGET`, 2 hours.
+  The run made 39 updates in 119 minutes, not the 15 that the masked attempt's 7.5 minutes per update implied: as
+  responses shortened (7,598 → 2,368 tokens on average), a batch's generation fell from 416 to 117 s (§9)
+  [measured]. Nemotron-Cascade's code RL ran 22 to 90 steps (arXiv 2603.19220 App. B; arXiv 2512.13607 App. D Table
+  19). The sampler evaluates the first and the last policy on `eval-model/val`'s 512 KodCode val prompts × 4 at the
+  protocol's T 0.6 and top-p 0.95, with their seeds and its own loop stop: the SFT model's pass@1 is 0.334 there
+  against 0.325 under `onpolicy/rollouts.py`'s round-based stop [measured]. The last policy is then evaluated by the
+  reasoning protocol (§5) beside the SFT model (`scripts/post_sft_queue.sh` items 2–3); results in
+  `docs/results.md` §6.
 
 ## 7. Not in the pipeline
 
@@ -603,6 +605,39 @@ stage instead (§6), whose reward already counts a loop as a failure [inference]
 Provenance: code on branch `onpolicy-experiments` @ `7257448` (`onpolicy/train.py`, `onpolicy/selection.py`,
 `onpolicy/rollouts.py`, `eval/official_loop_stop.py`); records under the SFT run's `onpolicy-7676/`; the planned FTPO →
 DPO design as it stood: `docs/post-training.md` §8 at commit `9b106ca`.
+
+## 9. The RL run
+
+The run of §6 from the SFT model (step 7676), with the soft overlong punishment: 39 updates of 128 prompts × 8
+samples in 119 minutes, the last policy kept as `onpolicy-7676/rl/step-39` (records: `onpolicy-7676/rl/train.jsonl`,
+one line per update; `evals.jsonl`; log `onpolicy-7676/rl-16k-soft.log`) [measured].
+
+**KodCode val** (512 prompts × 4, T 0.6, top-p 0.95, the sampler's loop stop; `evals.jsonl`) [measured]:
+
+| Policy | pass@1 | Pass | Fail | Not closed | Loops stopped | Cut at 16,384 | Mean tokens |
+|---|---|---|---|---|---|---|---|
+| SFT (update 0) | 0.334 | 684 | 437 | 918 | 903 | 15 | 3,553 |
+| RL (update 39) | 0.426 | 872 | 896 | 266 | 260 | 8 | 1,934 |
+
+The gain is in closing: 652 fewer responses end unclosed, and of them 188 more pass and 459 more fail; 28.8% of the
+newly closed answers pass [arithmetic], near the 24.7–25.6% of loops that pass when `</think>` is forced at the cut
+(§8). Among closed responses (pass, fail, trivial pass, no code, time-out) the pass share fell from 0.605 to 0.489
+[arithmetic]: the RL policy answers prompts it used to loop on, mostly the harder ones [inference: §8's loops sit
+mostly on prompts the SFT model never solved].
+
+**Training** (`train.jsonl`; each batch's prompts new, so its pass rate is a held-out estimate at T 1.0) [measured]:
+
+- pass rate over all responses: mean 0.411 over updates 0–4 and 0.444 over 34–38 (range 0.372–0.557 per batch);
+- mean response length 7,598 tokens at update 0, 2,368 at update 38 (least 1,829); cut responses 44 of 1,024 at
+  update 0, then at most 3 per batch (17 in updates 1–38);
+- token entropy 1.13 at update 0, 0.31 at update 38; groups with mixed rewards 110 of 128 at update 0, 66–86 after;
+- gradient norm median 0.228, above the clip of 1.0 at updates 26 (6.22), 29 (1.52) and 30 (6.41); the batches
+  sampled after them passed 0.512 (update 27) and 0.461 (update 31).
+
+**Earlier attempts** (same prompts and seeds) [measured]: an 8,192-token limit with 4 updates per batch left 397 and
+377 of 1,024 responses unclosed in its two batches (`rl/attempt-8k-ppo4-train.jsonl`; the run's limit and one update
+per batch: §6); overlong filtering at 16,384 tokens raised the cut share to 19.5% in six batches
+(`rl/attempt-16k-masked-train.jsonl`; the soft punishment that replaced it: §6).
 
 ## References
 
