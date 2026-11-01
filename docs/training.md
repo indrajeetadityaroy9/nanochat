@@ -447,7 +447,12 @@ allocated 71.11 GiB in the file-level stage and 71.12 GiB in the repository stag
 (3,811 steps) [measured: `results/pretrain/pretrain-curves.jsonl`]. After the last step, `resid_lambdas` span
 0.157–2.599, 0.16–0.61 on the 12 value-embedding layers (indices 1, 3, …, 23) and 0.59–2.60 on the others, and
 `x0_lambdas` −0.234–0.135, within ±0.08 after the first two layers [measured: `diagnostics-step.npy`, last row].
-Every step's values:
+Over the whole run [measured: `results/pretrain/pretrain-curves.jsonl`]: the first step's loss 10.3972, ln V; 42 steps
+clipped (gradient norm above `MAX_GRAD_NORM`): steps 3–41 (the warmup is steps 0–39), then only steps 59,447, 66,552
+and 66,817 (largest norm after step 100 3.93, step 66,817); median gradient norm from step 100 0.362 at 8K and 0.372 at
+32K; 17 losses above the trailing 200 steps' mean by 4 standard deviations from step 1,000, the largest 6.2 at step
+66,109 (46 steps after the stage switch); logsumexp maximum 18.92 (step 6,092), 17.70–18.92 from step 3,000; the
+largest QK-norm gain 4.150 (4.148 at the last step). Every step's values:
 `results/pretrain/pretrain-curves.jsonl`; the likelihood trajectory to the last step: `results/pretrain/trajectory.json`
 (`docs/results.md` §4).
 

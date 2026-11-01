@@ -3,6 +3,8 @@
 \providecommand{\arraybackslash}{\let\\\tabularnewline}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,calc,fit,positioning}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
 
 \settopmatter{printfolios=true}
 \setlength{\emergencystretch}{1em}
@@ -720,8 +722,170 @@ on both sides as a further safeguard, as in Gemma 2, which uses $c = 30$~\cite{g
 limit useful confidence: with all logits in $(-15, 15)$, one token can still receive probability up to
 $e^{15} / (e^{15} + (V - 1)\, e^{-15}) \approx 1 - 3 \times 10^{-9}$.
 
-\paragraph{Precision.} Parameters, gradients and optimizer states are kept in FP32. Activations and matrix
-multiplication inputs are BF16, with FP32 accumulation.
+\section{Training Strategy}
+\label{sec:training}
+
+The model is pretrained in one run of 69,874 steps on one GPU, with the settings in Table~\ref{tab:train}. The
+optimizer, the weight decay and the initialization treat the three parameter types of Section~\ref{sec:model}
+differently: weight matrices, lookup tables and vectors. Each paragraph below gives one training choice and the reason
+for it; the last describes the run.
+
+\begin{table}
+  \caption{Pretraining settings. Vectors: the QK-norm scales and the residual scalars $\lambda_r$, $\lambda_0$. Tokens
+  per parameter counts non-embedding parameters.}
+  \label{tab:train}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{>{\raggedright\arraybackslash}p{2.6cm}>{\raggedright\arraybackslash}p{5.2cm}}
+    \toprule
+    Weight matrices & NorMuon (169.9M parameters): Nesterov momentum 0.95, 5 Newton--Schulz steps, $\beta_2 = 0.95$ \\
+    Tables and vectors & AdamW (352.3M parameters): $\beta = (0.9, 0.95)$, $\epsilon = 10^{-8}$ \\
+    Peak learning rate & $2.35 \times 10^{-3}$ for every parameter \\
+    Weight decay & 0.153; vectors 0 \\
+    Schedule & linear warm-up over 40 steps, then linear decay to zero \\
+    Batch size & 1,474,560 tokens \\
+    Steps & 69,874: 66,063 at context 8,192, then 3,811 at 32,768 \\
+    Training tokens & 103.0B: 97.4B at 8,192, 5.6B at 32,768 \\
+    Tokens per parameter & 528 \\
+    Gradient clipping & global norm 1.0 \\
+    Precision & FP32 weights, gradients and optimizer states; BF16 matrix multiplication inputs \\
+    Hardware, time & one NVIDIA GH200 GPU, 76.3 hours \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Optimizer.} The weight matrices are trained with NorMuon~\cite{li2025normuon}, a variant of Muon, and the
+lookup tables and vectors with AdamW~\cite{loshchilov2019adamw}. Muon replaces the momentum of each weight matrix with
+the nearest semi-orthogonal matrix, computed with five Newton--Schulz iterations~\cite{jordan2024muon}; this update is
+steepest descent under the spectral norm~\cite{bernstein2024oldoptimizer}. As in Muon's original implementation and
+its large-scale use, the embedding tables, the output layer and the vectors are trained with
+AdamW~\cite{jordan2024muon,liu2025muon}. Muon's updates are balanced across directions but not across neurons: some
+rows of a matrix receive much larger updates than others~\cite{li2025normuon}. NorMuon divides each row of the
+orthogonalized update by a running estimate of its root mean square, then restores the update's overall norm. At 1.1B
+and 5.4B parameters, NorMuon reached AdamW's final loss in 21.7\% and 13.9\% fewer steps, against 10.4\% and 6.1\% for
+Muon~\cite{li2025normuon}. In this model, NorMuon trains the 144 attention and MLP matrices and the 12 value-embedding
+gate matrices, 170M parameters. AdamW trains the token embedding, the output layer and the 12 value-embedding tables,
+352M parameters, and the 6,192 parameters of the QK-norm scales and the residual scalars.
+
+\paragraph{One learning rate.} All parameters share one peak learning rate and one weight decay. NorMuon's update of
+an $a \times b$ matrix is scaled by $0.2\sqrt{\max(a, b)}$, which matches its root mean square to that of a typical
+AdamW update, so that matrix and non-matrix parameters can share the learning rate and the weight
+decay~\cite{liu2025muon}. Only one learning rate is then calibrated.
+
+\paragraph{Batch size and peak learning rate.} The batch size and a reference learning rate come from the compute
+scaling laws of DeepSeek LLM, $B = 0.2920\, C^{0.3271}$ tokens and $\eta = 0.3118\, C^{-0.125}$, with training compute
+$C = MD$, $D$ the training tokens and $M$ the non-embedding FLOPs per token, including attention~\cite{deepseek2024llm}.
+For this model, $M = 2.83 \times 10^9$ at the 8,192-token context and $D = 103$B, so the laws give a batch of 1.44M
+tokens, rounded to 15 micro-batches of 98,304 tokens (the largest micro-batch that fits in GPU memory), and
+$\eta = 8.63 \times 10^{-4}$. The laws were fit for AdamW with a step-wise schedule, not for NorMuon with linear decay,
+so the learning rate is calibrated on the model itself: three short runs of the same 522M model, each on 0.98B tokens
+(5 tokens per non-embedding parameter), at $\times 1$, $\times 2$ and $\times 4$ the law's learning rate for their
+compute. A parabola fit to their validation bits per byte on code, against the logarithm of the multiplier, has its
+minimum at $\times 2.72$, and the run uses $\times 2.72$ the law's learning rate, a peak of $2.35 \times 10^{-3}$. The
+run at $\times 2$ reached 0.0078 lower bits per byte than the run at $\times 1$, and the run at $\times 4$ only 0.0005
+higher than at $\times 2$, so the optimum is flat between $\times 2$ and $\times 4$. Calibrating at the target size
+avoids transferring a learning rate from a smaller model; under the standard parameterization used here, the optimal
+learning rate shifts with width~\cite{yang2022mup}. Using the multiplier for 105 times as many tokens assumes that the
+law's decrease of the learning rate with compute also holds for NorMuon.
+
+\paragraph{Weight decay.} The weight decay is set from the training length. With decoupled weight decay, the weights
+are an exponential moving average of recent updates over a timescale of $\tau = 1/(\eta\lambda)$
+steps~\cite{wang2024adamwema}. The optimal $\tau$, as a fraction of the training steps, falls as a power law in tokens
+per parameter (TPP), $1.084\, \mathrm{TPP}^{-0.527}$, fit with AdamW over 20 to 1,280 tokens per
+parameter~\cite{bergsma2025powerlines}. At 528 tokens per parameter this is 4.0\% of the run, 2,783 steps, so
+$\lambda = 0.153$ at the peak learning rate. The same weight decay is applied to NorMuon's matrices: without weight
+decay, Muon's weights and layer outputs grow beyond the range in which BF16 is precise~\cite{liu2025muon}. The tables
+are decayed, including the output layer (Section~\ref{sec:model}); the vectors are not.
+
+\paragraph{Schedule.} The learning rate rises linearly over the first 40 steps and then decays linearly to zero at the
+end of training. A linear warm-up over $2/(1 - \beta_2)$ steps, 40 for $\beta_2 = 0.95$, is an untuned rule for Adam
+that matches the training of RAdam, which adapts its warm-up automatically~\cite{ma2021warmup}. Linear decay to zero
+outperformed decay to 10\% of the peak by a margin that grows with tokens per parameter, and was about 0.84\% better
+than the best warmup-stable-decay schedule at 610M parameters and 80 tokens per parameter~\cite{bergsma2025d2z}. The
+decay continues through the repository-level stage, which therefore starts at 5.5\% of the peak learning rate.
+
+\paragraph{Gradient clipping.} The global gradient norm is clipped to 1.0 before both optimizers, as in DeepSeek
+LLM~\cite{deepseek2024llm}. Neither optimizer depends on a steady scale of the gradient: AdamW divides by its running
+root mean square, and the Newton--Schulz iteration normalizes its input. Clipping therefore only limits sudden large
+gradients.
+
+\paragraph{Training length and stages.} The model is trained on 528 tokens per non-embedding parameter, a length set
+by the data: at this length no source is drawn beyond its size, so no document is read twice
+(Section~\ref{sec:data-pretrain}). This is 26 times the compute-optimal 20 tokens per
+parameter~\cite{hoffmann2022chinchilla}, as small code LLMs are trained far beyond the compute-optimal length. The
+non-embedding parameters are those of the layers and the output layer, 195M; the token embedding and the
+value-embedding tables are excluded, since a lookup costs no matrix multiplication~\cite{kaplan2020scaling}. The
+file-level stage takes 66,063 steps at the 8,192-token context and the repository-level stage the last 3,811 steps at
+32,768. At the switch only the data and the context length change; the batch size in tokens, the optimizer state, the
+schedule and the RoPE base stay the same.
+
+\paragraph{Initialization.} The initialization follows the parameter types. The query, key and value matrices, the
+MLP input matrix, the token embedding and the value-embedding tables are drawn uniformly with standard deviation
+$d^{-1/2}$, which keeps the variance of a matrix product's outputs equal to that of its normalized
+inputs~\cite{lecun1998efficient}. The attention output matrix, the MLP output matrix and the output layer start at
+zero, as in Fixup~\cite{zhang2019fixup}: every layer starts as the identity, and the model starts by predicting the
+uniform distribution over the vocabulary. The value-embedding gate weights start at zero, so every gate starts at 1;
+the residual scalars start at $\lambda_r = 1$ and $\lambda_0 = 0$, and the QK-norm scales at 1.
+
+\paragraph{Mixed precision.} Parameters, gradients and optimizer states are kept in FP32, as master
+weights~\cite{micikevicius2018mixed}. Matrix multiplications take BF16 inputs and accumulate in FP32; normalization
+statistics and the loss are computed in FP32. The Newton--Schulz iterations run in BF16.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[scale only axis, width=0.74\columnwidth, height=3.6cm, xmin=0, xmax=70, ymin=0.85, ymax=1.40,
+        axis y line*=left, xlabel={step (thousands)}, ylabel={training loss}, tick label style={font=\footnotesize},
+        label style={font=\footnotesize}]
+      \addplot[thick, mark=none] coordinates {
+        (0.75,1.3823) (1.25,1.2759) (1.75,1.2233) (2.25,1.1937) (2.75,1.1728) (3.25,1.1569) (3.75,1.1437)
+        (4.25,1.1333) (4.75,1.1266) (5.25,1.1170) (5.75,1.1111) (6.25,1.1063) (6.75,1.1016) (7.25,1.0953)
+        (7.75,1.0930) (8.25,1.0881) (8.75,1.0849) (9.25,1.0820) (9.75,1.0783) (10.25,1.0761) (10.75,1.0730)
+        (11.25,1.0699) (11.75,1.0674) (12.25,1.0660) (12.75,1.0628) (13.25,1.0626) (13.75,1.0592) (14.25,1.0566)
+        (14.75,1.0561) (15.25,1.0554) (15.75,1.0522) (16.25,1.0502) (16.75,1.0493) (17.25,1.0481) (17.75,1.0449)
+        (18.25,1.0453) (18.75,1.0432) (19.25,1.0405) (19.75,1.0402) (20.25,1.0379) (20.75,1.0360) (21.25,1.0365)
+        (21.75,1.0354) (22.25,1.0335) (22.75,1.0328) (23.25,1.0309) (23.75,1.0288) (24.25,1.0261) (24.75,1.0275)
+        (25.25,1.0251) (25.75,1.0220) (26.25,1.0212) (26.75,1.0214) (27.25,1.0207) (27.75,1.0189) (28.25,1.0168)
+        (28.75,1.0161) (29.25,1.0141) (29.75,1.0145) (30.25,1.0143) (30.75,1.0117) (31.25,1.0099) (31.75,1.0091)
+        (32.25,1.0090) (32.75,1.0070) (33.25,1.0063) (33.75,1.0051) (34.25,1.0038) (34.75,1.0024) (35.25,1.0016)
+        (35.75,1.0012) (36.25,0.9981) (36.75,0.9973) (37.25,0.9965) (37.75,0.9948) (38.25,0.9944) (38.75,0.9922)
+        (39.25,0.9918) (39.75,0.9911) (40.25,0.9894) (40.75,0.9880) (41.25,0.9882) (41.75,0.9852) (42.25,0.9845)
+        (42.75,0.9847) (43.25,0.9815) (43.75,0.9824) (44.25,0.9811) (44.75,0.9773) (45.25,0.9768) (45.75,0.9758)
+        (46.25,0.9741) (46.75,0.9725) (47.25,0.9719) (47.75,0.9713) (48.25,0.9709) (48.75,0.9696) (49.25,0.9661)
+        (49.75,0.9654) (50.25,0.9646) (50.75,0.9628) (51.25,0.9607) (51.75,0.9603) (52.25,0.9572) (52.75,0.9561)
+        (53.25,0.9562) (53.75,0.9536) (54.25,0.9514) (54.75,0.9500) (55.25,0.9500) (55.75,0.9474) (56.25,0.9457)
+        (56.75,0.9419) (57.25,0.9414) (57.75,0.9405) (58.25,0.9375) (58.75,0.9371) (59.25,0.9352) (59.75,0.9321)
+        (60.25,0.9310) (60.75,0.9291) (61.25,0.9284) (61.75,0.9242) (62.25,0.9214) (62.75,0.9208) (63.25,0.9181)
+        (63.75,0.9166) (64.25,0.9146) (64.75,0.9115) (65.25,0.9091) (65.75,0.9072)};
+      \addplot[thick, mark=none] coordinates {
+        (66.19,0.9039) (66.44,0.8906) (66.69,0.8917) (66.94,0.8858) (67.19,0.8855) (67.44,0.8825) (67.69,0.8804)
+        (67.94,0.8783) (68.19,0.8782) (68.44,0.8756) (68.69,0.8820) (68.94,0.8712) (69.19,0.8772) (69.44,0.8730)
+        (69.69,0.8723)};
+      \draw[densely dotted] (axis cs:66.063,0.85) -- (axis cs:66.063,1.40);
+    \end{axis}
+    \begin{axis}[scale only axis, width=0.74\columnwidth, height=3.6cm, xmin=0, xmax=70, ymin=0, ymax=2.6,
+        axis y line*=right, axis x line=none, ylabel={learning rate ($10^{-3}$)},
+        tick label style={font=\footnotesize}, label style={font=\footnotesize}]
+      \addplot[gray, dashed, mark=none] coordinates {(0,0.0586) (0.04,2.3454) (69.874,0)};
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Training loss (solid; means over 500 steps, 250 in the repository-level stage) and learning rate (dashed).
+  The dotted line marks the switch from the 8,192-token file-level stage to the 32,768-token repository-level stage;
+  the two stages' losses are on different data.}
+  \label{fig:loss}
+\end{figure}
+
+\paragraph{The training run.} The run finished in one attempt, without restarts or interventions, in 76.3 hours
+(Figure~\ref{fig:loss}). The median throughput was 381,146 tokens per second at the 8,192-token context and 299,281 at
+32,768, a model FLOPs utilization (MFU) of 0.508 and 0.515: the model FLOPs executed per second over the GPU's dense
+BF16 peak of 989 TFLOP/s. No document is read twice, so each step's loss is measured on text the model has not yet
+trained on. The first step's loss was 10.397, $\ln V$, as the zero-initialized output layer implies. The loss fell to
+0.906 at the end of the file-level stage and 0.869 at the end of training (means over each stage's last 50 steps).
+Training was stable. The gradient norm exceeded the clipping threshold in steps 3 to 41, during and just after the
+warm-up, and afterwards in only 3 steps (largest 3.93, step 66,817); no loss or gradient was non-finite. In 17 steps
+the loss exceeded the mean of the previous 200 steps by more than 4 standard deviations, at most by 6.2 (step 66,109,
+just after the switch to the 32,768-token context). The largest log-sum-exp of the soft-capped logits was 18.9, below
+its bound $15 + \ln V = 25.4$, and the largest QK-norm scale grew from 1 to 4.15.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
