@@ -5,7 +5,8 @@ Times-metric serif at 8 pt, fonts embedded as TrueType (no Type 3), per-step tra
 - fig_loss: training loss (window means) and the learning-rate schedule;
 - fig_stability: gradient norm with the clipping threshold, log-sum-exp of the capped logits with its bound c + ln V,
   and each layer's largest QK-norm scale;
-- fig_residual: the residual scalars lambda_r and lambda_0 of every layer over training.
+- fig_residual: the residual scalars lambda_r and lambda_0 of every layer over training, dots marking the layers
+  with value embeddings.
 
 Inputs, written by the run itself: metrics.jsonl (one `train` record per step, train/loop.py) and
 diagnostics-step.npy with its column names in diagnostics.json (train/diagnostics.py). Needs numpy and matplotlib
@@ -25,12 +26,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import TwoSlopeNorm
+from matplotlib.transforms import blended_transform_factory
 
 BATCH = 1_474_560  # tokens per step (docs/training.md §2)
 CLIP = 1.0  # train/optim.py MAX_GRAD_NORM
 CAP = 15.0  # model/modeling.py FINAL_LOGIT_SOFTCAPPING
 VOCAB = 32_768
 LAYERS = 24
+VE_LAYERS = list(range(2, LAYERS + 1, 2))  # 1-based layers with value embeddings (model/modeling.py has_ve)
 COLUMN, TEXT = 3.25, 6.75  # ICML widths, inches
 ACCENT = "#D55E00"  # Okabe-Ito vermilion: reference lines
 SCALARS = ("loss", "learning_rate", "grad_norm", "max_logsumexp", "mean_square_logsumexp")
@@ -166,7 +169,9 @@ def fig_stability(d, out, png):
 
 
 def fig_residual(d, out, png):
-    """The residual scalars lambda_r and lambda_0 of every layer over training (every 50th step)."""
+    """The residual scalars lambda_r and lambda_0 of every layer over training (every 50th step); white is the
+    initial value (lambda_r = 1, lambda_0 = 0), each side of it on its own linear scale; dots mark the value-embedding
+    layers."""
     sub = np.arange(0, d["steps"], 50)
     rows = np.asarray(d["diagnostics"][sub])
     fig, axs = plt.subplots(1, 2, figsize=(TEXT, 2.0), gridspec_kw={"wspace": 0.42})
@@ -182,6 +187,9 @@ def fig_residual(d, out, png):
         cb.outline.set_linewidth(0.4)
         ax.axvline(tokens(d["stage"] - 1), color="k", ls=":", lw=0.7)
         ax.set_yticks([1, 4, 8, 12, 16, 20, 24])
+        ax.tick_params(axis="y", length=0, pad=7)
+        ax.plot(np.full(len(VE_LAYERS), -0.022), VE_LAYERS, "o", color="k", ms=1.8, clip_on=False,
+                transform=blended_transform_factory(ax.transAxes, ax.transData))
         ax.set_ylabel("layer")
         ax.set_xlabel("training tokens (B)")
         tag(ax, letter, -0.13)

@@ -707,7 +707,11 @@ scalars of every layer over training.
   \includegraphics[width=\textwidth]{figures/fig_residual}
   \caption{The residual scalars of every layer over training (every 50th step): (a) $\lambda_r$, which scales the
   residual stream before the layer, and (b) $\lambda_0$, the weight of the normalized token embedding $x_0$ added to
-  it. Both start as in a standard pre-norm transformer ($\lambda_r = 1$, $\lambda_0 = 0$); the dotted line marks the
+  it. Each row is one layer, and its color gives the scalar's value (color bar). White is the initial value, as in a
+  standard pre-norm transformer ($\lambda_r = 1$, $\lambda_0 = 0$). In (a), purple ($\lambda_r < 1$) shrinks the
+  accumulated residual stream and orange ($\lambda_r > 1$) enlarges it; in (b), red adds the token embedding and blue
+  subtracts it. Each color scale is linear on each side of white, with its own range. Dots mark the 12 layers with
+  value embeddings, as in Figure~\ref{fig:model}a; all of them end with $\lambda_r < 1$. The dotted line marks the
   switch to the 32,768-token repository-level stage.}
   \label{fig:residual}
 \end{figure*}
@@ -789,7 +793,8 @@ the result in the training run. Table~\ref{tab:train} lists the settings.
   clipping threshold; steps 3 to 41, the first 0.06B tokens, are not resolved at this scale. (b) Largest and
   root-mean-square log-sum-exp of the soft-capped output logits of every step (the root mean square over tokens,
   averaged over 250 steps), with the bound $c + \ln V$ that soft-capping imposes. (c) Largest QK-norm scale of each
-  layer. The shaded region is the 32,768-token repository-level stage.}
+  layer, one line per layer colored by depth (color bar) from layer 1 (dark purple) to layer 24 (yellow); the top line
+  is layer 1. The shaded region is the 32,768-token repository-level stage.}
   \label{fig:stability}
 \end{figure*}
 
