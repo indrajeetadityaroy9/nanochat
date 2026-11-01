@@ -38,7 +38,7 @@ GROUP_COLOR = {"repository": "#0072B2", "repositories": "#0072B2", "synthetic": 
 GROUP_LABEL = {"repository": "repository code", "synthetic": "synthetic code", "notebooks": "notebooks",
                "functions": "functions", "text": "web text", "math": "mathematics", "traces": "Codeforces traces"}
 SCALARS = ("loss", "learning_rate", "grad_norm", "tokens_per_second", "mfu", "max_logsumexp", "mean_square_logsumexp",
-           "qk_norm_gain_max", "gpu_power_watts", "gpu_sm_clock_mhz")
+           "qk_norm_gain_max")
 
 plt.rcParams.update({
     "font.family": "serif", "font.serif": ["Times New Roman", "Liberation Serif", "Times", "Nimbus Roman"],
@@ -324,13 +324,16 @@ def fig_optimizer(d, out, png):
 
 
 def fig_systems(d, out, png):
-    """Throughput and MFU, and the GPU's power and SM clock (NVML, every 10th step)."""
-    fig, axs = plt.subplots(1, 2, figsize=(TEXT, 1.8), gridspec_kw={"wspace": 0.5})
-    a, b = axs
+    """Training throughput and MFU per stage (medians over 250-step windows)."""
+    fig, a = plt.subplots(figsize=(COLUMN, 1.8))
+    mark_stage(a, d)
     for lo, hi in ((0, d["stage"]), (d["stage"], d["steps"])):
         m, v = windows(d["tokens_per_second"], 250, lo, hi, np.nanmedian)
         a.plot(tokens(m), v / 1e3, color="k", lw=0.9)
+    a.set_ylim(250, 400)
     a.set_ylabel("throughput (K tokens/s)")
+    a.set_xlabel("training tokens (B)")
+    a.set_xlim(0, tokens(d["steps"] - 1))
     mfu = a.twinx()
     mfu.spines["right"].set_visible(True)
     for lo, hi in ((0, d["stage"]), (d["stage"], d["steps"])):
@@ -339,25 +342,6 @@ def fig_systems(d, out, png):
     mfu.set_ylim(0.45, 0.55)
     mfu.set_ylabel("MFU", color="#0072B2")
     mfu.tick_params(axis="y", colors="#0072B2")
-    a.set_ylim(250, 400)
-    m, v = windows(d["gpu_power_watts"], 250, 0, d["steps"])
-    b.plot(tokens(m), v, color="k", lw=0.9)
-    b.axhline(700, color="#D55E00", ls="--", lw=0.8)
-    b.text(0.02, 703, "700 W limit", transform=b.get_yaxis_transform(), fontsize=6.5, color="#D55E00", va="bottom")
-    b.set_ylim(550, 760)
-    b.set_ylabel("GPU power (W)")
-    clock = b.twinx()
-    clock.spines["right"].set_visible(True)
-    m, v = windows(d["gpu_sm_clock_mhz"], 250, 0, d["steps"])
-    clock.plot(tokens(m), v, color="#0072B2", lw=0.9, ls="--")
-    clock.set_ylabel("SM clock (MHz)", color="#0072B2")
-    clock.tick_params(axis="y", colors="#0072B2")
-    clock.set_ylim(1200, 1700)
-    for ax, tag in zip(axs, "ab"):
-        mark_stage(ax, d, label=False)
-        ax.set_xlabel("training tokens (B)")
-        ax.set_xlim(0, tokens(d["steps"] - 1))
-        ax.text(-0.2, 1.02, f"({tag})", transform=ax.transAxes, fontweight="bold")
     save(fig, "fig_systems", out, png)
 
 
