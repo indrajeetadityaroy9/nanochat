@@ -84,7 +84,8 @@ nominal; `train/loop.py`).
 ## 2. Design basis
 
 - **Value embeddings, kept** (from the literature): per-layer token-indexed tables are MoVE's LaVE baseline,
-  V = V + g ⊙ M_t with g = 2σ(x W_g), zero-initialized and reading the full width (arXiv 2601.22887 §4.1), on half
+  V = V + g ⊙ M_t with g = 2σ(x W_g) reading the full width (arXiv 2601.22887 §4.1; the zero initialization of W_g,
+  which starts the gate at 1, is this code's, `init_weights`), on half
   the layers; LaVE ×1 gains 0.016, 0.010 and 0.010 validation bpb at D12, D20 and D32 (§4.2 Table 1). The alternating
   placement, the gate and its full-width read are not ablated here. None of the reference code models has them.
 - **Learnable QK-norm gains, kept** (not ablated): per-head qk-layernorm with head-dim learnable parameters is arXiv
@@ -106,13 +107,13 @@ nominal; `train/loop.py`).
   large from the start as Llama 3 (500,000, arXiv 2407.21783 §3.2); base 10k against 500k at 8K changes Gemma 2B's
   perplexity 4.4627 → 4.4485 (Wiki) and 6.4429 → 6.4593 (FlanV2), under 0.33% and of mixed sign (arXiv 2410.06205
   Table 2).
-- **ReLU², not SwiGLU:** squared ReLU is Primer's most effective modification (arXiv 2109.08668 §3, Fig. 5); against
-  it, SwiGLU beats ReLU at matched parameters and compute (arXiv 2002.05202 Table 1); not ablated here. A gated MLP
-  would also need a gated decode MLP (`model/kernels/decode.cu` hard-codes relu², `EPI_RELU2`).
+- **ReLU², not SwiGLU:** squared ReLU is Primer's most effective modification (arXiv 2109.08668 §3, after Fig. 4);
+  against it, SwiGLU beats ReLU at matched parameters and compute (arXiv 2002.05202 Table 1); not ablated here. A gated
+  MLP would also need a gated decode MLP (`model/kernels/decode.cu` hard-codes relu², `EPI_RELU2`).
 - **SSSL windows of 512:** sliding-window layers (arXiv 2004.05150 §3.1) with every fourth and the last layer full;
   Gemma 3 finds the local:global ratio of minimal impact up to 7:1 and the window reducible "significantly without
-  impacting perplexity" (arXiv 2503.19786 §5.2: Fig. 3, 2B and 9B models; Fig. 4, 2B, windows 512–4,096 at 1:1 and
-  3:1).
+  impacting perplexity" (arXiv 2503.19786 §5.2, Fig. 3 and Fig. 4; the model sizes and window values are in the
+  figures only [unverified]).
 - **Shape:** the shape rule's MobileLLM ratio (§1). A deeper, thinner alternative at about d24's
   non-embedding parameters, 35 × 640 (193,070,080), costs M 3,234,201,600 per token at 8K (+14.2%) and nominal
   1,827,033,600 (+6.9%) [arithmetic], so an equal-token comparison gives it more compute; its 5 heads would need
