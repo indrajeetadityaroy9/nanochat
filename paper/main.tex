@@ -78,23 +78,23 @@ backtracking, it reasons in a thinking block, outlines an algorithm and checks i
 and writes a solution. It solved eight of nine LeetCode problems and two of three tasks that ask it to reduce a
 function's time complexity, but found none of the bugs in three buggy functions (Appendix~\ref{sec:examples}).
 
-The paper makes five contributions:
+The paper makes three contributions:
 \begin{itemize}
-  \item A 522M-parameter, GPT-style decoder-only LLM for Python and C++ code generation, pretrained from scratch on
-  one NVIDIA GH200 GPU: 103B tokens (528 tokens per non-embedding parameter) in 76.3 hours, from a corpus of code, web
-  text and math curated from 18 sources in 9 Hugging Face datasets, with a file-level stage at a context length of
-  8,192 tokens, a repository-level stage at 32,768 tokens and fused GPU kernels.
+  \item A minimal viable reasoning code model built on one NVIDIA GH200 GPU: a 522M-parameter, GPT-style decoder-only
+  LLM for Python and C++, pretrained from scratch on 103B tokens (528 tokens per non-embedding parameter) in 76.3 hours,
+  from a corpus of code, web text and math curated from 18 sources in 9 Hugging Face datasets, with a file-level stage
+  at a context length of 8,192 tokens, a repository-level stage at 32,768 tokens and fused GPU kernels. After
+  post-training, the model reasons in a thinking block before it answers, and solves eight of nine LeetCode problems,
+  including graph and backtracking problems, and two of three tasks that reduce a function's time complexity, with
+  every test passing (Appendix~\ref{sec:examples}).
   \item Post-training on the same GPU: SFT on reasoning traces, which teaches the model to reason before it answers,
   followed by RL with rewards from unit tests and an objective based on DAPO.
-  \item A minimal viable reasoning code model: the final RL model reasons in a thinking block before it answers, and
-  solves eight of nine LeetCode problems, including graph and backtracking problems, and two of three tasks that
-  reduce a function's time complexity, with every test passing (Appendix~\ref{sec:examples}).
-  \item A failure analysis of each model that traces its main failure to a root cause and to the stage that addresses
-  it: the wrong and unending completions of the pretrained model, the reasoning loops of the SFT model, and the
-  remaining wrong answers of the RL model.
-  \item An evaluation of each model with each benchmark's official tool and 95\% confidence intervals: the pretrained
-  model on Python and C++ code generation and on code infilling, the SFT and RL models on HumanEval and HumanEval+;
-  and a comparison of the pretrained model with the published scores of base models of 0.36B to 3B parameters.
+  \item An evaluation and failure analysis of each model. Each benchmark is run with its official tool and reported
+  with 95\% confidence intervals: the pretrained model on Python and C++ code generation and on code infilling, the SFT
+  and RL models on HumanEval and HumanEval+, and the pretrained model against the published scores of base models of
+  0.36B to 3B parameters. Each model's main failure is traced to a root cause and to the stage that addresses it: the
+  wrong and unending completions of the pretrained model, the reasoning loops of the SFT model, and the remaining wrong
+  answers of the RL model.
 \end{itemize}
 
 \section{Data}
