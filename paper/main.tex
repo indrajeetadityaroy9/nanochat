@@ -73,9 +73,9 @@ gives the larger and significant gain, from 22.0\% to 31.7\% (exact McNemar $p =
 Post-training also reveals a failure the predictions did not anticipate: the SFT model falls into reasoning loops and
 leaves 44.8\% of its responses on held-out problems unfinished. RL removes most of these loops, but most of the answers
 it adds are wrong, so its gain comes from finishing responses rather than from more accurate answers.
-The final RL model is a minimal working reasoning code model: given a LeetCode problem, it reasons in a thinking block,
-outlines an algorithm and checks it on the problem's examples, closes its reasoning, and writes a correct solution
-(Figure~\ref{fig:example}).
+The final RL model is a minimal working reasoning code model: on LeetCode problems, including graph search and
+backtracking, it reasons in a thinking block, outlines an algorithm and checks it on examples, closes its reasoning,
+and writes a solution; it solved eight of the nine problems it was given (Figure~\ref{fig:example}).
 
 The paper makes five contributions:
 \begin{itemize}
@@ -86,7 +86,8 @@ The paper makes five contributions:
   \item Post-training on the same GPU: SFT on reasoning traces, which teaches the model to reason before it answers,
   followed by RL with rewards from unit tests and an objective based on DAPO.
   \item A minimal viable reasoning code model: the final RL model reasons in a thinking block before it answers, and
-  solves the LeetCode problems it was given, each answer passing all tests (Figure~\ref{fig:example}).
+  solves eight of nine LeetCode problems, including graph and backtracking problems, with every test passing
+  (Figure~\ref{fig:example}).
   \item A failure analysis of each model that traces its main failure to a root cause and to the stage that addresses
   it: the wrong and unending completions of the pretrained model, the reasoning loops of the SFT model, and the
   remaining wrong answers of the RL model.
@@ -1451,26 +1452,31 @@ losing 15 against SFT ($p = 0.12$) and 33 and 6 against the pretrained model ($p
 HumanEval+ among its finished answers, against 51.5\% for SFT: it answers more problems, with a lower pass rate on the
 answers it gives.
 
-\paragraph{Example.} Figure~\ref{fig:example} shows the RL model on LeetCode problem 3 with the evaluation's chat
-prompt and greedy decoding. It recalls the sliding-window approach, outlines it, traces it on the problem's examples,
-closes its reasoning and writes an explained solution whose code passes every test. With the same prompt it also
-solves LeetCode problems 56 (merge intervals) and 20 (valid parentheses), in 1,423 and 1,147 tokens, each answer
-passing every test. LeetCode problems were not removed from the training data, so these examples show how the model
-reasons and answers, not that it generalizes.
+\paragraph{Example.} Figure~\ref{fig:example} shows the RL model on LeetCode problem 52, N-Queens II (hard), with the
+evaluation's chat prompt and greedy decoding. It identifies the problem as backtracking, outlines the steps, weighs and
+drops an alternative, drafts a recursion that tracks one queen per row and rejects shared columns and diagonals,
+checks the draft on $n = 4$ and $n = 1$, closes its reasoning and writes an explained solution whose code passes every
+test. Of nine LeetCode problems given with the same prompt, the model solved eight, each answer passing every test:
+3, 20 and 56; graph problems 207 (Course Schedule) and 200 (Number of Islands); backtracking problems 79 (Word
+Search), 39 (Combination Sum) and 52; each response used 1,147 to 1,804 tokens and closed its reasoning. It failed
+on 124, Binary Tree Maximum Path Sum (hard): its answer follows only paths that descend from a node and calls
+\texttt{max} on an integer. LeetCode problems were not removed from the training data, so these examples show how the
+model reasons and answers, not that it generalizes.
 \begin{figure*}
   \centering
   \begin{minipage}[t]{0.49\textwidth}
-    \footnotesize
+    \scriptsize
     \textbf{Prompt}\vspace{-0.5em}
 \begin{verbatim}
-Please provide a self-contained Python script that
-solves the following problem in a markdown code block:
+Please provide a self-contained Python script that solves the following
+problem in a markdown code block:
 ```python
-def length_of_longest_substring(s: str) -> int:
-    """Given a string s, return the length of the
-    longest substring without repeating characters.
-    >>> length_of_longest_substring("abcabcbb")
-    3
+def total_n_queens(n: int) -> int:
+    """The n-queens puzzle is the problem of placing n queens on an n x n
+    chessboard such that no two queens attack each other. Given an integer n,
+    return the number of distinct solutions to the n-queens puzzle.
+    >>> total_n_queens(4)
+    2
     [...]
     """
 ```
@@ -1478,71 +1484,108 @@ def length_of_longest_substring(s: str) -> int:
     \vspace{-0.5em}\textbf{Response: reasoning}\vspace{-0.5em}
 \begin{verbatim}
 <think>
-Okay, I need to solve the problem of finding the length of
-the longest substring without repeating characters in a
-given string. Hmm, I remember that this is a classic
-problem. Let me think about the approach.
+Okay, I need to solve the n-queens problem in Python. The function is called
+total_n_queens and returns the number of solutions. Hmm, I remember that the
+n-queens problem is a classic problem. Let's think about how to approach it.
+First, the problem is to place n queens on an n x n chessboard such that no
+two queens attack each other. Each queen must be in a different row, column,
+and diagonal.
 [...]
-I think the standard approach is to use a sliding window
-technique.
-[...]
-Wait, another approach is to use a dictionary to keep
-track of the last occurrence of each character.
+I think the standard approach is to use backtracking.
 [...]
 Let me outline the steps:
-1. Initialize variables: start = 0, max_length = 0,
-   char_index = {}.
-2. Iterate through the string with end index.
-3. For each character, if it's in char_index and its index
-   is >= start, move start to index + 1.
-4. Update the character's index.
-5. Update max_length if current window is larger.
+1. Initialize a list to keep track of the positions of queens.
+2. Use a recursive function to place queens row by row.
+3. For each row, try placing a queen in each column.
+4. Check if the position is valid.
+5. Count all valid solutions.
 [...]
-Wait, let's test this.
-For "abcabcbb":
-Indices 0-2: 'a','b','c' -> length 3.
-Then, when 'a' is encountered again, start moves to 1.
+Alternatively, I can use itertools to generate all possible permutations of
+n queens. But that might be less efficient.
+Another approach is to use backtracking with pruning.
 [...]
-Another test case: "bbbbb" -> returns 1.
-Another test case: "pwwkew" -> returns 3 (substring
-"wke").
+So, the code will be:
+def total_n_queens(n):
+    if n == 0:
+        return 0
+    count = 0
+    queens = [-1] * n
+    def backtrack(row):
+        nonlocal count
+        if row == n:
+            count += 1
+            return
+        for col in range(n):
+            if is_valid(queens, row, col):
+                queens[row] = col
+                backtrack(row + 1)
+                queens[row] = -1
+    backtrack(0)
+    return count
+def is_valid(queens, row, col):
+    for i in range(row):
+        if queens[i] == col or abs(queens[i] - col) == abs(i - row):
+            return False
+    return True
+Wait, but in the code above, queens is a list where queens[i] is the column
+of the ith queen.
 [...]
-Yes, that should work.
+Let me test with n=4.
+n=4, the number of solutions is 2.
+[...]
+Another test: n=1 returns 1.
+[...]
+I think that's the solution.
 </think>
 \end{verbatim}
   \end{minipage}\hfill
   \begin{minipage}[t]{0.49\textwidth}
-    \footnotesize
+    \scriptsize
     \textbf{Response: answer}\vspace{-0.5em}
 \begin{verbatim}
-To solve this problem, we need to find the length of the
-longest substring without repeating characters in a given
-string. This problem can be efficiently solved using the
-sliding window technique.
+To solve the n-queens problem, we need to determine the number of distinct
+solutions to the problem of placing n queens on an n x n chessboard such
+that no two queens attack each other. Each queen must be in a different row,
+column, and diagonal.
+[...]
+The problem can be approached using backtracking. The idea is to place
+queens row by row, ensuring that each queen is valid in the current
+position.
 [...]
 ### Solution Code
 ```python
-def length_of_longest_substring(s: str) -> int:
-    char_map = {}
-    max_length = 0
-    start = 0
-    for end, char in enumerate(s):
-        if char in char_map:
-            start = max(start, char_map[char] + 1)
-        char_map[char] = end
-        max_length = max(max_length, end - start + 1)
-    return max_length
+def total_n_queens(n: int) -> int:
+    [...]
+    if n == 0:
+        return 0
+    count = 0
+    queens = [-1] * n
+    def backtrack(row):
+        nonlocal count
+        if row == n:
+            count += 1
+            return
+        for col in range(n):
+            if is_valid(queens, row, col):
+                queens[row] = col
+                backtrack(row + 1)
+                queens[row] = -1
+    def is_valid(queens, row, col):
+        for i in range(row):
+            if queens[i] == col or abs(queens[i] - col) == abs(i - row):
+                return False
+        return True
+    backtrack(0)
+    return count
+[...]
 ```
 [...]
-This approach efficiently finds the longest substring
-without repeating characters in linear time, O(n), where n
-is the length of the string.
 \end{verbatim}
   \end{minipage}
-  \caption{The RL model solving LeetCode problem 3, Longest Substring Without Repeating Characters (medium), with the
-  evaluation's chat prompt and greedy decoding. The response has 1,490 tokens: the reasoning, closed by
-  \texttt{</think>}, and then the answer. Excerpts of the model's output, with line breaks added and arrows written as
-  \texttt{->}; [...] marks omitted text. The code passes the problem's three examples and five further tests.}
+  \caption{The RL model solving LeetCode problem 52, N-Queens II (hard), with the evaluation's chat prompt and greedy
+  decoding. The response has 1,685 tokens: the reasoning, closed by \texttt{</think>}, and then the answer. Excerpts of
+  the model's output with line breaks added and blank lines removed; [...] marks omitted text, including the docstring
+  and a duplicate helper in the answer's code. The code returns the correct count for $n = 1$ to 6 and 8.}
   \label{fig:example}
 \end{figure*}
 
