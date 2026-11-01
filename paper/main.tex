@@ -797,9 +797,8 @@ layer and the normalization parameters with AdamW~\cite{jordan2024muon,liu2025mu
 
 \paragraph{Configuration.} NorMuon uses Nesterov momentum 0.95, five Newton--Schulz iterations in BF16 and a
 second-moment decay of 0.95; AdamW uses $\beta = (0.9, 0.95)$ and $\epsilon = 10^{-8}$. Both optimizers share one peak
-learning rate and one weight decay: NorMuon's update of an $a \times b$ matrix is scaled by $0.2\sqrt{\max(a, b)}$,
-which matches its root mean square to that of a typical AdamW update, so that matrix and non-matrix parameters can
-share these hyperparameters~\cite{liu2025muon}.
+learning rate and one weight decay: NorMuon's updates are rescaled to the root mean square of AdamW's updates, so that
+matrix and non-matrix parameters can share these hyperparameters~\cite{liu2025muon}.
 
 \subsection{Batch size and learning rate}
 \label{sec:batch-lr}
@@ -819,20 +818,13 @@ not calibrated. The calibration runs train on 106 times fewer tokens than the tr
 assumes that the law's decrease of the learning rate with compute, fit for AdamW at compute-optimal model and data
 sizes, also holds for NorMuon and for a fixed model trained longer.
 
-\paragraph{Configuration and evidence.} The laws are
-\[
-  B = 0.2920\, C^{0.3271}\ \text{tokens}, \qquad \eta = 0.3118\, C^{-0.125},
-\]
-with training compute $C = MD$, $D$ the training tokens and
-\[
-  M = 72\, n_{\mathrm{layer}} d^2 + 12\, n_{\mathrm{layer}}\, d\, l_{\mathrm{seq}}
-\]
-the non-embedding FLOPs per token, which counts attention over the whole context in every layer, here also in the 18
-local-attention layers, and leaves out the output layer. With $M = 2.83 \times 10^9$ at the 8,192-token context and
-$D = 103$B, $C = 2.9 \times 10^{20}$ FLOPs, and the laws give a batch of 1.44M tokens, rounded to 15 micro-batches of
-98,304 tokens with gradient accumulation, and $\eta = 8.62 \times 10^{-4}$. A micro-batch holds twelve 8,192-token or
-three 32,768-token sequences; by an estimate from the measured peak memory, a fourth 32,768-token sequence would not
-fit in GPU memory.
+\paragraph{Configuration and evidence.} The training compute is $C = MD$, with $D$ the training tokens and $M$ the
+non-embedding FLOPs per token as defined by DeepSeek LLM, which counts attention over the whole context in every
+layer, here also in the 18 local-attention layers, and leaves out the output layer. With $M = 2.83 \times 10^9$ at the
+8,192-token context and $D = 103$B, $C = 2.9 \times 10^{20}$ FLOPs, and the laws give a batch of 1.44M tokens, rounded
+to 15 micro-batches of 98,304 tokens with gradient accumulation, and $\eta = 8.62 \times 10^{-4}$. A micro-batch holds
+twelve 8,192-token or three 32,768-token sequences; by an estimate from the measured peak memory, a fourth
+32,768-token sequence would not fit in GPU memory.
 For the calibration, three runs of the 522M model on 0.98B tokens each (5 tokens per non-embedding parameter) used
 $\times 1$, $\times 2$ and $\times 4$ the law's learning rate for their compute. A parabola fit to their validation
 bits per byte on code, against the logarithm of the multiplier, has its minimum at $\times 2.72$. The run at
@@ -850,8 +842,8 @@ than at $\times 2$, so the optimum is flat between $\times 2$ and $\times 4$.
 
 \subsection{Weight decay}
 
-\paragraph{Weight decay.} The weight decay is $\lambda = 0.153$, set from the training length and decoupled from the
-gradient update~\cite{loshchilov2019adamw}: at step $t$, each decayed parameter is multiplied by $1 - \eta_t \lambda$.
+\paragraph{Weight decay.} The weight decay is $\lambda = 0.153$, decoupled from the gradient
+update~\cite{loshchilov2019adamw} and set from the training length.
 
 \paragraph{Why this weight decay.} With decoupled weight decay, the weights are an exponential moving average of recent
 updates over a timescale of $\tau = 1/(\eta\lambda)$ steps~\cite{wang2024adamwema}. The optimal $\tau$, as a fraction
