@@ -73,8 +73,11 @@ gives the larger and significant gain, from 22.0\% to 31.7\% (exact McNemar $p =
 Post-training also reveals a failure the predictions did not anticipate: the SFT model falls into reasoning loops and
 leaves 44.8\% of its responses on held-out problems unfinished. RL removes most of these loops, but most of the answers
 it adds are wrong, so its gain comes from finishing responses rather than from more accurate answers.
+The final RL model is a minimal working reasoning code model: given a LeetCode problem, it reasons in a thinking block,
+outlines an algorithm and checks it on the problem's examples, closes its reasoning, and writes a correct solution
+(Figure~\ref{fig:example}).
 
-The paper makes four contributions:
+The paper makes five contributions:
 \begin{itemize}
   \item A 522M-parameter, GPT-style decoder-only LLM for Python and C++ code generation, pretrained from scratch on
   one NVIDIA GH200 GPU: 103B tokens (528 tokens per non-embedding parameter) in 76.3 hours, from a corpus of code, web
@@ -82,6 +85,8 @@ The paper makes four contributions:
   8,192 tokens, a repository-level stage at 32,768 tokens and fused GPU kernels.
   \item Post-training on the same GPU: SFT on reasoning traces, which teaches the model to reason before it answers,
   followed by RL with rewards from unit tests and an objective based on DAPO.
+  \item A minimal viable reasoning code model: the final RL model reasons in a thinking block before it answers, and
+  solves the LeetCode problems it was given, each answer passing all tests (Figure~\ref{fig:example}).
   \item A failure analysis of each model that traces its main failure to a root cause and to the stage that addresses
   it: the wrong and unending completions of the pretrained model, the reasoning loops of the SFT model, and the
   remaining wrong answers of the RL model.
@@ -231,10 +236,9 @@ HumanEval infilling programs (Section~\ref{sec:results-setup}). The filter remov
 491,203 training documents (0.28\%), matching every HumanEval+ task, 372 of the 378 MBPP+ tasks and 157 of the 164
 HumanEval-X C++ references. The rule also removes common code, such as many implementations of a primality test that
 match a HumanEval reference solution; removing 0.28\% of the documents is an acceptable cost for keeping these
-benchmarks out of the training data. Two evaluated benchmarks are not covered by this filter: the original MBPP
+benchmarks out of the training data. One evaluated benchmark is not covered by this filter: the original MBPP
 problems of the base model's 3-shot evaluation, of which 298 of the 500 statements share a 10-gram with 4,315 training
-documents, and LiveCodeBench\footnote{\url{https://github.com/LiveCodeBench/LiveCodeBench}}, whose overlap with the
-pretraining data is not measured.
+documents.
 Validation documents are not filtered, so every likelihood measurement during training uses the same set.
 
 \paragraph{Train and validation split.} The validation split holds out 1\% of the corpus to measure how well the
@@ -340,9 +344,7 @@ several sources with different wrappers, for example a language header or a func
 a split by prompt would leave other versions of a validation problem in the training split. A problem is therefore
 identified by its statement with these wrappers removed and its case and spacing normalized. In an earlier version of
 the dataset without KodCode and without the cap, a split by exact prompt left 928 of 2,921 validation problems with
-their statement in the training split, and a split by problem left none. In the same version, no SFT prompt shared more
-than 18.6\% of the distinctive 8-word sequences of any of the 454 LiveCodeBench problems used in the evaluation;
-KodCode's prompts were not measured.
+their statement in the training split, and a split by problem left none.
 
 \subsection{Reinforcement learning data}
 \label{sec:data-rl}
@@ -1448,6 +1450,101 @@ losing 15 against SFT ($p = 0.12$) and 33 and 6 against the pretrained model ($p
 87.2\% of its responses, with a median response of 1,228 tokens against 1,902 for SFT, and passed 44.1\% of
 HumanEval+ among its finished answers, against 51.5\% for SFT: it answers more problems, with a lower pass rate on the
 answers it gives.
+
+\paragraph{Example.} Figure~\ref{fig:example} shows the RL model on LeetCode problem 3 with the evaluation's chat
+prompt and greedy decoding. It recalls the sliding-window approach, outlines it, traces it on the problem's examples,
+closes its reasoning and writes an explained solution whose code passes every test. With the same prompt it also
+solves LeetCode problems 56 (merge intervals) and 20 (valid parentheses), in 1,423 and 1,147 tokens, each answer
+passing every test. LeetCode problems were not removed from the training data, so these examples show how the model
+reasons and answers, not that it generalizes.
+\begin{figure*}
+  \centering
+  \begin{minipage}[t]{0.49\textwidth}
+    \footnotesize
+    \textbf{Prompt}\vspace{-0.5em}
+\begin{verbatim}
+Please provide a self-contained Python script that
+solves the following problem in a markdown code block:
+```python
+def length_of_longest_substring(s: str) -> int:
+    """Given a string s, return the length of the
+    longest substring without repeating characters.
+    >>> length_of_longest_substring("abcabcbb")
+    3
+    [...]
+    """
+```
+\end{verbatim}
+    \vspace{-0.5em}\textbf{Response: reasoning}\vspace{-0.5em}
+\begin{verbatim}
+<think>
+Okay, I need to solve the problem of finding the length of
+the longest substring without repeating characters in a
+given string. Hmm, I remember that this is a classic
+problem. Let me think about the approach.
+[...]
+I think the standard approach is to use a sliding window
+technique.
+[...]
+Wait, another approach is to use a dictionary to keep
+track of the last occurrence of each character.
+[...]
+Let me outline the steps:
+1. Initialize variables: start = 0, max_length = 0,
+   char_index = {}.
+2. Iterate through the string with end index.
+3. For each character, if it's in char_index and its index
+   is >= start, move start to index + 1.
+4. Update the character's index.
+5. Update max_length if current window is larger.
+[...]
+Wait, let's test this.
+For "abcabcbb":
+Indices 0-2: 'a','b','c' -> length 3.
+Then, when 'a' is encountered again, start moves to 1.
+[...]
+Another test case: "bbbbb" -> returns 1.
+Another test case: "pwwkew" -> returns 3 (substring
+"wke").
+[...]
+Yes, that should work.
+</think>
+\end{verbatim}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.49\textwidth}
+    \footnotesize
+    \textbf{Response: answer}\vspace{-0.5em}
+\begin{verbatim}
+To solve this problem, we need to find the length of the
+longest substring without repeating characters in a given
+string. This problem can be efficiently solved using the
+sliding window technique.
+[...]
+### Solution Code
+```python
+def length_of_longest_substring(s: str) -> int:
+    char_map = {}
+    max_length = 0
+    start = 0
+    for end, char in enumerate(s):
+        if char in char_map:
+            start = max(start, char_map[char] + 1)
+        char_map[char] = end
+        max_length = max(max_length, end - start + 1)
+    return max_length
+```
+[...]
+This approach efficiently finds the longest substring
+without repeating characters in linear time, O(n), where n
+is the length of the string.
+\end{verbatim}
+  \end{minipage}
+  \caption{The RL model solving LeetCode problem 3, Longest Substring Without Repeating Characters (medium), with the
+  evaluation's chat prompt and greedy decoding. The response has 1,490 tokens: the reasoning, closed by
+  \texttt{</think>}, and then the answer. Excerpts of the model's output, with line breaks added and arrows written as
+  \texttt{->}; [...] marks omitted text. The code passes the problem's three examples and five further tests.}
+  \label{fig:example}
+\end{figure*}
 
 \paragraph{Failure analysis.} RL reduces unfinished responses to 21 (19 loops) and finishes 143 answers. Of the 63
 problems on which the SFT model did not finish, RL finishes 48 and passes 19; the other 29 answers are wrong, and wrong
