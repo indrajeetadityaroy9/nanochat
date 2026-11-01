@@ -38,16 +38,13 @@ decreases as a power law in the number of model parameters, the number of traini
 compute~\cite{kaplan2020scaling}. For a fixed compute budget, the training loss is lowest when model size and training
 tokens are scaled equally~\cite{hoffmann2022chinchilla}: the compute-optimal Chinchilla model has 70B parameters and is
 trained on 1.4T tokens, about 20 tokens per parameter. Frontier LLMs are therefore trained on large GPU clusters.
-DeepSeek-V3, a mixture-of-experts (MoE) LLM with 671B total and 37B activated parameters, was pretrained on 14.8T
-tokens on 2,048 H800 GPUs and used 2.788M GPU hours for its full training~\cite{deepseek2024v3}.
 
-Code LLMs follow the same trend. DeepSeek-Coder was pretrained from scratch on 2T tokens~\cite{guo2024deepseekcoder},
-StarCoder2 on 3.3--4.3T tokens~\cite{lozhkov2024starcoder2} and Seed-Coder on 6T tokens~\cite{seed2025coder}.
-DeepSeek-Coder-V2 and Qwen2.5-Coder continue pretraining from general-purpose LLMs on an additional 6T and 5.5T tokens
-of code-focused data~\cite{deepseek2024coderv2,hui2024qwen25coder}. Their instruction-tuned and reasoning models are
-then post-trained with supervised fine-tuning (SFT), followed by preference optimization such as direct preference
-optimization (DPO)~\cite{rafailov2023dpo,hui2024qwen25coder,seed2025coder} or reinforcement learning
-(RL)~\cite{deepseek2024coderv2,seed2025coder}. Small code LLMs are trained far beyond the compute-optimal number of
+Code LLMs follow the same trend. DeepSeek-Coder was pretrained from scratch on 2T tokens~\cite{guo2024deepseekcoder}
+and StarCoder2 on 3.3--4.3T tokens~\cite{lozhkov2024starcoder2}, and Qwen2.5-Coder continues the pretraining of a
+general-purpose LLM on an additional 5.5T tokens of code-focused data~\cite{hui2024qwen25coder}. Instruction-tuned code
+models are then post-trained with supervised fine-tuning (SFT) followed by preference
+optimization~\cite{hui2024qwen25coder}, and reasoning models with SFT followed by reinforcement learning
+(RL)~\cite{wang2025nemotroncascade}. Small code LLMs are trained far beyond the compute-optimal number of
 tokens: StarCoder2-3B is trained on 3.1T tokens, about 1,000 tokens per parameter~\cite{lozhkov2024starcoder2}, and all
 Qwen2.5-Coder models, including the 0.5B model, on over 5.5T tokens~\cite{hui2024qwen25coder}. All Qwen3 models,
 including the 0.6B model, are pretrained on 36T tokens~\cite{yang2025qwen3}.
@@ -390,10 +387,8 @@ the line break after it. Across 18 byte-level tokenizers, the number of vocabula
 correlated with MBPP pass@1 at Spearman $\rho = -0.717$~\cite{meister2026tokeval}.
 
 \paragraph{Vocabulary size.} Larger vocabularies gave no clear gain on code in earlier work: StarCoder2 found that
-increasing the vocabulary to 100K tokens did not improve performance~\cite{lozhkov2024starcoder2}, and across
-vocabularies of 32K to 256K tokens the HumanEval pass@1 of a 1.5B model varied only from 20.52 to 20.84 and did not
-grow with the vocabulary~\cite{dagan2024tokenizer}. The SA-BPE tokenizers also use 32,768
-tokens~\cite{chizhov2026sabpe}.
+increasing the vocabulary to 100K tokens did not improve performance~\cite{lozhkov2024starcoder2}. The SA-BPE
+tokenizers also use 32,768 tokens~\cite{chizhov2026sabpe}.
 
 \paragraph{Comparison of tokenizers.} Four tokenizers were trained on the same data and measured on the 6.21~GB of
 validation text (Table~\ref{tab:tokenizers}): SA-BPE with the pre-tokenizer above, BPE with the same pre-tokenizer,
@@ -633,9 +628,8 @@ the ratio of MobileLLM-350M (32 layers of width 960), rounded up to a multiple o
 
 \paragraph{Normalization.} The model uses pre-norm RMSNorm without a learned scale, and linear layers without biases.
 Each attention and MLP sublayer reads $\bar{x} = \mathrm{RMSNorm}(x)$ and adds its output back to $x$, and a final
-RMSNorm precedes the output layer. Pre-norm, unlike the post-norm of the original transformer, can be trained without a
-learning-rate warm-up stage~\cite{xiong2020prenorm}; the model still uses a short warm-up of 40 steps. RMSNorm matches
-the quality of LayerNorm with 7--64\% less running time~\cite{zhang2019rmsnorm}. The RMSNorm before each sublayer and
+RMSNorm precedes the output layer. RMSNorm matches the quality of LayerNorm with 7--64\% less running
+time~\cite{zhang2019rmsnorm}. The RMSNorm before each sublayer and
 before the output layer feeds only linear layers, which can absorb any per-dimension scale, so a learned scale there
 would be redundant; QK-norm, which feeds RoPE rather than a linear layer, keeps its learned scale. Removing biases
 increased training stability for large models in PaLM~\cite{chowdhery2022palm}.
@@ -654,9 +648,7 @@ model may keep a low perplexity but lose the ability to retrieve information fro
 derived lower bound for a 32,768-token context is $6.4 \times 10^5$~\cite{men2024ropebase}. The base $10^6$ is above
 this bound and is used from the first step, so the
 position encoding does not change when the context grows from 8,192 to 32,768 tokens; Qwen2.5-Coder instead raises
-its base from $10^4$ to $10^6$ at its 32K stage~\cite{hui2024qwen25coder}. A large base costs little at short context:
-Gemma 2B models trained from scratch with bases $10^4$ and $5 \times 10^5$ reached validation perplexities of 4.4627
-and 4.4485 on Wiki and 6.4429 and 6.4593 on FlanV2~\cite{barbero2024rope}.
+its base from $10^4$ to $10^6$ at its 32K stage~\cite{hui2024qwen25coder}.
 
 \paragraph{Local and global attention layers.} Three of every four layers use local (sliding-window)
 attention~\cite{beltagy2020longformer}, in which each token attends only to itself and the previous 512 tokens; every
@@ -741,10 +733,10 @@ softmax, in training, evaluation and sampling:
 \]
 Since $\tanh(u) \approx u$ for small $|u|$, logits well below 15 in magnitude pass almost unchanged, and larger ones
 are squeezed smoothly toward $\pm 15$; the derivative $1 - \tanh^2(z/c)$ is never zero, so every logit keeps a
-gradient. The reason is training stability. QK-norm acts on the attention logits but does not prevent the drift of
-the output logits~\cite{chameleon2024}. This output-logit divergence, the logits drifting to very negative values,
-appears at large learning rates in models without weight decay; an auxiliary z-loss resolves it and weight decay
-mitigates it~\cite{wortsman2023smallscale}. The output layer here is weight-decayed, and soft-capping bounds the logits
+gradient. The reason is training stability: QK-norm acts on the attention logits, not on the output logits. Output-logit
+divergence, the logits drifting to very negative values, appears at large learning rates in models without weight
+decay; an auxiliary z-loss resolves it and weight decay mitigates it~\cite{wortsman2023smallscale}. The output layer
+here is weight-decayed, and soft-capping bounds the logits
 on both sides as a further safeguard, as in Gemma 2, which uses $c = 30$~\cite{gemma2024gemma2}. Soft-capping does not
 limit useful confidence: with all logits in $(-15, 15)$, one token can still receive probability up to
 $e^{15} / (e^{15} + (V - 1)\, e^{-15}) \approx 1 - 3 \times 10^{-9}$.
@@ -841,7 +833,7 @@ NorMuon~\cite{li2025normuon}, a variant of Muon~\cite{jordan2024muon}. The embed
 vector parameters (the QK-norm scales and the residual scalars) are trained with AdamW~\cite{loshchilov2019adamw}.
 
 \paragraph{Why NorMuon\@.} Muon updates each weight matrix with its orthogonalized momentum, which gives every direction
-of the update the same size~\cite{jordan2024muon,bernstein2024oldoptimizer}. Its updates are balanced across
+of the update the same size~\cite{jordan2024muon}. Its updates are balanced across
 directions but not across neurons: some rows of a matrix receive much larger updates than others~\cite{li2025normuon}.
 NorMuon divides each row of the update by a running estimate of its root mean square, then restores the update's
 overall norm. At 1.1B and 5.4B parameters, NorMuon reached AdamW's final loss in 21.7\% and 13.9\% fewer steps,
@@ -988,8 +980,8 @@ value-embedding tables are drawn uniformly with standard deviation $d^{-1/2}$. T
 output matrix, the output layer and the value-embedding gate weights start at zero, the residual scalars at
 $\lambda_r = 1$ and $\lambda_0 = 0$, and the QK-norm scales at 1.
 
-\paragraph{Why this initialization.} The uniform initialization is the standard fan-in
-initialization~\cite{lecun1998efficient}. With zero output matrices, as in Fixup~\cite{zhang2019fixup}, every layer
+\paragraph{Why this initialization.} The uniform initialization is the standard fan-in initialization. With zero
+output matrices, as in Fixup~\cite{zhang2019fixup}, every layer
 starts as the identity and the model starts by predicting the uniform distribution over the vocabulary. The zero gate
 weights start every gate at 1, and the residual scalars start as in a standard pre-norm transformer.
 
@@ -1000,8 +992,8 @@ The residual scalars, also not weight-decayed, moved away from their initial val
 $\lambda_0$ in layers 3 to 24 reached $-0.98$ to 0.65 by then and shrank to near zero by the end of training
 (Figure~\ref{fig:residual}; final values in Section~\ref{sec:model}).
 
-\paragraph{Mixed precision.} Parameters, gradients and optimizer states are kept in FP32, as master
-weights~\cite{micikevicius2018mixed}. Matrix multiplications take BF16 inputs and accumulate in FP32; normalization
+\paragraph{Mixed precision.} Parameters, gradients and optimizer states are kept in FP32. Matrix multiplications take
+BF16 inputs and accumulate in FP32; normalization
 statistics and the loss are computed in FP32. No loss or gradient was non-finite during the run.
 
 \subsubsection{The training run}
