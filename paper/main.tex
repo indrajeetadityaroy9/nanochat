@@ -990,6 +990,7 @@ This section reports the pretrained model on code generation and code infilling,
 pretrained, SFT and RL models, and compares the three models on HumanEval.
 
 \subsection{Evaluation setup}
+\label{sec:results-setup}
 
 \paragraph{Benchmarks.} HumanEval and MBPP ask for a Python function from a docstring or a short task
 description~\cite{chen2021codex,austin2021mbpp}; HumanEval+ and MBPP+ run the same programs on EvalPlus's additional
@@ -1020,8 +1021,16 @@ order~\cite{bavarian2022fim}. Sampled MultiPL-E uses 20 programs per problem ins
 
 \paragraph{SFT and RL models.} The SFT and RL models are evaluated with EvalPlus's chat prompt through vLLM's
 OpenAI-compatible server, greedy, with up to 32,768 tokens per response. The model reasons, ends its reasoning with
-\texttt{</think>}, and writes its answer; the code in the answer is scored. A response that never ends its reasoning
-and falls into a repeating loop is stopped and scored as a failure.
+\texttt{</think>}, and writes its answer; the code in the answer is scored.
+
+\paragraph{Finished answers.} A response is a \emph{finished answer} if it ends its reasoning with \texttt{</think>}
+and then gives its answer. A response that never writes \texttt{</think>} has no answer and fails, for one of two
+reasons. Most often the reasoning falls into a loop, repeating the same text: from 4,096 generated tokens on, every
+2,048 tokens, the evaluation checks whether at least 99\% of the last 4,096 tokens lie inside a 32-token sequence that
+occurs more than once within them, and if so, stops the response. Otherwise the response reaches the 32,768-token
+limit. Stopping a loop saves generation time; it assumes that a looping response would not recover and write
+\texttt{</think>} before the limit. For the pretrained model, which does not reason, a finished answer is a completion
+that stops before EvalPlus's 768-token limit.
 
 \subsection{Pretrained model}
 
@@ -1058,7 +1067,8 @@ and falls into a repeating loop is stopped and scored as a failure.
 \begin{table*}
   \caption{The pretrained, SFT and RL models on HumanEval (164 problems), greedy: pass@1 (\%) with its 95\% Wilson
   interval. The pretrained model uses EvalPlus's completion prompt, the SFT and RL models its chat prompt. Finished:
-  responses that end with an answer (Table~\ref{tab:failures}); tokens: median response length.}
+  responses that give an answer instead of looping or reaching the token limit (Section~\ref{sec:results-setup});
+  tokens: median response length.}
   \label{tab:post-humaneval}
   \small
   \begin{tabular}{lrrrrr}
@@ -1106,8 +1116,9 @@ analyzes where its gain comes from.
 \label{sec:failures}
 
 \begin{table}
-  \caption{Outcome of each HumanEval+ problem (164), greedy decoding. No finished answer: for the pretrained model, a
-  completion that runs to the 768-token limit; for the SFT and RL models, a response that never ends its reasoning.
+  \caption{Outcome of each HumanEval+ problem (164), greedy decoding. No finished answer: a response stopped in a
+  reasoning loop or at the token limit, without an answer (Section~\ref{sec:results-setup}); for the pretrained model,
+  a completion that runs to the 768-token limit. SFT: 61 loops and 2 at the limit; RL: 19 loops and 2 at the limit.
   Wrong output and runtime error are determined by re-running the first failing test.}
   \label{tab:failures}
   \small
