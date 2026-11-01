@@ -180,7 +180,7 @@ part (§8).
 
 ## 4. Published dataset and provenance
 
-`corpus/pretrain/publish.py`, `DATASET` = `iaroy/nanochat-data` (private on the Hub). `push` replaces the dataset's tree
+`corpus/pretrain/publish.py`, `DATASET` = `iaroy/nanochat-data` (public on the Hub). `push` replaces the dataset's tree
 in one commit (history kept) with `<source>/<split>/<k>.parquet` (`curated/`'s: 1,812 shards, 6 × 100 repository, 12 ×
 101 others; 166,229,888,890 bytes), `decontamination.json` (§3), `tokenizer/tokenizer.{tiktoken,pattern}` (§5) and the
 card `README.md` (`publish.card`). `pull` downloads `publish.REVISION`, the tree pretraining read: its shards and record
