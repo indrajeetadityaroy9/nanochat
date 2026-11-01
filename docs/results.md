@@ -335,6 +335,25 @@ step, which runs after the MBPP generations [measured]. Wilson 95% intervals (`m
 - **Every pass closed its reasoning**: plus passes 52 of 101 closed SFT responses and 0 of 63 unclosed; 63 of 143 and
   0 of 21 for RL. Of RL's 26 HumanEval+ gains over SFT, 19 are problems on which the SFT response was loop-stopped;
   RL closed 48 of the SFT model's 63 unclosed responses [measured].
+- **Failure classes** (HumanEval+, 164; §3's definitions and order, the post-trained models' "no finished answer"
+  being a response that never closed `</think>`; wrong output or runtime exception by re-running EvalPlus's first
+  failing base input in a subprocess, 5 s limit, no network) [measured]:
+
+  | Class | Base | SFT 7676 | RL step 39 |
+  |---|---|---|---|
+  | Passed | 36 | 52 | 63 |
+  | Passed base tests only | 8 | 2 | 4 |
+  | No finished answer | 22 | 63 | 21 |
+  | Wrong output | 85 | 38 | 65 |
+  | Runtime exception | 13 | 8 | 9 |
+  | Entry point undefined | 0 | 1 | 2 |
+  | Unparseable | 0 | 0 | 0 |
+  | Finished answers; passed, % of them | 142; 25.4 | 101; 51.5 | 143; 44.1 |
+
+  The same procedure reproduces §3's base column exactly (the base's 22 by its completions' re-encoded tokens, ≥ 760
+  of 768). Exceptions: base `NameError` 5, `TypeError` 3, `ValueError` 3, `IndexError` 1, `RecursionError` 1; SFT
+  `ValueError`, `TypeError`, `IndexError` 2 each, `KeyError` and `AttributeError` 1; RL `TypeError` 4, `ValueError` 3,
+  `IndexError` and `KeyError` 1. Every non-empty answer parses (`ast.parse`): 164 of 164, 101 of 101, 143 of 143.
 
 ## References
 
