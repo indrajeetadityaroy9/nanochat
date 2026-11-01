@@ -683,7 +683,8 @@ Every command runs in the `nanochat` image from the repository's root (`docs/tra
 `scripts/setup.sh`, which pulls the dataset), through `scripts/container.sh` on the GH200 or, for the text stages
 (prepare, curate, decontaminate, publish), on any host with cgroup v2 (`parallel.memory`), as `docker run --rm --user
 $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/workspace/nanochat -w /workspace/nanochat -v $PWD:/workspace/nanochat
-nanochat python -m corpus.<step>` (with `-e HF_TOKEN=<token>` for the steps that read the Hub).
+nanochat python -m corpus.<step>` (with `-e HF_TOKEN=<token>` for prepare, whose gated sources need one, and for
+push; the pull is anonymous).
 
 The pretraining corpus, once, to build the published dataset:
 1. **Prepare**: `python -m corpus.pretrain.prepare` fetches and standardizes every source's extent (§1–§2).

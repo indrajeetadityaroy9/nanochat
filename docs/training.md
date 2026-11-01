@@ -558,7 +558,7 @@ On a fresh GH200 host with Docker, the NVIDIA driver and the NVIDIA Container To
 
 ```bash
 git clone https://github.com/indrajeetadityaroy9/nanochat nanochat && cd nanochat
-HF_TOKEN=<read token> scripts/setup.sh
+scripts/setup.sh
 ```
 
 `scripts/setup.sh` writes the CDI spec, locks the SM clock (§7; re-run it after a reboot), joins the docker group,

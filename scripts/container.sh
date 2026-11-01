@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run a command in the nanochat image as the invoking user, this checkout mounted at /workspace/nanochat (paths.py
-# ROOT); HF_TOKEN passes through from the environment (the private dataset, corpus/pretrain/publish.py). NGC's
+# ROOT); HF_TOKEN passes through from the environment when set: the published dataset is public, but rebuilding the
+# corpus reads gated sources (corpus/pretrain/sources.py) and publishing writes to the Hub. NGC's
 # documented run flags; stack hard limit unlimited for evalplus's reliability_guard (setrlimit RLIMIT_STACK); SYS_NICE
 # for decode.cu's prompt store, bound to the CPU's NUMA node (mbind; Docker's default seccomp profile requires it).
 set -euo pipefail
