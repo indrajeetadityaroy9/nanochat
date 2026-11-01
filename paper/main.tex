@@ -697,8 +697,7 @@ even layers, the layers with value embeddings, and from 0.59 to 2.60 in the odd 
 $\pm 0.08$ after the first two layers, where it is $-0.23$ and $0.14$.
 
 \paragraph{MLP\@.} The MLP computes $\mathrm{ReLU}(\bar{x} W_1)^2 W_2$, the squared ReLU, with hidden size 3,072
-($4d$). Primer found the squared ReLU the most effective of its modifications~\cite{so2021primer}. Gated units such as
-SwiGLU outperform ReLU at matched parameters~\cite{shazeer2020glu}.
+($4d$). Primer found the squared ReLU the most effective of its modifications~\cite{so2021primer}.
 
 \paragraph{Output logit soft-capping.} In a standard LLM, the output logits $z = \bar{x} W_{\mathrm{out}}$ are
 unbounded and the next-token probabilities are $\mathrm{softmax}(z)$. Here every logit is soft-capped before the
