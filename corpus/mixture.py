@@ -67,7 +67,7 @@ class Stage:
                 for name, group in self.groups.items() for s in group.sources}
 
 
-# The plan that sizes the packs: d24 at 525.893 tokens per parameter (docs/training.md §2), 69,580 steps of 15
+# The plan that sizes the packs: d24 at 525.893 tokens per parameter, 69,580 steps of 15
 # micro-batches; its last REPO_LEVEL_SHARE of steps at 32K
 MAX_STEPS, BATCH_SIZE = 69_580, 15 * MICRO_BATCH_TOKENS
 REPO_LEVEL_STEPS = round(REPO_LEVEL_SHARE * MAX_STEPS)
@@ -111,8 +111,7 @@ BYTES_PER_TOKEN = {"stack_edu_python": 3.460, "ultradata_stack_v3_l2_python": 3.
                    "ultradata_math_l3_qa": 2.917, "ultradata_math_l3_conversation": 3.457,
                    "ultradata_math_l3_multi_style": 3.332, "ultradata_math_l3_textbook_exercise": 3.032}
 # Relative widening of a byte target for a retrained tokenizer's compression: below the 6.4% (English) to 6.9% (code)
-# relative NSL spread across training mixes of arXiv 2402.01035 Fig. 2 [arithmetic]; it held for every tokenizer arm
-# (results/pretrain/tokenizer_split_merge-intrinsic.json train_tokens_over_draw >= 1.017)
+# relative NSL spread across training mixes of arXiv 2402.01035 Fig. 2
 SPREAD = 0.06
 
 

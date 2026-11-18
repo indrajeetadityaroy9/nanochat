@@ -1,13 +1,13 @@
 """
 A run's likelihood trajectory: eval/bpb.py likelihood of each saved model from a step on, the evaluated checkpoints'
-from their evaluations (eval-<step>.json), the analysis checkpoints' (docs/training.md §6) scored here into
+from their evaluations (eval-<step>.json), the analysis checkpoints' (run.py analysis_steps) scored here into
 RUNS/<run>/likelihood-<step>.json; then each group's bits per byte, its paired change from a reference step and
 between consecutive steps over identical rows and solutions (metrics.paired_rows), and the summed learning rate of the
 updates between consecutive steps.
 
     python -m eval.trajectory <run_name> <reference step> <first step> <out.json>
 
-The base run's: `<run_name> 66063 62887 results/pretrain/trajectory.json` (docs/training.md §9, docs/results.md §4).
+The base run's: `<run_name> 66063 62887 results/pretrain/trajectory.json`.
 """
 import gc
 import json

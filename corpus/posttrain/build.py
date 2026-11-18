@@ -1,7 +1,7 @@
 """
-The SFT corpus (docs/corpus.md §10): the reasoning traces of Nemotron-Cascade's SFT stages 1 and 2 (code), of
+The SFT corpus: the reasoning traces of Nemotron-Cascade's SFT stages 1 and 2 (code), of
 Nemotron-SFT-Competitive-Programming-v2 (Python, C++, Exercism) and of KodCode-V1-SFT-R1 (its R1-verified rows),
-rendered in the post-training format (render; docs/post-training.md §3), filtered, at most CAPS traces per prompt in
+rendered in the post-training format (render; corpus/posttrain/sft.py), filtered, at most CAPS traces per prompt in
 each group, split by problem (problem) into train and val, tokenized and packed whole into 32,768-token rows by the
 base's packer (corpus/pack.py), one attention segment per trace. Each document's context (the prompt and THINK) is
 written as <split>.context, whose labels the loader ignores (corpus/loader.py). Each val document's source and place
@@ -47,11 +47,11 @@ GROUPS = {
     "kodcode": ("KodCode/KodCode-V1-SFT-R1/data/train-*.parquet", "kodcode"),
 }
 # Traces per prompt in each group, drawn at random; None: every trace. The long-trace groups (many traces per prompt):
-# the largest cap in {2, 1} at which 2 epochs of the packed train rows stay within 12.5B tokens (docs/corpus.md
-# §10); Exercism and KodCode as their data gives (about one trace per problem)
+# the largest cap in {2, 1} at which 2 epochs of the packed train rows stay within 12.5B tokens; Exercism and KodCode
+# as their data gives (about one trace per problem)
 CAPS = {"cascade_stage1": 2, "cascade_stage2": 2, "cp_python": 2, "cp_cpp": 2, "cp_exercism": None, "kodcode": None}
 VAL_SHARE = 0.01        # problems held out
-MIN_REASONING = 20      # reasoning tokens: below, a one-sentence lead-in to the code (docs/corpus.md §10)
+MIN_REASONING = 20      # reasoning tokens: below, a one-sentence lead-in to the code
 SEED = 0
 CHUNK_BYTES = 2**28     # a worker task: one byte range of a source file (the outputs do not depend on it)
 SHARD_DOCUMENTS = 4096  # documents per packed shard (one crate pack call)
@@ -146,7 +146,7 @@ def parse(row: dict, kind: str) -> tuple[str, str, str, bool] | str:
 
 
 def render(prompt: str, reasoning: str, answer: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The post-training format's document (docs/post-training.md §3) without its BOS tokens: (context, reasoning, the
+    """The post-training format's document (corpus/posttrain/sft.py) without its BOS tokens: (context, reasoning, the
     rest) tokens, each encoded alone as ordinary text (the context as inference encodes a prompt)."""
     enc = get_tokenizer().enc
     return tuple(enc.encode_to_numpy(text, disallowed_special=()).astype(TOKEN_DTYPE)
@@ -247,7 +247,7 @@ def source_tasks() -> list[tuple[int, str, Path, int, int]]:
     tasks = []
     for g, (pattern, kind) in enumerate(GROUPS.values()):
         if not (paths := sorted(SOURCE.glob(pattern))):
-            raise FileNotFoundError(f"no source file matches {SOURCE / pattern} (docs/corpus.md §11)")
+            raise FileNotFoundError(f"no source file matches {SOURCE / pattern} (GROUPS' datasets go under SOURCE)")
         for path in paths:
             size = pq.ParquetFile(path).num_row_groups if path.suffix == ".parquet" else path.stat().st_size
             step = 1 if path.suffix == ".parquet" else CHUNK_BYTES

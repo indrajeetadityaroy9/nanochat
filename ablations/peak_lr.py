@@ -1,8 +1,8 @@
 """
 Peak-lr calibration (d24): the base model's multiplier of DeepSeek LLM's law eta = 0.3118 C^-0.125 (arXiv 2401.02954
 §3.1 Eq. 1), the optimum of d24 at 5 tokens per parameter; the law, with its batch, carries the compute dependence
-to the base plan. The runs: conf/experiment/peak_lr_d24.yaml; their records: results/pretrain/peak_lr_d24.jsonl
-(ablations/records.py).
+to the base plan. The runs: conf/experiment/peak_lr_d24.yaml; their records (ablations/records.py):
+results/pretrain/peak_lr_d24.jsonl, written by that sweep and read here.
 """
 import json
 import math

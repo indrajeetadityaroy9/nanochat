@@ -1,5 +1,5 @@
 """
-RL with verifiable rewards from the SFT model (docs/post-training.md §6): the trainer, in the training image with the
+RL with verifiable rewards from the SFT model: the trainer, in the training image with the
 native model (model/modeling.py, the fused kernels SFT trained with), beside onpolicy/sampler.py in the vLLM image on
 the same GPU (scripts/rl.sh), exchanging the policies and their batches through files (the sampler's docstring), for
 BUDGET seconds of training.
@@ -13,9 +13,8 @@ mean, the batch's std), r_i 1 when the response's answer passes its problem's te
 failing answer, or a loop: an exact cycle never ends, so it is a failure rather than an answer cut short), plus DAPO's
 soft overlong punishment (`overlong`, arXiv 2503.14476 §3.4, Eq. 13): 0 up to L_MAX - L_CACHE tokens, then falling
 linearly to -1 at L_MAX, the sampler's limit, so a cut response scores -1. Masking cut responses instead (overlong
-filtering, DAPO §3.4) left nothing against length: from the SFT model the cut share rose from 3.7% to 19.5% in six
-batches and the pass rate over all responses fell from 0.420 to 0.391 (rl/attempt-16k-masked-train.jsonl), where
-10-15% truncation "typically destabilized training" (ScaleRL, arXiv 2510.13786 App. A.15). The trained groups are
+filtering, DAPO §3.4) leaves nothing against length, where 10-15% truncation "typically destabilized training"
+(ScaleRL, arXiv 2510.13786 App. A.15). The trained groups are
 those whose rewards differ (a group of equal rewards has zero advantage and no gradient, DAPO §3.2); a trivial prompt's
 group is unused; no KL term (DAPO §2.3). pi is the distribution the sampler draws from at T 1.0: the capped logits
 c tanh(h W / c) of the final hidden states, the head in fp32 as vLLM computes it (the export's "head_dtype"). The head
@@ -23,7 +22,7 @@ and its loss are `Head`, its gradients computed in its forward HEAD_CHUNK rows a
 positions (no prompt position); the backbone runs over the responses packed into rows of the context (`pack`: first
 fit decreasing, each response its own attention segment).
 
-Optimizer (docs/post-training.md §6): AdamW at a constant LR, beta (0.9, 0.95), no weight decay, the gradient's norm
+Optimizer: AdamW at a constant LR, beta (0.9, 0.95), no weight decay, the gradient's norm
 clipped at 1.0; eps 1e-15, as an eps near the gradients' scale clips them (ScaleRL, arXiv 2510.13786 App. A.3). The
 weights are fp32; the forward's bf16 GEMM copies are rounded to nearest and the published policy
 (inference/export_hf.py `hf_weights`) holds the same rounding, so the sampler samples the policy the trainer

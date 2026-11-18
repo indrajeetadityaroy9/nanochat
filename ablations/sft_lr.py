@@ -1,8 +1,8 @@
 """
-SFT peak-lr calibration (docs/post-training.md §4): complete schedules at 1/10, 1/3 and 1 times the base run's peak
+SFT peak-lr calibration: complete schedules at 1/10, 1/3 and 1 times the base run's peak
 lr over the same first 2% of the SFT train rows, each scored by the response loss on the held-out problems after its
 last step; the full run's scale is the fitted optimum moved to the full run's steps (its epochs of the train rows). The
-runs: conf/experiment/sft_lr.yaml; their records: results/posttrain/sft_lr.jsonl (ablations/records.py).
+runs: conf/experiment/sft_lr.yaml; their records (ablations/records.py): results/posttrain/sft_lr.jsonl.
 """
 import json
 import math
@@ -11,9 +11,7 @@ import metrics
 from paths import POSTTRAIN_RESULTS
 
 # The optimum lr falls with the run's steps at a fixed batch as steps^-STEPS_EXPONENT: 0.32 in arXiv 2409.19913 §6
-# Eq. 5, 0.30 in its §4.1 (Llama-1); the repository's d8 pair (docs/training.md §5: optimum x0.574 over 20.0x the
-# steps, 40.05x the tokens, at 2x the batch, taken as sqrt(2)) gives 0.30 per steps, 0.24 per tokens [arithmetic;
-# inference: transferred to SFT]
+# Eq. 5, 0.30 in its §4.1 (Llama-1); assumed to transfer to SFT
 STEPS_EXPONENT = 0.30
 
 

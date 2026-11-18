@@ -35,7 +35,7 @@ from metrics import latency
 from paths import PCH
 
 # basedpyright rules kept on (every other rule off): errors that fail at run time (NameError, AttributeError, call
-# TypeErrors and unmatched overloads); the measured basis and the rules not kept: docs/experiments.md §6
+# TypeErrors and unmatched overloads)
 PYRIGHT_RULES = ("reportUndefinedVariable", "reportAttributeAccessIssue", "reportCallIssue")
 # The configuration python_diagnostics writes (pyrightconfig.json), also the basedpyright verdicts' cache identity
 PYRIGHT_CONFIG = {"typeCheckingMode": "off", **dict.fromkeys(PYRIGHT_RULES, "error")}
@@ -59,7 +59,7 @@ TOP_P = 0.95
 # Candidates per task, the greedy one included: pass@10 (Codex Table 1; EvalPlus, arXiv 2305.01210 Table 3)
 ATTEMPTS = 10
 # Cores of the starting affinity that the evaluation process tree keeps to (decoder host thread, syntax masks,
-# in-process checks; basis: docs/evaluation.md §1); timed checks run on the others, as EvalPlus's docs/execution.md
+# in-process checks); timed checks run on the others, as EvalPlus's docs/execution.md
 # warns against an oversubscribed test bed
 DECODE_CORES = 16
 

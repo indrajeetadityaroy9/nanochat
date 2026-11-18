@@ -5,8 +5,8 @@
   GPU. It sizes the KV cache only.
 - Every vllm.LLM.generate refuses a prompt holding "\\r" (ValueError): the corpus normalizes line endings
   (corpus/pretrain/prepare.py), so the model never trained on one; a tool whose prompts carry one gets a normalizing
-  task or hook (docs/evaluation.md §4) instead of a silently corrupted measurement. Token-id prompts are decoded to
-  check.
+  task or hook (eval/official_lm_eval/, eval/official_lcb.py) instead of a silently corrupted measurement. Token-id
+  prompts are decoded to check.
 - Every process registers the "nanochat" reasoning parser (eval/official_reasoning_parser.py): `vllm serve
   --reasoning-parser-plugin` imports it in the API server only, and the spawned engine core looks the parser up too.
 """
@@ -35,7 +35,7 @@ def checked_generate(self, prompts, *args, **kwargs):
         else:
             text = p["prompt"] if isinstance(p, dict) else p
         if "\r" in text:
-            raise ValueError(f"a prompt holds a carriage return (docs/evaluation.md §4): {text[:200]!r}")
+            raise ValueError(f"a prompt holds a carriage return: {text[:200]!r}")
     return generate(self, prompts, *args, **kwargs)
 
 

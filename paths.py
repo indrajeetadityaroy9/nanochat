@@ -26,5 +26,6 @@ CACHE_VARIABLES = ("XDG_CACHE_HOME", "HF_HOME", "TORCHINDUCTOR_CACHE_DIR", "TRIT
                    "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR", "CARGO_HOME")
 
 if __name__ == "__main__":
-    for directory in (CORPUS, RUNS, NATIVE, PCH, *(Path(os.environ[n]) for n in CACHE_VARIABLES)):
+    for directory in (CORPUS, RUNS, NATIVE, PCH, PRETRAIN_RESULTS, POSTTRAIN_RESULTS,
+                      *(Path(os.environ[n]) for n in CACHE_VARIABLES)):
         directory.mkdir(parents=True, exist_ok=True)

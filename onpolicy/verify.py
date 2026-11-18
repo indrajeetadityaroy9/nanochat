@@ -1,5 +1,5 @@
 """
-KodCode's tests on a response's answer (docs/post-training.md §5, §6). The answer's code (`code`) is its last fenced
+KodCode's tests on a response's answer. The answer's code (`code`) is its last fenced
 block tagged python that defines one of the names the tests import (else its last python block: a later block is
 often a usage example or a test), else its last untagged block, dedented; a response with none fails. Instruct and
 complete problems: the code as solution.py beside KodCode's pytest file after `from solution import *` (a share of

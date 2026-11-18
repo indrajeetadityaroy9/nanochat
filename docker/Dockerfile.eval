@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Evaluation image for the benchmarks' official tools (scripts/official_eval.sh, docs/evaluation.md §4): vLLM 0.32.0
+# Evaluation image for the benchmarks' official tools (scripts/official_eval.sh): vLLM 0.32.0
 # (torch, transformers, g++) with the tools at their pinned commits in a venv over it. The image's inference stack
 # (vLLM, torch, Triton, transformers, tokenizers, safetensors, numpy) constrains every install, so it stays the image's.
 

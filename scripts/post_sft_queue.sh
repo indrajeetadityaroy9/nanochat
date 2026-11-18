@@ -1,5 +1,5 @@
 #!/bin/bash
-# The GPU queue after an SFT run (docs/post-training.md §6). While the run trains it waits; once the run has written
+# The GPU queue after an SFT run. While the run trains it waits; once the run has written
 # its end record (metrics.jsonl kind "end") and its container CONTAINER (default sft-run) is gone, it stops the run's
 # termination watchers (scripts/official_termination_watch.sh, if any), lets a probe already started finish (the
 # probes' lock), and runs, in order:
@@ -25,14 +25,14 @@
 # DRY_RUN=1 logs each command instead of running it (the waiting, watcher and skip logic run as they would; without a
 # kept RL policy the final model is rl/step-K, so every item shows).
 #
-#   [DRY_RUN=1] scripts/post_sft_queue.sh <run name> [<final step, default 7676>]
+#   [DRY_RUN=1] scripts/post_sft_queue.sh <run name> <final step>
 #
 # Output: one line per event in LOG (default RUNS/<run>/post-sft-queue.log); each item's own outputs and logs.
 main() {
   set -uo pipefail
   local ROOT RUN DIR FINAL
   ROOT=$(cd "$(dirname "$0")/.." && pwd)
-  RUN=$1 FINAL=${2:-7676}
+  RUN=$1 FINAL=$2
   DIR=${RUNS:-$ROOT/artifacts/runs}/$RUN
   local LOG=${LOG:-$DIR/post-sft-queue.log} CONTAINER=${CONTAINER:-sft-run} POLL=${POLL:-60}
   local DRY_BELOW=${DRY_BELOW:-0.05} PROBE_PROMPTS=${PROBE_PROMPTS:-128}

@@ -1,5 +1,5 @@
 """
-The RL stage's sampler (docs/post-training.md §6), in the vLLM image beside the trainer (onpolicy/rl.py, the training
+The RL stage's sampler, in the vLLM image beside the trainer (onpolicy/rl.py, the training
 image) on the same GPU: for each policy the trainer publishes, its evaluation if it is the first or the trainer's last,
 then its batch of rollouts, judged.
 

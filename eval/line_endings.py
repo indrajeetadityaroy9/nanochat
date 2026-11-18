@@ -1,4 +1,4 @@
-"""The corpus's line endings for text a benchmark tool sends the model (docs/evaluation.md §4): CR LF, then a lone CR,
+"""The corpus's line endings for text a benchmark tool sends the model: CR LF, then a lone CR,
 as LF, as corpus/pretrain/prepare.py `lines` normalizes every training document, so the model never sees a "\\r" it
 never trained on. Standard library only: the official tools' environments import it."""
 

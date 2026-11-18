@@ -1,5 +1,5 @@
 """
-The RL stage's prompt pools (docs/post-training.md §6): the rows of KodCode-V1-SFT-R1's `train` split (every row's R1
+The RL stage's prompt pools: the rows of KodCode-V1-SFT-R1's `train` split (every row's R1
 reply passed its tests) whose SFT context, the prompt and THINK encoded as corpus/posttrain/build.py render encodes
 it, is a document context of the SFT corpus's train or val split; one row per distinct context (the first in file
 order), with KodCode's tests (pytest for the instruct and complete styles, stdin/stdout cases for online_judge) and

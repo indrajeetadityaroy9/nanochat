@@ -1,6 +1,6 @@
 #!/bin/bash
-# The natural-termination probe of one post-trained checkpoint (eval/official_termination.py; docs/post-training.md
-# §5), also beside a running training job: the checkpoint exported with --chat to a temporary directory (CPU), then
+# The natural-termination probe of one post-trained checkpoint (eval/official_termination.py), also beside a running
+# training job: the checkpoint exported with --chat to a temporary directory (CPU), then
 # sampled by vLLM offline on the GPU with gpu_memory_utilization VLLM_GPU_MEMORY_UTILIZATION (default 0.12; vLLM
 # fails at its start if the GPU has less free), one probe at a time (a lock).
 # The run's metrics.jsonl gives its tokens/s during the probe against before it and the time it lost, as information.

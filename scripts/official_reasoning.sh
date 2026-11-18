@@ -1,5 +1,5 @@
 #!/bin/bash
-# The reasoning protocol of a post-trained checkpoint (docs/post-training.md §5) by the benchmarks' official tools:
+# The reasoning protocol of a post-trained checkpoint by the benchmarks' official tools:
 # the checkpoint exported with the SFT's chat format (inference/export_hf.py --chat), served by `vllm serve` (vLLM
 # 0.32.0's Transformers backend, the head in fp32) with the "nanochat" reasoning parser (eval/official_reasoning_parser.py:
 # the answer after the last "</think>"); EvalPlus's OpenAI backend, greedy (n 1, T 0) and sampled (its chat prompt,

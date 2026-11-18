@@ -1,4 +1,4 @@
-"""Natural termination of a post-trained checkpoint's reasoning (docs/evaluation.md §10): a fixed prompt set sampled
+"""Natural termination of a post-trained checkpoint's reasoning: a fixed prompt set sampled
 once each by vLLM offline from the --chat export (inference/export_hf.py; bf16, the head in fp32, eos = BOS, max new
 tokens the context less the prompt), and how the responses end:
 

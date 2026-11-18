@@ -28,21 +28,21 @@ if TYPE_CHECKING:
 
     from train.schedule import RunPlan
 
-# A run with more than one evaluated checkpoint also keeps analysis checkpoints (docs/training.md §6): full state
+# A run with more than one evaluated checkpoint also keeps analysis checkpoints (eval/trajectory.py): full state
 # every FULL_STATE_EVERY steps (Pythia's cadence, arXiv 2304.01373 §2.4), fp32 weights only at steps 1, 2,
 # 4, ..., EARLY_WEIGHTS_LAST (Pythia's log-spaced early checkpoints) and at repo_level_start + AFTER_STAGE_WEIGHTS
 FULL_STATE_EVERY = 1000
 EARLY_WEIGHTS_LAST = 512
 AFTER_STAGE_WEIGHTS = (100, 200, 400, 800, 1600)
 # RunConfig.generate: eval/suite.py evaluate's modes, or "none": the run trains only (an SFT run: its checkpoint is
-# evaluated by the benchmarks' official tools, docs/post-training.md §5)
+# evaluated by the benchmarks' official tools, scripts/official_reasoning.sh)
 EVALUATED = ("benchmarks", "parse")
 
 
 @dataclass
 class RunConfig:
     """A run of the base model (d24): its recipe (the defaults, learning_rate_scale's conf/run.yaml's) except the
-    fields set; with `base`, an SFT run of it (docs/post-training.md §4)."""
+    fields set; with `base`, an SFT run of it (conf/experiment/sft.yaml)."""
     tokens_per_param: float | None = None  # None: the data's max_tokens_per_param (train/stages.py)
     # times the law's peak lr (conf/run.yaml sets the measured multiplier); an SFT run's: times its base run's peak lr
     learning_rate_scale: float = 1.0

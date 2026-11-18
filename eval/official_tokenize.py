@@ -1,8 +1,8 @@
 """Checks of the prompts scripts/official_reasoning.sh serves, before generation: every message a tool will send holds no
-"\\r" (the corpus normalizes line endings, eval/line_endings.py, so the model never trained on one; docs/evaluation.md
-§4), and vLLM's POST /tokenize renders the first problem's messages through the --chat export's template
-(inference/export_hf.py CHAT_TEMPLATE) as BOS + encode_ordinary(prompt.strip() + THINK), prompt being the text the SFT
-renderer saw (corpus/posttrain/build.py render; docs/post-training.md §3):
+"\\r" (the corpus normalizes line endings, eval/line_endings.py, so the model never trained on one), and vLLM's POST
+/tokenize renders the first problem's messages through the --chat export's template (inference/export_hf.py
+CHAT_TEMPLATE) as BOS + encode_ordinary(prompt.strip() + THINK), prompt being the text the SFT renderer saw
+(corpus/posttrain/build.py render):
 
 - evalplus: EvalPlus's OpenAI backend's one user message per HumanEval+ and MBPP+ task (evalplus/provider/openai.py
   codegen: the instruction prefix of codegen.py:222, then the task prompt stripped in a python fence); prompt = that

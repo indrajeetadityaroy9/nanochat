@@ -3,7 +3,7 @@ the problems and the judge (evaluate_functional_correctness) but no generator, s
 the export, and the package's CLI judges them: single-line, multi-line and random-span, greedy, one sample a task, in
 the prefix-suffix-middle order (PSM).
 
-Prompts are corpus.tokenizer.fim_prompt's PSM token ids, the layout the packer trains (docs/corpus.md §8): prefix and
+Prompts are corpus.tokenizer.fim_prompt's PSM token ids, the layout the packer trains (corpus/pack.py): prefix and
 suffix encoded apart, BOS first. A middle ends at BOS (the model's end of text, the paper's EOT) or another special
 token, at most `budget` tokens, the benchmark's longest reference middle (the paper names no budget). Samples are
 written as the CLI reads them, {"task_id", "completion"} per line.

@@ -1,5 +1,5 @@
 #!/bin/bash
-# The SFT model's export and evaluation before RL (onpolicy/, docs/post-training.md §5), each step skipped when its
+# The SFT model's export and evaluation before RL (onpolicy/), each step skipped when its
 # output exists (a rerun resumes):
 #   1. the checkpoint exported with --chat (inference/export_hf.py, CPU) to RUNS/<run>/onpolicy-<step>/model;
 #   2. its evaluation to eval-model/: the natural-termination probe on PROBE_PROMPTS (default 128) prompts per set

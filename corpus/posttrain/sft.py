@@ -1,5 +1,5 @@
 """
-The SFT corpus's name, its one training stage and the post-training format's markers (docs/post-training.md §3),
+The SFT corpus's name, its one training stage and the post-training format's markers,
 torch-free and light for every process that plans or trains an SFT run; the corpus itself: corpus/posttrain/build.py.
 """
 from corpus.mixture import REPO_LEVEL_STAGE, Group, Stage

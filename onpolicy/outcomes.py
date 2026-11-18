@@ -1,5 +1,5 @@
 """
-The KodCode val evaluation's outcomes (docs/post-training.md §5) for one rollouts directory (onpolicy/rollouts.py,
+The KodCode val evaluation's outcomes for one rollouts directory (onpolicy/rollouts.py,
 with its verdicts, onpolicy/verify.py), written to <dir>/outcomes.json: pooled, per temperature and per source (the
 prompt's `source`), the outcomes, the loop rates per response and per prompt, the exact-cycle loops' onsets and
 periods, and over the prompts whose responses are all verified pass@1 and pass@n (unbiased, arXiv 2107.03374 Eq. 1),

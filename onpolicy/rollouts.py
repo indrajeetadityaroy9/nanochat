@@ -1,5 +1,5 @@
 """
-The KodCode val evaluation's rollouts (docs/post-training.md §5): --prompts prompts of the val pool held out from the
+The KodCode val evaluation's rollouts: --prompts prompts of the val pool held out from the
 train pool (onpolicy/prompts.py `held_out`, `sample`, seeded by --seed; only prompts whose context and --max-tokens
 fit the model's context), each sampled under every (temperature, count) of --samples at top-p TOP_P, by vLLM offline
 from a --chat export (inference/export_hf.py; bf16, the head in fp32, eos = BOS), through

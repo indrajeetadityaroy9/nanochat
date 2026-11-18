@@ -1,5 +1,5 @@
 #!/bin/bash
-# RL with verifiable rewards from a post-trained checkpoint (docs/post-training.md §6): the trainer (onpolicy/rl.py,
+# RL with verifiable rewards from a post-trained checkpoint: the trainer (onpolicy/rl.py,
 # the training image: the native model) and the sampler (onpolicy/sampler.py, the vLLM image: the engines and the
 # tests) on the GPU together for the trainer's time budget (onpolicy/rl.py BUDGET), exchanging policies and batches
 # under /dev/shm/nanochat-rl-<step>, cleared first. The trainer resumes from rl/state.pt when present, the sampler from

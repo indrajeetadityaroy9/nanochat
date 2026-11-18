@@ -48,7 +48,7 @@ def plan(*, model: CausalLM, tokens_per_param: float) -> RunPlan:
 
 
 def sft_plan(*, model: CausalLM, rows: int, epochs: float, batch_size: int, learning_rate: float) -> RunPlan:
-    """SFT's plan (docs/post-training.md §4): SFT_STAGE from the first step, the base run's `batch_size` tokens per
+    """SFT's plan: SFT_STAGE from the first step, the base run's `batch_size` tokens per
     step (15 micro-batches of 3 rows of 32,768 tokens for d24's), whole steps over `epochs` times the `rows` packed
     rows (train/stages.py stage_batches reads past the first epoch), at peak `learning_rate`, no weight decay."""
     gradient_accumulation_steps = batch_size // MICRO_BATCH_TOKENS

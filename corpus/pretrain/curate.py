@@ -240,8 +240,8 @@ def main() -> None:
         if spec.category == REPOSITORY_FILE:
             shuffle(source, paths[source], drops[source])
             # MEMORY // (2 * largest) workers leave each 4 x the largest partition of the machine's memory (MEMORY is
-            # half of it) [arithmetic], above the three copies a worker holds (the read table, its sorted copy, the
-            # contents as Python strings for topological_sort); the peak is not measured [inference]
+            # half of it), above the three copies a worker holds (the read table, its sorted copy, the contents as
+            # Python strings for topological_sort)
             largest = max(sum(md.row_group(g).total_byte_size for md in map(pq.read_metadata, part.iterdir())
                               for g in range(md.num_row_groups)) for part in shuffle_dir(source).iterdir())
             with ProcessPoolExecutor(min(os.cpu_count(), MEMORY // (2 * largest)), mp_context=SPAWN) as pool:
